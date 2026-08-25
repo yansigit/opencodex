@@ -185,6 +185,38 @@ export function retryableAntigravity429DelayMs(
   return delay !== undefined && delay <= MAX_SHORT_RETRY_MS ? delay : null;
 }
 
+export const ANTIGRAVITY_MISSING_PROJECT_MESSAGE =
+  "Antigravity requires a discovered Cloud Code Assist project id (re-run `ocx login google-antigravity`).";
+
+export type BindAntigravityProjectFailure = {
+  ok: false;
+  status: 400;
+  type: "invalid_request_error";
+  message: string;
+};
+
+export type BindAntigravityProjectSuccess<T extends { project?: string }> = {
+  ok: true;
+  provider: T & { project: string };
+};
+
+/** Pair Cloud Code Assist `project` with the credential in use. Never keep a previous account's id. */
+export function bindAntigravityProject<T extends { project?: string }>(
+  provider: T,
+  projectId: string | undefined,
+): BindAntigravityProjectSuccess<T> | BindAntigravityProjectFailure {
+  const project = typeof projectId === "string" ? projectId.trim() : "";
+  if (!project) {
+    return {
+      ok: false,
+      status: 400,
+      type: "invalid_request_error",
+      message: ANTIGRAVITY_MISSING_PROJECT_MESSAGE,
+    };
+  }
+  return { ok: true, provider: { ...provider, project } };
+}
+
 export type AntigravityAccountSelectionReason =
   | "affinity"
   | "active"
