@@ -48,6 +48,14 @@ describe("enforce-pr-target workflow", () => {
     assert.match(workflow, /const DEFAULT_BASE = "dev";/);
   });
 
+  it("treats generated sync PRs as checklist-free but still requires exact-head baseline evidence", () => {
+    assert.match(workflow, /syncGenerated/);
+    assert.match(workflow, /sync.*upstream-/);
+    assert.match(workflow, /requiredChecksSuccessful/);
+    assert.match(workflow, /syncBaselineReady/);
+    assert.match(workflow, /syncGenerated && syncBaselineReady/);
+  });
+
   it("soft-fails ready-for-review restoration the same way", () => {
     assert.match(workflow, /readyConversionFailed/);
     assert.match(workflow, /Could not mark pull request ready for review/);
@@ -77,6 +85,8 @@ describe("enforce-pr-target workflow", () => {
     assert.match(workflow, /^  workflow_dispatch:/m);
     assert.match(workflow, /CURSOR_BUGBOT_APP_ID/);
     assert.match(workflow, /CURSOR_BUGBOT_POLICY/);
+    assert.match(workflow, /trustedBaseline/);
+    assert.match(workflow, /\["ci", "hygiene"\]/);
     assert.match(workflow, /exactHeadBugbotEvidence/);
     assert.match(workflow, /checks\.listForRef/);
     assert.match(workflow, /check\.app\?\.id/);

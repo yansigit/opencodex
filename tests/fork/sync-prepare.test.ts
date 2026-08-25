@@ -143,6 +143,7 @@ describe("fork sync daily preparation", () => {
       recommendedLane: "emergency-rebuild",
     }), { runner: queued.runner })).resolves.toEqual({
       status: "history-diverged",
+      branch: "sync/upstream-v2.32.0-tagsha",
       resolutions: [],
       unresolved: [],
     });

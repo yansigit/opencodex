@@ -35,6 +35,7 @@ function conflictedPaths(stdout: string): string[] {
 function resultForSkipped(event: SyncEvent): PrepareResult {
   return {
     status: event.kind === "history-diverged" ? "history-diverged" : "skipped",
+    ...(event.kind === "history-diverged" ? { branch: branchFor(event) } : {}),
     resolutions: [],
     unresolved: [],
   };

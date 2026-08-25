@@ -9,6 +9,7 @@ const {
   defaultAgentMaintenanceState,
   changedFileListComplete,
   exactHeadBugbotEvidence,
+  maintenanceReadyEvidence,
   findGithubSource,
   hasExactHeadMaintainerWaiver,
   isExpectedJulesHeadAdvance,
@@ -124,6 +125,55 @@ describe("baseline CI evidence", () => {
     assert.equal(requiredChecksSuccessful(checks, SHA, ["ci", "hygiene"], 15368), true);
     checks.push({ id: 4, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "failure" });
     assert.equal(requiredChecksSuccessful(checks, SHA, ["ci", "hygiene"], 15368), false);
+  });
+});
+
+describe("maintenance PR readiness", () => {
+  const checks = [
+    { id: 1, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
+    { id: 2, name: "enforce-target", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
+    { id: 3, name: "hygiene", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
+  ];
+
+  it("accepts an exact-head Bugbot success with all baseline checks", () => {
+    const result = maintenanceReadyEvidence({
+      checkRuns: [...checks, {
+        id: 4, name: "Cursor Bugbot", app: { id: 99 }, head_sha: SHA,
+        status: "completed", conclusion: "success",
+      }],
+      headSha: SHA,
+      expectedBugbotAppId: 99,
+    });
+    assert.equal(result.ready, true);
+    assert.equal(result.bugbotWaived, false);
+  });
+
+  it("allows missing Bugbot evidence only in shadow policy", () => {
+    const result = maintenanceReadyEvidence({
+      checkRuns: checks,
+      headSha: SHA,
+      expectedBugbotAppId: 99,
+      bugbotPolicy: "shadow",
+    });
+    assert.equal(result.ready, true);
+    assert.equal(result.bugbotShadow, true);
+  });
+
+  it("accepts a two-maintainer exact-head outage waiver", () => {
+    const result = maintenanceReadyEvidence({
+      checkRuns: checks,
+      headSha: SHA,
+      expectedBugbotAppId: 99,
+      bugbotPolicy: "required",
+      labels: ["review-bot-waived"],
+      maintainers: ["alice", "carol"],
+      reviews: [
+        { id: 1, user: { login: "alice" }, commit_id: SHA, state: "APPROVED" },
+        { id: 2, user: { login: "carol" }, commit_id: SHA, state: "APPROVED" },
+      ],
+    });
+    assert.equal(result.ready, true);
+    assert.equal(result.bugbotWaived, true);
   });
 });
 
@@ -261,6 +311,29 @@ describe("Jules API boundary", () => {
         requirePlanApproval: true,
         automationMode: "AUTO_CREATE_PR",
       },
+    );
+  });
+
+  it("passes a validated upstream sync branch to Jules", () => {
+    assert.deepEqual(
+      buildJulesSessionRequest({
+        title: "opencodex-agent:sync-hotspot",
+        prompt: "Resolve the hotspot.",
+        source: "sources/github/yansigit/opencodex",
+        startingBranch: "sync/upstream-v1.2.3-abcdef1234567",
+        requirePlanApproval: false,
+      }).sourceContext.githubRepoContext,
+      { startingBranch: "sync/upstream-v1.2.3-abcdef1234567" },
+    );
+    assert.throws(
+      () => buildJulesSessionRequest({
+        title: "x",
+        prompt: "x",
+        source: "sources/repo",
+        startingBranch: "feature/untrusted",
+        requirePlanApproval: false,
+      }),
+      /starting branch/,
     );
   });
 

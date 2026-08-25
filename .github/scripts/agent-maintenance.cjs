@@ -1,7 +1,7 @@
 "use strict";
 
 const STATE_PATTERN = /<!-- opencodex-agent-maintenance-state:([\s\S]*?) -->/;
-const TASK_KINDS = new Set(["implement", "plan", "scheduled-docs", "scheduled-tests"]);
+const TASK_KINDS = new Set(["implement", "plan", "scheduled-docs", "scheduled-tests", "sync-hotspot"]);
 const STATUSES = new Set(["queued", "planning", "running", "reviewing", "needs-human", "failed", "completed"]);
 const MAX_REPAIR_ATTEMPTS = 2;
 const MAX_FINDINGS = 10;
@@ -135,6 +135,47 @@ function requiredChecksSuccessful(checkRuns, headSha, requiredNames, expectedApp
   });
 }
 
+function maintenanceReadyEvidence({
+  checkRuns = [],
+  headSha,
+  expectedBugbotAppId,
+  expectedChecksAppId = 15368,
+  requiredNames = ["ci", "enforce-target", "hygiene"],
+  bugbotPolicy = "shadow",
+  labels = [],
+  reviews = [],
+  maintainers = [],
+}) {
+  if (!["shadow", "required"].includes(bugbotPolicy)) {
+    throw new Error(`Invalid CURSOR_BUGBOT_POLICY: ${bugbotPolicy}`);
+  }
+  const baselineReady = requiredChecksSuccessful(
+    checkRuns,
+    headSha,
+    requiredNames,
+    expectedChecksAppId,
+  );
+  const bugbotEvidence = exactHeadBugbotEvidence({
+    checkRuns,
+    liveHeadSha: headSha,
+    expectedAppId: expectedBugbotAppId,
+  });
+  const bugbotWaived = !bugbotEvidence && hasExactHeadMaintainerWaiver({
+    labels,
+    reviews,
+    maintainers,
+    headSha,
+  });
+  const bugbotShadow = !bugbotEvidence && !bugbotWaived && bugbotPolicy === "shadow";
+  return {
+    baselineReady,
+    bugbotEvidence,
+    bugbotWaived,
+    bugbotShadow,
+    ready: baselineReady && Boolean(bugbotEvidence || bugbotWaived || bugbotShadow),
+  };
+}
+
 function trustedActiveMaintenanceCount(records) {
   return records.filter((record) =>
     record?.error ||
@@ -225,11 +266,14 @@ function validateSessionPullRequest({ session, pr, owner, repo, expectedAuthorId
   return { number, headSha: pr.head.sha };
 }
 
-function buildJulesSessionRequest({ title, prompt, source, requirePlanApproval }) {
+function buildJulesSessionRequest({ title, prompt, source, startingBranch = "dev", requirePlanApproval }) {
+  if (startingBranch !== "dev" && !/^sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64}$/i.test(startingBranch)) {
+    throw new Error("invalid Jules starting branch");
+  }
   return {
     title,
     prompt,
-    sourceContext: { source, githubRepoContext: { startingBranch: "dev" } },
+    sourceContext: { source, githubRepoContext: { startingBranch } },
     requirePlanApproval: Boolean(requirePlanApproval),
     automationMode: "AUTO_CREATE_PR",
   };
@@ -374,6 +418,7 @@ module.exports = {
   createJulesClient,
   defaultAgentMaintenanceState,
   exactHeadBugbotEvidence,
+  maintenanceReadyEvidence,
   findGithubSource,
   hasExactHeadMaintainerWaiver,
   isExpectedJulesHeadAdvance,

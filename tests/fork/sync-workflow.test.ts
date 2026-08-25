@@ -38,7 +38,7 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("main-behind");
     expect(workflow).toContain("history-diverged");
     expect(workflow).toContain("Fork sync lane: $kind");
-    expect(workflow).toContain("if: steps.pin.outputs.kind != 'already-current'");
+    expect(workflow).toContain("steps.pin.outputs.kind != 'already-current'");
   });
 
   test("prepares daily merges and opens draft PRs only for merged branches", () => {
@@ -46,6 +46,15 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("/scripts/fork/sync/cli.ts\" draft-pr");
     expect(workflow).toContain("steps.prepare.outputs.status == 'merged'");
     expect(workflow).toContain("refs/heads/$branch:refs/heads/$branch");
+  });
+
+  test("publishes a remote sync branch for every conflict handoff", () => {
+    expect(workflow).toContain(
+      "if: steps.pin.outputs.kind == 'pin-updated' || steps.pin.outputs.kind == 'main-behind' || steps.pin.outputs.kind == 'history-diverged'",
+    );
+    expect(workflow).toContain("status\" = \"hotspot-handoff\" ] || [ \"$status\" = \"history-diverged\"");
+    expect(workflow).toContain('git push origin "refs/heads/$branch:refs/heads/$branch"');
+    expect(workflow).toContain('git switch -C "$branch"');
   });
 
   test("prepares from dev while keeping trusted scripts on the default branch", () => {
@@ -66,6 +75,34 @@ describe("fork upstream sync workflow contract", () => {
   test("passes the prepare status into the Cursor handoff event", () => {
     expect(workflow).toContain("prepareStatus");
     expect(workflow).toContain("jq --arg prepareStatus");
+    const cursorStep = workflow.split("- name: Notify Cursor handoff")[1];
+    expect(cursorStep).toBeDefined();
+    expect(cursorStep).toContain('bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$RUNNER_TEMP/fork-sync-handoff.json"');
+    expect(cursorStep).not.toContain('emit < "$event_file"');
+  });
+
+  test("passes the full prepare result and three-way metadata to handoff", () => {
+    const issueStep = workflow.split("- name: Notify GitHub issue")[1];
+    expect(issueStep).toContain("fork-sync-prepare.json");
+    expect(issueStep).toContain("prepareResult");
+    expect(issueStep).toContain("headSha");
+    expect(issueStep).toContain("mergeBaseCount");
+    expect(issueStep).toContain("mergeBaseShas");
+  });
+
+  test("falls back to a trusted Jules issue only when Cursor is unavailable", () => {
+    const cursorStep = workflow.split("- name: Notify Cursor handoff")[1];
+    expect(cursorStep).toContain("coordinator_status");
+    expect(cursorStep).toContain("FORK_SYNC_NOTIFIERS=github-issue");
+    expect(cursorStep).toContain("FORK_SYNC_COORDINATORS=\"\"");
+    expect(cursorStep).toContain("FORK_SYNC_CURSOR_WEBHOOK_URL");
+    expect(cursorStep).toContain("FORK_SYNC_CURSOR_WEBHOOK_SECRET");
+  });
+
+  test("does not create a Jules issue before Cursor fallback is known to fail", () => {
+    const issueStep = workflow.split("- name: Notify GitHub issue")[1];
+    expect(issueStep).toContain("steps.pin.outputs.kind != 'history-diverged'");
+    expect(issueStep).toContain("steps.prepare.outputs.status != 'hotspot-handoff'");
   });
 
   test("asserts pinning did not move the default branch HEAD", () => {

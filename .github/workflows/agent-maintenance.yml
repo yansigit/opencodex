@@ -35,7 +35,7 @@ jobs:
     permissions:
       actions: write
       checks: read
-      contents: read
+      contents: write
       issues: write
       pull-requests: write
     steps:
@@ -54,11 +54,13 @@ jobs:
           AGENT_MAINTENANCE_MODE: ${{ vars.AGENT_MAINTENANCE_MODE }}
           AGENT_MAINTENANCE_SCHEDULES: ${{ vars.AGENT_MAINTENANCE_SCHEDULES }}
           CURSOR_BUGBOT_APP_ID: ${{ vars.CURSOR_BUGBOT_APP_ID }}
+          CURSOR_BUGBOT_POLICY: ${{ vars.CURSOR_BUGBOT_POLICY }}
           CURSOR_BUGBOT_USER_ID: ${{ vars.CURSOR_BUGBOT_USER_ID }}
           JULES_BOT_USER_ID: ${{ vars.JULES_BOT_USER_ID }}
           JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
         with:
           script: |
+            const fs = require("node:fs");
             const path = require("node:path");
             const {
               MAX_REPAIR_ATTEMPTS,
@@ -69,9 +71,11 @@ jobs:
               defaultAgentMaintenanceState,
               exactHeadBugbotEvidence,
               findGithubSource,
+              hasExactHeadMaintainerWaiver,
               isExpectedJulesHeadAdvance,
               julesSessionDisposition,
               latestActiveLabelActor,
+              maintenanceReadyEvidence,
               parseAgentMaintenanceState,
               quotaExhaustionExpired,
               requiredChecksSuccessful,
@@ -81,6 +85,9 @@ jobs:
               validateSessionPullRequest,
               verifiedBugbotFindings
             } = require(path.join(process.cwd(), ".github", "scripts", "agent-maintenance.cjs"));
+            const { parseMaintainerLogins } = require(
+              path.join(process.cwd(), ".github", "scripts", "pr-maintainers.cjs")
+            );
             const { isAgentProtectedPath } = require(
               path.join(process.cwd(), ".github", "scripts", "pr-sponsored-surface.cjs")
             );
@@ -125,7 +132,8 @@ jobs:
               "agent:needs-human": ["d93f0b", "Maintenance task needs a maintainer"],
               "agent:failed": ["b60205", "Maintenance task failed"],
               "agent:done": ["0e8a16", "Maintenance task completed"],
-              "review-bot-waived": ["6f42c1", "Two-maintainer exact-head review outage waiver"]
+              "review-bot-waived": ["6f42c1", "Two-maintainer exact-head review outage waiver"],
+              "review-ready": ["0e8a16", "Automated maintenance checks passed; awaiting human merge"]
             };
             const LIFECYCLE = [
               "agent:queued", "agent:running", "agent:reviewing",
@@ -356,25 +364,41 @@ jobs:
                   await setLifecycle(issue.number, "agent:queued");
                   continue;
                 }
-                const scheduledTaskKind = trustedGenerated && issue.title.startsWith("[agent:docs]")
-                  ? "scheduled-docs"
-                  : trustedGenerated && issue.title.startsWith("[agent:tests]")
-                    ? "scheduled-tests"
-                    : null;
-                const taskKind = recipe?.taskKind || scheduledTaskKind || (labelNames.has("agent:plan") ? "plan" : "implement");
-                const periodKey = issue.title.replace(/^\[agent:(?:docs|tests)\]\s*/, "");
-                const taskId = recipe?.taskId || (scheduledTaskKind ? `${scheduledTaskKind === "scheduled-docs" ? "docs" : "tests"}-${periodKey}` : `issue-${issue.number}`);
-                state = defaultAgentMaintenanceState({ taskId, taskKind, issueNumber: issue.number });
-                const prompt = taskKind === "scheduled-docs"
-                  ? "Audit weekly documentation drift. Change only README.md, docs-site/**, screenshots/**, examples/**, and related documentation tests. Fill .github/PULL_REQUEST_TEMPLATE.md and record `bun run prepush` in Verification."
-                  : taskKind === "scheduled-tests"
-                    ? "Improve monthly test health. Change only tests/** and existing test helpers. If production code is needed, stop and explain why. Fill .github/PULL_REQUEST_TEMPLATE.md and record `bun run prepush` in Verification."
-                    : `Implement trusted maintenance issue #${issue.number}. Follow AGENTS.md and nested instructions, target dev, and fill .github/PULL_REQUEST_TEMPLATE.md. Issue title: ${issue.title}\nIssue body:\n${issue.body || ""}`;
-                try {
+               const scheduledTaskKind = trustedGenerated && issue.title.startsWith("[agent:docs]")
+                 ? "scheduled-docs"
+                 : trustedGenerated && issue.title.startsWith("[agent:tests]")
+                   ? "scheduled-tests"
+                    : issue.title.startsWith("[agent:sync]")
+                      ? "sync-hotspot"
+                   : null;
+               const taskKind = recipe?.taskKind || scheduledTaskKind || (labelNames.has("agent:plan") ? "plan" : "implement");
+               const periodKey = issue.title.replace(/^\[agent:(?:docs|tests)\]\s*/, "");
+               const taskId = recipe?.taskId || (scheduledTaskKind ? `${scheduledTaskKind === "scheduled-docs" ? "docs" : "tests"}-${periodKey}` : `issue-${issue.number}`);
+               state = defaultAgentMaintenanceState({ taskId, taskKind, issueNumber: issue.number });
+               const syncBranchMatch = taskKind === "sync-hotspot"
+                 ? String(issue.body || "").match(/(?:^|\n)Sync branch:\s*(sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64})(?:\s|$)/i)
+                 : null;
+               const startingBranch = syncBranchMatch?.[1] || "dev";
+               if (taskKind === "sync-hotspot" && !syncBranchMatch) {
+                 state.status = "needs-human";
+                 state.reason = "Sync hotspot issue is missing a validated Sync branch";
+                 await saveRecord(issue.number, comment, state);
+                 await setLifecycle(issue.number, "agent:needs-human");
+                 continue;
+               }
+               const prompt = taskKind === "scheduled-docs"
+                 ? "Audit weekly documentation drift. Change only README.md, docs-site/**, screenshots/**, examples/**, and related documentation tests. Fill .github/PULL_REQUEST_TEMPLATE.md and record `bun run prepush` in Verification."
+                 : taskKind === "scheduled-tests"
+                   ? "Improve monthly test health. Change only tests/** and existing test helpers. If production code is needed, stop and explain why. Fill .github/PULL_REQUEST_TEMPLATE.md and record `bun run prepush` in Verification."
+                    : taskKind === "sync-hotspot"
+                      ? `Resolve upstream sync shared hotspot conflicts for issue #${issue.number} from ${startingBranch}. Follow docs/fork/OWNED.md: preserve upstream control flow and re-fit fork behavior. Target dev branch and fill .github/PULL_REQUEST_TEMPLATE.md.\nIssue title: ${issue.title}\nIssue body:\n${issue.body || ""}`
+                   : `Implement trusted maintenance issue #${issue.number}. Follow AGENTS.md and nested instructions, target dev, and fill .github/PULL_REQUEST_TEMPLATE.md. Issue title: ${issue.title}\nIssue body:\n${issue.body || ""}`;
+               try {
                   const request = buildJulesSessionRequest({
                     title: `opencodex-agent:${taskId}`,
                     prompt,
                     source: await connectedSource(),
+                    startingBranch,
                     requirePlanApproval: taskKind === "plan"
                   });
                   if (request.automationMode !== "AUTO_CREATE_PR") throw new Error("Jules request is not PR-only");
@@ -579,13 +603,87 @@ jobs:
                 }
               }
               const baselineNames = ["ci", "enforce-target", "hygiene"];
-              const baselineReady = requiredChecksSuccessful(checkRuns, pr.head.sha, baselineNames, 15368);
               const appId = Number(process.env.CURSOR_BUGBOT_APP_ID);
-              const evidence = exactHeadBugbotEvidence({ checkRuns, liveHeadSha: pr.head.sha, expectedAppId: appId });
-              if (evidence && baselineReady) {
-                state.lastBugbotCheckRunId = evidence.checkRunId;
+              const labels = (pr.labels || []).map(label => label.name || label);
+              const bugbotPolicy = process.env.CURSOR_BUGBOT_POLICY || "shadow";
+              let waiverReviews = [];
+              let maintainers = [];
+              if (labels.includes("review-bot-waived")) {
+                try {
+                  waiverReviews = await github.paginate(github.rest.pulls.listReviews, {
+                    owner, repo, pull_number: pr.number, per_page: 100
+                  });
+                  maintainers = parseMaintainerLogins(
+                    fs.readFileSync(path.join(process.cwd(), "MAINTAINERS.md"), "utf8")
+                  );
+                } catch (error) {
+                  core.warning(`Could not verify Cursor Bugbot waiver: ${error.message}`);
+                }
+              }
+              const readiness = maintenanceReadyEvidence({
+                checkRuns,
+                headSha: pr.head.sha,
+                expectedBugbotAppId: appId,
+                expectedChecksAppId: 15368,
+                requiredNames: baselineNames,
+                bugbotPolicy,
+                labels,
+                reviews: waiverReviews,
+                maintainers
+              });
+              const baselineReady = readiness.baselineReady;
+              if (readiness.ready) {
+                state.lastBugbotCheckRunId = readiness.bugbotEvidence?.checkRunId || null;
                 state.status = "reviewing";
                 state.reason = `automated-review-passed:${pr.head.sha}`;
+                if (pr.draft) {
+                  try {
+                    const result = await github.graphql(
+                      `mutation($id: ID!) {
+                        markPullRequestReadyForReview(input: { pullRequestId: $id }) {
+                          pullRequest { isDraft }
+                        }
+                      }`,
+                      { id: pr.node_id }
+                    );
+                    if (result.markPullRequestReadyForReview.pullRequest.isDraft) {
+                      throw new Error("GitHub left the maintenance PR in draft state");
+                    }
+                  } catch (error) {
+                    state.reason = `Could not mark PR ready for review: ${error.message}`;
+                    await saveRecord(issue.number, comment, state);
+                    await setLifecycle(issue.number, "agent:needs-human");
+                    continue;
+                  }
+                }
+                if (!labels.includes("review-ready")) {
+                  await github.rest.issues.addLabels({
+                    owner, repo, issue_number: pr.number, labels: ["review-ready"]
+                  });
+                }
+                const readinessMarker = "<!-- opencodex-agent-maintenance-ready -->";
+                const readinessBody = [
+                  readinessMarker,
+                  `Automated maintenance checks passed for exact head \`${pr.head.sha}\`; this PR is ready for human merge.`,
+                  "This workflow never merges PRs; a human maintainer must perform the final merge."
+                ].join("\n\n");
+                const readinessComments = await github.paginate(github.rest.issues.listComments, {
+                  owner, repo, issue_number: pr.number, per_page: 100
+                });
+                const readinessComment = readinessComments
+                  .filter(item => item.user?.login === "github-actions[bot]" && item.body?.includes(readinessMarker))
+                  .sort((a, b) => Number(b.id) - Number(a.id))[0] || null;
+                if (readinessComment) {
+                  if (readinessComment.body !== readinessBody) {
+                    await github.rest.issues.updateComment({
+                      owner, repo, comment_id: readinessComment.id, body: readinessBody
+                    });
+                  }
+                } else {
+                  await github.rest.issues.createComment({
+                    owner, repo, issue_number: pr.number, body: readinessBody
+                  });
+                }
                 await saveRecord(issue.number, comment, state);
                 await setLifecycle(issue.number, "agent:reviewing");
                 continue;
