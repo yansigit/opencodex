@@ -209,7 +209,8 @@ async function prepareCcaSseResponse(
             return failoverOrPassthrough();
           }
           if (probe === "quota_exhausted" || probe === "geo_blocked") {
-            return passthrough();
+            const status = probe === "quota_exhausted" ? 429 : 403;
+            return passthrough(undefined, status);
           }
         }
         return failoverOrPassthrough();
@@ -236,7 +237,8 @@ async function prepareCcaSseResponse(
           return failoverOrPassthrough();
         }
         if (probe === "quota_exhausted" || probe === "geo_blocked") {
-          return passthrough(overflow);
+          const status = probe === "quota_exhausted" ? 429 : 403;
+          return passthrough(overflow, status);
         }
         if (probe === "terminal") return passthrough(overflow);
       }
@@ -338,8 +340,7 @@ async function fetchGoogleWithRetryInternal(
   let antigravityHostIndex = 0;
   let lastError: unknown;
   let compatibilityReplayUsed = false;
-  const maxAttempts = label === "Antigravity" ? 1 : GOOGLE_RETRY_ATTEMPTS;
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  for (let attempt = 0; attempt < GOOGLE_RETRY_ATTEMPTS; attempt++) {
     if (ctx.abortSignal?.aborted) throw abortError(ctx.abortSignal);
     try {
       const res = await fetchWithAttemptDeadline(activeRequest.url, {
@@ -472,5 +473,5 @@ export function fetchVertexWithRetry(request: AdapterRequest, ctx: AdapterFetchC
 
 /** Antigravity (Cloud Code Assist) retry wrapper. */
 export function fetchAntigravityWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}): Promise<Response> {
-  return fetchGoogleWithRetryInternal("Antigravity", request, { ...ctx, returnRawErrors: true }, false, { retry429: false });
+  return fetchGoogleWithRetry("Antigravity", request, ctx, { retry429: false });
 }

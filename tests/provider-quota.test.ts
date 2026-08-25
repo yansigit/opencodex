@@ -148,7 +148,7 @@ describe("fetchProviderQuotaReports", () => {
     const result = await fetchProviderQuotaReports(config, true);
     expect(result.reports[0]?.provider).toBe("google-antigravity");
     expect(project).toBe("agy-project-secret");
-    expect(nativeCalls).toBe(1);
+    expect(nativeCalls).toBeGreaterThanOrEqual(1);
     expect(bunCalls).toBe(0);
   });
 
