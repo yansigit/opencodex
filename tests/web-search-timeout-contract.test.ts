@@ -5,6 +5,7 @@ import { responseWithDeferredRequestLog, type RequestLogEntry } from "../src/ser
 import type { AdapterEvent, OcxProviderConfig } from "../src/types";
 import { runWithWebSearch as runWithWebSearchProduction, type WebSearchLoopDeps } from "../src/web-search/loop";
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
+import { OcxRequestValidationError } from "../src/lib/errors";
 
 function runWithWebSearch(
   deps: Omit<WebSearchLoopDeps, "incomingMeta"> & { incomingMeta?: WebSearchLoopDeps["incomingMeta"] },
@@ -409,4 +410,153 @@ describe("web-search timeout runtime contracts", () => {
       },
     });
   }, 1_000);
+
+  test("validates a rotated adapter before the second web-search build", async () => {
+    let builds = 0;
+    let fetches = 0;
+    const firstAdapter: ProviderAdapter = {
+      name: "first",
+      buildRequest: () => {
+        builds += 1;
+        return { url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" };
+      },
+      fetchResponse: async () => {
+        fetches += 1;
+        return new Response("rate limited", { status: 429 });
+      },
+      async *parseStream() { yield { type: "done" }; },
+      async parseResponse() { return [{ type: "done" }]; },
+    };
+    const rotatedAdapter: ProviderAdapter = {
+      ...firstAdapter,
+      name: "rotated",
+      buildRequest: () => {
+        builds += 1;
+        return { url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" };
+      },
+      fetchResponse: async () => {
+        fetches += 1;
+        return new Response("unexpected rotated fetch", { status: 200 });
+      },
+    };
+    const response = await runWithWebSearch(deps(firstAdapter, {
+      on429: () => rotatedAdapter,
+      validateAdapter: (_parsed, adapter) => {
+        if (adapter === rotatedAdapter) throw new OcxRequestValidationError("provider options route changed");
+      },
+    }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { message: "provider options route changed", type: "invalid_request_error", code: "invalid_request_error" },
+    });
+    expect(builds).toBe(1);
+    expect(fetches).toBe(1);
+  });
+
+  test("preserves an upstream HTTP 400 as upstream_error", async () => {
+    const adapter: ProviderAdapter = {
+      name: "upstream-400",
+      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
+      fetchResponse: async () => new Response("provider rejected request", { status: 400 }),
+      async *parseStream() { yield { type: "done" }; },
+      async parseResponse() { return [{ type: "done" }]; },
+    };
+    const response = await runWithWebSearch(deps(adapter, { maxSearches: 0 }));
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        message: "Provider error 400",
+        type: "upstream_error",
+        code: null,
+      },
+    });
+  });
+
+  test("a streamed web-search rotation failure is a typed 400 terminal", async () => {
+    let builds = 0;
+    let rotatedBuilds = 0;
+    let fetches = 0;
+    let parses = 0;
+    const firstAdapter: ProviderAdapter = {
+      name: "first",
+      buildRequest: () => {
+        builds += 1;
+        return { url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" };
+      },
+      fetchResponse: async () => {
+        fetches += 1;
+        return new Response(fetches === 1 ? "ok" : "rate limited", { status: fetches === 1 ? 200 : 429 });
+      },
+      async *parseStream() {
+        parses += 1;
+        const events: AdapterEvent[] = parses === 1
+          ? [
+              { type: "tool_call_start", id: "search_1", name: "web_search" },
+              { type: "tool_call_delta", arguments: JSON.stringify({ query: "docs" }) },
+              { type: "tool_call_end" },
+              { type: "done" },
+            ]
+          : [{ type: "done" }];
+        for (const event of events) yield event;
+      },
+      async parseResponse() { return [{ type: "done" }]; },
+    };
+    const rotatedAdapter: ProviderAdapter = {
+      ...firstAdapter,
+      name: "rotated",
+      buildRequest: () => {
+        rotatedBuilds += 1;
+        return { url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" };
+      },
+      fetchResponse: async () => {
+        fetches += 1;
+        return new Response("unexpected rotated fetch", { status: 200 });
+      },
+    };
+    const response = await runWithWebSearch(deps(firstAdapter, {
+      backend: "xai",
+      on429: () => rotatedAdapter,
+      validateAdapter: (_parsed, adapter) => {
+        if (adapter === rotatedAdapter) throw new OcxRequestValidationError("provider options route changed");
+      },
+    }));
+    const sse = await response.text();
+    expect(response.status).toBe(200);
+    expect(builds).toBe(2);
+    expect(rotatedBuilds).toBe(0);
+    expect(fetches).toBe(2);
+    expect(sse).toContain("event: response.failed");
+    expect(sse).toContain('"type":"invalid_request_error"');
+    expect(sse).not.toContain('"code":"upstream_server_error"');
+    expect(sse).not.toContain("event: response.completed");
+  });
+
+  test("a streamed upstream HTTP 400 remains upstream_error", async () => {
+    let fetches = 0;
+    let parses = 0;
+    const adapter: ProviderAdapter = {
+      name: "upstream-400-stream",
+      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
+      fetchResponse: async () => {
+        fetches += 1;
+        return new Response(fetches === 1 ? "ok" : "provider rejected request", { status: fetches === 1 ? 200 : 400 });
+      },
+      async *parseStream() {
+        parses += 1;
+        if (parses === 1) {
+          yield { type: "tool_call_start", id: "search_1", name: "web_search" };
+          yield { type: "tool_call_delta", arguments: JSON.stringify({ query: "docs" }) };
+          yield { type: "tool_call_end" };
+        }
+        yield { type: "done" };
+      },
+      async parseResponse() { return [{ type: "done" }]; },
+    };
+    const response = await runWithWebSearch(deps(adapter, { backend: "xai" }));
+    const sse = await response.text();
+    expect(response.status).toBe(200);
+    expect(sse).toContain("event: response.failed");
+    expect(sse).toContain('"type":"upstream_error"');
+    expect(sse).not.toContain('"type":"invalid_request_error"');
+  });
 });

@@ -23,6 +23,7 @@ import {
 import { formatWebSearchResults } from "./format-result";
 import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
+import { OcxRequestValidationError } from "../lib/errors";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -230,8 +231,14 @@ function forcedAnswerNudge(): OcxMessage {
   };
 }
 
-function jsonError(status: number, message: string): Response {
-  return new Response(JSON.stringify({ error: { message, type: "upstream_error", code: null } }), {
+function jsonError(status: number, message: string, errorType = "upstream_error", code: string | null = null): Response {
+  return new Response(JSON.stringify({
+    error: {
+      message,
+      type: errorType,
+      code,
+    },
+  }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
@@ -240,7 +247,12 @@ function jsonError(status: number, message: string): Response {
 /** Hard provider/parse failure inside an iteration. The eager first iteration converts it to a
  *  non-200 jsonError; later (already-streaming) iterations surface it as an in-stream error event. */
 class LoopError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly errorType?: string,
+    readonly code?: string,
+  ) {
     super(message);
     this.name = "LoopError";
   }
@@ -301,6 +313,8 @@ export interface WebSearchLoopDeps {
   onUsage?: (usage: OcxUsage | undefined) => void;
   /** Observe the exact adapter request selected for each routed-model iteration. */
   onRequestBuilt?: (request: AdapterRequest) => void;
+  /** Validate the final adapter before every cached replay or request build. */
+  validateAdapter?: (parsed: OcxParsedRequest, adapter: ProviderAdapter) => void;
   /** Called before each routed-model dispatch in the loop, for attempt telemetry. Same-target 429 replays pass the `rate-limit-429` recovery kind. */
   onAttemptSend?: (recovery?: AttemptRecoveryKind) => void;
   /**
@@ -424,6 +438,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
        * header deadline. The caller owns same-target 429 replays and key rotation around it.
        */
       const fetchOnce = async (requestAdapter: ProviderAdapter, recovery?: AttemptRecoveryKind): Promise<IterationResponse> => {
+        deps.validateAdapter?.(iterParsed, requestAdapter);
         let request: AdapterRequest;
         if (cachedRequest !== undefined && cachedAdapter === requestAdapter) {
           request = cachedRequest;
@@ -555,6 +570,9 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       return prepared;
     } catch (error) {
       if (isTranslatorBudgetExceededError(error)) throw error;
+      if (error instanceof OcxRequestValidationError) {
+        throw new LoopError(error.status, error.message, "invalid_request_error", "invalid_request_error");
+      }
       if (headerDeadline.didExpire()) {
         throw new LoopError(504, `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`);
       }
@@ -785,7 +803,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     firstPrepared = await prepareIterationDrained(false);
   } catch (e) {
     if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
-    if (e instanceof LoopError) return jsonError(e.status, e.message);
+    if (e instanceof LoopError) return jsonError(e.status, e.message, e.errorType, e.code ?? null);
     throw e;
   }
 
@@ -869,7 +887,18 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               message: "upstream translation buffer exceeded the safe limit",
             };
           } else {
-            yield { type: "error", message: e instanceof LoopError ? e.message : (e instanceof Error ? e.message : String(e)) };
+            const message = e instanceof LoopError ? e.message : (e instanceof Error ? e.message : String(e));
+            yield {
+              type: "error",
+              ...(e instanceof LoopError ? {
+                status: e.status,
+                ...(e.errorType !== undefined || e.status === 400
+                  ? { errorType: e.errorType ?? "upstream_error" }
+                  : {}),
+                ...(e.code !== undefined ? { code: e.code } : {}),
+              } : {}),
+              message,
+            };
           }
           return;
         }

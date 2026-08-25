@@ -14,6 +14,8 @@ import {
   resolveEnvValue,
 } from "../../config";
 import { parseRequest } from "../../responses/parser";
+import { googleProviderOptionsRouteError } from "../../responses/google-provider-options";
+import type { ProviderAdapter } from "../../adapters/base";
 import {
   bindReasoningReplayScope,
   commitReasoningReplayServingIdentity,
@@ -73,6 +75,7 @@ import {
 import { isDebugEnabled, isInjectionDebugEnabled } from "../../lib/debug-settings";
 import { debugStreamDiagnostic } from "../../lib/debug";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
+import { OcxRequestValidationError } from "../../lib/errors";
 import { resolveClientRetryAfter } from "../../lib/retry-after";
 import { enrichOpenCodeZenRateLimitMessage } from "../../providers/opencode-zen-rate-limit";
 import { modelInList, namespacedToolName } from "../../types";
@@ -2900,6 +2903,27 @@ async function handleResponsesInner(
     delete logCtx.accountLogLabel;
   }
   const adapter = resolveAdapter(adapterProvider, config.cacheRetention);
+  const googleOptionsError = googleProviderOptionsRouteError(parsed, {
+    providerName: route.providerName,
+    provider: adapterProvider,
+    adapterName: adapter.name,
+  });
+  if (googleOptionsError) {
+    return formatErrorResponse(400, "invalid_request_error", googleOptionsError);
+  }
+  const assertGoogleOptionsRoute = (
+    candidate: Pick<ProviderAdapter, "name" | "validateRequest">,
+    provider: OcxProviderConfig,
+    requestParsed: OcxParsedRequest = parsed,
+  ): void => {
+    const message = googleProviderOptionsRouteError(requestParsed, {
+      providerName: route.providerName,
+      provider,
+      adapterName: candidate.name,
+    });
+    if (message) throw new OcxRequestValidationError(message);
+    if (requestParsed.options.providerOptions?.google) candidate.validateRequest?.(requestParsed);
+  };
   bindRouteReasoningReplayScope({
     parsed,
     providerName: route.providerName,
@@ -2914,6 +2938,7 @@ async function handleResponsesInner(
   }
   logCtx.providerAdapter = adapter.name;
   try {
+    assertGoogleOptionsRoute(adapter, adapterProvider);
     adapter.validateRequest?.(parsed);
   } catch (err) {
     return formatErrorResponse(
@@ -3142,6 +3167,7 @@ async function handleResponsesInner(
     );
     let request: Awaited<ReturnType<typeof adapter.buildRequest>>;
     try {
+      assertGoogleOptionsRoute(adapter, adapterProvider);
       request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
     } catch (error) {
       releaseCodexAuthContextProbeLease(authCtx);
@@ -3422,6 +3448,12 @@ async function handleResponsesInner(
         return { failed: formatErrorResponse(502, "upstream_error", "Recovery changed the provider wire unexpectedly") };
       }
       try {
+        assertGoogleOptionsRoute(retryAdapter, route.provider);
+      } catch (err) {
+        upstream.abort();
+        return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err))) };
+      }
+      try {
         request = await retryAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
@@ -3536,6 +3568,7 @@ async function handleResponsesInner(
         logCtx.accountLogLabel,
       );
       try {
+        assertGoogleOptionsRoute(refreshedAdapter, refreshedProvider);
         request = await refreshedAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
@@ -4357,6 +4390,7 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       },
+      validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       ...(vidPlan?.timeoutMs ? { videoTimeoutMs: vidPlan.timeoutMs } : {}),
       onUsage: usage => {
         // Cursor may assign _cursorConversationId inside the image loop's first runTurn;
@@ -4446,6 +4480,7 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       },
+      validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       onAttemptSend: (recovery?: AttemptRecoveryKind) =>
         noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
       ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
@@ -4753,6 +4788,7 @@ async function handleResponsesInner(
   let initialRequest: AdapterRequest | undefined;
   let inputTokenEstimate: number | undefined;
   try {
+    assertGoogleOptionsRoute(activeAdapter, route.provider);
     initialRequest = await activeAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
     refreshRoutedNamespaceToolAliases(initialRequest);
     recordAdapterReasoning(logCtx, initialRequest);
@@ -4861,6 +4897,13 @@ async function handleResponsesInner(
     const rebuildAndRefetch = async (
       recovery: AttemptRecoveryKind,
     ): Promise<Response | { failed: Response }> => {
+      try {
+        assertGoogleOptionsRoute(activeAdapter, route.provider);
+      } catch (err) {
+        cleanupUpstreamAbort();
+        upstream.abort();
+        return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err))) };
+      }
       let retryRequest: AdapterRequest;
       if (sameTargetRequest !== undefined && sameTargetParsed === parsed && sameTargetToken === transportToken) {
         // Same target (key/adapter/parsed/tier unchanged): replay the exact cached request.
@@ -5375,6 +5418,16 @@ async function handleResponsesInner(
     nextParsed: OcxParsedRequest,
     initialRecoveryKind?: AttemptRecoveryKind,
   ): AsyncGenerator<AdapterEvent> {
+    const requestValidationEvent = (error: unknown): AdapterEvent | undefined => {
+      if (!(error instanceof OcxRequestValidationError)) return undefined;
+      return {
+        type: "error",
+        status: error.status,
+        errorType: "invalid_request_error",
+        code: "invalid_request_error",
+        message: error.message,
+      };
+    };
     let response: Response | undefined;
     // One-shot recovery label for the next top-of-loop continuation send after a failover rotation.
     let nextContinuationRecoveryKind: AttemptRecoveryKind | undefined = initialRecoveryKind;
@@ -5387,6 +5440,7 @@ async function handleResponsesInner(
      */
     const fetchContinuation = async (recoveryKind?: AttemptRecoveryKind): Promise<Response> => {
       let continuationRequest: AdapterRequest | undefined;
+      assertGoogleOptionsRoute(activeAdapter, route.provider, nextParsed);
       if (sameTargetRequest !== undefined && sameTargetParsed === nextParsed && sameTargetToken === transportToken) {
         // Same target (key/adapter/parsed/tier unchanged): replay the exact cached request.
         continuationRequest = sameTargetRequest;
@@ -5474,7 +5528,10 @@ async function handleResponsesInner(
         nextContinuationRecoveryKind = undefined;
         response = await fetchContinuation(recoveryKind);
       } catch (error) {
-        if (options.abortSignal?.aborted || upstream.signal.aborted) {
+        const validationEvent = requestValidationEvent(error);
+        if (validationEvent) {
+          yield validationEvent;
+        } else if (options.abortSignal?.aborted || upstream.signal.aborted) {
           yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
         } else {
           yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -5520,7 +5577,10 @@ async function handleResponsesInner(
         try {
           response = await fetchContinuation("rate-limit-429");
         } catch (error) {
-          if (options.abortSignal?.aborted || upstream.signal.aborted) {
+          const validationEvent = requestValidationEvent(error);
+          if (validationEvent) {
+            yield validationEvent;
+          } else if (options.abortSignal?.aborted || upstream.signal.aborted) {
             yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
           } else {
             yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -5751,7 +5811,10 @@ async function handleResponsesInner(
         detachContinuationBodyGuard();
       }
     } catch (error) {
-      if (options.abortSignal?.aborted) {
+      const validationEvent = requestValidationEvent(error);
+      if (validationEvent) {
+        yield validationEvent;
+      } else if (options.abortSignal?.aborted) {
         yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
       } else {
         yield { type: "error", message: `Provider continuation parse failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };

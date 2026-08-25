@@ -2,6 +2,7 @@ import type { AdapterFetchContext, AdapterRequest, ProviderAdapter } from "./bas
 import { debugDroppedFrame } from "../lib/debug";
 import { createToolCallIdAllocator } from "./tool-call-id";
 import { createImageBudget, materializeInlineImage, MAX_ENCODED_BYTES_PER_IMAGE, artifactHttpUrl } from "../images/artifacts";
+import { OcxRequestValidationError } from "../lib/errors";
 import type {
   AdapterEvent,
   OcxAssistantMessage,
@@ -19,7 +20,8 @@ import { contentPartsToText, parseDataUrl } from "./image";
 import { getVertexAccessToken } from "../lib/gcp-adc";
 import { fetchAntigravityWithRetry, fetchVertexWithRetry } from "./google-http";
 import { safeAntigravityHttpErrorMessage, safeVertexHttpErrorMessage } from "./google-errors";
-import { isVertexTruncatedTurn, vertexTruncationErrorMessage } from "./google-truncation";
+import { sanitizeUpstreamErrorText } from "./upstream-http-error";
+import { googleTruncationErrorMessage, isVertexTruncatedTurn, vertexTruncationErrorMessage } from "./google-truncation";
 import { ANTIGRAVITY_REQUEST_UA, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
 import { repairGoogleToolPairs, stripTrailingClaudePrefill } from "./google-antigravity-tools";
 import { canonicalAntigravityHttpsHost, isAntigravityHttpsHost } from "./google-antigravity-hosts";
@@ -139,6 +141,19 @@ const GEMINI_EMPTY_PLACEHOLDER = "(empty)";
 const GEMINI_EMPTY_TOOL_OUTPUT_PLACEHOLDER = "(empty tool output)";
 const GEMINI_MISSING_TOOL_RESULT = "[missing tool_result for this tool_use in history]";
 
+function appendGeminiContent(
+  contents: unknown[],
+  next: { role: string; parts: unknown[] },
+  mergeAdjacentUsers = true,
+): void {
+  const previous = contents.at(-1) as { role?: unknown; parts?: unknown[] } | undefined;
+  if (mergeAdjacentUsers && previous?.role === "user" && next.role === "user" && Array.isArray(previous.parts)) {
+    previous.parts.push(...next.parts);
+  } else {
+    contents.push(next);
+  }
+}
+
 /** A Gemini text part, or undefined when the value cannot form a valid non-empty text block. */
 function geminiTextPart(text: unknown): { text: string } | undefined {
   return typeof text === "string" && text.length > 0 ? { text } : undefined;
@@ -208,6 +223,11 @@ function messagesToGeminiFormat(
   const systemInstruction = { parts: [{ text: systemText }] };
 
   const contents: unknown[] = [];
+  let userMergeBarrier = false;
+  const appendContent = (next: { role: string; parts: unknown[] }): void => {
+    appendGeminiContent(contents, next, !userMergeBarrier);
+    userMergeBarrier = false;
+  };
   const messages = repairGoogleToolPairs(parsed.context.messages, { dropUnmatchedCalls: repairToolPairs });
 
   const callIds = createToolCallIdAllocator();
@@ -226,7 +246,7 @@ function messagesToGeminiFormat(
       case "user":
       case "developer": {
         if (typeof msg.content === "string") {
-          contents.push({ role: "user", parts: [{ text: msg.content || GEMINI_EMPTY_PLACEHOLDER }] });
+          appendContent({ role: "user", parts: [{ text: msg.content || GEMINI_EMPTY_PLACEHOLDER }] });
         } else {
           const parts: unknown[] = [];
           for (const p of msg.content as OcxContentPart[]) {
@@ -241,7 +261,7 @@ function messagesToGeminiFormat(
             const textPart = geminiTextPart(p.text);
             if (textPart) parts.push(textPart);
           }
-          contents.push({ role: "user", parts: parts.length > 0 ? parts : [{ text: GEMINI_EMPTY_PLACEHOLDER }] });
+          appendContent({ role: "user", parts: parts.length > 0 ? parts : [{ text: GEMINI_EMPTY_PLACEHOLDER }] });
         }
         break;
       }
@@ -291,8 +311,11 @@ function messagesToGeminiFormat(
         // A turn with nothing Gemini can represent (e.g. thinking-only) would serialize as
         // `parts: []`, which the Anthropic translation rejects. Skip it, as the Anthropic
         // adapter does for its own empty assistant content.
-        if (parts.length === 0) break;
-        contents.push({ role: "model", parts });
+        if (parts.length === 0) {
+          userMergeBarrier = true;
+          break;
+        }
+        appendContent({ role: "model", parts });
         if (toolCalls.length > 0) {
           // Gemini/Claude-on-Antigravity requires one adjacent response batch for the whole
           // function-call turn. Replayed histories can be interrupted, reversed, duplicated, or
@@ -321,7 +344,7 @@ function messagesToGeminiFormat(
           for (const orphan of orphanResults) {
             responseParts.push(...geminiOrphanToolResultParts(orphan));
           }
-          contents.push({ role: "user", parts: responseParts });
+          appendContent({ role: "user", parts: responseParts });
           i = j - 1;
         }
         break;
@@ -332,7 +355,7 @@ function messagesToGeminiFormat(
         // batch never reach here (the assistant branch consumes them). Standalone or
         // barrier-delayed results still have to stay visible — especially image-bearing
         // screenshots — as explicit user text rather than vanishing or 400ing CCA.
-        contents.push({ role: "user", parts: geminiOrphanToolResultParts(msg as OcxToolResultMessage) });
+        appendContent({ role: "user", parts: geminiOrphanToolResultParts(msg as OcxToolResultMessage) });
         break;
       }
     }
@@ -393,6 +416,13 @@ function usageFromGemini(usage: Record<string, number> | undefined): OcxUsage | 
     ...(usage.cachedContentTokenCount !== undefined ? { cachedInputTokens: usage.cachedContentTokenCount } : {}),
     ...(usage.thoughtsTokenCount !== undefined ? { reasoningOutputTokens: usage.thoughtsTokenCount } : {}),
   };
+}
+
+function googlePromptFeedbackError(root: Record<string, unknown>): Extract<AdapterEvent, { type: "error" }> | undefined {
+  const feedback = root.promptFeedback;
+  if (!isGoogleRecord(feedback) || typeof feedback.blockReason !== "string" || !feedback.blockReason.trim()) return undefined;
+  const reason = sanitizeUpstreamErrorText(feedback.blockReason).slice(0, 160);
+  return { type: "error", message: `google response blocked by prompt feedback: ${reason}` };
 }
 
 /**
@@ -681,8 +711,23 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
   let vertexReplaySession: string | undefined;
   let restoreGoogleToolName = (name: string): string => name;
   const emitInTurnGroundingSourcesQueue: boolean[] = [];
+  const truncationErrorMessage = provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
+    ? vertexTruncationErrorMessage
+    : googleTruncationErrorMessage;
   return {
     name: "google",
+    validateRequest(parsed: OcxParsedRequest) {
+      if (provider.googleMode === "cloud-code-assist" && parsed.options.providerOptions?.google) {
+        throw new OcxRequestValidationError("provider_options.google is not supported on Google Cloud Code Assist routes");
+      }
+      const googleOptions = parsed.options.providerOptions?.google;
+      if (isImageCapableModel(parsed.modelId)
+        && (googleOptions?.thinkingBudget !== undefined || googleOptions?.includeThoughts !== undefined)) {
+        throw new OcxRequestValidationError(
+          "provider_options.google thinking_budget and include_thoughts are not supported for image-capable Gemini models",
+        );
+      }
+    },
 
     // Vertex + Antigravity get Kiro-style retry/timeout + classified, redacted errors.
     // Direct AI-Studio uses the canonical server transport (fetchWithTransientRetry), which
@@ -723,6 +768,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       // catalog is a guaranteed upstream 400.
       const toolConfig = tools ? toolChoiceToGeminiToolConfig(parsed) : undefined;
       if (toolConfig) body.toolConfig = toolConfig;
+      const googleOptions = parsed.options.providerOptions?.google;
+      if (googleOptions?.safetySettings) body.safetySettings = googleOptions.safetySettings;
+      if (googleOptions?.cachedContent) body.cachedContent = googleOptions.cachedContent;
 
       const generationConfig: Record<string, unknown> = {};
       if (parsed.options.maxOutputTokens) generationConfig.maxOutputTokens = parsed.options.maxOutputTokens;
@@ -744,7 +792,13 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const thinkingLevel = thinkingEligible
         ? mapReasoningEffort(provider, parsed.modelId, parsed.options.reasoning)
         : undefined;
-      if (thinkingLevel) generationConfig.thinkingConfig = { thinkingLevel };
+      if (!isImageCapableModel(parsed.modelId)) {
+        const thinkingConfig: Record<string, unknown> = {};
+        if (googleOptions?.thinkingBudget !== undefined) thinkingConfig.thinkingBudget = googleOptions.thinkingBudget;
+        else if (thinkingLevel) thinkingConfig.thinkingLevel = thinkingLevel;
+        if (googleOptions?.includeThoughts !== undefined) thinkingConfig.includeThoughts = googleOptions.includeThoughts;
+        if (Object.keys(thinkingConfig).length > 0) generationConfig.thinkingConfig = thinkingConfig;
+      }
       if (!generationConfig.thinkingConfig && isImageCapableModel(parsed.modelId)) {
         generationConfig.responseModalities = ["TEXT", "IMAGE"];
       }
@@ -1010,7 +1064,14 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         // absent key and an empty array are already skipped here; `null` joins them. A non-null
         // non-array container is still claimed structure the parser cannot read, and stays
         // terminal.
-        if (rawCandidates === undefined || rawCandidates === null) return "continue";
+        if (rawCandidates === undefined || rawCandidates === null) {
+          const feedbackError = googlePromptFeedbackError(root);
+          if (feedbackError) {
+            yield feedbackError;
+            return "terminate";
+          }
+          return "continue";
+        }
         if (!Array.isArray(rawCandidates)) {
           yield invalidGoogleShapeEvent({
             reason: "candidates_not_array",
@@ -1018,7 +1079,14 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           });
           return "terminate";
         }
-        if (rawCandidates.length === 0) return "continue";
+        if (rawCandidates.length === 0) {
+          const feedbackError = googlePromptFeedbackError(root);
+          if (feedbackError) {
+            yield feedbackError;
+            return "terminate";
+          }
+          return "continue";
+        }
         const rawCandidate = rawCandidates[0];
         if (!isGoogleRecord(rawCandidate)) {
           // Unlike a root `data: null` keepalive, this is a claimed response candidate. Treat it
@@ -1191,9 +1259,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         }
         // Fail-closed: a turn cut off mid tool call (MAX_TOKENS / MALFORMED_FUNCTION_CALL) surfaces
         // an error instead of a silently-incomplete done. Mirrors kiro-truncation.
-        if ((provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist")
-          && isVertexTruncatedTurn(lastFinishReason, toolCallsStarted)) {
-          yield { type: "error", message: vertexTruncationErrorMessage(lastFinishReason) };
+        if (isVertexTruncatedTurn(lastFinishReason, toolCallsStarted)) {
+          yield { type: "error", message: truncationErrorMessage(lastFinishReason) };
           return;
         }
         if (!sawAnyFrame || !sawTerminalSignal) {
@@ -1345,6 +1412,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       }
       const candidates = rawCandidates as { finishReason?: string }[] | undefined;
       if (!candidates?.length) {
+        const feedbackError = googlePromptFeedbackError(json);
+        if (feedbackError) return finish([feedbackError]);
         return finish([{ type: "error", message: "google response contained no candidates" }]);
       }
       const rawCandidate: unknown = candidates[0];
@@ -1417,9 +1486,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
       // Fail-closed truncation, same as the stream path: a non-stream turn cut off mid tool call
       // (MAX_TOKENS / MALFORMED_FUNCTION_CALL) surfaces an error instead of a silent done.
-      if (provider.googleMode === "vertex"
-        && isVertexTruncatedTurn(candidate.finishReason, toolCallsStarted)) {
-        return finish([{ type: "error", message: vertexTruncationErrorMessage(candidate.finishReason) }]);
+      if (isVertexTruncatedTurn(candidate.finishReason, toolCallsStarted)) {
+        return finish([{ type: "error", message: truncationErrorMessage(candidate.finishReason) }]);
       }
 
       const usage = json.usageMetadata as Record<string, number> | undefined;
