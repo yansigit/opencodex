@@ -6,6 +6,12 @@ description: Sağlayıcı girdileri, kimlik doğrulama, uç noktalar, model kata
 Bir sağlayıcı, opencodex'e bir modelin nerede yaşadığını, hangi hat adaptörünü
 konuştuğunu ve isteklerin nasıl doğrulandığını söyler.
 
+Azure identity configurations use `azureCredential` and are documented in the
+[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
+including `managedIdentityClientId`, the exact scope, `liveModels: false`,
+mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
+remains supported separately.
+
 ## Sağlayıcı ile ilgili üst düzey alanlar
 
 | Alan | Tip | Varsayılan | Anlamı |
@@ -136,6 +142,8 @@ alanlı seçilmiş kimlikleri yalın kimliklere yeniden yazar.
 | `desktopExecutor?` | `DesktopExecutorConfig` | Yalnızca Cursor: harici bilgisayar kullanımı ve ekran kaydetme komutları. |
 | `unsafeAllowNativeLocalExec?` | `boolean` | Cursor eski boolean değeri, yalnızca daha yeni alan ayarlanmadığında `nativeLocalExec: "on"` değerine eşdeğerdir. |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Cursor yerel yürütme politikası. `off` varsayılandır; `codex-sandbox` şu anda `off` gibi kapalı olarak başarısız olur. |
+| `commandCodeVersion?` | `string` | Yalnızca Command Code OAuth (`adapter: "command-code"`). `/alpha/generate` isteklerinde `x-command-code-version` başlığını sabitler. Belirtilmezse adaptör varsayılanı (`0.52.1`) kullanılır. API anahtarı `commandcode` önayarı (`openai-chat` / `/provider/v1`) tarafından okunmaz. |
+| `projectContext?` | `"off" \| "on"` | Yalnızca Command Code OAuth (`adapter: "command-code"`). `"on"` iken, proxy işlem çalışma dizinindeki sınırlı proje dosyalarını `/alpha/generate` `memory` / `taste` / `skills` zarfına kopyalar. Eksik veya `"off"` iken dosyalar diskte olsa bile boş zarf korunur. API anahtarı `commandcode` önayarı tarafından okunmaz. Üst düzeyde değil, `providers.command-code` üzerinde ayarlayın. Panoda **Providers → Command Code → Edit JSON** kullanın. `process.cwd()` hedeflediğiniz depo olsun diye proxy'yi güvenilir Codex proje dizininden başlatın. Fail-soft: eksik, okunamayan, zaman aşımı veya yol kaçışı o parçayı düşürür; tur başarısız olmaz. `~/.commandcode/skills` veya diğer ev skill ağaçlarını okumaz. `x-taste-learning` bu bayraktan bağımsız olarak `"false"` kalır. |
 
 API anahtarı sağlayıcıları değişmez bir anahtar veya bir ortam referansı
 tutabilir. OAuth sağlayıcıları `ocx login` tarafından doldurulan kimlik bilgisi
@@ -328,8 +336,10 @@ Cursor sunucu güdümlü yerel araçlar varsayılan olarak devre dışıdır. Co
 onayı ve sanal alan politikasıyla `apply_patch` ve `exec_command` gibi kendi
 araçlarını kullanmaya devam eder:
 
-- `"off"` (varsayılan), Cursor yerel `read`, `write`, `delete`, `ls`, `grep`,
-  `shell` ve `fetch` yürütmesini reddeder.
+- `"off"` (varsayılan), proxy üzerinde Cursor yerel `read`, `write`, `delete`, `ls`, `grep`,
+  `shell` ve `fetch` yürütmesini reddeder. Tur bare Codex `shell_command` veya `exec_command`
+  duyurduğunda yerel Shell/Read/Ls/Grep/Fetch proxy yerine bu Codex köprüsüne eşlenir; write/delete
+  reddedilmeye devam eder.
 - `"on"`, güvenilen yerel yürütmeyi seçer ve Codex onay/sanal alan anlambilimini
   atlar.
 - `"codex-sandbox"` uyumluluk için tutulur ancak `"off"` gibi kapalı olarak

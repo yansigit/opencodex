@@ -203,6 +203,12 @@ than nudged.
   `Closes #<number>` to link it. GitHub auto-closes the linked issue only
   when the PR merges into the default branch (`main`); PRs here target
   `dev`, so close the issue manually once the change is on `dev`.
+- **Target repository (fork vs. upstream):** when working in a cloned fork
+  (where `origin` is the user's fork and `upstream` is the parent repository),
+  **NEVER** create a PR targeting `upstream` (`lidge-jun/opencodex`) unless the
+  user explicitly requests an upstream submission. Always specify the user's fork
+  explicitly: `gh pr create --repo yansigit/opencodex --base dev --head <branch>`.
+  Upstream PR creation is an external action requiring explicit user direction.
 
 ## Branch policy
 

@@ -166,6 +166,17 @@ export function clearAntigravityAccountCooldown(accountId: string): boolean {
   return accountHealth.delete(accountId);
 }
 
+export function sweepExpiredAntigravityRoutingHealth(now = Date.now()): number {
+  let removed = 0;
+  for (const [accountId, health] of accountHealth) {
+    if (health.cooldownUntil <= now) {
+      accountHealth.delete(accountId);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
 export function retryableAntigravity429DelayMs(
   retryAfterHeader: string | null | undefined,
   now = Date.now(),

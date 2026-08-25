@@ -192,8 +192,19 @@ export async function handleComboRoutes(ctx: ManagementContext): Promise<Respons
       if (config.subagentModels) {
         config.subagentModels = [...new Set(config.subagentModels.map(migrateAgentReference))];
       }
+      if (config.subagentRoles) {
+        for (const role of config.subagentRoles) {
+          role.model = migrateAgentReference(role.model);
+        }
+      }
       if (config.injectionModel && migratedModels.has(config.injectionModel)) {
         config.injectionModel = migrateReference(config.injectionModel);
+      }
+      if (config.v2NativeParentOverride?.model && migratedModels.has(config.v2NativeParentOverride.model)) {
+        config.v2NativeParentOverride = {
+          ...config.v2NativeParentOverride,
+          model: migrateReference(config.v2NativeParentOverride.model),
+        };
       }
       if (config.shadowCallIntercept?.model && migratedModels.has(config.shadowCallIntercept.model)) {
         config.shadowCallIntercept = {

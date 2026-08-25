@@ -106,6 +106,13 @@ describe("GitHub Actions hardening", () => {
     expect(ci.jobs?.["platform-windows"]?.["timeout-minutes"]).toBe(25);
     expect(ci.jobs?.["keyring-smoke"]?.["timeout-minutes"]).toBe(8);
     expect(ci.jobs?.["npm-global-smoke"]?.["timeout-minutes"]).toBe(8);
+    // The packed tarball name follows package.json (`yansigit-opencodex-*.tgz` on
+    // this fork). Installing a hardcoded upstream filename makes the smoke fail
+    // after `npm pack` with ENOENT.
+    expect(workflow).toContain(
+      `npm install -g "./$(node -p "require('./pack.json')[0].filename")"`,
+    );
+    expect(workflow).not.toContain("bitkyc08-opencodex-*.tgz");
     expect(ci.jobs?.ci?.["timeout-minutes"]).toBe(5);
     expect(ci.permissions).toEqual({ contents: "read" });
 
@@ -193,9 +200,8 @@ describe("GitHub Actions hardening", () => {
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test --isolate tests")).toBe(true);
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test tests")).toBe(false);
 
-    // macOS is the unsharded control for every CI-relevant change. It may skip
-    // only when the shared path filter says the entire expensive suite is out of
-    // scope (for example a docs-site-only PR).
+    // macOS is the unsharded control for push and dispatch. Pull requests skip
+    // it so merge feedback is not gated on that 30-minute runtime.
     const macosSteps = (ci.jobs?.["platform-macos"] as { steps?: { run?: string }[] })?.steps ?? [];
     // The 60s per-test ceiling is part of the pinned shape: dropping it silently
     // restores the timing-flake class this lane kept surfacing.
@@ -223,7 +229,7 @@ describe("GitHub Actions hardening", () => {
     expect(macosTestRun).not.toContain("while true");
     expect((ci.jobs?.["platform-macos"] as { needs?: string; if?: string })?.needs).toBe("changes");
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
-      .toBe("github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'");
+      .toBe("github.event_name != 'pull_request'");
 
     // Windows is dispatch-only: it gates nothing, not even the shipping
     // boundary. The sharded promotion run surfaced ~207 Windows-only failures
@@ -340,10 +346,12 @@ describe("GitHub Actions hardening", () => {
     // `ci.yml` therefore carries no base filter at all. `service-lifecycle.yml`
     // keeps its list: it gates the release service path, not review.
     const gate = await readText(".github/workflows/enforce-pr-target.yml");
-    const allowed = gate.match(/const ALLOWED_BASES = \[([^\]]*)\];/);
+    const allowed = gate.match(
+      /const ALLOWED_BASES\s*=\s*context\.repo\.owner === "lidge-jun"\s*\? \["dev"\]\s*:\s*\["dev", "main"\]/,
+    );
     expect(allowed).not.toBeNull();
-    const bases = [...(allowed?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(m => m[1]);
-    expect(bases).toEqual(["dev"]);
+    expect(allowed?.[0]).toContain('["dev"]');
+    expect(allowed?.[0]).toContain('["dev", "main"]');
 
     // The gate itself must stay unfiltered by base, or the stacked exemption it
     // implements would never be evaluated for the branches it exempts.
@@ -414,6 +422,7 @@ describe("GitHub Actions hardening", () => {
       ".gitattributes",
       ".github/workflows/ci.yml",
       ".github/workflows/enforce-pr-target.yml",
+      ".github/workflows/fork-auto-release.yml",
       ".github/workflows/release.yml",
       ".github/workflows/stale-needs-info.yml",
       ".npmignore",
@@ -423,6 +432,7 @@ describe("GitHub Actions hardening", () => {
       "bin/**",
       "bun.lock",
       "gui/**",
+      "integrations/replit-gateway/**",
       "package.json",
       "scripts/**",
       "src/**",
@@ -468,11 +478,14 @@ describe("GitHub Actions hardening", () => {
     expect(scopeIndex).toBeGreaterThan(filterIndex);
 
     const scopedCondition = "github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'";
-    for (const jobName of ["test", "storage-policy", "gates", "platform-macos", "keyring-smoke"]) {
+    for (const jobName of ["test", "storage-policy", "gates", "keyring-smoke"]) {
       const job = ci.jobs?.[jobName] as { needs?: string; if?: string } | undefined;
       expect(`${jobName}:${job?.needs}`).toBe(`${jobName}:changes`);
       expect(`${jobName}:${job?.if}`).toBe(`${jobName}:${scopedCondition}`);
     }
+    const macosJob = ci.jobs?.["platform-macos"] as { needs?: string; if?: string } | undefined;
+    expect(`platform-macos:${macosJob?.needs}`).toBe("platform-macos:changes");
+    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:github.event_name != 'pull_request'");
   });
 
   test("cross-platform CI keeps the GUI lint and build gates", async () => {
@@ -887,6 +900,7 @@ describe("GitHub Actions hardening", () => {
     "require",
     "require",
     "require",
+    "require",
   ] as const;
 
   /** Reads every allowed-base PR performs before any enforcement writes. */
@@ -901,6 +915,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.get",
       "pulls.listFiles",
       "pulls.get",
+      "checks.listForRef",
       ...tail,
     ];
   }
@@ -916,6 +931,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.get",
       "pulls.listFiles",
       "pulls.get",
+      "checks.listForRef",
       ...tail,
     ];
   }
@@ -936,6 +952,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.listFiles",
       "pulls.listFiles",
       "pulls.get",
+      "checks.listForRef",
       ...tail,
     ];
   }
@@ -1023,12 +1040,14 @@ describe("GitHub Actions hardening", () => {
     // workflow YAML under a write token against base-pinned scripts — a
     // mismatch that crashes the gate and breaks the trusted-base model.
     //
-    // `status` is the only extra trigger. CodeRabbit publishes a legacy
-    // commit status; this privileged workflow is loaded from the default branch
-    // and re-reads live review evidence before any mutation.
+    // CodeRabbit publishes a legacy commit status; Cursor Bugbot publishes a
+    // check run. Both are wake-up signals only: this privileged workflow is
+    // loaded from the default branch and re-reads live evidence before writes.
     expect(Object.keys(workflow.on ?? {}).sort()).toEqual([
+      "check_run",
       "pull_request_target",
       "status",
+      "workflow_dispatch",
     ]);
 
     // And the trigger is exactly a `types:` list — nothing else.
@@ -1042,6 +1061,8 @@ describe("GitHub Actions hardening", () => {
     // single assertion.
     expect(Object.keys(workflow.on?.pull_request_target ?? {})).toEqual(["types"]);
     expect(Object.prototype.hasOwnProperty.call(workflow.on ?? {}, "status")).toBe(true);
+    expect(workflow.on?.check_run).toEqual({ types: ["completed"] });
+    expect(Object.keys(workflow.on?.workflow_dispatch?.inputs ?? {})).toEqual(["pull_number"]);
 
     // Exactly the scopes this gate needs. `pull-requests: write` covers title and
     // comment updates. `contents: write` is required for the draft GraphQL
@@ -1049,6 +1070,7 @@ describe("GitHub Actions hardening", () => {
     // when contents was unset). Asserting the whole object pins both presence
     // and the absence of anything broader (write-all, contents alone, …).
     expect(workflow.permissions).toEqual({
+      checks: "read",
       contents: "write",
       "pull-requests": "write",
     });
@@ -1066,6 +1088,7 @@ describe("GitHub Actions hardening", () => {
     ]);
     expect(resolver?.["runs-on"]).toBe("ubuntu-latest");
     expect(resolver?.permissions).toEqual({
+      checks: "read",
       contents: "read",
       "pull-requests": "read",
     });
@@ -1103,6 +1126,7 @@ describe("GitHub Actions hardening", () => {
     ]);
     expect(job?.["runs-on"]).toBe("ubuntu-latest");
     expect(job?.permissions).toEqual({
+      checks: "read",
       contents: "write",
       "pull-requests": "write",
     });
@@ -1136,7 +1160,7 @@ describe("GitHub Actions hardening", () => {
       // so the scripts match the workflow definition `pull_request_target`
       // itself loaded; everything else resolves to `dev`.
       ref:
-        "${{ github.event_name == 'status' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
+        "${{ github.event_name != 'pull_request_target' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
       "persist-credentials": false,
       // MAINTAINERS.md rides along so the completion ping reads the canonical
       // maintainer list from the same trusted base revision as the scripts.
@@ -1145,6 +1169,8 @@ describe("GitHub Actions hardening", () => {
 
     expect(Object.keys(scriptStep).sort()).toEqual(["env", "name", "uses", "with"]);
     expect(scriptStep.env).toEqual({
+      CURSOR_BUGBOT_APP_ID: "${{ vars.CURSOR_BUGBOT_APP_ID }}",
+      CURSOR_BUGBOT_POLICY: "${{ vars.CURSOR_BUGBOT_POLICY }}",
       RESOLVED_PULL_NUMBER: "${{ needs.resolve-pr.outputs.pull-number }}",
     });
 
@@ -1216,10 +1242,11 @@ describe("GitHub Actions hardening", () => {
     expect(script).toContain("PR head moved while listing changed files");
     expect(script).toContain("github.rest.repos.getCollaboratorPermissionLevel");
     expect(script).toContain("github.rest.repos.compareCommitsWithBasehead");
-    // The allow-list is the gate's whole policy, so it is pinned by value and
-    // not just by shape: a widened list is the one edit that opens every base
-    // at once while every behavioural scenario below still passes.
-    expect(script).toMatch(/const ALLOWED_BASES = \["dev"\];/);
+    // The allow-list is fork-aware: upstream stays dev-only while the public
+    // fork also permits merge-from-main sync PRs.
+    expect(script).toMatch(
+      /const ALLOWED_BASES\s*=\s*context\.repo\.owner === "lidge-jun"\s*\? \["dev"\]\s*:\s*\["dev", "main"\]/,
+    );
     expect(script).toMatch(/const DEFAULT_BASE = "dev";/);
 
     // The read-only resolver is the single authority for PR identity. The
@@ -1328,6 +1355,7 @@ describe("GitHub Actions hardening", () => {
           name !== "github.rest.repos.compareCommitsWithBasehead" &&
           name !== "github.rest.repos.listPullRequestsAssociatedWithCommit" &&
           name !== "github.rest.issues.listEvents" &&
+          name !== "github.rest.checks.listForRef" &&
           // Hygiene reassessment reads the changed-file list; not a write.
           name !== "github.rest.pulls.listFiles",
       );
@@ -1523,6 +1551,37 @@ describe("GitHub Actions hardening", () => {
       // Reads only. If a rewrite adds a write here, it appears in this list.
       expect(methodsOf(result)).toEqual(readsAllowedBase());
       expect(result.logs.join(" ")).toContain("All PR quality gates passed");
+    });
+
+    test("required Bugbot policy accepts only the configured App's success on the live head", async () => {
+      const clean = await run({
+        pr: { base: { ref: "dev" } },
+        authorPermission: "write",
+        bugbotPolicy: "required",
+        bugbotAppId: 99,
+        checkRuns: [{
+          name: "Cursor Bugbot",
+          status: "completed",
+          conclusion: "success",
+          app: { id: 99 },
+        }],
+      });
+      expect(clean.warnings.some(warning => warning.startsWith("setFailed:"))).toBe(false);
+
+      for (const check of [
+        { name: "Cursor Bugbot", status: "completed", conclusion: "neutral", app: { id: 99 } },
+        { name: "Cursor Bugbot", status: "completed", conclusion: "success", app: { id: 7 } },
+        { name: "Cursor Bugbot", status: "in_progress", conclusion: null, app: { id: 99 } },
+      ]) {
+        const blocked = await run({
+          pr: { base: { ref: "dev" } },
+          authorPermission: "write",
+          bugbotPolicy: "required",
+          bugbotAppId: 99,
+          checkRuns: [check],
+        });
+        expect(blocked.warnings.some(warning => warning.includes("bugbot_review"))).toBe(true);
+      }
     });
 
     test("a contributor PR targeting dev is drafted with a readiness checklist", async () => {
@@ -1944,7 +2003,7 @@ describe("GitHub Actions hardening", () => {
         "graphql",
         "issues.createComment",
       ]));
-      expect(callsTo(result, "checks.listForRef")).toEqual([]);
+      expect(callsTo(result, "checks.listForRef")).toHaveLength(1);
       expect(callsTo(result, "pulls.update")).toEqual([]);
       const drafts = callsTo(result, "graphql") as [{ query: string }, { query: string }];
       expect(drafts[0]!.query).toContain("reviewThreads");
@@ -2075,7 +2134,7 @@ describe("GitHub Actions hardening", () => {
           checkRuns,
         });
 
-        expect(callsTo(result, "checks.listForRef")).toEqual([]);
+        expect(callsTo(result, "checks.listForRef")).toHaveLength(1);
         expect(callsTo(result, "pulls.update")).toEqual([]);
         const drafts = callsTo(result, "graphql") as [{ query: string }, { query: string }];
         expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
@@ -3005,6 +3064,31 @@ describe("GitHub Actions hardening", () => {
       expect(callsTo(result, "issues.createComment")).toEqual([]);
       expect(callsTo(result, "issues.updateComment")).toEqual([]);
       expect(callsTo(result, "graphql")).toEqual([]);
+    });
+
+    test("manual reconciliation resolves only a live open unmerged PR", async () => {
+      const open = await runResolver({
+        pr: { number: 42, base: { ref: "dev" }, state: "open", merged: false },
+        eventName: "workflow_dispatch",
+        resolvedPullNumber: 42,
+      });
+      expect(open.outputs).toEqual([{ name: "pull-number", value: "42" }]);
+      expect(callsTo(open, "pulls.get")).toEqual([
+        { owner: "lidge-jun", repo: "opencodex", pull_number: 42 },
+      ]);
+
+      for (const pr of [
+        { number: 42, base: { ref: "dev" }, state: "closed" as const, merged: false },
+        { number: 42, base: { ref: "dev" }, state: "closed" as const, merged: true },
+      ]) {
+        const terminal = await runResolver({
+          pr,
+          eventName: "workflow_dispatch",
+          resolvedPullNumber: 42,
+        });
+        expect(terminal.outputs).toEqual([]);
+        expect(terminal.logs.join(" ")).toContain("not an open, unmerged PR");
+      }
     });
 
     test("the write gate consumes the resolved PR number without re-resolving status SHA", async () => {

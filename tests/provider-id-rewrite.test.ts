@@ -14,6 +14,8 @@ test("rewrites every routed-string site", () => {
     subagentModels: [`${FROM}/qwen3.7-max`],
     subagentModelFallback: [`${FROM}/qwen3.6-flash`],
     injectionModel: `${FROM}/qwen3.7-plus`,
+    v2NativeParentOverride: { enabled: false, model: `${FROM}/qwen3.7-plus` },
+    subagentRoles: [{ id: "reviewer", description: "PR review", model: `${FROM}/qwen3.7-max`, developerInstructions: "Review." }],
     shadowCallIntercept: { model: `${FROM}/qwen3.6-flash` },
     webSearchSidecar: { model: `${FROM}/qwen3.7-max` },
     visionSidecar: { model: `${FROM}/qwen3.7-max` },
@@ -27,10 +29,10 @@ test("rewrites every routed-string site", () => {
     },
   } as unknown as OcxConfig;
 
-  // 14 sites: defaultProvider, one of two disabledModels, subagentModels,
-  // subagentModelFallback, injectionModel, shadowCallIntercept.model,
-  // webSearchSidecar.model, visionSidecar.model, and the six claudeCode entries.
-  expect(rewriteProviderReferences(config, FROM, TO)).toEqual({ changed: 14, collisions: [] });
+  // 15 sites: defaultProvider, one of two disabledModels, subagentModels,
+  // subagentModelFallback, injectionModel, subagentRoles[].model, shadowCallIntercept.model,
+  // webSearchSidecar.model, v2NativeParentOverride.model, and the six claudeCode entries.
+  expect(rewriteProviderReferences(config, FROM, TO)).toEqual({ changed: 16, collisions: [] });
   expect(JSON.stringify(config)).not.toContain(`"${FROM}/`);
   expect(config.disabledModels).toContain("anthropic/claude-sonnet-5");
 });

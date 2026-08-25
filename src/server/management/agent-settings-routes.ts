@@ -31,7 +31,7 @@ import { deriveProviderPresets } from "../../providers/derive";
 import { providerCodexAccountMode } from "../../providers/registry";
 import { routedSlug, slugEquals } from "../../providers/slug-codec";
 import { clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
-import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
+import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
@@ -60,6 +60,7 @@ import {
   webSearchCandidateRows,
   webSearchModelIsRejected,
   webSearchModelRejection,
+  type WebSearchBackend,
 } from "./web-search-sidecar-options";
 import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
@@ -67,8 +68,16 @@ import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerS
 import type { PersistedUsageAttempt } from "../../usage/log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { applySystemEnvToggle } from "../system-env";
+import { routeModel } from "../../router";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels, fetchGrokCandidateModels, buildClaudeDesktopState } from "./shared";
+import {
+  agentRolesSyncEffective,
+  parseSubagentRoles,
+  routedOnV2Warnings,
+  unionRoleModelsIntoRoster,
+} from "../../codex/agent-roles";
+import { syncCodexAgentRoles } from "../../codex/agent-roles-sync";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import { readManagementJsonBody, readOptionalManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 
@@ -78,6 +87,57 @@ const grokApplyEncoder = new TextEncoder();
 let grokApplyFlight: { startedAt: number; promise: Promise<unknown>; bytes: number } | null = null;
 let grokApplyHighWaterBytes = 0;
 let grokApplyTestHooks: { now?: () => number; run?: () => Promise<unknown> } | null = null;
+
+type V2NativeParentOverrideInput = { enabled: boolean; model: string | null };
+
+function v2NativeParentOverrideDto(
+  config: OcxConfig,
+  upstreamEnabled: boolean,
+): { enabled: boolean; model: string | null; active: boolean } {
+  const override = config.v2NativeParentOverride;
+  const enabled = override?.enabled === true;
+  const model = override?.model ?? null;
+  return {
+    enabled,
+    model,
+    active: enabled
+      && model !== null
+      && v2NativeParentOverrideTargetIsNoncanonical(config, model)
+      && config.multiAgentMode === "v2"
+      && upstreamEnabled
+      && config.keepNativeChatGptOnV1 !== true,
+  };
+}
+
+function v2NativeParentOverrideTargetIsNoncanonical(config: OcxConfig, model: string): boolean {
+  try {
+    return !isCanonicalOpenAiForwardProvider(routeModel(config, model).provider);
+  } catch {
+    return false;
+  }
+}
+
+function persistV2NativeParentOverride(
+  config: OcxConfig,
+  next: V2NativeParentOverrideInput,
+): { ok: true } | { ok: false; reason: string } {
+  const outcome = mutatePersistedConfig(persisted => {
+    const nextPersisted = {
+      enabled: next.enabled,
+      ...(next.model === null ? {} : { model: next.model }),
+    };
+    const previous = persisted.v2NativeParentOverride;
+    const changed = previous?.enabled !== nextPersisted.enabled || previous?.model !== nextPersisted.model;
+    if (changed) persisted.v2NativeParentOverride = nextPersisted;
+    return { changed, value: true };
+  });
+  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
+  config.v2NativeParentOverride = {
+    enabled: next.enabled,
+    ...(next.model === null ? {} : { model: next.model }),
+  };
+  return { ok: true };
+}
 
 class GrokApplyBusyError extends Error {}
 
@@ -233,6 +293,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       getMultiAgentModeHintText,
     } = await import("../../codex/features");
     const enabled = isMultiAgentV2Enabled();
+    const v2NativeParentOverride = v2NativeParentOverrideDto(config, enabled);
     return jsonResponse({
       enabled,
       agentsMaxThreadsConflict: enabled && hasAgentsMaxThreads(),
@@ -246,6 +307,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       // max_depth is V1-only upstream; this is the global-flag statement, derived
       // server-side so no client can present it as an effective V2 limit.
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
+      v2NativeParentOverride,
     });
   }
   if (url.pathname === "/api/v2" && req.method === "PUT") {
@@ -258,8 +320,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       agentsMaxDepth?: unknown;
       subagentDeveloperInstructions?: unknown;
       multiAgentModeHintText?: unknown;
+      v2NativeParentOverride?: unknown;
     };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return jsonResponse({ error: "body must be a JSON object" }, 400);
+    }
     const wantsFlag = body.enabled !== undefined;
     const wantsThreads = body.maxConcurrentThreadsPerSession !== undefined;
     const wantsMode = body.multiAgentMode !== undefined;
@@ -268,8 +334,9 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     const wantsMaxDepth = body.agentsMaxDepth !== undefined;
     const wantsSubagentInstructions = body.subagentDeveloperInstructions !== undefined;
     const wantsModeHintText = body.multiAgentModeHintText !== undefined;
-    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText) {
-      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, and/or multiAgentModeHintText" }, 400);
+    const wantsV2NativeParentOverride = body.v2NativeParentOverride !== undefined;
+    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride) {
+      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, multiAgentModeHintText, and/or v2NativeParentOverride" }, 400);
     }
     if (wantsFlag && typeof body.enabled !== "boolean") return jsonResponse({ error: "body.enabled must be a boolean" }, 400);
     if (wantsMode && body.multiAgentMode !== "v1" && body.multiAgentMode !== "default" && body.multiAgentMode !== "v2") {
@@ -308,6 +375,69 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     const modeFlag = mode === "v2" ? true : mode === "v1" ? false : undefined;
     if (wantsFlag && modeFlag !== undefined && body.enabled !== modeFlag) {
       return jsonResponse({ error: `body.enabled conflicts with multiAgentMode '${mode}'` }, 400);
+    }
+    const { isMultiAgentV2Enabled: readMultiAgentV2Enabled } = await import("../../codex/features");
+    const currentUpstreamEnabled = readMultiAgentV2Enabled();
+    const prospectiveMode = mode ?? config.multiAgentMode ?? "default";
+    const prospectiveKeepNative = wantsKeepNative
+      ? body.keepNativeChatGptOnV1 === true
+      : config.keepNativeChatGptOnV1 === true;
+    const prospectiveUpstreamEnabled = wantsFlag
+      ? body.enabled as boolean
+      : modeFlag ?? currentUpstreamEnabled;
+    let v2NativeParentOverride: V2NativeParentOverrideInput | undefined;
+    if (wantsV2NativeParentOverride) {
+      const raw = body.v2NativeParentOverride;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        return jsonResponse({ error: "body.v2NativeParentOverride must be an object" }, 400);
+      }
+      const keys = Object.keys(raw as object);
+      if (keys.length !== 2 || !keys.includes("enabled") || !keys.includes("model")) {
+        return jsonResponse({ error: "body.v2NativeParentOverride must contain enabled and model" }, 400);
+      }
+      const candidate = raw as { enabled?: unknown; model?: unknown };
+      if (typeof candidate.enabled !== "boolean") {
+        return jsonResponse({ error: "body.v2NativeParentOverride.enabled must be a boolean" }, 400);
+      }
+      if (candidate.model !== null && (typeof candidate.model !== "string" || candidate.model.trim().length === 0)) {
+        return jsonResponse({ error: "body.v2NativeParentOverride.model must be a nonblank string or null" }, 400);
+      }
+      v2NativeParentOverride = {
+        enabled: candidate.enabled,
+        model: candidate.model === null ? null : (candidate.model as string).trim(),
+      };
+      if (v2NativeParentOverride.model !== null) {
+        let target;
+        try {
+          target = routeModel(config, v2NativeParentOverride.model);
+        } catch {
+          return jsonResponse({ error: "body.v2NativeParentOverride.model must resolve to a configured provider" }, 400);
+        }
+        if (isCanonicalOpenAiForwardProvider(target.provider)) {
+          return jsonResponse({ error: "body.v2NativeParentOverride.model must resolve to a noncanonical provider" }, 400);
+        }
+      }
+      if (v2NativeParentOverride.enabled) {
+        if (v2NativeParentOverride.model === null) {
+          return jsonResponse({ error: "enabling v2NativeParentOverride requires a model" }, 400);
+        }
+        if (prospectiveMode !== "v2") {
+          return jsonResponse({ error: "enabling v2NativeParentOverride requires multiAgentMode 'v2'" }, 400);
+        }
+        if (!prospectiveUpstreamEnabled) {
+          return jsonResponse({ error: "enabling v2NativeParentOverride requires the upstream V2 feature" }, 400);
+        }
+        if (prospectiveKeepNative) {
+          return jsonResponse({ error: "enabling v2NativeParentOverride conflicts with keepNativeChatGptOnV1" }, 400);
+        }
+      }
+    }
+    // Override-only writes have a field-scoped persistence path and do not restamp the catalog.
+    if (v2NativeParentOverride && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
+        && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText) {
+      const persisted = persistV2NativeParentOverride(config, v2NativeParentOverride);
+      if (!persisted.ok) return jsonResponse({ error: `persisting v2NativeParentOverride failed: ${persisted.reason}` }, 502);
+      return jsonResponse({ ok: true, v2NativeParentOverride: v2NativeParentOverrideDto(config, readMultiAgentV2Enabled()) });
     }
     const {
       isMultiAgentV2Enabled, hasAgentsMaxThreads, getLogicalMaxThreads, transitionMultiAgentV2,
@@ -387,6 +517,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     if (getAgentsEnabled() === false && isMultiAgentV2Enabled()) {
       warnings.push("agents.enabled = false has no effect while features.multi_agent_v2 is enabled; upstream keeps V2 active.");
     }
+    if (v2NativeParentOverride) {
+      const persisted = persistV2NativeParentOverride(config, v2NativeParentOverride);
+      if (!persisted.ok) return jsonResponse({ error: `persisting v2NativeParentOverride failed: ${persisted.reason}` }, 502);
+    }
     const catalogRefresh = await convergeCodexCatalog();
     if (requestedFlag !== undefined) warnings.push("Applies to new sessions; restart the Codex app or wait out its picker cache to see the ladder change.");
     const enabled = isMultiAgentV2Enabled();
@@ -402,6 +536,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       subagentDeveloperInstructions: getSubagentDeveloperInstructions(),
       multiAgentModeHintText: getMultiAgentModeHintText(),
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
+      v2NativeParentOverride: v2NativeParentOverrideDto(config, enabled),
       warnings,
       catalogRefresh,
     });
@@ -472,9 +607,18 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     const { CODEX_REASONING_LEVELS } = await import("../../reasoning-effort");
     const nativeModels = listCatalogNativeSlugs()
       .filter(slug => !disabled.has(slug))
-      .map(slug => ({ provider: "openai", model: slug, namespaced: slug }));
+      .map(slug => ({ provider: "openai", model: slug, namespaced: slug, canonical: true }));
     const routedModels = uniqueCatalogModelsForPublicList(models)
-      .map(m => ({ provider: m.provider, model: m.id, namespaced: catalogModelSlug(m) }))
+      .map(m => {
+        const namespaced = catalogModelSlug(m);
+        const canonical = !v2NativeParentOverrideTargetIsNoncanonical(config, namespaced);
+        return {
+          provider: m.provider,
+          model: m.id,
+          namespaced,
+          ...(canonical ? { canonical: true } : {}),
+        };
+      })
       .filter(m => ![...disabled].some(stored => (
         stored === m.namespaced || slugEquals(stored, m.provider, m.model)
       )));
@@ -653,6 +797,98 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     await syncClaudeAgentDefsBestEffort();
     await autoApplyDesktopBestEffort();
     return jsonResponse({ ok: true, applied: chosen, catalogRefresh });
+  }
+
+  if (url.pathname === "/api/subagent-roles" && req.method === "GET") {
+    const models = await fetchAllModels(config);
+    const disabled = new Set(config.disabledModels ?? []);
+    const { listCatalogNativeSlugs } = await import("../../codex/catalog");
+    const { CODEX_REASONING_LEVELS } = await import("../../reasoning-effort");
+    const nativeModels = listCatalogNativeSlugs()
+      .filter(slug => !disabled.has(slug))
+      .map(slug => ({ provider: "openai", model: slug, namespaced: slug }));
+    const routedModels = uniqueCatalogModelsForPublicList(models)
+      .map(m => ({ provider: m.provider, model: m.id, namespaced: catalogModelSlug(m) }))
+      .filter(m => ![...disabled].some(stored => (
+        stored === m.namespaced || slugEquals(stored, m.provider, m.model)
+      )));
+    return jsonResponse({
+      roles: config.subagentRoles ?? [],
+      ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
+      syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
+      efforts: CODEX_REASONING_LEVELS.map(l => l.effort),
+      available: [...nativeModels, ...routedModels],
+    });
+  }
+  if (url.pathname === "/api/subagent-roles" && req.method === "PUT") {
+    let parsedBody: unknown;
+    try {
+      parsedBody = await readManagementJsonBody(req);
+    } catch (error) {
+      rethrowManagementBodyTooLarge(error);
+      return jsonResponse({ error: "invalid JSON body" }, 400);
+    }
+    if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+      return jsonResponse({ error: "body must be a JSON object" }, 400);
+    }
+    const body = parsedBody as { roles?: unknown; remove?: unknown; syncCodexAgentRoles?: unknown };
+    if ("remove" in body) {
+      if ("roles" in body) return jsonResponse({ error: "body.remove cannot be combined with body.roles" }, 400);
+      if (typeof body.remove !== "string" || body.remove.trim().length === 0) {
+        return jsonResponse({ error: "body.remove must be a non-empty role id" }, 400);
+      }
+      const id = body.remove.trim();
+      config.subagentRoles = (config.subagentRoles ?? []).filter(role => role.id !== id);
+      const { saveConfigPreservingClaudeCode: save } = await import("../../config");
+      save(config);
+      const warnings = [...syncCodexAgentRoles(config).warnings];
+      const catalogRefresh = await convergeCodexCatalog();
+      await syncClaudeAgentDefsBestEffort();
+      await autoApplyDesktopBestEffort();
+      return jsonResponse({
+        ok: true,
+        roles: config.subagentRoles,
+        ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
+        syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
+        warnings,
+        catalogRefresh,
+      });
+    }
+    if (!("roles" in body)) return jsonResponse({ error: "body.roles is required" }, 400);
+    const parsed = parseSubagentRoles(body.roles);
+    if (!parsed.ok) return jsonResponse({ error: parsed.error, index: parsed.index }, 400);
+    if ("syncCodexAgentRoles" in body && body.syncCodexAgentRoles !== null) {
+      if (typeof body.syncCodexAgentRoles !== "boolean") {
+        return jsonResponse({ error: "syncCodexAgentRoles must be a boolean" }, 400);
+      }
+    }
+
+    const warnings: string[] = [];
+    const union = unionRoleModelsIntoRoster(config.subagentModels, parsed.roles);
+    if (union.droppedRoleIds.length > 0) {
+      warnings.push(`Featured roster truncated to 5 models; dropped role id(s): ${union.droppedRoleIds.join(", ")}`);
+    }
+    warnings.push(...routedOnV2Warnings(parsed.roles, config));
+
+    config.subagentRoles = parsed.roles;
+    config.subagentModels = union.models;
+    if ("syncCodexAgentRoles" in body && typeof body.syncCodexAgentRoles === "boolean") {
+      config.syncCodexAgentRoles = body.syncCodexAgentRoles;
+    }
+    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
+    save(config);
+    warnings.push(...syncCodexAgentRoles(config).warnings);
+    const catalogRefresh = await convergeCodexCatalog();
+    await syncClaudeAgentDefsBestEffort();
+    await autoApplyDesktopBestEffort();
+    return jsonResponse({
+      ok: true,
+      roles: config.subagentRoles,
+      ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
+      syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
+      warnings,
+      catalogRefresh,
+    });
   }
 
   // Priority-ordered subagent model fallback chain for quota-aware spawn routing.
@@ -1118,13 +1354,11 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       if (field === "webSearchSidecar"
         && (section.model !== undefined || section.backend !== undefined)) {
         const stored = config.claudeCode?.webSearchSidecar;
-        const effectiveBackend = section.backend === "anthropic"
-          ? "anthropic"
-          : section.backend === "openai"
-            ? "openai"
-            : section.backend === null
-              ? config.webSearchSidecar?.backend ?? "openai"
-              : stored?.backend ?? config.webSearchSidecar?.backend ?? "openai";
+        const effectiveBackend = section.backend === null
+          ? config.webSearchSidecar?.backend ?? "openai"
+          : typeof section.backend === "string" && allowedBackends.includes(section.backend)
+            ? section.backend as WebSearchBackend
+            : stored?.backend ?? config.webSearchSidecar?.backend ?? "openai";
         const effectiveModel = section.model === ""
           ? config.webSearchSidecar?.model
           : typeof section.model === "string"

@@ -64,6 +64,7 @@ import type { PersistedUsageAttempt } from "../../usage/log";
 import { AUTH_MATRIX, isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { applySystemEnvToggle } from "../system-env";
 import { buildApiAccessEndpoints } from "./api-access";
+import { isAzureIdentityProvider } from "../../config/provider-validation";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
@@ -309,19 +310,29 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     return jsonResponse({ ok: true, provider, activeAccountId: body.accountId });
   }
 
-  // Opt-in Anthropic OAuth account pool (#294): enable/threshold/strategy + clear cooldown.
+  // Opt-in OAuth account pool settings (Anthropic + Cursor).
   if (url.pathname === "/api/oauth/accounts/pool" && req.method === "GET") {
     const provider = (url.searchParams.get("provider") ?? "").trim().toLowerCase();
-    if (provider !== "anthropic") return jsonResponse({ error: "pool config is only supported for anthropic" }, 400);
-    const pool = config.anthropicAccountPool ?? {};
-    return jsonResponse({
-      provider,
-      enabled: pool.enabled === true,
-      autoSwitchThreshold: typeof pool.autoSwitchThreshold === "number" ? pool.autoSwitchThreshold : 80,
-      strategy: normalizeAccountPoolStrategy(pool.strategy),
-      stickyLimit: normalizeAccountPoolStickyLimit(pool.stickyLimit),
-      experimental: true,
-    });
+    if (provider === "anthropic") {
+      const pool = config.anthropicAccountPool ?? {};
+      return jsonResponse({
+        provider,
+        enabled: pool.enabled === true,
+        autoSwitchThreshold: typeof pool.autoSwitchThreshold === "number" ? pool.autoSwitchThreshold : 80,
+        strategy: normalizeAccountPoolStrategy(pool.strategy),
+        stickyLimit: normalizeAccountPoolStickyLimit(pool.stickyLimit),
+        experimental: true,
+      });
+    }
+    if (provider === "cursor") {
+      const pool = config.cursorAccountPool ?? {};
+      return jsonResponse({
+        provider,
+        enabled: pool.enabled === true,
+        experimental: true,
+      });
+    }
+    return jsonResponse({ error: "pool config is only supported for anthropic or cursor" }, 400);
   }
   if (url.pathname === "/api/oauth/accounts/pool" && (req.method === "PUT" || req.method === "PATCH")) {
     const parsedBody = await readManagementJsonBodyOr(req, {});
@@ -336,7 +347,32 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       stickyLimit?: unknown;
     };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
-    if (provider !== "anthropic") return jsonResponse({ error: "pool config is only supported for anthropic" }, 400);
+    if (provider !== "anthropic" && provider !== "cursor") {
+      return jsonResponse({ error: "pool config is only supported for anthropic or cursor" }, 400);
+    }
+    if (provider === "cursor") {
+      if (
+        body.autoSwitchThreshold !== undefined
+        || body.strategy !== undefined
+        || body.stickyLimit !== undefined
+      ) {
+        return jsonResponse({ error: "cursor pool only supports enabled" }, 400);
+      }
+      let enabled = config.cursorAccountPool?.enabled === true;
+      if (body.enabled !== undefined) {
+        if (typeof body.enabled !== "boolean") return jsonResponse({ error: "enabled must be a boolean" }, 400);
+        enabled = body.enabled;
+      }
+      config.cursorAccountPool = { enabled };
+      saveConfigPreservingClaudeCode(config);
+      reconcileLiveStateStores();
+      return jsonResponse({
+        ok: true,
+        provider,
+        enabled,
+        experimental: true,
+      });
+    }
     let enabled = config.anthropicAccountPool?.enabled === true;
     if (body.enabled !== undefined) {
       if (typeof body.enabled !== "boolean") return jsonResponse({ error: "enabled must be a boolean" }, 400);
@@ -497,6 +533,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   if (url.pathname === "/api/providers/keys" && req.method === "GET") {
     const name = (url.searchParams.get("name") ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     const { listProviderApiKeys } = await import("../../providers/api-keys");
     return jsonResponse(listProviderApiKeys(config, name));
   }
@@ -504,6 +541,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; key?: string; label?: string };
     const name = (body.name ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (typeof body.key !== "string" || !body.key.trim()) return jsonResponse({ error: "key is required" }, 400);
     const { addProviderApiKey } = await import("../../providers/api-keys");
     const result = addProviderApiKey(config, name, body.key, body.label);
@@ -520,6 +558,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; id?: string };
     const name = (body.name ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!body.id) return jsonResponse({ error: "missing id" }, 400);
     const { setActiveProviderApiKey } = await import("../../providers/api-keys");
     if (!setActiveProviderApiKey(config, name, body.id)) return jsonResponse({ error: "key not found" }, 404);
@@ -537,6 +576,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const id = typeof body.id === "string" ? body.id.trim() : "";
     const alias = typeof body.alias === "string" ? body.alias.trim() : "";
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!id) return jsonResponse({ error: "missing id" }, 400);
     if (typeof body.alias !== "string" || alias.length > 80 || /[\x00-\x1f\x7f]/.test(alias)) {
       return jsonResponse({ error: "alias must be at most 80 printable characters" }, 400);
@@ -549,6 +589,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const name = (url.searchParams.get("name") ?? "").trim();
     const id = url.searchParams.get("id") ?? "";
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!id) return jsonResponse({ error: "missing id" }, 400);
     const { removeProviderApiKey } = await import("../../providers/api-keys");
     if (!removeProviderApiKey(config, name, id)) return jsonResponse({ error: "key not found" }, 404);

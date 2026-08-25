@@ -52,6 +52,66 @@ non-empty `model`. `input` may be a string or an array of Responses items.
 | Service and execution | `stream`, `service_tier`, `parallel_tool_calls`, `instructions`, `metadata`, and `user` |
 | Extended Responses fields | `background`, `include`, `prompt`, `text`, and `truncation` are accepted for compatible routes |
 
+### Google provider options
+
+Responses requests may opt into a strict Google GenerateContent extension under
+`provider_options.google`:
+
+```json
+{
+  "model": "gemini-3.7-flash",
+  "input": "Explain this result",
+  "provider_options": {
+    "google": {
+      "thinking_budget": 4096,
+      "include_thoughts": false,
+      "safety_settings": [
+        {
+          "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+          "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+        }
+      ],
+      "cached_content": "cachedContents/my-cache"
+    }
+  }
+}
+```
+
+The accepted keys are exactly `thinking_budget`, `include_thoughts`,
+`safety_settings`, and `cached_content`; unknown keys at either nested level,
+or unknown safety-setting keys, fail request validation. The parser maps these
+snake-case request fields to typed internal fields; they are not arbitrary
+provider passthrough data.
+
+- `thinking_budget` must be a safe integer greater than or equal to `-1`.
+  An explicit budget takes precedence over the routed model's derived thinking
+  level. `include_thoughts` augments the resulting thinking configuration, and
+  an explicit `false` is preserved.
+- `safety_settings` accepts at most 16 entries, with no duplicate categories.
+  Categories are `HARM_CATEGORY_HATE_SPEECH`,
+  `HARM_CATEGORY_SEXUALLY_EXPLICIT`, `HARM_CATEGORY_DANGEROUS_CONTENT`,
+  `HARM_CATEGORY_HARASSMENT`, `HARM_CATEGORY_CIVIC_INTEGRITY`, and
+  `HARM_CATEGORY_JAILBREAK`. Thresholds are
+  `HARM_BLOCK_THRESHOLD_UNSPECIFIED`, `BLOCK_LOW_AND_ABOVE`,
+  `BLOCK_MEDIUM_AND_ABOVE`, `BLOCK_ONLY_HIGH`, `BLOCK_NONE`, and `OFF`.
+- `cached_content` must be exactly one of these Google resource-name forms:
+  `cachedContents/{id}` for AI Studio, or
+  `projects/{project}/locations/{location}/cachedContents/{cachedContent}` for
+  Vertex. Each segment must be non-empty; whitespace, query strings, fragments,
+  and extra segments are rejected.
+
+The extension is supported only when the final route uses the Google adapter in
+AI Studio or Vertex mode. Cloud Code Assist (including the
+`google-antigravity` provider) and every non-Google route are rejected with a
+400 before an upstream request is made. This check is applied after routing and
+adapter overrides are resolved, including retry and fallback paths.
+
+`cached_content` opts into reuse of a provider-side Google cache that already
+exists; it is not a local prompt-cache key. The resource name identifies
+provider-managed content, so use it only when the caller is authorized to reuse
+that content and accepts Google's retention and access policies. opencodex does
+not create, inspect, or delete the provider cache through this field.
+
 Unknown item types are accepted as loose typed items for forward compatibility. Translated adapters
 handle only the item types they recognize, and may reject a feature their provider cannot represent.
 
@@ -163,22 +223,24 @@ effort default to `reasoning.summary: "auto"` so thinking streams back as
 `reasoning.summary: "none"`. An explicit `reasoning.summary` of `auto`, `concise`,
 `detailed`, or `none` wins over `include_reasoning`.
 
-Structured output is part of that translation: `response_format` with `json_object` or
-`json_schema` is forwarded to routed `openai-chat` models. On `POST /v1/responses` the
-equivalent request field is `text.format`: native Responses routes preserve it in the raw
-Responses body, and it is translated to `response_format` when the model routes to an
-`openai-chat` provider. A model listed in the provider's `noStructuredOutputModels` omits
-`response_format` on that chat wire; sibling models keep the translation. Unclassified backends
-receive the field and return their own error instead of the proxy guessing their capability.
+Structured output is part of that translation. `response_format` with `json_object` or
+`json_schema` is forwarded to routed `openai-chat` models, subject to the provider's
+`noStructuredOutputModels` opt-out: listed models omit `response_format`, while sibling models
+keep it. Routed Google models lower supported requests to Gemini JSON mode
+(`responseMimeType` / `responseSchema`), but skip that lowering when the request has tools, the
+selected model is Claude, or the model is image-capable. Kiro rejects structured output.
+Cursor has no structured-output wire field and rejects before transport.
+
+On `POST /v1/responses`, the equivalent request field is `text.format`: native Responses routes
+preserve it in the raw Responses body, and it is translated to `response_format` when the model
+routes to an `openai-chat` provider. Adapter behavior is capability-specific: an adapter may
+forward, skip, ignore, or reject a feature according to its implementation, rather than every
+unrepresentable feature failing closed.
 
 Non-streaming output has `object: "chat.completion"`. Streaming output uses SSE objects with
 `object: "chat.completion.chunk"`, choice deltas, a terminal choice with `finish_reason`, and
 `data: [DONE]`. Tool-call and usage information are translated back where the source events carry
 them.
-
-Because the internal execution path is Responses-based, a provider adapter can impose a narrower
-feature set. For example, a request feature that cannot be represented by the selected adapter is
-returned as an error instead of silently changing its meaning.
 
 ## `POST /v1/messages` and `count_tokens`
 

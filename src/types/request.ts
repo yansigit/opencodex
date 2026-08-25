@@ -68,6 +68,8 @@ export interface OcxParsedRequest {
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */
   _clientThreadId?: string;
+  /** True when promptCacheKey is a shared cache cohort rather than a conversation identity. */
+  _promptCacheKeyIsSharedCohort?: boolean;
   /** Conversation/provider/account/model-bound namespace for reasoning replay state. */
   _reasoningReplayScope?: OcxReasoningReplayScopeRef;
   /**
@@ -99,6 +101,12 @@ export interface OcxParsedRequest {
    * executes searches via the gpt-5.4-mini sidecar (see src/web-search). Absent when not requested.
    */
   _webSearch?: Record<string, unknown>;
+  /**
+   * Antigravity Gemini in-turn CCA grounding: google_search and optional url_context ride the main
+   * routed fetch instead of the web-search sidecar loop. Set by core.ts when resolveCcaInTurnGrounding
+   * matches; consumed by the Google adapter at buildRequest/parseStream time.
+   */
+  _ccaInTurnGrounding?: { search: boolean; urlContext: boolean };
   /** Hosted image_generation tool config stashed for the image bridge sidecar (see src/images). */
   _imageGeneration?: { toolNames: Set<string>; originalTool?: Record<string, unknown> };
   /**
@@ -250,9 +258,13 @@ export interface OcxRequestOptions {
   /**
    * Responses `text.format` (json_schema / json_object), preserved for adapters whose
    * upstream wire has an equivalent. The openai-chat adapter re-nests it as chat
-   * `response_format`, the exact inverse of responseFormatToText in src/chat/inbound.ts.
-   * The native passthrough ignores it (it forwards `_rawBody.text` verbatim) and Kiro
-   * keeps rejecting structured output via `_structuredOutput`.
+   * `response_format`, the exact inverse of responseFormatToText in src/chat/inbound.ts; the
+   * Google adapter lowers supported requests to Gemini JSON mode (`responseMimeType` /
+   * `responseSchema`) but skips requests with tools, Claude models, or image-capable models.
+   * The `openai-chat` adapter can omit it for models in `noStructuredOutputModels`; Kiro
+   * rejects structured output via `_structuredOutput`; and Cursor has no structured-output
+   * wire field and rejects the request before transport.
+   * Native passthrough does not consume this option and forwards `_rawBody.text` verbatim.
    */
   textFormat?: {
     type: "json_schema" | "json_object";
@@ -261,6 +273,32 @@ export interface OcxRequestOptions {
     schema?: Record<string, unknown>;
     strict?: boolean;
   };
+  providerOptions?: { google?: GoogleProviderOptions };
+}
+
+export type GoogleSafetyCategory =
+  | "HARM_CATEGORY_HATE_SPEECH"
+  | "HARM_CATEGORY_SEXUALLY_EXPLICIT"
+  | "HARM_CATEGORY_DANGEROUS_CONTENT"
+  | "HARM_CATEGORY_HARASSMENT"
+  | "HARM_CATEGORY_CIVIC_INTEGRITY"
+  | "HARM_CATEGORY_JAILBREAK";
+export type GoogleSafetyThreshold =
+  | "HARM_BLOCK_THRESHOLD_UNSPECIFIED"
+  | "BLOCK_LOW_AND_ABOVE"
+  | "BLOCK_MEDIUM_AND_ABOVE"
+  | "BLOCK_ONLY_HIGH"
+  | "BLOCK_NONE"
+  | "OFF";
+export interface GoogleSafetySetting {
+  category: GoogleSafetyCategory;
+  threshold: GoogleSafetyThreshold;
+}
+export interface GoogleProviderOptions {
+  thinkingBudget?: number;
+  includeThoughts?: boolean;
+  safetySettings?: GoogleSafetySetting[];
+  cachedContent?: string;
 }
 
 export type OcxMessagePhase = "commentary" | "final_answer";

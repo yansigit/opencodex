@@ -360,6 +360,12 @@ function handleShow(args: string[]): void {
     ...(prov.modelCosts !== undefined ? { modelCosts: sanitizeModelCostsForDisplay(prov.modelCosts) } : {}),
     ...(prov.apiKey ? { apiKey: maskSecret(prov.apiKey) } : {}),
     ...(prov.apiKeyPool ? { apiKeyPool: prov.apiKeyPool.map(e => ({ ...e, key: maskSecret(e.key) })) } : {}),
+    ...(prov.azureCredential ? {
+      azureCredential: {
+        type: prov.azureCredential.type,
+        hasManagedIdentityClientId: Boolean(prov.azureCredential.managedIdentityClientId?.trim()),
+      },
+    } : {}),
   };
 
   if (wantsJson) {
@@ -426,6 +432,7 @@ const PROVIDER_USAGE = `Usage: ocx provider <subcommand>
 Subcommands:
   list                  List configured and available providers
   add <name>            Add a provider (registry or custom)
+  install-replit        Install the paired Replit gateway providers
   edit <name>           Edit live provider fields
   test <name>           Test the provider's upstream model endpoint
   remove <name>         Remove a configured provider
@@ -440,6 +447,8 @@ Examples:
   ocx provider list
   ocx provider add anthropic --api-key sk-ant-...
   ocx provider add my-ollama --adapter openai-chat --base-url http://localhost:11434/v1
+  ocx provider install-replit --origin https://my-app.replit.app
+    (gateway key via REPLIT_GATEWAY_KEY, --stdin, or --gateway-key-file; never argv)
   ocx provider show anthropic --json
   ocx provider set-default anthropic
   ocx provider remove my-ollama`;
@@ -461,6 +470,11 @@ export async function handleProviderCommand(args: string[]): Promise<void> {
     case "add":
       await handleAdd(subArgs);
       break;
+    case "install-replit": {
+      const { handleInstallReplit } = await import("./provider-replit");
+      await handleInstallReplit(subArgs);
+      break;
+    }
     case "remove":
       handleRemove(subArgs);
       break;

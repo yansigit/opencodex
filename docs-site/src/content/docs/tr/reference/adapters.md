@@ -242,6 +242,7 @@ Cursor'ın `agent.v1.AgentService/Run` servisi.
 **Kimlik Doğrulama:** `provider.apiKey`'den veya iletilen yetkilendirme
 başlığından Cursor OAuth/erişim belirteci.
 
+- Yapılandırılmış çıktı taşımadan önce reddedilir: Cursor'ın protobuf çıktı şeması alanı yoktur, bu yüzden `text.format` / `response_format` JSON object veya schema (ve dahili structured-output bayrağı) `400 invalid_request_error` döndürür. Araçlar bu denetimi atlatamaz.
 - Sıradan getirme/ayrıştırma yolu yerine `runTurn` kullanır. İstekler, sunucu
   olayları, araç argümanları, kullanım denetim noktaları ve istemci yanıtları
   `cursor/gen/agent_pb.ts` içindeki `@bufbuild/protobuf` şemalarıyla kodlanır ve
@@ -263,18 +264,38 @@ başlığından Cursor OAuth/erişim belirteci.
   vardır; `nativeLocalExec: "on"` daha geniş yerleşik yürütücüyü etkinleştirir
   ve Codex onay/sanal alan anlambilimini atlar ve eski
   `unsafeAllowNativeLocalExec: true` yalnızca `nativeLocalExec` ayarlanmadığında
-  eşdeğer kalır.
+  eşdeğer kalır. Varsayılan `off` ile, katalogda köprü aracı varken yerel
+  Shell/Read/Ls/Grep/Fetch Codex `shell_command`/`exec_command` çağrılarına
+  eşlenir; write/delete reddedilmeye devam eder.
+
+## `command-code`
+
+**Hedefler:** Command Code **OAuth** abonelik agent API'si (`POST {baseUrl}/alpha/generate`).
+**Kimlik doğrulama:** `ocx login command-code` OAuth Bearer.
+
+- API anahtarı `commandcode` önayından (`openai-chat` → `POST {baseUrl}/provider/v1/chat/completions`) ayrıdır. API anahtarı yolu `projectContext` okumaz ve generate zarfını diskten doldurmaz.
+- `providers.command-code` üzerindeki isteğe bağlı `projectContext: "on"`, istek anında `process.cwd()` içindeki sınırlı dosyaları `memory`, `taste` ve `skills` alanlarına kopyalar. Eksik veya `"off"` iken depoda dosyalar olsa bile `memory: ""`, `taste: null`, `skills: null` gönderilir — yalnızca opt-in, otomatik yükleme yok.
+- Çalışma dizini Codex'in düzenlediği depoyla eşleşsin diye proxy'yi güvenilir Codex proje dizininden başlatın.
+- **Memory:** yalnızca cwd'deki `AGENTS.md` UTF-8 (`CLAUDE.md`, `CODEX.md` veya ev yolları değil). Üst sınır 32.768 bayt; aşımda `<!-- truncated -->` ile önek kesilir.
+- **Taste:** `.commandcode/taste/taste.md` UTF-8 veya yoksa `null`. Üst sınır 8.192 bayt, aynı kesme işareti. Var ama boş dosya `""` gönderir. `x-taste-learning` `"false"` kalır; taste yüklemek Command Code taste learning değildir.
+- **Skills:** proje skill köklerinden sırayla XML: `.commandcode/skills`, `.agents/skills`, `.pi/skills`. `SKILL.md` içeren her alt dizin bir `<skill name="…">…</skill>` olur (ad YAML frontmatter `name:` veya dizin adından). `.` ile başlayan adlar ve dizin olmayanlar atlanır; çözümlenen ada göre first-wins; en fazla 16 skill; toplam XML üst sınırı 32.768 bayt. `~/.commandcode/skills` veya diğer ev skill ağaçlarını okumaz.
+- Yol sınırlandırması cwd altında realpath ile yapılır; symlink kaçışları düşürülür. Her dosya işlemi 2 saniye zaman aşımı. Sonuçlar cwd başına 30 saniye önbelleğe alınır (en fazla 128 giriş). Herhangi bir hata fail-soft olarak yalnızca o parçayı düşürür.
+- `commandCodeVersion`, `x-command-code-version` sabitler (varsayılan `0.52.1`). `permissionMode` `"standard"`, `mode` `"agent"` kalır.
 
 ## `azure-openai` (takma ad: `azure`)
 
 **Hedefler:** **Azure OpenAI**. `openai-responses`'ı sarar (bu nedenle
 `passthrough: true`).
-**Kimlik Doğrulama:** `api-key` başlığı aracılığıyla `key` (Bearer değil).
+**Kimlik Doğrulama:** `api-key` başlığı üzerinden API anahtarı veya
+`DefaultAzureCredential` üzerinden Azure kimliği (Bearer; `api-key` değil). Modlar birbirini dışlar.
 
 - İstek oluşturmayı Responses doğrudan geçişine devreder, `baseUrl`'in
   çözümlenmemiş şablon yer tutucusu içermediğini doğrular ve `Authorization`'ı
   `api-key` ile değiştirir. Yapılandırılan URL doğrudan Azure'un v1 Responses
   API'sini hedefler, bu nedenle adaptör `api-version` eklemez.
+- Kimlik modunda tam scope `https://cognitiveservices.azure.com/.default` kullanılır ve
+  yapılandırılmış modeller statiktir (`liveModels: false`); genel `/models` keşfi yapılmaz.
+  Tam `DefaultAzureCredential` zinciri ve yapılandırma için İngilizce sayfaya bakın.
 
 ## Görsel yardımcıları (`image.ts`)
 
@@ -285,5 +306,4 @@ Vizyon duyarlı adaptörler tarafından kullanılan paylaşılan yardımcılar:
 - `contentPartsToText(content)` — salt metin araç mesajları için içerik
   parçalarını metne düzleştirir (açıklanmayan bir görsel kısa bir `[image]`
   işaretçisi haline gelir, asla belirteç patlatan bir base64 bloğu olmaz).
-
 

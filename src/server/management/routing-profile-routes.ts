@@ -177,11 +177,19 @@ function migrateProfileModelReferences(
   if (config.subagentModels) {
     config.subagentModels = [...new Set(config.subagentModels.map(migrateAgentReference))];
   }
+  if (config.subagentRoles) {
+    for (const role of config.subagentRoles) {
+      role.model = migrateAgentReference(role.model);
+    }
+  }
   if (config.subagentModelFallback) {
     config.subagentModelFallback = [...new Set(config.subagentModelFallback.map(migrateAgentReference))];
   }
   if (config.injectionModel && config.injectionModel === oldPublicModel) {
     config.injectionModel = newPublicModel;
+  }
+  if (config.v2NativeParentOverride?.model && config.v2NativeParentOverride.model === oldPublicModel) {
+    config.v2NativeParentOverride = { ...config.v2NativeParentOverride, model: newPublicModel };
   }
   if (config.shadowCallIntercept?.model && config.shadowCallIntercept.model === oldPublicModel) {
     config.shadowCallIntercept = { ...config.shadowCallIntercept, model: newPublicModel };

@@ -25,6 +25,29 @@ on the v1 surface so they can still spawn Grok or Claude. ChatGPT-native parents
 `NEW_TASK` bodies; routed models cannot read them. Routed parents stay on v2, where child tasks
 are plaintext. This is a switch *inside* v2, not a fourth catalog mode.
 
+For a different trade-off, the experimental **V2 native parent override** can replace an eligible
+ChatGPT-native v2 root parent with one routed model before the parent runs. It keeps the v2 tool
+surface and makes that root's child tasks plaintext, but it is independent of both
+`keepNativeChatGptOnV1` and `agentTaskRecovery`:
+
+| Setting | What it preserves or changes | Cost/limitation |
+| --- | --- | --- |
+| `keepNativeChatGptOnV1` | Preserves the native ChatGPT parent, but advertises it on v1. | The native v2 task-encryption problem is avoided by leaving v2, and it applies to new sessions. |
+| `agentTaskRecovery` | Preserves the native v2 parent and recovers a routed child task through ChatGPT. | The extra authenticated ChatGPT request consumes quota, adds latency, and returns model-produced plaintext. |
+| `v2NativeParentOverride` | Preserves v2 tools while executing eligible native roots on one configured routed model. | The routed provider receives the root data; availability, context, behavior, latency, cost, and privacy differ by provider. |
+
+The override is off unless explicitly enabled, requires an explicitly forced v2 surface and the
+upstream V2 flag, and is unavailable while **Keep ChatGPT on v1** is on. There is no automatic
+target selection or fallback. Once a root qualifies, a missing, unavailable, or canonical ChatGPT
+target fails closed instead of sending that request to ChatGPT. The target is looked up for every
+eligible request, so changing it affects later parent turns and compaction; it is not pinned per
+thread. The requested model remains the request identity in logs, while the effective/resolved
+model and provider show what OpenCodex actually executes.
+
+The target and enabled selection may remain persisted while `active` is false. Changing the mode,
+upstream V2 flag, or Keep ChatGPT on v1 makes subsequent parent requests skip the override until
+the prerequisites are restored.
+
 :::tip[Not sure?]
 Start with **base**. Choose **v1** when cross-provider delegation must work predictably. Force **v2**
 only when you specifically want its newer session model across every catalog entry.
@@ -68,7 +91,7 @@ inherits the parent model and rejects model or effort overrides. Guidance theref
 use `fork_turns: "none"` (or a positive partial turn count such as `"3"`) when passing `model` or
 `reasoning_effort`, and to make the task message self-contained.
 
-Custom `injectionPrompt` text can use all four placeholders:
+Custom `injectionPrompt` text can use these placeholders:
 
 | Placeholder | Replaced with |
 | --- | --- |
@@ -76,6 +99,7 @@ Custom `injectionPrompt` text can use all four placeholders:
 | `{{effort}}` | The configured `injectionEffort`, or an empty string |
 | `{{roster}}` | The resolved picker-visible, surface-compatible roster |
 | `{{fallback}}` | The configured global fallback guidance |
+| `{{roles}}` | Compact enabled-role catalog (id, when-to-use, model, optional effort), filtered to the current surface and 700-character budget |
 
 The built-in v2 guidance has a 700-character budget. If it would exceed the budget, opencodex drops
 the roster first rather than truncating the core spawn instructions. Built-in guidance fires only
@@ -108,6 +132,15 @@ rejects `model_fallback` as an unknown field, which skips the entire role defini
 (#1190). opencodex can still read a legacy `model_fallback` line from the TOML for
 backwards compatibility, but `ocx doctor` warns about it and Codex itself will ignore
 the affected role.
+
+When `syncCodexAgentRoles` is effective, opencodex also writes marker-owned
+`$CODEX_HOME/agents/ocx-<id>.toml` files for enabled named roles (`subagentRoles`).
+Those files carry only `name`, `description`, `developer_instructions`, `model`, and
+optional `model_reasoning_effort`. Unset means on once any enabled role exists;
+`syncCodexAgentRoles: false` prunes OpenCodex-owned `ocx-*.toml` files and leaves
+user-authored agent files untouched. A user-owned agent file with the same `name`
+(including `reviewer.toml` next to `ocx-reviewer.toml`) wins; OpenCodex skips or
+prunes its owned file and leaves the user file unchanged.
 
 Duplicate model ids are removed while preserving the first occurrence. During selection, opencodex
 skips candidates that are disabled, unroutable, backed by a disabled provider, marked unhealthy,
@@ -152,6 +185,11 @@ for the full trust boundary and configuration.
 Combo routing remains unchanged and continues to consider only canonical native ChatGPT targets for
 encrypted tasks.
 
+The parent override avoids this recovery path by routing the eligible root before Codex can create
+encrypted child content. It does not decrypt or rewrite Codex's protocol. Native children remain
+native; if a native child later creates a routed grandchild, that nested native parent can still
+produce an unreadable encrypted task. Nested parent override is not supported.
+
 ## Changing the mode
 
 ### GUI
@@ -159,7 +197,7 @@ encrypted tasks.
 - **Dashboard** → first stat cell: choose **v1**, **base**, or **v2**.
 - **Models** → top-row segmented control: choose the same global mode.
 - **Dashboard** → **Sub-agent delegation**: set guidance model/effort and the native-default opt-in.
-- **Subagents**: choose and order the roster and configure the global fallback chain.
+- **Subagents**: edit named roles, choose and order the roster, and configure custom parent guidance, global child instructions, and the native-default opt-in.
 
 ### CLI
 
@@ -192,7 +230,7 @@ The management API exposes matching `GET` and `PUT` endpoints:
 
 | Endpoint | Manages |
 | --- | --- |
-| `/api/v2` | Surface mode, native feature flag, and thread settings |
+| `/api/v2` | Surface mode, native feature flag, thread settings, and the V2 native parent override |
 | `/api/injection-model` | Preferred model, effort, custom prompt, guidance, and native-default sync |
 | `/api/effort-caps` | Main-agent and sub-agent effort ceilings |
 | `/api/subagent-models` | Ordered roster of up to five models |
@@ -209,6 +247,18 @@ curl -X PUT http://localhost:10100/api/injection-model \
   -H 'Content-Type: application/json' \
   -d '{"model":"anthropic/claude-sonnet-5","effort":"xhigh"}'
 ```
+
+The override is managed through the dashboard or this endpoint; it has no CLI command:
+
+```bash
+curl -X PUT http://localhost:10100/api/v2 \
+  -H 'Content-Type: application/json' \
+  -d '{"v2NativeParentOverride":{"enabled":true,"model":"anthropic/claude-sonnet-5"}}'
+```
+
+See [Agent configuration](/reference/configuration/agents/#v2-native-parent-override) and the
+[Management API reference](/reference/management-api/#v2-native-parent-override) for the exact
+contracts and validation rules.
 
 ## FAQ
 

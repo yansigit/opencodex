@@ -235,7 +235,9 @@ function hasKnownLegacyOpenAiReference(config: OcxConfig): boolean {
   return config.defaultProvider === LEGACY_OPENAI_MULTI_PROVIDER_ID
     || matchesList(config.disabledModels)
     || matchesList(config.subagentModels)
+    || (config.subagentRoles ?? []).some(role => matches(role.model))
     || matches(config.injectionModel)
+    || matches(config.v2NativeParentOverride?.model)
     || matches(config.shadowCallIntercept?.model)
     || matches(config.webSearchSidecar?.model)
     || matches(config.visionSidecar?.model)
@@ -253,7 +255,15 @@ function hasKnownLegacyOpenAiReference(config: OcxConfig): boolean {
 function rewriteLegacyOpenAiReferences(config: OcxConfig, warnings: string[]): void {
   config.disabledModels = rewriteLegacyOpenAiModelList(config.disabledModels);
   config.subagentModels = rewriteLegacyOpenAiModelList(config.subagentModels);
+  if (config.subagentRoles) {
+    for (const role of config.subagentRoles) {
+      role.model = rewriteLegacyOpenAiSelectedId(role.model);
+    }
+  }
   if (config.injectionModel) config.injectionModel = rewriteLegacyOpenAiSelectedId(config.injectionModel);
+  if (config.v2NativeParentOverride?.model) {
+    config.v2NativeParentOverride.model = rewriteLegacyOpenAiSelectedId(config.v2NativeParentOverride.model);
+  }
   if (config.shadowCallIntercept?.model) {
     config.shadowCallIntercept.model = rewriteLegacyOpenAiSelectedId(config.shadowCallIntercept.model);
   }
@@ -295,9 +305,11 @@ function isKnownLegacyValuePath(path: readonly string[]): boolean {
   const joined = path.join(".");
   if (joined === "defaultProvider") return true;
   if (/^(disabledModels|subagentModels)\.\d+$/.test(joined)) return true;
+  if (/^subagentRoles\.\d+\.model$/.test(joined)) return true;
   if (/^providers\.(openai|openai-multi)\.selectedModels\.\d+$/.test(joined)) return true;
   return new Set([
     "injectionModel",
+    "v2NativeParentOverride.model",
     "shadowCallIntercept.model",
     "webSearchSidecar.model",
     "visionSidecar.model",

@@ -92,24 +92,26 @@ describe("install scripts", () => {
   test("POSIX installer matches the Node launcher prerequisite", async () => {
     const script = await readText("scripts/install.sh");
 
-    expect(script).toContain("Node.js 18+ is required");
-    expect(script).toContain("npm install -g @bitkyc08/opencodex");
+    expect(script).toContain("Node.js 22+ is required");
+    expect(script).toContain('[ "$NODE_MAJOR" -lt 22 ]');
+    expect(script).toContain("npm install -g @yansigit/opencodex");
     expect(script).toContain("command -v ocx");
     expect(script).toContain("ocx help");
-    expect(script).not.toContain("bun install -g @bitkyc08/opencodex");
+    expect(script).not.toContain("bun install -g @yansigit/opencodex");
     expect(script).not.toContain("bun.sh/install");
   });
 
   test("PowerShell installer matches the Node launcher prerequisite", async () => {
     const script = await readText("scripts/install.ps1");
 
-    expect(script).toContain("Node.js 18+ is required");
-    expect(script).toContain("& $npm.Source install -g @bitkyc08/opencodex");
+    expect(script).toContain("Node.js 22+ is required");
+    expect(script).toContain("$nodeMajor -lt 22");
+    expect(script).toContain("& $npm.Source install -g @yansigit/opencodex");
     expect(script).toContain("$LASTEXITCODE");
     expect(script).toContain("Get-Command ocx.cmd");
     expect(script).toContain("Get-Command ocx");
     expect(script).toContain("& $ocx.Source help");
-    expect(script).not.toContain("bun install -g @bitkyc08/opencodex");
+    expect(script).not.toContain("bun install -g @yansigit/opencodex");
     expect(script).not.toContain("bun.sh/install.ps1");
   });
 

@@ -8,14 +8,12 @@ import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { codexPlanKey } from "../codex/plan";
 import { resolveEnvValue } from "../config";
-import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot } from "../oauth";
+import { getValidAccessToken, getValidAccessTokenForAccount } from "../oauth";
 import { getAccountCredential, getAccountSet, getCredential } from "../oauth/store";
-import { providerFetch } from "../server/responses/fetch-helpers";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
 import { apiKeyPoolEntryId } from "./api-keys";
 import { XAI_GROK_CLIENT_VERSION, XAI_GROK_COMPATIBILITY } from "./xai-transport";
 import { getProviderRegistryEntry, providerCodexAccountMode, registryEntryForProviderDestination } from "./registry";
-import { antigravityOAuthDestinationConfigError, isAntigravityOAuthProvider } from "../lib/provider-tls-profile";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "./openai-tiers";
 import {
@@ -30,6 +28,12 @@ import {
   type CodexCapacityAggregation,
   type CodexCapacityQuota,
 } from "./codex-capacity";
+import {
+  AntigravityQuotaRpcError,
+  fetchAntigravityLiveQuota,
+  isTerminalAntigravityQuotaStatus,
+} from "./antigravity-quota";
+import { antigravityHostCandidates, isAntigravityHttpsHost } from "../adapters/google-antigravity-hosts";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
@@ -2067,55 +2071,95 @@ function antigravityUsedPercent(quotaInfo: Record<string, unknown>): number | un
   const remaining = normalizePercent(toFiniteNumber(quotaInfo.remainingFraction) !== undefined
     ? toFiniteNumber(quotaInfo.remainingFraction)! * 100
     : toFiniteNumber(quotaInfo.remainingPercentage) !== undefined
-      ? toFiniteNumber(quotaInfo.remainingPercentage)! * 100
+      ? toFiniteNumber(quotaInfo.remainingPercentage)!
       : undefined);
   if (remaining === undefined) return undefined;
   return normalizePercent(100 - remaining);
 }
 
-async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
-  if (antigravityOAuthDestinationConfigError(provider, config)) return null;
-  let snapshot: Awaited<ReturnType<typeof getValidAccessTokenSnapshot>>;
+async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
+  const credential = getCredential("google-antigravity");
+  if (!credential?.projectId) return null;
+  let accessToken: string;
   try {
-    snapshot = await getValidAccessTokenSnapshot("google-antigravity");
+    accessToken = await getValidAccessToken("google-antigravity");
   } catch {
     return null;
   }
-  if (!snapshot.projectId) return null;
-  const { accessToken, projectId } = snapshot;
   const baseUrl = (config.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
-  const executor = providerFetch(config, undefined, { providerName: "google-antigravity" });
-  const response = await executor(`${baseUrl}/v1internal:fetchAvailableModels`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": antigravityUserAgent(),
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({ project: projectId }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
-  if (!response.ok) return null;
-  const body = asRecord(await readQuotaJson(response));
-  const models = asRecord(body?.models);
-  if (!models) return null;
+  let liveQuota: ProviderQuota | null;
+  try {
+    liveQuota = await fetchAntigravityLiveQuota({
+      accessToken,
+      projectId: credential.projectId,
+      baseUrl,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    if (error instanceof AntigravityQuotaRpcError && isTerminalAntigravityQuotaStatus(error.status)) {
+      return TERMINAL_QUOTA_FAILURE;
+    }
+    liveQuota = null;
+  }
 
   const windows = new Map<string, ProviderQuotaWindow>();
-  for (const [modelId, rawModelInfo] of Object.entries(models)) {
-    const modelInfo = asRecord(rawModelInfo);
-    if (!modelInfo) continue;
-    for (const quotaInfo of quotaInfoEntries(modelInfo)) {
-      const label = classifyAntigravityFamily(modelId, modelInfo, quotaInfo);
-      if (!label || windows.has(label)) continue;
-      const percent = antigravityUsedPercent(quotaInfo);
-      if (percent === undefined) continue;
-      windows.set(label, {
-        label,
-        percent,
-        ...(normalizeResetAt(quotaInfo.resetTime) !== undefined ? { resetAt: normalizeResetAt(quotaInfo.resetTime) } : {}),
+  for (const [index, host] of antigravityHostCandidates(baseUrl).entries()) {
+    if (!isAntigravityHttpsHost(host)) continue;
+    try {
+      const response = await fetch(`${host}/v1internal:fetchAvailableModels`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": antigravityUserAgent(),
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ project: credential.projectId }),
+        redirect: "error",
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
+      if (!response.ok) {
+        if (index === 0 && (response.status === 404 || response.status === 503)) continue;
+        break;
+      }
+      const body = asRecord(await readQuotaJson(response));
+      const models = asRecord(body?.models);
+      if (models) {
+        for (const [modelId, rawModelInfo] of Object.entries(models)) {
+          const modelInfo = asRecord(rawModelInfo);
+          if (!modelInfo) continue;
+          for (const quotaInfo of quotaInfoEntries(modelInfo)) {
+            const label = classifyAntigravityFamily(modelId, modelInfo, quotaInfo);
+            if (!label || windows.has(label)) continue;
+            const percent = antigravityUsedPercent(quotaInfo);
+            if (percent === undefined) continue;
+            windows.set(label, {
+              label,
+              percent,
+              ...(normalizeResetAt(quotaInfo.resetTime) !== undefined ? { resetAt: normalizeResetAt(quotaInfo.resetTime) } : {}),
+            });
+          }
+        }
+      }
+      break;
+    } catch {
+      if (index === 0) continue;
+      break;
     }
+  }
+
+  if (liveQuota) {
+    const liveWindows = liveQuota.customWindows ?? [];
+    const catalogClaude = windows.get("Cla");
+    const customWindows = [
+      ...liveWindows,
+      ...(liveWindows.some(window => window.label === "Cla") || !catalogClaude ? [] : [catalogClaude]),
+    ];
+    return report(provider, "google-antigravity:retrieveUserQuota", {
+      ...liveQuota,
+      ...(customWindows.length > 0 ? { customWindows } : {}),
+      updatedAt: Date.now(),
+    });
   }
 
   const customWindows = ["Gem", "Cla"].flatMap(label => {
@@ -2144,7 +2188,7 @@ async function maybeFetchProviderQuota(
     if (provider.authMode === "oauth" && name === "xai") return fetchXaiQuota(name);
     if (provider.authMode === "oauth" && name === "anthropic") return fetchAnthropicQuota(name);
     if (provider.authMode === "oauth" && name === "cursor") return fetchCursorQuota(name);
-    if (isAntigravityOAuthProvider(name, provider)) return fetchAntigravityQuota(name, provider);
+    if (provider.authMode === "oauth" && name === "google-antigravity") return fetchAntigravityQuota(name, provider);
     // Kimi Code `/usages` accepts OAuth or coding-plan API keys, but only on the canonical
     // host and only for real key auth — forward/local modes carry no credential of ours.
     if (provider.authMode === "oauth" && name === "kimi") return fetchKimiQuota(name, provider);

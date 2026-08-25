@@ -1,6 +1,6 @@
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
-import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
+import { adapterEventDiagnosticDetails, bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type BridgeDiagnosticContext, type BridgeDiagnosticSequence, type ResponsesTerminalStatus } from "../../bridge";
 import { formatPassthroughUpstreamError } from "./passthrough-error";
 import {
   createResponsesFieldBackfillBlockRewrite,
@@ -14,6 +14,8 @@ import {
   resolveEnvValue,
 } from "../../config";
 import { parseRequest } from "../../responses/parser";
+import { googleProviderOptionsRouteError } from "../../responses/google-provider-options";
+import type { ProviderAdapter } from "../../adapters/base";
 import {
   bindReasoningReplayScope,
   commitReasoningReplayServingIdentity,
@@ -70,8 +72,10 @@ import {
   pickComboTarget,
   targetKey,
 } from "../../combos";
-import { isInjectionDebugEnabled } from "../../lib/debug-settings";
+import { isDebugEnabled, isInjectionDebugEnabled } from "../../lib/debug-settings";
+import { debugStreamDiagnostic } from "../../lib/debug";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
+import { OcxRequestValidationError } from "../../lib/errors";
 import { resolveClientRetryAfter } from "../../lib/retry-after";
 import { antigravityOAuthDestinationConfigError, isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import { enrichOpenCodeZenRateLimitMessage } from "../../providers/opencode-zen-rate-limit";
@@ -117,7 +121,19 @@ import {
   resolveAntigravityAccountForSession,
   retryableAntigravity429DelayMs,
 } from "../../oauth/antigravity-routing";
-import { buildWebSearchTool, planWebSearch, runWithWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../web-search";
+import {
+  CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST,
+  bindCursorSessionAffinity,
+  cursorSessionKeyFromParts,
+  formatCursorProviderForLog,
+  isCursorAccountPoolActive,
+  recordCursorAccountBillingCooldown,
+  resolveCursorAccountForSession,
+  rotateCursorAccountOn429,
+  rotateCursorAccountOnAuth,
+} from "../../oauth/cursor-routing";
+import { getAccountCredential } from "../../oauth/store";
+import { buildWebSearchTool, mediaBridgeWillRun, planWebSearch, resolveCcaInTurnGrounding, runWithWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../web-search";
 import { buildImageTool, buildVideoTool, planImageBridge, planVideoBridge, runWithImageBridge, clampImageMaxRounds, IMAGE_GEN_TOOL_NAME, VIDEO_GEN_TOOL_NAME } from "../../images";
 import { describeImagesInPlace, isModelTextOnly, planVisionSidecar, resolveOpenAiVisionModel, shouldResolveOpenAiVisionSidecar, stripImagesInPlace } from "../../vision";
 import { createAdapterEventQueue, preflightAdapterEvents, type AdapterEventQueue } from "../../adapters/run-turn-queue";
@@ -281,6 +297,7 @@ import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from ".
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
+import { decideV2NativeParentOverride } from "./v2-native-parent-override";
 import { mapCodexAuthContextErrorToResponse } from "./codex-auth-error";
 import { hasUnreadableEncryptedAgentTask, looksLikeBackendCiphertext, sanitizeEncryptedContentInPlace } from "./encrypted-payload";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel } from "./fetch-helpers";
@@ -339,6 +356,34 @@ import { preflightComboStreamResponse } from "./combo-stream-preflight";
 // bridging. A second byte-stream reader would reinterpret that transport's
 // already-committed event boundary and can replay custom adapter work.
 const runTurnAdapterSseResponses = new WeakSet<Response>();
+
+function diagnoseAdapterEvents(
+  events: AsyncIterable<AdapterEvent>,
+  adapterName: string,
+  requestId: string | undefined,
+  logCtx: RequestLogContext,
+  state: BridgeDiagnosticSequence,
+): AsyncIterable<AdapterEvent> {
+  if (!requestId) return events;
+  return (async function* () {
+    for await (const event of events) {
+      const attempt = logCtx.activeAttempt;
+      debugStreamDiagnostic(
+        {
+          requestId,
+          adapterName,
+          ...(attempt?.ordinal !== undefined ? { attempt: attempt.ordinal } : {}),
+          ...(attempt?.recoveryKinds.at(-1) !== undefined ? { recovery: attempt.recoveryKinds.at(-1) } : {}),
+        },
+        "adapter",
+        ++state.value,
+        event.type,
+        adapterEventDiagnosticDetails(event),
+      );
+      yield event;
+    }
+  })();
+}
 
 /**
  * Adapters whose continuation state must survive Codex's store:false requests.
@@ -520,7 +565,7 @@ function bindRouteReasoningReplayScope(args: {
     // seed assigned before route binding. A Cursor conversation must be scoped to the exact
     // provider/destination/adapter/model/credential that serves it.
     if (continuationOwner) parsed._cursorIdentityScope = providerContinuationRouteScope(continuationOwner);
-    else if (!parsed._cursorIdentityScope?.startsWith("cursor-unowned:")) {
+    else if (!parsed._cursorIdentityScope?.trim()) {
       // Prevent the adapter's token-only fallback from recreating a provider-private id after the
       // route owner failed closed. The sentinel is per parsed request and contains no credential.
       parsed._cursorIdentityScope = `cursor-unowned:${randomUUID()}`;
@@ -1233,6 +1278,8 @@ export interface HandleResponsesOptions {
   admission?: DataPlaneAdmission;
   /** Called at most once after the complete client body is read and accepted for dispatch. */
   onRequestBodyRead?: () => void;
+  /** Internal combo handoff invoked after the final adapter accepts the parsed request. */
+  onRequestValidated?: () => void;
   forceEmptyResponseId?: boolean;
   abortSignal?: AbortSignal;
   /** One-shot TTFT callback: first non-empty model output observed (WP4). */
@@ -1682,6 +1729,7 @@ async function applyFinalRouteRequestNormalization(args: {
       subagentModels: config.subagentModels,
       subagentModelFallback: config.subagentModelFallback,
       injectionPrompt: config.injectionPrompt,
+      subagentRoles: config.subagentRoles,
     });
     if (guidance) {
       injectDeveloperMessage(parsed, guidance);
@@ -1843,6 +1891,7 @@ export async function handleComboResponses(
   let lastFailure: Response | null = null;
   while (pick) {
     if (options.abortSignal?.aborted) return clientCancelledResponse();
+    const selectedPick = pick;
     const childLog: RequestLogContext = {
       model: pick.target.model,
       provider: pick.target.provider,
@@ -1864,24 +1913,31 @@ export async function handleComboResponses(
     });
     let resolvedAuth: CodexAuthContext | undefined;
     let terminalRecorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined;
-    const started = Date.now();
-    const attempt = beginRequestAttempt(
-      (logCtx.attempts?.length ?? 0) + 1,
-      pick.target.provider,
-      pick.target.model,
-      config.providers[pick.target.provider]!.adapter,
-    );
-    childLog.activeAttempt = attempt;
+    let started: number | undefined;
+    let attempt: ReturnType<typeof beginRequestAttempt> | undefined;
+    const beginAttempt = (): void => {
+      if (attempt) return;
+      started = Date.now();
+      attempt = beginRequestAttempt(
+        (logCtx.attempts?.length ?? 0) + 1,
+        selectedPick.target.provider,
+        selectedPick.target.model,
+        config.providers[selectedPick.target.provider]!.adapter,
+      );
+      childLog.activeAttempt = attempt;
+      childLog.activeAttemptStartedAt = started;
+      recordAttemptRequestedEffort(childLog);
+    };
     let attemptRetained = false;
     const retainCancelledAttempt = (): void => {
-      if (attemptRetained) return;
+      if (attemptRetained || !attempt) return;
       sealRequestAttemptIdentity(
         attempt,
         childLog.provider,
         childLog.providerAdapter ?? attempt.adapter,
         childLog.accountLogLabel,
       );
-      finishRequestAttempt(attempt, 499, Date.now() - started, childLog.usage);
+      finishRequestAttempt(attempt, 499, Date.now() - (started ?? Date.now()), childLog.usage);
       (logCtx.attempts ??= []).push(attempt);
       attemptRetained = true;
     };
@@ -1901,10 +1957,11 @@ export async function handleComboResponses(
         comboAttempt: true,
         comboReplaySnapshot,
         deferCodexResetDerivedCooldown,
+        onRequestValidated: beginAttempt,
         // Attempt-relative TTFT is recorded HERE (not via childLog.firstOutputMs — a later
         // Object.assign(logCtx, childLog) would overwrite the request-relative value).
         onFirstOutput: () => {
-          if (attempt.firstOutputMs === undefined) {
+          if (attempt && started !== undefined && attempt.firstOutputMs === undefined) {
             attempt.firstOutputMs = Math.max(0, Date.now() - started);
           }
           options.onFirstOutput?.();
@@ -1956,6 +2013,7 @@ export async function handleComboResponses(
     }
 
     if (response.ok) {
+      if (!attempt) return response;
       sealRequestAttemptIdentity(
         attempt,
         childLog.provider,
@@ -2002,20 +2060,22 @@ export async function handleComboResponses(
       retainCancelledAttempt();
       return clientCancelledResponse();
     }
-    sealRequestAttemptIdentity(
-      attempt,
-      childLog.provider,
-      childLog.providerAdapter ?? attempt.adapter,
-      childLog.accountLogLabel,
-    );
-    finishRequestAttempt(
-      attempt,
-      failure.response.status,
-      Date.now() - started,
-      failure.usage,
-    );
-    (logCtx.attempts ??= []).push(attempt);
-    attemptRetained = true;
+    if (attempt) {
+      sealRequestAttemptIdentity(
+        attempt,
+        childLog.provider,
+        childLog.providerAdapter ?? attempt.adapter,
+        childLog.accountLogLabel,
+      );
+      finishRequestAttempt(
+        attempt,
+        failure.response.status,
+        Date.now() - (started ?? Date.now()),
+        failure.usage,
+      );
+      (logCtx.attempts ??= []).push(attempt);
+      attemptRetained = true;
+    }
     lastFailure = failure.response;
     if (comboFailureDecision(failure.response.status, failure.classificationText, {
       code: failure.upstreamCode,
@@ -2024,7 +2084,7 @@ export async function handleComboResponses(
       return lastFailure;
     }
     console.warn(
-      `[combo] ${comboId}: ${targetKey(pick.target)} failed with ${failure.response.status} after ${Date.now() - started}ms`,
+      `[combo] ${comboId}: ${targetKey(pick.target)} failed with ${failure.response.status} after ${started === undefined ? 0 : Date.now() - started}ms`,
     );
     const nextPick = advanceComboAfterFailure(config, pick, {
       retryAfter: failure.retryAfter,
@@ -2232,6 +2292,7 @@ async function handleResponsesInner(
   let toolBridgeMaps: ReturnType<typeof buildToolBridgeMaps>;
   try {
     parsed = parseRequest(body);
+    parsed._promptCacheKeyIsSharedCohort = options.promptCacheKeyIsSharedCohort === true;
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
     if (previousResponseInputExpanded) parsed._previousResponseInputExpanded = true;
     const providerContinuationCandidate = options.comboReplaySnapshot
@@ -2357,6 +2418,27 @@ async function handleResponsesInner(
     return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
 
+  const parentOverride = decideV2NativeParentOverride({
+    kind: "responses",
+    config,
+    headers: req.headers,
+    parsed,
+    sourceRoute: route,
+    comboAttempt: options.comboAttempt,
+    targetEvidence: evidenceFromBody(parsed._rawBody),
+  });
+  if (parentOverride.kind === "reject") {
+    if (parentOverride.trace) logCtx.routeDecision = parentOverride.trace as typeof logCtx.routeDecision;
+    return formatErrorResponse(404, "invalid_request_error", parentOverride.message);
+  }
+  if (parentOverride.kind === "override") {
+    route = parentOverride.route;
+    parsed.modelId = route.modelId;
+    if (parsed._rawBody && typeof parsed._rawBody === "object") {
+      (parsed._rawBody as { model?: string }).model = route.modelId;
+    }
+  }
+
   const hasUnexpandedPreviousResponse = !!parsed.previousResponseId
     && parsed._previousResponseInputExpanded !== true;
   // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
@@ -2480,6 +2562,7 @@ async function handleResponsesInner(
             "_providerContinuationOwner",
             "_cursorConversationId",
             "_clientThreadId",
+            "_promptCacheKeyIsSharedCohort",
             "_reasoningReplayScope",
             "_cursorIsolateConversation",
           ];
@@ -2666,13 +2749,25 @@ async function handleResponsesInner(
         if (antigravityAccountId) recordAntigravitySyntheticFailure(antigravityAccountId, error);
       }
     : undefined;
+  let cursorPoolAccountId: string | null = null;
+  let cursorPoolFailovers = 0;
+  const oauthSessionKeyParts = {
+    sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
+    threadIdHeader: req.headers.get("thread-id"),
+    promptCacheKey: typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
+    clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
+    promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort === true,
+  };
   const anthropicSessionKey = route.providerName === "anthropic" && route.provider.authMode === "oauth"
-    ? anthropicSessionKeyFromParts({
-      sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
-      threadIdHeader: req.headers.get("thread-id"),
-      promptCacheKey: typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
+    ? anthropicSessionKeyFromParts(oauthSessionKeyParts)
+    : null;
+  if (isAntigravityOAuth) {
+    antigravitySessionKey = antigravitySessionKeyFromParts(oauthSessionKeyParts);
+  }
+  const cursorSessionKey = route.providerName === "cursor"
+    && route.provider.authMode === "oauth"
+    ? cursorSessionKeyFromParts({
       clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
-      promptCacheKeyIsSharedCohort: options.promptCacheKeyIsSharedCohort === true,
     })
     : null;
   if (isAntigravityOAuth) {
@@ -2705,6 +2800,36 @@ async function handleResponsesInner(
         promoteAnthropicActiveAccount(selection.accountId);
         route.provider = { ...route.provider, apiKey: accessToken };
         logCtx.provider = formatAnthropicProviderForLog("anthropic", selection.accountId, config);
+      } else if (
+        route.providerName === "cursor"
+        && route.provider.authMode === "oauth"
+        && isCursorAccountPoolActive(config)
+      ) {
+        const selection = resolveCursorAccountForSession(cursorSessionKey, config);
+        if (!selection.accountId) {
+          if (selection.reason === "all-cooled") {
+            return formatErrorResponse(
+              429,
+              "rate_limit_error",
+              "All Cursor OAuth accounts are temporarily rate-limited",
+            );
+          }
+          return formatErrorResponse(401, "authentication_error", "No eligible Cursor OAuth account available");
+        }
+        let resolved = await getValidAccessTokenSnapshot("cursor");
+        if (selection.accountId !== resolved.accountId) {
+          const accessToken = await getValidAccessTokenForAccount("cursor", selection.accountId);
+          resolved = { ...resolved, accountId: selection.accountId, accessToken };
+        }
+        cursorPoolAccountId = selection.accountId;
+        parsed._cursorIdentityScope = selection.accountId;
+        bindCursorSessionAffinity(cursorSessionKey, selection.accountId);
+        replayOAuthCredentialSnapshot = {
+          accountId: resolved.accountId,
+          generation: resolved.generation,
+        };
+        route.provider = { ...route.provider, apiKey: resolved.accessToken };
+        logCtx.provider = formatCursorProviderForLog("cursor", selection.accountId);
       } else {
         let resolved: OAuthAccessSnapshot;
         if (isAntigravityOAuth) {
@@ -2786,6 +2911,27 @@ async function handleResponsesInner(
     delete logCtx.accountLogLabel;
   }
   const adapter = resolveAdapter(adapterProvider, config.cacheRetention);
+  const googleOptionsError = googleProviderOptionsRouteError(parsed, {
+    providerName: route.providerName,
+    provider: adapterProvider,
+    adapterName: adapter.name,
+  });
+  if (googleOptionsError) {
+    return formatErrorResponse(400, "invalid_request_error", googleOptionsError);
+  }
+  const assertGoogleOptionsRoute = (
+    candidate: Pick<ProviderAdapter, "name" | "validateRequest">,
+    provider: OcxProviderConfig,
+    requestParsed: OcxParsedRequest = parsed,
+  ): void => {
+    const message = googleProviderOptionsRouteError(requestParsed, {
+      providerName: route.providerName,
+      provider,
+      adapterName: candidate.name,
+    });
+    if (message) throw new OcxRequestValidationError(message);
+    if (requestParsed.options.providerOptions?.google) candidate.validateRequest?.(requestParsed);
+  };
   bindRouteReasoningReplayScope({
     parsed,
     providerName: route.providerName,
@@ -2799,6 +2945,17 @@ async function handleResponsesInner(
     logCtx.conversationId = normalizeLogConversationId(parsed._cursorConversationId);
   }
   logCtx.providerAdapter = adapter.name;
+  try {
+    assertGoogleOptionsRoute(adapter, adapterProvider);
+    adapter.validateRequest?.(parsed);
+  } catch (err) {
+    return formatErrorResponse(
+      400,
+      "invalid_request_error",
+      redactSecretString(err instanceof Error ? err.message : String(err)),
+    );
+  }
+  options.onRequestValidated?.();
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
   if (!options.comboAttempt && !logCtx.activeAttempt) {
@@ -2830,6 +2987,23 @@ async function handleResponsesInner(
     );
     if (passiveSubjectId) logCtx.activeAttempt.labRouteSubjectId = passiveSubjectId;
   }
+  const diagnosticRequestId = isDebugEnabled() ? randomUUID() : undefined;
+  const adapterDiagnosticState: BridgeDiagnosticSequence = { value: 0 };
+  const diagnosticContext: BridgeDiagnosticContext | undefined = diagnosticRequestId
+    ? { requestId: diagnosticRequestId, adapterName: adapter.name, sequence: adapterDiagnosticState }
+    : undefined;
+  const noteDiagnosticAttempt = (
+    attempt: RequestLogContext["activeAttempt"],
+    inputEstimate: number | undefined,
+    recovery?: AttemptRecoveryKind,
+    adapterName?: string,
+  ): void => {
+    noteAttemptSend(attempt, inputEstimate, recovery);
+    if (!diagnosticContext) return;
+    diagnosticContext.attempt = attempt?.ordinal;
+    diagnosticContext.recovery = recovery;
+    if (adapterName) diagnosticContext.adapterName = adapterName;
+  };
   const isPassthrough = "passthrough" in adapter && !!adapter.passthrough;
 
   if (adapter.name === "kiro" && parsed.previousResponseId && !parsed._previousResponseInputExpanded) {
@@ -3001,6 +3175,7 @@ async function handleResponsesInner(
     );
     let request: Awaited<ReturnType<typeof adapter.buildRequest>>;
     try {
+      assertGoogleOptionsRoute(adapter, adapterProvider);
       request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
     } catch (error) {
       releaseCodexAuthContextProbeLease(authCtx);
@@ -3242,7 +3417,7 @@ async function handleResponsesInner(
       // Body is a replayable string; nothing has streamed to the client yet.
       upstreamResponse = await fetchWithTransientRetry(
         recovery => {
-          noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, recovery);
+          noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, recovery, route.provider.adapter);
           return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
             method: request.method,
             headers: request.headers,
@@ -3284,6 +3459,12 @@ async function handleResponsesInner(
         return { failed: formatErrorResponse(502, "upstream_error", "Recovery changed the provider wire unexpectedly") };
       }
       try {
+        assertGoogleOptionsRoute(retryAdapter, route.provider);
+      } catch (err) {
+        upstream.abort();
+        return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err))) };
+      }
+      try {
         request = await retryAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
@@ -3313,7 +3494,7 @@ async function handleResponsesInner(
       try {
         return await fetchWithTransientRetry(
           innerRecovery => {
-            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, innerRecovery ?? recovery);
+            noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, innerRecovery ?? recovery, retryAdapter.name);
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -3410,6 +3591,7 @@ async function handleResponsesInner(
         logCtx.accountLogLabel,
       );
       try {
+        assertGoogleOptionsRoute(refreshedAdapter, refreshedProvider);
         request = await refreshedAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
@@ -3428,7 +3610,7 @@ async function handleResponsesInner(
       try {
         upstreamResponse = await fetchWithTransientRetry(
           recovery => {
-            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, recovery ?? "oauth-401");
+            noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, recovery ?? "oauth-401", refreshedAdapter.name);
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -3490,7 +3672,7 @@ async function handleResponsesInner(
           recovery => {
             // The first send of every replay is itself a rate-limit retry; inner transient-5xx
             // recoveries keep their own label (recovery is provided for those).
-            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, recovery ?? "rate-limit-429");
+            noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, recovery ?? "rate-limit-429", route.provider.adapter);
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -4138,13 +4320,23 @@ async function handleResponsesInner(
   //   - non-runTurn: web-search wins over image when both eligible (documented priority)
   //   - runTurn: image bridge may run (it supports runTurn); web-search is skipped so runTurn
   //     can proceed for web-search-only turns
-  const wsPlan = !routedCompaction
-    ? planWebSearch(config, parsed, false, route.provider, route.modelId, openAiSidecar)
-    : undefined;
   const imgPlan = !routedCompaction ? await planImageBridge(config, parsed, route.provider) : undefined;
   const vidPlan = !routedCompaction ? await planVideoBridge(config, parsed, route.provider) : undefined;
-  const canRunWebSearch = !!wsPlan && !adapter.runTurn;
-  if ((imgPlan || vidPlan) && canRunWebSearch) {
+  const hasMediaPlan = !!(imgPlan || vidPlan);
+  // A media plan is not enough to suppress Gemini 2.x grounding: both bridges inject tools only
+  // on streaming turns. This is the potential-injection value used to resolve sidecar precedence.
+  const mediaMayInject = mediaBridgeWillRun(hasMediaPlan, false, !!adapter.runTurn, parsed.stream);
+  const wsPlan = !routedCompaction
+    ? planWebSearch(config, parsed, false, route.provider, route.modelId, openAiSidecar, mediaMayInject)
+    : undefined;
+  const webSearchWinsMedia = !!wsPlan && !adapter.runTurn;
+  const mediaWillRun = mediaBridgeWillRun(hasMediaPlan, !!wsPlan, !!adapter.runTurn, parsed.stream);
+  const ccaInTurnGrounding = !routedCompaction
+    ? resolveCcaInTurnGrounding(config, parsed, false, route.provider, route.modelId, mediaWillRun)
+    : undefined;
+  if (ccaInTurnGrounding) parsed._ccaInTurnGrounding = ccaInTurnGrounding;
+  const canRunWebSearch = webSearchWinsMedia && !ccaInTurnGrounding;
+  if (hasMediaPlan && webSearchWinsMedia) {
     // Web search takes priority when both are active — the media bridge cannot run
     // alongside runWithWebSearch. Surface a runtime signal so the user knows their
     // configured video/image bridge was skipped for this turn, rather than silently
@@ -4152,7 +4344,7 @@ async function handleResponsesInner(
     if (vidPlan) console.warn("[videos] video bridge skipped: web search is active for this turn");
     if (imgPlan) console.warn("[images] image bridge skipped: web search is active for this turn");
   }
-  if ((imgPlan || vidPlan) && (!wsPlan || adapter.runTurn)) {
+  if (mediaWillRun || (imgPlan && !parsed.stream && !webSearchWinsMedia)) {
     // The image bridge detects a hosted image_generation tool and requires streaming.
     // The video bridge activates from config and injects a tool — it also needs streaming
     // (the loop returns SSE). For video-only (no imgPlan) on a non-streaming request, skip
@@ -4201,11 +4393,13 @@ async function handleResponsesInner(
     const imgResponse = await runWithImageBridge({
       parsed, adapter,
       incomingMeta: { headers: selectedForwardHeaders, abortSignal: options.abortSignal, translatorBudget },
+      ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       ...(imgPlan ? { plan: imgPlan } : {}),
       ...(vidPlan ? { videoPlan: vidPlan } : {}),
       forwardHeaders: selectedForwardHeaders,
       onAttemptSend: (recovery?: AttemptRecoveryKind) =>
-        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery),
+        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
+      ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
       abortSignal: options.abortSignal,
       maxRounds: imgPlan && vidPlan
         ? clampImageMaxRounds(Math.min(config.images?.maxRounds ?? 3, config.images?.videoMaxRounds ?? 2))
@@ -4220,6 +4414,7 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       },
+      validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       ...(vidPlan?.timeoutMs ? { videoTimeoutMs: vidPlan.timeoutMs } : {}),
       onUsage: usage => {
         // Cursor may assign _cursorConversationId inside the image loop's first runTurn;
@@ -4289,6 +4484,7 @@ async function handleResponsesInner(
     const wsResponse = await runWithWebSearch({
       parsed, adapter,
       incomingMeta: { headers: selectedForwardHeaders, abortSignal: options.abortSignal, translatorBudget },
+      ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       backend: wsPlan.backend,
       forwardProvider: wsPlan.forwardSidecar?.provider,
       anthropicSidecar: wsPlan.anthropicSidecar,
@@ -4308,8 +4504,10 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       },
+      validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       onAttemptSend: (recovery?: AttemptRecoveryKind) =>
-        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery),
+        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
+      ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
       onUsage: usage => {
         logCtx.usageFromBridge = true;
         if (usage) {
@@ -4398,10 +4596,14 @@ async function handleResponsesInner(
       pacingSlotAcquired = false,
     ): Promise<void> => {
       try {
+        if (diagnosticContext) {
+          diagnosticContext.recovery = recovery;
+          diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
+        }
         if (!pacingSlotAcquired) {
           await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal);
         }
-        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery);
+        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name);
         const runTurnProviderFetch = providerFetch(
           route.provider,
           options.codexWsRuntimeIdentity,
@@ -4455,13 +4657,15 @@ async function handleResponsesInner(
         onBacklogExceeded: () => runTurnAbort.abort(),
       });
       void runTurnAttempt(retryQueue, "empty-completion");
-      return retryQueue.stream();
+      return diagnoseAdapterEvents(retryQueue.stream(), adapter.name, diagnosticRequestId, logCtx, adapterDiagnosticState);
     };
 
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     if (parsed.stream) {
       void runTurn();
-      let eventSource: AsyncIterable<AdapterEvent> = queue.stream();
+      let eventSource: AsyncIterable<AdapterEvent> = diagnoseAdapterEvents(
+        queue.stream(), adapter.name, diagnosticRequestId, logCtx, adapterDiagnosticState,
+      );
       if (options.comboAttempt) {
         const preflight = await preflightAdapterEvents(eventSource);
         if (preflight.error || preflight.empty) {
@@ -4499,6 +4703,7 @@ async function handleResponsesInner(
           // grok-build's strict decoder dies on the typed response.heartbeat frame; its
           // eventsource layer tolerates comment keep-alives. Codex needs the opposite.
           ...(logCtx.surface === "grok" ? { heartbeatStyle: "comment" as const } : {}),
+          ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
           onUsage: usage => {
             // Raw adapter usage, pre wire-normalization: the bridged SSE now always carries
             // zero-default detail objects, so provenance must come from here (cache_detail_missing).
@@ -4607,6 +4812,7 @@ async function handleResponsesInner(
   let initialRequest: AdapterRequest | undefined;
   let inputTokenEstimate: number | undefined;
   try {
+    assertGoogleOptionsRoute(activeAdapter, route.provider);
     initialRequest = await activeAdapter.buildRequest(parsed, {
       headers: selectedForwardHeaders,
       translatorBudget,
@@ -4648,7 +4854,7 @@ async function handleResponsesInner(
   let upstreamResponse: Response;
   try {
     if (activeAdapter.fetchResponse) {
-      noteAttemptSend(logCtx.activeAttempt, inputTokenEstimate);
+      noteDiagnosticAttempt(logCtx.activeAttempt, inputTokenEstimate, undefined, activeAdapter.name);
       await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal);
       upstreamResponse = await activeAdapter.fetchResponse(builtInitialRequest, {
         abortSignal: upstream.signal,
@@ -4659,6 +4865,7 @@ async function handleResponsesInner(
           modelId: route.modelId,
           pacingSlotAcquired: true,
         }),
+        ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       });
     } else {
       // #1851 scope guard: transient-5xx retry on this generic adapter path is opt-in for
@@ -4668,7 +4875,7 @@ async function handleResponsesInner(
       const fetchWithRetryPolicy = route.provider.adapter === "google" ? fetchWithTransientRetry : fetchWithResetRetry;
       upstreamResponse = await fetchWithRetryPolicy(
         recovery => {
-          noteAttemptSend(logCtx.activeAttempt, inputTokenEstimate, recovery);
+          noteDiagnosticAttempt(logCtx.activeAttempt, inputTokenEstimate, recovery, activeAdapter.name);
           return fetchWithHeaderTimeout(builtInitialRequest.url, applyUpstreamRecoveryInit({
             method: builtInitialRequest.method,
             headers: builtInitialRequest.headers,
@@ -4719,6 +4926,13 @@ async function handleResponsesInner(
     const rebuildAndRefetch = async (
       recovery: AttemptRecoveryKind,
     ): Promise<Response | { failed: Response }> => {
+      try {
+        assertGoogleOptionsRoute(activeAdapter, route.provider);
+      } catch (err) {
+        cleanupUpstreamAbort();
+        upstream.abort();
+        return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err))) };
+      }
       let retryRequest: AdapterRequest;
       if (sameTargetRequest !== undefined && sameTargetParsed === parsed && sameTargetToken === transportToken) {
         // Same target (key/adapter/parsed/tier unchanged): replay the exact cached request.
@@ -4754,7 +4968,7 @@ async function handleResponsesInner(
       if (retryEstimate !== undefined) logCtx.usageLogInputTokens = retryEstimate;
       logCtx.providerAdapter = activeAdapter.name;
       sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
-      noteAttemptSend(logCtx.activeAttempt, retryEstimate, recovery);
+      noteDiagnosticAttempt(logCtx.activeAttempt, retryEstimate, recovery, activeAdapter.name);
       try {
         try {
           if (activeAdapter.fetchResponse) {
@@ -4768,6 +4982,7 @@ async function handleResponsesInner(
                 modelId: route.modelId,
                 pacingSlotAcquired: true,
               }),
+              ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
             });
           }
           return await fetchWithHeaderTimeout(retryRequest.url, {
@@ -4988,6 +5203,105 @@ async function handleResponsesInner(
           break;
         }
       }
+      if (
+        upstreamResponse.status === 402
+        && cursorPoolAccountId
+        && isCursorAccountPoolActive(config)
+      ) {
+        recordCursorAccountBillingCooldown(
+          cursorPoolAccountId,
+          upstreamResponse.headers.get("retry-after"),
+        );
+      }
+      while (
+        (upstreamResponse.status === 401 || upstreamResponse.status === 403)
+        && route.providerName === "cursor"
+        && route.provider.authMode === "oauth"
+        && cursorPoolAccountId
+        && isCursorAccountPoolActive(config)
+        && cursorPoolFailovers < CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST
+      ) {
+        const nextAccountId = rotateCursorAccountOnAuth(
+          config,
+          cursorPoolAccountId,
+          cursorSessionKey,
+        );
+        if (!nextAccountId) break;
+        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
+        try {
+          const accessToken = await getValidAccessTokenForAccount("cursor", nextAccountId);
+          cursorPoolAccountId = nextAccountId;
+          cursorPoolFailovers += 1;
+          parsed._cursorIdentityScope = nextAccountId;
+          route.provider = { ...route.provider, apiKey: accessToken };
+          replayOAuthCredentialSnapshot = undefined;
+          invalidateSameTargetRequest();
+          activeAdapter = resolveAdapter(
+            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+            config.cacheRetention,
+          );
+          bindRouteReasoningReplayScope({
+            parsed,
+            providerName: route.providerName,
+            provider: route.provider,
+            adapterName: activeAdapter.name,
+            codexAuthContext: authCtx,
+            forwardHeaders: selectedForwardHeaders,
+          });
+          logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
+          sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
+          const result = await rebuildAndRefetch("cursor-oauth-auth");
+          if ("failed" in result) return result.failed;
+          upstreamResponse = result;
+        } catch {
+          break;
+        }
+      }
+      while (
+        upstreamResponse.status === 429
+        && route.providerName === "cursor"
+        && route.provider.authMode === "oauth"
+        && cursorPoolAccountId
+        && isCursorAccountPoolActive(config)
+        && cursorPoolFailovers < CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST
+      ) {
+        const nextAccountId = rotateCursorAccountOn429(
+          config,
+          cursorPoolAccountId,
+          upstreamResponse.headers.get("retry-after"),
+          cursorSessionKey,
+        );
+        if (!nextAccountId) break;
+        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
+        try {
+          const accessToken = await getValidAccessTokenForAccount("cursor", nextAccountId);
+          cursorPoolAccountId = nextAccountId;
+          cursorPoolFailovers += 1;
+          parsed._cursorIdentityScope = nextAccountId;
+          route.provider = { ...route.provider, apiKey: accessToken };
+          replayOAuthCredentialSnapshot = undefined;
+          invalidateSameTargetRequest();
+          activeAdapter = resolveAdapter(
+            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+            config.cacheRetention,
+          );
+          bindRouteReasoningReplayScope({
+            parsed,
+            providerName: route.providerName,
+            provider: route.provider,
+            adapterName: activeAdapter.name,
+            codexAuthContext: authCtx,
+            forwardHeaders: selectedForwardHeaders,
+          });
+          logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
+          sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
+          const result = await rebuildAndRefetch("cursor-oauth-429");
+          if ("failed" in result) return result.failed;
+          upstreamResponse = result;
+        } catch {
+          break;
+        }
+      }
       // Unknown provenance is deliberately fail-soft in pre-flight: after a restart, TTL expiry,
       // or LRU eviction, a valid same-backend blob must survive. A decoder's own 4xx identity is
       // the missing authoritative signal. Rebuild once through the same sanitation path used by a
@@ -5108,6 +5422,16 @@ async function handleResponsesInner(
     nextParsed: OcxParsedRequest,
     initialRecoveryKind?: AttemptRecoveryKind,
   ): AsyncGenerator<AdapterEvent> {
+    const requestValidationEvent = (error: unknown): AdapterEvent | undefined => {
+      if (!(error instanceof OcxRequestValidationError)) return undefined;
+      return {
+        type: "error",
+        status: error.status,
+        errorType: "invalid_request_error",
+        code: "invalid_request_error",
+        message: error.message,
+      };
+    };
     let response: Response | undefined;
     // One-shot recovery label for the next top-of-loop continuation send after a failover rotation.
     let nextContinuationRecoveryKind: AttemptRecoveryKind | undefined = initialRecoveryKind;
@@ -5120,6 +5444,7 @@ async function handleResponsesInner(
      */
     const fetchContinuation = async (recoveryKind?: AttemptRecoveryKind): Promise<Response> => {
       let continuationRequest: AdapterRequest | undefined;
+      assertGoogleOptionsRoute(activeAdapter, route.provider, nextParsed);
       if (sameTargetRequest !== undefined && sameTargetParsed === nextParsed && sameTargetToken === transportToken) {
         // Same target (key/adapter/parsed/tier unchanged): replay the exact cached request.
         continuationRequest = sameTargetRequest;
@@ -5155,8 +5480,13 @@ async function handleResponsesInner(
       // Optional recovery label for same-target / failover continuation sends.
       const replayKind: AttemptRecoveryKind | undefined = recoveryKind;
       try {
+        if (diagnosticContext) {
+          diagnosticContext.recovery = replayKind;
+          diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
+          diagnosticContext.adapterName = activeAdapter.name;
+        }
         if (activeAdapter.fetchResponse) {
-          noteAttemptSend(logCtx.activeAttempt, continuationEstimate, replayKind);
+          noteDiagnosticAttempt(logCtx.activeAttempt, continuationEstimate, replayKind, activeAdapter.name);
           await waitForProviderRequestSlot(route.providerName, route.provider, nextParsed.modelId, upstream.signal);
           return await activeAdapter.fetchResponse(builtContinuationRequest, {
             abortSignal: upstream.signal,
@@ -5167,6 +5497,7 @@ async function handleResponsesInner(
               modelId: nextParsed.modelId,
               pacingSlotAcquired: true,
             }),
+            ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
           });
         }
         // Same #1851 scope guard as the initial send: transient-5xx retry only for direct
@@ -5174,7 +5505,7 @@ async function handleResponsesInner(
         const fetchContinuationWithRetryPolicy = route.provider.adapter === "google" ? fetchWithTransientRetry : fetchWithResetRetry;
         return await fetchContinuationWithRetryPolicy(
           recovery => {
-            noteAttemptSend(logCtx.activeAttempt, continuationEstimate, recovery ?? replayKind);
+            noteDiagnosticAttempt(logCtx.activeAttempt, continuationEstimate, recovery ?? replayKind, activeAdapter.name);
             return fetchWithHeaderTimeout(
               builtContinuationRequest.url,
               applyUpstreamRecoveryInit({
@@ -5203,7 +5534,10 @@ async function handleResponsesInner(
         nextContinuationRecoveryKind = undefined;
         response = await fetchContinuation(recoveryKind);
       } catch (error) {
-        if (options.abortSignal?.aborted || upstream.signal.aborted) {
+        const validationEvent = requestValidationEvent(error);
+        if (validationEvent) {
+          yield validationEvent;
+        } else if (options.abortSignal?.aborted || upstream.signal.aborted) {
           yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
         } else {
           yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -5249,7 +5583,10 @@ async function handleResponsesInner(
         try {
           response = await fetchContinuation("rate-limit-429");
         } catch (error) {
-          if (options.abortSignal?.aborted || upstream.signal.aborted) {
+          const validationEvent = requestValidationEvent(error);
+          if (validationEvent) {
+            yield validationEvent;
+          } else if (options.abortSignal?.aborted || upstream.signal.aborted) {
             yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
           } else {
             yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -5361,6 +5698,113 @@ async function handleResponsesInner(
           }
         }
       }
+      if (
+        response.status === 402
+        && cursorPoolAccountId
+        && isCursorAccountPoolActive(config)
+      ) {
+        recordCursorAccountBillingCooldown(
+          cursorPoolAccountId,
+          response.headers.get("retry-after"),
+        );
+      }
+      if (
+        (response.status === 401 || response.status === 403)
+        && route.providerName === "cursor"
+        && route.provider.authMode === "oauth"
+        && cursorPoolAccountId
+        && isCursorAccountPoolActive(config)
+        && cursorPoolFailovers < CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST
+      ) {
+        const nextAccountId = rotateCursorAccountOnAuth(
+          config,
+          cursorPoolAccountId,
+          cursorSessionKey,
+        );
+        if (nextAccountId) {
+          try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+          try {
+            const accessToken = await getValidAccessTokenForAccount("cursor", nextAccountId);
+            cursorPoolAccountId = nextAccountId;
+            cursorPoolFailovers += 1;
+            parsed._cursorIdentityScope = nextAccountId;
+            route.provider = { ...route.provider, apiKey: accessToken };
+            replayOAuthCredentialSnapshot = undefined;
+            invalidateSameTargetRequest();
+            activeAdapter = resolveAdapter(
+              resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+              config.cacheRetention,
+            );
+            bindRouteReasoningReplayScope({
+              parsed: nextParsed,
+              providerName: route.providerName,
+              provider: route.provider,
+              adapterName: activeAdapter.name,
+            });
+            bindRouteReasoningReplayScope({
+              parsed,
+              providerName: route.providerName,
+              provider: route.provider,
+              adapterName: activeAdapter.name,
+            });
+            logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
+            sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
+            nextContinuationRecoveryKind = "cursor-oauth-auth";
+            continue;
+          } catch {
+            // fall through to emit continuation error below
+          }
+        }
+      }
+      if (
+        response.status === 429
+        && route.providerName === "cursor"
+        && route.provider.authMode === "oauth"
+        && cursorPoolAccountId
+        && isCursorAccountPoolActive(config)
+        && cursorPoolFailovers < CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST
+      ) {
+        const nextAccountId = rotateCursorAccountOn429(
+          config,
+          cursorPoolAccountId,
+          response.headers.get("retry-after"),
+          cursorSessionKey,
+        );
+        if (nextAccountId) {
+          try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+          try {
+            const accessToken = await getValidAccessTokenForAccount("cursor", nextAccountId);
+            cursorPoolAccountId = nextAccountId;
+            cursorPoolFailovers += 1;
+            parsed._cursorIdentityScope = nextAccountId;
+            route.provider = { ...route.provider, apiKey: accessToken };
+            replayOAuthCredentialSnapshot = undefined;
+            invalidateSameTargetRequest();
+            activeAdapter = resolveAdapter(
+              resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
+              config.cacheRetention,
+            );
+            bindRouteReasoningReplayScope({
+              parsed: nextParsed,
+              providerName: route.providerName,
+              provider: route.provider,
+              adapterName: activeAdapter.name,
+            });
+            bindRouteReasoningReplayScope({
+              parsed,
+              providerName: route.providerName,
+              provider: route.provider,
+              adapterName: activeAdapter.name,
+            });
+            logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
+            sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
+            nextContinuationRecoveryKind = "cursor-oauth-429";
+            continue;
+          } catch {
+            // fall through to emit continuation error below
+          }
+        }
+      }
       if (shouldAttemptImageTierRetry({
         status: response.status,
         adapterName: activeAdapter.name,
@@ -5393,7 +5837,13 @@ async function handleResponsesInner(
       const detachContinuationBodyGuard = cancelBodyOnAbort(response.body, upstream.signal);
       try {
         if (nextParsed.stream) {
-          yield* activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata);
+          yield* diagnoseAdapterEvents(
+            activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata),
+            activeAdapter.name,
+            diagnosticRequestId,
+            logCtx,
+            adapterDiagnosticState,
+          );
         } else if (activeAdapter.parseResponse) {
           yield* await activeAdapter.parseResponse(response, translatorBudget, logCtx.activeTierMetadata);
         } else {
@@ -5403,7 +5853,10 @@ async function handleResponsesInner(
         detachContinuationBodyGuard();
       }
     } catch (error) {
-      if (options.abortSignal?.aborted) {
+      const validationEvent = requestValidationEvent(error);
+      if (validationEvent) {
+        yield validationEvent;
+      } else if (options.abortSignal?.aborted) {
         yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
       } else {
         yield { type: "error", message: `Provider continuation parse failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -5425,11 +5878,18 @@ async function handleResponsesInner(
   };
 
   if (parsed.stream) {
-    const initialEventStream = activeAdapter.parseStream(
-      upstreamResponse,
-      translatorBudget,
-      logCtx.activeTierMetadata,
+    const initialEventStream = diagnoseAdapterEvents(
+      activeAdapter.parseStream(upstreamResponse, translatorBudget, logCtx.activeTierMetadata),
+      activeAdapter.name,
+      diagnosticRequestId,
+      logCtx,
+      adapterDiagnosticState,
     );
+    if (diagnosticContext) {
+      diagnosticContext.adapterName = activeAdapter.name;
+      diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
+      diagnosticContext.recovery = logCtx.activeAttempt?.recoveryKinds.at(-1);
+    }
     const eventStream = terminalGuardEnabled
       ? guardTerminalEventStream({
           parsed,
@@ -5465,6 +5925,7 @@ async function handleResponsesInner(
         ...(routedCompaction ? { compaction: true } : {}),
         // Same grok-surface split as the runTurn branch above.
         ...(logCtx.surface === "grok" ? { heartbeatStyle: "comment" as const } : {}),
+        ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
         onUsage: usage => {
           // Raw adapter usage, pre wire-normalization (see the runTurn branch above).
           logCtx.usageFromBridge = true;
