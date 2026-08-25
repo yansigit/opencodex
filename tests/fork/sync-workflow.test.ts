@@ -57,11 +57,12 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain('git switch -C "$branch"');
   });
 
-  test("prepares from dev while keeping trusted scripts on the default branch", () => {
-    expect(workflow).toContain("ref: ${{ github.event.repository.default_branch }}");
-    expect(workflow).toContain("git fetch origin dev");
-    expect(workflow).toContain("git worktree add");
-    expect(workflow).toContain("FORK_SYNC_WORKTREE");
+ test("prepares from dev while keeping trusted scripts on the default branch", () => {
+   expect(workflow).toContain("ref: ${{ github.event.repository.default_branch }}");
+   expect(workflow).toContain("git fetch origin dev");
+   expect(workflow).toContain("git fetch --force upstream main dev --tags --prune");
+   expect(workflow).toContain("git worktree add");
+   expect(workflow).toContain("FORK_SYNC_WORKTREE");
     expect(workflow).not.toContain("base=main");
     expect(workflow).not.toContain("base: main");
   });
