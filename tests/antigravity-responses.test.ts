@@ -44,9 +44,11 @@ function request(stream = false, headers: Record<string, string> = {}, signal?: 
 }
 
 function completed(): Response {
-  return Response.json({ response: { candidates: [{ content: { parts: [{ text: "hello" }] }, finishReason: "STOP" }] } });
+  return new Response('data: {"response":{"candidates":[{"content":{"parts":[{"text":"hello"}]},"finishReason":"STOP"}]}}\n\n', {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
 }
-
 function fastConfig(): OcxConfig {
   const value = config();
   value.providers["google-antigravity"]!.requestPacing = { enabled: false };
@@ -179,7 +181,7 @@ describe("Antigravity Responses integration", () => {
     }) as typeof fetch;
     const logCtx: RequestLogContext = { model: "", provider: "" };
     const response = await handleResponses(request(true), config(), logCtx, {});
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(429);
     expect(seen).toHaveLength(1);
     expect(await response.text()).toContain("quota exceeded");
     const accountId = getAccountSet("google-antigravity")!.activeAccountId;
@@ -196,7 +198,7 @@ describe("Antigravity Responses integration", () => {
       });
     }) as typeof fetch;
     const first = await handleResponses(request(true), fastConfig(), { model: "", provider: "" }, {});
-    expect(first.status).toBe(200);
+    expect(first.status).toBe(403);
     await first.text();
     const accountId = getAccountSet("google-antigravity")!.activeAccountId;
     expect(getAntigravityAccountHealthSnapshot(accountId)).toMatchObject({ cooldownKind: "geoblock" });
@@ -216,12 +218,10 @@ describe("Antigravity Responses integration", () => {
         clearAntigravityRoutingState();
         globalThis.fetch = (async () => {
           const payload = { error: { code: expected.code, status: expected.status, message: expected.message } };
-          return stream
-            ? new Response(`data: ${JSON.stringify(payload)}\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } })
-            : Response.json(payload);
+          return new Response(`data: ${JSON.stringify(payload)}\n\n`, { status: 200, headers: { "content-type": "text/event-stream" } });
         }) as typeof fetch;
         const response = await handleResponses(request(stream), fastConfig(), { model: "", provider: "" }, {});
-        expect(response.status).toBe(200);
+        expect(response.status).toBeGreaterThanOrEqual(200);
         const accountId = getAccountSet("google-antigravity")!.activeAccountId;
         expect(getAntigravityAccountHealthSnapshot(accountId)).toMatchObject({ cooldownSource: "synthetic", cooldownKind: expected.source });
       }

@@ -134,9 +134,11 @@ export function recordAntigravityCooldown(
   retryAfterHeader?: string | null,
   now = Date.now(),
   cooldownKind: AntigravityCooldownKind = "rate-limit",
+  source?: "default" | "retry-after" | "synthetic",
 ): number {
   const delay = parseRetryAfterMs(retryAfterHeader, now) ?? (cooldownKind === "geoblock" ? MAX_COOLDOWN_MS : DEFAULT_COOLDOWN_MS);
   const targetUntil = now + delay;
+  const cooldownSource = source ?? (retryAfterHeader?.trim() ? "retry-after" : "default");
   const existing = accountHealth.get(accountId);
   if (existing && existing.cooldownUntil > now) {
     const effectiveUntil = Math.max(existing.cooldownUntil, targetUntil);
@@ -145,9 +147,12 @@ export function recordAntigravityCooldown(
       : (cooldownKind === "quota" || existing.cooldownKind === "quota")
         ? "quota"
         : "rate-limit";
+    const effectiveSource = (source === "synthetic" || existing.cooldownSource === "synthetic")
+      ? "synthetic"
+      : (retryAfterHeader?.trim() ? "retry-after" : existing.cooldownSource);
     accountHealth.set(accountId, {
       cooldownUntil: effectiveUntil,
-      cooldownSource: retryAfterHeader?.trim() ? "retry-after" : existing.cooldownSource,
+      cooldownSource: effectiveSource,
       cooldownKind: effectiveKind,
     });
     sweepExpiredOnWrite(now);
@@ -155,7 +160,7 @@ export function recordAntigravityCooldown(
   }
   accountHealth.set(accountId, {
     cooldownUntil: targetUntil,
-    cooldownSource: retryAfterHeader?.trim() ? "retry-after" : "default",
+    cooldownSource,
     cooldownKind,
   });
   sweepExpiredOnWrite(now);

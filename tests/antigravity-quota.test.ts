@@ -455,27 +455,19 @@ describe("Antigravity live quota", () => {
     expect(result.reports).toEqual([]);
   });
 
-  test("does not fail over to daily or prod for a custom baseUrl on 404/503", async () => {
+  test("Antigravity quota never sends OAuth credentials to a non-canonical base URL", async () => {
     const customHost = "https://custom-proxy.example.com";
     const requested: string[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = String(input);
       requested.push(url);
-      if (url.startsWith(customHost) && url.includes(":retrieveUserQuota")) return jsonResponse({}, 404);
-      if (url.startsWith(customHost) && url.includes(":retrieveUserQuotaSummary")) return jsonResponse({}, 503);
-      if (url.endsWith(":fetchAvailableModels")) return catalogResponse();
-      return jsonResponse({}, 404);
+      return jsonResponse({}, 200);
     }) as typeof fetch;
 
     const result = await fetchProviderQuotaReports(config(customHost), true);
 
-    expect(requested.filter(url => url.startsWith(DAILY_HOST) || url.startsWith(PROD_HOST))).toEqual([]);
-    expect(requested.filter(url => url.startsWith(customHost))).toEqual([
-      `${customHost}/v1internal:retrieveUserQuota`,
-      `${customHost}/v1internal:retrieveUserQuotaSummary`,
-      `${customHost}/v1internal:fetchAvailableModels`,
-    ]);
-    expect(result.reports[0]?.source).toBe("google-antigravity:fetchAvailableModels");
+    expect(requested).toEqual([]);
+    expect(result.reports).toEqual([]);
   });
 
   test("rewrites known Google http host to HTTPS for live quota RPCs", async () => {

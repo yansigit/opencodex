@@ -2,7 +2,10 @@ import { parseUpstreamJsonPayload, safeUpstreamErrorString, sanitizeUpstreamErro
 
 /** Pull the human detail out of the Google API error envelope `{error:{message,status,code}}`. */
 function googleErrorDetail(payloadText: string): { message?: string; status?: string } {
-  const trimmed = payloadText.trim();
+  let trimmed = payloadText.trim();
+  if (trimmed.startsWith("data:")) {
+    trimmed = trimmed.replace(/^data:\s*/, "").trim();
+  }
   if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
     return { message: trimmed || undefined };
   }
@@ -18,7 +21,8 @@ function googleErrorDetail(payloadText: string): { message?: string; status?: st
 const ANTIGRAVITY_GEO_BLOCKED_MARKER = "user location is not supported for the api use";
 
 export function isAntigravityGeoBlockedBody(payloadText: string): boolean {
-  return payloadText.toLowerCase().includes(ANTIGRAVITY_GEO_BLOCKED_MARKER);
+  const lower = payloadText.toLowerCase();
+  return lower.includes(ANTIGRAVITY_GEO_BLOCKED_MARKER) || lower.includes("location is not supported");
 }
 
 function classifyGoogle(label: string, status: number | undefined, enumStatus: string | undefined, text: string): string {

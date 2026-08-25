@@ -7,7 +7,7 @@ import {
 } from "./google-errors";
 import { isGoogleMixedBuiltinToolError, repairGoogleInvalidRequestBody, stripGoogleBuiltinToolsFromWireBody } from "./google-wire-compiler";
 import { normalizeUpstreamHttpErrorResponse, readDisplaySafeErrorPayloadText } from "./upstream-http-error";
-import { recordAntigravityCooldown } from "../oauth/antigravity-routing";
+import { recordAntigravityCooldown, recordAntigravitySyntheticFailure } from "../oauth/antigravity-routing";
 import {
   antigravityHostCandidates,
   canonicalAntigravityHttpsHost,
@@ -178,6 +178,7 @@ function responseWithBufferedBody(
 async function prepareCcaSseResponse(
   response: Response,
   fetchPeer: (() => Promise<Response>) | undefined,
+  accountId?: string,
 ): Promise<Response> {
   if (!response.body) return fetchPeer ? fetchPeer() : response;
   const reader = response.body.getReader();
@@ -209,6 +210,13 @@ async function prepareCcaSseResponse(
             return failoverOrPassthrough();
           }
           if (probe === "quota_exhausted" || probe === "geo_blocked") {
+            if (accountId) {
+              recordAntigravitySyntheticFailure(accountId, {
+                code: probe === "quota_exhausted" ? 429 : 403,
+                status: probe === "quota_exhausted" ? "RESOURCE_EXHAUSTED" : "PERMISSION_DENIED",
+                message: probe === "quota_exhausted" ? "quota exceeded" : "user location is not supported",
+              });
+            }
             const status = probe === "quota_exhausted" ? 429 : 403;
             return passthrough(undefined, status);
           }
@@ -237,6 +245,13 @@ async function prepareCcaSseResponse(
           return failoverOrPassthrough();
         }
         if (probe === "quota_exhausted" || probe === "geo_blocked") {
+          if (accountId) {
+            recordAntigravitySyntheticFailure(accountId, {
+              code: probe === "quota_exhausted" ? 429 : 403,
+              status: probe === "quota_exhausted" ? "RESOURCE_EXHAUSTED" : "PERMISSION_DENIED",
+              message: probe === "quota_exhausted" ? "quota exceeded" : "user location is not supported",
+            });
+          }
           const status = probe === "quota_exhausted" ? 429 : 403;
           return passthrough(overflow, status);
         }
@@ -296,11 +311,12 @@ async function recordAntigravityHttpCooldown(
       response.headers.get("retry-after"),
       Date.now(),
       isQuotaExhaustedBody(payloadText) ? "quota" : "rate-limit",
+      "synthetic",
     );
     return true;
   }
   if (response.status === 403 || isAntigravityGeoBlockedBody(payloadText)) {
-    recordAntigravityCooldown(accountId, response.headers.get("retry-after"), Date.now(), "geoblock");
+    recordAntigravityCooldown(accountId, response.headers.get("retry-after"), Date.now(), "geoblock", "synthetic");
     return true;
   }
   return false;
@@ -373,7 +389,7 @@ async function fetchGoogleWithRetryInternal(
             opts,
           )
           : undefined;
-        return prepareCcaSseResponse(res, fetchPeer);
+        return prepareCcaSseResponse(res, fetchPeer, ctx.accountId);
       }
       if (res.status === 400 && repairInvalid400 && !compatibilityReplayUsed) {
         let payloadText = "";
