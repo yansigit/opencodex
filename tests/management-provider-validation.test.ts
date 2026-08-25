@@ -130,6 +130,77 @@ afterEach(() => {
 });
 
 describe("provider management validation", () => {
+  test("accepts Azure identity and exposes only a safe credential presence bit", () => {
+    const provider = {
+      adapter: "azure-openai",
+      baseUrl: "https://resource.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " },
+    };
+    expect(providerManagementConfigError("azure", provider)).toBeNull();
+    expect(providerManagementConfigError("azure", { ...provider, apiKey: "${AZURE_KEY}" })).toContain("apiKey");
+    expect(providerManagementConfigError("azure", { ...provider, apiKeyPool: [] })).toContain("apiKeyPool");
+    expect(providerManagementConfigError("azure", { ...provider, authMode: "oauth" })).toContain("authMode");
+    expect(providerManagementConfigError("azure", { ...provider, azureCredential: { type: "default-azure-credential", managedIdentityClientId: "   " } })).toContain("non-empty");
+    expect(providerManagementConfigError("azure", { ...provider, azureCredential: { type: "default-azure-credential", token: "secret-token" } })).toContain("unrecognized");
+    const redactedNameError = providerManagementConfigError("sk-super-secret-9876", {
+      ...provider,
+      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "   " },
+    })!;
+    expect(redactedNameError).not.toContain("sk-super-secret-9876");
+    expect(redactedNameError).toContain("[REDACTED]");
+
+    const dto = safeConfigDTO({ port: 10100, defaultProvider: "azure", providers: { azure: provider } } as OcxConfig) as {
+      providers: { azure: Record<string, unknown> };
+    };
+    expect(dto.providers.azure.hasAzureCredential).toBe(true);
+    expect(JSON.stringify(dto)).not.toContain("client-123");
+  });
+
+  test("provider POST does not carry a stale key pool into Azure identity and PATCH can set/clear it", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    saveConfig(config("127.0.0.1"));
+    const server = startServer(0);
+    try {
+      const base = {
+        adapter: "azure-openai",
+        baseUrl: "http://127.0.0.1:1/openai",
+        allowPrivateNetwork: true,
+        liveModels: false,
+        models: ["gpt-4o"],
+      };
+      expect((await fetch(new URL("/api/providers", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "azure", provider: { ...base, apiKey: "key", apiKeyPool: [{ id: "k1", key: "key" }, { id: "k2", key: "key2" }] } }),
+      })).status).toBe(200);
+      expect((await fetch(new URL("/api/providers", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "azure", provider: { ...base, azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " } } }),
+      })).status).toBe(200);
+      expect(loadConfig().providers.azure?.apiKeyPool).toBeUndefined();
+      expect(loadConfig().providers.azure?.azureCredential?.managedIdentityClientId).toBe("client-123");
+
+      const patchResponse = await fetch(new URL("/api/providers?name=azure", server.url), {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ azureCredential: null }),
+      });
+      expect(patchResponse.status).toBe(200);
+      expect(loadConfig().providers.azure?.azureCredential).toBeUndefined();
+      const setResponse = await fetch(new URL("/api/providers?name=azure", server.url), {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ azureCredential: { type: "default-azure-credential" } }),
+      });
+      expect(setResponse.status).toBe(200);
+      expect(loadConfig().providers.azure?.azureCredential).toEqual({ type: "default-azure-credential" });
+    } finally {
+      await server.stop(true);
+    }
+  });
   test("provider reload adopts only the validated disk row without rewriting config", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -2694,6 +2765,14 @@ describe("provider management validation", () => {
     const clearTransport = await patch("gateway", { apiKeyTransport: "" });
     expect(clearTransport?.status).toBe(200);
     expect(liveConfig.providers.gateway.apiKeyTransport).toBeUndefined();
+
+    // Credential header names are case-insensitive at the HTTP boundary and must never persist.
+    for (const name of ["API-KEY", "api-key"]) {
+      const rejected = await patch("extra", { headers: { [name]: "should-not-persist" } });
+      expect(rejected?.status).toBe(400);
+      expect(liveConfig.providers.extra.headers).toBeUndefined();
+      expect(loadConfig().providers.extra?.headers).toBeUndefined();
+    }
 
     // authMode local is guarded by the registry: nvidia (key) → 400; ollama (local) → ok.
     const nvidiaLocal = await patch("nvidia", { authMode: "local" });

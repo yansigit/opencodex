@@ -77,6 +77,7 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | `apiKey?` | `string` | API key, or an `${ENV_VAR}` / `$ENV_VAR` reference resolved at request time. |
 | `apiKeyTransport?` | `"x-api-key" \| "bearer"` | Anthropic key header style. Defaults to native `x-api-key`; valid only for key-auth `anthropic` providers. |
 | `apiKeyPool?` | `ApiKeyPoolEntry[]` | Multi-key pool. `apiKey` mirrors the active entry; each item has `id`, `key`, optional `label`, and optional numeric `addedAt`. |
+| `azureCredential?` | `{ type: "default-azure-credential"; managedIdentityClientId?: string }` | Azure identity mode for `azure-openai`/`azure`. Mutually exclusive with `apiKey` and `apiKeyPool`; uses `DefaultAzureCredential` with scope `https://cognitiveservices.azure.com/.default`. The optional client ID is write-only and only selects the managed-identity leg. Identity providers use static configured models and must not use generic `/models` discovery. |
 | `defaultModel?` | `string` | Model used when this provider is selected without an explicit model. |
 | `models?` | `string[]` | Seed/fallback model list. With `liveModels: false`, these are the only discovered models. |
 | `liveModels?` | `boolean` | Fetch the live catalog on start/sync (default `true`). Custom providers use `${baseUrl}/models`; built-ins may use a registry URL and filter. |
@@ -389,6 +390,78 @@ acceptable-use policy forbids circumventing rate limits and manipulating usage m
 | `codexWarmupEnabled?` | `boolean` | `false` | Opt into synthetic Codex pool-account validation. |
 | `codexWarmupMaxAgeSeconds?` | `number` | `691200` | Revalidate an account after 8 days. |
 | `codexWarmupModel?` | `string` | `gpt-5.4-mini` | Native model used for optional warmup. |
+
+## Azure OpenAI authentication
+
+Use the `azure-openai` adapter (or its `azure` alias) with a real resource URL. The adapter sends
+requests to the v1 Responses endpoint by appending `/v1/responses`; do not leave the registry's
+`{resource}` placeholder in a hand-written configuration.
+
+For Azure identity, `DefaultAzureCredential` is selected by the exact credential object below. Keep
+the model catalog static because identity mode does not perform generic `/models` discovery:
+
+```json
+{
+  "providers": {
+    "azure-identity": {
+      "adapter": "azure-openai",
+      "baseUrl": "https://my-resource.openai.azure.com/openai",
+      "azureCredential": {
+        "type": "default-azure-credential"
+      },
+      "models": ["gpt-4o"],
+      "liveModels": false,
+      "defaultModel": "gpt-4o"
+    }
+  }
+}
+```
+
+To select a user-assigned managed identity, add its client id to the same object:
+
+```json
+{
+  "providers": {
+    "azure-managed-identity": {
+      "adapter": "azure-openai",
+      "baseUrl": "https://my-resource.openai.azure.com/openai",
+      "azureCredential": {
+        "type": "default-azure-credential",
+        "managedIdentityClientId": "00000000-0000-0000-0000-000000000000"
+      },
+      "models": ["gpt-4o"],
+      "liveModels": false,
+      "defaultModel": "gpt-4o"
+    }
+  }
+}
+```
+
+The client id is write-only: it is used only for the managed-identity leg and is not returned in
+management DTOs. Identity requests use the exact scope
+`https://cognitiveservices.azure.com/.default` and send one `Authorization: Bearer` header. If the
+credential chain cannot produce a token, the request fails with the stable redacted error
+`Azure identity credential unavailable`; SDK diagnostics and tokens are never returned.
+
+`azureCredential` is mutually exclusive with both `apiKey` and `apiKeyPool` (and with non-key
+`authMode` values). If you prefer ordinary Azure API-key authentication, leave out
+`azureCredential` and use the existing key mode:
+
+```json
+{
+  "providers": {
+    "azure-key": {
+      "adapter": "azure-openai",
+      "baseUrl": "https://my-resource.openai.azure.com/openai",
+      "apiKey": "${AZURE_OPENAI_API_KEY}",
+      "defaultModel": "gpt-4o"
+    }
+  }
+}
+```
+
+Key mode remains API-key compatible and sends `api-key` instead of Bearer authentication. Do not
+combine the two modes in one provider entry; use separate provider entries when both are needed.
 
 ## Fixed provider endpoints
 
