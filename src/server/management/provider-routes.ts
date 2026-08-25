@@ -20,7 +20,7 @@ import {
   upstreamHttpVersionConfigError,
   withConfigMutationLockSync,
 } from "../../config";
-import { isAzureIdentityProvider } from "../../config/provider-validation";
+import { azureCredentialConfigError, isAzureIdentityProvider } from "../../config/provider-validation";
 import {
   clearLoginState,
   getLoginStatus,
@@ -599,8 +599,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         ? { ...existing.modelContextWindows, ...(prov.modelContextWindows ?? {}) }
         : { ...existing.modelContextWindows };
     }
-    const mergedProviderError = providerManagementConfigError(name, prov);
-    if (mergedProviderError) return jsonResponse({ error: mergedProviderError }, 400);
+    const azureError = azureCredentialConfigError(prov);
+    if (azureError) return jsonResponse({ error: azureError }, 400);
     const replacement = stripRegistryOnlyStaticHeaders(name, prov);
     config.providers[name] = replacement;
     invalidateReplacedAzureCredential(existing, replacement);
