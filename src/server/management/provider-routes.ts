@@ -38,7 +38,7 @@ import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { parseAntigravityAvailableModels } from "../../providers/antigravity-models";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets } from "../../providers/derive";
-import { effectiveGoogleMode, providerCodexAccountMode, providerMatchesRegistryTransport } from "../../providers/registry";
+import { providerCodexAccountMode, providerMatchesRegistryTransport } from "../../providers/registry";
 import {
   extractModelEnvelopeRows,
   extractProviderModelItems,
@@ -49,6 +49,8 @@ import { routedSlug, slugEquals } from "../../providers/slug-codec";
 import { clearAccountQuotaCache, clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
 import { clearKeyCooldowns } from "../../providers/key-failover";
 import { providerRequestPacingStatus } from "../../providers/request-pacing";
+import { antigravityOAuthDestinationConfigError, clearProviderTlsProfileStatus, getProviderTlsProfileStatus, isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
+import { redactErrorMessage } from "../../lib/redact";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
 import { clearThreadAccountMap } from "../../codex/routing";
@@ -237,6 +239,17 @@ function applyProviderPatchFields(
       // `requestPacingConfigError` is the runtime narrowing boundary above; keep the
       // assertion explicit because a generic plain record cannot express `enabled`.
       next.requestPacing = structuredClone(value) as unknown as OcxProviderConfig["requestPacing"];
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "tlsProfile")) {
+    const value = rawBody.tlsProfile;
+    if (value === null || value === "") {
+      delete next.tlsProfile;
+    } else if (value === "antigravity-browser") {
+      next.tlsProfile = value;
+    } else {
+      return { error: "tlsProfile must be antigravity-browser or null" };
     }
     touched = true;
   }
@@ -437,6 +450,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       upstreamHttpVersion: p.upstreamHttpVersion,
       authMode: p.authMode,
       apiKeyTransport: p.apiKeyTransport,
+      tlsProfile: p.tlsProfile,
+      tlsProfileStatus: p.tlsProfile === undefined ? "disabled" : getProviderTlsProfileStatus(name, p),
       disabled: p.disabled === true,
       codexAccountMode: providerCodexAccountMode(name, p),
       ...(name === "xai" ? { xaiResponsesOptInState: xaiResponsesOptInState(p) } : {}),
@@ -504,6 +519,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return jsonResponse({ error: "provider reload source changed" }, 409);
     }
     reconcileLiveStateStores();
+    clearProviderTlsProfileStatus(name);
     // The complete disk snapshot owns display overlays, including providers that this
     // live routing instance deliberately does not adopt.
     refreshUserCostOverlays(currentDiskConfig);
@@ -604,6 +620,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const replacement = stripRegistryOnlyStaticHeaders(name, prov);
     config.providers[name] = replacement;
     invalidateReplacedAzureCredential(existing, replacement);
+    clearProviderTlsProfileStatus(name);
     if (body.setDefault === true) config.defaultProvider = name;
     save(config);
     reconcileLiveStateStores();
@@ -741,6 +758,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     });
     if (replayError !== undefined) return jsonResponse({ error: replayError }, 409);
     reconcileLiveStateStores();
+    if (applied.editorTouched && !pacingOnly) clearProviderTlsProfileStatus(name);
     if (applied.editorTouched && !pacingOnly) {
       const { clearModelCache } = await import("../../codex/model-cache");
       clearModelCache(name);
@@ -772,6 +790,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (prov.disabled) {
       return jsonResponse({ ok: false, error: "Provider is disabled", latencyMs: 0 });
     }
+    const antigravityError = antigravityOAuthDestinationConfigError(name, prov);
+    if (antigravityError) return jsonResponse({ ok: false, error: antigravityError, latencyMs: 0 }, 400);
     if (prov.authMode === "forward") {
       return jsonResponse({
         ok: true,
@@ -786,12 +806,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return jsonResponse({ applicable: false, reason: "static_catalog", latencyMs: 0 });
     }
     const { buildModelsRequest, getValidAccessTokenSnapshot, resolveModelsAuthToken } = await import("../../oauth");
-    const antigravity = effectiveGoogleMode(name, prov) === "cloud-code-assist";
+    const antigravity = isAntigravityOAuthProvider(name, prov);
     const snapshot = antigravity
       ? await getValidAccessTokenSnapshot(name).catch(() => undefined)
       : undefined;
     const apiKey = snapshot?.accessToken ?? await resolveModelsAuthToken(name, prov);
-    if (prov.authMode === "oauth" && !apiKey) {
+    if ((prov.authMode === "oauth" || antigravity) && !apiKey) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "static catalog only — upstream not verified (not logged in)" });
     }
     if (prov.adapter === "cursor") {
@@ -815,7 +835,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         message: `Connected. ${live.models.length} models.`,
       });
     }
-    const project = prov.project ?? snapshot?.projectId;
+    const project = antigravity ? snapshot?.projectId : prov.project;
     if (antigravity && !project) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "Antigravity project unavailable — re-run `ocx login google-antigravity`" });
     }
@@ -897,7 +917,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         latencyMs: Date.now() - started,
         error: err instanceof ProviderOutboundPolicyError
           ? `upstream /models blocked by destination policy: ${err.message}`
-          : err instanceof Error ? err.message : "Connection test failed",
+          : err instanceof Error ? redactErrorMessage(err.message) : "Connection test failed",
       });
     }
   }
@@ -937,6 +957,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const removed = config.providers[name];
     delete config.providers[name];
     invalidateReplacedAzureCredential(removed, undefined);
+    clearProviderTlsProfileStatus(name);
     const { dropProviderCustomModels } = await import("../../providers/provider-id-rewrite");
     const droppedCustomModels = dropProviderCustomModels(config, name);
     setProviderContextCap(config, name, false);

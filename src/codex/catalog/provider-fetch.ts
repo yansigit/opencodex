@@ -26,6 +26,7 @@ import {
   observeActiveOAuthAccessToken,
   resolveModelsAuthToken,
   type OAuthActiveTokenObservation,
+  type OAuthAccessSnapshot,
 } from "../../oauth";
 import type { OcxConfig, OcxProviderConfig } from "../../types";
 import { modelInList } from "../../types";
@@ -60,6 +61,7 @@ import {
   providerOutboundPost,
   providerRedirectError,
 } from "../../lib/provider-outbound";
+import { isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import { redactSecretString } from "../../lib/redact";
 import {
   extractProviderModelItems,
@@ -130,7 +132,7 @@ interface ModelsAuthResolution {
   readonly apiKey: string | undefined;
   readonly observed: boolean;
   readonly oauthApiBaseUrl?: string;
-  readonly oauthProjectId?: string;
+  readonly oauthSnapshot?: OAuthAccessSnapshot;
 }
 
 type ModelsAuthResolver =
@@ -1156,8 +1158,8 @@ function observedModelsAuthResolver(
       return {
         apiKey: observation.snapshot.accessToken,
         observed: true,
+        oauthSnapshot: observation.snapshot,
         ...(observation.snapshot.apiBaseUrl ? { oauthApiBaseUrl: observation.snapshot.apiBaseUrl } : {}),
-        ...(observation.snapshot.projectId ? { oauthProjectId: observation.snapshot.projectId } : {}),
       };
     },
   };
@@ -1219,13 +1221,15 @@ async function fetchProviderModelsWithAuth(
     clearProviderDiscoveryStatus(name);
     return observed(configured, "authoritative");
   }
+  const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
+  const antigravityOAuth = isAntigravityOAuthProvider(name, prov);
   const auth: ModelsAuthResolution = captured.observedAuth ?? (resolveAuth.kind === "refreshing"
-    ? prov.authMode === "oauth" && effectiveGoogleMode(name, prov) === "cloud-code-assist"
+    ? antigravityOAuth && cloudCodeAssist
       ? await getValidAccessTokenSnapshot(name)
         .then(snapshot => ({
           apiKey: snapshot.accessToken,
           observed: false,
-          ...(snapshot.projectId ? { oauthProjectId: snapshot.projectId } : {}),
+          oauthSnapshot: snapshot,
         }))
         .catch(() => ({ apiKey: undefined, observed: false }))
       : { apiKey: await resolveModelsAuthToken(name, prov), observed: false }
@@ -1304,14 +1308,14 @@ async function fetchProviderModelsWithAuth(
       "degraded",
     );
   }
-  if (prov.authMode === "oauth" && !apiKey) {
+  if ((prov.authMode === "oauth" || antigravityOAuth) && !apiKey) {
     // No usable token (logged out, or account marked needsReauth). Still surface the
     // configured static catalog so the GUI Models tab / rail counts are not empty —
     // matching Cursor's !apiKey → configured degradation and fetch-failure fallback.
     return observed(configured, "degraded");
   }
-  const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
-  const project = prov.project ?? auth.oauthProjectId;
+  if (antigravityOAuth && !cloudCodeAssist) return observed(configured, "degraded");
+  const project = antigravityOAuth ? auth.oauthSnapshot?.projectId : prov.project ?? auth.oauthSnapshot?.projectId;
   if (cloudCodeAssist && !project) return observed(configured, "degraded");
   const fresh = getFreshCached(name, ttlMs);
   if (fresh) {

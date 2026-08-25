@@ -23,6 +23,7 @@ import {
   removePid,
   removeRuntimePort,
   ocxStartProcessCacheSizeForTests,
+  requestPacingConfigError,
   setOcxStartProcessCacheForTests,
   setProcessCommandLineExecForTests,
   setProcessCommandLinePlatformForTests,
@@ -112,6 +113,21 @@ function writeAccountNamespaceConfig(
 }
 
 describe("opencodex config defaults", () => {
+  test("accepts and preserves provider-level jitter-only request pacing", () => {
+    const defaults = getDefaultConfig();
+    const requestPacing = { enabled: true, jitterMs: 500 };
+    const result = validateConfigCandidate({
+      ...defaults,
+      providers: {
+        ...defaults.providers,
+        openai: { ...defaults.providers.openai!, requestPacing },
+      },
+    });
+
+    expect(requestPacingConfigError(requestPacing)).toBeNull();
+    expect(result).toMatchObject({ ok: true, config: { providers: { openai: { requestPacing } } } });
+  });
+
   test("config candidate validates and preserves strict Azure identity", () => {
     const base = getDefaultConfig();
     const valid = validateConfigCandidate({
@@ -177,6 +193,28 @@ describe("opencodex config defaults", () => {
     });
   });
 
+  test("config candidates reject noncanonical Antigravity OAuth destinations", () => {
+    const defaults = getDefaultConfig();
+    const antigravity = {
+      adapter: "google",
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth",
+      googleMode: "cloud-code-assist",
+    };
+    expect(validateConfigCandidate({
+      ...defaults,
+      providers: {
+        ...defaults.providers,
+        "google-antigravity": { ...antigravity, baseUrl: "https://evil.example.test", authMode: "oauth" },
+      },
+    })).toMatchObject({ ok: false, error: expect.stringContaining("canonical Antigravity") });
+    for (const baseUrl of ["https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"]) {
+      expect(validateConfigCandidate({
+        ...defaults,
+        providers: { ...defaults.providers, "google-antigravity": { ...antigravity, baseUrl, authMode: "oauth" } },
+      }).ok).toBe(true);
+    }
+  });
   test("v2 native parent override round-trips trimmed and isolates malformed hand edits", () => {
     const defaults = getDefaultConfig();
     const valid = validateConfigCandidate({

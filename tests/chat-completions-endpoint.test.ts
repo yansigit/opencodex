@@ -908,6 +908,7 @@ test("chat-native consumes pacing before the response-header timeout starts", as
     },
     clearTimer: () => { pacingTimer = undefined; },
     enqueueMicrotask: callback => callback(),
+    random: () => 0,
   });
 
   let starts = 0;

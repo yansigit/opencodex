@@ -10,7 +10,7 @@ import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthr
 import { loginKimi, refreshKimiToken } from "./kimi";
 import { loginNous, NousTokenError, refreshNousToken, clearNousRefreshIntent, RefreshIntentIOError } from "./nous";
 import { loginChatGPT, refreshChatGPTToken } from "./chatgpt";
-import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
+import { AntigravityTokenRequestError, loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
 import { loginGithubCopilot, refreshGithubCopilotToken, validateCopilotApiBaseUrl } from "./github-copilot";
 import { loginCommandCode, refreshCommandCodeToken } from "./command-code";
@@ -222,6 +222,7 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     refresh: refreshAntigravityToken,
     providerConfig: oauthConfig("google-antigravity"),
     defaultModel: oauthDefaultModel("google-antigravity"),
+    defaultRefreshPolicy: "lazy-only",
   },
   cursor: {
     login: (ctrl, opts) => loginCursor(ctrl, undefined, { forceLogin: opts?.forceLogin }),
@@ -466,8 +467,16 @@ export async function getValidAccessTokenSnapshot(provider: string): Promise<OAu
   return resolveAccessSnapshotForAccount(provider, set.activeAccountId);
 }
 
+/** Resolve a specific stored account without consulting or changing the active account. */
+export async function getValidAccessTokenSnapshotForAccount(
+  provider: string,
+  accountId: string,
+): Promise<OAuthAccessSnapshot> {
+  return resolveAccessSnapshotForAccount(provider, accountId);
+}
+
 /** Providers whose upstream-401 replay path may force a snapshot refresh. */
-const FORCE_REFRESH_PROVIDERS = new Set(["xai", "github-copilot", "kiro"]);
+const FORCE_REFRESH_PROVIDERS = new Set(["xai", "github-copilot", "kiro", "google-antigravity"]);
 
 export async function forceRefreshOAuthAccessSnapshot(
   rejected: OAuthAccessSnapshot,
@@ -501,6 +510,9 @@ function isTerminalRefreshError(err: unknown): boolean {
     || msg.includes("expired_token");
 }
 function terminal(error:unknown):boolean{
+  if (error instanceof AntigravityTokenRequestError) {
+    return (error.httpStatus === 400 || error.httpStatus === 401) && error.oauthError !== undefined;
+  }
   if(error instanceof XaiTokenRequestError)return ["invalid_grant","refresh_token_reused","revoked_token"].includes(error.oauthError??"");
   if(error instanceof AnthropicTokenError)return (error.httpStatus===400||error.httpStatus===401)&&["invalid_grant","refresh_token_reused","revoked","revoked_token","refresh_token_revoked"].includes(error.oauthError??"");
   if(error instanceof KiroTokenRefreshError)return (error.httpStatus===400||error.httpStatus===401)&&error.oauthError!==undefined;
@@ -630,7 +642,7 @@ export async function refreshAnthropicAccountWithLock(
       writeOAuthRefreshIntent(provider, accountId, generation, now(), deps.flight?.flightId);
       if (deps.signal?.aborted) throw deps.signal.reason;
       if (deps.flight) deps.flight.dispatched = true;
-      const fresh = merged(await def.refresh(stored.refresh, deps.signal), stored);
+      const fresh = merged(await def.refresh(stored.refresh, deps.signal, stored), stored);
       const outcome = await mergeAccountCredential(provider, accountId, fresh, {
         expectedGeneration: generation,
         afterPrePersistRead: deps.afterPrePersistRead,

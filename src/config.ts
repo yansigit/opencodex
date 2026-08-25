@@ -60,6 +60,7 @@ import { recordOwnedConfigPath } from "./lib/config-ownership";
 import { assertNotRealHomeUnderTest } from "./lib/test-home-guard";
 import { providerDestinationConfigError } from "./lib/destination-policy";
 import { redactSecretString } from "./lib/redact";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "./lib/provider-tls-profile";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import {
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
@@ -440,18 +441,21 @@ const requestPacingRuleSchema = z.object({
   // Keep the RPM-derived timer within the same one-hour bound as minIntervalMs.
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
-}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined, {
-  message: "request pacing rules need requestsPerMinute or minIntervalMs",
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
+}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined || value.jitterMs !== undefined, {
+  message: "request pacing rules need requestsPerMinute, minIntervalMs, or jitterMs",
 });
 
 const requestPacingSchema = z.object({
   enabled: z.boolean(),
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
   models: z.record(z.string().trim().min(1), requestPacingRuleSchema).optional(),
 }).strict().refine(value => value.enabled === false
   || value.requestsPerMinute !== undefined
   || value.minIntervalMs !== undefined
+  || value.jitterMs !== undefined
   || (value.models !== undefined && Object.keys(value.models).length > 0), {
   message: "enabled request pacing needs a provider rule or model override",
 });
@@ -487,6 +491,7 @@ const providerConfigSchema = z.object({
     ? value
     : { ...value, managedIdentityClientId: value.managedIdentityClientId.trim() }).optional(),
   requestPacing: requestPacingSchema.optional().catch(undefined),
+  tlsProfile: z.literal("antigravity-browser").optional(),
   mcpMaxTools: z.number().int().positive().optional(),
   mcpMaxSchemaBytes: z.number().int().positive().optional(),
   mcpMaxResultBytes: z.number().int().positive().optional(),
@@ -1058,6 +1063,14 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "responsesPath"],
         message: responsesPathError,
+      });
+    }
+    const tlsProfileError = providerTlsProfileConfigError(name, provider);
+    if (tlsProfileError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "tlsProfile"],
+        message: tlsProfileError,
       });
     }
     const headersError = providerHeadersConfigError((provider as { headers?: unknown }).headers);
@@ -2192,6 +2205,10 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
   const result = configSchema.safeParse(value);
   if (result.success) {
     const config = normalizeApiKeyIds(result.data as OcxConfig);
+    for (const [name, provider] of Object.entries(config.providers)) {
+      const antigravityError = antigravityOAuthDestinationConfigError(name, provider);
+      if (antigravityError) return { ok: false, error: `providers.${name}.baseUrl: ${antigravityError}` };
+    }
     if (value && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, "subagentRoles")) {
       const parsedRoles = parseSubagentRoles((value as { subagentRoles?: unknown }).subagentRoles);
       if (!parsedRoles.ok) return { ok: false, error: `schema_invalid: ${parsedRoles.error}` };

@@ -77,6 +77,7 @@ import { debugStreamDiagnostic } from "../../lib/debug";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
 import { OcxRequestValidationError } from "../../lib/errors";
 import { resolveClientRetryAfter } from "../../lib/retry-after";
+import { antigravityOAuthDestinationConfigError, isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import { enrichOpenCodeZenRateLimitMessage } from "../../providers/opencode-zen-rate-limit";
 import { modelInList, namespacedToolName } from "../../types";
 import type {
@@ -94,6 +95,7 @@ import {
   forceRefreshOAuthAccessSnapshot,
   getOAuthCredentialApiBaseUrl,
   getValidAccessTokenForAccount,
+  getValidAccessTokenSnapshotForAccount,
   getValidAccessTokenSnapshot,
   publicOAuthAuthenticationErrorMessage,
   type OAuthAccessSnapshot,
@@ -112,12 +114,12 @@ import {
   rotateAnthropicAccountOn429,
 } from "../../oauth/anthropic-routing";
 import {
-  antigravity429StickWaitMs,
   antigravitySessionKeyFromParts,
-  bindAntigravityProject,
   bindAntigravitySessionAffinity,
+  recordAntigravityCooldown,
+  recordAntigravitySyntheticFailure,
   resolveAntigravityAccountForSession,
-  rotateAntigravityAccountOn429,
+  retryableAntigravity429DelayMs,
 } from "../../oauth/antigravity-routing";
 import {
   CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST,
@@ -174,6 +176,7 @@ import {
   fetchWithResetRetry,
   fetchWithTransientRetry,
   prepareSameTarget429Wait,
+  sleepWithAbort,
 } from "../../lib/upstream-retry";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
@@ -2724,14 +2727,28 @@ async function handleResponsesInner(
 
   // OAuth providers: swap in a fresh access token (auto-refreshed) as the Bearer key, so the
   // existing openai-chat / anthropic adapters authenticate with no change.
-  const isOAuth401ReplayProvider = (route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro")
-    && route.provider.authMode === "oauth";
+  const isAntigravityOAuth = isAntigravityOAuthProvider(route.providerName, route.provider);
+  if (route.providerName === "google-antigravity") {
+    const antigravityConfigError = antigravityOAuthDestinationConfigError(route.providerName, route.provider);
+    if (antigravityConfigError) {
+      return formatErrorResponse(400, "invalid_request_error", antigravityConfigError);
+    }
+  }
+  const isOAuth401ReplayProvider = isAntigravityOAuth
+    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro")
+      && route.provider.authMode === "oauth");
   let sentOAuthSnapshot: OAuthAccessSnapshot | undefined;
   let replayOAuthCredentialSnapshot: Pick<OAuthAccessSnapshot, "accountId" | "generation"> | undefined;
   let anthropicPoolAccountId: string | null = null;
   let anthropicPoolFailovers = 0;
-  let antigravityAccountId: string | undefined;
-  let antigravityFailovers = 0;
+  let antigravityAccountId: string | null = null;
+  let antigravitySessionKey: string | null = null;
+  let antigravity429RetryAttempted = false;
+  const observeAntigravityProviderError = isAntigravityOAuth
+    ? (error: { code?: string; status?: number; message?: string }) => {
+        if (antigravityAccountId) recordAntigravitySyntheticFailure(antigravityAccountId, error);
+      }
+    : undefined;
   let cursorPoolAccountId: string | null = null;
   let cursorPoolFailovers = 0;
   const oauthSessionKeyParts = {
@@ -2744,18 +2761,24 @@ async function handleResponsesInner(
   const anthropicSessionKey = route.providerName === "anthropic" && route.provider.authMode === "oauth"
     ? anthropicSessionKeyFromParts(oauthSessionKeyParts)
     : null;
-  const antigravitySessionKey = route.providerName === "google-antigravity"
-    && route.provider.authMode === "oauth"
-    && route.provider.googleMode === "cloud-code-assist"
-    ? antigravitySessionKeyFromParts(oauthSessionKeyParts)
-    : null;
+  if (isAntigravityOAuth) {
+    antigravitySessionKey = antigravitySessionKeyFromParts(oauthSessionKeyParts);
+  }
   const cursorSessionKey = route.providerName === "cursor"
     && route.provider.authMode === "oauth"
     ? cursorSessionKeyFromParts({
       clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
     })
     : null;
-  if (route.provider.authMode === "oauth") {
+  if (isAntigravityOAuth) {
+    antigravitySessionKey = antigravitySessionKeyFromParts({
+      sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
+      threadIdHeader: req.headers.get("thread-id"),
+      clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
+      promptCacheKey: typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
+    });
+  }
+  if (route.provider.authMode === "oauth" || isAntigravityOAuth) {
     try {
       if (route.providerName === "anthropic" && isAnthropicAccountPoolEnabled(config)) {
         const selection = resolveAnthropicAccountForSession(anthropicSessionKey, config);
@@ -2777,50 +2800,6 @@ async function handleResponsesInner(
         promoteAnthropicActiveAccount(selection.accountId);
         route.provider = { ...route.provider, apiKey: accessToken };
         logCtx.provider = formatAnthropicProviderForLog("anthropic", selection.accountId, config);
-      } else if (
-        route.providerName === "google-antigravity"
-        && route.provider.googleMode === "cloud-code-assist"
-      ) {
-        const selection = resolveAntigravityAccountForSession(antigravitySessionKey);
-        if (!selection.accountId) {
-          if (selection.reason === "all-cooled") {
-            return formatErrorResponse(
-              429,
-              "rate_limit_error",
-              "All Google Antigravity OAuth accounts are temporarily unavailable",
-            );
-          }
-          return formatErrorResponse(
-            401,
-            "authentication_error",
-            "No eligible Google Antigravity OAuth account available",
-          );
-        }
-        let resolved = await getValidAccessTokenSnapshot(route.providerName);
-        if (selection.accountId !== resolved.accountId) {
-          const accessToken = await getValidAccessTokenForAccount("google-antigravity", selection.accountId);
-          const nextCredential = getAccountCredential("google-antigravity", selection.accountId);
-          resolved = {
-            ...resolved,
-            accountId: selection.accountId,
-            accessToken,
-            // Always replace; omitting a missing id would keep the previous account's projectId.
-            projectId: nextCredential?.projectId,
-          };
-        }
-        replayOAuthCredentialSnapshot = {
-          accountId: resolved.accountId,
-          generation: resolved.generation,
-        };
-        if (selection.reason === "failover") replayOAuthCredentialSnapshot = undefined;
-        route.provider = { ...route.provider, apiKey: resolved.accessToken };
-        antigravityAccountId = selection.accountId;
-        bindAntigravitySessionAffinity(antigravitySessionKey, selection.accountId);
-        const bound = bindAntigravityProject(route.provider, resolved.projectId);
-        if (!bound.ok) {
-          return formatErrorResponse(bound.status, bound.type, bound.message);
-        }
-        route.provider = bound.provider;
       } else if (
         route.providerName === "cursor"
         && route.provider.authMode === "oauth"
@@ -2852,7 +2831,28 @@ async function handleResponsesInner(
         route.provider = { ...route.provider, apiKey: resolved.accessToken };
         logCtx.provider = formatCursorProviderForLog("cursor", selection.accountId);
       } else {
-        const resolved = await getValidAccessTokenSnapshot(route.providerName);
+        let resolved: OAuthAccessSnapshot;
+        if (isAntigravityOAuth) {
+          const selection = resolveAntigravityAccountForSession(antigravitySessionKey);
+          if (!selection.accountId) {
+            return formatErrorResponse(401, "authentication_error", "Selected Antigravity OAuth account is unavailable");
+          }
+          if (selection.cooldownUntil !== undefined) {
+            const retryAfter = Math.max(1, Math.ceil((selection.cooldownUntil - Date.now()) / 1000));
+            if (selection.cooldownKind === "geoblock") {
+              return formatErrorResponse(403, "permission_error", "Selected Antigravity OAuth account is unavailable in this location");
+            }
+            return formatErrorResponse(429, "rate_limit_error", "Selected Antigravity OAuth account is temporarily rate-limited", { retryAfter: String(retryAfter) });
+          }
+          if (selection.reason === "active-needs-reauth") {
+            return formatErrorResponse(401, "authentication_error", "Selected Antigravity OAuth account needs reauthentication");
+          }
+          antigravityAccountId = selection.accountId;
+          resolved = await getValidAccessTokenSnapshotForAccount(route.providerName, selection.accountId);
+          bindAntigravitySessionAffinity(antigravitySessionKey, selection.accountId);
+        } else {
+          resolved = await getValidAccessTokenSnapshot(route.providerName);
+        }
         replayOAuthCredentialSnapshot = {
           accountId: resolved.accountId,
           generation: resolved.generation,
@@ -2863,6 +2863,14 @@ async function handleResponsesInner(
           // `{}` is intentional: this is an account-scoped request with no stored routing metadata.
           // Only genuinely accountless adapter calls leave the context undefined and use local/env fallback.
           parsed._kiroAuthContext = { ...(resolved.kiro ?? {}) };
+        }
+        // Antigravity (cloud-code-assist) must use the project paired with this exact token
+        // snapshot. A configured project may belong to another account and is never a fallback.
+        if (isAntigravityOAuth) {
+          if (!resolved.projectId) {
+            return formatErrorResponse(400, "invalid_request_error", "Antigravity project unavailable — re-run `ocx login google-antigravity`");
+          }
+          route.provider = { ...route.provider, project: resolved.projectId };
         }
       }
     } catch (err) {
@@ -3277,6 +3285,9 @@ async function handleResponsesInner(
     // rejection is sticky for the whole turn, set from every parsed payload on the inspection side.
     let inspectionSawUndeclaredTool = false;
     const noteInspectedPayload = (payload: unknown) => {
+      if (isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravitySyntheticFailure(antigravityAccountId, payload);
+      }
       // Gated on the same flag as the guard itself: with no readable catalog (or a forward-auth
       // provider) every name looks undeclared, and flipping this would stop recording continuation
       // state for exactly the passthrough traffic the guard deliberately stands down for.
@@ -3457,6 +3468,7 @@ async function handleResponsesInner(
         request = await retryAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
+          ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
         });
         refreshRoutedNamespaceToolAliases(request);
         recordAdapterReasoning(logCtx, request);
@@ -3530,6 +3542,14 @@ async function handleResponsesInner(
         releaseCodexAuthContextProbeLease(authCtx);
         return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
       }
+      if (isAntigravityOAuth && refreshed.accountId !== antigravityAccountId) {
+        upstream.abort();
+        return formatErrorResponse(401, "authentication_error", "Antigravity OAuth account changed during refresh");
+      }
+      if (isAntigravityOAuth && !refreshed.projectId) {
+        upstream.abort();
+        return formatErrorResponse(400, "invalid_request_error", "Antigravity project unavailable — re-run `ocx login google-antigravity`");
+      }
       sentOAuthSnapshot = refreshed;
       replayOAuthCredentialSnapshot = {
         accountId: refreshed.accountId,
@@ -3537,6 +3557,9 @@ async function handleResponsesInner(
       };
       if (route.providerName === "kiro") {
         parsed._kiroAuthContext = { ...(refreshed.kiro ?? {}) };
+      }
+      if (isAntigravityOAuth) {
+        route.provider = { ...route.provider, project: refreshed.projectId };
       }
       const refreshedProvider = resolveProviderTransport(
         route.providerName,
@@ -3572,6 +3595,7 @@ async function handleResponsesInner(
         request = await refreshedAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
+          ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
         });
         refreshRoutedNamespaceToolAliases(request);
         recordAdapterReasoning(logCtx, request);
@@ -4789,7 +4813,11 @@ async function handleResponsesInner(
   let inputTokenEstimate: number | undefined;
   try {
     assertGoogleOptionsRoute(activeAdapter, route.provider);
-    initialRequest = await activeAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    initialRequest = await activeAdapter.buildRequest(parsed, {
+      headers: selectedForwardHeaders,
+      translatorBudget,
+      ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
+    });
     refreshRoutedNamespaceToolAliases(initialRequest);
     recordAdapterReasoning(logCtx, initialRequest);
     recordAdapterTier(logCtx, initialRequest);
@@ -4835,6 +4863,7 @@ async function handleResponsesInner(
         executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
           providerName: route.providerName,
           modelId: route.modelId,
+          pacingSlotAcquired: true,
         }),
         ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       });
@@ -4914,6 +4943,7 @@ async function handleResponsesInner(
             headers: selectedForwardHeaders,
             translatorBudget,
             ...(imageTierBias > 0 ? { imageTierBias } : {}),
+            ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
           });
           recordAdapterReasoning(logCtx, retryRequest);
           recordAdapterTier(logCtx, retryRequest);
@@ -4950,6 +4980,7 @@ async function handleResponsesInner(
               executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
                 providerName: route.providerName,
                 modelId: route.modelId,
+                pacingSlotAcquired: true,
               }),
               ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
             });
@@ -4991,6 +5022,14 @@ async function handleResponsesInner(
           cleanupUpstreamAbort();
           return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
         }
+        if (isAntigravityOAuth && refreshed.accountId !== antigravityAccountId) {
+          cleanupUpstreamAbort();
+          return formatErrorResponse(401, "authentication_error", "Antigravity OAuth account changed during refresh");
+        }
+        if (isAntigravityOAuth && !refreshed.projectId) {
+          cleanupUpstreamAbort();
+          return formatErrorResponse(400, "invalid_request_error", "Antigravity project unavailable — re-run `ocx login google-antigravity`");
+        }
         sentOAuthSnapshot = refreshed;
         replayOAuthCredentialSnapshot = {
           accountId: refreshed.accountId,
@@ -4998,6 +5037,9 @@ async function handleResponsesInner(
         };
         if (route.providerName === "kiro") {
           parsed._kiroAuthContext = { ...(refreshed.kiro ?? {}) };
+        }
+        if (isAntigravityOAuth) {
+          route.provider = { ...route.provider, project: refreshed.projectId };
         }
         const refreshedProvider = resolveProviderTransport(
           route.providerName,
@@ -5094,6 +5136,37 @@ async function handleResponsesInner(
         upstreamResponse = result;
       }
 
+      // Antigravity never rotates accounts. Record the account cooldown and allow only one
+      // short, abort-aware replay on the same credential; longer Retry-After values surface to
+      // the client so a conversation cannot churn through accounts or requests.
+      if (upstreamResponse.status === 403 && isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravityCooldown(antigravityAccountId, upstreamResponse.headers.get("retry-after"), Date.now(), "geoblock");
+      }
+      if (upstreamResponse.status === 429 && isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravityCooldown(antigravityAccountId, upstreamResponse.headers.get("retry-after"));
+        const retryAfter = retryableAntigravity429DelayMs(upstreamResponse.headers.get("retry-after"));
+        if (!antigravity429RetryAttempted && retryAfter !== null) {
+          antigravity429RetryAttempted = true;
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+          try {
+            await sleepWithAbort(retryAfter, upstream.signal);
+          } catch {
+            cleanupUpstreamAbort();
+            upstream.abort();
+            return clientCancelledResponse();
+          }
+          if (options.abortSignal?.aborted || upstream.signal.aborted) {
+            cleanupUpstreamAbort();
+            upstream.abort();
+            return clientCancelledResponse();
+          }
+          const result = await rebuildAndRefetch("rate-limit-429");
+          if ("failed" in result) return result.failed;
+          upstreamResponse = result;
+          continue recovery;
+        }
+      }
+
       // Opt-in Anthropic OAuth account pool (#294): cool the failed account and retry
       // with another eligible OAuth account (bounded per request). Disabled by default.
       while (
@@ -5124,75 +5197,6 @@ async function handleResponsesInner(
           );
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
           const result = await rebuildAndRefetch("anthropic-oauth-429");
-          if ("failed" in result) return result.failed;
-          upstreamResponse = result;
-        } catch {
-          break;
-        }
-      }
-      // Antigravity OAuth accounts use the same bounded pre-stream carousel as Anthropic, but
-      // their process-local routing module also excludes accounts cooled by quota/rate-limit
-      // responses. Geoblocked 403s intentionally never enter this loop.
-      while (
-        upstreamResponse.status === 429
-        && route.providerName === "google-antigravity"
-        && route.provider.googleMode === "cloud-code-assist"
-        && antigravityAccountId
-        && antigravityFailovers < 3
-      ) {
-        const stickWaitMs = antigravity429StickWaitMs(antigravityAccountId);
-        if (stickWaitMs !== null) {
-          await Bun.sleep(stickWaitMs);
-          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
-          invalidateSameTargetRequest();
-          activeAdapter = resolveAdapter(
-            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
-            config.cacheRetention,
-          );
-          bindRouteReasoningReplayScope({
-            parsed,
-            providerName: route.providerName,
-            provider: route.provider,
-            adapterName: activeAdapter.name,
-            codexAuthContext: authCtx,
-            forwardHeaders: selectedForwardHeaders,
-          });
-          const result = await rebuildAndRefetch("rate-limit-429");
-          if ("failed" in result) return result.failed;
-          upstreamResponse = result;
-          continue;
-        }
-        const nextAccountId = rotateAntigravityAccountOn429(antigravityAccountId, antigravitySessionKey);
-        if (!nextAccountId) break;
-        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
-        try {
-          const accessToken = await getValidAccessTokenForAccount("google-antigravity", nextAccountId);
-          const nextCredential = getAccountCredential("google-antigravity", nextAccountId);
-          const bound = bindAntigravityProject(
-            { ...route.provider, apiKey: accessToken },
-            nextCredential?.projectId,
-          );
-          if (!bound.ok) {
-            return formatErrorResponse(bound.status, bound.type, bound.message);
-          }
-          antigravityAccountId = nextAccountId;
-          antigravityFailovers += 1;
-          route.provider = bound.provider;
-          replayOAuthCredentialSnapshot = undefined;
-          invalidateSameTargetRequest();
-          activeAdapter = resolveAdapter(
-            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
-            config.cacheRetention,
-          );
-          bindRouteReasoningReplayScope({
-            parsed,
-            providerName: route.providerName,
-            provider: route.provider,
-            adapterName: activeAdapter.name,
-            codexAuthContext: authCtx,
-            forwardHeaders: selectedForwardHeaders,
-          });
-          const result = await rebuildAndRefetch("rate-limit-429");
           if ("failed" in result) return result.failed;
           upstreamResponse = result;
         } catch {
@@ -5450,6 +5454,7 @@ async function handleResponsesInner(
             headers: selectedForwardHeaders,
             translatorBudget,
             ...(imageTierBias > 0 ? { imageTierBias } : {}),
+            ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
           });
           recordAdapterReasoning(logCtx, continuationRequest);
           recordAdapterTier(logCtx, continuationRequest);
@@ -5490,6 +5495,7 @@ async function handleResponsesInner(
             executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
               providerName: route.providerName,
               modelId: nextParsed.modelId,
+              pacingSlotAcquired: true,
             }),
             ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
           });
@@ -5586,6 +5592,42 @@ async function handleResponsesInner(
             yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
           }
           return;
+        }
+      }
+
+      if (response.status === 403 && isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravityCooldown(antigravityAccountId, response.headers.get("retry-after"), Date.now(), "geoblock");
+      }
+      if (response.status === 429 && isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravityCooldown(antigravityAccountId, response.headers.get("retry-after"));
+        const retryAfter = retryableAntigravity429DelayMs(response.headers.get("retry-after"));
+        if (!antigravity429RetryAttempted && retryAfter !== null) {
+          antigravity429RetryAttempted = true;
+          try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+          try {
+            await sleepWithAbort(retryAfter, upstream.signal);
+          } catch {
+            if (options.abortSignal?.aborted || upstream.signal.aborted) {
+              yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
+            } else {
+              yield { type: "error", message: "Provider continuation failed: retry wait interrupted" };
+            }
+            return;
+          }
+          if (options.abortSignal?.aborted || upstream.signal.aborted) {
+            yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
+            return;
+          }
+          try {
+            response = await fetchContinuation("rate-limit-429");
+          } catch (error) {
+            if (options.abortSignal?.aborted || upstream.signal.aborted) {
+              yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
+            } else {
+              yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
+            }
+            return;
+          }
         }
       }
 

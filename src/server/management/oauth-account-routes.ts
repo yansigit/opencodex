@@ -511,6 +511,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       clearAnthropicAccountCooldown(id);
       clearAnthropicSessionAffinityForAccount(id);
     }
+    if (provider === "google-antigravity") {
+      const { clearAntigravityAccountCooldown, clearAntigravitySessionAffinityForAccount } = await import("../../oauth/antigravity-routing");
+      clearAntigravityAccountCooldown(id);
+      clearAntigravitySessionAffinityForAccount(id);
+    }
     if (!getAccountSet(provider)) clearLoginState(provider);
     const { clearModelCache } = await import("../../codex/model-cache");
     const { clearGatherRoutedModelsInflight } = await import("../../codex/catalog");

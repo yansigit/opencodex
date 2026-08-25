@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import * as storeModule from "../src/oauth/store";
 import { MAX_SIDECAR_RESPONSE_BYTES } from "../src/web-search/parse";
 
@@ -418,6 +418,10 @@ describe("planWebSearch gemini arm (L8)", () => {
 });
 
 import { runGeminiWebSearch } from "../src/web-search/gemini-executor";
+import {
+  resetProviderTlsProfileForTests,
+  setProviderTlsRuntimeForTest,
+} from "../src/lib/provider-tls-profile";
 import * as oauthModule from "../src/oauth";
 mock.module("../src/oauth", () => ({
   ...oauthModule,
@@ -432,7 +436,92 @@ import { createTestTranslatorBudget } from "./helpers/translator-budget";
 import type { AdapterEvent, ProviderAdapter } from "../src/adapters/base";
 
 describe("runGeminiWebSearch request shape (review P1)", () => {
-  test("malicious baseUrl ignored: registry destination, manual redirect, bearer + IDE UA, full envelope, thinkingConfig", async () => {
+  test("uses the opt-in Antigravity executor for Gemini grounding", async () => {
+    accountSets = { "google-antigravity": { accounts: [{ id: "a1", credential: { projectId: "proj-9" } }], activeAccountId: "a1" } };
+    let nativeCalls = 0;
+    let bunCalls = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      bunCalls += 1;
+      return new Response(JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "bun" }] } }] } }), { status: 200 });
+    }) as typeof fetch;
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => {
+          nativeCalls += 1;
+          return new Response(JSON.stringify({ response: { candidates: [{ content: { parts: [{ text: "native" }] } }] } }), { status: 200 });
+        },
+      }),
+    });
+    try {
+      const out = await runGeminiWebSearch("q", "google-antigravity", {
+        ...cca,
+        googleMode: "cloud-code-assist",
+        tlsProfile: "antigravity-browser",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      }, { model: "gemini-3.7-flash", reasoning: "low", timeoutMs: 5000 });
+      expect(out.text).toBe("native");
+      expect(nativeCalls).toBe(1);
+      expect(bunCalls).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetProviderTlsProfileForTests();
+    }
+  });
+
+  test("redacts proxy credentials from profiled native errors", async () => {
+    accountSets = { "google-antigravity": { accounts: [{ id: "a1", credential: { projectId: "proj-9" } }], activeAccountId: "a1" } };
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => {
+          throw new Error("native connect failed at http://proxy-user:proxy-secret@example.test:8080/?access_token=gem-token-abc");
+        },
+      }),
+    });
+    try {
+      const out = await runGeminiWebSearch("q", "google-antigravity", {
+        ...cca,
+        googleMode: "cloud-code-assist",
+        tlsProfile: "antigravity-browser",
+      }, { model: "gemini-3.7-flash", reasoning: "low", timeoutMs: 5000 });
+      expect(out.error).toContain("native connect failed");
+      expect(out.error).not.toMatch(/proxy-user|proxy-secret|gem-token-abc|access_token/);
+    } finally {
+      resetProviderTlsProfileForTests();
+    }
+  });
+
+  test("classifies a profiled TimeoutError as a timeout without leaking details", async () => {
+    accountSets = { "google-antigravity": { accounts: [{ id: "a1", credential: { projectId: "proj-9" } }], activeAccountId: "a1" } };
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => {
+          const timeout = new Error("timed out at http://proxy-user:proxy-secret@example.test:8080/?token=gem-secret");
+          timeout.name = "TimeoutError";
+          throw timeout;
+        },
+      }),
+    });
+    const warning = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const out = await runGeminiWebSearch("q", "google-antigravity", {
+        ...cca,
+        googleMode: "cloud-code-assist",
+        tlsProfile: "antigravity-browser",
+      }, { model: "gemini-3.7-flash", reasoning: "low", timeoutMs: 5000 });
+      expect(out.error).toContain("timed out");
+      expect(out.error).not.toMatch(/proxy-user|proxy-secret|gem-secret|token=/);
+      expect(warning).toHaveBeenCalledWith(expect.stringContaining("timeout"));
+    } finally {
+      warning.mockRestore();
+      resetProviderTlsProfileForTests();
+    }
+  });
+
+  test("malicious baseUrl fails closed and does not dispatch upstream", async () => {
     accountSets = { "google-antigravity": { accounts: [{ id: "a1", credential: { projectId: "proj-9" } }], activeAccountId: "a1" } };
     const captured: Array<{ url: string; init: RequestInit }> = [];
     const realFetch = globalThis.fetch;
@@ -443,7 +532,12 @@ describe("runGeminiWebSearch request shape (review P1)", () => {
     try {
       const evil: OcxProviderConfig = { adapter: "google", baseUrl: "https://evil.example/v1", authMode: "oauth" };
       const out = await runGeminiWebSearch("q", "google-antigravity", evil, { model: "gemini-3.7-flash", reasoning: "low", timeoutMs: 5000, describeImages: false });
-      expect(out.text).toBe("ok");
+      expect(out.error).toContain("canonical Antigravity HTTPS destination");
+      expect(captured).toHaveLength(0);
+
+      const canonical: OcxProviderConfig = { adapter: "google", baseUrl: "https://daily-cloudcode-pa.googleapis.com", authMode: "oauth" };
+      const validOut = await runGeminiWebSearch("q", "google-antigravity", canonical, { model: "gemini-3.7-flash", reasoning: "low", timeoutMs: 5000, describeImages: false });
+      expect(validOut.text).toBe("ok");
       expect(captured).toHaveLength(1);
       const req = captured[0]!;
       expect(new URL(req.url).origin).toBe("https://daily-cloudcode-pa.googleapis.com");

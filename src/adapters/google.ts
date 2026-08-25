@@ -1,4 +1,4 @@
-import type { AdapterFetchContext, AdapterRequest, ProviderAdapter } from "./base";
+import type { AdapterFetchContext, AdapterRequest, IncomingMeta, ProviderAdapter } from "./base";
 import { debugDroppedFrame } from "../lib/debug";
 import { createToolCallIdAllocator } from "./tool-call-id";
 import { createImageBudget, materializeInlineImage, MAX_ENCODED_BYTES_PER_IMAGE, artifactHttpUrl } from "../images/artifacts";
@@ -47,6 +47,16 @@ import {
 } from "../lib/translator-budget";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../reasoning-effort";
+import { normalizeAntigravityProviderError } from "../oauth/antigravity-routing";
+
+const INLINE_ERROR_URL_USERINFO = /https?:\/\/[^\s"'<>]*@/gi;
+
+function safeAntigravityInlineErrorMessage(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return sanitizeUpstreamErrorText(value)
+    .replace(INLINE_ERROR_URL_USERINFO, "[REDACTED_URL]")
+    .slice(0, 500);
+}
 
 // Google-family models (Gemini/Vertex/Antigravity) tend to emit long running commentary between
 // tool calls. This steers them to keep the BETWEEN-STEP text to one line and reason internally
@@ -702,6 +712,7 @@ function invalidGoogleShapeEvent(
 export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapter {
   // Per-request closure: resolveAdapter builds a fresh adapter per request (server.ts), so buildRequest
   // can stash the CCA model/session for parseStream's reasoning-replay observation.
+  let observeProviderError: IncomingMeta["onProviderError"];
   let antigravityModel: string | undefined;
   let antigravitySession: string | undefined;
   // Vertex returns the same opaque Gemini thought signatures as CCA, but its replay namespace
@@ -742,7 +753,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         }
       : {}),
 
-    async buildRequest(parsed: OcxParsedRequest) {
+    async buildRequest(parsed: OcxParsedRequest, options?: IncomingMeta) {
+      observeProviderError = options?.onProviderError;
       const routedModelId = provider.googleMode === "cloud-code-assist"
         ? resolveAntigravityEffortWireModel(
             parsed.modelId,
@@ -1024,7 +1036,15 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
         // Inline provider error inside a 200 stream → terminal error (see openai-chat.ts).
         if (chunk.error) {
-          const err = chunk.error as { message?: string } | undefined;
+          const rawError = chunk.error as { code?: unknown; status?: unknown; message?: unknown };
+          const safeMessage = safeAntigravityInlineErrorMessage(rawError.message);
+          const error = normalizeAntigravityProviderError({
+            code: rawError.code,
+            status: rawError.status,
+            message: safeMessage,
+          });
+          if (provider.googleMode === "cloud-code-assist" && error) observeProviderError?.(error);
+          const err = { ...(error ?? {}), message: error?.message ?? safeMessage ?? "upstream error" };
           // Clear-on-invalid: a signature rejection means our replayed thoughtSignatures are stale.
           // Drop the cache entry so the next turn starts clean instead of re-injecting a bad sig.
           const replayModel = provider.googleMode === "cloud-code-assist" ? antigravityModel : vertexReplayModel;
@@ -1034,7 +1054,12 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
             && /signature|invalid_argument|invalid argument/i.test(err?.message ?? "")) {
             clearAntigravityReplay(replayModel, replaySession);
           }
-          yield { type: "error", message: err?.message ?? "upstream error" };
+          yield {
+            type: "error",
+            ...(error?.status !== undefined ? { status: error.status } : {}),
+            ...(error?.code ? { code: error.code } : {}),
+            message: err.message ?? "upstream error",
+          };
           return "terminate";
         }
 
@@ -1304,7 +1329,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       // Cloud Code Assist exposes only the SSE transport. Unary callers still use this
       // buffered adapter entry point, so collect the exact same events parseStream emits
       // instead of maintaining a second CCA JSON parser.
-      if (provider.googleMode === "cloud-code-assist") {
+      const isSse = response.headers.get("content-type")?.includes("text/event-stream") ?? false;
+      if (provider.googleMode === "cloud-code-assist" && isSse) {
         const events: AdapterEvent[] = [];
         let previousTail: AdapterEvent | undefined;
         try {
@@ -1393,10 +1419,24 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         return events;
       };
       if (raw.error) {
-        const err = raw.error as { message?: string };
-        return finish([{ type: "error", message: err.message ?? "upstream error" }]);
+        const rawError = raw.error as { code?: unknown; status?: unknown; message?: unknown };
+        const safeMessage = safeAntigravityInlineErrorMessage(rawError.message);
+        const error = normalizeAntigravityProviderError({
+          code: rawError.code,
+          status: rawError.status,
+          message: safeMessage,
+        });
+        if (error) observeProviderError?.(error);
+        return finish([{
+          type: "error",
+          ...(error?.status !== undefined ? { status: error.status } : {}),
+          ...(error?.code ? { code: error.code } : {}),
+          message: error?.message ?? safeMessage ?? "upstream error",
+        }]);
       }
-      const json = raw;
+      const json = (provider.googleMode === "cloud-code-assist" && raw.response && typeof raw.response === "object" && !Array.isArray(raw.response))
+        ? (raw.response as Record<string, unknown>)
+        : raw;
       const events: AdapterEvent[] = [];
 
       const rawCandidates: unknown = json.candidates;

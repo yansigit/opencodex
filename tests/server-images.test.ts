@@ -16,6 +16,7 @@ import { handleImages, IMAGES_RESPONSE_MAX_BYTES, readImageResponseBytes } from 
 import { saveCredential } from "../src/oauth/store";
 import type { OcxConfig } from "../src/types";
 import { ANTIGRAVITY_REQUEST_UA } from "../src/adapters/google-antigravity-wire";
+import { resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../src/lib/provider-tls-profile";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 
@@ -55,6 +56,7 @@ afterEach(() => {
   clearThreadAccountMap();
   clearAccountNeedsReauth("pool-a");
   clearAccountQuota();
+  resetProviderTlsProfileForTests();
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
 });
 
@@ -1109,7 +1111,7 @@ function ccaConfig(): OcxConfig {
       openai: disabledOpenAiProvider,
       "google-antigravity": {
         adapter: "google",
-        baseUrl: "https://attacker.example.com",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
         googleMode: "cloud-code-assist",
       } as OcxConfig["providers"][string],
     },
@@ -1169,6 +1171,147 @@ const CCA_CREDENTIAL = {
   expires: Date.now() + 3_600_000,
   projectId: "cca-project-123",
 } as const;
+
+test("CCA image generation uses the opted-in profiled executor", async () => {
+  let nativeCalls = 0;
+  let bunCalls = 0;
+  let project: string | undefined;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    bunCalls += 1;
+    return new Response(null, { status: 500 });
+  }) as typeof fetch;
+  setProviderTlsRuntimeForTest({
+    importWreq: async () => ({
+      createTransport: async () => ({ close: async () => undefined }),
+      fetch: async (_input, init) => {
+        nativeCalls += 1;
+        project = (JSON.parse(String(init?.body)) as { project?: string }).project;
+        return Response.json({
+          response: {
+            candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: CCA_TINY_PNG } }] } }],
+          },
+        });
+      },
+    }),
+  });
+  const config = {
+    ...ccaConfig(),
+    providers: {
+      ...ccaConfig().providers,
+      "google-antigravity": {
+        adapter: "google",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        authMode: "oauth",
+        googleMode: "cloud-code-assist",
+        project: "configured-stale-project",
+        tlsProfile: "antigravity-browser",
+      },
+    },
+  } as OcxConfig;
+  saveConfig(config);
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+  try {
+    const response = await handleImages(
+      new Request("http://127.0.0.1/v1/images/generations", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "a neon cat" }),
+      }),
+      config,
+      "generations",
+      { model: "", provider: "" },
+    );
+    expect(response.status).toBe(200);
+    expect(nativeCalls).toBe(1);
+    expect(bunCalls).toBe(0);
+    expect(project).toBe("cca-project-123");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("CCA image native errors redact proxy credentials", async () => {
+  setProviderTlsRuntimeForTest({
+    importWreq: async () => ({
+      createTransport: async () => ({ close: async () => undefined }),
+      fetch: async () => {
+        throw new Error("native image failure at http://proxy-user:proxy-secret@example.test:8080/?api_key=image-secret");
+      },
+    }),
+  });
+  const config = {
+    ...ccaConfig(),
+    providers: {
+      ...ccaConfig().providers,
+      "google-antigravity": {
+        adapter: "google",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        authMode: "oauth",
+        googleMode: "cloud-code-assist",
+        tlsProfile: "antigravity-browser",
+      },
+    },
+  } as OcxConfig;
+  saveConfig(config);
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+  const response = await handleImages(
+    new Request("http://127.0.0.1/v1/images/generations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "a neon cat" }),
+    }),
+    config,
+    "generations",
+    { model: "", provider: "" },
+  );
+  expect(response.status).toBe(502);
+  const json = await response.json() as { error: { message: string } };
+  expect(json.error.message).toContain("CCA image generation failed");
+  expect(json.error.message).not.toMatch(/proxy-user|proxy-secret|image-secret|api_key/);
+});
+
+test("CCA image preserves profiled TimeoutError semantics", async () => {
+  setProviderTlsRuntimeForTest({
+    importWreq: async () => ({
+      createTransport: async () => ({ close: async () => undefined }),
+      fetch: async () => {
+        const timeout = new Error("timed out at http://proxy-user:proxy-secret@example.test:8080/?token=image-secret");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      },
+    }),
+  });
+  const config = {
+    ...ccaConfig(),
+    providers: {
+      ...ccaConfig().providers,
+      "google-antigravity": {
+        adapter: "google",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        authMode: "oauth",
+        googleMode: "cloud-code-assist",
+        tlsProfile: "antigravity-browser",
+      },
+    },
+  } as OcxConfig;
+  saveConfig(config);
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+  const response = await handleImages(
+    new Request("http://127.0.0.1/v1/images/generations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "a neon cat" }),
+    }),
+    config,
+    "generations",
+    { model: "", provider: "" },
+  );
+  expect(response.status).toBe(504);
+  const json = await response.json() as { error: { message: string } };
+  expect(json.error.message).toContain("timed out");
+  expect(json.error.message).not.toMatch(/proxy-user|proxy-secret|image-secret|token=/);
+});
 
 test("CCA image fallback generates images via Google Antigravity when no OpenAI upstream exists", async () => {
   const registryHits: CcaFetchRequest[] = [];
@@ -1295,9 +1438,19 @@ test("CCA image fallback never sends Authorization to a tampered config baseUrl 
   const attackerHits: CcaFetchRequest[] = [];
   ccaFetchMock(registryHits, attackerHits);
 
-  // ccaConfig already sets baseUrl to https://attacker.example.com — if the pin
-  // were ever removed, this host would receive the OAuth bearer token.
-  saveConfig(ccaConfig());
+  // Tampered baseUrl must fail closed and never send OAuth credentials
+  const tampered = {
+    ...ccaConfig(),
+    providers: {
+      ...ccaConfig().providers,
+      "google-antigravity": {
+        adapter: "google",
+        baseUrl: "https://attacker.example.com",
+        googleMode: "cloud-code-assist",
+      } as OcxConfig["providers"][string],
+    },
+  } as OcxConfig;
+  saveConfig(tampered);
   await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
 
   const server = startServer(0);
@@ -1307,16 +1460,12 @@ test("CCA image fallback never sends Authorization to a tampered config baseUrl 
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt: "a cat" }),
     });
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(400);
 
-    // The registry host received the request with the OAuth bearer token.
-    expect(registryHits).toHaveLength(1);
-    expect(registryHits[0].url).toContain("daily-cloudcode-pa.googleapis.com");
-    expect(registryHits[0].headers.get("authorization")).toBe("Bearer cca-access-token");
-
-    // The attacker host received ZERO requests — no Authorization header leak.
+    // No calls should go to the attacker host or registry host.
     const authLeak = attackerHits.filter(r => r.headers.get("authorization"));
     expect(attackerHits).toHaveLength(0);
+    expect(registryHits).toHaveLength(0);
     expect(authLeak).toHaveLength(0);
   } finally {
     await server.stop(true);
@@ -1379,7 +1528,7 @@ test("CCA fallback serves images when OpenAI forward auth fails but Google Antig
       openai: { ...canonicalOpenAiProvider, codexAccountMode: "pool" },
       "google-antigravity": {
         adapter: "google",
-        baseUrl: "https://attacker.example.com",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
         googleMode: "cloud-code-assist",
       } as OcxConfig["providers"][string],
     },

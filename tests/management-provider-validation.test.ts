@@ -41,6 +41,7 @@ import { LOCAL_PROVIDER_RELOAD_NAME_HEADER, LOCAL_PROVIDER_RELOAD_PATH } from ".
 import { getAccountSet, saveCredential } from "../src/oauth/store";
 import { fastPolicyForModel } from "../src/providers/service-tier";
 import { resolveWireProtocolOverride } from "../src/server/adapter-resolve";
+import { providerTlsFetch, resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../src/lib/provider-tls-profile";
 
 // Full-suite Windows load: startServer + multi-step provider PATCH/GET flows exceed the
 // default 5s per-test budget (same flake class as 810fa115 / claude-management-api).
@@ -116,6 +117,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetProviderTlsProfileForTests();
+  setProviderTlsRuntimeForTest(undefined);
   globalThis.fetch = originalGlobalFetch;
   if (previousApiToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
@@ -2998,6 +3001,221 @@ describe("provider management validation", () => {
     expect(raw).not.toContain(sentinelName);
     expect(raw).not.toContain(sentinelValue);
   });
+
+  test("GET /api/providers exposes only redacted Antigravity TLS profile state", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+          tlsProfile: "antigravity-browser",
+          apiKey: "must-not-leak",
+        },
+      },
+    };
+    const req = new Request("http://127.0.0.1/api/providers", { method: "GET" });
+    const res = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
+    expect(res?.status).toBe(200);
+    const raw = await res!.text();
+    const row = (JSON.parse(raw) as { name: string; tlsProfile?: string; tlsProfileStatus?: string }[])
+      .find(item => item.name === "google-antigravity");
+    expect(row).toMatchObject({ tlsProfile: "antigravity-browser", tlsProfileStatus: "disabled" });
+    expect(raw).not.toContain("must-not-leak");
+  });
+
+  test("PATCH /api/providers persists the validated Antigravity TLS profile", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+        },
+      },
+    };
+    const request = new Request("http://127.0.0.1/api/providers?name=google-antigravity", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
+    });
+    const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {});
+    expect(response?.status).toBe(200);
+    expect(liveConfig.providers["google-antigravity"]?.tlsProfile).toBe("antigravity-browser");
+  });
+
+  test("POST and PATCH reject Antigravity TLS profiles outside the canonical OAuth CCA contract", async () => {
+    const canonical = {
+      adapter: "google" as const,
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+      tlsProfile: "antigravity-browser" as const,
+    };
+    const cases = [
+      { name: "other-provider", provider: { ...canonical } },
+      { name: "google-antigravity", provider: { ...canonical, authMode: "key" as const } },
+      { name: "google-antigravity", provider: { ...canonical, googleMode: "ai-studio" as const } },
+      { name: "google-antigravity", provider: { ...canonical, baseUrl: "https://example.test" } },
+    ];
+    expect(providerManagementConfigError("google-antigravity", canonical)).toBeNull();
+    for (const candidate of cases) {
+      expect(providerManagementConfigError(candidate.name, candidate.provider)).toContain("tlsProfile");
+
+      const postConfig: OcxConfig = {
+        port: 0,
+        hostname: "127.0.0.1",
+        defaultProvider: "openai",
+        openaiProviderTierVersion: 2,
+        providers: { openai: { ...canonicalDirect } },
+      };
+      const post = new Request("http://127.0.0.1/api/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: candidate.name, provider: candidate.provider }),
+      });
+      expect((await handleManagementAPI(post, new URL(post.url), postConfig, {}))?.status).toBe(400);
+
+      const patchConfig: OcxConfig = {
+        port: 0,
+        hostname: "127.0.0.1",
+        defaultProvider: "openai",
+        openaiProviderTierVersion: 2,
+        providers: {
+          openai: { ...canonicalDirect },
+          [candidate.name]: { ...candidate.provider, tlsProfile: undefined },
+        },
+      };
+      const patch = new Request(`http://127.0.0.1/api/providers?name=${encodeURIComponent(candidate.name)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
+      });
+      expect((await handleManagementAPI(patch, new URL(patch.url), patchConfig, {}))?.status).toBe(400);
+    }
+  });
+
+  test("provider management rejects noncanonical Antigravity OAuth destinations", async () => {
+    const invalid = {
+      adapter: "google" as const,
+      baseUrl: "https://evil.example.test",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+    };
+    expect(providerManagementConfigError("google-antigravity", invalid)).toContain("canonical Antigravity");
+    const postConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: { openai: { ...canonicalDirect } },
+    };
+    const post = new Request("http://127.0.0.1/api/providers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "google-antigravity", provider: invalid }),
+    });
+    expect((await handleManagementAPI(post, new URL(post.url), postConfig, {}))?.status).toBe(400);
+  });
+
+  test("GET /api/providers clears active TLS status when the profile is removed", async () => {
+    const profiled = {
+      adapter: "google" as const,
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+      tlsProfile: "antigravity-browser" as const,
+    };
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      providers: { openai: { ...canonicalDirect }, "google-antigravity": profiled },
+    };
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => new Response("ok"),
+      }),
+    });
+    await providerTlsFetch("google-antigravity", profiled, globalThis.fetch)("https://daily-cloudcode-pa.googleapis.com/v1internal");
+    const request = () => new Request("http://127.0.0.1/api/providers", { method: "GET" });
+    const active = await handleManagementAPI(request(), new URL(request().url), liveConfig, {});
+    const activeRow = (JSON.parse(await active!.text()) as Array<{ name: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(activeRow?.tlsProfileStatus).toBe("active");
+
+    liveConfig.providers["google-antigravity"] = {
+      ...profiled,
+      baseUrl: "https://cloudcode-pa.googleapis.com",
+    };
+    const replacedRequest = request();
+    const replaced = await handleManagementAPI(replacedRequest, new URL(replacedRequest.url), liveConfig, {});
+    const replacedRow = (JSON.parse(await replaced!.text()) as Array<{ name: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(replacedRow?.tlsProfileStatus).toBe("disabled");
+
+    liveConfig.providers["google-antigravity"] = profiled;
+
+    liveConfig.providers["google-antigravity"] = { ...profiled, tlsProfile: undefined };
+    const removedRequest = request();
+    const removed = await handleManagementAPI(removedRequest, new URL(removedRequest.url), liveConfig, {});
+    const removedRow = (JSON.parse(await removed!.text()) as Array<{ name: string; tlsProfile?: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(removedRow).toMatchObject({ tlsProfileStatus: "disabled" });
+    expect(removedRow?.tlsProfile).toBeUndefined();
+  });
+
+  test("provider connectivity diagnostics redact profiled native errors", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+          tlsProfile: "antigravity-browser",
+        },
+      },
+    };
+    await saveCredential("google-antigravity", {
+      access: "management-access-token",
+      refresh: "management-refresh-token",
+      expires: Date.now() + 3_600_000,
+      projectId: "management-project",
+    });
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => {
+          throw new Error("native management failure at http://proxy-user:proxy-secret@example.test:8080/?access_token=management-access-token");
+        },
+      }),
+    });
+    const req = new Request("http://127.0.0.1/api/providers/test?name=google-antigravity", { method: "POST" });
+    const response = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
+    expect(response?.status).toBe(200);
+    const body = await response!.json() as { ok: boolean; error?: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).not.toMatch(/proxy-user|proxy-secret|management-access-token|access_token/);
+  });
+
   test("provider PATCH merges headers case-insensitively", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });

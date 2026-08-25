@@ -7,7 +7,7 @@ import {
 } from "./google-errors";
 import { isGoogleMixedBuiltinToolError, repairGoogleInvalidRequestBody, stripGoogleBuiltinToolsFromWireBody } from "./google-wire-compiler";
 import { normalizeUpstreamHttpErrorResponse, readDisplaySafeErrorPayloadText } from "./upstream-http-error";
-import { recordAntigravityCooldown } from "../oauth/antigravity-routing";
+import { recordAntigravityCooldown, recordAntigravitySyntheticFailure } from "../oauth/antigravity-routing";
 import {
   antigravityHostCandidates,
   canonicalAntigravityHttpsHost,
@@ -178,6 +178,7 @@ function responseWithBufferedBody(
 async function prepareCcaSseResponse(
   response: Response,
   fetchPeer: (() => Promise<Response>) | undefined,
+  accountId?: string,
 ): Promise<Response> {
   if (!response.body) return fetchPeer ? fetchPeer() : response;
   const reader = response.body.getReader();
@@ -209,6 +210,13 @@ async function prepareCcaSseResponse(
             return failoverOrPassthrough();
           }
           if (probe === "quota_exhausted" || probe === "geo_blocked") {
+            if (accountId) {
+              recordAntigravitySyntheticFailure(accountId, {
+                code: probe === "quota_exhausted" ? 429 : 403,
+                status: probe === "quota_exhausted" ? "RESOURCE_EXHAUSTED" : "PERMISSION_DENIED",
+                message: probe === "quota_exhausted" ? "quota exceeded" : "user location is not supported",
+              });
+            }
             const status = probe === "quota_exhausted" ? 429 : 403;
             return passthrough(undefined, status);
           }
@@ -237,6 +245,13 @@ async function prepareCcaSseResponse(
           return failoverOrPassthrough();
         }
         if (probe === "quota_exhausted" || probe === "geo_blocked") {
+          if (accountId) {
+            recordAntigravitySyntheticFailure(accountId, {
+              code: probe === "quota_exhausted" ? 429 : 403,
+              status: probe === "quota_exhausted" ? "RESOURCE_EXHAUSTED" : "PERMISSION_DENIED",
+              message: probe === "quota_exhausted" ? "quota exceeded" : "user location is not supported",
+            });
+          }
           const status = probe === "quota_exhausted" ? 429 : 403;
           return passthrough(overflow, status);
         }
@@ -262,6 +277,8 @@ function isUnavailableResponse(response: Response): boolean {
 export interface GoogleRetryOptions {
   /** Repair-and-replay structurally invalid 400 bodies (Vertex/Antigravity behavior). */
   repairInvalid400?: boolean;
+  /** Let the Responses layer own Antigravity's single same-account 429 replay. */
+  retry429?: boolean;
 }
 
 async function normalizeFinalGoogleError(label: string, res: Response, signal?: AbortSignal): Promise<Response> {
@@ -291,13 +308,15 @@ async function recordAntigravityHttpCooldown(
   if (response.status === 429) {
     recordAntigravityCooldown(
       accountId,
-      isQuotaExhaustedBody(payloadText) ? "quota_exhausted" : "rate_limited",
-      retryAfterMs(response.headers.get("retry-after")),
+      response.headers.get("retry-after"),
+      Date.now(),
+      isQuotaExhaustedBody(payloadText) ? "quota" : "rate-limit",
+      "synthetic",
     );
     return true;
   }
-  if (isAntigravityGeoBlockedBody(payloadText)) {
-    recordAntigravityCooldown(accountId, "geo_blocked");
+  if (response.status === 403 || isAntigravityGeoBlockedBody(payloadText)) {
+    recordAntigravityCooldown(accountId, response.headers.get("retry-after"), Date.now(), "geoblock", "synthetic");
     return true;
   }
   return false;
@@ -318,6 +337,7 @@ async function fetchGoogleWithRetryInternal(
   opts: GoogleRetryOptions = {},
 ): Promise<Response> {
   const repairInvalid400 = opts.repairInvalid400 ?? true;
+  const retry429 = opts.retry429 ?? true;
   const timeoutMs = ctx.timeoutMs ?? 200_000;
   const executor = ctx.executor ?? globalThis.fetch;
   let activeRequest = request;
@@ -369,7 +389,7 @@ async function fetchGoogleWithRetryInternal(
             opts,
           )
           : undefined;
-        return prepareCcaSseResponse(res, fetchPeer);
+        return prepareCcaSseResponse(res, fetchPeer, ctx.accountId);
       }
       if (res.status === 400 && repairInvalid400 && !compatibilityReplayUsed) {
         let payloadText = "";
@@ -396,6 +416,9 @@ async function fetchGoogleWithRetryInternal(
           attempt--; // The changed-request replay is separate from transient retry accounting.
           continue;
         }
+      }
+      if (res.status === 429 && !retry429) {
+        return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
       }
       if (!retryableGoogleStatus(res.status) || attempt === GOOGLE_RETRY_ATTEMPTS - 1) {
         return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
@@ -466,5 +489,5 @@ export function fetchVertexWithRetry(request: AdapterRequest, ctx: AdapterFetchC
 
 /** Antigravity (Cloud Code Assist) retry wrapper. */
 export function fetchAntigravityWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}): Promise<Response> {
-  return fetchGoogleWithRetry("Antigravity", request, ctx);
+  return fetchGoogleWithRetry("Antigravity", request, ctx, { retry429: false });
 }

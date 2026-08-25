@@ -119,6 +119,21 @@ ocx logout <provider>
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport with an opt-in HTTP/1.1 compatibility path, and account-filtered model discovery. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
 
+### Antigravity pacing and TLS profile
+
+The built-in `google-antigravity` provider uses conservative request pacing by default: 30 RPM,
+at least 2,000 ms between request starts, and up to 500 ms of positive jitter. Existing explicit
+`requestPacing` settings remain authoritative; `jitterMs` may be set from 0 through 60,000 ms and
+only delays a start. Model rules can make the provider slower, never faster.
+
+The dashboard can explicitly enable `tlsProfile: "antigravity-browser"` for this provider. This is
+an experimental, unofficial compatibility mechanism, not a compliance feature.
+It may make traffic more distinctive, and initialization failures fall back to Bun; requests that
+already reached the native transport are not replayed. The profile is limited to canonical Cloud
+Code Assist hosts, keeps certificate and hostname verification enabled, and leaves OAuth/token/
+onboarding requests on standard Bun TLS. Users who prioritize account-policy safety should use the
+official Gemini API-key, Vertex, or documented Gemini Code Assist routes.
+
 After a terminal Nous refresh failure, run `ocx login nous` to reauthenticate.
 
 For the canonical Kimi Coding Plan presets (`kimi` account login and `kimi-code` API key),
