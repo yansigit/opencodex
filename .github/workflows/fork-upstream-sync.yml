@@ -99,7 +99,7 @@ jobs:
 
       - name: Prepare daily merge
         id: prepare
-        if: steps.pin.outputs.kind == 'pin-updated' || steps.pin.outputs.kind == 'main-behind'
+        if: steps.pin.outputs.kind == 'pin-updated' || steps.pin.outputs.kind == 'main-behind' || steps.pin.outputs.kind == 'history-diverged'
         env:
           FORK_SYNC_WORKTREE: ${{ runner.temp }}/fork-sync-dev
         run: |
@@ -118,6 +118,16 @@ jobs:
               --slurpfile result "$result_file" \
               '{event: $event[0], result: $result[0]}' \
               > "$RUNNER_TEMP/fork-sync-draft-pr.json"
+          elif [ "$status" = "hotspot-handoff" ] || [ "$status" = "history-diverged" ]; then
+            branch="$(jq -r '.branch' "$result_file")"
+            if [ "$status" = "history-diverged" ]; then
+              git switch -C "$branch"
+            fi
+            if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
+              echo "Sync handoff branch already exists: $branch"
+            else
+              git push origin "refs/heads/$branch:refs/heads/$branch"
+            fi
           fi
 
       - name: Create or update draft sync PR
@@ -129,15 +139,19 @@ jobs:
           set -eu
           bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" draft-pr < "$RUNNER_TEMP/fork-sync-draft-pr.json"
 
-      # Issue tracking is always enabled for non-noop events.
+      # Conflict issue tracking is deferred until the Cursor handoff fails.
       - name: Notify GitHub issue
-        if: steps.pin.outputs.kind != 'already-current'
+        if: >-
+          steps.pin.outputs.kind != 'already-current' &&
+          steps.pin.outputs.kind != 'history-diverged' &&
+          steps.prepare.outputs.status != 'hotspot-handoff'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           FORK_SYNC_UPSTREAM_REPO: https://github.com/lidge-jun/opencodex.git
           FORK_SYNC_NOTIFIERS: github-issue
           FORK_SYNC_COORDINATORS: ""
+          FORK_SYNC_WORKTREE: ${{ runner.temp }}/fork-sync-dev
         run: |
           set -eu
           event_file="$(cat "$RUNNER_TEMP/fork-sync-event-path")"
@@ -145,23 +159,46 @@ jobs:
           if [ -z "$handoff_status" ]; then
             handoff_status="$(jq -r '.kind' "$event_file")"
           fi
+          prepare_result='null'
+          if [ -f "$RUNNER_TEMP/fork-sync-prepare.json" ]; then
+            prepare_result="$(cat "$RUNNER_TEMP/fork-sync-prepare.json")"
+          fi
+          head_sha="$(git -C "$FORK_SYNC_WORKTREE" rev-parse HEAD)"
+          merge_base_shas="$(git -C "$FORK_SYNC_WORKTREE" merge-base --all HEAD vendor/main 2>/dev/null || true)"
           handoff_file="$RUNNER_TEMP/fork-sync-handoff.json"
           jq --arg prepareStatus "$handoff_status" \
-            '. + {prepareStatus: $prepareStatus}' \
+            --arg headSha "$head_sha" \
+            --arg mergeBaseShas "$merge_base_shas" \
+            --argjson prepareResult "$prepare_result" \
+            '($mergeBaseShas | split("\\n") | map(select(length > 0))) as $bases
+              | . + {prepareStatus: $prepareStatus, headSha: $headSha,
+          mergeBaseShas: $bases, mergeBaseCount: ($bases | length),
+                prepareResult: $prepareResult}' \
             "$event_file" > "$handoff_file"
-          bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$handoff_file"
+          bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$event_file"
 
       # Cursor handles only conflicts the Action could not resolve or
       # disconnected histories; ordinary daily merges stop at a draft PR.
       - name: Notify Cursor handoff
         if: steps.prepare.outputs.status == 'hotspot-handoff' || steps.pin.outputs.kind == 'history-diverged'
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           FORK_SYNC_UPSTREAM_REPO: https://github.com/lidge-jun/opencodex.git
           FORK_SYNC_NOTIFIERS: ""
           FORK_SYNC_COORDINATORS: cursor-webhook
           FORK_SYNC_CURSOR_WEBHOOK_URL: ${{ secrets.FORK_SYNC_CURSOR_WEBHOOK_URL }}
           FORK_SYNC_CURSOR_WEBHOOK_SECRET: ${{ secrets.FORK_SYNC_CURSOR_WEBHOOK_SECRET }}
         run: |
-          set -eu
-          event_file="$(cat "$RUNNER_TEMP/fork-sync-event-path")"
-          bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$event_file"
+          set -u
+          coordinator_status=1
+          if [ -n "${FORK_SYNC_CURSOR_WEBHOOK_URL:-}" ] && [ -n "${FORK_SYNC_CURSOR_WEBHOOK_SECRET:-}" ]; then
+            set +e
+            bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$RUNNER_TEMP/fork-sync-handoff.json"
+            coordinator_status=$?
+            set -e
+          fi
+          if [ "$coordinator_status" -ne 0 ]; then
+            FORK_SYNC_NOTIFIERS=github-issue FORK_SYNC_COORDINATORS="" \
+              bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$RUNNER_TEMP/fork-sync-handoff.json"
+          fi

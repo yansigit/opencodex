@@ -100,12 +100,15 @@ jobs:
             if (context.eventName === "check_run") {
               const check = context.payload.check_run;
               const expectedAppId = Number(process.env.CURSOR_BUGBOT_APP_ID);
-              if (
-                check?.name !== "Cursor Bugbot" ||
-                !Number.isSafeInteger(expectedAppId) ||
-                check.app?.id !== expectedAppId
-              ) {
-                core.info("Check producer is not the configured Cursor Bugbot App; skipping.");
+              const trustedBugbot =
+                check?.name === "Cursor Bugbot" &&
+                Number.isSafeInteger(expectedAppId) &&
+                check.app?.id === expectedAppId;
+              const trustedBaseline =
+                ["ci", "hygiene"].includes(check?.name) &&
+                check.app?.id === 15368;
+              if (!trustedBugbot && !trustedBaseline) {
+                core.info("Check producer is not a trusted sync readiness check; skipping.");
                 return;
               }
               const openPrs = await github.paginate(github.rest.pulls.list, {
@@ -321,7 +324,8 @@ jobs:
             );
             const {
               exactHeadBugbotEvidence,
-              hasExactHeadMaintainerWaiver
+              hasExactHeadMaintainerWaiver,
+              requiredChecksSuccessful
             } = require(
               path.join(
                 process.cwd(),
@@ -758,6 +762,10 @@ jobs:
             const bugbotAppId = Number(process.env.CURSOR_BUGBOT_APP_ID);
             let bugbotEvidence = null;
             let bugbotWaived = false;
+            const syncGenerated =
+              pr.base.ref === "dev" &&
+              /^sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64}$/i.test(pr.head.ref ?? "");
+            let syncBaselineReady = !syncGenerated;
             if (bugbotPolicy === "required" || bugbotPolicy === "shadow") {
               try {
                 const checkRuns = await github.paginate(
@@ -769,6 +777,18 @@ jobs:
                   liveHeadSha: pr.head.sha,
                   expectedAppId: bugbotAppId
                 });
+                if (syncGenerated) {
+                  // This job is the enforce-target baseline check. Requiring
+                  // its previous result here would deadlock a draft after the
+                  // first run fails only because CI/hygiene were incomplete;
+                  // this run becomes the successful enforce-target result.
+                  syncBaselineReady = requiredChecksSuccessful(
+                    checkRuns,
+                    pr.head.sha,
+                    ["ci", "hygiene"],
+                    15368
+                  );
+                }
               } catch (error) {
                 core.warning(`Could not verify Cursor Bugbot: ${error.message}`);
               }
@@ -793,6 +813,9 @@ jobs:
               } else if (!bugbotEvidence && !bugbotWaived) {
                 core.info("Cursor Bugbot exact-head evidence is absent (shadow mode).");
               }
+            }
+            if (syncGenerated && !syncBaselineReady) {
+              failures.push({ code: "sync_baseline" });
             }
 
             // A maintainer issue comment saying the change does not touch
@@ -868,7 +891,7 @@ jobs:
             // lookup fails closed — the PR is treated as a contributor PR.
             const authorIsMaintainer =
               !permissionLookupFailed && authorHasPushPermission(authorPermission);
-            const checklistRequired = !authorIsMaintainer;
+            const checklistRequired = !authorIsMaintainer && !syncGenerated;
 
             // A confirmed maintainer does not need the bot's checklist: retire
             // the injected section from the body so it stops rendering as a
@@ -1141,10 +1164,14 @@ jobs:
               }
             }
 
+            const syncReady = syncGenerated && syncBaselineReady;
+
             // A contributor PR stays a draft while the checklist is open, even
             // when every quality gate already passes.
             const mustDraft =
-              failures.length > 0 || (checklistRequired && !checklistComplete);
+              failures.length > 0 ||
+              (checklistRequired && !checklistComplete) ||
+              (syncGenerated && !syncReady);
 
             // Which reset notice (head drift vs claim check) accompanies the
             // draft path; only one can be active because the claim check is
@@ -1182,6 +1209,11 @@ jobs:
                   "Wait for a successful Cursor Bugbot check on the current head, or obtain the exact-head outage waiver."
                 );
               }
+              if (failures.some(failure => failure.code === "sync_baseline")) {
+                actions.push(
+                  "Wait for successful exact-head `ci`, `enforce-target`, and `hygiene` checks."
+                );
+              }
               for (const failure of failures) {
                 const hint = HYGIENE_FAILURE_HINTS[failure.code];
                 if (!hint) continue;
@@ -1207,7 +1239,9 @@ jobs:
             // to labeled PRs (maintainer PRs never carry this label), so the
             // label is kept as a visible status marker only.
             const readyMoment =
-              checklistRequired && checklistComplete && failures.length === 0;
+              failures.length === 0 &&
+              ((checklistRequired && checklistComplete) ||
+                (syncGenerated && syncReady));
             const reviewReadyDesired = readyMoment;
             const hasReviewReadyLabel = (pr.labels ?? []).some(
               label => label.name === REVIEW_READY_LABEL
@@ -1455,7 +1489,8 @@ jobs:
             let readyConverted = false;
             const shouldMarkReady =
               (gateState.active && gateState.autoDraftedByBot) ||
-              (checklistRequired && checklistComplete);
+              (checklistRequired && checklistComplete) ||
+              (syncGenerated && syncReady);
             if (shouldMarkReady && pr.draft) {
               try {
                 await markReadyForReview();
@@ -1472,7 +1507,10 @@ jobs:
               ...gateState,
               active: readyConversionFailed ? true : false
             };
-            if (checklistRequired && checklistComplete) {
+            if (
+              (checklistRequired && checklistComplete) ||
+              (syncGenerated && syncReady)
+            ) {
               const maintainers = readMaintainerLogins().filter(
                 login => login !== pr.user.login
               );
@@ -1507,7 +1545,9 @@ jobs:
 
               await upsertGateComment(readyState, {
                 status: "READY",
-                statusReason: "all PR quality gates passed; the review readiness checklist is complete.",
+                statusReason: syncGenerated
+                  ? "all exact-head sync PR quality gates passed; ready for human merge."
+                  : "all PR quality gates passed; the review readiness checklist is complete.",
                 actions: [],
                 readiness,
                 checklistRequired,

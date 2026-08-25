@@ -30,6 +30,10 @@ describe("agent maintenance workflow", () => {
     assert.doesNotMatch(workflow, /github\.event\.pull_request\.head|refs\/pull\/|gh\s+pr\s+checkout/);
   });
 
+  it("grants contents write for ready-for-review GraphQL mutations", () => {
+    assert.match(workflow, /permissions:[\s\S]*?contents: write/);
+  });
+
   it("keeps dispatch bounded, idempotent, and permission gated", () => {
     assert.match(workflow, /github\.event_name != 'workflow_dispatch' \|\|[\s\S]*?github\.ref == format/);
     assert.match(workflow, /context\.eventName === "workflow_dispatch"/);
@@ -90,6 +94,31 @@ describe("agent maintenance workflow", () => {
     assert.match(workflow, /comments\.filter\(item =>/);
     assert.match(workflow, /\.sort\(\(a, b\) => Number\(b\.id\) - Number\(a\.id\)\)/);
     assert.match(workflow, /error\.comment/);
+    assert.match(workflow, /markPullRequestReadyForReview/);
     assert.match(workflow, /julesSessionDisposition/);
+  });
+
+  it("marks a fully verified draft ready and records the human merge boundary", () => {
+    assert.match(workflow, /maintenanceReadyEvidence/);
+    assert.match(workflow, /review-ready/);
+    assert.match(workflow, /issues\.addLabels/);
+    assert.match(workflow, /opencodex-agent-maintenance-ready/);
+    assert.match(workflow, /ready for human merge/);
+    assert.match(workflow, /This workflow never merges PRs/);
+  });
+
+  it("supports shadow Bugbot policy and exact-head maintainer waivers", () => {
+    assert.match(workflow, /CURSOR_BUGBOT_POLICY/);
+    assert.match(workflow, /hasExactHeadMaintainerWaiver/);
+    assert.match(workflow, /pulls\.listReviews/);
+    assert.match(workflow, /parseMaintainerLogins/);
+    assert.match(workflow, /MAINTAINERS\.md/);
+  });
+
+  it("routes sync hotspots to the issue's validated sync branch", () => {
+    assert.match(workflow, /sync-hotspot/);
+    assert.match(workflow, /Sync branch:/);
+    assert.match(workflow, /startingBranch/);
+    assert.ok(workflow.includes(String.raw`sync\/upstream-`));
   });
 });
