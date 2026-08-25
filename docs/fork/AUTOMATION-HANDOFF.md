@@ -12,3 +12,9 @@ Add these repository secrets to the fork:
 The automation must stop after preparing the disposable rebuild, decision
 table, and draft PR. A human reviews and merges `origin/dev`; this
 implementation does not open the Automations editor.
+
+GitHub `pull_request_target` and scheduled workflows load their trusted
+automation from the repository default branch (`origin/main`). Promoting the
+maintenance workflow and its controller from `dev` to `origin/main` is a
+maintainer-controlled release step; until that promotion, the implementation
+is present on `dev` but is not active on GitHub's default-branch event path.

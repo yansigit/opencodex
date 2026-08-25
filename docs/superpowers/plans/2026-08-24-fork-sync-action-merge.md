@@ -20,16 +20,26 @@ handoffs.
 **Tech Stack:** Bun-native TypeScript, `bun:test`, GitHub REST `fetch`,
 GitHub Actions YAML, and JSON package metadata.
 
+## Amendment (2026-08-25)
+
+The original draft used `main` as the integration PR base. The implemented
+dev-first flow targets `dev`; `main` remains the trusted default branch for
+workflow source and maintainer-controlled release promotion. References to
+`vendor/main` below name the upstream release ref and are not PR targets.
+Socket-backed verification is valid when run with the pinned Bun binary
+outside the restricted sandbox; the sandbox's loopback bind failure is not a
+reason to weaken or skip those tests.
+
 ## Global Constraints
 
-- Work on `feat/fork-sync-action-merge` created from current `main`.
+- Work on `feat/fork-sync-action-merge` created from current `dev`.
 - Do not edit the approved plan at `/Users/user/.cursor/plans/fork_action_merge_49995033.plan.md`.
 - Pin with `git fetch . <target>:refs/heads/<ref>`; never `git switch` or checkout to pin.
 - Preserve `name: "@yansigit/opencodex"` and take `version` plus all other package fields from upstream.
 - Daily prepare handles only `pin-updated` / `main-behind` with `recommendedLane: "daily-merge"`.
 - Abort conflicted merges containing a `shared-hotspot`; never push a conflicted branch.
-- Draft PRs target `main`; the client has no merge operation.
-- Never use `gh pr merge`, `--force`, `git merge -X`, or `git push origin main`.
+- Draft PRs target `dev`; the client has no merge operation.
+- Never use `gh pr merge`, `--force`, `git merge -X`, or direct pushes to `origin/main` or `origin/dev`.
 - Tests use injected `CommandRunner`, `ProcessRunner`, and `fetch`; no test mutates a real repository.
 - Run only focused `bun test tests/fork/...` checks during implementation; do not run the full monorepo suite.
 
@@ -182,7 +192,7 @@ Run: `git add scripts/fork/sync/prepare.ts scripts/fork/sync/cli.ts tests/fork/s
   merge endpoint is exposed.
 
 - [ ] **Step 1: Write failing HTTP tests** for create, same-tag/head update,
-  `draft: true`, `base: "main"`, resolution-table body, and absence of
+  `draft: true`, `base: "dev"`, resolution-table body, and absence of
   secret/token logging. Assert request paths and methods never contain
   `/merge`.
 - [ ] **Step 2: Run the red PR suite**
@@ -219,7 +229,7 @@ plus `prepareStatus`. Cursor webhook selection is limited to
   `pull-requests: write`, a default-branch HEAD assertion, prepare invocation,
   sync-branch-only push, draft PR invocation, and cursor gating. Keep
   forbidden regexes for `gh pr merge`, `--force`, `git merge -X`, and
-  `git push origin main`.
+  direct pushes to `origin/main` or `origin/dev`.
 - [ ] **Step 2: Run the red contract tests**
 
 Run: `bun test tests/fork/sync-workflow.test.ts tests/fork/sync-cli.test.ts`

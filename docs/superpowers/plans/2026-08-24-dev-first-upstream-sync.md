@@ -10,6 +10,14 @@
 
 **Spec:** The approved audit design in the conversation: upstream release tag → sync PR to `dev` → nightly; `dev` → promotion PR → `main` → stable release.
 
+## Verification amendment (2026-08-25)
+
+The socket-backed focused suites pass with Bun 1.4 outside the restricted
+sandbox. A full `bun run prepush` was attempted with the same runtime but did
+not complete after several minutes without output; it is not marked green
+here. The remaining full-suite gate belongs in CI or an otherwise monitored
+runner, while the sandbox-only loopback `EADDRINUSE` diagnosis is resolved.
+
 ## Global Constraints
 
 - Never run sync scripts loaded from the mutable integration worktree when write-capable workflow credentials are present.
@@ -102,5 +110,5 @@ bun test tests/fork/sync-pull-request.test.ts tests/fork/sync-workflow.test.ts t
 
 - [x] **Step 1: Run all focused fork-sync tests.**
 - [x] **Step 2: Run `bun run typecheck`.**
-- [ ] **Step 3: Run `bun run prepush` because this changes release and repository automation (blocked by unrelated full-suite loopback-port contention in the environment).**
+- [ ] **Step 3: Complete `bun run prepush` on a monitored CI/host runner (the local full-suite attempt stalled after focused socket tests passed; do not weaken or skip the suite).**
 - [x] **Step 4: Inspect the final workflow diff for permissions, branch targets, secret scope, and exact-SHA behavior.**
