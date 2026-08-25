@@ -5,7 +5,7 @@ import { MAX_SIDECAR_RESPONSE_BYTES } from "../src/web-search/parse";
 let accountSets: Record<string, { accounts: Array<{ id: string; needsReauth?: boolean; credential?: Record<string, unknown> }>; activeAccountId?: string }> = {};
 mock.module("../src/oauth/store", () => ({
   ...storeModule,
-  getAccountSet: (provider: string) => accountSets[provider] ?? storeModule.getAccountSet(provider),
+  getAccountSet: (provider: string) => accountSets[provider] ?? null,
 }));
 
 import { mapCcaGroundedResponse } from "../src/web-search/gemini-executor";
