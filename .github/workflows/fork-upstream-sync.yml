@@ -32,17 +32,17 @@ jobs:
       - name: Install script dependencies
         run: bun install --frozen-lockfile
 
-     - name: Fetch upstream release refs
-       run: |
-         set -eu
-         if git remote get-url upstream >/dev/null 2>&1; then
-           git remote set-url upstream https://github.com/lidge-jun/opencodex.git
-         else
-           git remote add upstream https://github.com/lidge-jun/opencodex.git
-         fi
-         git fetch --force upstream main dev --tags --prune
-         bootstrap_refs=()
-         if git ls-remote --exit-code origin refs/heads/vendor/main >/dev/null; then
+      - name: Fetch upstream release refs
+        run: |
+          set -eu
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream https://github.com/lidge-jun/opencodex.git
+          else
+            git remote add upstream https://github.com/lidge-jun/opencodex.git
+          fi
+          git fetch --force upstream main dev --tags --prune
+          bootstrap_refs=()
+          if git ls-remote --exit-code origin refs/heads/vendor/main >/dev/null; then
             git fetch origin refs/heads/vendor/main:refs/heads/vendor/main
           else
             git branch vendor/main upstream/main
