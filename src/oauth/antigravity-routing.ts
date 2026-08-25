@@ -171,6 +171,10 @@ export function clearAntigravityAccountCooldown(accountId: string): boolean {
   return accountHealth.delete(accountId);
 }
 
+export function isAntigravityAccountInCooldown(accountId: string, now = Date.now()): boolean {
+  return getAntigravityAccountHealthSnapshot(accountId, now) !== null;
+}
+
 export function sweepExpiredAntigravityRoutingHealth(now = Date.now()): number {
   let removed = 0;
   for (const [accountId, health] of accountHealth) {
