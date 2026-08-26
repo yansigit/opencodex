@@ -1413,4 +1413,37 @@ describe("xAI hosted-call authorization through handleResponses", () => {
     const body = await response.json() as { error: { message: string } };
     expect(body.error.message).toContain('undeclared client tool "x_keyword_search"');
   });
+
+  test("normalizes un-prefixed tool call when exactly one namespaced match is declared", () => {
+    const declared = new Set(["default_api:exec"]);
+    const block = sse("response.output_item.added", {
+      item: { id: "item_1", type: "function_call", name: "exec", arguments: "{}" },
+    });
+    const rewrite = createUndeclaredToolCallGuardBlockRewrite(declared);
+    const out = rewrite(block);
+    expect(out).toEqual([block]);
+  });
+
+  test("rejects un-prefixed tool call when ambiguous across multiple declared tools", () => {
+    const declared = new Set(["default_api:exec", "other_api:exec"]);
+    const block = sse("response.output_item.added", {
+      item: { id: "item_1", type: "function_call", name: "exec", arguments: "{}" },
+    });
+    const rewrite = createUndeclaredToolCallGuardBlockRewrite(declared);
+    const out = rewrite(block);
+    expect(out.length).toBe(2);
+    expect(out[0]).toContain("response.failed");
+    expect(out[0]).toContain("routed provider emitted undeclared client tool");
+    expect(out[0]).toContain("exec");
+  });
+
+  test("normalizes sanitized tool call with replaced colon when exactly one match is declared", () => {
+    const declared = new Set(["default_api:exec"]);
+    const block = sse("response.output_item.added", {
+      item: { id: "item_1", type: "function_call", name: "default_api_exec", arguments: "{}" },
+    });
+    const rewrite = createUndeclaredToolCallGuardBlockRewrite(declared);
+    const out = rewrite(block);
+    expect(out).toEqual([block]);
+  });
 });

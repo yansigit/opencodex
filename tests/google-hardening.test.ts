@@ -1449,4 +1449,29 @@ describe("google provider hardening", () => {
     expect(google?.modelContextWindows?.["gemini-3.5-flash-lite"]).toBe(1_048_576);
     expect(google?.modelInputModalities?.["gemini-3.5-flash-lite"]).toEqual(["text", "image"]);
   });
+
+  test("AI Studio and Vertex apply thought signature bypass sentinel to historical tool calls without signatures", async () => {
+    const adapter = createGoogleAdapter(provider());
+    const req: OcxParsedRequest = {
+      modelId: "gemini-3.7-flash",
+      stream: false,
+      options: {},
+      context: {
+        messages: [
+          { role: "user", content: "call tool" },
+          { role: "assistant", content: [{ type: "toolCall", id: "call_1", name: "lookup", arguments: {} }] },
+          { role: "toolResult", toolCallId: "call_1", toolName: "lookup", content: "ok" },
+          { role: "user", content: "next turn" },
+        ],
+      },
+    } as unknown as OcxParsedRequest;
+
+    const built = await adapter.buildRequest(req);
+    const body = JSON.parse(built.body) as { contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> };
+    const modelTurn = body.contents.find(c => c.role === "model");
+    expect(modelTurn).toBeDefined();
+    const fcPart = modelTurn?.parts.find(p => p.functionCall);
+    expect(fcPart).toBeDefined();
+    expect(fcPart?.thoughtSignature).toBe("skip_thought_signature_validator");
+  });
 });

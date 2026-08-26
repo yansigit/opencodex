@@ -33,9 +33,9 @@ export function formatCommandCodeErrorBody(_status: number, _headers: Headers, p
     const payload = JSON.parse(payloadText) as unknown;
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
     const error = (payload as Record<string, unknown>).error;
-    const message = error && typeof error === "object" && !Array.isArray(error)
+    const message = (error && typeof error === "object" && !Array.isArray(error)
       ? (error as Record<string, unknown>).message
-      : undefined;
+      : undefined) ?? (payload as Record<string, unknown>).message;
     return typeof message === "string" && message.trim()
       ? redactSecretString(message.trim()).slice(0, 400)
       : "";
