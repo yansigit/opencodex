@@ -91,6 +91,15 @@ const KIMI_PRICING = "https://platform.kimi.ai/docs/pricing (official table; cac
 const QWEN38_MAX_PRICING = "https://qwen.ai/blog?id=qwen3.8 (Qwen release announcement; no Model Studio billing row yet; cache rates unpublished -> 0)";
 const COMMAND_CODE_PRICING = "https://commandcode.ai/models + https://commandcode.ai/models.data (official model manifest)";
 const COMMAND_CODE_VERIFIED_AT = "2026-08-26";
+const CURSOR_DOCS_PRICING = "https://cursor.com/docs/models-and-pricing";
+const CURSOR_GROK_46: Cost4 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
+const CURSOR_GROK_45: Cost4 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
+const CURSOR_COMPOSER_1: Cost4 = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 };
+const CURSOR_COMPOSER_25: Cost4 = { input: 0.5, output: 2.5, cacheRead: 0.2, cacheWrite: 0 };
+const CURSOR_COMPOSER_25_FAST: Cost4 = { input: 3, output: 15, cacheRead: 0.5, cacheWrite: 0 };
+const CURSOR_GROK_46_FAST: Cost4 = { input: 4, output: 12, cacheRead: 1, cacheWrite: 0 };
+const CURSOR_GROK_45_FAST: Cost4 = { input: 4, output: 18, cacheRead: 1, cacheWrite: 0 };
+const CLAUDE_OPUS_FAST: Cost4 = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 };
 
 export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   // claude-opus-5 is exposed by three providers but absent from the jawcode bundle, so
@@ -181,6 +190,16 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   { provider: "alibaba-token-plan-intl", modelId: "qwen3.8-max", cost4: QWEN38_MAX, source: QWEN38_MAX_PRICING, verifiedAt: "2026-08-04", status: "verified" },
   // Cursor Auto router — Cursor's published fixed token price (verified).
   { provider: "cursor", modelId: "auto", cost4: { input: 1.25, output: 6, cacheRead: 0.25, cacheWrite: 1.25 }, source: "https://docs.cursor.com/account/pricing + https://cursor.com/blog/aug-2025-pricing", verifiedAt: "2026-07-20", status: "verified" },
+  // Cursor-specific native models (verified from official docs).
+  { provider: "cursor", modelId: "grok-4.6", cost4: CURSOR_GROK_46, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "grok-4.5", cost4: CURSOR_GROK_45, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "composer-1", cost4: CURSOR_COMPOSER_1, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "composer-2.5", cost4: CURSOR_COMPOSER_25, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "composer-2.5-fast", cost4: CURSOR_COMPOSER_25_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "grok-4.6-fast", cost4: CURSOR_GROK_46_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "grok-4.5-fast", cost4: CURSOR_GROK_45_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "claude-opus-5-fast", cost4: CLAUDE_OPUS_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "claude-opus-4-8-fast", cost4: CLAUDE_OPUS_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
 ];
 
 /**

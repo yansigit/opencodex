@@ -269,8 +269,8 @@ describe("resolveMatchedPrice", () => {
     expect(resolveMatchedPrice("openrouter", "anthropic-claude-3.5-sonnet")).toBeNull();
   });
 
-  test("16. shipped overlay membership: 55 keys, including Opus 5 and compatibility prices", () => {
-    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(55);
+  test("16. shipped overlay membership includes Cursor pricing", () => {
+    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(64);
     expect(EXPECTED_PRICE_OVERLAYS.some(row => row.status === "unverified")).toBe(false);
     const keys = new Set(EXPECTED_PRICE_OVERLAYS.map(row => `${row.provider}/${row.modelId}`));
     for (const expected of [
@@ -324,6 +324,15 @@ describe("resolveMatchedPrice", () => {
       "alibaba-token-plan/qwen3.8-max",
       "alibaba-token-plan-intl/qwen3.8-max",
       "cursor/auto",
+      "cursor/grok-4.6",
+      "cursor/grok-4.5",
+      "cursor/composer-1",
+      "cursor/composer-2.5",
+      "cursor/composer-2.5-fast",
+      "cursor/grok-4.6-fast",
+      "cursor/grok-4.5-fast",
+      "cursor/claude-opus-5-fast",
+      "cursor/claude-opus-4-8-fast",
     ]) {
       expect(keys.has(expected)).toBe(true);
     }
@@ -347,6 +356,41 @@ describe("resolveMatchedPrice", () => {
       });
       expect(compatibility?.source).toContain("gemini-3.6-flash");
     }
+  });
+
+  test("Cursor-specific native models resolve from verified expected price overlays", () => {
+    const grok46 = resolveMatchedPrice("cursor", "grok-4.6");
+    expect(grok46).toMatchObject({
+      provider: "cursor",
+      modelId: "grok-4.6",
+      cost4: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+      source: "expected",
+      status: "verified",
+    });
+    const composer25 = resolveMatchedPrice("cursor", "composer-2.5");
+    expect(composer25).toMatchObject({
+      provider: "cursor",
+      modelId: "composer-2.5",
+      cost4: { input: 0.5, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
+      source: "expected",
+      status: "verified",
+    });
+    const composer25Fast = resolveMatchedPrice("cursor", "composer-2.5-fast");
+    expect(composer25Fast).toMatchObject({
+      provider: "cursor",
+      modelId: "composer-2.5-fast",
+      cost4: { input: 3, output: 15, cacheRead: 0.5, cacheWrite: 0 },
+      source: "expected",
+      status: "verified",
+    });
+    const grok46Fast = resolveMatchedPrice("cursor", "grok-4.6-fast");
+    expect(grok46Fast).toMatchObject({
+      provider: "cursor",
+      modelId: "grok-4.6-fast",
+      cost4: { input: 4, output: 12, cacheRead: 1, cacheWrite: 0 },
+      source: "expected",
+      status: "verified",
+    });
   });
 
   test("pool-suffixed google-antigravity provider matches official Anthropic Claude Opus 4.6 overlay", () => {
@@ -622,7 +666,7 @@ describe("xAI Priority Processing pricing", () => {
     expect(resolveMatchedPrice("cursor", "grok-4.6")?.cost4).toEqual({
       input: 2,
       output: 6,
-      cacheRead: 0.3,
+      cacheRead: 0.5,
       cacheWrite: 0,
     });
   });
