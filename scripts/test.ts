@@ -146,7 +146,9 @@ if (import.meta.main) {
   const isolated = createIsolatedTestEnvironment();
   try {
     const requestedTests = process.argv.slice(2);
-    await waitForExclusiveRun(process.pid);
+    if (requestedTests.length === 0) {
+      await waitForExclusiveRun(process.pid);
+    }
     const startedAt = Date.now();
     const child = Bun.spawnSync(
       [process.execPath, "test", "--isolate", ...(requestedTests.length > 0 ? requestedTests : ["./tests/"])],
