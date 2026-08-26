@@ -1,7 +1,6 @@
 import type { OAuthController, OAuthCredentials } from "./types";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isAddrInUse } from "../server/ports";
 import { parseCallbackInput } from "./callback-server";
 
 const COMMAND_CODE_STUDIO_URL = "https://commandcode.ai";
@@ -115,21 +114,11 @@ function createCallbackServer(state: string): {
       return Response.json({ success: false, error: message }, { status: 400, headers });
     }
   };
-  const create = (port: number): Array<ReturnType<typeof Bun.serve>> => {
-    // The advertised callback host is `127.0.0.1`; on Windows `localhost` commonly resolves to `::1`
-    // first, so also bind the IPv6 loopback best-effort (mirrors the shared OAuthCallbackFlow).
-    const servers = [Bun.serve({ hostname: "127.0.0.1", port, fetch })];
-    try {
-      servers.push(Bun.serve({ hostname: "::1", port: servers[0].port, fetch }));
-    } catch (error) {
-      if (isAddrInUse(error)) {
-        for (const server of servers) server.stop(true);
-        throw error;
-      }
-      // IPv6 unsupported (EAFNOSUPPORT etc.) degrades to the IPv4-only listener.
-    }
-    return servers;
-  };
+  const create = (port: number): Array<ReturnType<typeof Bun.serve>> => [
+    // The advertised callback host is explicitly IPv4, so an IPv6 listener is
+    // unnecessary and can conflict with this socket on dual-stack runtimes.
+    Bun.serve({ hostname: "127.0.0.1", port, fetch }),
+  ];
   try {
     return { servers: create(COMMAND_CODE_CALLBACK_PORT), callback };
   } catch {

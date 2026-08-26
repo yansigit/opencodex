@@ -1,4 +1,5 @@
 import type { CodexAccountMode, OcxProviderConfig } from "../types";
+import { isAzureIdentityProvider } from "../config/provider-validation";
 import { cloneFastWire } from "./fastwire";
 import {
   PROVIDER_REGISTRY,
@@ -226,6 +227,7 @@ export function providerConfigSeed(entry: ProviderRegistryEntry): OcxProviderCon
     ...(entry.modelSuffixBracketStrip !== undefined ? { modelSuffixBracketStrip: entry.modelSuffixBracketStrip } : {}),
     ...(entry.staticHeaders ? { headers: { ...entry.staticHeaders } } : {}),
     ...(entry.defaultModel ? { defaultModel: entry.defaultModel } : {}),
+    ...(entry.requestPacing ? { requestPacing: structuredClone(entry.requestPacing) } : {}),
     ...(entry.models ? { models: [...entry.models] } : {}),
     ...(liveModels !== undefined ? { liveModels } : {}),
     ...(entry.contextWindow !== undefined ? { contextWindow: entry.contextWindow } : {}),
@@ -416,6 +418,7 @@ export function hasLegacyClinePassReasoningEfforts(name: string, prov: OcxProvid
 }
 
 export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig): void {
+  if (isAzureIdentityProvider(prov)) prov.liveModels = false;
   const entry = PROVIDER_REGISTRY.find(row => row.id === name);
   if (!entry || !providerMatchesRegistryTransportWithStaticGuards(name, prov)) {
     // Name lookup failed, but the row may still point at a vendor route we know. #1100 was
@@ -438,6 +441,7 @@ export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig
   repairStaticModelCatalogProvider(name, prov);
   if (prov.apiKeyTransport === undefined && seed.apiKeyTransport !== undefined) prov.apiKeyTransport = seed.apiKeyTransport;
   if (!prov.defaultModel && seed.defaultModel) prov.defaultModel = seed.defaultModel;
+  if (prov.requestPacing === undefined && seed.requestPacing) prov.requestPacing = structuredClone(seed.requestPacing);
   if (prov.responsesPath === undefined && seed.responsesPath !== undefined) prov.responsesPath = seed.responsesPath;
   // Fill mode only when absent: an explicit persisted `direct` must never be overwritten.
   if (prov.codexAccountMode === undefined && seed.codexAccountMode !== undefined) prov.codexAccountMode = seed.codexAccountMode;

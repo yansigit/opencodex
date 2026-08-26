@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderOutboundDependencies } from "../src/lib/provider-outbound";
 import { PROXY_ENV_KEYS } from "../src/lib/proxy-env";
+import { resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../src/lib/provider-tls-profile";
 
 const proxyKeys = PROXY_ENV_KEYS.flatMap(key => [key, key.toLowerCase()]);
 const originalProxyEnv = Object.fromEntries(proxyKeys.map(key => [key, process.env[key]]));
@@ -14,6 +15,7 @@ afterEach(() => {
     if (previous === undefined) delete process.env[key];
     else process.env[key] = previous;
   }
+  resetProviderTlsProfileForTests();
 });
 
 function directDependencies(
@@ -51,6 +53,107 @@ function directDependencies(
 }
 
 describe("provider outbound GET transport", () => {
+  test("rejects a noncanonical Antigravity OAuth destination before dispatch", async () => {
+    const { providerOutboundGet, ProviderOutboundPolicyError } = await import("../src/lib/provider-outbound");
+    let resolveCalls = 0;
+    await expect(providerOutboundGet(
+      "google-antigravity",
+      { adapter: "google", authMode: "oauth", baseUrl: "https://evil.example.test" },
+      "https://evil.example.test/v1internal:fetchAvailableModels",
+      { headers: { authorization: "Bearer must-not-send" } },
+      { resolveAddresses: async () => { resolveCalls += 1; throw new Error("must not resolve"); } },
+    )).rejects.toThrow(ProviderOutboundPolicyError);
+    expect(resolveCalls).toBe(0);
+  });
+
+  test("Antigravity model discovery uses the opted-in profiled executor", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    let nativeCalls = 0;
+    let bunCalls = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      bunCalls += 1;
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+    setProviderTlsRuntimeForTest({
+      resolveDestination: mock(async () => ({
+        hostname: "daily-cloudcode-pa.googleapis.com",
+        addresses: [{ address: "142.250.1.1", family: 4 }],
+        privateNetwork: false,
+      })),
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => {
+          nativeCalls += 1;
+          return new Response(null, { status: 200 });
+        },
+      }),
+    });
+    try {
+      const { providerOutboundPost } = await import("../src/lib/provider-outbound");
+      const response = await providerOutboundPost(
+        "google-antigravity",
+        {
+          adapter: "google",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          tlsProfile: "antigravity-browser",
+        },
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+        { headers: { authorization: "Bearer redacted" }, body: "{}" },
+        { resolveAddresses: mock(async () => ({
+          hostname: "daily-cloudcode-pa.googleapis.com",
+          addresses: [{ address: "142.250.1.1", family: 4 }],
+          privateNetwork: false,
+        })) },
+      );
+      expect(response.status).toBe(200);
+      expect(nativeCalls).toBe(1);
+      expect(bunCalls).toBe(0);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  test("rejects unsafe profiled DNS answers before native bearer dispatch", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    let nativeCalls = 0;
+    setProviderTlsRuntimeForTest({
+      resolveDestination: mock(async () => ({
+        hostname: "daily-cloudcode-pa.googleapis.com",
+        addresses: [{ address: "142.250.1.1", family: 4 }],
+        privateNetwork: false,
+      })),
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => {
+          nativeCalls += 1;
+          return new Response("must not send");
+        },
+      }),
+    });
+    const { providerOutboundPost } = await import("../src/lib/provider-outbound");
+    await expect(providerOutboundPost(
+      "google-antigravity",
+      {
+        adapter: "google",
+        authMode: "oauth",
+        googleMode: "cloud-code-assist",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        tlsProfile: "antigravity-browser",
+      },
+      "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+      { headers: { authorization: "Bearer must-not-send" }, body: "{}" },
+      {
+        resolveAddresses: mock(async () => {
+          throw new Error("provider URL hostname daily-cloudcode-pa.googleapis.com resolves to a private-network address");
+        }),
+      },
+    )).rejects.toThrow(/private-network/);
+    expect(nativeCalls).toBe(0);
+  });
+
   test("direct HTTPS connects only to the validated address with TLS verification", async () => {
     for (const key of proxyKeys) delete process.env[key];
     const { providerOutboundGet } = await import("../src/lib/provider-outbound");
@@ -365,8 +468,8 @@ describe("provider outbound POST transport", () => {
 
     const response = await providerOutboundPost(
       "google-antigravity",
-      { baseUrl: "https://provider.example" },
-      "https://provider.example/v1internal:fetchAvailableModels",
+      { baseUrl: "https://daily-cloudcode-pa.googleapis.com", adapter: "google", authMode: "oauth", googleMode: "cloud-code-assist" },
+      "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
       { headers: { authorization: "Bearer test-token" }, body },
       dependencies,
     );

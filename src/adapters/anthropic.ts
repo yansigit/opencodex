@@ -27,6 +27,7 @@ import { CLAUDE_CODE_HEADERS, claudeCodeSessionId } from "./client-fingerprint";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { decodeServerSentEvents } from "../lib/sse-decoder";
 import { isTranslatorBudgetExceededError, retainTranslatedEventBatch, type TranslatorBudget } from "../lib/translator-budget";
+import { isReasoningEffortOmitted, modelRecordValue } from "../reasoning-effort";
 
 /** Map a user content part to an Anthropic content block (text or image source). */
 function toAnthropicContentPart(p: OcxContentPart): unknown {
@@ -469,10 +470,10 @@ function claudeFamilyVersion(modelId: string): { family: string; major: number; 
   // Find the segment that actually starts with `claude-`, rather than assuming it is either
   // the first (breaks `anthropic/claude-sonnet-5`) or the last (breaks `claude-sonnet-5/variant`,
   // where the slash carries a vendor suffix rather than a routing prefix).
-  const match = /(?:^|\/)claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?!\d)/.exec(modelId);
+  const match = /(?:^|\/)claude-([a-z]+)-(\d+)(?:[.-](\d{1,2}))?(?!\d)/i.exec(modelId);
   if (!match) return undefined;
   return {
-    family: match[1]!,
+    family: match[1]!.toLowerCase(),
     major: Number(match[2]),
     minor: match[3] === undefined ? 0 : Number(match[3]),
   };
@@ -516,6 +517,18 @@ function supportsExplicitThinkingDisable(modelId: string): boolean {
 /** `output_config.effort` accepts low|medium|high|xhigh|max — "minimal" is rejected with a 400. */
 function adaptiveEffort(effort: string): string {
   return effort === "minimal" ? "low" : effort;
+}
+
+function defaultReasoningEffort(provider: OcxProviderConfig, modelId: string): string | undefined {
+  const value = modelRecordValue(provider.modelDefaultReasoningEfforts, modelId);
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  // `__omit__` means "send no reasoning field", not "an effort literally named
+  // __omit__". Without this the sentinel reached the wire as
+  // `output_config.effort: "__omit__"` on adaptive models, and enabled budget
+  // thinking on the rest — the opposite of what it asks for (#2432).
+  if (!trimmed || isReasoningEffortOmitted(trimmed)) return undefined;
+  return trimmed;
 }
 
 function usageFromAnthropic(usage: Record<string, number> | undefined): OcxUsage | undefined {
@@ -926,16 +939,17 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
       // anyway, and thinking shares the caller's `max_tokens` — which truncates a small-budget
       // request before it can emit its stop sequence (#545). Say "disabled" out loud where the
       // model both defaults to thinking and accepts being told not to.
-      if (parsed.options.reasoning === "none" && supportsExplicitThinkingDisable(parsed.modelId)) {
+      const effectiveReasoning = parsed.options.reasoning ?? defaultReasoningEffort(provider, parsed.modelId);
+      if (effectiveReasoning === "none" && supportsExplicitThinkingDisable(parsed.modelId)) {
         body.thinking = { type: "disabled" };
-      } else if (typeof parsed.options.reasoning === "string" && parsed.options.reasoning !== "none") {
+      } else if (typeof effectiveReasoning === "string" && effectiveReasoning !== "none") {
         if (usesAdaptiveThinking(parsed.modelId)) {
           // Adaptive-thinking models replace the token budget with an effort knob and reject
           // `thinking.type: "enabled"` outright. `max_tokens` still caps thinking plus visible
           // output, so high effort needs the same total-token headroom as budget thinking or a
           // default 8192-token request can spend everything on thought and return empty text.
           body.thinking = { type: "adaptive" };
-          const effort = adaptiveEffort(parsed.options.reasoning);
+          const effort = adaptiveEffort(effectiveReasoning);
           body.output_config = { effort };
           const explicitMaxOut = parsed.options.maxOutputTokens;
           const wantBudget = reasoningBudget(effort);
@@ -951,7 +965,7 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
           // 400s ("max_tokens must be greater than thinking.budget_tokens"). Size them so max_tokens
           // always exceeds the budget within a model-safe ceiling, reserving room for visible output.
           const maxOut = parsed.options.maxOutputTokens ?? DEFAULT_MAX_TOKENS;
-          const wantBudget = reasoningBudget(parsed.options.reasoning);
+          const wantBudget = reasoningBudget(effectiveReasoning);
           const maxTokens = Math.min(REASONING_MAX_TOKENS_CEILING, Math.max(maxOut, wantBudget + OUTPUT_HEADROOM));
           const budget = Math.max(MIN_THINKING_BUDGET, Math.min(wantBudget, maxTokens - OUTPUT_FLOOR));
           body.max_tokens = maxTokens;

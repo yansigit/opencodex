@@ -72,7 +72,7 @@ describe("fork sync GitHub issue notifier", () => {
     expect((fake.calls[1]?.value as { labels: string[] }).labels).toEqual(["fork-sync", "triage"]);
   });
 
-  test("recommends a merge-from-main draft PR for daily-merge events", async () => {
+  test("recommends a dev-targeted draft PR for daily-merge events", async () => {
     const fake = client();
     await createGitHubIssueNotifier({
       client: fake.api,
@@ -81,8 +81,8 @@ describe("fork sync GitHub issue notifier", () => {
 
     const created = fake.calls[1]?.value as { body: string };
     expect(created.body).toContain("recommendedLane: daily-merge");
-    expect(created.body).toContain("open or update a merge-from-main draft PR");
-    expect(created.body).not.toContain("rebuild run/main");
+    expect(created.body).toContain("open or update a draft PR merging upstream into dev");
+    expect(created.body).not.toContain("rebuild the sync branch from origin/dev");
   });
 
   test("reserves the rebuild recommendation for history-diverged events", async () => {
@@ -92,7 +92,7 @@ describe("fork sync GitHub issue notifier", () => {
       upstreamRepo: "lidge-jun/opencodex",
     }).notify(event("history-diverged", "emergency-rebuild"));
     const emergencyBody = emergency.calls[1]?.value as { body: string };
-    expect(emergencyBody.body).toContain("rebuild run/main");
+    expect(emergencyBody.body).toContain("rebuild the sync branch from origin/dev");
 
     const failed = client();
     await createGitHubIssueNotifier({
@@ -101,7 +101,63 @@ describe("fork sync GitHub issue notifier", () => {
     }).notify(event("pin-diverged"));
     const failedBody = failed.calls[1]?.value as { body: string };
     expect(failedBody.body).toContain("investigate the fork sync event");
-    expect(failedBody.body).not.toContain("rebuild run/main");
+    expect(failedBody.body).not.toContain("rebuild the sync branch from origin/dev");
+  });
+
+  test("attaches agent:jules label for hotspot-handoff prepare status", async () => {
+    const fake = client();
+    await createGitHubIssueNotifier({
+      client: fake.api,
+      upstreamRepo: "lidge-jun/opencodex",
+    }).notify({
+      ...event("pin-updated", "daily-merge"),
+      prepareStatus: "hotspot-handoff",
+      headSha: "4444444444444444444444444444444444444444",
+      mergeBaseCount: 1,
+      mergeBaseShas: ["5555555555555555555555555555555555555555"],
+      prepareResult: {
+        status: "hotspot-handoff",
+        branch: "sync/upstream-v2.29.0-1111111",
+        resolutions: [{
+          path: ".github/workflows/fork-upstream-sync.yml",
+          classification: "shared-hotspot",
+          action: "merge --abort",
+        }],
+        unresolved: [".github/workflows/fork-upstream-sync.yml"],
+      },
+    });
+
+    const created = fake.calls[1]?.value as { title: string; body: string; labels: string[] };
+    expect(created.labels).toContain("agent:jules");
+    expect(created.labels).toContain("fork-sync");
+    expect(created.labels).toContain("agent:generated");
+    expect(created.title).toContain("[agent:sync]");
+    expect(created.body).toContain("docs/fork/OWNED.md");
+    expect(created.body).toContain("sync/upstream-v2.29.0-1111111");
+    expect(created.body).toContain(".github/workflows/fork-upstream-sync.yml");
+    expect(created.body).toContain("mergeBaseCount: 1");
+    expect(created.body).toContain("5555555555555555555555555555555555555555");
+    expect(created.body).toContain("vendor/main SHA:");
+    expect(created.body).toContain("head SHA:");
+  });
+
+  test("routes history-diverged events to the trusted Jules fallback", async () => {
+    const fake = client();
+    await createGitHubIssueNotifier({
+      client: fake.api,
+      upstreamRepo: "lidge-jun/opencodex",
+    }).notify({
+      ...event("history-diverged", "emergency-rebuild"),
+      headSha: "4444444444444444444444444444444444444444",
+      mergeBaseCount: 2,
+    });
+
+    const created = fake.calls[1]?.value as { title: string; body: string; labels: string[] };
+    expect(created.title).toBe("[agent:sync] Upstream Conflict Hotspot: v2.29.0");
+    expect(created.labels).toEqual(["fork-sync", "agent:jules", "agent:generated"]);
+    expect(created.body).toContain("sync/upstream-v2.29.0-1111111");
+    expect(created.body).toContain("history-diverged");
+    expect(created.body).toContain("mergeBaseCount: 2");
   });
 
   test("does not call GitHub for an already-current event", async () => {

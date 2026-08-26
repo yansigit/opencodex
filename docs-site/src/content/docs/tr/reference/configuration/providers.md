@@ -6,6 +6,12 @@ description: Sağlayıcı girdileri, kimlik doğrulama, uç noktalar, model kata
 Bir sağlayıcı, opencodex'e bir modelin nerede yaşadığını, hangi hat adaptörünü
 konuştuğunu ve isteklerin nasıl doğrulandığını söyler.
 
+Azure identity configurations use `azureCredential` and are documented in the
+[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
+including `managedIdentityClientId`, the exact scope, `liveModels: false`,
+mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
+remains supported separately.
+
 ## Sağlayıcı ile ilgili üst düzey alanlar
 
 | Alan | Tip | Varsayılan | Anlamı |
@@ -76,6 +82,8 @@ alanlı seçilmiş kimlikleri yalın kimliklere yeniden yazar.
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `azure-openai` (veya takma ad `azure`) seçeneklerinden biri. |
 | `baseUrl` | `string` | Yukarı akış API temel URL'si. Çoğu yerleşik sabit uç nokta uyumsuzluğu yok sayar; çakışma güvenli anahtar önayarları aynı adlı daha eski özel bir hedefi korur. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | İstemci tarafı istek başlangıç aralığı. `jitterMs` yalnızca 0–60.000 ms pozitif rastgele gecikme ekler; model kuralları yalnızca gecikmeyi artırabilir. |
+| `tlsProfile?` | `"antigravity-browser"` | Yalnızca Google Antigravity Cloud Code Assist kanonik ana bilgisayarları için deneysel, resmi olmayan TLS/HTTP2 uyumluluk profili. Kullanım şartlarına uyumu veya askıya alınmayı önlemeyi garanti etmez, trafiği daha ayırt edilebilir kılabilir ve başlatma başarısız olursa Bun'a döner. |
 | `responsesPath?` | `string` | Anahtar kimlik doğrulamalı `openai-responses` istekleri için göreli kaynak yolu. `/` ile başlamalı ve şema, sorgu veya parça içermemelidir. |
 | `supportsServiceTier?` | `boolean` | Üç durumlu `service_tier` yeteneği. `true`: hızlı mod enjekte edebilir ve arayan değerleri korunur. `false`: alan kaldırılır ve asla enjekte edilmez (desteklemediği belgelenen yukarı akış bunu almamalıdır). Yok: sağlayıcı sınıflandırılmamıştır — arayan tarafından sağlanan değerler dokunulmadan korunur ve hızlı mod asla enjekte etmez. Kayıt defteri kurallı OpenAI'yi (`true`), DeepSeek'i ve Volcengine Ark'ı (`false`) sınıflandırır; bunu yalnızca katmanları gerçekten destekleyen özel ağ geçitleri için açıkça ayarlayın. |
 | `preserveResponsesReasoningContent?` | `boolean` | Düz metin akıl yürütme içeriğini boşaltmak yerine (boşaltma ChatGPT arka ucunun kuralıdır) tekrarlanan Responses akıl yürütme öğelerinde tutun. DeepSeek gibi sözleşmesi akıl yürütme tekrarını kabul eden yukarı akışlar için etkinleştirin. Proxy tarafından basılan `ocxr1` zarfları her zaman kaldırılır. |
@@ -91,6 +99,7 @@ alanlı seçilmiş kimlikleri yalın kimliklere yeniden yazar.
 | `modelContextWindows?` | `Record<string, number>` | Model başına bağlam geri dönüşleri/sınırları. Bunlar `contextWindow`'u geçersiz kılar: bilinmeyen bir pencere yapılandırılmış değeri kullanırken, daha küçük canlı meta veriler yetkili kalır. |
 | `modelInputModalities?` | `Record<string, string[]>` | Model başına girdi ipuçları, örn. `["text"]` veya `["text", "image"]`. |
 | `modelMaxInputTokens?` | `Record<string, number>` | Katalog otomatik sıkıştırma ipuçları için kullanılan pozitif model başına maksimum girdi sınırları. |
+| `modelAutoCompactTokenLimits?` | `Record<string, number>` | Model başına pozitif güvenli tamsayı biçiminde yumuşak otomatik sıkıştırma bütçeleri. Değerler yalnızca bağlamın veya maksimum girdinin etkin %90 zarfını düşürebilir ve yetkili bir bağlam penceresi bilinmiyorsa yayımlanmaz. Canonical `openai` için anahtarlar, sağlayıcı veya hesap seçici öneki olmadan desteklenen tam yerel model kimlikleri olmalıdır. Sağlayıcı PATCH girdileri birleştirir; bir anahtarı `null` yapmak o anahtarı siler, alanın tamamını `null` yapmak haritayı temizler. Bu `null` silme işaretleri yalnızca PATCH içindir. |
 | `defaultMaxOutputTokens?` | `number` | İstemci `max_output_tokens` değerini atladığında sağlayıcı genelinde `openai-chat` geri dönüşü. |
 | `modelMaxOutputTokens?` | `Record<string, number>` | Pozitif model başına `openai-chat` geri dönüş bütçeleri; tam/kalıp eşleşmeleri sağlayıcı varsayılanını yener. |
 | `modelCosts?` | `Record<string, Cost4>` | Sağlayıcının tam yukarı akış model kimliğine göre anahtarlanan model başına görüntüleme fiyatları (1M token başına USD) — bir sağlayıcı tanımlayıcısı veya yönlendirilen `provider/model` etiketi değil, örn. `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`. Herhangi bir model kimliği geçerli bir anahtardır — özel sağlayıcılar `openai-chat` adaptörü aracılığıyla herhangi bir OpenAI uyumlu uç noktayı hedefleyebilir ve yerel veya dahili sağlayıcı kimlikleri yerleşik kataloglarda bulunmasalar bile çalışır. Kullanıcı tarafından yapılandırılan fiyatlar Günlükler `~$` ve Kullanım tahminlerinde yerleşik katalogları yener; geçmiş girdiler geçerli katmandan yeniden fiyatlandırılır, bu nedenle bir fiyatı düzenlemek geçmiş toplamları değiştirebilir. Geri dönüş sırası: kullanıcı `modelCosts` → jawcode kataloğu → beklenen fiyat katmanı → model düzeyinde satıcı geri dönüşü ve tamamen sıfır bir girdi bu dizideki bir sonraki kaynağa düşer. Her oran en fazla 1.000.000 (1M token başına USD) olan negatif olmayan sonlu bir sayı olmalıdır; aralık dışı satırlar yönetim sınırı tarafından reddedilir ve yükleme sırasında bırakılır. Yalnızca görüntüleme zamanı tahmini: katmanlar yönlendirmeyi, hesap seçimini, kotaları veya faturalandırmayı asla etkilemez. |
@@ -483,4 +492,3 @@ bildirir; senkronize edilen katalog `xhigh`'ı ayrı tutarken `max` bildirir.
   "visionSidecar": { "enabled": true }
 }
 ```
-

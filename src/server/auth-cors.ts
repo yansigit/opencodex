@@ -10,6 +10,7 @@ import {
 } from "../config";
 import {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   nonBlankStringArrayConfigError,
@@ -19,6 +20,7 @@ import {
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
+  isAzureIdentityProvider,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { redactSecretString } from "../lib/redact";
@@ -26,8 +28,10 @@ import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { openRouterRoutingConfigError } from "../providers/openrouter-routing";
+import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compact-budget";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
+import { antigravityOAuthDestinationConfigError, getProviderTlsProfileStatus, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -565,6 +569,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     if (contextOverlayError) return contextOverlayError;
     delete canonicalCandidate.contextWindow;
     delete canonicalCandidate.modelContextWindows;
+    // User-owned soft compaction policy; it does not alter the canonical transport seed.
+    delete canonicalCandidate.modelAutoCompactTokenLimits;
     const canonical = seed && sameCanonicalProviderSeed(canonicalCandidate, seed);
     if (!canonical) {
       return `provider ${name} must equal the canonical built-in provider seed`;
@@ -573,6 +579,12 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     return `provider ${name} must not include codexAccountMode`;
   }
   const typed = provider as unknown as OcxProviderConfig;
+  const tlsProfileError = providerTlsProfileConfigError(name, typed);
+  if (tlsProfileError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${tlsProfileError}`;
+  }
+  const antigravityError = antigravityOAuthDestinationConfigError(name, typed);
+  if (antigravityError) return `provider ${name} ${antigravityError}`;
   const baseUrlError = providerBaseUrlConfigError(typed.baseUrl);
   if (baseUrlError) return `provider ${name} ${baseUrlError}`;
   if (effectiveGoogleMode(name, typed) === "vertex" && typed.location !== undefined) {
@@ -605,8 +617,17 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const apiKeyTransportError = apiKeyTransportConfigError(typed);
   if (apiKeyTransportError) return `provider ${name} ${apiKeyTransportError}`;
+  const azureCredentialError = azureCredentialConfigError(raw);
+  if (azureCredentialError) return `provider ${JSON.stringify(redactSecretString(name))} ${azureCredentialError}`;
   const maxInputError = positiveIntegerRecordConfigError(raw.modelMaxInputTokens, "modelMaxInputTokens");
   if (maxInputError) return `provider ${name} ${maxInputError}`;
+  const autoCompactError = modelAutoCompactTokenLimitsConfigError(
+    raw.modelAutoCompactTokenLimits,
+    { requireNativeIds: name === "openai" },
+  );
+  if (autoCompactError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${autoCompactError}`;
+  }
   const reasoningSummariesError = booleanRecordConfigError(raw.modelSupportsReasoningSummaries, "modelSupportsReasoningSummaries");
   if (reasoningSummariesError) return `provider ${name} ${reasoningSummariesError}`;
   const reasoningSummaryDeliveryError = reasoningSummaryDeliveryRecordConfigError(
@@ -689,6 +710,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       adapter: provider.adapter,
       baseUrl: publicProviderBaseUrl(provider.baseUrl),
       hasApiKey: !!provider.apiKey,
+      hasAzureCredential: isAzureIdentityProvider(provider),
       hasHeaders: !!provider.headers && Object.keys(provider.headers).length > 0,
     };
     if (name === "xai") {
@@ -704,9 +726,11 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "freeTier",
       "liveModels",
       "requestPacing",
+      "tlsProfile",
       "models",
       "contextWindow",
       "modelContextWindows",
+      "modelAutoCompactTokenLimits",
       "defaultMaxOutputTokens",
       "modelMaxOutputTokens",
       "openRouterRouting",
@@ -728,6 +752,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     ] as const) {
       copyIfDefined(dto, provider, key);
     }
+    dto.tlsProfileStatus = provider.tlsProfile === undefined ? "disabled" : getProviderTlsProfileStatus(name, provider);
     const modelCosts = sanitizeModelCostsForDisplay(provider.modelCosts);
     if (modelCosts) dto.modelCosts = modelCosts;
     // Resolve the note by DESTINATION, not by name. A preset saved under a custom name is
@@ -748,6 +773,9 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     defaultProvider: config.defaultProvider,
     codexAutoStart: codexAutoStartEnabled(config),
     websockets: config.websockets,
+    // The GUI's browser-open toggle reads and writes this; absent means the
+    // historical auto-open behavior.
+    oauthOpenBrowser: config.oauthOpenBrowser !== false,
     providers,
   };
 }

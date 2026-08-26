@@ -6,6 +6,7 @@ import * as z from "zod/v4";
 import { isValidProviderName, hasOwnProvider } from "./config/provider-name";
 import {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   nonBlankStringArrayConfigError,
@@ -59,6 +60,7 @@ import { recordOwnedConfigPath } from "./lib/config-ownership";
 import { assertNotRealHomeUnderTest } from "./lib/test-home-guard";
 import { providerDestinationConfigError } from "./lib/destination-policy";
 import { redactSecretString } from "./lib/redact";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "./lib/provider-tls-profile";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import {
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
@@ -73,6 +75,7 @@ import {
   type ProviderCostOverlay,
 } from "./types";
 import { OPENAI_CODEX_PROVIDER_ID } from "./providers/openai-tiers";
+import { modelAutoCompactTokenLimitsConfigError } from "./providers/auto-compact-budget";
 import { fastWireDeclarationError, hasFastWireCapabilityConflict } from "./providers/fastwire";
 import {
   getProviderRegistryEntry,
@@ -439,18 +442,21 @@ const requestPacingRuleSchema = z.object({
   // Keep the RPM-derived timer within the same one-hour bound as minIntervalMs.
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
-}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined, {
-  message: "request pacing rules need requestsPerMinute or minIntervalMs",
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
+}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined || value.jitterMs !== undefined, {
+  message: "request pacing rules need requestsPerMinute, minIntervalMs, or jitterMs",
 });
 
 const requestPacingSchema = z.object({
   enabled: z.boolean(),
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
   models: z.record(z.string().trim().min(1), requestPacingRuleSchema).optional(),
 }).strict().refine(value => value.enabled === false
   || value.requestsPerMinute !== undefined
   || value.minIntervalMs !== undefined
+  || value.jitterMs !== undefined
   || (value.models !== undefined && Object.keys(value.models).length > 0), {
   message: "enabled request pacing needs a provider rule or model override",
 });
@@ -479,7 +485,14 @@ const fastWireSchema = z.object({
 const providerConfigSchema = z.object({
   adapter: z.string().min(1),
   baseUrl: z.string().min(1),
+  azureCredential: z.object({
+    type: z.literal("default-azure-credential"),
+    managedIdentityClientId: z.string().trim().min(1).optional(),
+  }).strict().transform(value => value.managedIdentityClientId === undefined
+    ? value
+    : { ...value, managedIdentityClientId: value.managedIdentityClientId.trim() }).optional(),
   requestPacing: requestPacingSchema.optional().catch(undefined),
+  tlsProfile: z.literal("antigravity-browser").optional(),
   mcpMaxTools: z.number().int().positive().optional(),
   mcpMaxSchemaBytes: z.number().int().positive().optional(),
   mcpMaxResultBytes: z.number().int().positive().optional(),
@@ -524,6 +537,8 @@ const providerConfigSchema = z.object({
 export { isValidProviderName, hasOwnProvider } from "./config/provider-name";
 export {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
+  isAzureIdentityProvider,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   nonBlankStringArrayConfigError,
@@ -836,6 +851,11 @@ const agentTaskRecoverySchema = z.object({
   cacheEntries: z.number().int().min(1).max(512).optional(),
 }).strict();
 
+const v2NativeParentOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  model: z.string().trim().min(1).optional(),
+}).strict();
+
 const configSchema = z.object({
   port: z.number().int().min(0).max(65535).default(10100),
   managementUsageMaxReadBytes: z.number().int().positive().default(64 * 1024 * 1024),
@@ -869,6 +889,9 @@ const configSchema = z.object({
   defaultProvider: z.string().min(1).default("openai"),
   // A retry can be billable, so absence and malformed hand edits both stay off.
   emptyCompletionRetry: z.boolean().optional().catch(false),
+  // A malformed hand edit must not silently stop opening the browser: fall back
+  // to undefined, which resolves to the historical auto-open behavior.
+  oauthOpenBrowser: z.boolean().optional().catch(undefined),
   openaiProviderTierVersion: z.union([z.literal(1), z.literal(2)]).optional(),
   // Invalid hand edits must not discard an otherwise usable config.
   googleAntigravityStaticCatalogVersion: z.union([z.literal(1), z.literal(2)]).optional().catch(undefined),
@@ -876,6 +899,8 @@ const configSchema = z.object({
   providerContextCaps: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
+  // Invalid hand edits disable only this experimental opt-in subtree.
+  v2NativeParentOverride: v2NativeParentOverrideSchema.optional().catch(undefined),
   // Invalid optional recovery config must not discard unrelated provider/account state.
   agentTaskRecovery: agentTaskRecoverySchema.optional().catch(undefined),
   // These selections pre-date schema validation and used to pass through as
@@ -1044,6 +1069,14 @@ const configSchema = z.object({
         message: responsesPathError,
       });
     }
+    const tlsProfileError = providerTlsProfileConfigError(name, provider);
+    if (tlsProfileError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "tlsProfile"],
+        message: tlsProfileError,
+      });
+    }
     const headersError = providerHeadersConfigError((provider as { headers?: unknown }).headers);
     if (headersError) {
       ctx.addIssue({
@@ -1068,6 +1101,14 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "apiKeyTransport"],
         message: apiKeyTransportError,
+      });
+    }
+    const azureCredentialError = azureCredentialConfigError(provider);
+    if (azureCredentialError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "azureCredential"],
+        message: azureCredentialError,
       });
     }
     const modelAdaptersError = modelAdapterRecordConfigError(
@@ -1105,6 +1146,17 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "modelMaxInputTokens"],
         message: maxInputError,
+      });
+    }
+    const autoCompactError = modelAutoCompactTokenLimitsConfigError(
+      (provider as { modelAutoCompactTokenLimits?: unknown }).modelAutoCompactTokenLimits,
+      { requireNativeIds: name === OPENAI_CODEX_PROVIDER_ID },
+    );
+    if (autoCompactError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "modelAutoCompactTokenLimits"],
+        message: autoCompactError,
       });
     }
     const reasoningSummariesError = booleanRecordConfigError(
@@ -2043,6 +2095,16 @@ function agentTaskRecoveryError(value: unknown): string | null {
   return `schema_invalid: agentTaskRecovery${field ? `.${field}` : ""}: ${issue?.message ?? "invalid configuration"}`;
 }
 
+function v2NativeParentOverrideError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "v2NativeParentOverride") || raw.v2NativeParentOverride === undefined) return null;
+  const result = v2NativeParentOverrideSchema.safeParse(raw.v2NativeParentOverride);
+  if (result.success) return null;
+  const issue = result.error.issues[0];
+  const field = issue?.path.join(".");
+  return `schema_invalid: v2NativeParentOverride${field ? `.${field}` : ""}: ${issue?.message ?? "invalid configuration"}`;
+}
+
 /**
  * Same reasoning as {@link blankHostnameError}, and more urgent: the read path degrades a
  * malformed selection-order map to undefined, which on a write would drop every entry the
@@ -2102,6 +2164,14 @@ function emptyCompletionRetryError(value: unknown): string | null {
   return "schema_invalid: emptyCompletionRetry: must be a boolean or omitted";
 }
 
+function oauthOpenBrowserError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "oauthOpenBrowser")) return null;
+  const enabled = raw.oauthOpenBrowser;
+  if (enabled === undefined || typeof enabled === "boolean") return null;
+  return "schema_invalid: oauthOpenBrowser: must be a boolean or omitted";
+}
+
 /** Validate an in-memory config candidate without touching disk. Used by headless CLI import/set. */
 /**
  * Reject a loopback-listener port that collides with the proxy port (#1102).
@@ -2148,15 +2218,21 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? appOwnedMemoryBudgetError(value)
     ?? upstreamHostCircuitThresholdError(value)
     ?? agentTaskRecoveryError(value)
+    ?? v2NativeParentOverrideError(value)
     ?? googleAntigravityStaticCatalogVersionError(value)
     ?? codexAccountPrioritiesError(value)
     ?? codexAccountPickerEnabledError(value)
     ?? emptyCompletionRetryError(value)
+    ?? oauthOpenBrowserError(value)
     ?? loopbackListenerPortError(value);
   if (boundaryError) return { ok: false, error: boundaryError };
   const result = configSchema.safeParse(value);
   if (result.success) {
     const config = normalizeApiKeyIds(result.data as OcxConfig);
+    for (const [name, provider] of Object.entries(config.providers)) {
+      const antigravityError = antigravityOAuthDestinationConfigError(name, provider);
+      if (antigravityError) return { ok: false, error: `providers.${name}.baseUrl: ${antigravityError}` };
+    }
     if (value && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, "subagentRoles")) {
       const parsedRoles = parseSubagentRoles((value as { subagentRoles?: unknown }).subagentRoles);
       if (!parsedRoles.ok) return { ok: false, error: `schema_invalid: ${parsedRoles.error}` };

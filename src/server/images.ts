@@ -33,7 +33,9 @@ import { readJsonRequestBody } from "./request-decompress";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
 import type { RequestLogContext } from "./request-log";
 import { codexLogAccountId, decodeRequestErrorResponse } from "./responses";
-import { getValidAccessToken, getOAuthCredentialProjectId } from "../oauth/index";
+import { getValidAccessToken, getOAuthCredentialProjectId, getValidAccessTokenSnapshot, type OAuthAccessSnapshot } from "../oauth/index";
+import { isCanonicalAntigravityUrl, providerTlsFetch } from "../lib/provider-tls-profile";
+import { redactErrorMessage } from "../lib/redact";
 import { safeAntigravityHttpErrorMessage } from "../adapters/google-errors";
 import { sanitizeUpstreamErrorText } from "../adapters/upstream-http-error";
 import { ANTIGRAVITY_REQUEST_UA } from "../adapters/google-antigravity-wire";
@@ -156,6 +158,9 @@ async function tryCcaImageGeneration(
   if (endpoint !== "generations") return undefined;
   const provider = config.providers?.["google-antigravity"];
   if (!provider || provider.disabled) return undefined;
+  if (provider.baseUrl && !isCanonicalAntigravityUrl(provider.baseUrl)) {
+    return formatErrorResponse(400, "invalid_request_error", "google-antigravity requires a canonical destination");
+  }
 
   const prompt = (body as { prompt?: unknown })?.prompt;
   if (typeof prompt !== "string" || !prompt.trim()) {
@@ -174,36 +179,25 @@ async function tryCcaImageGeneration(
   // OAuth token refresh and project discovery, not just the upstream fetch.
   const timeoutMs = config.images?.timeoutMs ?? IMAGES_UPSTREAM_TIMEOUT_MS;
   const linkedSignal = signalWithTimeout(timeoutMs, signal);
-  let token: string;
+  let snapshot: OAuthAccessSnapshot;
   try {
-    // Race the OAuth refresh against the deadline signal. getValidAccessToken
-    // chains through 4 layers (resolveAccessSnapshotForAccount →
-    // refreshAndPersistAccessToken → refreshGenericAccountWithLock →
-    // def.refresh()) that do HTTP calls without accepting a signal. Rather than
-    // threading signal through the entire chain, race the whole call against
-    // linkedSignal: when the signal aborts we stop awaiting and surface the
-    // cancellation immediately instead of hanging on the refresh HTTP call.
-    token = await abortableRace(getValidAccessToken("google-antigravity"), linkedSignal.signal);
+    snapshot = await abortableRace(getValidAccessTokenSnapshot("google-antigravity"), linkedSignal.signal);
   } catch (err) {
     linkedSignal.cleanup();
-    // abortableRace rejects immediately when the signal fires, so client
-    // cancellation and deadline expiry surface here. Parent abort propagates
-    // into the linked signal, so check parent first (499) before the linked
-    // signal (504).
     if (signal.aborted) {
       return formatErrorResponse(499, "client_closed_request", "CCA image request canceled by client");
     }
     if (linkedSignal.signal.aborted) {
       return formatErrorResponse(504, "upstream_error", "CCA image generation timed out during authentication");
     }
-    // Missing/revoked credential → 401 (re-login required); transient refresh/network → 502.
     const errName = err instanceof Error ? err.name : "";
     if (errName === "OAuthLoginRequiredError") {
       return formatErrorResponse(401, "invalid_request_error", "Google Antigravity login required: run 'ocx login google-antigravity'");
     }
     return formatErrorResponse(502, "upstream_error", "CCA image generation failed: OAuth token refresh failed");
   }
-  const project = getOAuthCredentialProjectId("google-antigravity");
+  const token = snapshot.accessToken;
+  const project = snapshot.projectId;
   if (!project) {
     linkedSignal.cleanup();
     return formatErrorResponse(
@@ -234,10 +228,8 @@ async function tryCcaImageGeneration(
   let upstream: Response | undefined;
   try {
     try {
-      // Image generation is a paid, non-idempotent POST. A transport failure is
-      // ambiguous: the upstream may have accepted the request before the
-      // connection failed, so never replay it on a peer host.
-      upstream = await fetch(`${baseUrl}/v1internal:generateContent`, {
+      const executor = providerTlsFetch("google-antigravity", provider, globalThis.fetch);
+      upstream = await executor(`${baseUrl}/v1internal:generateContent`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -249,23 +241,15 @@ async function tryCcaImageGeneration(
       });
     } catch (err) {
       if (signal.aborted) return formatErrorResponse(499, "client_closed_request", "CCA image request canceled by client");
-      if (err instanceof Error && err.name === "TimeoutError") {
-        return ccaAmbiguousImageTransportError("upstream request timed out");
-      }
-      // Network/DNS/runtime errors may embed the request URL or headers verbatim
-      // (e.g. "fetch failed: https://…/v1internal:generateContent"). The token
-      // lives in an Authorization header, not in the URL, but sanitize defensively
-      // so no upstream-rejected credential or query param can reach the client,
-      // and strip the internal base URL host from the surfaced message.
-      // 400, not 5xx: the POST is paid and non-idempotent. Codex retries every
-      // 5xx up to 5 attempts, which would duplicate generation after an ambiguous
-      // transport failure (the upstream may already have accepted the request).
       const rawMsg = err instanceof Error ? err.message : String(err);
-      const safeMsg = sanitizeUpstreamErrorText(rawMsg).replace(
-        /https?:\/\/[^\s"'<>]+/gi,
-        "[upstream-url]",
-      );
-      return ccaAmbiguousImageTransportError(safeMsg);
+      const safeMsg = redactErrorMessage(sanitizeUpstreamErrorText(rawMsg));
+      if (err instanceof Error && err.name === "TimeoutError") {
+        return formatErrorResponse(504, "upstream_error", `CCA image generation timed out: ${safeMsg}`);
+      }
+      if (provider.tlsProfile === "antigravity-browser") {
+        return formatErrorResponse(502, "upstream_error", `CCA image generation failed: ${safeMsg}`);
+      }
+      return ccaAmbiguousImageTransportError(safeMsg.replace(/https?:\/\/[^\s"'<>]+/gi, "[upstream-url]"));
     }
 
     // Stream the upstream body with a bounded reader so an oversized or malicious

@@ -4,6 +4,7 @@
 export type { OcxTool, OcxToolChoice } from "./types/tools";
 export {
   namespacedToolName,
+  normalizeDeclaredToolName,
   toolChoiceAliases,
   createToolChoiceResolver,
   toolChoiceCandidates,
@@ -43,6 +44,10 @@ export type {
   OcxProviderOpaqueToolCallMetadata,
   OcxAssistantContentPart,
   OcxRequestOptions,
+  GoogleProviderOptions,
+  GoogleSafetySetting,
+  GoogleSafetyCategory,
+  GoogleSafetyThreshold,
   OcxMessagePhase,
   OcxProviderContinuationOwner,
   OcxProviderContinuationState,
@@ -86,6 +91,7 @@ export type {
 
 export type {
   RefreshPolicy,
+  ProviderTlsProfile,
   OpenRouterProviderRouting,
   ResponsesItemIdRepairConfig,
   RateLimitRetryPolicy,

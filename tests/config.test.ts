@@ -23,6 +23,7 @@ import {
   removePid,
   removeRuntimePort,
   ocxStartProcessCacheSizeForTests,
+  requestPacingConfigError,
   setOcxStartProcessCacheForTests,
   setProcessCommandLineExecForTests,
   setProcessCommandLinePlatformForTests,
@@ -112,6 +113,48 @@ function writeAccountNamespaceConfig(
 }
 
 describe("opencodex config defaults", () => {
+  test("accepts and preserves provider-level jitter-only request pacing", () => {
+    const defaults = getDefaultConfig();
+    const requestPacing = { enabled: true, jitterMs: 500 };
+    const result = validateConfigCandidate({
+      ...defaults,
+      providers: {
+        ...defaults.providers,
+        openai: { ...defaults.providers.openai!, requestPacing },
+      },
+    });
+
+    expect(requestPacingConfigError(requestPacing)).toBeNull();
+    expect(result).toMatchObject({ ok: true, config: { providers: { openai: { requestPacing } } } });
+  });
+
+  test("config candidate validates and preserves strict Azure identity", () => {
+    const base = getDefaultConfig();
+    const valid = validateConfigCandidate({
+      ...base,
+      defaultProvider: "azure",
+      providers: {
+        azure: {
+          adapter: "azure-openai",
+          baseUrl: "https://resource.openai.azure.com/openai",
+          azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " },
+        },
+      },
+    });
+    expect(valid.ok).toBe(true);
+    if (valid.ok) expect(valid.config.providers.azure?.azureCredential?.managedIdentityClientId).toBe("client-123");
+
+    expect(validateConfigCandidate({
+      ...base,
+      defaultProvider: "azure",
+      providers: { azure: { adapter: "openai-chat", baseUrl: "https://example.test/v1", azureCredential: { type: "default-azure-credential" } } },
+    }).ok).toBe(false);
+    expect(validateConfigCandidate({
+      ...base,
+      defaultProvider: "azure",
+      providers: { azure: { adapter: "azure-openai", baseUrl: "https://resource.openai.azure.com/openai", azureCredential: { type: "default-azure-credential", unknown: "x" } } },
+    }).ok).toBe(false);
+  });
   test("malformed classifier config is normalized at load, even with subagentEffort absent (#1697)", () => {
     // normalizePersistedClaudeCode used to be reached only through a subagentEffort short-circuit,
     // so a config whose ONLY defect was elsewhere in claudeCode was never normalized. These
@@ -148,6 +191,65 @@ describe("opencodex config defaults", () => {
       ok: false,
       error: expect.stringContaining("emptyCompletionRetry"),
     });
+  });
+
+  test("config candidates reject noncanonical Antigravity OAuth destinations", () => {
+    const defaults = getDefaultConfig();
+    const antigravity = {
+      adapter: "google",
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth",
+      googleMode: "cloud-code-assist",
+    };
+    expect(validateConfigCandidate({
+      ...defaults,
+      providers: {
+        ...defaults.providers,
+        "google-antigravity": { ...antigravity, baseUrl: "https://evil.example.test", authMode: "oauth" },
+      },
+    })).toMatchObject({ ok: false, error: expect.stringContaining("canonical Antigravity") });
+    for (const baseUrl of ["https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"]) {
+      expect(validateConfigCandidate({
+        ...defaults,
+        providers: { ...defaults.providers, "google-antigravity": { ...antigravity, baseUrl, authMode: "oauth" } },
+      }).ok).toBe(true);
+    }
+  });
+  test("v2 native parent override round-trips trimmed and isolates malformed hand edits", () => {
+    const defaults = getDefaultConfig();
+    const valid = validateConfigCandidate({
+      ...defaults,
+      v2NativeParentOverride: { enabled: false, model: "  relay/model  " },
+    });
+    expect(valid).toMatchObject({
+      ok: true,
+      config: { v2NativeParentOverride: { enabled: false, model: "relay/model" } },
+    });
+
+    writeConfig({
+      port: 12345,
+      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1" } },
+      defaultProvider: "custom",
+      v2NativeParentOverride: { enabled: "yes", model: 42 },
+    });
+    const loaded = loadConfig();
+    expect(loaded.v2NativeParentOverride).toBeUndefined();
+    expect(loaded.providers.custom).toBeDefined();
+    expect(loaded.port).toBe(12345);
+  });
+
+  test("v2 native parent override rejects malformed programmatic writes", () => {
+    const defaults = getDefaultConfig();
+    for (const override of [
+      { enabled: "yes", model: "relay/model" },
+      { enabled: true, model: "   " },
+      { enabled: true, model: null },
+      { enabled: true, model: "relay/model", extra: true },
+    ]) {
+      const result = validateConfigCandidate({ ...defaults, v2NativeParentOverride: override });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("v2NativeParentOverride");
+    }
   });
 
   test("usage and MCP config overrides change the effective bound while defaults remain compatible", () => {
@@ -1751,6 +1853,40 @@ describe("opencodex config defaults", () => {
     });
     expect(readConfigDiagnostics().source).toBe("fallback");
     expect(readConfigDiagnostics().error).toContain("providers.custom.modelMaxInputTokens");
+  });
+
+  test("disk config validates per-model auto-compaction budgets with native exact ids", () => {
+    writeConfig({
+      port: 10100,
+      providers: {
+        custom: {
+          adapter: "openai-chat",
+          baseUrl: "https://example.test/v1",
+          modelAutoCompactTokenLimits: { model: 1.5 },
+        },
+      },
+      defaultProvider: "custom",
+    });
+    expect(readConfigDiagnostics().source).toBe("fallback");
+    expect(readConfigDiagnostics().error).toContain("providers.custom.modelAutoCompactTokenLimits");
+
+    rmSync(testDir, { recursive: true, force: true });
+    mkdirSync(testDir, { recursive: true });
+    writeConfig({
+      port: 10100,
+      providers: {
+        openai: {
+          adapter: "openai-responses",
+          baseUrl: "https://chatgpt.com/backend-api/codex",
+          authMode: "forward",
+          codexAccountMode: "direct",
+          modelAutoCompactTokenLimits: { "team/gpt-5.6-sol": 64_000 },
+        },
+      },
+      defaultProvider: "openai",
+    });
+    expect(readConfigDiagnostics().source).toBe("fallback");
+    expect(readConfigDiagnostics().error).toContain("exact supported native model id");
   });
 
   test("disk config preserves valid OpenRouter routing and rejects invalid destinations", () => {

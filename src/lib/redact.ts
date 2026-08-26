@@ -490,8 +490,17 @@ export function redactUrlForLog(url: string): string {
     parsed.hash = "";
     return parsed.toString();
   } catch {
-    return redactSecretString(url.split("?")[0] ?? url);
+    const stripped = (url.split(/[?#]/)[0] ?? url).replace(/:\/\/[^@\s]+@/g, "://");
+    return redactSecretString(stripped);
   }
+}
+
+/** Redact credentials and userinfo from arbitrary diagnostic text. */
+export function redactErrorMessage(value: string): string {
+  return redactSecretString(value).replace(
+    /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi,
+    match => redactUrlForLog(match),
+  );
 }
 
 const USER_HOME_PATH_PATTERNS: Array<[RegExp, string]> = [

@@ -8,6 +8,8 @@ import type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } 
  */
 export type RefreshPolicy = "proactive" | "lazy-only" | "disabled";
 
+export type ProviderTlsProfile = "antigravity-browser";
+
 export interface OpenRouterProviderRouting {
   /** OpenRouter provider slugs to try first, in priority order. */
   order?: string[];
@@ -68,6 +70,8 @@ export interface RequestPacingRule {
   requestsPerMinute?: number;
   /** Minimum delay between request starts. The slower configured value wins. */
   minIntervalMs?: number;
+  /** Positive-only random delay added to each request-start slot. */
+  jitterMs?: number;
 }
 
 export interface ProviderRequestPacingConfig extends RequestPacingRule {
@@ -136,6 +140,8 @@ export interface OcxProviderConfig {
   codexToolMode?: "code_mode_only" | "shell";
   /** Optional outbound request-start pacing shared by this provider and its model overrides. */
   requestPacing?: ProviderRequestPacingConfig;
+  /** Explicitly acknowledged experimental browser-compatible transport profile. */
+  tlsProfile?: ProviderTlsProfile;
   /** Cursor MCP compatibility bounds; positive integers when configured. */
   mcpMaxTools?: number;
   mcpMaxSchemaBytes?: number;
@@ -245,6 +251,11 @@ export interface OcxProviderConfig {
    */
   codexAccountMode?: CodexAccountMode;
   apiKey?: string;
+  /** Azure OpenAI identity authentication; mutually exclusive with API-key fields. */
+  azureCredential?: {
+    type: "default-azure-credential";
+    managedIdentityClientId?: string;
+  };
   /**
    * Key-auth header style for Anthropic-compatible providers.
    * Defaults to the native Anthropic `x-api-key`; gateways may require
@@ -281,6 +292,11 @@ export interface OcxProviderConfig {
   modelInputModalities?: Record<string, string[]>;
   /** Model-specific max input token limits. Values cap auto_compact_token_limit. */
   modelMaxInputTokens?: Record<string, number>;
+  /**
+   * Per-model soft compaction budgets. Values may only lower the effective
+   * context/max-input envelope; they never raise hard admission limits.
+   */
+  modelAutoCompactTokenLimits?: Record<string, number>;
   /**
    * Provider-wide fallback for chat-completions `max_tokens` when the caller omits
    * Responses `max_output_tokens`. Adapters still let an explicit request win.

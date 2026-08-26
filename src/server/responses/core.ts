@@ -1,6 +1,6 @@
 import type { Server } from "bun";
 import { randomUUID } from "node:crypto";
-import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
+import { adapterEventDiagnosticDetails, bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type BridgeDiagnosticContext, type BridgeDiagnosticSequence, type ResponsesTerminalStatus } from "../../bridge";
 import { formatPassthroughUpstreamError } from "./passthrough-error";
 import {
   createResponsesFieldBackfillBlockRewrite,
@@ -14,6 +14,8 @@ import {
   resolveEnvValue,
 } from "../../config";
 import { parseRequest } from "../../responses/parser";
+import { googleProviderOptionsRouteError } from "../../responses/google-provider-options";
+import type { ProviderAdapter } from "../../adapters/base";
 import {
   bindReasoningReplayScope,
   commitReasoningReplayServingIdentity,
@@ -70,9 +72,12 @@ import {
   pickComboTarget,
   targetKey,
 } from "../../combos";
-import { isInjectionDebugEnabled } from "../../lib/debug-settings";
+import { isDebugEnabled, isInjectionDebugEnabled } from "../../lib/debug-settings";
+import { debugStreamDiagnostic } from "../../lib/debug";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
+import { OcxRequestValidationError } from "../../lib/errors";
 import { resolveClientRetryAfter } from "../../lib/retry-after";
+import { antigravityOAuthDestinationConfigError, isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import { enrichOpenCodeZenRateLimitMessage } from "../../providers/opencode-zen-rate-limit";
 import { modelInList, namespacedToolName } from "../../types";
 import type {
@@ -90,6 +95,7 @@ import {
   forceRefreshOAuthAccessSnapshot,
   getOAuthCredentialApiBaseUrl,
   getValidAccessTokenForAccount,
+  getValidAccessTokenSnapshotForAccount,
   getValidAccessTokenSnapshot,
   publicOAuthAuthenticationErrorMessage,
   type OAuthAccessSnapshot,
@@ -108,12 +114,12 @@ import {
   rotateAnthropicAccountOn429,
 } from "../../oauth/anthropic-routing";
 import {
-  antigravity429StickWaitMs,
   antigravitySessionKeyFromParts,
-  bindAntigravityProject,
   bindAntigravitySessionAffinity,
+  recordAntigravityCooldown,
+  recordAntigravitySyntheticFailure,
   resolveAntigravityAccountForSession,
-  rotateAntigravityAccountOn429,
+  retryableAntigravity429DelayMs,
 } from "../../oauth/antigravity-routing";
 import {
   CURSOR_POOL_MAX_FAILOVERS_PER_REQUEST,
@@ -170,6 +176,7 @@ import {
   fetchWithResetRetry,
   fetchWithTransientRetry,
   prepareSameTarget429Wait,
+  sleepWithAbort,
 } from "../../lib/upstream-retry";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
@@ -211,7 +218,7 @@ import {
   rotateProviderTransportOn429,
 } from "../../providers/key-failover";
 import { shouldAttemptImageTierRetry } from "../image-retry";
-import { resolveProviderTransport } from "../../providers/xai-transport";
+import { isXaiResponsesDestination, resolveProviderTransport } from "../../providers/xai-transport";
 import type { WsData } from "../ws-bridge";
 import { codexAccountSelectionForTurn, registerTurn, trackStreamLifetime, unregisterTurn } from "../lifecycle";
 import { redactSecretString, sanitizeLogMetadataString } from "../../lib/redact";
@@ -290,6 +297,7 @@ import { createResponsesModelPayloadRewrite, rewriteResponsesModelJson } from ".
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
+import { decideV2NativeParentOverride } from "./v2-native-parent-override";
 import { mapCodexAuthContextErrorToResponse } from "./codex-auth-error";
 import { hasUnreadableEncryptedAgentTask, looksLikeBackendCiphertext, sanitizeEncryptedContentInPlace } from "./encrypted-payload";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel } from "./fetch-helpers";
@@ -328,12 +336,14 @@ import {
 import {
   collectDeclaredNamelessClientCallTypes,
   collectDeclaredWireToolNames,
+  collectProviderExecutedCallTypes,
   createUndeclaredToolCallGuardBlockRewrite,
   currentTurnWireToolCatalogBody,
   hasExplicitWireToolCatalog,
   undeclaredToolCallMessage,
   undeclaredToolCallName,
   undeclaredToolCallNameInResponse,
+  type ProviderExecutedCallType,
 } from "../responses-undeclared-tool-guard";
 import { createGithubCopilotResponsesBlockRewrite } from "../github-copilot-responses-repair";
 import { responsesJsonToSseStream } from "../responses-json-events";
@@ -348,6 +358,34 @@ import { preflightComboStreamResponse } from "./combo-stream-preflight";
 // bridging. A second byte-stream reader would reinterpret that transport's
 // already-committed event boundary and can replay custom adapter work.
 const runTurnAdapterSseResponses = new WeakSet<Response>();
+
+function diagnoseAdapterEvents(
+  events: AsyncIterable<AdapterEvent>,
+  adapterName: string,
+  requestId: string | undefined,
+  logCtx: RequestLogContext,
+  state: BridgeDiagnosticSequence,
+): AsyncIterable<AdapterEvent> {
+  if (!requestId) return events;
+  return (async function* () {
+    for await (const event of events) {
+      const attempt = logCtx.activeAttempt;
+      debugStreamDiagnostic(
+        {
+          requestId,
+          adapterName,
+          ...(attempt?.ordinal !== undefined ? { attempt: attempt.ordinal } : {}),
+          ...(attempt?.recoveryKinds.at(-1) !== undefined ? { recovery: attempt.recoveryKinds.at(-1) } : {}),
+        },
+        "adapter",
+        ++state.value,
+        event.type,
+        adapterEventDiagnosticDetails(event),
+      );
+      yield event;
+    }
+  })();
+}
 
 /**
  * Adapters whose continuation state must survive Codex's store:false requests.
@@ -2382,6 +2420,27 @@ async function handleResponsesInner(
     return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
 
+  const parentOverride = decideV2NativeParentOverride({
+    kind: "responses",
+    config,
+    headers: req.headers,
+    parsed,
+    sourceRoute: route,
+    comboAttempt: options.comboAttempt,
+    targetEvidence: evidenceFromBody(parsed._rawBody),
+  });
+  if (parentOverride.kind === "reject") {
+    if (parentOverride.trace) logCtx.routeDecision = parentOverride.trace as typeof logCtx.routeDecision;
+    return formatErrorResponse(404, "invalid_request_error", parentOverride.message);
+  }
+  if (parentOverride.kind === "override") {
+    route = parentOverride.route;
+    parsed.modelId = route.modelId;
+    if (parsed._rawBody && typeof parsed._rawBody === "object") {
+      (parsed._rawBody as { model?: string }).model = route.modelId;
+    }
+  }
+
   const hasUnexpandedPreviousResponse = !!parsed.previousResponseId
     && parsed._previousResponseInputExpanded !== true;
   // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
@@ -2670,14 +2729,28 @@ async function handleResponsesInner(
 
   // OAuth providers: swap in a fresh access token (auto-refreshed) as the Bearer key, so the
   // existing openai-chat / anthropic adapters authenticate with no change.
-  const isOAuth401ReplayProvider = (route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro")
-    && route.provider.authMode === "oauth";
+  const isAntigravityOAuth = isAntigravityOAuthProvider(route.providerName, route.provider);
+  if (route.providerName === "google-antigravity") {
+    const antigravityConfigError = antigravityOAuthDestinationConfigError(route.providerName, route.provider);
+    if (antigravityConfigError) {
+      return formatErrorResponse(400, "invalid_request_error", antigravityConfigError);
+    }
+  }
+  const isOAuth401ReplayProvider = isAntigravityOAuth
+    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro")
+      && route.provider.authMode === "oauth");
   let sentOAuthSnapshot: OAuthAccessSnapshot | undefined;
   let replayOAuthCredentialSnapshot: Pick<OAuthAccessSnapshot, "accountId" | "generation"> | undefined;
   let anthropicPoolAccountId: string | null = null;
   let anthropicPoolFailovers = 0;
-  let antigravityAccountId: string | undefined;
-  let antigravityFailovers = 0;
+  let antigravityAccountId: string | null = null;
+  let antigravitySessionKey: string | null = null;
+  let antigravity429RetryAttempted = false;
+  const observeAntigravityProviderError = isAntigravityOAuth
+    ? (error: { code?: string; status?: number; message?: string }) => {
+        if (antigravityAccountId) recordAntigravitySyntheticFailure(antigravityAccountId, error);
+      }
+    : undefined;
   let cursorPoolAccountId: string | null = null;
   let cursorPoolFailovers = 0;
   const oauthSessionKeyParts = {
@@ -2690,18 +2763,24 @@ async function handleResponsesInner(
   const anthropicSessionKey = route.providerName === "anthropic" && route.provider.authMode === "oauth"
     ? anthropicSessionKeyFromParts(oauthSessionKeyParts)
     : null;
-  const antigravitySessionKey = route.providerName === "google-antigravity"
-    && route.provider.authMode === "oauth"
-    && route.provider.googleMode === "cloud-code-assist"
-    ? antigravitySessionKeyFromParts(oauthSessionKeyParts)
-    : null;
+  if (isAntigravityOAuth) {
+    antigravitySessionKey = antigravitySessionKeyFromParts(oauthSessionKeyParts);
+  }
   const cursorSessionKey = route.providerName === "cursor"
     && route.provider.authMode === "oauth"
     ? cursorSessionKeyFromParts({
       clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
     })
     : null;
-  if (route.provider.authMode === "oauth") {
+  if (isAntigravityOAuth) {
+    antigravitySessionKey = antigravitySessionKeyFromParts({
+      sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
+      threadIdHeader: req.headers.get("thread-id"),
+      clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
+      promptCacheKey: typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
+    });
+  }
+  if (route.provider.authMode === "oauth" || isAntigravityOAuth) {
     try {
       if (route.providerName === "anthropic" && isAnthropicAccountPoolEnabled(config)) {
         const selection = resolveAnthropicAccountForSession(anthropicSessionKey, config);
@@ -2723,50 +2802,6 @@ async function handleResponsesInner(
         promoteAnthropicActiveAccount(selection.accountId);
         route.provider = { ...route.provider, apiKey: accessToken };
         logCtx.provider = formatAnthropicProviderForLog("anthropic", selection.accountId, config);
-      } else if (
-        route.providerName === "google-antigravity"
-        && route.provider.googleMode === "cloud-code-assist"
-      ) {
-        const selection = resolveAntigravityAccountForSession(antigravitySessionKey);
-        if (!selection.accountId) {
-          if (selection.reason === "all-cooled") {
-            return formatErrorResponse(
-              429,
-              "rate_limit_error",
-              "All Google Antigravity OAuth accounts are temporarily unavailable",
-            );
-          }
-          return formatErrorResponse(
-            401,
-            "authentication_error",
-            "No eligible Google Antigravity OAuth account available",
-          );
-        }
-        let resolved = await getValidAccessTokenSnapshot(route.providerName);
-        if (selection.accountId !== resolved.accountId) {
-          const accessToken = await getValidAccessTokenForAccount("google-antigravity", selection.accountId);
-          const nextCredential = getAccountCredential("google-antigravity", selection.accountId);
-          resolved = {
-            ...resolved,
-            accountId: selection.accountId,
-            accessToken,
-            // Always replace; omitting a missing id would keep the previous account's projectId.
-            projectId: nextCredential?.projectId,
-          };
-        }
-        replayOAuthCredentialSnapshot = {
-          accountId: resolved.accountId,
-          generation: resolved.generation,
-        };
-        if (selection.reason === "failover") replayOAuthCredentialSnapshot = undefined;
-        route.provider = { ...route.provider, apiKey: resolved.accessToken };
-        antigravityAccountId = selection.accountId;
-        bindAntigravitySessionAffinity(antigravitySessionKey, selection.accountId);
-        const bound = bindAntigravityProject(route.provider, resolved.projectId);
-        if (!bound.ok) {
-          return formatErrorResponse(bound.status, bound.type, bound.message);
-        }
-        route.provider = bound.provider;
       } else if (
         route.providerName === "cursor"
         && route.provider.authMode === "oauth"
@@ -2798,7 +2833,28 @@ async function handleResponsesInner(
         route.provider = { ...route.provider, apiKey: resolved.accessToken };
         logCtx.provider = formatCursorProviderForLog("cursor", selection.accountId);
       } else {
-        const resolved = await getValidAccessTokenSnapshot(route.providerName);
+        let resolved: OAuthAccessSnapshot;
+        if (isAntigravityOAuth) {
+          const selection = resolveAntigravityAccountForSession(antigravitySessionKey);
+          if (!selection.accountId) {
+            return formatErrorResponse(401, "authentication_error", "Selected Antigravity OAuth account is unavailable");
+          }
+          if (selection.cooldownUntil !== undefined) {
+            const retryAfter = Math.max(1, Math.ceil((selection.cooldownUntil - Date.now()) / 1000));
+            if (selection.cooldownKind === "geoblock") {
+              return formatErrorResponse(403, "permission_error", "Selected Antigravity OAuth account is unavailable in this location");
+            }
+            return formatErrorResponse(429, "rate_limit_error", "Selected Antigravity OAuth account is temporarily rate-limited", { retryAfter: String(retryAfter) });
+          }
+          if (selection.reason === "active-needs-reauth") {
+            return formatErrorResponse(401, "authentication_error", "Selected Antigravity OAuth account needs reauthentication");
+          }
+          antigravityAccountId = selection.accountId;
+          resolved = await getValidAccessTokenSnapshotForAccount(route.providerName, selection.accountId);
+          bindAntigravitySessionAffinity(antigravitySessionKey, selection.accountId);
+        } else {
+          resolved = await getValidAccessTokenSnapshot(route.providerName);
+        }
         replayOAuthCredentialSnapshot = {
           accountId: resolved.accountId,
           generation: resolved.generation,
@@ -2809,6 +2865,14 @@ async function handleResponsesInner(
           // `{}` is intentional: this is an account-scoped request with no stored routing metadata.
           // Only genuinely accountless adapter calls leave the context undefined and use local/env fallback.
           parsed._kiroAuthContext = { ...(resolved.kiro ?? {}) };
+        }
+        // Antigravity (cloud-code-assist) must use the project paired with this exact token
+        // snapshot. A configured project may belong to another account and is never a fallback.
+        if (isAntigravityOAuth) {
+          if (!resolved.projectId) {
+            return formatErrorResponse(400, "invalid_request_error", "Antigravity project unavailable — re-run `ocx login google-antigravity`");
+          }
+          route.provider = { ...route.provider, project: resolved.projectId };
         }
       }
     } catch (err) {
@@ -2849,6 +2913,27 @@ async function handleResponsesInner(
     delete logCtx.accountLogLabel;
   }
   const adapter = resolveAdapter(adapterProvider, config.cacheRetention);
+  const googleOptionsError = googleProviderOptionsRouteError(parsed, {
+    providerName: route.providerName,
+    provider: adapterProvider,
+    adapterName: adapter.name,
+  });
+  if (googleOptionsError) {
+    return formatErrorResponse(400, "invalid_request_error", googleOptionsError);
+  }
+  const assertGoogleOptionsRoute = (
+    candidate: Pick<ProviderAdapter, "name" | "validateRequest">,
+    provider: OcxProviderConfig,
+    requestParsed: OcxParsedRequest = parsed,
+  ): void => {
+    const message = googleProviderOptionsRouteError(requestParsed, {
+      providerName: route.providerName,
+      provider,
+      adapterName: candidate.name,
+    });
+    if (message) throw new OcxRequestValidationError(message);
+    if (requestParsed.options.providerOptions?.google) candidate.validateRequest?.(requestParsed);
+  };
   bindRouteReasoningReplayScope({
     parsed,
     providerName: route.providerName,
@@ -2863,6 +2948,7 @@ async function handleResponsesInner(
   }
   logCtx.providerAdapter = adapter.name;
   try {
+    assertGoogleOptionsRoute(adapter, adapterProvider);
     adapter.validateRequest?.(parsed);
   } catch (err) {
     return formatErrorResponse(
@@ -2903,6 +2989,23 @@ async function handleResponsesInner(
     );
     if (passiveSubjectId) logCtx.activeAttempt.labRouteSubjectId = passiveSubjectId;
   }
+  const diagnosticRequestId = isDebugEnabled() ? randomUUID() : undefined;
+  const adapterDiagnosticState: BridgeDiagnosticSequence = { value: 0 };
+  const diagnosticContext: BridgeDiagnosticContext | undefined = diagnosticRequestId
+    ? { requestId: diagnosticRequestId, adapterName: adapter.name, sequence: adapterDiagnosticState }
+    : undefined;
+  const noteDiagnosticAttempt = (
+    attempt: RequestLogContext["activeAttempt"],
+    inputEstimate: number | undefined,
+    recovery?: AttemptRecoveryKind,
+    adapterName?: string,
+  ): void => {
+    noteAttemptSend(attempt, inputEstimate, recovery);
+    if (!diagnosticContext) return;
+    diagnosticContext.attempt = attempt?.ordinal;
+    diagnosticContext.recovery = recovery;
+    if (adapterName) diagnosticContext.adapterName = adapterName;
+  };
   const isPassthrough = "passthrough" in adapter && !!adapter.passthrough;
 
   if (adapter.name === "kiro" && parsed.previousResponseId && !parsed._previousResponseInputExpanded) {
@@ -3072,8 +3175,14 @@ async function handleResponsesInner(
     const clientDeclaredNamelessCallTypes = collectDeclaredNamelessClientCallTypes(
       clientToolAuthorizationBody,
     );
+    // Hosted calls the PROVIDER runs itself. Gated on the destination actually being xAI, so a
+    // declaration alone cannot buy the exemption on some other upstream that never serves it.
+    const providerExecutedCallTypes = isXaiResponsesDestination(route.provider)
+      ? collectProviderExecutedCallTypes(clientToolAuthorizationBody)
+      : new Set<ProviderExecutedCallType>();
     let request: Awaited<ReturnType<typeof adapter.buildRequest>>;
     try {
+      assertGoogleOptionsRoute(adapter, adapterProvider);
       request = await adapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
     } catch (error) {
       releaseCodexAuthContextProbeLease(authCtx);
@@ -3183,6 +3292,9 @@ async function handleResponsesInner(
     // rejection is sticky for the whole turn, set from every parsed payload on the inspection side.
     let inspectionSawUndeclaredTool = false;
     const noteInspectedPayload = (payload: unknown) => {
+      if (isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravitySyntheticFailure(antigravityAccountId, payload);
+      }
       // Gated on the same flag as the guard itself: with no readable catalog (or a forward-auth
       // provider) every name looks undeclared, and flipping this would stop recording continuation
       // state for exactly the passthrough traffic the guard deliberately stands down for.
@@ -3191,6 +3303,7 @@ async function handleResponsesInner(
         payload,
         declaredWireToolNames,
         declaredNamelessClientCallTypes,
+        providerExecutedCallTypes,
       ) !== undefined) {
         inspectionSawUndeclaredTool = true;
       }
@@ -3204,6 +3317,7 @@ async function handleResponsesInner(
             response,
             declaredWireToolNames,
             declaredNamelessClientCallTypes,
+            providerExecutedCallTypes,
           ) !== undefined
         ) {
           return;
@@ -3312,7 +3426,7 @@ async function handleResponsesInner(
       // Body is a replayable string; nothing has streamed to the client yet.
       upstreamResponse = await fetchWithTransientRetry(
         recovery => {
-          noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, recovery);
+          noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, recovery, route.provider.adapter);
           return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
             method: request.method,
             headers: request.headers,
@@ -3354,9 +3468,16 @@ async function handleResponsesInner(
         return { failed: formatErrorResponse(502, "upstream_error", "Recovery changed the provider wire unexpectedly") };
       }
       try {
+        assertGoogleOptionsRoute(retryAdapter, route.provider);
+      } catch (err) {
+        upstream.abort();
+        return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err))) };
+      }
+      try {
         request = await retryAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
+          ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
         });
         refreshRoutedNamespaceToolAliases(request);
         recordAdapterReasoning(logCtx, request);
@@ -3382,7 +3503,7 @@ async function handleResponsesInner(
       try {
         return await fetchWithTransientRetry(
           innerRecovery => {
-            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, innerRecovery ?? recovery);
+            noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, innerRecovery ?? recovery, retryAdapter.name);
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -3430,6 +3551,14 @@ async function handleResponsesInner(
         releaseCodexAuthContextProbeLease(authCtx);
         return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
       }
+      if (isAntigravityOAuth && refreshed.accountId !== antigravityAccountId) {
+        upstream.abort();
+        return formatErrorResponse(401, "authentication_error", "Antigravity OAuth account changed during refresh");
+      }
+      if (isAntigravityOAuth && !refreshed.projectId) {
+        upstream.abort();
+        return formatErrorResponse(400, "invalid_request_error", "Antigravity project unavailable — re-run `ocx login google-antigravity`");
+      }
       sentOAuthSnapshot = refreshed;
       replayOAuthCredentialSnapshot = {
         accountId: refreshed.accountId,
@@ -3437,6 +3566,9 @@ async function handleResponsesInner(
       };
       if (route.providerName === "kiro") {
         parsed._kiroAuthContext = { ...(refreshed.kiro ?? {}) };
+      }
+      if (isAntigravityOAuth) {
+        route.provider = { ...route.provider, project: refreshed.projectId };
       }
       const refreshedProvider = resolveProviderTransport(
         route.providerName,
@@ -3468,9 +3600,11 @@ async function handleResponsesInner(
         logCtx.accountLogLabel,
       );
       try {
+        assertGoogleOptionsRoute(refreshedAdapter, refreshedProvider);
         request = await refreshedAdapter.buildRequest(parsed, {
           headers: selectedForwardHeaders,
           translatorBudget,
+          ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
         });
         refreshRoutedNamespaceToolAliases(request);
         recordAdapterReasoning(logCtx, request);
@@ -3485,7 +3619,7 @@ async function handleResponsesInner(
       try {
         upstreamResponse = await fetchWithTransientRetry(
           recovery => {
-            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, recovery ?? "oauth-401");
+            noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, recovery ?? "oauth-401", refreshedAdapter.name);
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -3547,7 +3681,7 @@ async function handleResponsesInner(
           recovery => {
             // The first send of every replay is itself a rate-limit retry; inner transient-5xx
             // recoveries keep their own label (recovery is provided for those).
-            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate, recovery ?? "rate-limit-429");
+            noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, recovery ?? "rate-limit-429", route.provider.adapter);
             return fetchWithHeaderTimeout(request.url, applyUpstreamRecoveryInit({
               method: request.method,
               headers: request.headers,
@@ -3855,6 +3989,7 @@ async function handleResponsesInner(
           ? createUndeclaredToolCallGuardBlockRewrite(
             declaredWireToolNames,
             declaredNamelessClientCallTypes,
+            providerExecutedCallTypes,
           )
           : undefined,
       ].filter((rewrite): rewrite is NonNullable<typeof rewrite> => rewrite !== undefined);
@@ -4076,6 +4211,7 @@ async function handleResponsesInner(
               JSON.parse(clientJson),
               declaredWireToolNames,
               declaredNamelessClientCallTypes,
+              providerExecutedCallTypes,
             );
           } catch {
             return undefined;
@@ -4273,7 +4409,8 @@ async function handleResponsesInner(
       ...(vidPlan ? { videoPlan: vidPlan } : {}),
       forwardHeaders: selectedForwardHeaders,
       onAttemptSend: (recovery?: AttemptRecoveryKind) =>
-        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery),
+        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
+      ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
       abortSignal: options.abortSignal,
       maxRounds: imgPlan && vidPlan
         ? clampImageMaxRounds(Math.min(config.images?.maxRounds ?? 3, config.images?.videoMaxRounds ?? 2))
@@ -4288,6 +4425,7 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       },
+      validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       ...(vidPlan?.timeoutMs ? { videoTimeoutMs: vidPlan.timeoutMs } : {}),
       onUsage: usage => {
         // Cursor may assign _cursorConversationId inside the image loop's first runTurn;
@@ -4377,8 +4515,10 @@ async function handleResponsesInner(
         recordAdapterReasoning(logCtx, request);
         recordAdapterTier(logCtx, request);
       },
+      validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       onAttemptSend: (recovery?: AttemptRecoveryKind) =>
-        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery),
+        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
+      ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
       onUsage: usage => {
         logCtx.usageFromBridge = true;
         if (usage) {
@@ -4467,10 +4607,14 @@ async function handleResponsesInner(
       pacingSlotAcquired = false,
     ): Promise<void> => {
       try {
+        if (diagnosticContext) {
+          diagnosticContext.recovery = recovery;
+          diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
+        }
         if (!pacingSlotAcquired) {
           await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, runTurnAbort.signal);
         }
-        noteAttemptSend(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery);
+        noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name);
         const runTurnProviderFetch = providerFetch(
           route.provider,
           options.codexWsRuntimeIdentity,
@@ -4524,13 +4668,15 @@ async function handleResponsesInner(
         onBacklogExceeded: () => runTurnAbort.abort(),
       });
       void runTurnAttempt(retryQueue, "empty-completion");
-      return retryQueue.stream();
+      return diagnoseAdapterEvents(retryQueue.stream(), adapter.name, diagnosticRequestId, logCtx, adapterDiagnosticState);
     };
 
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     if (parsed.stream) {
       void runTurn();
-      let eventSource: AsyncIterable<AdapterEvent> = queue.stream();
+      let eventSource: AsyncIterable<AdapterEvent> = diagnoseAdapterEvents(
+        queue.stream(), adapter.name, diagnosticRequestId, logCtx, adapterDiagnosticState,
+      );
       if (options.comboAttempt) {
         const preflight = await preflightAdapterEvents(eventSource);
         if (preflight.error || preflight.empty) {
@@ -4568,6 +4714,7 @@ async function handleResponsesInner(
           // grok-build's strict decoder dies on the typed response.heartbeat frame; its
           // eventsource layer tolerates comment keep-alives. Codex needs the opposite.
           ...(logCtx.surface === "grok" ? { heartbeatStyle: "comment" as const } : {}),
+          ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
           onUsage: usage => {
             // Raw adapter usage, pre wire-normalization: the bridged SSE now always carries
             // zero-default detail objects, so provenance must come from here (cache_detail_missing).
@@ -4676,7 +4823,12 @@ async function handleResponsesInner(
   let initialRequest: AdapterRequest | undefined;
   let inputTokenEstimate: number | undefined;
   try {
-    initialRequest = await activeAdapter.buildRequest(parsed, { headers: selectedForwardHeaders, translatorBudget });
+    assertGoogleOptionsRoute(activeAdapter, route.provider);
+    initialRequest = await activeAdapter.buildRequest(parsed, {
+      headers: selectedForwardHeaders,
+      translatorBudget,
+      ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
+    });
     refreshRoutedNamespaceToolAliases(initialRequest);
     recordAdapterReasoning(logCtx, initialRequest);
     recordAdapterTier(logCtx, initialRequest);
@@ -4713,7 +4865,7 @@ async function handleResponsesInner(
   let upstreamResponse: Response;
   try {
     if (activeAdapter.fetchResponse) {
-      noteAttemptSend(logCtx.activeAttempt, inputTokenEstimate);
+      noteDiagnosticAttempt(logCtx.activeAttempt, inputTokenEstimate, undefined, activeAdapter.name);
       await waitForProviderRequestSlot(route.providerName, route.provider, route.modelId, upstream.signal);
       upstreamResponse = await activeAdapter.fetchResponse(builtInitialRequest, {
         abortSignal: upstream.signal,
@@ -4722,6 +4874,7 @@ async function handleResponsesInner(
         executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
           providerName: route.providerName,
           modelId: route.modelId,
+          pacingSlotAcquired: true,
         }),
         ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       });
@@ -4733,7 +4886,7 @@ async function handleResponsesInner(
       const fetchWithRetryPolicy = route.provider.adapter === "google" ? fetchWithTransientRetry : fetchWithResetRetry;
       upstreamResponse = await fetchWithRetryPolicy(
         recovery => {
-          noteAttemptSend(logCtx.activeAttempt, inputTokenEstimate, recovery);
+          noteDiagnosticAttempt(logCtx.activeAttempt, inputTokenEstimate, recovery, activeAdapter.name);
           return fetchWithHeaderTimeout(builtInitialRequest.url, applyUpstreamRecoveryInit({
             method: builtInitialRequest.method,
             headers: builtInitialRequest.headers,
@@ -4784,6 +4937,13 @@ async function handleResponsesInner(
     const rebuildAndRefetch = async (
       recovery: AttemptRecoveryKind,
     ): Promise<Response | { failed: Response }> => {
+      try {
+        assertGoogleOptionsRoute(activeAdapter, route.provider);
+      } catch (err) {
+        cleanupUpstreamAbort();
+        upstream.abort();
+        return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(err instanceof Error ? err.message : String(err))) };
+      }
       let retryRequest: AdapterRequest;
       if (sameTargetRequest !== undefined && sameTargetParsed === parsed && sameTargetToken === transportToken) {
         // Same target (key/adapter/parsed/tier unchanged): replay the exact cached request.
@@ -4794,6 +4954,7 @@ async function handleResponsesInner(
             headers: selectedForwardHeaders,
             translatorBudget,
             ...(imageTierBias > 0 ? { imageTierBias } : {}),
+            ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
           });
           recordAdapterReasoning(logCtx, retryRequest);
           recordAdapterTier(logCtx, retryRequest);
@@ -4818,7 +4979,7 @@ async function handleResponsesInner(
       if (retryEstimate !== undefined) logCtx.usageLogInputTokens = retryEstimate;
       logCtx.providerAdapter = activeAdapter.name;
       sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
-      noteAttemptSend(logCtx.activeAttempt, retryEstimate, recovery);
+      noteDiagnosticAttempt(logCtx.activeAttempt, retryEstimate, recovery, activeAdapter.name);
       try {
         try {
           if (activeAdapter.fetchResponse) {
@@ -4830,6 +4991,7 @@ async function handleResponsesInner(
               executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
                 providerName: route.providerName,
                 modelId: route.modelId,
+                pacingSlotAcquired: true,
               }),
               ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
             });
@@ -4871,6 +5033,14 @@ async function handleResponsesInner(
           cleanupUpstreamAbort();
           return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(err));
         }
+        if (isAntigravityOAuth && refreshed.accountId !== antigravityAccountId) {
+          cleanupUpstreamAbort();
+          return formatErrorResponse(401, "authentication_error", "Antigravity OAuth account changed during refresh");
+        }
+        if (isAntigravityOAuth && !refreshed.projectId) {
+          cleanupUpstreamAbort();
+          return formatErrorResponse(400, "invalid_request_error", "Antigravity project unavailable — re-run `ocx login google-antigravity`");
+        }
         sentOAuthSnapshot = refreshed;
         replayOAuthCredentialSnapshot = {
           accountId: refreshed.accountId,
@@ -4878,6 +5048,9 @@ async function handleResponsesInner(
         };
         if (route.providerName === "kiro") {
           parsed._kiroAuthContext = { ...(refreshed.kiro ?? {}) };
+        }
+        if (isAntigravityOAuth) {
+          route.provider = { ...route.provider, project: refreshed.projectId };
         }
         const refreshedProvider = resolveProviderTransport(
           route.providerName,
@@ -4974,6 +5147,37 @@ async function handleResponsesInner(
         upstreamResponse = result;
       }
 
+      // Antigravity never rotates accounts. Record the account cooldown and allow only one
+      // short, abort-aware replay on the same credential; longer Retry-After values surface to
+      // the client so a conversation cannot churn through accounts or requests.
+      if (upstreamResponse.status === 403 && isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravityCooldown(antigravityAccountId, upstreamResponse.headers.get("retry-after"), Date.now(), "geoblock");
+      }
+      if (upstreamResponse.status === 429 && isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravityCooldown(antigravityAccountId, upstreamResponse.headers.get("retry-after"));
+        const retryAfter = retryableAntigravity429DelayMs(upstreamResponse.headers.get("retry-after"));
+        if (!antigravity429RetryAttempted && retryAfter !== null) {
+          antigravity429RetryAttempted = true;
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+          try {
+            await sleepWithAbort(retryAfter, upstream.signal);
+          } catch {
+            cleanupUpstreamAbort();
+            upstream.abort();
+            return clientCancelledResponse();
+          }
+          if (options.abortSignal?.aborted || upstream.signal.aborted) {
+            cleanupUpstreamAbort();
+            upstream.abort();
+            return clientCancelledResponse();
+          }
+          const result = await rebuildAndRefetch("rate-limit-429");
+          if ("failed" in result) return result.failed;
+          upstreamResponse = result;
+          continue recovery;
+        }
+      }
+
       // Opt-in Anthropic OAuth account pool (#294): cool the failed account and retry
       // with another eligible OAuth account (bounded per request). Disabled by default.
       while (
@@ -5004,75 +5208,6 @@ async function handleResponsesInner(
           );
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
           const result = await rebuildAndRefetch("anthropic-oauth-429");
-          if ("failed" in result) return result.failed;
-          upstreamResponse = result;
-        } catch {
-          break;
-        }
-      }
-      // Antigravity OAuth accounts use the same bounded pre-stream carousel as Anthropic, but
-      // their process-local routing module also excludes accounts cooled by quota/rate-limit
-      // responses. Geoblocked 403s intentionally never enter this loop.
-      while (
-        upstreamResponse.status === 429
-        && route.providerName === "google-antigravity"
-        && route.provider.googleMode === "cloud-code-assist"
-        && antigravityAccountId
-        && antigravityFailovers < 3
-      ) {
-        const stickWaitMs = antigravity429StickWaitMs(antigravityAccountId);
-        if (stickWaitMs !== null) {
-          await Bun.sleep(stickWaitMs);
-          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
-          invalidateSameTargetRequest();
-          activeAdapter = resolveAdapter(
-            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
-            config.cacheRetention,
-          );
-          bindRouteReasoningReplayScope({
-            parsed,
-            providerName: route.providerName,
-            provider: route.provider,
-            adapterName: activeAdapter.name,
-            codexAuthContext: authCtx,
-            forwardHeaders: selectedForwardHeaders,
-          });
-          const result = await rebuildAndRefetch("rate-limit-429");
-          if ("failed" in result) return result.failed;
-          upstreamResponse = result;
-          continue;
-        }
-        const nextAccountId = rotateAntigravityAccountOn429(antigravityAccountId, antigravitySessionKey);
-        if (!nextAccountId) break;
-        try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* already consumed/closed */ }
-        try {
-          const accessToken = await getValidAccessTokenForAccount("google-antigravity", nextAccountId);
-          const nextCredential = getAccountCredential("google-antigravity", nextAccountId);
-          const bound = bindAntigravityProject(
-            { ...route.provider, apiKey: accessToken },
-            nextCredential?.projectId,
-          );
-          if (!bound.ok) {
-            return formatErrorResponse(bound.status, bound.type, bound.message);
-          }
-          antigravityAccountId = nextAccountId;
-          antigravityFailovers += 1;
-          route.provider = bound.provider;
-          replayOAuthCredentialSnapshot = undefined;
-          invalidateSameTargetRequest();
-          activeAdapter = resolveAdapter(
-            resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
-            config.cacheRetention,
-          );
-          bindRouteReasoningReplayScope({
-            parsed,
-            providerName: route.providerName,
-            provider: route.provider,
-            adapterName: activeAdapter.name,
-            codexAuthContext: authCtx,
-            forwardHeaders: selectedForwardHeaders,
-          });
-          const result = await rebuildAndRefetch("rate-limit-429");
           if ("failed" in result) return result.failed;
           upstreamResponse = result;
         } catch {
@@ -5298,6 +5433,16 @@ async function handleResponsesInner(
     nextParsed: OcxParsedRequest,
     initialRecoveryKind?: AttemptRecoveryKind,
   ): AsyncGenerator<AdapterEvent> {
+    const requestValidationEvent = (error: unknown): AdapterEvent | undefined => {
+      if (!(error instanceof OcxRequestValidationError)) return undefined;
+      return {
+        type: "error",
+        status: error.status,
+        errorType: "invalid_request_error",
+        code: "invalid_request_error",
+        message: error.message,
+      };
+    };
     let response: Response | undefined;
     // One-shot recovery label for the next top-of-loop continuation send after a failover rotation.
     let nextContinuationRecoveryKind: AttemptRecoveryKind | undefined = initialRecoveryKind;
@@ -5310,6 +5455,7 @@ async function handleResponsesInner(
      */
     const fetchContinuation = async (recoveryKind?: AttemptRecoveryKind): Promise<Response> => {
       let continuationRequest: AdapterRequest | undefined;
+      assertGoogleOptionsRoute(activeAdapter, route.provider, nextParsed);
       if (sameTargetRequest !== undefined && sameTargetParsed === nextParsed && sameTargetToken === transportToken) {
         // Same target (key/adapter/parsed/tier unchanged): replay the exact cached request.
         continuationRequest = sameTargetRequest;
@@ -5319,6 +5465,7 @@ async function handleResponsesInner(
             headers: selectedForwardHeaders,
             translatorBudget,
             ...(imageTierBias > 0 ? { imageTierBias } : {}),
+            ...(observeAntigravityProviderError ? { onProviderError: observeAntigravityProviderError } : {}),
           });
           recordAdapterReasoning(logCtx, continuationRequest);
           recordAdapterTier(logCtx, continuationRequest);
@@ -5344,8 +5491,13 @@ async function handleResponsesInner(
       // Optional recovery label for same-target / failover continuation sends.
       const replayKind: AttemptRecoveryKind | undefined = recoveryKind;
       try {
+        if (diagnosticContext) {
+          diagnosticContext.recovery = replayKind;
+          diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
+          diagnosticContext.adapterName = activeAdapter.name;
+        }
         if (activeAdapter.fetchResponse) {
-          noteAttemptSend(logCtx.activeAttempt, continuationEstimate, replayKind);
+          noteDiagnosticAttempt(logCtx.activeAttempt, continuationEstimate, replayKind, activeAdapter.name);
           await waitForProviderRequestSlot(route.providerName, route.provider, nextParsed.modelId, upstream.signal);
           return await activeAdapter.fetchResponse(builtContinuationRequest, {
             abortSignal: upstream.signal,
@@ -5354,6 +5506,7 @@ async function handleResponsesInner(
             executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
               providerName: route.providerName,
               modelId: nextParsed.modelId,
+              pacingSlotAcquired: true,
             }),
             ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
           });
@@ -5363,7 +5516,7 @@ async function handleResponsesInner(
         const fetchContinuationWithRetryPolicy = route.provider.adapter === "google" ? fetchWithTransientRetry : fetchWithResetRetry;
         return await fetchContinuationWithRetryPolicy(
           recovery => {
-            noteAttemptSend(logCtx.activeAttempt, continuationEstimate, recovery ?? replayKind);
+            noteDiagnosticAttempt(logCtx.activeAttempt, continuationEstimate, recovery ?? replayKind, activeAdapter.name);
             return fetchWithHeaderTimeout(
               builtContinuationRequest.url,
               applyUpstreamRecoveryInit({
@@ -5392,7 +5545,10 @@ async function handleResponsesInner(
         nextContinuationRecoveryKind = undefined;
         response = await fetchContinuation(recoveryKind);
       } catch (error) {
-        if (options.abortSignal?.aborted || upstream.signal.aborted) {
+        const validationEvent = requestValidationEvent(error);
+        if (validationEvent) {
+          yield validationEvent;
+        } else if (options.abortSignal?.aborted || upstream.signal.aborted) {
           yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
         } else {
           yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -5438,12 +5594,51 @@ async function handleResponsesInner(
         try {
           response = await fetchContinuation("rate-limit-429");
         } catch (error) {
-          if (options.abortSignal?.aborted || upstream.signal.aborted) {
+          const validationEvent = requestValidationEvent(error);
+          if (validationEvent) {
+            yield validationEvent;
+          } else if (options.abortSignal?.aborted || upstream.signal.aborted) {
             yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
           } else {
             yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
           }
           return;
+        }
+      }
+
+      if (response.status === 403 && isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravityCooldown(antigravityAccountId, response.headers.get("retry-after"), Date.now(), "geoblock");
+      }
+      if (response.status === 429 && isAntigravityOAuth && antigravityAccountId) {
+        recordAntigravityCooldown(antigravityAccountId, response.headers.get("retry-after"));
+        const retryAfter = retryableAntigravity429DelayMs(response.headers.get("retry-after"));
+        if (!antigravity429RetryAttempted && retryAfter !== null) {
+          antigravity429RetryAttempted = true;
+          try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
+          try {
+            await sleepWithAbort(retryAfter, upstream.signal);
+          } catch {
+            if (options.abortSignal?.aborted || upstream.signal.aborted) {
+              yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
+            } else {
+              yield { type: "error", message: "Provider continuation failed: retry wait interrupted" };
+            }
+            return;
+          }
+          if (options.abortSignal?.aborted || upstream.signal.aborted) {
+            yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
+            return;
+          }
+          try {
+            response = await fetchContinuation("rate-limit-429");
+          } catch (error) {
+            if (options.abortSignal?.aborted || upstream.signal.aborted) {
+              yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
+            } else {
+              yield { type: "error", message: `Provider continuation failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
+            }
+            return;
+          }
         }
       }
 
@@ -5653,7 +5848,13 @@ async function handleResponsesInner(
       const detachContinuationBodyGuard = cancelBodyOnAbort(response.body, upstream.signal);
       try {
         if (nextParsed.stream) {
-          yield* activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata);
+          yield* diagnoseAdapterEvents(
+            activeAdapter.parseStream(response, translatorBudget, logCtx.activeTierMetadata),
+            activeAdapter.name,
+            diagnosticRequestId,
+            logCtx,
+            adapterDiagnosticState,
+          );
         } else if (activeAdapter.parseResponse) {
           yield* await activeAdapter.parseResponse(response, translatorBudget, logCtx.activeTierMetadata);
         } else {
@@ -5663,7 +5864,10 @@ async function handleResponsesInner(
         detachContinuationBodyGuard();
       }
     } catch (error) {
-      if (options.abortSignal?.aborted) {
+      const validationEvent = requestValidationEvent(error);
+      if (validationEvent) {
+        yield validationEvent;
+      } else if (options.abortSignal?.aborted) {
         yield { type: "error", message: "client closed request during terminal continuation", status: 499 };
       } else {
         yield { type: "error", message: `Provider continuation parse failed: ${redactSecretString(error instanceof Error ? error.message : String(error))}` };
@@ -5685,11 +5889,18 @@ async function handleResponsesInner(
   };
 
   if (parsed.stream) {
-    const initialEventStream = activeAdapter.parseStream(
-      upstreamResponse,
-      translatorBudget,
-      logCtx.activeTierMetadata,
+    const initialEventStream = diagnoseAdapterEvents(
+      activeAdapter.parseStream(upstreamResponse, translatorBudget, logCtx.activeTierMetadata),
+      activeAdapter.name,
+      diagnosticRequestId,
+      logCtx,
+      adapterDiagnosticState,
     );
+    if (diagnosticContext) {
+      diagnosticContext.adapterName = activeAdapter.name;
+      diagnosticContext.attempt = logCtx.activeAttempt?.ordinal;
+      diagnosticContext.recovery = logCtx.activeAttempt?.recoveryKinds.at(-1);
+    }
     const eventStream = terminalGuardEnabled
       ? guardTerminalEventStream({
           parsed,
@@ -5725,6 +5936,7 @@ async function handleResponsesInner(
         ...(routedCompaction ? { compaction: true } : {}),
         // Same grok-surface split as the runTurn branch above.
         ...(logCtx.surface === "grok" ? { heartbeatStyle: "comment" as const } : {}),
+        ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
         onUsage: usage => {
           // Raw adapter usage, pre wire-normalization (see the runTurn branch above).
           logCtx.usageFromBridge = true;

@@ -66,7 +66,8 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | --- | --- | --- |
 | `adapter` | `string` | One of `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `azure-openai` (or alias `azure`). |
 | `baseUrl` | `string` | Upstream API base URL. Most built-in fixed endpoints ignore a mismatch; collision-safe key presets preserve an older same-named custom destination. |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | Optional client-side outbound request-start pacing, separate from upstream usage, billing, and rate-limit indicators. RPM is converted to an even interval; `minIntervalMs` may impose a longer interval. Provider limits apply across all models, while `models` entries use exact upstream model IDs (for example `nvidia/llama-3.1-nemotron-ultra-253b-v1`) and can only add delay. Queue waits do not consume the upstream response-header timeout. HTTP, Responses WebSocket, and explicit adapter `fetchResponse`/`runTurn` dispatches are covered. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | Optional client-side outbound request-start pacing, separate from upstream usage, billing, and rate-limit indicators. RPM is converted to an even interval; `minIntervalMs` may impose a longer interval; `jitterMs` adds only a positive random delay (0–60,000 ms). Provider limits apply across all models, while `models` entries use exact upstream model IDs and can only add delay. Queue waits do not consume the upstream response-header timeout. HTTP, Responses WebSocket, and explicit adapter `fetchResponse`/`runTurn` dispatches are covered. |
+| `tlsProfile?` | `"antigravity-browser"` | Explicit, experimental Antigravity-only TLS/HTTP2 compatibility profile. It requires Google OAuth Cloud Code Assist and canonical Antigravity hosts. It is unofficial, does not ensure Terms-of-Service compliance or prevent suspension, may make traffic more distinctive, and falls back to Bun if initialization fails. OAuth/token/onboarding traffic remains on standard Bun TLS. Prefer official Gemini API-key, Vertex, or documented Code Assist routes when policy safety matters. |
 | `upstreamHttpVersion?` | `"auto" \| "http1.1" \| "h1" \| "http2" \| "h2"` | Pin the HTTP version used for upstream requests to this provider. Defaults to `auto`, which lets Bun negotiate. An explicit pin requires an HTTPS target and fails locally when it cannot be honored. Set `http1.1` when a provider's HTTP/2 SSE stream stalls instead of delivering events — the symptom is a long-running streaming request that produces nothing and eventually times out. For Cursor, `http1.1`/`h1` selects its `RunSSE` + `BidiAppend` compatibility transport for inference and also pins live model discovery. Management `POST`/`PATCH` accept `null` to clear it back to `auto`. |
 | `responsesPath?` | `string` | Relative resource path for key-auth `openai-responses` requests. It must start with `/` and contain no scheme, query, or fragment. |
 | `supportsServiceTier?` | `boolean` | Tri-state canonical Fast capability fallback. `true` publishes Fast in the catalog, satisfies service-tier routing requirements, contributes a supported fingerprint, and lets fast mode inject the provider's canonical wire value on a compatible final adapter. `false` strips the field and never injects, and exact model declarations cannot reopen it. Absent leaves the provider unclassified: fast mode does not inject or normalize a canonical caller value, and caller values obey the final wire's forwarding permission (`chatServiceTier` on Chat; passthrough on Responses). The registry classifies canonical OpenAI (`true`), DeepSeek, and Volcengine Ark (`false`); set it explicitly only for custom gateways that genuinely support tiers. |
@@ -77,6 +78,7 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | `apiKey?` | `string` | API key, or an `${ENV_VAR}` / `$ENV_VAR` reference resolved at request time. |
 | `apiKeyTransport?` | `"x-api-key" \| "bearer"` | Anthropic key header style. Defaults to native `x-api-key`; valid only for key-auth `anthropic` providers. |
 | `apiKeyPool?` | `ApiKeyPoolEntry[]` | Multi-key pool. `apiKey` mirrors the active entry; each item has `id`, `key`, optional `label`, and optional numeric `addedAt`. |
+| `azureCredential?` | `{ type: "default-azure-credential"; managedIdentityClientId?: string }` | Azure identity mode for `azure-openai`/`azure`. Mutually exclusive with `apiKey` and `apiKeyPool`; uses `DefaultAzureCredential` with scope `https://cognitiveservices.azure.com/.default`. The optional client ID is write-only and only selects the managed-identity leg. Identity providers use static configured models and must not use generic `/models` discovery. |
 | `defaultModel?` | `string` | Model used when this provider is selected without an explicit model. |
 | `models?` | `string[]` | Seed/fallback model list. With `liveModels: false`, these are the only discovered models. |
 | `liveModels?` | `boolean` | Fetch the live catalog on start/sync (default `true`). Custom providers use `${baseUrl}/models`; built-ins may use a registry URL and filter. |
@@ -85,6 +87,7 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | `modelContextWindows?` | `Record<string, number>` | Per-model context fallbacks/caps. These override `contextWindow`: an unknown window uses the configured value, while smaller live metadata remains authoritative. |
 | `modelInputModalities?` | `Record<string, string[]>` | Per-model input hints such as `["text"]` or `["text", "image"]`. |
 | `modelMaxInputTokens?` | `Record<string, number>` | Positive per-model max input limits used for catalog auto-compaction hints. |
+| `modelAutoCompactTokenLimits?` | `Record<string, number>` | Positive safe-integer per-model soft auto-compaction budgets. Values can only lower the effective 90%-of-context/max-input envelope and are omitted when no authoritative context window is known. For canonical `openai`, keys must be exact supported native model IDs without provider or account-selector prefixes. Provider PATCH merges entries; set a key to `null` to delete it or the whole field to `null` to clear the map. These `null` tombstones are PATCH-only. |
 | `defaultMaxOutputTokens?` | `number` | Provider-wide `openai-chat` fallback when the client omits `max_output_tokens`. |
 | `modelMaxOutputTokens?` | `Record<string, number>` | Positive per-model `openai-chat` fallback budgets; exact/pattern matches beat the provider default. |
 | `modelCosts?` | `Record<string, Cost4>` | Per-model display prices (USD per 1M tokens), keyed by that provider's exact upstream model id — not a provider identifier or a routed `provider/model` label, e.g. `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`. Any model id is a valid key — custom providers may target any OpenAI-compatible endpoint through the `openai-chat` adapter, and local or internal provider ids work even when they are absent from the built-in catalogs. User-configured prices win over the built-in catalogs in the Logs `~$` and Usage estimates; historical entries are repriced from the current overlay, so editing a price can move past totals. The fallback order is user `modelCosts` → exact official correction → jawcode catalog → expected-price overlay → model-level vendor fallback, and an all-zero entry falls through to the next source in that sequence. Each rate must be a non-negative finite number at most 1,000,000 (USD per 1M tokens); out-of-range rows are rejected by the management boundary and dropped on load. Display-time estimation only: overlays never affect routing, account selection, quotas, or billing. |
@@ -211,7 +214,10 @@ configured under [`claudeCode.authMode`](/reference/configuration/server/#claude
 Dashboard connection tests and live model discovery use a bounded GET-only transport. Without an
 outbound proxy, opencodex resolves the hostname once and connects only to that validated address.
 HTTPS retains the original Host, SNI, and certificate verification; provider config cannot disable
-certificate checks.
+certificate checks. The native TLS profile performs a direct DNS safety preflight, but its native
+transport cannot pin the checked address, so a small DNS time-of-check/time-of-use residual remains;
+normal certificate and hostname verification are separate controls. Proxy-routed requests retain
+the proxy's peer-selection boundary.
 
 When `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` applies, these operations keep Bun's native fetch.
 URL and literal-address checks still run, but the proxy chooses the final route, DNS answer, and peer,
@@ -389,6 +395,78 @@ acceptable-use policy forbids circumventing rate limits and manipulating usage m
 | `codexWarmupEnabled?` | `boolean` | `false` | Opt into synthetic Codex pool-account validation. |
 | `codexWarmupMaxAgeSeconds?` | `number` | `691200` | Revalidate an account after 8 days. |
 | `codexWarmupModel?` | `string` | `gpt-5.4-mini` | Native model used for optional warmup. |
+
+## Azure OpenAI authentication
+
+Use the `azure-openai` adapter (or its `azure` alias) with a real resource URL. The adapter sends
+requests to the v1 Responses endpoint by appending `/v1/responses`; do not leave the registry's
+`{resource}` placeholder in a hand-written configuration.
+
+For Azure identity, `DefaultAzureCredential` is selected by the exact credential object below. Keep
+the model catalog static because identity mode does not perform generic `/models` discovery:
+
+```json
+{
+  "providers": {
+    "azure-identity": {
+      "adapter": "azure-openai",
+      "baseUrl": "https://my-resource.openai.azure.com/openai",
+      "azureCredential": {
+        "type": "default-azure-credential"
+      },
+      "models": ["gpt-4o"],
+      "liveModels": false,
+      "defaultModel": "gpt-4o"
+    }
+  }
+}
+```
+
+To select a user-assigned managed identity, add its client id to the same object:
+
+```json
+{
+  "providers": {
+    "azure-managed-identity": {
+      "adapter": "azure-openai",
+      "baseUrl": "https://my-resource.openai.azure.com/openai",
+      "azureCredential": {
+        "type": "default-azure-credential",
+        "managedIdentityClientId": "00000000-0000-0000-0000-000000000000"
+      },
+      "models": ["gpt-4o"],
+      "liveModels": false,
+      "defaultModel": "gpt-4o"
+    }
+  }
+}
+```
+
+The client id is write-only: it is used only for the managed-identity leg and is not returned in
+management DTOs. Identity requests use the exact scope
+`https://cognitiveservices.azure.com/.default` and send one `Authorization: Bearer` header. If the
+credential chain cannot produce a token, the request fails with the stable redacted error
+`Azure identity credential unavailable`; SDK diagnostics and tokens are never returned.
+
+`azureCredential` is mutually exclusive with both `apiKey` and `apiKeyPool` (and with non-key
+`authMode` values). If you prefer ordinary Azure API-key authentication, leave out
+`azureCredential` and use the existing key mode:
+
+```json
+{
+  "providers": {
+    "azure-key": {
+      "adapter": "azure-openai",
+      "baseUrl": "https://my-resource.openai.azure.com/openai",
+      "apiKey": "${AZURE_OPENAI_API_KEY}",
+      "defaultModel": "gpt-4o"
+    }
+  }
+}
+```
+
+Key mode remains API-key compatible and sends `api-key` instead of Bearer authentication. Do not
+combine the two modes in one provider entry; use separate provider entries when both are needed.
 
 ## Fixed provider endpoints
 

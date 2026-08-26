@@ -51,6 +51,28 @@ interface GoogleTokenPayload {
   id_token?: unknown;
 }
 
+const TERMINAL_OAUTH_ERRORS = new Set([
+  "access_denied",
+  "expired_token",
+  "invalid_grant",
+  "refresh_token_reused",
+  "refresh_token_revoked",
+  "revoked",
+  "revoked_token",
+]);
+
+export class AntigravityTokenRequestError extends Error {
+  readonly httpStatus: number;
+  readonly oauthError?: string;
+
+  constructor(httpStatus: number, oauthError?: string) {
+    super(`Antigravity token request failed: ${httpStatus}`);
+    this.name = "AntigravityTokenRequestError";
+    this.httpStatus = httpStatus;
+    if (oauthError) this.oauthError = oauthError;
+  }
+}
+
 function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
   const part = token.split(".")[1];
   if (!part) return undefined;
@@ -75,8 +97,17 @@ async function postToken(body: Record<string, string>, signal?: AbortSignal): Pr
     signal: requestSignal(signal),
   });
   if (!response.ok) {
-    // Status only — the body can carry grant/account details.
-    throw new Error(`Antigravity token request failed: ${response.status}`);
+    let oauthError: string | undefined;
+    if (response.status === 400 || response.status === 401) {
+      try {
+        const body = await response.json() as { error?: unknown };
+        const candidate = typeof body.error === "string" ? body.error.trim().toLowerCase() : "";
+        if (TERMINAL_OAUTH_ERRORS.has(candidate)) oauthError = candidate;
+      } catch {
+        /* Keep status-only errors for malformed or non-JSON responses. */
+      }
+    }
+    throw new AntigravityTokenRequestError(response.status, oauthError);
   }
   return (await response.json()) as GoogleTokenPayload;
 }
@@ -221,7 +252,11 @@ export async function loginAntigravity(ctrl: OAuthController, opts?: { forceAcco
   return new AntigravityOAuthFlow(ctrl, opts).login();
 }
 
-export async function refreshAntigravityToken(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials> {
+export async function refreshAntigravityToken(
+  refreshToken: string,
+  signal?: AbortSignal,
+  previousCredential?: OAuthCredentials,
+): Promise<OAuthCredentials> {
   if (!refreshToken) throw new Error("Antigravity credentials are expired and do not include a refresh token");
   const payload = await postToken({
     grant_type: "refresh_token",
@@ -230,8 +265,10 @@ export async function refreshAntigravityToken(refreshToken: string, signal?: Abo
     refresh_token: refreshToken,
   }, signal);
   const creds = credentialsFromPayload(payload, refreshToken);
-  // Re-discover the project on refresh so a newly-onboarded account fills in projectId.
-  const projectId = await discoverAntigravityProject(creds.access, signal).catch(() => undefined);
+  // Project discovery is onboarding work, not ordinary token renewal. Preserve the existing
+  // account-scoped project id and avoid an extra authenticated CCA call when it is present.
+  const projectId = previousCredential?.projectId
+    ?? await discoverAntigravityProject(creds.access, signal).catch(() => undefined);
   return projectId ? { ...creds, projectId } : creds;
 }
 

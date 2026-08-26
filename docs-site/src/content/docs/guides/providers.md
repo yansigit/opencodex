@@ -119,6 +119,21 @@ ocx logout <provider>
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Experimental PKCE login, live HTTP/2 transport with an opt-in HTTP/1.1 compatibility path, and account-filtered model discovery. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Experimental. GitHub device flow + `copilot_internal` exchange (VS Code OAuth client). Requires an active Copilot subscription; not an official third-party API. |
 
+### Antigravity pacing and TLS profile
+
+The built-in `google-antigravity` provider uses conservative request pacing by default: 30 RPM,
+at least 2,000 ms between request starts, and up to 500 ms of positive jitter. Existing explicit
+`requestPacing` settings remain authoritative; `jitterMs` may be set from 0 through 60,000 ms and
+only delays a start. Model rules can make the provider slower, never faster.
+
+The dashboard can explicitly enable `tlsProfile: "antigravity-browser"` for this provider. This is
+an experimental, unofficial compatibility mechanism, not a compliance feature.
+It may make traffic more distinctive, and initialization failures fall back to Bun; requests that
+already reached the native transport are not replayed. The profile is limited to canonical Cloud
+Code Assist hosts, keeps certificate and hostname verification enabled, and leaves OAuth/token/
+onboarding requests on standard Bun TLS. Users who prioritize account-policy safety should use the
+official Gemini API-key, Vertex, or documented Gemini Code Assist routes.
+
 After a terminal Nous refresh failure, run `ocx login nous` to reauthenticate.
 
 For the canonical Kimi Coding Plan presets (`kimi` account login and `kimi-code` API key),
@@ -129,6 +144,39 @@ field, opencodex does not strip it and retry or mutate saved configuration. Othe
 deny-by-default.
 
 You can also start OAuth from the [web dashboard](/guides/web-dashboard/).
+
+### Logging in from another browser profile, or another machine
+
+When a login starts, the proxy opens the authorization URL on **its own** machine, using the OS
+default browser — and therefore the default profile. That is the right behavior for a local
+desktop and the wrong one in two common cases: you need a different browser profile (a work
+identity, a second account), or the dashboard is open against a proxy running somewhere else.
+
+Every login surface shows the authorization URL with a copy button, the device code when the
+provider issues one, and a field to paste the redirect URL or authorization code back. So you can
+always finish a login by hand.
+
+To stop the proxy from opening a browser at all, tick **Don't open a browser on the proxy machine**
+beside the login button, or set it permanently:
+
+```json
+{ "oauthOpenBrowser": false }
+```
+
+Absent and `true` both open, so nothing changes for an existing install; only an explicit
+`false` declines. `POST /api/oauth/login` and `POST /api/codex-auth/login` also accept a
+per-request `openBrowser` boolean that overrides the stored setting for that login.
+
+Two cases behave differently, and it is worth knowing which you are in:
+
+- **A different browser profile on the same machine** works with the copied link alone. The
+  loopback callback on `127.0.0.1` still completes the flow.
+- **A browser on a different machine** also needs the paste fallback, because the redirect URI is
+  still `http://127.0.0.1:<port>/callback` on the proxy's host. Finish the login there, then paste
+  the redirect URL (or just the code) back into the dashboard or `ocx account code`.
+
+Device-code providers never open a browser from the proxy in either case: they show a code and a
+verification URL to open wherever you are signed in.
 
 ### Multiple OAuth accounts
 
@@ -257,6 +305,25 @@ an ambiguous token selection), when `KIROCLI_DB_PATH` / `KIRO_CLI_DB_FILE` redir
 from the live CLI store, or when an existing primary CLI database has no recognized token row.
 Repair or remove the unreadable database under the normal `kiro-cli` data path, unset those import
 selectors, then retry. Signing in from a machine with no existing `kiro-cli` session is unaffected.
+
+## Azure OpenAI identity
+
+Azure OpenAI can use the Azure SDK's default credential chain instead of an API
+key. Configure `adapter: "azure-openai"` (or `"azure"`), a real resource
+`baseUrl`, and `azureCredential: { "type": "default-azure-credential" }`.
+For a user-assigned managed identity, add the non-secret
+`managedIdentityClientId`; it selects only that managed-identity leg. Identity
+uses the exact scope `https://cognitiveservices.azure.com/.default`, sends one
+`Authorization: Bearer` header, and reports credential/import failures only as
+`Azure identity credential unavailable` without returning SDK diagnostics or
+tokens.
+
+Set `models` and `liveModels: false` for the supported static catalog; Azure
+identity does not use generic `/models` discovery. Do not combine
+`azureCredential` with `apiKey`, `apiKeyPool`, or a non-key `authMode`. API-key
+mode remains supported separately and uses the adapter's `api-key` header.
+See the [Azure OpenAI authentication configuration reference](/reference/configuration/providers/#azure-openai-authentication)
+for copyable identity and API-key examples.
 
 ## 3. API-key catalog
 

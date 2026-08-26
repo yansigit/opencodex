@@ -259,6 +259,19 @@ export interface OcxConfig {
   port: number;
   /** Opt in to one identical-turn retry when a Responses completion has no text or tool call. */
   emptyCompletionRetry?: boolean;
+  /**
+   * Whether a login may open a browser on the machine running the proxy.
+   *
+   * Absent and `true` both mean "open", which is what every existing install
+   * already does. Only an explicit `false` declines — for an operator who wants
+   * to paste the authorization URL into a different browser profile, or who is
+   * driving the dashboard from a different machine than the proxy.
+   *
+   * Deliberately a boolean and not an "auto" mode: inferring headlessness from
+   * SSH_CONNECTION or a missing DISPLAY breaks a working login silently when
+   * the guess is wrong.
+   */
+  oauthOpenBrowser?: boolean;
   /** Maximum usage-log bytes read for one management snapshot. */
   managementUsageMaxReadBytes?: number;
   providers: Record<string, OcxProviderConfig>;
@@ -455,6 +468,8 @@ export interface OcxConfig {
    * Routed parents get v2 tools; Sol/Terra can still spawn Grok/Claude (issue #92).
    */
   keepNativeChatGptOnV1?: boolean;
+  /** Experimental routed target for eligible native V2 root parents. */
+  v2NativeParentOverride?: { enabled?: boolean; model?: string };
   /** Experimental, default-off ChatGPT recovery for encrypted V2 routed tasks. */
   agentTaskRecovery?: {
     enabled?: boolean;

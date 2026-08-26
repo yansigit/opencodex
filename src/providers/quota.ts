@@ -8,7 +8,7 @@ import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { codexPlanKey } from "../codex/plan";
 import { resolveEnvValue } from "../config";
-import { getValidAccessToken, getValidAccessTokenForAccount } from "../oauth";
+import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, type OAuthAccessSnapshot } from "../oauth";
 import { getAccountCredential, getAccountSet, getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
 import { apiKeyPoolEntryId } from "./api-keys";
@@ -34,6 +34,7 @@ import {
   isTerminalAntigravityQuotaStatus,
 } from "./antigravity-quota";
 import { antigravityHostCandidates, isAntigravityHttpsHost } from "../adapters/google-antigravity-hosts";
+import { providerTlsFetch } from "../lib/provider-tls-profile";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
@@ -2078,22 +2079,23 @@ function antigravityUsedPercent(quotaInfo: Record<string, unknown>): number | un
 }
 
 async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
-  const credential = getCredential("google-antigravity");
-  if (!credential?.projectId) return null;
-  let accessToken: string;
+  let snapshot: OAuthAccessSnapshot;
   try {
-    accessToken = await getValidAccessToken("google-antigravity");
+    snapshot = await getValidAccessTokenSnapshot("google-antigravity");
   } catch {
     return null;
   }
+  if (!snapshot.projectId) return null;
   const baseUrl = (config.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
+  const fetchImpl = providerTlsFetch(provider, config, globalThis.fetch);
   let liveQuota: ProviderQuota | null;
   try {
     liveQuota = await fetchAntigravityLiveQuota({
-      accessToken,
-      projectId: credential.projectId,
+      accessToken: snapshot.accessToken,
+      projectId: snapshot.projectId,
       baseUrl,
       timeoutMs: REQUEST_TIMEOUT_MS,
+      fetchImpl,
     });
   } catch (error) {
     if (error instanceof AntigravityQuotaRpcError && isTerminalAntigravityQuotaStatus(error.status)) {
@@ -2106,15 +2108,15 @@ async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig
   for (const [index, host] of antigravityHostCandidates(baseUrl).entries()) {
     if (!isAntigravityHttpsHost(host)) continue;
     try {
-      const response = await fetch(`${host}/v1internal:fetchAvailableModels`, {
+      const response = await fetchImpl(`${host}/v1internal:fetchAvailableModels`, {
         method: "POST",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
           "User-Agent": antigravityUserAgent(),
-          Authorization: `Bearer ${accessToken}`,
+          Authorization: `Bearer ${snapshot.accessToken}`,
         },
-        body: JSON.stringify({ project: credential.projectId }),
+        body: JSON.stringify({ project: snapshot.projectId }),
         redirect: "error",
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });

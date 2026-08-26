@@ -41,6 +41,7 @@ import { LOCAL_PROVIDER_RELOAD_NAME_HEADER, LOCAL_PROVIDER_RELOAD_PATH } from ".
 import { getAccountSet, saveCredential } from "../src/oauth/store";
 import { fastPolicyForModel } from "../src/providers/service-tier";
 import { resolveWireProtocolOverride } from "../src/server/adapter-resolve";
+import { providerTlsFetch, resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../src/lib/provider-tls-profile";
 
 // Full-suite Windows load: startServer + multi-step provider PATCH/GET flows exceed the
 // default 5s per-test budget (same flake class as 810fa115 / claude-management-api).
@@ -116,6 +117,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetProviderTlsProfileForTests();
+  setProviderTlsRuntimeForTest(undefined);
   globalThis.fetch = originalGlobalFetch;
   if (previousApiToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
@@ -130,6 +133,77 @@ afterEach(() => {
 });
 
 describe("provider management validation", () => {
+  test("accepts Azure identity and exposes only a safe credential presence bit", () => {
+    const provider = {
+      adapter: "azure-openai",
+      baseUrl: "https://resource.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " },
+    };
+    expect(providerManagementConfigError("azure", provider)).toBeNull();
+    expect(providerManagementConfigError("azure", { ...provider, apiKey: "${AZURE_KEY}" })).toContain("apiKey");
+    expect(providerManagementConfigError("azure", { ...provider, apiKeyPool: [] })).toContain("apiKeyPool");
+    expect(providerManagementConfigError("azure", { ...provider, authMode: "oauth" })).toContain("authMode");
+    expect(providerManagementConfigError("azure", { ...provider, azureCredential: { type: "default-azure-credential", managedIdentityClientId: "   " } })).toContain("non-empty");
+    expect(providerManagementConfigError("azure", { ...provider, azureCredential: { type: "default-azure-credential", token: "secret-token" } })).toContain("unrecognized");
+    const redactedNameError = providerManagementConfigError("sk-super-secret-9876", {
+      ...provider,
+      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "   " },
+    })!;
+    expect(redactedNameError).not.toContain("sk-super-secret-9876");
+    expect(redactedNameError).toContain("[REDACTED]");
+
+    const dto = safeConfigDTO({ port: 10100, defaultProvider: "azure", providers: { azure: provider } } as OcxConfig) as {
+      providers: { azure: Record<string, unknown> };
+    };
+    expect(dto.providers.azure.hasAzureCredential).toBe(true);
+    expect(JSON.stringify(dto)).not.toContain("client-123");
+  });
+
+  test("provider POST does not carry a stale key pool into Azure identity and PATCH can set/clear it", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    saveConfig(config("127.0.0.1"));
+    const server = startServer(0);
+    try {
+      const base = {
+        adapter: "azure-openai",
+        baseUrl: "http://127.0.0.1:1/openai",
+        allowPrivateNetwork: true,
+        liveModels: false,
+        models: ["gpt-4o"],
+      };
+      expect((await fetch(new URL("/api/providers", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "azure", provider: { ...base, apiKey: "key", apiKeyPool: [{ id: "k1", key: "key" }, { id: "k2", key: "key2" }] } }),
+      })).status).toBe(200);
+      expect((await fetch(new URL("/api/providers", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: "azure", provider: { ...base, azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " } } }),
+      })).status).toBe(200);
+      expect(loadConfig().providers.azure?.apiKeyPool).toBeUndefined();
+      expect(loadConfig().providers.azure?.azureCredential?.managedIdentityClientId).toBe("client-123");
+
+      const patchResponse = await fetch(new URL("/api/providers?name=azure", server.url), {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ azureCredential: null }),
+      });
+      expect(patchResponse.status).toBe(200);
+      expect(loadConfig().providers.azure?.azureCredential).toBeUndefined();
+      const setResponse = await fetch(new URL("/api/providers?name=azure", server.url), {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ azureCredential: { type: "default-azure-credential" } }),
+      });
+      expect(setResponse.status).toBe(200);
+      expect(loadConfig().providers.azure?.azureCredential).toEqual({ type: "default-azure-credential" });
+    } finally {
+      await server.stop(true);
+    }
+  });
   test("provider reload adopts only the validated disk row without rewriting config", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -476,6 +550,18 @@ describe("provider management validation", () => {
     expect(secretNameError).toContain("[REDACTED]");
   });
 
+  test("provider management redacts provider names from auto-compaction validation errors", () => {
+    const secretName = "sk-super-secret-9876";
+    const error = providerManagementConfigError(secretName, {
+      adapter: "openai-chat",
+      baseUrl: "https://api.example.test/v1",
+      modelAutoCompactTokenLimits: { model: 0 },
+    })!;
+    expect(error).toContain("modelAutoCompactTokenLimits");
+    expect(error).not.toContain(secretName);
+    expect(error).toContain("[REDACTED]");
+  });
+
   test("provider request pacing PATCH persists provider and model limits without catalog churn", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -670,13 +756,18 @@ describe("provider management validation", () => {
       freshHome();
       const server = startServer(0);
       try {
-        expect((await seedProvider(server.url, { modelContextWindows: { "deepseek-v4-flash": 900000 } })).status).toBe(200);
+        expect((await seedProvider(server.url, {
+          modelContextWindows: { "deepseek-v4-flash": 900000 },
+          modelAutoCompactTokenLimits: { "deepseek-v4-flash": 120000 },
+        })).status).toBe(200);
         expect((await seedProvider(server.url, {})).status).toBe(200);
 
         // The user's key survives, and the registry seed is NOT persisted into user config:
         // router.ts fills registry values beneath user entries at resolve time, so writing
         // them here would be a side effect of an unrelated save.
         expect(loadConfig().providers["opencode-go"]?.modelContextWindows).toEqual({ "deepseek-v4-flash": 900000 });
+        expect(loadConfig().providers["opencode-go"]?.modelAutoCompactTokenLimits)
+          .toEqual({ "deepseek-v4-flash": 120000 });
       } finally {
         await server.stop(true);
       }
@@ -686,11 +777,19 @@ describe("provider management validation", () => {
       freshHome();
       const server = startServer(0);
       try {
-        expect((await seedProvider(server.url, { modelContextWindows: { "deepseek-v4-flash": 900000 } })).status).toBe(200);
-        expect((await seedProvider(server.url, { modelContextWindows: { "kimi-k3": 300000 } })).status).toBe(200);
+        expect((await seedProvider(server.url, {
+          modelContextWindows: { "deepseek-v4-flash": 900000 },
+          modelAutoCompactTokenLimits: { "deepseek-v4-flash": 120000 },
+        })).status).toBe(200);
+        expect((await seedProvider(server.url, {
+          modelContextWindows: { "kimi-k3": 300000 },
+          modelAutoCompactTokenLimits: { "kimi-k3": 90000 },
+        })).status).toBe(200);
 
         expect(loadConfig().providers["opencode-go"]?.modelContextWindows)
           .toEqual({ "deepseek-v4-flash": 900000, "kimi-k3": 300000 });
+        expect(loadConfig().providers["opencode-go"]?.modelAutoCompactTokenLimits)
+          .toEqual({ "deepseek-v4-flash": 120000, "kimi-k3": 90000 });
       } finally {
         await server.stop(true);
       }
@@ -841,6 +940,9 @@ describe("provider management validation", () => {
         ["map-shape", { ...canonicalDirect, modelContextWindows: [] }],
         ["map-value", { ...canonicalDirect, modelContextWindows: { "gpt-5.6-sol": "wide" } }],
         ["map-key", { ...canonicalDirect, modelContextWindows: { "  ": 500_000 } }],
+        ["soft-map-shape", { ...canonicalDirect, modelAutoCompactTokenLimits: [] }],
+        ["soft-map-value", { ...canonicalDirect, modelAutoCompactTokenLimits: { "gpt-5.6-sol": 1e100 } }],
+        ["soft-map-key", { ...canonicalDirect, modelAutoCompactTokenLimits: { "team/gpt-5.6-sol": 120_000 } }],
       ] as const) {
         const response = await fetch(new URL("/api/providers", server.url), {
           method: "POST",
@@ -855,6 +957,7 @@ describe("provider management validation", () => {
       // the proxy advertises.
       for (const [, provider] of [
         ["per-model", { ...canonicalDirect, modelContextWindows: { "gpt-5.6-sol": 500_000 } }],
+        ["soft-per-model", { ...canonicalDirect, modelAutoCompactTokenLimits: { "gpt-5.6-sol": 120_000 } }],
         ["provider-wide", { ...canonicalDirect, contextWindow: 500_000 }],
       ] as const) {
         const response = await fetch(new URL("/api/providers", server.url), {
@@ -864,6 +967,19 @@ describe("provider management validation", () => {
         });
         expect(response.status).toBe(200);
       }
+
+      // POST enriches the canonical row with registry-owned capabilities. A later budget-only
+      // PATCH must validate the overlay against a fresh seed instead of rejecting those fields.
+      const patchedBudget = await fetch(new URL("/api/providers?name=openai", server.url), {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ modelAutoCompactTokenLimits: { "gpt-5.6-terra": 90_000 } }),
+      });
+      expect(patchedBudget.status).toBe(200);
+      expect(loadConfig().providers.openai.modelAutoCompactTokenLimits).toEqual({
+        "gpt-5.6-sol": 120_000,
+        "gpt-5.6-terra": 90_000,
+      });
 
       const acceptedCustom = await fetch(new URL("/api/providers", server.url), {
         method: "POST",
@@ -997,9 +1113,16 @@ describe("provider management validation", () => {
       expect(legacy.status).toBe(400);
 
       const dto = await fetch(new URL("/api/config", server.url)).then(response => response.json()) as {
-        providers: Record<string, { codexAccountMode?: string }>;
+        providers: Record<string, {
+          codexAccountMode?: string;
+          modelAutoCompactTokenLimits?: Record<string, number>;
+        }>;
       };
       expect(dto.providers.openai.codexAccountMode).toBe("direct");
+      expect(dto.providers.openai.modelAutoCompactTokenLimits).toEqual({
+        "gpt-5.6-sol": 120_000,
+        "gpt-5.6-terra": 90_000,
+      });
       expect(dto.providers["openai-multi"]).toBeUndefined();
       expect(dto.providers["custom-max-input"]).not.toHaveProperty("modelMaxInputTokens");
 
@@ -2695,6 +2818,14 @@ describe("provider management validation", () => {
     expect(clearTransport?.status).toBe(200);
     expect(liveConfig.providers.gateway.apiKeyTransport).toBeUndefined();
 
+    // Credential header names are case-insensitive at the HTTP boundary and must never persist.
+    for (const name of ["API-KEY", "api-key"]) {
+      const rejected = await patch("extra", { headers: { [name]: "should-not-persist" } });
+      expect(rejected?.status).toBe(400);
+      expect(liveConfig.providers.extra.headers).toBeUndefined();
+      expect(loadConfig().providers.extra?.headers).toBeUndefined();
+    }
+
     // authMode local is guarded by the registry: nvidia (key) → 400; ollama (local) → ok.
     const nvidiaLocal = await patch("nvidia", { authMode: "local" });
     expect(nvidiaLocal?.status).toBe(400);
@@ -2735,6 +2866,7 @@ describe("provider management validation", () => {
           models: ["wide", "narrow"],
           contextWindow: 256_000,
           modelContextWindows: { narrow: 64_000 },
+          modelAutoCompactTokenLimits: { narrow: 32_000 },
           modelSupportsServiceTier: { narrow: false },
         },
       },
@@ -2758,27 +2890,32 @@ describe("provider management validation", () => {
       name: string;
       contextWindow?: number;
       modelContextWindows?: Record<string, number>;
+      modelAutoCompactTokenLimits?: Record<string, number>;
     }>;
     expect(rows.find(row => row.name === "relay")).toMatchObject({
       contextWindow: 256_000,
       modelContextWindows: { narrow: 64_000 },
+      modelAutoCompactTokenLimits: { narrow: 32_000 },
       modelSupportsServiceTier: { narrow: false },
     });
 
     const updated = await request("PATCH", {
       contextWindow: 350_000,
       modelContextWindows: { wide: 350_000 },
+      modelAutoCompactTokenLimits: { wide: 100_000 },
       modelSupportsServiceTier: { wide: true },
     });
     expect(updated?.status).toBe(200);
     expect(liveConfig.providers.relay).toMatchObject({
       contextWindow: 350_000,
       modelContextWindows: { wide: 350_000, narrow: 64_000 },
+      modelAutoCompactTokenLimits: { wide: 100_000, narrow: 32_000 },
       modelSupportsServiceTier: { wide: true, narrow: false },
     });
     expect(loadConfig().providers.relay).toMatchObject({
       contextWindow: 350_000,
       modelContextWindows: { wide: 350_000, narrow: 64_000 },
+      modelAutoCompactTokenLimits: { wide: 100_000, narrow: 32_000 },
       modelSupportsServiceTier: { wide: true, narrow: false },
     });
 
@@ -2792,6 +2929,9 @@ describe("provider management validation", () => {
       { modelContextWindows: { wide: 1e100 } },
       { modelContextWindows: { "": 100_000 } },
       { modelContextWindows: { wide: -1 } },
+      { modelAutoCompactTokenLimits: { wide: 1e100 } },
+      { modelAutoCompactTokenLimits: { "": 100_000 } },
+      { modelAutoCompactTokenLimits: { constructor: 100_000 } },
       { modelSupportsServiceTier: { wide: "yes" } },
       { modelSupportsServiceTier: { "": true } },
     ]) {
@@ -2800,11 +2940,16 @@ describe("provider management validation", () => {
     expect(liveConfig.providers.relay).toMatchObject({
       contextWindow: 350_000,
       modelContextWindows: { wide: 350_000, narrow: 64_000 },
+      modelAutoCompactTokenLimits: { wide: 100_000, narrow: 32_000 },
       modelSupportsServiceTier: { wide: true, narrow: false },
     });
 
     expect((await request("PATCH", { modelContextWindows: { wide: null } }))?.status).toBe(200);
     expect(liveConfig.providers.relay.modelContextWindows).toEqual({ narrow: 64_000 });
+
+    expect((await request("PATCH", { modelAutoCompactTokenLimits: { wide: null } }))?.status).toBe(200);
+    expect(liveConfig.providers.relay.modelAutoCompactTokenLimits).toEqual({ narrow: 32_000 });
+    expect(loadConfig().providers.relay.modelAutoCompactTokenLimits).toEqual({ narrow: 32_000 });
 
     expect((await request("PATCH", { modelSupportsServiceTier: { wide: null } }))?.status).toBe(200);
     expect(liveConfig.providers.relay.modelSupportsServiceTier).toEqual({ narrow: false });
@@ -2812,12 +2957,15 @@ describe("provider management validation", () => {
     const cleared = await request("PATCH", {
       contextWindow: null,
       modelContextWindows: null,
+      modelAutoCompactTokenLimits: null,
       modelSupportsServiceTier: null,
     });
     expect(cleared?.status).toBe(200);
     expect(liveConfig.providers.relay.contextWindow).toBeUndefined();
     expect(liveConfig.providers.relay.modelContextWindows).toBeUndefined();
+    expect(liveConfig.providers.relay.modelAutoCompactTokenLimits).toBeUndefined();
     expect(liveConfig.providers.relay.modelSupportsServiceTier).toBeUndefined();
+    expect(loadConfig().providers.relay.modelAutoCompactTokenLimits).toBeUndefined();
   });
 
   test("provider PATCH manages custom headers with merge and clear semantics", async () => {
@@ -2919,6 +3067,221 @@ describe("provider management validation", () => {
     expect(raw).not.toContain(sentinelName);
     expect(raw).not.toContain(sentinelValue);
   });
+
+  test("GET /api/providers exposes only redacted Antigravity TLS profile state", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+          tlsProfile: "antigravity-browser",
+          apiKey: "must-not-leak",
+        },
+      },
+    };
+    const req = new Request("http://127.0.0.1/api/providers", { method: "GET" });
+    const res = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
+    expect(res?.status).toBe(200);
+    const raw = await res!.text();
+    const row = (JSON.parse(raw) as { name: string; tlsProfile?: string; tlsProfileStatus?: string }[])
+      .find(item => item.name === "google-antigravity");
+    expect(row).toMatchObject({ tlsProfile: "antigravity-browser", tlsProfileStatus: "disabled" });
+    expect(raw).not.toContain("must-not-leak");
+  });
+
+  test("PATCH /api/providers persists the validated Antigravity TLS profile", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+        },
+      },
+    };
+    const request = new Request("http://127.0.0.1/api/providers?name=google-antigravity", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
+    });
+    const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {});
+    expect(response?.status).toBe(200);
+    expect(liveConfig.providers["google-antigravity"]?.tlsProfile).toBe("antigravity-browser");
+  });
+
+  test("POST and PATCH reject Antigravity TLS profiles outside the canonical OAuth CCA contract", async () => {
+    const canonical = {
+      adapter: "google" as const,
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+      tlsProfile: "antigravity-browser" as const,
+    };
+    const cases = [
+      { name: "other-provider", provider: { ...canonical } },
+      { name: "google-antigravity", provider: { ...canonical, authMode: "key" as const } },
+      { name: "google-antigravity", provider: { ...canonical, googleMode: "ai-studio" as const } },
+      { name: "google-antigravity", provider: { ...canonical, baseUrl: "https://example.test" } },
+    ];
+    expect(providerManagementConfigError("google-antigravity", canonical)).toBeNull();
+    for (const candidate of cases) {
+      expect(providerManagementConfigError(candidate.name, candidate.provider)).toContain("tlsProfile");
+
+      const postConfig: OcxConfig = {
+        port: 0,
+        hostname: "127.0.0.1",
+        defaultProvider: "openai",
+        openaiProviderTierVersion: 2,
+        providers: { openai: { ...canonicalDirect } },
+      };
+      const post = new Request("http://127.0.0.1/api/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: candidate.name, provider: candidate.provider }),
+      });
+      expect((await handleManagementAPI(post, new URL(post.url), postConfig, {}))?.status).toBe(400);
+
+      const patchConfig: OcxConfig = {
+        port: 0,
+        hostname: "127.0.0.1",
+        defaultProvider: "openai",
+        openaiProviderTierVersion: 2,
+        providers: {
+          openai: { ...canonicalDirect },
+          [candidate.name]: { ...candidate.provider, tlsProfile: undefined },
+        },
+      };
+      const patch = new Request(`http://127.0.0.1/api/providers?name=${encodeURIComponent(candidate.name)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
+      });
+      expect((await handleManagementAPI(patch, new URL(patch.url), patchConfig, {}))?.status).toBe(400);
+    }
+  });
+
+  test("provider management rejects noncanonical Antigravity OAuth destinations", async () => {
+    const invalid = {
+      adapter: "google" as const,
+      baseUrl: "https://evil.example.test",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+    };
+    expect(providerManagementConfigError("google-antigravity", invalid)).toContain("canonical Antigravity");
+    const postConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: { openai: { ...canonicalDirect } },
+    };
+    const post = new Request("http://127.0.0.1/api/providers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "google-antigravity", provider: invalid }),
+    });
+    expect((await handleManagementAPI(post, new URL(post.url), postConfig, {}))?.status).toBe(400);
+  });
+
+  test("GET /api/providers clears active TLS status when the profile is removed", async () => {
+    const profiled = {
+      adapter: "google" as const,
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+      tlsProfile: "antigravity-browser" as const,
+    };
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      providers: { openai: { ...canonicalDirect }, "google-antigravity": profiled },
+    };
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => new Response("ok"),
+      }),
+    });
+    await providerTlsFetch("google-antigravity", profiled, globalThis.fetch)("https://daily-cloudcode-pa.googleapis.com/v1internal");
+    const request = () => new Request("http://127.0.0.1/api/providers", { method: "GET" });
+    const active = await handleManagementAPI(request(), new URL(request().url), liveConfig, {});
+    const activeRow = (JSON.parse(await active!.text()) as Array<{ name: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(activeRow?.tlsProfileStatus).toBe("active");
+
+    liveConfig.providers["google-antigravity"] = {
+      ...profiled,
+      baseUrl: "https://cloudcode-pa.googleapis.com",
+    };
+    const replacedRequest = request();
+    const replaced = await handleManagementAPI(replacedRequest, new URL(replacedRequest.url), liveConfig, {});
+    const replacedRow = (JSON.parse(await replaced!.text()) as Array<{ name: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(replacedRow?.tlsProfileStatus).toBe("disabled");
+
+    liveConfig.providers["google-antigravity"] = profiled;
+
+    liveConfig.providers["google-antigravity"] = { ...profiled, tlsProfile: undefined };
+    const removedRequest = request();
+    const removed = await handleManagementAPI(removedRequest, new URL(removedRequest.url), liveConfig, {});
+    const removedRow = (JSON.parse(await removed!.text()) as Array<{ name: string; tlsProfile?: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(removedRow).toMatchObject({ tlsProfileStatus: "disabled" });
+    expect(removedRow?.tlsProfile).toBeUndefined();
+  });
+
+  test("provider connectivity diagnostics redact profiled native errors", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+          tlsProfile: "antigravity-browser",
+        },
+      },
+    };
+    await saveCredential("google-antigravity", {
+      access: "management-access-token",
+      refresh: "management-refresh-token",
+      expires: Date.now() + 3_600_000,
+      projectId: "management-project",
+    });
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => {
+          throw new Error("native management failure at http://proxy-user:proxy-secret@example.test:8080/?access_token=management-access-token");
+        },
+      }),
+    });
+    const req = new Request("http://127.0.0.1/api/providers/test?name=google-antigravity", { method: "POST" });
+    const response = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
+    expect(response?.status).toBe(200);
+    const body = await response!.json() as { ok: boolean; error?: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).not.toMatch(/proxy-user|proxy-secret|management-access-token|access_token/);
+  });
+
   test("provider PATCH merges headers case-insensitively", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -2999,7 +3362,7 @@ describe("provider management validation", () => {
       "x-opencode-client": "desktop",
     });
   });
-  test("concurrent provider PATCHes merge different headers", async () => {
+  test("concurrent provider PATCHes serialize mixed fields and per-model soft budgets", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -3034,6 +3397,19 @@ describe("provider management validation", () => {
     expect(first?.status).toBe(200);
     expect(second?.status).toBe(200);
     expect(liveConfig.providers.hdr.headers).toEqual({ "X-A": "a", "X-B": "b" });
+
+    const [third, fourth] = await Promise.all([
+      patch("hdr", {
+        headers: { "X-C": "c" },
+        modelAutoCompactTokenLimits: { m1: 80_000 },
+      }),
+      patch("hdr", { modelAutoCompactTokenLimits: { m2: 64_000 } }),
+    ]);
+    expect(third?.status).toBe(200);
+    expect(fourth?.status).toBe(200);
+    expect(liveConfig.providers.hdr.headers).toEqual({ "X-A": "a", "X-B": "b", "X-C": "c" });
+    expect(liveConfig.providers.hdr.modelAutoCompactTokenLimits).toEqual({ m1: 80_000, m2: 64_000 });
+    expect(loadConfig().providers.hdr.modelAutoCompactTokenLimits).toEqual({ m1: 80_000, m2: 64_000 });
   });
   test("provider context-cap API persists toggles and annotates model rows", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });

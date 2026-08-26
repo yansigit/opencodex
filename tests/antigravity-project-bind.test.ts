@@ -62,28 +62,21 @@ describe("bindAntigravityProject", () => {
     expect(bound.provider.project).toBe("project-from-current-account");
   });
 
-  test("does not promote global active on session-scoped failover", () => {
+  test("binds project from snapshot without promoting global active", () => {
     const source = readFileSync(new URL("../src/server/responses/core.ts", import.meta.url), "utf8");
     const start = source.indexOf("resolveAntigravityAccountForSession(antigravitySessionKey)");
-    const end = source.indexOf('if (route.providerName === "kiro")', start);
+    const end = source.indexOf("} catch (err) {", start);
     const initialSelection = source.slice(start, end);
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(initialSelection).toContain("bindAntigravityProject");
+    expect(initialSelection).toContain("resolved.projectId");
     expect(initialSelection).not.toContain('setActiveAccount("google-antigravity"');
   });
 
-  test("429 carousel does not promote global active on hop", () => {
+  test("Antigravity enforces strict session affinity without 429 account rotation carousel", () => {
     const source = readFileSync(new URL("../src/server/responses/core.ts", import.meta.url), "utf8");
-    const start = source.indexOf("rotateAntigravityAccountOn429(antigravityAccountId");
-    const end = source.indexOf("// Unknown provenance is deliberately fail-soft", start);
-    const carousel = source.slice(start, end);
-
-    expect(start).toBeGreaterThanOrEqual(0);
-    expect(end).toBeGreaterThan(start);
-    expect(carousel).toContain("rotateAntigravityAccountOn429");
-    expect(carousel).not.toContain('setActiveAccount("google-antigravity"');
+    expect(source).not.toContain("rotateAntigravityAccountOn429");
   });
 
   test("threads Antigravity accountId into image and web-search sidecar fetches", () => {

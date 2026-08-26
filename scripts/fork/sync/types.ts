@@ -35,6 +35,11 @@ export interface SyncEvent {
   mergeBaseCount?: number;
   recommendedLane?: "noop" | "daily-merge" | "emergency-rebuild";
   prepareStatus?: PrepareResult["status"];
+  prepareResult?: PrepareResult;
+  /** SHA of the integration branch head used for the three-way comparison. */
+  headSha?: string;
+  /** All merge bases found between headSha and vendorMainSha. */
+  mergeBaseShas?: string[];
   detectedAt: string;
   error?: string;
 }

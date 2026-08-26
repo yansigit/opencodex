@@ -6,6 +6,12 @@ description: Записи провайдеров, аутентификация, 
 Провайдер сообщает opencodex, где живёт модель, на каком wire-adapter'е она работает и как
 аутентифицируются запросы.
 
+Azure identity configurations use `azureCredential` and are documented in the
+[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
+including `managedIdentityClientId`, the exact scope, `liveModels: false`,
+mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
+remains supported separately.
+
 ## Верхнеуровневые поля, связанные с провайдерами
 
 | Поле | Тип | По умолчанию | Значение |
@@ -69,7 +75,8 @@ cross-route credential fallback не существует. Строки API GPT-
 | --- | --- | --- |
 | `adapter` | `string` | Один из `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `azure-openai` (или alias `azure`). |
 | `baseUrl` | `string` | Базовый URL API upstream'а. Большинство built-in fixed-endpoint'ов игнорируют несовпадение; collision-safe key-preset'ы сохраняют старый custom destination с тем же именем. |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | Опциональное клиентское выравнивание начала исходящих запросов, отдельное от учёта использования, биллинга и индикаторов rate limit апстрима. Лимит провайдера действует на все модели, а `models` сопоставляется с точными ID моделей апстрима и может только увеличить задержку. Ожидание очереди не расходует таймаут заголовков ответа. Поддерживаются HTTP, Responses WebSocket и явные вызовы адаптеров `fetchResponse`/`runTurn`. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | Клиентское выравнивание начала запросов. `jitterMs` добавляет только положительную случайную задержку от 0 до 60 000 мс; правила моделей могут лишь увеличить задержку. |
+| `tlsProfile?` | `"antigravity-browser"` | Экспериментальный неофициальный TLS/HTTP2-профиль только для Google Antigravity Cloud Code Assist и канонических хостов. Он не гарантирует соблюдение условий или отсутствие блокировки, может сделать трафик более отличимым и переходит на Bun при ошибке инициализации. |
 | `responsesPath?` | `string` | Relative resource path для key-auth запросов `openai-responses`. Должен начинаться с `/` и не может содержать scheme, query или fragment. |
 | `supportsServiceTier?` | `boolean` | Три состояния поддержки `service_tier`. `true`: fast mode может подставлять поле, значения вызывающего сохраняются. `false`: поле удаляется и никогда не подставляется (апстрим, для которого задокументировано отсутствие поддержки, не должен его получать). Не задано: провайдер не классифицирован — значения вызывающего сохраняются без изменений, fast mode не подставляет. Registry классифицирует canonical OpenAI (`true`), DeepSeek и Volcengine Ark (`false`); задавайте явно только для custom gateway'ев, реально поддерживающих tier'ы. |
 | `preserveResponsesReasoningContent?` | `boolean` | Сохранять plaintext reasoning content в replay'нутых Responses reasoning item'ах вместо очистки (очистка — правило ChatGPT backend'а). Включайте для upstream'ов, чей контракт принимает reasoning replay, например DeepSeek. Proxy-minted `ocxr1` envelope'ы удаляются всегда. |
@@ -85,6 +92,7 @@ cross-route credential fallback не существует. Строки API GPT-
 | `modelContextWindows?` | `Record<string, number>` | Значения и cap'ы контекста по отдельным моделям. Перекрывают `contextWindow`: если окно неизвестно, берётся заданное значение, а более маленькая live-metadata остаётся авторитетной. |
 | `modelInputModalities?` | `Record<string, string[]>` | Подсказки modality по модели, например `["text"]` или `["text", "image"]`. |
 | `modelMaxInputTokens?` | `Record<string, number>` | Положительные лимиты max input по моделям, используемые для подсказок auto-compaction в каталоге. |
+| `modelAutoCompactTokenLimits?` | `Record<string, number>` | Мягкие бюджеты автосжатия по моделям в виде положительных безопасных целых чисел. Они могут только уменьшать эффективную границу в 90 % контекста или максимального ввода и не выдаются, если авторитетное окно контекста неизвестно. Для канонического `openai` ключами могут быть только точные поддерживаемые ID нативных моделей без префиксов провайдера или селектора аккаунта. PATCH провайдера объединяет записи: `null` для ключа удаляет его, а `null` для всего поля очищает карту. Такие маркеры `null` допустимы только в PATCH. |
 | `defaultMaxOutputTokens?` | `number` | Provider-wide fallback для `openai-chat`, когда клиент не передал `max_output_tokens`. |
 | `modelMaxOutputTokens?` | `Record<string, number>` | Положительные fallback-budget'ы `openai-chat` по моделям; exact/pattern-match имеет приоритет над provider-default. |
 | `modelCosts?` | `Record<string, Cost4>` | Отображаемые цены по моделям (USD за 1M токенов), ключ — точный upstream id модели этого провайдера (не идентификатор провайдера и не маршрутизируемая метка `provider/model`), значение — четыре поля: `input`, `output`, `cacheRead`, `cacheWrite` (пример: `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`). Любой id допустим — кастомный провайдер может указывать на любой OpenAI-совместимый endpoint через адаптер `openai-chat`, а локальные и внутренние провайдеры работают даже без строки во встроенных каталогах. Пользовательские цены имеют приоритет над встроенными каталогами в оценках `~$` в Logs и Usage; исторические записи пересчитываются по текущему оверлею, поэтому изменение цены может сдвинуть прошлые суммы (порядок: пользователь → каталог jawcode → expected-price overlay → вендорская цена модели); полностью нулевая запись переходит к следующему источнику. Каждая ставка должна быть неотрицательным конечным числом не более 1 000 000 (USD за 1M токенов); строки вне диапазона отклоняются на управляющей границе и отбрасываются при загрузке. Только оценка для отображения: оверлеи не влияют на маршрутизацию, выбор аккаунта, квоты или биллинг. |

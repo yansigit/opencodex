@@ -19,6 +19,8 @@ export interface IncomingMeta {
    * anthropic adapter consumes it; others ignore it.
    */
   imageTierBias?: number;
+  /** Provider-scoped structured error observation; never receives ordinary model payloads. */
+  onProviderError?: (error: { code?: string; status?: number; message?: string }) => void;
 }
 
 export interface ProviderAdapter {
@@ -81,7 +83,7 @@ export interface AdapterRequest {
     /** Client tool-search names actually lowered to upstream function calls for this request. */
     convertedRoutedToolSearchNames?: ReadonlySet<string>;
     /** Upstream-only aliases for namespace tools flattened in this request. */
-    convertedRoutedNamespaceToolAliases?: ReadonlyMap<string, { namespace: string; name: string }>;
+    convertedRoutedNamespaceToolAliases?: ReadonlyMap<string, { namespace: string; name: string; kind: "function" | "custom" }>;
     /** Releases observation of a serialized request body after its final fetch attempt settles. */
     releaseBodyObservation?: () => void;
     /** Exact reasoning parameter emitted by the adapter, for request-log diagnostics only. */
