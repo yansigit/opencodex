@@ -657,9 +657,13 @@ test("Cursor Chat Completions structured output returns 400 before transport", a
     { model: "", provider: "" },
   );
 
-  // Cursor accepts structured output and downgrades it via system prompt instructions,
-  // so the request proceeds to transport instead of returning an upfront 400.
-  expect(response.status).toBe(502);
+  expect(response.status).toBe(400);
+  expect(await response.json()).toMatchObject({
+    error: {
+      type: "invalid_request_error",
+      message: "Cursor does not support structured output",
+    },
+  });
 });
 
 test("responsesSseToChatCompletionsSse emits parallel tool calls once with stable indices", async () => {
