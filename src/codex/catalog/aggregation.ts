@@ -13,6 +13,7 @@ import { getModelMetadata, getModelMetadataCaseInsensitive, listModelMetadata, r
 import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../../providers/derive";
 import { getProviderRegistryEntry } from "../../providers/registry";
 import { applyProviderContextCap, providerContextCap } from "../../providers/context-cap";
+import { clampAutoCompactTokenLimit } from "../../providers/auto-compact-budget";
 import { routedSlug, slugEquals, slugEquivalenceKey, slugsEquivalent } from "../../providers/slug-codec";
 import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
@@ -152,19 +153,17 @@ export function deriveComboCatalogModel(
   // A combo is cap-limited only when every member defining its effective minimum was
   // itself reduced by a provider cap. An uncapped member at the same minimum means the
   // combo would have the same window even without the cap.
-  const contextCapped = limitingMembers.every(member => (
-    member.contextCapped === true
-    || (
-      typeof member.detectedContextWindow === "number"
-      && typeof member.contextWindow === "number"
-      && member.detectedContextWindow > member.contextWindow
-    )
-  ));
+  const contextCapped = limitingMembers.every(member => member.contextCapped === true);
   const maxInputTokens = Math.min(
+    contextWindow,
     ...members.map(member => member.maxInputTokens ?? member.contextWindow!),
   );
-  const detectedContextWindow = Math.min(
-    ...limitingMembers.map(member => member.detectedContextWindow ?? member.contextWindow!),
+  const autoCompactTokenLimit = Math.min(
+    ...members.map(member => clampAutoCompactTokenLimit(
+      member.contextWindow!,
+      member.maxInputTokens,
+      member.autoCompactTokenLimit,
+    )),
   );
   const defaultReasoningEffort = effectiveComboDefault(
     combo.defaultEffort,
@@ -177,8 +176,7 @@ export function deriveComboCatalogModel(
     owned_by: COMBO_NAMESPACE,
     contextWindow,
     maxInputTokens,
-    metadataSource: "derived",
-    detectedContextWindow,
+    autoCompactTokenLimit,
     ...(hasLimitingContextCapMetadata ? { contextCapped } : {}),
     inputModalities,
     reasoningEfforts,
@@ -222,6 +220,7 @@ export function comboCatalogWarningSignature(
       key,
       contextWindow: member?.contextWindow ?? null,
       maxInputTokens: member?.maxInputTokens ?? null,
+      autoCompactTokenLimit: member?.autoCompactTokenLimit ?? null,
       inputModalities: [...new Set(member?.inputModalities ?? [])].sort(),
       reasoningEfforts: [...new Set(member?.reasoningEfforts ?? [])].sort(),
       parallelToolCalls: member?.parallelToolCalls === true,
@@ -311,6 +310,7 @@ export function normalizedOpenAiApiSignature(model: CatalogModel): string {
     id: model.id,
     contextWindow: model.contextWindow ?? null,
     maxInputTokens: model.maxInputTokens ?? null,
+    autoCompactTokenLimit: model.autoCompactTokenLimit ?? null,
     inputModalities: [...new Set(model.inputModalities ?? [])].sort(),
     reasoningEfforts: [...new Set(model.reasoningEfforts ?? [])].sort(),
     ownedBy: model.owned_by ?? null,
