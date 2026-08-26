@@ -375,6 +375,7 @@ describe("Cursor tool definitions", () => {
     expect(note).toContain("Get-Content");
     expect(note).toContain("`cat`/`ls`/`rg`");
     expect(note).toContain("Codex client host");
+    expect(note).toContain("do not stop or narrate intended future actions in plain text");
   });
 
   test("adds codex-native edit guidance only when apply_patch is advertised", () => {
