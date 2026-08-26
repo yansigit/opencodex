@@ -1,16 +1,20 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import {
   workspaceMetadataCache,
+  workspaceConfigCache,
   pruneWorkspaceMetadataCache,
   MAX_WORKSPACE_METADATA_ENTRIES,
+  commandCodeConfig,
 } from "../src/adapters/command-code";
 
 beforeEach(() => {
   workspaceMetadataCache.clear();
+  workspaceConfigCache.clear();
 });
 
 afterEach(() => {
   workspaceMetadataCache.clear();
+  workspaceConfigCache.clear();
 });
 
 describe("workspaceMetadataCache eviction", () => {
@@ -64,5 +68,17 @@ describe("workspaceMetadataCache eviction", () => {
     expect(workspaceMetadataCache.size).toBe(0);
     pruneWorkspaceMetadataCache(Date.now());
     expect(workspaceMetadataCache.size).toBe(0);
+  });
+
+  test("commandCodeConfig returns a stable cached config across turns in the same session", async () => {
+    const sessionId = "session-1234";
+    const cwd = process.cwd();
+    const first = await commandCodeConfig(cwd, sessionId);
+    const second = await commandCodeConfig(cwd, sessionId);
+
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(first).toEqual(second);
+    expect(first).toBe(second);
   });
 });

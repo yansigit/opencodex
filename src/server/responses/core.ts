@@ -4519,7 +4519,7 @@ async function handleResponsesInner(
         }
       },
       recordSidecarOutcome: wsPlan.forwardSidecar?.recordOutcome,
-      connectTimeoutMs: config.connectTimeoutMs ?? 200_000,
+      connectTimeoutMs: config.connectTimeoutMs ?? Math.max(200_000, wsPlan.routedModelStallTimeoutMs),
       routedModelStallTimeoutMs: wsPlan.routedModelStallTimeoutMs,
       stallTimeoutSec: wsPlan.stallTimeoutSec,
       streamRoutedModelOutput: wsPlan.streamRoutedModelOutput,
