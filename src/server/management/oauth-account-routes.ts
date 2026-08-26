@@ -438,10 +438,20 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { provider?: unknown; accountId?: unknown };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
-    if (provider !== "anthropic") return jsonResponse({ error: "clear-cooldown is only supported for anthropic" }, 400);
+    const supported = provider === "anthropic" || provider === "google-antigravity" || provider === "cursor" || provider === "command-code";
+    if (!supported) return jsonResponse({ error: "clear-cooldown is not supported for this provider" }, 400);
     if (!accountId) return jsonResponse({ error: "missing accountId" }, 400);
-    const { clearAnthropicAccountCooldown } = await import("../../oauth/anthropic-routing");
-    const cleared = clearAnthropicAccountCooldown(accountId);
+    let cleared = false;
+    if (provider === "anthropic") {
+      const { clearAnthropicAccountCooldown } = await import("../../oauth/anthropic-routing");
+      cleared = clearAnthropicAccountCooldown(accountId);
+    } else if (provider === "google-antigravity") {
+      const { clearAntigravityAccountCooldown } = await import("../../oauth/antigravity-routing");
+      cleared = clearAntigravityAccountCooldown(accountId);
+    } else if (provider === "cursor" || provider === "command-code") {
+      const { clearPoolAccountCooldown } = await import("../../routing/account-pool");
+      cleared = clearPoolAccountCooldown(provider, accountId);
+    }
     return jsonResponse({ ok: true, cleared });
   }
 

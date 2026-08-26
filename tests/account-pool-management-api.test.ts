@@ -352,4 +352,60 @@ describe("Anthropic account pool strategy management API", () => {
       await server.stop(true);
     }
   });
+
+  test("POST /api/oauth/accounts/clear-cooldown supports anthropic, google-antigravity, cursor, and command-code", async () => {
+    const server = startServer(0);
+    try {
+      // Seed cooldowns
+      const { recordAntigravityCooldown, isAntigravityAccountInCooldown } = await import("../src/oauth/antigravity-routing");
+      const { recordPoolAccountCooldown, isAccountInCooldown } = await import("../src/routing/account-pool");
+      
+      recordAntigravityCooldown("g-acct-1", null, Date.now(), "rate-limit");
+      expect(isAntigravityAccountInCooldown("g-acct-1")).toBe(true);
+
+      recordPoolAccountCooldown("cursor", "cur-acct-1", "rate_limit", null);
+      expect(isAccountInCooldown("cursor", "cur-acct-1")).not.toBeNull();
+
+      recordPoolAccountCooldown("command-code", "cc-acct-1", "rate_limit", null);
+      expect(isAccountInCooldown("command-code", "cc-acct-1")).not.toBeNull();
+
+      // Clear via API
+      const resG = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "google-antigravity", accountId: "g-acct-1" }),
+      });
+      expect(resG.status).toBe(200);
+      expect(await resG.json()).toMatchObject({ ok: true });
+      expect(isAntigravityAccountInCooldown("g-acct-1")).toBe(false);
+
+      const resCur = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "cursor", accountId: "cur-acct-1" }),
+      });
+      expect(resCur.status).toBe(200);
+      expect(await resCur.json()).toMatchObject({ ok: true });
+      expect(isAccountInCooldown("cursor", "cur-acct-1")).toBeNull();
+
+      const resCc = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "command-code", accountId: "cc-acct-1" }),
+      });
+      expect(resCc.status).toBe(200);
+      expect(await resCc.json()).toMatchObject({ ok: true });
+      expect(isAccountInCooldown("command-code", "cc-acct-1")).toBeNull();
+
+      // Unsupported provider
+      const resBad = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "unknown", accountId: "x" }),
+      });
+      expect(resBad.status).toBe(400);
+    } finally {
+      await server.stop(true);
+    }
+  });
 });

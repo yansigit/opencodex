@@ -512,6 +512,16 @@ export default function ProviderAuthPanel({
                         {t("pws.reauthenticate")}
                       </button>
                     )}
+                    {inCooldown && authHandlers.onClearCooldown && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        disabled={busy || Boolean(switchingAccountId)}
+                        onClick={() => void authHandlers.onClearCooldown?.(item.name, account.id)}
+                      >
+                        {t("pws.clearCooldown")}
+                      </button>
+                    )}
                     <button type="button" className="btn btn-ghost btn-sm"
                       onClick={() => void authHandlers.onEditAlias(item.name, "oauth", account.id, account.alias)}>
                       {t("prov.editAlias")}
