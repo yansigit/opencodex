@@ -209,10 +209,11 @@ describe("controller fail-closed helpers", () => {
     assert.equal(trustedActiveMaintenanceCount([
       { state: { status: "running", sessionId: "one" } },
       { state: { status: "reviewing", sessionId: "two" } },
+      { state: { status: "planning", sessionId: "three" } },
       { state: null },
       { state: { status: "running", sessionId: null } },
       { error: new Error("corrupt bot state") },
-    ]), 3);
+    ]), 4);
   });
 
   it("accepts only Jules-authored fast-forward head movement", () => {
@@ -231,6 +232,7 @@ describe("controller fail-closed helpers", () => {
       headCommit: { sha: next, author: { id: 77 }, committer: { id: 1 } },
     };
     assert.equal(isExpectedJulesHeadAdvance(base), true);
+    assert.equal(isExpectedJulesHeadAdvance({ ...base, observedPusherId: null }), true);
     assert.equal(isExpectedJulesHeadAdvance({ ...base, reason: null }), true, "native Jules CI fixes are counted too");
     assert.equal(isExpectedJulesHeadAdvance({ ...base, reason: "unrelated-controller-error" }), false);
     assert.equal(isExpectedJulesHeadAdvance({ ...base, comparison: { ...base.comparison, status: "diverged" } }), false);
