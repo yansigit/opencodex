@@ -11,7 +11,7 @@ import { Select, Switch } from "../../ui";
 import { useT } from "../../i18n/shared";
 import { formatNamespacedModelId } from "../../provider-icons";
 import type { DelegationPatch, DelegationModelOption } from "../../pages/use-subagent-delegation";
-import type { UltraModePatch, UltraModeState, V2NativeParentOverrideState } from "../../pages/use-subagent-delegation";
+import type { UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState } from "../../pages/use-subagent-delegation";
 
 export interface SubagentDelegationSectionProps {
   model: string;
@@ -35,6 +35,9 @@ export interface SubagentDelegationSectionProps {
   nativeParentOverride?: V2NativeParentOverrideState;
   nativeParentOverrideSaving?: boolean;
   onNativeParentOverrideSave?: (state: V2NativeParentOverrideState) => void;
+  agentTaskRecovery?: AgentTaskRecoveryState;
+  agentTaskRecoverySaving?: boolean;
+  onAgentTaskRecoverySave?: (state: AgentTaskRecoveryState) => void;
 }
 
 export default function SubagentDelegationSection({
@@ -59,6 +62,9 @@ export default function SubagentDelegationSection({
   nativeParentOverride = { enabled: false, model: null, active: false },
   nativeParentOverrideSaving = false,
   onNativeParentOverrideSave = () => {},
+  agentTaskRecovery = { enabled: false, model: null },
+  agentTaskRecoverySaving = false,
+  onAgentTaskRecoverySave = () => {},
 }: SubagentDelegationSectionProps) {
   const t = useT();
   // A present empty/whitespace hint is an upstream override that suppresses the
@@ -225,6 +231,40 @@ export default function SubagentDelegationSection({
         {!nativeParentCanActivate && !nativeParentOverride.active && (
           <div className="muted setting-hint">{t("sub.nativeParentOverrideV2Required")}</div>
         )}
+      </div>
+
+      <div className="swi-delegation-row">
+        <div className="setting-copy">
+          <div className="font-semibold">{t("sub.agentTaskRecovery")}</div>
+          <div className="muted setting-hint">{t("sub.agentTaskRecoveryHint")}</div>
+        </div>
+        <div className="swi-delegation-controls">
+          <input
+            type="text"
+            className="input input-sm"
+            style={{ width: 180, textAlign: "right" }}
+            placeholder="gpt-5.6-luna"
+            value={agentTaskRecovery.model ?? ""}
+            onChange={e => {
+              const val = e.target.value.trim();
+              onAgentTaskRecoverySave({
+                enabled: agentTaskRecovery.enabled,
+                model: val.length > 0 ? val : null,
+              });
+            }}
+            disabled={agentTaskRecoverySaving}
+            aria-label={t("sub.agentTaskRecoveryModel")}
+          />
+          <Switch
+            on={agentTaskRecovery.enabled}
+            onClick={() => onAgentTaskRecoverySave({
+              enabled: !agentTaskRecovery.enabled,
+              model: agentTaskRecovery.model,
+            })}
+            disabled={agentTaskRecoverySaving}
+            label={t("sub.agentTaskRecovery")}
+          />
+        </div>
       </div>
 
       <div className="swi-delegation-row swi-prompt-editor">

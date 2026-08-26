@@ -6,7 +6,7 @@ import SubagentsWorkspace, { FEATURED_MAX } from "../components/subagents-worksp
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
-import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState } from "./use-subagent-delegation";
+import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState } from "./use-subagent-delegation";
 
 type CachedSubagents = { available: string[]; chosen: string[] };
 
@@ -27,6 +27,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const delegation = useSubagentDelegation(apiBase);
   const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false });
   const [nativeParentOverride, setNativeParentOverride] = useState<V2NativeParentOverrideState>({ enabled: false, model: null, active: false });
+  const [agentTaskRecovery, setAgentTaskRecovery] = useState<AgentTaskRecoveryState>({ enabled: false, model: null });
   const [multiAgentMode, setMultiAgentMode] = useState<"v1" | "default" | "v2">("default");
   const [keepNativeChatGptOnV1, setKeepNativeChatGptOnV1] = useState(false);
   const [childInstructions, setChildInstructions] = useState("");
@@ -34,6 +35,8 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const [ultraSaving, setUltraSaving] = useState(false);
   const [nativeParentOverrideSaving, setNativeParentOverrideSaving] = useState(false);
   const nativeParentOverrideSavingRef = useRef(false);
+  const [agentTaskRecoverySaving, setAgentTaskRecoverySaving] = useState(false);
+  const agentTaskRecoverySavingRef = useRef(false);
   const [ultraLoadFailed, setUltraLoadFailed] = useState(false);
   const ultraLoadGeneration = useRef(0);
   const currentUltraApiBase = useRef(apiBase);
@@ -56,6 +59,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       multiAgentModeHintText?: string | null;
       subagentDeveloperInstructions?: string | null;
       v2NativeParentOverride?: Partial<V2NativeParentOverrideState>;
+      agentTaskRecovery?: Partial<AgentTaskRecoveryState>;
     }>(res, t("sub.ultraModeLoadFail"));
     if (!data) return false;
     if (signal?.aborted || generation !== ultraLoadGeneration.current || currentUltraApiBase.current !== apiBase) return false;
@@ -76,6 +80,11 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       enabled: override?.enabled === true,
       model: typeof override?.model === "string" ? override.model : null,
       active: override?.active === true,
+    });
+    const recovery = data.agentTaskRecovery;
+    setAgentTaskRecovery({
+      enabled: recovery?.enabled === true,
+      model: typeof recovery?.model === "string" ? recovery.model : null,
     });
     return true;
   }, [apiBase, t]);
@@ -141,6 +150,32 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
     } finally {
       nativeParentOverrideSavingRef.current = false;
       setNativeParentOverrideSaving(false);
+    }
+  };
+
+  const saveAgentTaskRecovery = async (next: AgentTaskRecoveryState) => {
+    if (agentTaskRecoverySavingRef.current) return;
+    agentTaskRecoverySavingRef.current = true;
+    const requestApiBase = apiBase;
+    setAgentTaskRecoverySaving(true);
+    setStatus("");
+    try {
+      const res = await fetch(`${apiBase}/api/v2`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentTaskRecovery: { enabled: next.enabled, model: next.model } }),
+      });
+      await readJsonOrThrow(res, t("sub.agentTaskRecoverySaveFail"));
+      if (currentUltraApiBase.current !== requestApiBase || !await loadUltraMode()) return;
+      setOk(true);
+      setStatus(t("sub.agentTaskRecoverySaved"));
+    } catch (error) {
+      if (currentUltraApiBase.current !== requestApiBase) return;
+      setOk(false);
+      setStatus(error instanceof Error && error.message ? error.message : t("sub.networkError"));
+    } finally {
+      agentTaskRecoverySavingRef.current = false;
+      setAgentTaskRecoverySaving(false);
     }
   };
 
@@ -318,6 +353,9 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
           nativeParentOverride,
           nativeParentOverrideSaving,
           onNativeParentOverrideSave: next => { void saveNativeParentOverride(next); },
+          agentTaskRecovery,
+          agentTaskRecoverySaving,
+          onAgentTaskRecoverySave: next => { void saveAgentTaskRecovery(next); },
           prompt: delegation.prompt,
           childInstructions,
           childInstructionsSaving,

@@ -503,3 +503,62 @@ describe("/api/v2 v2NativeParentOverride", () => {
     expect((await response?.json()).v2NativeParentOverride).toEqual({ enabled: false, model: "relay/parent", active: false });
   });
 });
+
+describe("/api/v2 agentTaskRecovery", () => {
+  function recoveryConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
+    return {
+      providers: { relay: { adapter: "openai-chat", baseUrl: "https://relay.example/v1" } },
+      port: 10100,
+      defaultProvider: "relay",
+      ...overrides,
+    } as OcxConfig;
+  }
+
+  function putAgentTaskRecovery(body: unknown): Request {
+    return putV2({ agentTaskRecovery: body });
+  }
+
+  test("GET returns default inactive agentTaskRecovery state", async () => {
+    isolateHomes();
+    const config = recoveryConfig();
+    saveConfig(config);
+    const res = await handleManagementAPI(getV2(), new URL("http://localhost/api/v2"), config);
+    expect(res?.status).toBe(200);
+    expect((await res?.json()).agentTaskRecovery).toEqual({ enabled: false, model: null });
+  });
+
+  test("GET returns configured agentTaskRecovery state", async () => {
+    isolateHomes();
+    const config = recoveryConfig({ agentTaskRecovery: { enabled: true, model: "gpt-5.6-luna" } });
+    saveConfig(config);
+    const res = await handleManagementAPI(getV2(), new URL("http://localhost/api/v2"), config);
+    expect(res?.status).toBe(200);
+    expect((await res?.json()).agentTaskRecovery).toEqual({ enabled: true, model: "gpt-5.6-luna" });
+  });
+
+  test("PUT persists agentTaskRecovery to config and returns updated DTO", async () => {
+    isolateHomes();
+    const config = recoveryConfig();
+    saveConfig(config);
+    const saved = await handleManagementAPI(
+      putAgentTaskRecovery({ enabled: true, model: "gpt-5.6-luna" }),
+      new URL("http://localhost/api/v2"),
+      config,
+    );
+    expect(saved?.status).toBe(200);
+    expect((await saved?.json()).agentTaskRecovery).toEqual({ enabled: true, model: "gpt-5.6-luna" });
+    expect(loadConfig().agentTaskRecovery).toEqual({ enabled: true, model: "gpt-5.6-luna" });
+  });
+
+  test("PUT rejects invalid agentTaskRecovery payload", async () => {
+    isolateHomes();
+    const config = recoveryConfig();
+    saveConfig(config);
+    const res = await handleManagementAPI(
+      putAgentTaskRecovery({ enabled: "yes" }),
+      new URL("http://localhost/api/v2"),
+      config,
+    );
+    expect(res?.status).toBe(400);
+  });
+});
