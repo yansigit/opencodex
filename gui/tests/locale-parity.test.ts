@@ -60,6 +60,9 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "claude.fastOff",
   "claude.fastOn",
   // Dash / logs short labels, units, and surface badges
+  "logs.filter.speed.slow",
+  "logs.filter.speed.medium",
+  "logs.filter.speed.fast",
   "dash.col.baseUrl",
   "dash.mem.arrayBuffers",
   "dash.mem.external",

@@ -47,6 +47,9 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "dash.updateVersionTransition",
   "prov.accountId",
   "models.shadowCallOriginal",
+  "logs.filter.speed.slow",
+  "logs.filter.speed.medium",
+  "logs.filter.speed.fast",
   // One-glyph marker plus a model id in a narrow column; the meaning lives in the translated
   // tooltip (`logs.badge.interceptedHelperTitle`), not in the glyph.
   "logs.badge.interceptedHelper",
