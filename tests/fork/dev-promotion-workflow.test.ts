@@ -14,13 +14,39 @@ describe("dev promotion workflow contract", () => {
     expect(workflow.on?.workflow_run).toEqual({
       workflows: ["Cross-platform CI"],
       types: ["completed"],
-      branches: ["dev"],
+      branches: ["dev", "main"],
     });
     expect(workflow.on).toHaveProperty("workflow_dispatch");
     expect(workflowSource).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(workflowSource).toContain("github.event.workflow_run.event == 'push'");
     expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'dev'");
     expect(workflowSource).toContain("github.ref_name == github.event.repository.default_branch");
+  });
+
+  test("fast-forwards dev after a successful identical-tree main push", () => {
+    expect(workflow.jobs?.backmerge?.permissions).toEqual({
+      contents: "write",
+      actions: "read",
+    });
+    expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'main'");
+    expect(workflowSource).toContain("github.event.workflow_run.event == 'push'");
+    expect(workflowSource).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(workflowSource).toContain("id: verify-main");
+    expect(workflowSource).toContain("github.event.workflow_run.head_sha");
+    expect(workflowSource).toContain("refs/heads/main");
+    expect(workflowSource).toContain("refs/heads/dev");
+    expect(workflowSource).toContain("git merge-base --is-ancestor");
+    expect(workflowSource).toContain('git diff --quiet "$verified_main_sha" "$live_dev_sha" --');
+    expect(workflowSource).toContain('git push origin "$VERIFIED_MAIN_SHA:refs/heads/dev"');
+    expect(workflowSource).toContain("GIT_ASKPASS");
+    expect(workflowSource).toContain("git-askpass.sh");
+    expect(workflowSource).toContain("GIT_TERMINAL_PROMPT: 0");
+    expect(workflowSource).toContain("post_main_sha");
+    expect(workflowSource).toContain("post_dev_sha");
+    expect(workflowSource).toContain("dev back-merge postcheck failed");
+    expect(workflowSource).not.toContain("gh api --method PATCH");
+    expect(workflowSource).toContain("main moved before the dev back-merge");
+    expect(workflowSource).toContain("dev moved before the dev back-merge");
   });
 
   test("guards against a moved dev head before creating the promotion PR", () => {
@@ -75,7 +101,8 @@ describe("dev promotion workflow contract", () => {
   test("never merges or force-pushes main", () => {
     expect(workflowSource).not.toContain("\\`");
     expect(workflowSource).not.toMatch(/gh\s+pr\s+merge/);
-    expect(workflowSource).not.toMatch(/git\s+push/);
     expect(workflowSource).not.toMatch(/--force/);
+    expect(workflowSource).toMatch(/git\s+push\s+origin\s+\"\$VERIFIED_MAIN_SHA:refs\/heads\/dev\"/);
+    expect(workflowSource).not.toMatch(/git\s+push[^\n]*refs\/heads\/main/);
   });
 });
