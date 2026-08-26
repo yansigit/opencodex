@@ -2842,9 +2842,9 @@ async function handleResponsesInner(
           if (selection.cooldownUntil !== undefined) {
             const retryAfter = Math.max(1, Math.ceil((selection.cooldownUntil - Date.now()) / 1000));
             if (selection.cooldownKind === "geoblock") {
-              return formatErrorResponse(403, "permission_error", "Selected Antigravity OAuth account is unavailable in this location");
+              return formatErrorResponse(403, "permission_error", "Selected Antigravity OAuth account is in local cooldown after upstream location block");
             }
-            return formatErrorResponse(429, "rate_limit_error", "Selected Antigravity OAuth account is temporarily rate-limited", { retryAfter: String(retryAfter) });
+            return formatErrorResponse(429, "rate_limit_error", "Selected Antigravity OAuth account is in local cooldown after upstream rate limit", { retryAfter: String(retryAfter) });
           }
           if (selection.reason === "active-needs-reauth") {
             return formatErrorResponse(401, "authentication_error", "Selected Antigravity OAuth account needs reauthentication");

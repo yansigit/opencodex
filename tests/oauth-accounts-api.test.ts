@@ -11,6 +11,7 @@ import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 import { withStubbedProviderFetch } from "./helpers/catalog-provider-fetch";
 import { getAccountSet } from "../src/oauth/store";
+import { bindAntigravitySessionAffinity, resolveAntigravityAccountForSession } from "../src/oauth/antigravity-routing";
 import { ACCOUNT_IMPORT_DEADLINE_MS, ACCOUNT_IMPORT_MAX_BYTES, ACCOUNT_IMPORT_MAX_REQUEST_BYTES } from "../src/oauth/account-import/types";
 import { handleOauthAccountRoutes } from "../src/server/management/oauth-account-routes";
 
@@ -504,6 +505,7 @@ describe("multiauth accounts API", () => {
     const server = startServer(0);
     try {
       setCached("google-antigravity", [{ provider: "google-antigravity", id: "account-a-only-model" }]);
+      bindAntigravitySessionAffinity("session-test-1", "antigravity-a");
       const response = await fetch(new URL("/api/oauth/accounts/active", server.url), {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ provider: "google-antigravity", accountId: "antigravity-b" }),
@@ -511,6 +513,8 @@ describe("multiauth accounts API", () => {
 
       expect(response.status).toBe(200);
       expect(getStaleCached("google-antigravity")).toBeNull();
+      // Session affinity for existing conversations should have been cleared, so resolving session-test-1 now returns antigravity-b
+      expect(resolveAntigravityAccountForSession("session-test-1")).toMatchObject({ accountId: "antigravity-b", reason: "active" });
     } finally {
       await server.stop(true);
     }

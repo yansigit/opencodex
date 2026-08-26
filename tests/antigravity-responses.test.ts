@@ -6,7 +6,7 @@ import { handleResponses } from "../src/server/responses";
 import type { RequestLogContext } from "../src/server/request-log";
 import { OAUTH_PROVIDERS } from "../src/oauth";
 import { saveCredential } from "../src/oauth/store";
-import { clearAntigravityRoutingState, getAntigravityAccountHealthSnapshot } from "../src/oauth/antigravity-routing";
+import { clearAntigravityRoutingState, getAntigravityAccountHealthSnapshot, recordAntigravityCooldown } from "../src/oauth/antigravity-routing";
 import { getAccountSet } from "../src/oauth/store";
 import {
   resetProviderRequestPacingForTest,
@@ -269,6 +269,22 @@ describe("Antigravity Responses integration", () => {
     }) as typeof fetch;
     const response = await handleResponses(request(), config(), { model: "", provider: "" }, {});
     expect(response.status).toBe(400);
+    expect(calls).toBe(0);
+  });
+
+  test("returns clear local cooldown error message when active account is in cooldown", async () => {
+    const accountId = getAccountSet("google-antigravity")!.activeAccountId;
+    recordAntigravityCooldown(accountId, "60");
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return completed();
+    }) as typeof fetch;
+
+    const response = await handleResponses(request(), fastConfig(), { model: "", provider: "" }, {});
+    expect(response.status).toBe(429);
+    const body = await response.json() as { error?: { message?: string } };
+    expect(body.error?.message).toContain("Selected Antigravity OAuth account is in local cooldown after upstream rate limit");
     expect(calls).toBe(0);
   });
 
