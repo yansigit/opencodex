@@ -37,6 +37,16 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("exit 1");
   });
 
+  test("skips promotion PR mutation when main and verified dev trees are identical", () => {
+    expect(workflowSource).toContain('git fetch --no-tags origin "refs/heads/dev"');
+    expect(workflowSource).toContain('fetched_dev_sha="$(git rev-parse FETCH_HEAD)"');
+    expect(workflowSource).toContain('if [ "$fetched_dev_sha" != "$expected_ci_sha" ]; then');
+    expect(workflowSource).toContain('git diff --quiet HEAD "$fetched_dev_sha" --');
+    expect(workflowSource).toContain("trees_differ=false");
+    expect(workflowSource).toContain("trees_differ=true");
+    expect(workflowSource).toContain("if: steps.verify.outputs.trees_differ == 'true'");
+  });
+
   test("uses least privilege and an immutable trusted checkout", () => {
     expect(workflow.permissions).toEqual({});
     expect(workflow.jobs?.promote?.permissions).toEqual({
