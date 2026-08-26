@@ -90,7 +90,9 @@ function candidateModelName(record: Record<string, unknown>): string {
     ?? record.modelName
     ?? record.model
     ?? record.name
-    ?? record.displayName;
+    ?? record.displayName
+    ?? record.modelFamily
+    ?? record.model_family;
   return typeof explicit === "string" ? explicit.toLowerCase() : "";
 }
 
