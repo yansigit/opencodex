@@ -14,6 +14,86 @@ type DocModel = {
 const DOCS_URL = "https://cursor.com/docs/models-and-pricing";
 const DOCS_ORIGIN = new URL(DOCS_URL).origin;
 
+class JsDataParser {
+  private index = 0;
+
+  constructor(private readonly source: string) {}
+
+  parse(): unknown {
+    const value = this.value();
+    this.space();
+    if (this.index !== this.source.length) throw new Error("Unexpected trailing Cursor catalog data");
+    return value;
+  }
+
+  parsePrefix(): unknown { return this.value(); }
+
+  private value(): unknown {
+    this.space();
+    const char = this.source[this.index];
+    if (char === "{") return this.object();
+    if (char === "[") return this.array();
+    if (char === '"') return this.string();
+    if (this.source.startsWith("!0", this.index)) { this.index += 2; return true; }
+    if (this.source.startsWith("!1", this.index)) { this.index += 2; return false; }
+    if (this.source.startsWith("null", this.index)) { this.index += 4; return null; }
+    const number = this.source.slice(this.index).match(/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?/);
+    if (number) { this.index += number[0].length; return Number(number[0]); }
+    throw new Error(`Unsupported Cursor catalog value at offset ${this.index}`);
+  }
+
+  private object(): Record<string, unknown> {
+    this.index++;
+    const result: Record<string, unknown> = {};
+    this.space();
+    while (this.source[this.index] !== "}") {
+      const key = this.source[this.index] === '"' ? this.string() : this.identifier();
+      this.space();
+      if (this.source[this.index++] !== ":") throw new Error("Invalid Cursor catalog object");
+      result[String(key)] = this.value();
+      this.space();
+      if (this.source[this.index] === ",") { this.index++; this.space(); }
+      else if (this.source[this.index] !== "}") throw new Error("Invalid Cursor catalog object separator");
+    }
+    this.index++;
+    return result;
+  }
+
+  private array(): unknown[] {
+    this.index++;
+    const result: unknown[] = [];
+    this.space();
+    while (this.source[this.index] !== "]") {
+      result.push(this.value());
+      this.space();
+      if (this.source[this.index] === ",") { this.index++; this.space(); }
+      else if (this.source[this.index] !== "]") throw new Error("Invalid Cursor catalog array separator");
+    }
+    this.index++;
+    return result;
+  }
+
+  private string(): string {
+    const start = this.index++;
+    while (this.index < this.source.length) {
+      if (this.source[this.index] === "\\") { this.index += 2; continue; }
+      if (this.source[this.index++] === '"') return JSON.parse(this.source.slice(start, this.index)) as string;
+    }
+    throw new Error("Unterminated Cursor catalog string");
+  }
+
+  private identifier(): string {
+    const start = this.index;
+    while (/[A-Za-z0-9_$]/.test(this.source[this.index] ?? "")) this.index++;
+    if (start === this.index) throw new Error("Invalid Cursor catalog key");
+    return this.source.slice(start, this.index);
+  }
+
+  private space(): void {
+    while (/\s/.test(this.source[this.index] ?? "")) this.index++;
+  }
+}
+
 async function fetchDocsCatalog(): Promise<DocModel[]> {
   const page = await fetch(DOCS_URL, {
     headers: { "User-Agent": "opencodex-cursor-pricing-sync" },
@@ -34,15 +114,9 @@ async function fetchDocsCatalog(): Promise<DocModel[]> {
     if (start < 0) continue;
 
     const arrayStart = start + token.length;
-    let depth = 0;
-    for (let i = arrayStart; i < js.length; i++) {
-      if (js[i] === "[") depth++;
-      else if (js[i] === "]" && --depth === 0) {
-        const models = new Function(`return ${js.slice(arrayStart, i + 1)}`)() as unknown;
-        if (!Array.isArray(models)) throw new Error("Cursor MODELS export is not an array");
-        return models as DocModel[];
-      }
-    }
+    const models = new JsDataParser(js.slice(arrayStart)).parsePrefix();
+    if (!Array.isArray(models)) throw new Error("Cursor MODELS export is not an array");
+    return models as DocModel[];
   }
   throw new Error("Could not find Cursor MODELS catalog in any Next.js chunk");
 }
