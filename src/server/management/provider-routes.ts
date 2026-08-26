@@ -163,6 +163,20 @@ function applyProviderPatchFields(
       return { error: "authMode must be key, forward, oauth, or local" };
     }
   }
+  if (Object.hasOwn(rawBody, "azureCredential")) {
+    const value = rawBody.azureCredential;
+    if (value === null) {
+      delete next.azureCredential;
+    } else {
+      if (!isPlainRecord(value)) return { error: "azureCredential must be an object or null" };
+      const credential = structuredClone(value) as Record<string, unknown>;
+      if (typeof credential.managedIdentityClientId === "string") {
+        credential.managedIdentityClientId = credential.managedIdentityClientId.trim();
+      }
+      next.azureCredential = credential as OcxProviderConfig["azureCredential"];
+    }
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "apiKeyTransport")) {
     const transport = rawBody.apiKeyTransport;
     if (transport === "x-api-key" || transport === "bearer") {
@@ -608,7 +622,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // Overwriting an existing provider must not drop its multi-key pool: carry it over, then
     // let the (possibly new) apiKey join the pool as the active entry.
     const existingPool = config.providers[name]?.apiKeyPool;
-    if (existingPool && !prov.apiKeyPool) prov.apiKeyPool = existingPool;
+    if (existingPool && !prov.apiKeyPool && !prov.azureCredential) prov.apiKeyPool = existingPool;
     // The same rule applies to user-configured price overlays: the dashboard's
     // add/edit form does not send modelCosts, so an overwrite must not silently
     // erase hand-edited per-model prices from Logs/Usage estimates.
