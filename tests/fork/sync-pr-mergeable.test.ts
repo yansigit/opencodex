@@ -6,11 +6,11 @@ const workflowPath = resolve(import.meta.dir, "../../.github/workflows/fork-pr-m
 const workflow = () => readFileSync(workflowPath, "utf8");
 
 describe("fork PR mergeable workflow", () => {
-  test("revalidates checklist edits and readiness transitions", () => {
+  test("covers integration and release PRs with readiness revalidation", () => {
     const source = workflow();
 
     expect(source).toMatch(/\bpull_request:/);
-    expect(source).toMatch(/branches:\s*\n\s+- dev/);
+    expect(source).toMatch(/branches:\s*\n\s+- dev\s*\n\s+- main/);
     expect(source).toMatch(/types:[\s\S]*- edited/);
     expect(source).toMatch(/types:[\s\S]*- ready_for_review/);
     expect(source).not.toContain("pull_request_target");
@@ -43,7 +43,7 @@ describe("fork PR mergeable workflow", () => {
     expect(source).toContain("origin/${{ github.base_ref }}");
     expect(source).toContain("HEAD");
     expect(source).toContain(
-      "Recovery: merge \\`origin/dev\\` into the sync branch before retrying.",
+      "Recovery: merge \\`origin/${{ github.base_ref }}\\` into the sync branch before retrying.",
     );
     expect(source).toContain("GitHub's 3-way");
   });

@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - dev
+      - main
     types:
       - opened
       - reopened
@@ -63,7 +64,7 @@ jobs:
           git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
           if ! git merge-base --is-ancestor "origin/${{ github.base_ref }}" HEAD; then
             echo "The pull request head is not a descendant of origin/${{ github.base_ref }}"
-            echo "Recovery: merge \`origin/dev\` into the sync branch before retrying."
+            echo "Recovery: merge \`origin/${{ github.base_ref }}\` into the sync branch before retrying."
             echo "Never ask the human to resolve GitHub's 3-way of a disconnected rebuild."
             exit 1
           fi
