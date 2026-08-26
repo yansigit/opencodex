@@ -38,6 +38,11 @@ export type V2NativeParentOverrideState = {
   active: boolean;
 };
 
+export type AgentTaskRecoveryState = {
+  enabled: boolean;
+  model: string | null;
+};
+
 type DelegationResponse = {
   multiAgentGuidanceEnabled?: boolean;
   syncCodexSubagentDefaults?: boolean;
