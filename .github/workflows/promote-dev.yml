@@ -1,0 +1,95 @@
+name: Promote dev to main
+
+# A successful dev integration push opens or updates a human-gated promotion
+# PR. This workflow never merges main; release promotion remains explicit.
+on:
+  workflow_run:
+    workflows: ["Cross-platform CI"]
+    types: [completed]
+    branches: [dev]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: promote-dev-to-main
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: >-
+      (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'dev') ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout trusted promotion controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the CI head is still dev
+        env:
+          EXPECTED_CI_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
+        run: |
+          set -euo pipefail
+          live_dev_sha="$(git ls-remote origin refs/heads/dev | awk 'NR == 1 { print $1 }')"
+          expected_ci_sha="${EXPECTED_CI_SHA:-$live_dev_sha}"
+          if ! printf '%s\n' "$live_dev_sha" "$expected_ci_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::dev or CI head did not return a full commit SHA"
+            exit 1
+          fi
+          if [ "$live_dev_sha" != "$expected_ci_sha" ]; then
+            echo "::error::dev moved after CI completed; waiting for the newer CI run"
+            exit 1
+          fi
+          echo "Promoting verified dev commit $expected_ci_sha"
+
+      - name: Create or update the human promotion PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          expected_ci_sha="$(git ls-remote origin refs/heads/dev | awk 'NR == 1 { print $1 }')"
+          body_file="$RUNNER_TEMP/dev-promotion-body.md"
+          cat > "$body_file" <<EOF
+          ## Summary
+
+          Promote the verified \\`dev\\` integration branch to \\`main\\`.
+
+          Verified dev commit: \\`$expected_ci_sha\\`
+
+          ## Verification
+
+          This PR was opened automatically after successful Cross-platform CI on \\`dev\\`.
+          A human maintainer must review and merge it. This automation never merges \\`main\\`.
+
+          ## Checklist
+
+          - [ ] Required CI is green for the exact dev commit.
+          - [ ] Release notes and versioning are ready.
+          - [ ] A maintainer reviewed the promotion.
+          EOF
+
+          existing_pr="$(gh pr list --base main --head dev --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$existing_pr" ]; then
+            gh pr edit "$existing_pr" \
+              --title "promote: dev to main" \
+              --body-file "$body_file"
+            echo "Updated promotion PR #$existing_pr"
+          else
+            gh pr create \
+              --base main \
+              --head dev \
+              --title "promote: dev to main" \
+              --body-file "$body_file"
+          fi
