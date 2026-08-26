@@ -420,11 +420,7 @@ describe("GitHub Actions hardening", () => {
     // decides whether the costly jobs run. Pin the entire list on both paths.
     const ciPaths = [
       ".gitattributes",
-      ".github/workflows/ci.yml",
-      ".github/workflows/enforce-pr-target.yml",
-      ".github/workflows/fork-auto-release.yml",
-      ".github/workflows/release.yml",
-      ".github/workflows/stale-needs-info.yml",
+      ".github/workflows/**",
       ".npmignore",
       "LICENSE",
       "README.md",
