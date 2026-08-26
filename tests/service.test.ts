@@ -2344,4 +2344,15 @@ describe("credential-bearing definitions harden the Windows ACL strictly", () =>
   test("a definition with no proxy env at all carries no credential", () => {
     expect(definitionCarriesCredential(buildUnit(resolvedProxyEnv({})))).toBe(false);
   });
+
+  test("SERVICE_INSTALL_HEALTH_MS defaults to at least 30s and respects timeoutMs override", async () => {
+    expect(serviceModule.SERVICE_INSTALL_HEALTH_MS).toBeGreaterThanOrEqual(30_000);
+    const result = await confirmServiceServing({
+      port: 19999,
+      probe: async () => false,
+      timeoutMs: 50,
+      sleep: async () => {},
+    });
+    expect(result.ok).toBe(false);
+  });
 });
