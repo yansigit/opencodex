@@ -17,10 +17,6 @@ export function isCodexUsageAccountLogLabel(value: unknown): value is CodexUsage
   return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
 }
 
-export function isPersistableAccountLogLabel(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 128;
-}
-
 /**
  * Recovery kinds recorded per attempt in the usage log; the GUI renders localized labels
  * for these wire values.
@@ -57,7 +53,7 @@ export interface PersistedUsageAttempt {
   recoveryKinds: AttemptRecoveryKind[];
   usageStatus: UsageStatus;
   /** Stable non-PII identity for the account that served this attempt. */
-  accountLogLabel?: string;
+  accountLogLabel?: CodexUsageAccountLogLabel;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -86,7 +82,7 @@ export interface PersistedUsageEntry {
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
   /** Stable non-PII identity for account usage; absent for unauthenticated traffic. */
-  accountLogLabel?: string;
+  accountLogLabel?: CodexUsageAccountLogLabel;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   resolvedModel?: string;
@@ -371,7 +367,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
-    ...(isPersistableAccountLogLabel(attempt.accountLogLabel)
+    ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
       : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
@@ -458,7 +454,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-    ...(isPersistableAccountLogLabel(entry.accountLogLabel)
+    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()

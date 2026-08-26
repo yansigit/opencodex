@@ -4,21 +4,9 @@ import {
   projectUsageSummary,
   accountLabelForAttribution,
 } from "../src/usage/summary";
-import { isPersistableAccountLogLabel } from "../src/usage/log";
 import type { PersistedUsageEntry } from "../src/usage/log";
 
 describe("account usage attribution and filtering", () => {
-  test("isPersistableAccountLogLabel accepts valid account labels and IDs", () => {
-    expect(isPersistableAccountLogLabel("main")).toBe(true);
-    expect(isPersistableAccountLogLabel("pabc123")).toBe(true);
-    expect(isPersistableAccountLogLabel("a3ddfc22b5701915a5617a386883ff26")).toBe(true);
-    expect(isPersistableAccountLogLabel("7bbffb6c")).toBe(true);
-    expect(isPersistableAccountLogLabel("")).toBe(false);
-    expect(isPersistableAccountLogLabel(null)).toBe(false);
-    expect(isPersistableAccountLogLabel(undefined)).toBe(false);
-    expect(isPersistableAccountLogLabel(12345)).toBe(false);
-  });
-
   test("accountLabelForAttribution falls back to active account for provider when label is missing", () => {
     // Explicit label wins
     expect(accountLabelForAttribution("command-code", "custom-label", { "command-code": "active-id" }))
@@ -143,4 +131,3 @@ describe("account usage attribution and filtering", () => {
     expect(projected.models[0].model).toBe("zai-org/GLM-5.3");
   });
 });
-
