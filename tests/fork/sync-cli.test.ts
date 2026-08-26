@@ -327,6 +327,56 @@ describe("fork sync CLI", () => {
     });
   });
 
+  test("emit paginates GitHub issue listings", async () => {
+    const requests: string[] = [];
+    const issue = (number: number): Record<string, unknown> => ({
+      number,
+      title: `unrelated issue ${number}`,
+      body: "",
+      state: "open",
+      labels: ["fork-sync"],
+    });
+    const firstPage = Array.from({ length: 100 }, (_, index) => issue(index + 1));
+    const matching = {
+      number: 101,
+      title: "fork sync v2.29.0",
+      body: "",
+      state: "open",
+      labels: ["fork-sync"],
+    };
+    const fetchImpl = async (input: string | URL | Request, init?: RequestInit) => {
+      requests.push(`${init?.method ?? "GET"} ${String(input)}`);
+      if (requests.length === 1) return new Response(JSON.stringify(firstPage));
+      if (requests.length === 2) return new Response(JSON.stringify([matching]));
+      return new Response(null, { status: 200 });
+    };
+    const event: SyncEvent = {
+      kind: "pin-updated",
+      upstreamRepo: "upstream",
+      latestTag: "v2.29.0",
+      latestTagSha: TAG_SHA,
+      vendorMainSha: MAIN_SHA,
+      vendorDevSha: DEV_SHA,
+      detectedAt: "2026-08-22T18:00:00.000Z",
+    };
+
+    await runCli(["emit"], {
+      env: {
+        GITHUB_REPOSITORY: "yansigit/opencodex",
+        GITHUB_TOKEN: "secret-token",
+        FORK_SYNC_NOTIFIERS: "github-issue",
+      },
+      fetchImpl,
+      stdin: JSON.stringify(event),
+    });
+
+    expect(requests).toEqual([
+      "GET https://api.github.com/repos/yansigit/opencodex/issues?state=open&labels=fork-sync&per_page=100&page=1",
+      "GET https://api.github.com/repos/yansigit/opencodex/issues?state=open&labels=fork-sync&per_page=100&page=2",
+      "PATCH https://api.github.com/repos/yansigit/opencodex/issues/101",
+    ]);
+  });
+
   test("prepare reads an event from stdin and prints its result", async () => {
     const output: string[] = [];
     const calls: string[][] = [];

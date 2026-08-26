@@ -49,7 +49,7 @@ describe("fork sync draft pull requests", () => {
 
     expect(number).toBe(17);
     expect(requests.map(request => [request.input, request.init?.method ?? "GET"])).toEqual([
-      ["https://api.github.com/repos/yansigit/opencodex/pulls?state=open&base=dev", "GET"],
+      ["https://api.github.com/repos/yansigit/opencodex/pulls?head=yansigit:sync/upstream-v2.32.0-1111111&state=open&base=dev", "GET"],
       ["https://api.github.com/repos/yansigit/opencodex/pulls", "POST"],
     ]);
     const body = JSON.parse(String(requests[1]?.init?.body));

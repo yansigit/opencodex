@@ -7,6 +7,7 @@ export function mergePackageJson(ours: string, theirs: string): string {
     throw new Error("fork package.json must contain a version");
   }
   return `${JSON.stringify({
+    ...current,
     ...upstream,
     name: FORK_PACKAGE_NAME,
     version: current.version,
