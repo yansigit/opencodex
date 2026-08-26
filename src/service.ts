@@ -555,7 +555,7 @@ export function installedServiceListenPort(): number {
     ?? resolveServiceListenPort();
 }
 
-export const SERVICE_INSTALL_HEALTH_MS = 20_000;
+export const SERVICE_INSTALL_HEALTH_MS = Number(process.env.OCX_SERVICE_HEALTH_TIMEOUT_MS) || 30_000;
 
 /**
  * Whether a proxy actually answers on the port this install/start just produced.
