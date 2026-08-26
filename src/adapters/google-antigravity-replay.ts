@@ -38,9 +38,9 @@ const REPLAY_TTL_MS = 60 * 60 * 1000; // 1h
 export const ANTIGRAVITY_REPLAY_MAX_ENTRIES = 10_240;
 const REPLAY_EVICT_BATCH = 128;
 const REPLAY_MAX_CALLS_PER_SESSION = 256;
-export const ANTIGRAVITY_REPLAY_MAX_BYTES_PER_SESSION = 2 * 1024 * 1024;
+export const ANTIGRAVITY_REPLAY_MAX_BYTES_PER_SESSION = 8 * 1024 * 1024;
 export const ANTIGRAVITY_REPLAY_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
-const REPLAY_MAX_SIGNATURE_BYTES = 64 * 1024;
+const REPLAY_MAX_SIGNATURE_BYTES = 1024 * 1024;
 /** Fixed 64-hex outer key length, counted once per session entry. */
 const REPLAY_SESSION_KEY_BYTES = 64;
 const REPLAY_SNAPSHOT_FILE = "antigravity-replay.json";
