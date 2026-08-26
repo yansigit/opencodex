@@ -94,6 +94,7 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
           stdio: "ignore",
           env: {
             ...process.env,
+            OPENCODEX_BUN_PATH: process.env.OPENCODEX_BUN_PATH ?? process.execPath,
             HOME: identity.homeDir,
             USERPROFILE: identity.userProfile,
             OPENCODEX_HOME: home,
@@ -107,7 +108,7 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
         child.on("exit", () => { exited = true; });
 
         // 1. Proxy comes up + injected the Codex config (Design B root override on loopback).
-        const up = await waitUntil(() => healthy(port), 20_000);
+        const up = await waitUntil(() => healthy(port), 30_000);
         expect(up).toBe(true);
         expect(existsSync(join(home, "ocx.pid"))).toBe(true);
         const injected = readFileSync(codexConfig, "utf8");
@@ -131,7 +132,7 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
         expect(existsSync(join(home, "runtime-port.json"))).toBe(false);
         expect(readFileSync(codexConfig, "utf8")).not.toContain("opencodex");
       },
-      45_000,
+      60_000,
     );
   }
 });

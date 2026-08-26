@@ -711,6 +711,7 @@ export function buildCursorToolGuidanceSystemNote(
       ? `Use ${discoveryTools} only for explicit discovery/resource tasks, not generic tool-count demos.`
       : undefined,
     "Do not count or report a tool call unless a tool result was actually returned.",
+    "When pursuing a multi-step task, check, or verification, do not stop or narrate intended future actions in plain text; immediately call the tool to execute the next step until the task is complete.",
     hasBareExec
       ? `If a Cursor-native file read, directory listing, grep, or shell operation is rejected by the runtime, use ${shellBridgeLabel} with an equivalent host-shell-safe command (POSIX: \`cat\`/\`ls\`/\`rg\`; Windows PowerShell: \`Get-Content\`/\`Get-ChildItem\`/\`Select-String\`). For file edits, use ${structuredEditNames.length > 0 ? `the structured edit tools (${quotedNames(structuredEditNames)}) or ` : ""}\`apply_patch\` when available.`
       : undefined,
