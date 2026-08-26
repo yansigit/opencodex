@@ -146,6 +146,9 @@ After a successful `Cross-platform CI` push run on `dev`, the separate
 promotion workflow opens or updates one `dev`→`main` PR. It verifies that
 `dev` did not move while CI ran, then stops for human release review; it never
 merges or force-pushes `main`.
+Because GitHub loads `workflow_run` definitions from the default branch, a
+maintainer must promote this workflow to `main` once before automatic runs can
+start; the PR itself remains targeted at `dev` under the repository policy.
 
 If histories diverge again, a disconnected `run/dev` rebuild is an emergency
 recipe only. After reviewing that rebuild, check out `run/dev` first and use
