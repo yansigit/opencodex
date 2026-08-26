@@ -6,7 +6,7 @@ on:
   workflow_run:
     workflows: ["Cross-platform CI"]
     types: [completed]
-    branches: [dev]
+    branches: [dev, main]
   workflow_dispatch:
 
 permissions: {}
@@ -127,5 +127,112 @@ jobs:
           promotion_head="$(gh pr list --base main --head dev --state open --json headRefOid --jq '.[0].headRefOid // empty')"
           if [ "$promotion_head" != "$VERIFIED_CI_SHA" ]; then
             echo "::error::promotion PR head changed before verification"
+            exit 1
+          fi
+
+  backmerge:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout trusted promotion controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify main and dev are eligible
+        id: verify-main
+        env:
+          EXPECTED_CI_SHA: ${{ github.event.workflow_run.head_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          live_main_sha="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+          if ! printf '%s\n' "$live_main_sha" "$EXPECTED_CI_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::main or CI head did not return a full commit SHA"
+            exit 1
+          fi
+          if [ "$live_main_sha" != "$EXPECTED_CI_SHA" ]; then
+            echo "::error::main moved after CI completed; waiting for the newer CI run"
+            exit 1
+          fi
+          ci_runs="$(gh run list --workflow ci.yml --commit "$live_main_sha" --event push --limit 20 --json conclusion,status,headSha,event)"
+          if ! jq -e --arg sha "$live_main_sha" \
+            'any(.[]; .headSha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")' \
+            <<<"$ci_runs" >/dev/null; then
+            echo "::error::no successful Cross-platform CI push run exists for verified main"
+            exit 1
+          fi
+          git fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main \
+            refs/heads/dev:refs/remotes/origin/dev
+          verified_main_sha="$(git rev-parse refs/remotes/origin/main)"
+          live_dev_sha="$(git rev-parse refs/remotes/origin/dev)"
+          if [ "$verified_main_sha" != "$EXPECTED_CI_SHA" ]; then
+            echo "::error::fetched main ref did not match the verified CI commit"
+            exit 1
+          fi
+          eligible=true
+          if ! git merge-base --is-ancestor "$live_dev_sha" "$verified_main_sha"; then
+            echo "dev is not an ancestor of verified main; leaving dev unchanged"
+            eligible=false
+          elif ! git diff --quiet "$verified_main_sha" "$live_dev_sha" --; then
+            echo "main and dev trees differ; leaving dev unchanged"
+            eligible=false
+          fi
+          {
+            echo "eligible=$eligible"
+            if [ "$eligible" = true ]; then
+              echo "verified_main_sha=$verified_main_sha"
+              echo "live_dev_sha=$live_dev_sha"
+            fi
+          } >> "$GITHUB_OUTPUT"
+          if [ "$eligible" != true ]; then
+            exit 0
+          fi
+
+      - name: Fast-forward dev to verified main
+        if: steps.verify-main.outputs.eligible == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: 0
+          VERIFIED_MAIN_SHA: ${{ steps.verify-main.outputs.verified_main_sha }}
+          VERIFIED_DEV_SHA: ${{ steps.verify-main.outputs.live_dev_sha }}
+        run: |
+          set -euo pipefail
+          live_main_sha="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+          if [ "$live_main_sha" != "$VERIFIED_MAIN_SHA" ]; then
+            echo "::error::main moved before the dev back-merge"
+            exit 1
+          fi
+          live_dev_sha="$(git ls-remote origin refs/heads/dev | awk 'NR == 1 { print $1 }')"
+          if [ "$live_dev_sha" != "$VERIFIED_DEV_SHA" ]; then
+            echo "::error::dev moved before the dev back-merge"
+            exit 1
+          fi
+          askpass="$RUNNER_TEMP/git-askpass.sh"
+          cat > "$askpass" <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *) printf '%s\n' "$GH_TOKEN" ;;
+          esac
+          EOF
+          chmod 700 "$askpass"
+          GIT_ASKPASS="$askpass" git push origin "$VERIFIED_MAIN_SHA:refs/heads/dev"
+          post_refs="$(git ls-remote origin refs/heads/main refs/heads/dev)"
+          post_main_sha="$(awk '$2 == "refs/heads/main" { print $1 }' <<<"$post_refs")"
+          post_dev_sha="$(awk '$2 == "refs/heads/dev" { print $1 }' <<<"$post_refs")"
+          if [ "$post_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$post_dev_sha" != "$VERIFIED_MAIN_SHA" ]; then
+            echo "::error::dev back-merge postcheck failed; main or dev moved during the update"
             exit 1
           fi
