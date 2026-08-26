@@ -9,6 +9,7 @@ import { validateXaiSearchOptions, type XaiSearchOptions } from "./xai-executor"
 import type { OcxWebSearchSidecarConfig } from "../types";
 import { DEFAULT_STALL_TIMEOUT_SEC } from "../stall-timeout";
 import { buildWebSearchTool, extractHostedWebSearch, WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
+import { estimateInputTokens } from "../server/responses/input-admission";
 
 export { runWithWebSearch } from "./loop";
 export { buildWebSearchTool, extractHostedWebSearch, WEB_SEARCH_TOOL_NAME };
@@ -44,13 +45,19 @@ const STALL_MARGIN_SEC = 30;
  * deliberately permissive, so malformed values fall back locally without rejecting or rewriting
  * the caller's config object.
  */
-export function resolveRoutedModelStallTimeoutMs(value: unknown): number {
-  return typeof value === "number"
+export function resolveRoutedModelStallTimeoutMs(value: unknown, estimatedInputTokens?: number): number {
+  if (typeof value === "number"
     && Number.isInteger(value)
     && value >= 1
-    && value <= MAX_ROUTED_MODEL_STALL_TIMEOUT_MS
-    ? value
-    : DEFAULT_ROUTED_MODEL_STALL_TIMEOUT_MS;
+    && value <= MAX_ROUTED_MODEL_STALL_TIMEOUT_MS) {
+    return value;
+  }
+  const base = DEFAULT_ROUTED_MODEL_STALL_TIMEOUT_MS;
+  if (typeof estimatedInputTokens === "number" && Number.isFinite(estimatedInputTokens) && estimatedInputTokens > 100_000) {
+    const extraBlocks = Math.ceil((estimatedInputTokens - 100_000) / 100_000);
+    return Math.min(MAX_ROUTED_MODEL_STALL_TIMEOUT_MS, base + extraBlocks * 60_000);
+  }
+  return base;
 }
 
 function finiteCeil(value: number | undefined, fallback: number): number {
@@ -305,9 +312,10 @@ export function planWebSearch(
   const cfg = config.webSearchSidecar ?? {};
   if (cfg.enabled === false) return undefined;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const routedModelStallTimeoutMs = resolveRoutedModelStallTimeoutMs(cfg.routedModelStallTimeoutMs);
-  // Same `?? 200_000` default the server applies when threading connectTimeoutMs into the loop.
-  const connectTimeoutMs = config.connectTimeoutMs ?? 200_000;
+  const safeModelId = typeof modelId === "string" ? modelId : "";
+  const estimatedInputTokens = estimateInputTokens(parsed, safeModelId);
+  const routedModelStallTimeoutMs = resolveRoutedModelStallTimeoutMs(cfg.routedModelStallTimeoutMs, estimatedInputTokens);
+  const connectTimeoutMs = config.connectTimeoutMs ?? Math.max(200_000, routedModelStallTimeoutMs);
   // Shared auth state (#2188): presence only — backend PREFERENCE stays with
   // resolveSidecarBackend's explicit-or-openai contract.
   const auth = resolveSidecarAuth(config);

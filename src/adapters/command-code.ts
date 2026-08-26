@@ -254,6 +254,8 @@ interface GitWorkspaceInfo {
 }
 
 export const workspaceMetadataCache = new Map<string, { collectedAt: number; value: GitWorkspaceInfo }>();
+export const workspaceConfigCache = new Map<string, { collectedAt: number; value: Record<string, unknown> }>();
+export const SESSION_WORKSPACE_CONFIG_TTL_MS = 60 * 60_000;
 
 /**
  * Evict expired entries first, then the oldest live entry if at capacity.
@@ -277,6 +279,25 @@ export function pruneWorkspaceMetadataCache(now: number): void {
       }
     }
     if (oldestKey !== null) workspaceMetadataCache.delete(oldestKey);
+  }
+}
+
+export function pruneWorkspaceConfigCache(now: number): void {
+  for (const [key, entry] of workspaceConfigCache) {
+    if (now - entry.collectedAt >= SESSION_WORKSPACE_CONFIG_TTL_MS) {
+      workspaceConfigCache.delete(key);
+    }
+  }
+  if (workspaceConfigCache.size >= MAX_WORKSPACE_METADATA_ENTRIES) {
+    let oldestKey: string | null = null;
+    let oldestAt = Infinity;
+    for (const [key, entry] of workspaceConfigCache) {
+      if (entry.collectedAt < oldestAt) {
+        oldestAt = entry.collectedAt;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey !== null) workspaceConfigCache.delete(oldestKey);
   }
 }
 
@@ -316,7 +337,14 @@ async function gitWorkspaceInfo(cwd: string | undefined): Promise<GitWorkspaceIn
   return value;
 }
 
-async function commandCodeConfig(cwd: string | undefined): Promise<Record<string, unknown>> {
+export async function commandCodeConfig(cwd: string | undefined, sessionId?: string): Promise<Record<string, unknown>> {
+  const cacheKey = sessionId ? `${sessionId}:${cwd ?? ""}` : (cwd ?? "");
+  const now = Date.now();
+  if (cacheKey) {
+    const cached = workspaceConfigCache.get(cacheKey);
+    const ttl = sessionId ? SESSION_WORKSPACE_CONFIG_TTL_MS : WORKSPACE_METADATA_TTL_MS;
+    if (cached && now - cached.collectedAt < ttl) return cached.value;
+  }
   let structure: string[] = [];
   if (cwd) {
     try {
@@ -335,13 +363,18 @@ async function commandCodeConfig(cwd: string | undefined): Promise<Record<string
     } catch { /* workspace metadata is optional */ }
   }
   const git = await gitWorkspaceInfo(cwd);
-  return {
+  const value = {
     ...(cwd ? { workingDir: cwd } : {}),
     date: new Date().toISOString().slice(0, 10),
     environment: process.platform,
     structure,
     ...git,
   };
+  if (cacheKey) {
+    if (!workspaceConfigCache.has(cacheKey)) pruneWorkspaceConfigCache(now);
+    workspaceConfigCache.set(cacheKey, { collectedAt: now, value });
+  }
+  return value;
 }
 
 function usage(value: unknown): OcxUsage | undefined {
@@ -490,6 +523,7 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
     async buildRequest(parsed: OcxParsedRequest): Promise<AdapterRequest> {
       if (!provider.apiKey) throw new Error("Command Code credential missing — run ocx login command-code");
       const cwd = currentWorkingDirectory();
+      const sessionId = commandCodeSessionId(parsed);
       const tools = visibleTools(parsed);
       const toolNudge = buildNonOpenAIToolCatalogNudgeForTools(tools, parsed.options.toolChoice);
       const choiceInstruction = toolChoiceInstruction(parsed);
@@ -500,7 +534,7 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
       ].join("\n\n"), parsed.modelId);
       const reasoningEffort = supportedCommandCodeEffort(provider, parsed.modelId, parsed.options.reasoning);
       const body = {
-        config: await commandCodeConfig(cwd), memory: "", taste: null, skills: null,
+        config: await commandCodeConfig(cwd, sessionId), memory: "", taste: null, skills: null,
         permissionMode: "standard", mode: "agent",
         params: {
           model: canonicalCommandCodeModelId(parsed.modelId),
@@ -523,7 +557,7 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
         "x-cli-environment": "production",
         "x-taste-learning": "false",
         "x-co-flag": "false",
-        "x-session-id": commandCodeSessionId(parsed),
+        "x-session-id": sessionId,
       };
       if (cwd) headers["x-project-slug"] = projectSlug(cwd);
       return {
