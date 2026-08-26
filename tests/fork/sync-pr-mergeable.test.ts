@@ -6,11 +6,13 @@ const workflowPath = resolve(import.meta.dir, "../../.github/workflows/fork-pr-m
 const workflow = () => readFileSync(workflowPath, "utf8");
 
 describe("fork PR mergeable workflow", () => {
-  test("runs only for pull requests targeting main", () => {
+  test("revalidates checklist edits and readiness transitions", () => {
     const source = workflow();
 
     expect(source).toMatch(/\bpull_request:/);
     expect(source).toMatch(/branches:\s*\n\s+- main/);
+    expect(source).toMatch(/types:[\s\S]*- edited/);
+    expect(source).toMatch(/types:[\s\S]*- ready_for_review/);
     expect(source).not.toContain("pull_request_target");
     expect(source).toContain("ref: ${{ github.event.pull_request.head.sha }}");
   });
