@@ -110,6 +110,19 @@ export function clearAntigravitySessionAffinityForAccount(accountId: string): vo
   }
 }
 
+export function clearAntigravitySessionAffinity(): void {
+  sessionAffinity.clear();
+}
+
+/**
+ * Manual selection resets session affinity and clears any stale cooldown
+ * on the manually chosen account so requests immediately honor the user's choice.
+ */
+export function resetAntigravityRoutingForManualSelection(accountId: string): void {
+  sessionAffinity.clear();
+  clearAntigravityAccountCooldown(accountId);
+}
+
 /** Remove only the local routing state owned by one deleted Antigravity account. */
 export function clearAntigravityRoutingStateForAccount(accountId: string): void {
   clearAntigravityAccountCooldown(accountId);
