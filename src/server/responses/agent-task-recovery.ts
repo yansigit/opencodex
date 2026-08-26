@@ -45,7 +45,7 @@ export function agentTaskRecoveryConfig(config: OcxConfig): AgentTaskRecoveryOpt
     enabled: true,
     model: typeof raw.model === "string" && raw.model.trim().length > 0
       ? raw.model.trim()
-      : "gpt-5.6-sol",
+      : "gpt-5.6-luna",
     timeoutMs: Number.isFinite(raw.timeoutMs) && (raw.timeoutMs ?? 0) >= 1_000
       ? Math.min(120_000, Math.floor(raw.timeoutMs!))
       : 45_000,

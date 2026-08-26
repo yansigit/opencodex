@@ -89,6 +89,39 @@ let grokApplyHighWaterBytes = 0;
 let grokApplyTestHooks: { now?: () => number; run?: () => Promise<unknown> } | null = null;
 
 type V2NativeParentOverrideInput = { enabled: boolean; model: string | null };
+type AgentTaskRecoveryInput = { enabled: boolean; model: string | null };
+
+function agentTaskRecoveryDto(
+  config: OcxConfig,
+): { enabled: boolean; model: string | null } {
+  const recovery = config.agentTaskRecovery;
+  return {
+    enabled: recovery?.enabled === true,
+    model: recovery?.model ?? null,
+  };
+}
+
+function persistAgentTaskRecovery(
+  config: OcxConfig,
+  next: AgentTaskRecoveryInput,
+): { ok: true } | { ok: false; reason: string } {
+  const outcome = mutatePersistedConfig(persisted => {
+    const nextPersisted = {
+      enabled: next.enabled,
+      ...(next.model === null ? {} : { model: next.model }),
+    };
+    const previous = persisted.agentTaskRecovery;
+    const changed = previous?.enabled !== nextPersisted.enabled || previous?.model !== nextPersisted.model;
+    if (changed) persisted.agentTaskRecovery = nextPersisted;
+    return { changed, value: true };
+  });
+  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
+  config.agentTaskRecovery = {
+    enabled: next.enabled,
+    ...(next.model === null ? {} : { model: next.model }),
+  };
+  return { ok: true };
+}
 
 function v2NativeParentOverrideDto(
   config: OcxConfig,
@@ -308,6 +341,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       // server-side so no client can present it as an effective V2 limit.
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
       v2NativeParentOverride,
+      agentTaskRecovery: agentTaskRecoveryDto(config),
     });
   }
   if (url.pathname === "/api/v2" && req.method === "PUT") {
@@ -321,6 +355,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       subagentDeveloperInstructions?: unknown;
       multiAgentModeHintText?: unknown;
       v2NativeParentOverride?: unknown;
+      agentTaskRecovery?: unknown;
     };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const wantsFlag = body.enabled !== undefined;
@@ -332,8 +367,9 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     const wantsSubagentInstructions = body.subagentDeveloperInstructions !== undefined;
     const wantsModeHintText = body.multiAgentModeHintText !== undefined;
     const wantsV2NativeParentOverride = body.v2NativeParentOverride !== undefined;
-    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride) {
-      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, multiAgentModeHintText, and/or v2NativeParentOverride" }, 400);
+    const wantsAgentTaskRecovery = body.agentTaskRecovery !== undefined;
+    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride && !wantsAgentTaskRecovery) {
+      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, multiAgentModeHintText, v2NativeParentOverride, and/or agentTaskRecovery" }, 400);
     }
     if (wantsFlag && typeof body.enabled !== "boolean") return jsonResponse({ error: "body.enabled must be a boolean" }, 400);
     if (wantsMode && body.multiAgentMode !== "v1" && body.multiAgentMode !== "default" && body.multiAgentMode !== "v2") {
@@ -429,6 +465,30 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         }
       }
     }
+    let agentTaskRecovery: AgentTaskRecoveryInput | undefined;
+    if (wantsAgentTaskRecovery) {
+      const raw = body.agentTaskRecovery;
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        return jsonResponse({ error: "body.agentTaskRecovery must be an object" }, 400);
+      }
+      const candidate = raw as { enabled?: unknown; model?: unknown };
+      if (typeof candidate.enabled !== "boolean") {
+        return jsonResponse({ error: "body.agentTaskRecovery.enabled must be a boolean" }, 400);
+      }
+      if (candidate.model !== undefined && candidate.model !== null && (typeof candidate.model !== "string" || candidate.model.trim().length === 0)) {
+        return jsonResponse({ error: "body.agentTaskRecovery.model must be a nonblank string or null" }, 400);
+      }
+      agentTaskRecovery = {
+        enabled: candidate.enabled,
+        model: candidate.model === null || candidate.model === undefined ? null : (candidate.model as string).trim(),
+      };
+    }
+    if (agentTaskRecovery && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
+        && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride) {
+      const persisted = persistAgentTaskRecovery(config, agentTaskRecovery);
+      if (!persisted.ok) return jsonResponse({ error: `persisting agentTaskRecovery failed: ${persisted.reason}` }, 502);
+      return jsonResponse({ ok: true, agentTaskRecovery: agentTaskRecoveryDto(config) });
+    }
     if (v2NativeParentOverride && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
         && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText) {
       const persisted = persistV2NativeParentOverride(config, v2NativeParentOverride);
@@ -517,6 +577,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const persisted = persistV2NativeParentOverride(config, v2NativeParentOverride);
       if (!persisted.ok) return jsonResponse({ error: `persisting v2NativeParentOverride failed: ${persisted.reason}` }, 502);
     }
+    if (agentTaskRecovery) {
+      const persisted = persistAgentTaskRecovery(config, agentTaskRecovery);
+      if (!persisted.ok) return jsonResponse({ error: `persisting agentTaskRecovery failed: ${persisted.reason}` }, 502);
+    }
     const catalogRefresh = await convergeCodexCatalog();
     if (requestedFlag !== undefined) warnings.push("Applies to new sessions; restart the Codex app or wait out its picker cache to see the ladder change.");
     const enabled = isMultiAgentV2Enabled();
@@ -533,6 +597,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       multiAgentModeHintText: getMultiAgentModeHintText(),
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
       v2NativeParentOverride: v2NativeParentOverrideDto(config, enabled),
+      agentTaskRecovery: agentTaskRecoveryDto(config),
       warnings,
       catalogRefresh,
     });

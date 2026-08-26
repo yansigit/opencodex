@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createTranslatorBudget } from "../src/lib/translator-budget";
 import { warnAgentTaskRecoveryStartup } from "../src/server";
-import { resetAgentTaskRecoveryState } from "../src/server/responses/agent-task-recovery";
+import { agentTaskRecoveryConfig, resetAgentTaskRecoveryState } from "../src/server/responses/agent-task-recovery";
 import { agentTaskRecoveryWaiterCountForTests } from "../src/server/responses/agent-task-recovery-cache";
 import {
   agentMessage,
@@ -577,5 +577,32 @@ describe("agent task recovery (opt-in, default off)", () => {
     expect(await response.json()).toMatchObject({
       error: { code: "unreadable_encrypted_agent_task" },
     });
+  });
+
+  test("agentTaskRecoveryConfig defaults model to gpt-5.6-luna", () => {
+    const cfg = agentTaskRecoveryConfig(routedConfig({ enabled: true }));
+    expect(cfg?.model).toBe("gpt-5.6-luna");
+  });
+
+  test("recovery request sends gpt-5.6-luna by default in recovery payload", async () => {
+    let recoveryBody: any;
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      if (url === "https://chatgpt.com/backend-api/codex/responses") {
+        recoveryBody = JSON.parse(String(init?.body));
+        return new Response(recoverySse("recovered assignment payload"), { status: 200 });
+      }
+      return providerResponse();
+    }) as typeof fetch;
+
+    const response = await post(
+      routedConfig({ enabled: true }),
+      "xai/grok-4.5",
+      encryptedInput(),
+      codexHeaders(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(recoveryBody?.model).toBe("gpt-5.6-luna");
   });
 });
