@@ -1004,6 +1004,26 @@ export function filterRequestLogs(logs: RequestLogEntry[], params: URLSearchPara
     filtered = filtered.filter(entry => entry.provider === provider
       || entry.attempts?.some(attempt => attempt.provider === provider));
   }
+  const model = params.get("model")?.trim().toLowerCase();
+  if (model) {
+    filtered = filtered.filter(entry => entry.model.toLowerCase() === model
+      || entry.resolvedModel?.toLowerCase() === model
+      || entry.attempts?.some(attempt => attempt.model.toLowerCase() === model));
+  }
+  const sinceRaw = params.get("since")?.trim();
+  if (sinceRaw) {
+    const since = Number(sinceRaw);
+    if (Number.isFinite(since)) {
+      filtered = filtered.filter(entry => entry.timestamp >= since);
+    }
+  }
+  const untilRaw = params.get("until")?.trim();
+  if (untilRaw) {
+    const until = Number(untilRaw);
+    if (Number.isFinite(until)) {
+      filtered = filtered.filter(entry => entry.timestamp <= until);
+    }
+  }
   const conversationId = params.get("conversationId")?.trim() || params.get("conversation")?.trim();
   if (conversationId) {
     filtered = filtered.filter(entry => matchesLogConversationId(entry.conversationId, conversationId));

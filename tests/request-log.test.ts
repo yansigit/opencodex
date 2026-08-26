@@ -724,6 +724,21 @@ describe("request log metadata", () => {
     expect(combined.map(entry => entry.requestId)).toEqual(["c"]);
   });
 
+  test("filters logs by model, since, and until", () => {
+    const now = Date.now();
+    const logs = [
+      log({ requestId: "m1", model: "claude-3-5-sonnet", resolvedModel: "claude-3-5-sonnet-20241022", timestamp: now - 3000 }),
+      log({ requestId: "m2", model: "gpt-4o", timestamp: now - 2000 }),
+      log({ requestId: "m3", model: "gemini-1.5-pro", timestamp: now - 1000 }),
+    ];
+
+    expect(filterRequestLogs(logs, new URLSearchParams("model=claude-3-5-sonnet")).map(e => e.requestId)).toEqual(["m1"]);
+    expect(filterRequestLogs(logs, new URLSearchParams("model=claude-3-5-sonnet-20241022")).map(e => e.requestId)).toEqual(["m1"]);
+    expect(filterRequestLogs(logs, new URLSearchParams("model=gpt-4o")).map(e => e.requestId)).toEqual(["m2"]);
+    expect(filterRequestLogs(logs, new URLSearchParams(`since=${now - 2500}`)).map(e => e.requestId)).toEqual(["m2", "m3"]);
+    expect(filterRequestLogs(logs, new URLSearchParams(`until=${now - 1500}`)).map(e => e.requestId)).toEqual(["m1", "m2"]);
+  });
+
   test("filters logs by offset and limit", () => {
     const logs = Array.from({ length: 5 }, (_, i) => log({ requestId: `r${i}`, provider: "openai", status: 200 }));
     expect(filterRequestLogs(logs, new URLSearchParams("limit=2")).map(entry => entry.requestId)).toEqual(["r3", "r4"]);

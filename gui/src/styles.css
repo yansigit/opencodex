@@ -1948,6 +1948,18 @@ table.logs-table {
   margin-bottom: var(--space-3);
 }
 
+.logs-toolbar-secondary {
+  margin-top: calc(-1 * var(--space-1));
+  margin-bottom: var(--space-3);
+}
+
+.logs-filter-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
 .logs-segmented {
   display: inline-flex;
   border-radius: var(--radius-pill);
