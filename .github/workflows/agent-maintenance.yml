@@ -364,22 +364,22 @@ jobs:
                   await setLifecycle(issue.number, "agent:queued");
                   continue;
                 }
-               const scheduledTaskKind = trustedGenerated && issue.title.startsWith("[agent:docs]")
-                 ? "scheduled-docs"
-                 : trustedGenerated && issue.title.startsWith("[agent:tests]")
-                   ? "scheduled-tests"
-                    : issue.title.startsWith("[agent:sync]")
+                const scheduledTaskKind = trustedGenerated && issue.title.startsWith("[agent:docs]")
+                  ? "scheduled-docs"
+                  : trustedGenerated && issue.title.startsWith("[agent:tests]")
+                    ? "scheduled-tests"
+                    : trustedGenerated && issue.title.startsWith("[agent:sync]")
                       ? "sync-hotspot"
-                   : null;
-               const taskKind = recipe?.taskKind || scheduledTaskKind || (labelNames.has("agent:plan") ? "plan" : "implement");
-               const periodKey = issue.title.replace(/^\[agent:(?:docs|tests)\]\s*/, "");
-               const taskId = recipe?.taskId || (scheduledTaskKind ? `${scheduledTaskKind === "scheduled-docs" ? "docs" : "tests"}-${periodKey}` : `issue-${issue.number}`);
-               state = defaultAgentMaintenanceState({ taskId, taskKind, issueNumber: issue.number });
-               const syncBranchMatch = taskKind === "sync-hotspot"
-                 ? String(issue.body || "").match(/(?:^|\n)Sync branch:\s*(sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64})(?:\s|$)/i)
-                 : null;
-               const startingBranch = syncBranchMatch?.[1] || "dev";
-               if (taskKind === "sync-hotspot" && !syncBranchMatch) {
+                      : null;
+                const taskKind = recipe?.taskKind || scheduledTaskKind || (labelNames.has("agent:plan") ? "plan" : "implement");
+                const periodKey = issue.title.replace(/^\[agent:(?:docs|tests)\]\s*/, "");
+                const taskId = recipe?.taskId || (scheduledTaskKind ? `${scheduledTaskKind === "scheduled-docs" ? "docs" : "tests"}-${periodKey}` : `issue-${issue.number}`);
+                state = defaultAgentMaintenanceState({ taskId, taskKind, issueNumber: issue.number });
+                const syncBranchMatch = taskKind === "sync-hotspot"
+                  ? String(issue.body || "").match(/(?:^|\n)Sync branch:\s*(sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64})(?:\s|$)/i)
+                  : null;
+                const startingBranch = syncBranchMatch?.[1] || "dev";
+                if (taskKind === "sync-hotspot" && !syncBranchMatch) {
                  state.status = "needs-human";
                  state.reason = "Sync hotspot issue is missing a validated Sync branch";
                  await saveRecord(issue.number, comment, state);
@@ -595,7 +595,7 @@ jobs:
                     owner,
                     repo,
                     workflow_id: "enforce-pr-target.yml",
-                    ref: context.payload.repository.default_branch,
+                    ref: context.payload.repository?.default_branch,
                     inputs: { pull_number: String(pr.number) }
                   });
                 } catch (error) {
