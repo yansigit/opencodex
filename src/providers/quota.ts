@@ -8,7 +8,7 @@ import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { codexPlanKey } from "../codex/plan";
 import { resolveEnvValue } from "../config";
-import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, type OAuthAccessSnapshot } from "../oauth";
+import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, getValidAccessTokenSnapshotForAccount, type OAuthAccessSnapshot } from "../oauth";
 import { getAccountCredential, getAccountSet, getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
 import { apiKeyPoolEntryId } from "./api-keys";
@@ -1401,7 +1401,7 @@ export interface ProviderAccountQuota {
 
 /** Providers whose per-account quota can be probed. Extend as other OAuth APIs are covered. */
 export function supportsPerAccountQuota(provider: string): boolean {
-  return provider === "anthropic";
+  return provider === "anthropic" || provider === "google-antigravity";
 }
 
 function accountCacheKey(provider: string, accountId: string): string {
@@ -1520,8 +1520,13 @@ async function fetchAccountQuota(
 
   const probe = (async (): Promise<AccountQuotaCacheEntry> => {
     try {
-      const token = await getTokenForAccountQuotaProbe(provider, accountId);
-      const quota = await fetchAnthropicUsageQuota(token);
+      let quota: ProviderQuota | null = null;
+      if (provider === "anthropic") {
+        const token = await getTokenForAccountQuotaProbe(provider, accountId);
+        quota = await fetchAnthropicUsageQuota(token);
+      } else if (provider === "google-antigravity") {
+        quota = await fetchAntigravityAccountQuota(accountId);
+      }
       if (!quota) {
         // Preserve last-good bars and mark unavailable; advance TTL so failures
         // negative-cache instead of re-probing on every GUI poll.
@@ -2076,6 +2081,45 @@ function antigravityUsedPercent(quotaInfo: Record<string, unknown>): number | un
       : undefined);
   if (remaining === undefined) return undefined;
   return normalizePercent(100 - remaining);
+}
+
+async function fetchAntigravityAccountQuota(accountId: string): Promise<ProviderQuota | null> {
+  let snapshot: OAuthAccessSnapshot;
+  try {
+    snapshot = await getValidAccessTokenSnapshotForAccount("google-antigravity", accountId);
+  } catch {
+    return null;
+  }
+  if (!snapshot.projectId) return null;
+  const entry = getProviderRegistryEntry("google-antigravity");
+  const baseUrl = (entry?.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
+  const providerConfig: Pick<OcxProviderConfig, "adapter" | "authMode" | "baseUrl" | "googleMode" | "tlsProfile"> = {
+    adapter: "google",
+    authMode: "oauth",
+    googleMode: "cloud-code-assist",
+    baseUrl,
+  };
+  const fetchImpl = providerTlsFetch("google-antigravity", providerConfig, globalThis.fetch);
+  let liveQuota: ProviderQuota | null;
+  try {
+    liveQuota = await fetchAntigravityLiveQuota({
+      accessToken: snapshot.accessToken,
+      projectId: snapshot.projectId,
+      baseUrl,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      fetchImpl,
+    });
+  } catch (error) {
+    if (error instanceof AntigravityQuotaRpcError && isTerminalAntigravityQuotaStatus(error.status)) {
+      return null;
+    }
+    liveQuota = null;
+  }
+  if (!liveQuota) return null;
+  return {
+    ...liveQuota,
+    updatedAt: Date.now(),
+  };
 }
 
 async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {

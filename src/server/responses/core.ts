@@ -2772,14 +2772,6 @@ async function handleResponsesInner(
       clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
     })
     : null;
-  if (isAntigravityOAuth) {
-    antigravitySessionKey = antigravitySessionKeyFromParts({
-      sessionIdHeader: sessionIdHeaderFromRequest(req.headers),
-      threadIdHeader: req.headers.get("thread-id"),
-      clientThreadId: typeof parsed._clientThreadId === "string" ? parsed._clientThreadId : null,
-      promptCacheKey: typeof parsed.options.promptCacheKey === "string" ? parsed.options.promptCacheKey : null,
-    });
-  }
   if (route.provider.authMode === "oauth" || isAntigravityOAuth) {
     try {
       if (route.providerName === "anthropic" && isAnthropicAccountPoolEnabled(config)) {

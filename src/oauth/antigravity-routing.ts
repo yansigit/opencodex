@@ -269,11 +269,11 @@ export function resolveAntigravityAccountForSession(
       const account = set.accounts.find(candidate => candidate.id === bound.accountId);
       if (!account) {
         sessionAffinity.delete(key);
-        return { accountId: null, reason: "missing-affinity" };
+      } else {
+        bound.lastUsedAt = now;
+        if (account.needsReauth === true) return { accountId: account.id, reason: "active-needs-reauth" };
+        return { accountId: account.id, reason: "affinity", ...(getAntigravityAccountHealthSnapshot(account.id, now) ?? {}) };
       }
-      bound.lastUsedAt = now;
-      if (account.needsReauth === true) return { accountId: account.id, reason: "active-needs-reauth" };
-      return { accountId: account.id, reason: "affinity", ...(getAntigravityAccountHealthSnapshot(account.id, now) ?? {}) };
     }
   }
 
