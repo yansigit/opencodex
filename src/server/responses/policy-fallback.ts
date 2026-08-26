@@ -89,7 +89,7 @@ function finishFailedPolicyAttempt(logCtx: RequestLogContext, status: number): v
   const attempt = logCtx.activeAttempt;
   if (attempt) {
     const startedAt = logCtx.activeAttemptStartedAt ?? Date.now();
-    finishRequestAttempt(attempt, status, Math.max(0, Date.now() - startedAt), attempt.usage ?? logCtx.usage);
+    finishRequestAttempt(attempt, status, Math.max(0, Date.now() - startedAt), attempt.usage ?? logCtx.usage, logCtx.upstreamError);
   }
   delete logCtx.activeAttempt;
   delete logCtx.activeAttemptStartedAt;

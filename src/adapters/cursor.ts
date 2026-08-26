@@ -90,10 +90,9 @@ function cursorRequestSizeContext(request: { modelId: string; system: string[]; 
   };
 }
 
-function assertCursorRequestSupported(parsed: OcxParsedRequest): void {
-  if (parsed.options.textFormat !== undefined || parsed._structuredOutput === true) {
-    throw new Error("Cursor does not support structured output");
-  }
+function assertCursorRequestSupported(_parsed: OcxParsedRequest): void {
+  // Cursor downgrades structured output (JSON schema/object) into system prompt guidance
+  // via structuredOutputPrompt in protobuf-request.ts rather than rejecting it.
 }
 
 export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAdapterDeps = {}): ProviderAdapter {

@@ -540,6 +540,20 @@ function googlePartThoughtSignature(part: GoogleResponsePart): string | undefine
   return typeof nested === "string" && nested.length > 0 ? nested : undefined;
 }
 
+function ensureThoughtSignatureBypassSentinel(contents: unknown[]): void {
+  for (const c of contents as { role?: string; parts?: unknown[] }[]) {
+    if (c?.role !== "model" || !Array.isArray(c.parts)) continue;
+    for (const p of c.parts) {
+      if (p && typeof p === "object") {
+        const partObj = p as Record<string, unknown>;
+        if (partObj.functionCall && !partObj.thoughtSignature && !partObj.thought_signature) {
+          partObj.thoughtSignature = ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL;
+        }
+      }
+    }
+  }
+}
+
 /**
  * Carry a Gemini thought signature with the exact function-call part that produced it. Google
  * validates the signature against that specific part, so it must ride the individual tool call
@@ -882,19 +896,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           const strippedModelTail = /claude/i.test(wireModelId) ? stripTrailingClaudePrefill(contents) : false;
           if (antigravityUsesReplayCache(wireModelId)) {
             applyAntigravityReplay(wireModelId, sessionId, contents);
-            // If any functionCall still lacks a thoughtSignature on Gemini Antigravity,
-            // supply the bypass sentinel so Antigravity does not reject the turn with HTTP 400.
-            for (const c of contents as { role?: string; parts?: unknown[] }[]) {
-              if (c?.role !== "model" || !Array.isArray(c.parts)) continue;
-              for (const p of c.parts) {
-                if (p && typeof p === "object") {
-                  const partObj = p as Record<string, unknown>;
-                  if (partObj.functionCall && !partObj.thoughtSignature && !partObj.thought_signature) {
-                    partObj.thoughtSignature = ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL;
-                  }
-                }
-              }
-            }
+            ensureThoughtSignatureBypassSentinel(contents);
           } else {
             sanitizeAntigravityClaudeSignatures(contents);
           }
@@ -947,6 +949,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
             vertexReplaySession,
             (compiled.body as { contents: unknown[] }).contents,
           );
+          ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents);
         }
         // Vertex AI: project/location endpoint with GCP ADC, or x-goog-api-key fast path.
         const apiKey = resolveVertexApiKey(provider.apiKey);
@@ -978,6 +981,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
       const compiled = compileGoogleWireBody(body);
       restoreGoogleToolName = compiled.restoreToolName;
+      if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
+        ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents);
+      }
       emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
       return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
     },

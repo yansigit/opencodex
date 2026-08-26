@@ -1200,6 +1200,7 @@ export function finishRequestAttempt(
   status: number,
   durationMs: number,
   usage?: OcxUsage,
+  upstreamError?: string,
 ): PersistedUsageAttempt {
   const finalized = finalizedUsage(
     attempt.adapter,
@@ -1214,7 +1215,7 @@ export function finishRequestAttempt(
   else delete attempt.usage;
   if (finalized.totalTokens !== undefined) attempt.totalTokens = finalized.totalTokens;
   else delete attempt.totalTokens;
-  const errorCode = requestLogErrorCode(status);
+  const errorCode = requestLogErrorCode(status, upstreamError);
   if (errorCode) attempt.errorCode = errorCode;
   else delete attempt.errorCode;
   return attempt;

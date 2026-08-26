@@ -11,6 +11,7 @@ import {
   McpArgsSchema,
   McpToolCallSchema,
   ModelDetailsSchema,
+  ThinkingDeltaUpdateSchema,
   TextDeltaUpdateSchema,
   ToolCallSchema,
   ToolCallStartedUpdateSchema,
@@ -613,6 +614,56 @@ describe("Cursor live transport unexpected EOF", () => {
       }
 
       expect(messages).toContainEqual({ type: "text", text: "hello" });
+      expect(messages.at(-1)).toMatchObject({ type: "done" });
+    });
+  });
+
+  test("synthesizes done after assistant thinking on clean Connect EOF without turnEnded", async () => {
+    const thinkingFrame = encodeConnectFrame(toBinary(AgentServerMessageSchema, create(AgentServerMessageSchema, {
+      message: {
+        case: "interactionUpdate",
+        value: create(InteractionUpdateSchema, {
+          message: {
+            case: "thinkingDelta",
+            value: create(ThinkingDeltaUpdateSchema, { text: "pondering..." }),
+          },
+        }),
+      },
+    })));
+    const kvFrame = encodeConnectFrame(toBinary(AgentServerMessageSchema, create(AgentServerMessageSchema, {
+      message: {
+        case: "kvServerMessage",
+        value: create(KvServerMessageSchema, { id: 8 }),
+      },
+    })));
+    const connectEnd = encodeConnectFrame(new TextEncoder().encode("{}"), {
+      flags: CONNECT_FLAG_END_STREAM,
+    });
+
+    await withDiscoveryServer(stream => {
+      stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+      stream.end(Buffer.from(new Uint8Array([...thinkingFrame, ...kvFrame, ...connectEnd])));
+    }, async baseUrl => {
+      const transport = createLiveCursorTransport({
+        provider: { adapter: "cursor", baseUrl, apiKey: "test-token" },
+        translatorBudget: createTestTranslatorBudget(),
+        firstFrameTimeoutMs: 2_000,
+      });
+      const messages: Array<{ type: string }> = [];
+      try {
+        for await (const message of transport.run({
+          modelId: "composer-2",
+          conversationId: "cursor_clean_eof_thinking_test",
+          system: [],
+          messages: [{ role: "user", content: "hello" }],
+        })) {
+          messages.push(message);
+        }
+      } finally {
+        await transport.close?.();
+      }
+
+      expect(messages).toContainEqual({ type: "thinking", thinking: "pondering..." });
       expect(messages.at(-1)).toMatchObject({ type: "done" });
     });
   });

@@ -4,6 +4,8 @@ import { loginCommandCode, parseCommandCodeCallback, shouldImportLocalCommandCod
 import { buildModelsRequest, OAUTH_PROVIDERS } from "../src/oauth";
 import { commandCodeReasoningEfforts, resetCommandCodeReasoningEffortsForTest } from "../src/providers/command-code-efforts";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
+import { classifyError } from "../src/lib/errors";
+import { beginRequestAttempt, finishRequestAttempt } from "../src/server/request-log";
 import type { OcxParsedRequest, OcxProviderConfig } from "../src/types";
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
 
@@ -556,5 +558,36 @@ describe("Command Code provider", () => {
     const first = await builtRequest({ ...parsed(), options: { ...parsed().options, promptCacheKey: "shared" }, _promptCacheKeyIsSharedCohort: true });
     const second = await builtRequest({ ...parsed(), options: { ...parsed().options, promptCacheKey: "shared" }, context: { ...parsed().context, messages: [{ role: "user", content: "different", timestamp: 1 }] }, _promptCacheKeyIsSharedCohort: true });
     expect(first.headers["x-session-id"]).not.toBe(second.headers["x-session-id"]);
+  });
+
+  test("formats credit depletion 400 and classifies as insufficient_quota", () => {
+    const adapter = createCommandCodeAdapter(provider);
+    const rawPayload = JSON.stringify({
+      success: false,
+      error: {
+        code: "BAD_REQUEST",
+        status: 400,
+        message: "You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
+        docs: "https://commandcode.ai/docs/reference/errors/bad_request",
+      },
+    });
+    const formatted = adapter.formatErrorBody!(400, new Headers(), rawPayload);
+    expect(formatted).toContain("insufficient credits");
+    const classified = classifyError(400, "upstream_error", formatted);
+    expect(classified.code).toBe("insufficient_quota");
+    expect(classified.type).toBe("insufficient_quota");
+
+    const attempt = beginRequestAttempt(1, "command-code", "deepseek/deepseek-v4-flash", "command-code");
+    finishRequestAttempt(attempt, 400, 50, undefined, formatted);
+    expect(attempt.errorCode).toBe("insufficient_quota");
+
+    // Flat error format sent by Command Code API
+    const flatPayload = JSON.stringify({
+      code: "BAD_REQUEST",
+      status: 400,
+      message: "You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
+    });
+    const formattedFlat = adapter.formatErrorBody!(400, new Headers(), flatPayload);
+    expect(formattedFlat).toContain("insufficient credits");
   });
 });
