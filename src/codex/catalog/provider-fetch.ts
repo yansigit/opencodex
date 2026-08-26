@@ -61,6 +61,7 @@ import {
   providerOutboundPost,
   providerRedirectError,
 } from "../../lib/provider-outbound";
+import { isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import { redactSecretString } from "../../lib/redact";
 import {
   extractProviderModelItems,
@@ -1101,15 +1102,32 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
       item.context_size,
       item.max_model_len,
       item.max_context_length,
+      item.context_window,
+      item.max_context_window,
+      item.max_context_size,
+      item.n_ctx,
+      plainRecord(item.top_provider)?.max_context_length,
+      plainRecord(metadata?.top_provider)?.max_context_length,
       // llama.cpp reports the served context under `meta`: `n_ctx` is what the
       // server was actually started with, `n_ctx_train` the model's trained
       // maximum. Prefer the served value — routing must not promise a window the
       // running server will refuse. Both come LAST so no provider already
       // supplying a recognized field changes behavior (#1797).
       plainRecord(item.meta)?.n_ctx,
+      item.default_context_size,
       plainRecord(item.meta)?.n_ctx_train,
     );
-  const maxInputTokens = positiveSafeInteger(limits?.max_input_tokens, item.max_input_tokens);
+  const maxInputTokens = positiveSafeInteger(
+    limits?.max_input_tokens,
+    item.max_input_tokens,
+    item.max_input_length,
+    item.max_prompt_tokens,
+  );
+  const maxOutputTokens = positiveSafeInteger(
+    limits?.max_output_tokens,
+    item.max_output_tokens,
+    limits?.max_tokens,
+  );
   // Some OpenAI-compatible catalogs expose the selectable ladder under
   // `reasoning_parameters.efforts` instead of the older `reasoning_efforts` key.
   // Treat both as model metadata: otherwise a valid upstream capability disappears
@@ -1137,6 +1155,7 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
   return {
     ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
     ...(maxInputTokens && maxInputTokens > 0 ? { maxInputTokens } : {}),
+    ...(maxOutputTokens && maxOutputTokens > 0 ? { maxOutputTokens } : {}),
     ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
     ...(inputModalities ? { inputModalities } : {}),
     ...(capabilities ? { capabilities } : {}),
@@ -1232,8 +1251,10 @@ async function fetchProviderModelsWithAuth(
     clearProviderDiscoveryStatus(name);
     return observed(configured, "authoritative");
   }
+  const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
+  const antigravityOAuth = isAntigravityOAuthProvider(name, prov);
   const auth: ModelsAuthResolution = captured.observedAuth ?? (resolveAuth.kind === "refreshing"
-    ? prov.authMode === "oauth" && effectiveGoogleMode(name, prov) === "cloud-code-assist"
+    ? antigravityOAuth && cloudCodeAssist
       ? await getValidAccessTokenSnapshot(name)
         .then(snapshot => ({
           apiKey: snapshot.accessToken,
@@ -1317,14 +1338,14 @@ async function fetchProviderModelsWithAuth(
       "degraded",
     );
   }
-  if (prov.authMode === "oauth" && !apiKey) {
+  if ((prov.authMode === "oauth" || antigravityOAuth) && !apiKey) {
     // No usable token (logged out, or account marked needsReauth). Still surface the
     // configured static catalog so the GUI Models tab / rail counts are not empty —
     // matching Cursor's !apiKey → configured degradation and fetch-failure fallback.
     return observed(configured, "degraded");
   }
-  const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
-  const project = prov.project ?? auth.oauthProjectId;
+  if (antigravityOAuth && !cloudCodeAssist) return observed(configured, "degraded");
+  const project = antigravityOAuth ? auth.oauthProjectId : prov.project ?? auth.oauthProjectId;
   if (cloudCodeAssist && !project) return observed(configured, "degraded");
   const fresh = getFreshCached(name, ttlMs);
   if (fresh) {
