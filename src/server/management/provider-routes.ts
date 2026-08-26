@@ -31,6 +31,11 @@ import {
 } from "../../oauth";
 import { replaceProviderAccountSet } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
+import {
+  antigravityOAuthDestinationConfigError,
+  getProviderTlsProfileStatus,
+  isAntigravityOAuthProvider,
+} from "../../lib/provider-tls-profile";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost, providerRedirectError } from "../../lib/provider-outbound";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
@@ -212,6 +217,17 @@ function applyProviderPatchFields(
       // `requestPacingConfigError` is the runtime narrowing boundary above; keep the
       // assertion explicit because a generic plain record cannot express `enabled`.
       next.requestPacing = structuredClone(value) as unknown as OcxProviderConfig["requestPacing"];
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "tlsProfile")) {
+    const value = rawBody.tlsProfile;
+    if (value === null || value === "") {
+      delete next.tlsProfile;
+    } else if (value === "antigravity-browser") {
+      next.tlsProfile = value;
+    } else {
+      return { error: "tlsProfile must be antigravity-browser or null" };
     }
     touched = true;
   }
@@ -457,6 +473,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       upstreamHttpVersion: p.upstreamHttpVersion,
       authMode: p.authMode,
       apiKeyTransport: p.apiKeyTransport,
+      tlsProfile: p.tlsProfile,
+      tlsProfileStatus: p.tlsProfile === undefined ? "disabled" : getProviderTlsProfileStatus(name, p),
       disabled: p.disabled === true,
       codexAccountMode: providerCodexAccountMode(name, p),
       ...(name === "xai" ? { xaiResponsesOptInState: xaiResponsesOptInState(p) } : {}),
@@ -797,6 +815,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (prov.disabled) {
       return jsonResponse({ ok: false, error: "Provider is disabled", latencyMs: 0 });
     }
+    const antigravityError = antigravityOAuthDestinationConfigError(name, prov);
+    if (antigravityError) return jsonResponse({ ok: false, error: antigravityError, latencyMs: 0 }, 400);
     if (prov.authMode === "forward") {
       return jsonResponse({
         ok: true,
@@ -811,12 +831,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return jsonResponse({ applicable: false, reason: "static_catalog", latencyMs: 0 });
     }
     const { buildModelsRequest, getValidAccessTokenSnapshot, resolveModelsAuthToken } = await import("../../oauth");
-    const antigravity = effectiveGoogleMode(name, prov) === "cloud-code-assist";
+    const antigravity = isAntigravityOAuthProvider(name, prov);
     const snapshot = antigravity
       ? await getValidAccessTokenSnapshot(name).catch(() => undefined)
       : undefined;
     const apiKey = snapshot?.accessToken ?? await resolveModelsAuthToken(name, prov);
-    if (prov.authMode === "oauth" && !apiKey) {
+    if ((prov.authMode === "oauth" || antigravity) && !apiKey) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "static catalog only — upstream not verified (not logged in)" });
     }
     if (prov.adapter === "cursor") {
@@ -840,7 +860,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         message: `Connected. ${live.models.length} models.`,
       });
     }
-    const project = prov.project ?? snapshot?.projectId;
+    const project = antigravity ? snapshot?.projectId : prov.project;
     if (antigravity && !project) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "Antigravity project unavailable — re-run `ocx login google-antigravity`" });
     }
