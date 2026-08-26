@@ -61,6 +61,7 @@ import {
   providerOutboundPost,
   providerRedirectError,
 } from "../../lib/provider-outbound";
+import { isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import { redactSecretString } from "../../lib/redact";
 import {
   extractProviderModelItems,
@@ -1101,6 +1102,7 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
       item.context_size,
       item.max_model_len,
       item.max_context_length,
+      item.n_ctx,
       // llama.cpp reports the served context under `meta`: `n_ctx` is what the
       // server was actually started with, `n_ctx_train` the model's trained
       // maximum. Prefer the served value — routing must not promise a window the
@@ -1232,8 +1234,10 @@ async function fetchProviderModelsWithAuth(
     clearProviderDiscoveryStatus(name);
     return observed(configured, "authoritative");
   }
+  const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
+  const antigravityOAuth = isAntigravityOAuthProvider(name, prov);
   const auth: ModelsAuthResolution = captured.observedAuth ?? (resolveAuth.kind === "refreshing"
-    ? prov.authMode === "oauth" && effectiveGoogleMode(name, prov) === "cloud-code-assist"
+    ? antigravityOAuth && cloudCodeAssist
       ? await getValidAccessTokenSnapshot(name)
         .then(snapshot => ({
           apiKey: snapshot.accessToken,
@@ -1317,14 +1321,14 @@ async function fetchProviderModelsWithAuth(
       "degraded",
     );
   }
-  if (prov.authMode === "oauth" && !apiKey) {
+  if ((prov.authMode === "oauth" || antigravityOAuth) && !apiKey) {
     // No usable token (logged out, or account marked needsReauth). Still surface the
     // configured static catalog so the GUI Models tab / rail counts are not empty —
     // matching Cursor's !apiKey → configured degradation and fetch-failure fallback.
     return observed(configured, "degraded");
   }
-  const cloudCodeAssist = effectiveGoogleMode(name, prov) === "cloud-code-assist";
-  const project = prov.project ?? auth.oauthProjectId;
+  if (antigravityOAuth && !cloudCodeAssist) return observed(configured, "degraded");
+  const project = antigravityOAuth ? auth.oauthProjectId : prov.project ?? auth.oauthProjectId;
   if (cloudCodeAssist && !project) return observed(configured, "degraded");
   const fresh = getFreshCached(name, ttlMs);
   if (fresh) {
