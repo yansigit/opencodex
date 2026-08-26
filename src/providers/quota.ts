@@ -1401,7 +1401,12 @@ export interface ProviderAccountQuota {
 
 /** Providers whose per-account quota can be probed. Extend as other OAuth APIs are covered. */
 export function supportsPerAccountQuota(provider: string): boolean {
-  return provider === "anthropic" || provider === "google-antigravity";
+  return (
+    provider === "anthropic" ||
+    provider === "google-antigravity" ||
+    provider === "command-code" ||
+    provider === "cursor"
+  );
 }
 
 function accountCacheKey(provider: string, accountId: string): string {
@@ -1526,6 +1531,14 @@ async function fetchAccountQuota(
         quota = await fetchAnthropicUsageQuota(token);
       } else if (provider === "google-antigravity") {
         quota = await fetchAntigravityAccountQuota(accountId);
+      } else if (provider === "command-code") {
+        const token = await getTokenForAccountQuotaProbe(provider, accountId);
+        const res = await fetchCommandCodeUsageQuota(token);
+        quota = res === TERMINAL_QUOTA_FAILURE ? null : res;
+      } else if (provider === "cursor") {
+        const token = await getTokenForAccountQuotaProbe(provider, accountId);
+        const res = await fetchCursorUsageQuota(token);
+        quota = res?.quota ?? null;
       }
       if (!quota) {
         // Preserve last-good bars and mark unavailable; advance TTL so failures
@@ -1741,8 +1754,9 @@ function parseCommandCodeWindow(value: unknown): { percent: number; resetAt?: nu
   if (!row) return null;
   const cap = toFiniteNumber(row.cap);
   const used = toFiniteNumber(row.used);
-  if (cap === undefined || used === undefined || cap <= 0 || used < 0) return null;
-  const percent = normalizePercent((used / cap) * 100);
+  const percent = cap !== undefined && used !== undefined && cap > 0 && used >= 0
+    ? normalizePercent((used / cap) * 100)
+    : normalizePercent(row.percent);
   if (percent === undefined) return null;
   const resetAt = quotaResetAt(row);
   return { percent, ...(resetAt !== undefined ? { resetAt } : {}) };
@@ -1829,11 +1843,7 @@ async function resolveCommandCodeQuotaBearer(config: OcxProviderConfig): Promise
  * usage view uses (windowLimits.fiveHour / windowLimits.weekly), plus soft
  * whoami (team orgId scoping) and subscription-scoped spend for creditsUsd.
  */
-async function fetchCommandCodeQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
-  // Never release credentials to a user-edited or lookalike provider host.
-  if (!isCanonicalCommandCodeBaseUrl(config.baseUrl)) return null;
-  const bearer = await resolveCommandCodeQuotaBearer(config);
-  if (!bearer) return null;
+async function fetchCommandCodeUsageQuota(bearer: string): Promise<ProviderQuota | null | typeof TERMINAL_QUOTA_FAILURE> {
   const whoamiBody = await fetchCommandCodeJson(COMMAND_CODE_WHOAMI_URL, bearer);
   const whoami = asRecord(whoamiBody?.data) ?? whoamiBody;
   const org = asRecord(whoami?.org);
@@ -1857,7 +1867,7 @@ async function fetchCommandCodeQuota(provider: string, config: OcxProviderConfig
   const fiveHour = parseCommandCodeWindow(limits?.fiveHour);
   const weekly = parseCommandCodeWindow(limits?.weekly);
   const creditsUsd = await fetchCommandCodeSpend(bearer, credits, orgQuery);
-  return report(provider, "command-code:credits", {
+  return {
     ...(fiveHour ? {
       fiveHourPercent: fiveHour.percent,
       ...(fiveHour.resetAt !== undefined ? { fiveHourResetAt: fiveHour.resetAt } : {}),
@@ -1868,18 +1878,21 @@ async function fetchCommandCodeQuota(provider: string, config: OcxProviderConfig
     } : {}),
     ...(creditsUsd ? { creditsUsd } : {}),
     updatedAt: Date.now(),
-  });
+  };
+}
+
+async function fetchCommandCodeQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
+  // Never release credentials to a user-edited or lookalike provider host.
+  if (!isCanonicalCommandCodeBaseUrl(config.baseUrl)) return null;
+  const bearer = await resolveCommandCodeQuotaBearer(config);
+  if (!bearer) return null;
+  const result = await fetchCommandCodeUsageQuota(bearer);
+  if (!result || result === TERMINAL_QUOTA_FAILURE) return result;
+  return report(provider, "command-code:credits", result);
 }
 
 /** Cursor included usage via api2.cursor.sh (Bearer from OAuth) — unofficial, may change. */
-async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport | null> {
-  let accessToken: string;
-  try {
-    accessToken = await getValidAccessToken("cursor");
-  } catch {
-    return null;
-  }
-
+async function fetchCursorUsageQuota(accessToken: string): Promise<{ quota: ProviderQuota; source: string } | null> {
   const authHeaders = {
     Accept: "application/json",
     Authorization: `Bearer ${accessToken}`,
@@ -1939,15 +1952,17 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
         }
 
         if (totalPercent !== undefined || customWindows.length > 0) {
-          const built = report(provider, "cursor:period-usage", {
-            ...(totalPercent !== undefined ? {
-              monthlyPercent: totalPercent,
-              ...(resetAt !== undefined ? { monthlyResetAt: resetAt } : {}),
-            } : {}),
-            ...(customWindows.length > 0 ? { customWindows } : {}),
-            updatedAt: Date.now(),
-          });
-          if (built) return { ...built, reverseEngineered: true };
+          return {
+            source: "cursor:period-usage",
+            quota: {
+              ...(totalPercent !== undefined ? {
+                monthlyPercent: totalPercent,
+                ...(resetAt !== undefined ? { monthlyResetAt: resetAt } : {}),
+              } : {}),
+              ...(customWindows.length > 0 ? { customWindows } : {}),
+              updatedAt: Date.now(),
+            },
+          };
         }
       }
     }
@@ -1973,12 +1988,14 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
             ? normalizePercent((used / limit) * 100)
             : undefined);
         if (percent !== undefined) {
-          const built = report(provider, "cursor:usage-summary", {
-            monthlyPercent: percent,
-            monthlyResetAt: normalizeResetAt(body?.billingCycleEnd),
-            updatedAt: Date.now(),
-          });
-          if (built) return { ...built, reverseEngineered: true };
+          return {
+            source: "cursor:usage-summary",
+            quota: {
+              monthlyPercent: percent,
+              monthlyResetAt: normalizeResetAt(body?.billingCycleEnd),
+              updatedAt: Date.now(),
+            },
+          };
         }
       }
     }
@@ -2027,11 +2044,26 @@ async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport |
         return Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, start.getUTCDate());
       })()
     : undefined;
-  const built = report(provider, "cursor:auth-usage", {
-    monthlyPercent: percent,
-    ...(monthlyResetAt !== undefined ? { monthlyResetAt } : {}),
-    updatedAt: Date.now(),
-  });
+  return {
+    source: "cursor:auth-usage",
+    quota: {
+      monthlyPercent: percent,
+      ...(monthlyResetAt !== undefined ? { monthlyResetAt } : {}),
+      updatedAt: Date.now(),
+    },
+  };
+}
+
+async function fetchCursorQuota(provider: string): Promise<ProviderQuotaReport | null> {
+  let accessToken: string;
+  try {
+    accessToken = await getValidAccessToken("cursor");
+  } catch {
+    return null;
+  }
+  const result = await fetchCursorUsageQuota(accessToken);
+  if (!result) return null;
+  const built = report(provider, result.source, result.quota);
   return built ? { ...built, reverseEngineered: true } : null;
 }
 
