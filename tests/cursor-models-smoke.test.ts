@@ -18,38 +18,6 @@ import { create } from "@bufbuild/protobuf";
 import type { OcxParsedRequest, OcxTool, OcxMessage } from "../src/types";
 
 describe("Cursor Provider Models Comprehensive Smoke Test", () => {
-  test("Smoke 1: Kimi K3 structured output does not throw and formats prompt", async () => {
-    const adapter = createCursorAdapter({ adapter: "cursor", baseUrl: "https://example.com" });
-    const parsed = {
-      modelId: "cursor/kimi-k3",
-      context: { messages: [{ role: "user", content: "generate title", timestamp: 1 }] },
-      options: {
-        reasoning: "max",
-        textFormat: {
-          type: "json_schema",
-          name: "title_schema",
-          schema: {
-            type: "object",
-            properties: { title: { type: "string" } },
-            required: ["title"],
-          },
-        },
-      },
-      _structuredOutput: true,
-    } as unknown as OcxParsedRequest;
-
-    expect(() => adapter.validateRequest?.(parsed)).not.toThrow();
-
-    let seenHeadroom: number | undefined;
-    await adapter.runTurn(
-      parsed,
-      {
-        headers: new Headers(),
-      } as any,
-      () => {},
-    );
-  });
-
   test("Smoke 2: Kimi K3 textual pseudo tool call is converted into structured tool call", () => {
     const state = createCursorProtobufEventState({ clientToolNames: ["exec"] });
     const msg = create(AgentServerMessageSchema, {
@@ -134,4 +102,3 @@ describe("Cursor Provider Models Comprehensive Smoke Test", () => {
     expect(capturedHeadroom).toBe(300_000);
   });
 });
-

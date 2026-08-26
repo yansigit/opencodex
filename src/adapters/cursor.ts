@@ -91,7 +91,9 @@ function cursorRequestSizeContext(request: { modelId: string; system: string[]; 
 }
 
 function assertCursorRequestSupported(parsed: OcxParsedRequest): void {
-  void parsed;
+  if (parsed.options.textFormat !== undefined || parsed._structuredOutput === true) {
+    throw new Error("Cursor does not support structured output");
+  }
 }
 
 export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAdapterDeps = {}): ProviderAdapter {
