@@ -48,6 +48,11 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("refs/heads/$branch:refs/heads/$branch");
   });
 
+  test("configures the temporary automation commit identity in the sync worktree", () => {
+    expect(workflow).toContain('git -C "$FORK_SYNC_WORKTREE" config user.name "Yumi"');
+    expect(workflow).toContain('git -C "$FORK_SYNC_WORKTREE" config user.email "automation""@""sbyoon.com"');
+  });
+
   test("publishes a remote sync branch for every conflict handoff", () => {
     expect(workflow).toContain(
       "if: steps.pin.outputs.kind == 'pin-updated' || steps.pin.outputs.kind == 'main-behind' || steps.pin.outputs.kind == 'history-diverged'",
@@ -65,6 +70,16 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("FORK_SYNC_WORKTREE");
     expect(workflow).not.toContain("base=main");
     expect(workflow).not.toContain("base: main");
+  });
+
+  test("does not run dependency install scripts with the persisted write token", () => {
+    expect(workflow).toContain("bun install --frozen-lockfile --ignore-scripts");
+  });
+
+  test("rejects manual dispatches from untrusted refs", () => {
+    expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
+    expect(workflow).toContain("github.ref_name != github.event.repository.default_branch");
+    expect(workflow).toContain("github.ref_name != 'dev'");
   });
 
   test("keeps the upstream fetch step at the workflow step indentation", () => {
@@ -88,13 +103,23 @@ describe("fork upstream sync workflow contract", () => {
     expect(cursorStep).not.toContain('emit < "$event_file"');
   });
 
-  test("passes the full prepare result and three-way metadata to handoff", () => {
+  test("builds the handoff payload before either notifier can consume it", () => {
+    const handoffStep = workflow.split("- name: Build sync handoff payload")[1];
+    expect(handoffStep).toBeDefined();
+    expect(handoffStep).toContain('> "$RUNNER_TEMP/fork-sync-handoff.json"');
+    expect(handoffStep).toContain("fork-sync-prepare.json");
+    expect(handoffStep).toContain("mergeBaseCount");
     const issueStep = workflow.split("- name: Notify GitHub issue")[1];
-    expect(issueStep).toContain("fork-sync-prepare.json");
-    expect(issueStep).toContain("prepareResult");
-    expect(issueStep).toContain("headSha");
-    expect(issueStep).toContain("mergeBaseCount");
-    expect(issueStep).toContain("mergeBaseShas");
+    expect(issueStep).toContain('emit < "$RUNNER_TEMP/fork-sync-handoff.json"');
+  });
+
+  test("passes the full prepare result and three-way metadata to handoff", () => {
+    const handoffStep = workflow.split("- name: Build sync handoff payload")[1];
+    expect(handoffStep).toContain("fork-sync-prepare.json");
+    expect(handoffStep).toContain("prepareResult");
+    expect(handoffStep).toContain("headSha");
+    expect(handoffStep).toContain("mergeBaseCount");
+    expect(handoffStep).toContain("mergeBaseShas");
   });
 
   test("falls back to a trusted Jules issue only when Cursor is unavailable", () => {
