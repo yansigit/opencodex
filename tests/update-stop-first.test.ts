@@ -158,6 +158,7 @@ describe("update stops the running proxy before replacing files", () => {
       const bundledBun = join(repoRoot, "node_modules", "bun");
       const env = {
         ...process.env,
+        OPENCODEX_BUN_PATH: process.env.OPENCODEX_BUN_PATH ?? process.execPath,
         HOME: root,
         USERPROFILE: root,
         OPENCODEX_HOME: opencodexHome,
