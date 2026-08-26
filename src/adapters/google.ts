@@ -542,7 +542,8 @@ function googlePartThoughtSignature(part: GoogleResponsePart): string | undefine
   return typeof nested === "string" && nested.length > 0 ? nested : undefined;
 }
 
-function ensureThoughtSignatureBypassSentinel(contents: unknown[]): void {
+function ensureThoughtSignatureBypassSentinel(contents: unknown[], modelId?: string): void {
+  if (modelId && !/gemini-(?:3.7|2.5)|thinking/i.test(modelId)) return;
   for (const c of contents as { role?: string; parts?: unknown[] }[]) {
     if (c?.role !== "model" || !Array.isArray(c.parts)) continue;
     for (const p of c.parts) {
@@ -1035,7 +1036,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const compiled = compileGoogleWireBody(body);
       restoreGoogleToolName = compiled.restoreToolName;
       if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
-        ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents);
+        ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents, routedModelId);
       }
       emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
       return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
