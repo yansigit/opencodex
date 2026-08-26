@@ -108,7 +108,7 @@ const CURSOR_STREAM_SILENCE_FAIL_MS = 30_000;
  * for this long is equally stuck — the server is alive but the turn is not progressing.
  * Reset on every decoded frame that is not liveness-only.
  */
-const CURSOR_STREAM_HEARTBEAT_ONLY_FAIL_MS = 90_000;
+const CURSOR_STREAM_HEARTBEAT_ONLY_FAIL_MS = 180_000;
 /**
  * After `turnEnded` is decoded, the application turn is complete. A server that keeps
  * HTTP/2 open past this point cannot hold the turn hostage (senpi #1062): we close our side

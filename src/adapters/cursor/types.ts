@@ -25,9 +25,10 @@ export interface CursorRunRequest {
    * hydration). History stays text-only. data: URLs only in this slice.
    */
   selectedImages?: readonly ResolvedCursorImage[];
-  tools?: OcxTool[];
-  toolChoice?: OcxRequestOptions["toolChoice"];
-  parallelToolCalls?: boolean;
+ tools?: OcxTool[];
+ toolChoice?: OcxRequestOptions["toolChoice"];
+  textFormat?: OcxRequestOptions["textFormat"];
+ parallelToolCalls?: boolean;
   /**
    * Clear provider-private context-usage carry-forward before this run. Used when Codex starts a
    * newly observed compacted context epoch, so pre-compaction totals are not over-reported while

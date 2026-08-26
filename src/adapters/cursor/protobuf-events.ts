@@ -176,6 +176,7 @@ export interface CursorProtobufEventState {
    */
   syntheticStructuredEditToolNames?: ReadonlySet<string>;
   translatorBudget?: TranslatorBudget;
+  textToolCallBuffer?: string;
 }
 
 
@@ -329,7 +330,7 @@ function isCompleteJson(text: string): boolean {
 
 /** Schema-normalize a JSON-text argument blob for a named tool, if a schema is known. */
 function normalizeJsonText(text: string, toolName: string | undefined, state: CursorProtobufEventState): string {
-  const schema = toolSchemaForWireName(state, toolName);
+  const schema = toolSchemaForWireName(state, toolName) ?? (toolName ? defaultShellBridgeArgNormalizeSchema(toolName) : undefined);
   if (!schema) return text;
   try {
     const parsed = JSON.parse(text);
@@ -1240,14 +1241,159 @@ export function mapCursorProtobufServerMessage(
     return [];
   }
 
+const TOOL_CALL_START_PREFIX = "[TOOL_CALL]";
+const TOOL_CALL_ARGS_MARKER = "[ARGS]";
+
+function findPotentialMarkerPrefix(text: string): number {
+  for (let len = Math.min(TOOL_CALL_START_PREFIX.length - 1, text.length); len >= 1; len--) {
+    const candidate = text.slice(text.length - len);
+    if (TOOL_CALL_START_PREFIX.startsWith(candidate)) {
+      return text.length - len;
+    }
+  }
+  return -1;
+}
+
+function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState): CursorServerMessage[] {
+  if (!state.clientToolNames) {
+    return text ? [{ type: "text", text: normalizeCursorTextToolMarkers(text) }] : [];
+  }
+
+  let remaining = (state.textToolCallBuffer ?? "") + text;
+  state.textToolCallBuffer = undefined;
+
+  if (!remaining) return [];
+
+  const out: CursorServerMessage[] = [];
+
+  while (remaining.length > 0) {
+    const startIndex = remaining.indexOf(TOOL_CALL_START_PREFIX);
+    if (startIndex === -1) {
+      const partialIndex = findPotentialMarkerPrefix(remaining);
+      if (partialIndex !== -1) {
+        if (partialIndex > 0) {
+          out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining.slice(0, partialIndex)) });
+        }
+        state.textToolCallBuffer = remaining.slice(partialIndex);
+        break;
+      }
+      out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining) });
+      break;
+    }
+
+    // Check if the candidate at startIndex is actually a tool call
+    const candidateAfter = remaining.slice(startIndex + TOOL_CALL_START_PREFIX.length);
+    const argsPos = candidateAfter.indexOf(TOOL_CALL_ARGS_MARKER);
+    const namePart = argsPos !== -1 ? candidateAfter.slice(0, argsPos).trim() : candidateAfter;
+    const isCandidateValid = namePart.length > 0 && namePart.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(namePart);
+
+    if (!isCandidateValid && argsPos === -1) {
+      // Not a valid tool call and no [ARGS]; treat as plain text
+      out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining) });
+      break;
+    }
+
+    if (startIndex > 0) {
+      out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining.slice(0, startIndex)) });
+      remaining = remaining.slice(startIndex);
+      continue;
+    }
+
+    const argsMarkerIndex = remaining.indexOf(TOOL_CALL_ARGS_MARKER, TOOL_CALL_START_PREFIX.length);
+    if (argsMarkerIndex === -1) {
+      const nameCandidate = remaining.slice(TOOL_CALL_START_PREFIX.length);
+      if (nameCandidate.length > 64 || /[^a-zA-Z0-9_-]/.test(nameCandidate)) {
+        out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining) });
+        break;
+      }
+      state.textToolCallBuffer = remaining;
+      break;
+    }
+
+    const rawName = remaining.slice(TOOL_CALL_START_PREFIX.length, argsMarkerIndex).trim();
+    const wireName = normalizeCursorWireName(rawName);
+    const advertisedName = resolveAdvertisedClientToolName(state, wireName);
+
+    if (!advertisedName) {
+      const endOfMarker = argsMarkerIndex + TOOL_CALL_ARGS_MARKER.length;
+      out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining.slice(0, endOfMarker)) });
+      remaining = remaining.slice(endOfMarker);
+      continue;
+    }
+
+    const argsStart = argsMarkerIndex + TOOL_CALL_ARGS_MARKER.length;
+    let argsEnd = -1;
+    const trimmedOffset = remaining.slice(argsStart).search(/\S/);
+    if (trimmedOffset !== -1 && remaining[argsStart + trimmedOffset] === "{") {
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      const jsonStart = argsStart + trimmedOffset;
+      for (let i = jsonStart; i < remaining.length; i++) {
+        const char = remaining[i];
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (char === "\\") {
+          escape = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (!inString) {
+          if (char === "{") depth++;
+          else if (char === "}") {
+            depth--;
+            if (depth === 0) {
+              argsEnd = i + 1;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (argsEnd === -1) {
+      state.textToolCallBuffer = remaining;
+      break;
+    }
+
+    const argsJson = remaining.slice(argsStart, argsEnd).trim();
+    const toolCallId = `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+
+    const recordEvents = recordToolCall(state, toolCallId, wireName);
+    out.push(...recordEvents);
+    if (!recordEvents.some(e => e.type === "error")) {
+      const open = state.openToolCalls.get(toolCallId);
+      if (open) open.args = argsJson;
+      let finalArgs = normalizeJsonText(argsJson, wireName, state);
+      if (state.freeformToolNames?.has(open?.name ?? "") && !cursorFreeformWrapperValid(finalArgs)) {
+        try {
+          const parsed = JSON.parse(finalArgs) as unknown;
+          if (typeof parsed === "string") {
+            finalArgs = JSON.stringify({ input: parsed });
+          }
+        } catch {
+          finalArgs = JSON.stringify({ input: finalArgs });
+        }
+      }
+      out.push(...commitToolCall(state, toolCallId, finalArgs));
+    }
+
+    remaining = remaining.slice(argsEnd);
+  }
+
+  return out;
+}
+
   if (serverMessage.message.case !== "interactionUpdate") return [];
   const update = serverMessage.message.value.message;
   switch (update.case) {
     case "textDelta":
-      // #2305: fold Cursor display aliases inside textual pseudo tool-call markers back to
-      // the advertised wire name before any client sees the text. Real frames are already
-      // normalized structurally (mcpWireNameFromArgs above).
-      return update.value.text ? [{ type: "text", text: normalizeCursorTextToolMarkers(update.value.text) }] : [];
+      return update.value.text ? parseCursorTextToolCalls(update.value.text, state) : [];
     case "thinkingDelta":
       return update.value.text ? [{ type: "thinking", thinking: update.value.text }] : [];
     case "toolCallStarted": {
@@ -1364,18 +1510,23 @@ export function resolvedTurnUsage(state: CursorProtobufEventState): OcxUsage {
  */
 export function finalizeTurnEvents(state: CursorProtobufEventState): CursorServerMessage[] {
   state.terminated = true;
+  const prefixEvents: CursorServerMessage[] = [];
+  if (state.textToolCallBuffer) {
+    prefixEvents.push({ type: "text", text: normalizeCursorTextToolMarkers(state.textToolCallBuffer) });
+    state.textToolCallBuffer = undefined;
+  }
   if (state.openToolCalls.size > 0) {
     const openCallIds = [...state.openToolCalls.keys()];
     const openIds = openCallIds.join(", ");
     // Clear so a second turnEnded (should not happen, but defensive) doesn't re-emit.
     for (const callId of openCallIds) state.translatorBudget?.closeCall(callId);
     state.openToolCalls.clear();
-    return [{ type: "error", message: `Cursor stream ended with incomplete tool call(s): ${openIds}. Arguments may be truncated; the call was not committed.` }];
+    return [...prefixEvents, { type: "error", message: `Cursor stream ended with incomplete tool call(s): ${openIds}. Arguments may be truncated; the call was not committed.` }];
   }
   // Surface the absolute context size (when Cursor reported a checkpoint) as both totalTokens and
   // the estimated input side of Codex's visible `input + output` counter. Codex status lines can
   // render the additive pair instead of total_tokens, so leaving inputTokens at 0 makes a 16k-context
   // first turn display as "9 used". Keep outputTokens as the per-turn delta and clamp the inferred
   // input to 0 in case Cursor reports a checkpoint smaller than the streamed output delta.
-  return [{ type: "done", usage: resolvedTurnUsage(state) }];
+  return [...prefixEvents, { type: "done", usage: resolvedTurnUsage(state) }];
 }

@@ -1,7 +1,7 @@
 import { create, fromBinary, toBinary, toJson } from "@bufbuild/protobuf";
 import { fromJson, type JsonValue } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
-import type { OcxAssistantContentPart, OcxMessage, OcxToolResultMessage } from "../../types";
+import type { OcxAssistantContentPart, OcxMessage, OcxRequestOptions, OcxToolResultMessage } from "../../types";
 import { namespacedToolName } from "../../types";
 import type { CursorRunRequest } from "./types";
 import { cursorNeedsExternalToolContinuation, isCursorExternalWireModel } from "./discovery";
@@ -165,9 +165,26 @@ function truncateToolResultBlob(entry: RootBlobCandidate, maxBytes: number): Roo
   return markerOnly.byteLength <= maxBytes ? markerOnly : null;
 }
 
+function structuredOutputPrompt(textFormat: OcxRequestOptions["textFormat"]): string | undefined {
+  if (!textFormat) return undefined;
+  if (textFormat.type === "json_schema" && textFormat.schema) {
+    return [
+      "Your response must be a single valid JSON object strictly conforming to this JSON schema:",
+      JSON.stringify(textFormat.schema),
+      "Do not include any surrounding markdown fences, preamble, or commentary; return raw JSON only.",
+    ].join("\n");
+  }
+  if (textFormat.type === "json_object") {
+    return "Your response must be a single valid JSON object. Do not include any markdown fences or commentary; return raw JSON only.";
+  }
+  return undefined;
+}
+
 function systemPromptBlobs(request: CursorRunRequest): RootBlobCandidate[] {
   const prompts = request.system.length > 0 ? [...request.system] : ["You are a helpful assistant."];
   if (cursorRequestHasShellAlias(request.tools)) prompts.push(CURSOR_SHELL_ALIAS_SYSTEM_NOTE);
+  const structuredPrompt = structuredOutputPrompt(request.textFormat);
+  if (structuredPrompt) prompts.push(structuredPrompt);
   const cursorToolGuidance = buildCursorToolGuidanceSystemNote(
     cursorToolsForActivePrompt(request.tools, activePromptText(request), request.toolChoice),
     request.toolChoice,
@@ -726,7 +743,7 @@ function conversationTurns(
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, { text: `${prefix}\n${normalized.text}` }),
+            value: create(AssistantMessageSchema, { text: `${prefix}\n${toolResultToText(message)}` }),
           },
         })), requestScope));
         continue;

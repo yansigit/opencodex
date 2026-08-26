@@ -442,9 +442,10 @@ export function createCursorRequest(
     rawMessages: parsed.context.messages,
     ...(parsed._compactionRequest === true || parsed._contextCompactionBoundary === true ? { contextUsageReset: true } : {}),
     ...(parsed._compactionRequest === true ? { contextUsageStoreCheckpoints: false } : {}),
-    ...(budget.tools.length ? { tools: budget.tools } : {}),
-    ...(parsed.options.toolChoice ? { toolChoice: parsed.options.toolChoice } : {}),
-    ...(parsed.options.parallelToolCalls !== undefined ? { parallelToolCalls: parsed.options.parallelToolCalls } : {}),
+   ...(budget.tools.length ? { tools: budget.tools } : {}),
+   ...(parsed.options.toolChoice ? { toolChoice: parsed.options.toolChoice } : {}),
+    ...(parsed.options.textFormat ? { textFormat: parsed.options.textFormat } : {}),
+   ...(parsed.options.parallelToolCalls !== undefined ? { parallelToolCalls: parsed.options.parallelToolCalls } : {}),
   };
   const resolved = resolveCursorCheckpoint(parsed, request, options);
   if ("reason" in resolved) {
