@@ -45,6 +45,7 @@ describe("dev promotion workflow contract", () => {
     expect(workflow).toContain("human");
     expect(createStep).toContain('if [ "$live_dev_sha" != "$VERIFIED_CI_SHA" ]');
     expect(createStep).not.toContain('expected_ci_sha="$(git ls-remote');
+    expect(createStep).not.toContain("$expected_ci_sha");
   });
 
   test("never merges or force-pushes main", () => {

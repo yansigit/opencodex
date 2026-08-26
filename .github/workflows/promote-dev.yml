@@ -67,14 +67,11 @@ jobs:
             echo "::error::dev moved before the promotion PR mutation"
             exit 1
           fi
-          expected_ci_sha="$VERIFIED_CI_SHA"
           body_file="$RUNNER_TEMP/dev-promotion-body.md"
           cat > "$body_file" <<EOF
           ## Summary
 
           Promote the verified dev integration branch to main.
-
-          Verified dev commit: $expected_ci_sha
 
           ## Verification
 
