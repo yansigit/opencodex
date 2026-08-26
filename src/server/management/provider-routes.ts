@@ -20,7 +20,6 @@ import {
   upstreamHttpVersionConfigError,
   withConfigMutationLockSync,
 } from "../../config";
-import { azureCredentialConfigError, isAzureIdentityProvider } from "../../config/provider-validation";
 import {
   clearLoginState,
   getLoginStatus,
@@ -37,8 +36,8 @@ import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost,
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { parseAntigravityAvailableModels } from "../../providers/antigravity-models";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
-import { deriveProviderPresets } from "../../providers/derive";
-import { providerCodexAccountMode, providerMatchesRegistryTransport } from "../../providers/registry";
+import { deriveProviderPresets, providerConfigSeed } from "../../providers/derive";
+import { effectiveGoogleMode, providerCodexAccountMode, providerMatchesRegistryTransport } from "../../providers/registry";
 import {
   extractModelEnvelopeRows,
   extractProviderModelItems,
@@ -49,15 +48,13 @@ import { routedSlug, slugEquals } from "../../providers/slug-codec";
 import { clearAccountQuotaCache, clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
 import { clearKeyCooldowns } from "../../providers/key-failover";
 import { providerRequestPacingStatus } from "../../providers/request-pacing";
-import { antigravityOAuthDestinationConfigError, clearProviderTlsProfileStatus, getProviderTlsProfileStatus, isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
-import { redactErrorMessage } from "../../lib/redact";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { clearModelCache, getProviderDiscoveryStatus } from "../../codex/model-cache";
-import { azureIdentityClientId, invalidateAzureCredentialCache } from "../../lib/azure-identity";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
+import { modelAutoCompactTokenLimitsConfigError } from "../../providers/auto-compact-budget";
 import { resolveCodexHomeDir } from "../../codex/home";
 import { readUsageEntries } from "../../usage/log";
 import { getUsageDebugLogEntries } from "../../usage/debug";
@@ -105,16 +102,6 @@ type ProviderPatchApplication =
       enablingOpenAi: boolean;
       headersTouched: boolean;
     };
-
-function invalidateReplacedAzureCredential(
-  previous: OcxProviderConfig | undefined,
-  next: OcxProviderConfig | undefined,
-): void {
-  const previousClientId = previous ? azureIdentityClientId(previous) : undefined;
-  if (previousClientId !== undefined && previousClientId !== (next ? azureIdentityClientId(next) : undefined)) {
-    invalidateAzureCredentialCache(previousClientId);
-  }
-}
 
 /**
  * Apply the recognized PATCH field mask onto a provider copy. The caller runs this once
@@ -170,20 +157,6 @@ function applyProviderPatchFields(
     } else {
       return { error: "authMode must be key, forward, oauth, or local" };
     }
-  }
-  if (Object.hasOwn(rawBody, "azureCredential")) {
-    const value = rawBody.azureCredential;
-    if (value === null) {
-      delete next.azureCredential;
-    } else {
-      if (!isPlainRecord(value)) return { error: "azureCredential must be an object or null" };
-      const credential = structuredClone(value) as Record<string, unknown>;
-      if (typeof credential.managedIdentityClientId === "string") {
-        credential.managedIdentityClientId = credential.managedIdentityClientId.trim();
-      }
-      next.azureCredential = credential as OcxProviderConfig["azureCredential"];
-    }
-    touched = true;
   }
   if (Object.hasOwn(rawBody, "apiKeyTransport")) {
     const transport = rawBody.apiKeyTransport;
@@ -242,17 +215,6 @@ function applyProviderPatchFields(
     }
     touched = true;
   }
-  if (Object.hasOwn(rawBody, "tlsProfile")) {
-    const value = rawBody.tlsProfile;
-    if (value === null || value === "") {
-      delete next.tlsProfile;
-    } else if (value === "antigravity-browser") {
-      next.tlsProfile = value;
-    } else {
-      return { error: "tlsProfile must be antigravity-browser or null" };
-    }
-    touched = true;
-  }
   if (Object.hasOwn(rawBody, "upstreamHttpVersion")) {
     const value = rawBody.upstreamHttpVersion;
     if (value === null || value === "") {
@@ -302,6 +264,29 @@ function applyProviderPatchFields(
       }
       if (Object.keys(windows).length > 0) next.modelContextWindows = windows;
       else delete next.modelContextWindows;
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "modelAutoCompactTokenLimits")) {
+    const value = rawBody.modelAutoCompactTokenLimits;
+    const error = modelAutoCompactTokenLimitsConfigError(value, {
+      allowTombstones: true,
+      requireNativeIds: name === "openai",
+    });
+    if (error) return { error };
+    if (value === null) {
+      delete next.modelAutoCompactTokenLimits;
+    } else {
+      const budgets: Record<string, number> = Object.assign(
+        Object.create(null) as Record<string, number>,
+        next.modelAutoCompactTokenLimits ?? {},
+      );
+      for (const [model, budget] of Object.entries(value as Record<string, number | null>)) {
+        if (budget === null) delete budgets[model];
+        else budgets[model] = budget;
+      }
+      if (Object.keys(budgets).length > 0) next.modelAutoCompactTokenLimits = budgets;
+      else delete next.modelAutoCompactTokenLimits;
     }
     touched = true;
   }
@@ -408,6 +393,28 @@ function applyProviderPatchFields(
   return { next, touched, editorTouched, enablingOpenAi, headersTouched };
 }
 
+/** Validate the canonical OpenAI soft-budget overlay against a fresh registry seed. */
+function canonicalOpenAiBudgetPatchError(
+  provider: OcxProviderConfig,
+  rawBody: Record<string, unknown>,
+  keys: string[],
+  config: OcxConfig,
+): string | null {
+  if (!isCanonicalOpenAiForwardProvider(provider)) {
+    return "provider openai must be the canonical built-in provider";
+  }
+  const entry = getProviderRegistryEntry("openai");
+  if (!entry) return "provider openai registry seed is unavailable";
+  const seed = providerConfigSeed(entry);
+  if (provider.codexAccountMode !== undefined) seed.codexAccountMode = provider.codexAccountMode;
+  if (provider.modelAutoCompactTokenLimits !== undefined) {
+    seed.modelAutoCompactTokenLimits = { ...provider.modelAutoCompactTokenLimits };
+  }
+  const applied = applyProviderPatchFields("openai", seed, rawBody, keys, config);
+  if ("error" in applied) return applied.error;
+  return providerManagementConfigError("openai", applied.next);
+}
+
 export async function handleProviderRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, principal, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
 
@@ -436,26 +443,24 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     return jsonResponse(Object.entries(config.providers).map(([name, p]) => ({
       name, adapter: p.adapter, baseUrl: publicProviderBaseUrl(p.baseUrl), defaultModel: p.defaultModel,
       hasApiKey: !!p.apiKey,
-      hasAzureCredential: isAzureIdentityProvider(p),
       // Presence only (#959 review): header names and values never leave the process.
       hasHeaders: !!p.headers && Object.keys(p.headers).length > 0,
       allowPrivateNetwork: p.allowPrivateNetwork === true,
-      liveModels: isAzureIdentityProvider(p) ? false : p.liveModels !== false,
+      liveModels: p.liveModels !== false,
       requestPacing: p.requestPacing,
       models: p.models ?? [],
       contextWindow: p.contextWindow,
       modelContextWindows: p.modelContextWindows,
+      modelAutoCompactTokenLimits: p.modelAutoCompactTokenLimits,
       modelSupportsServiceTier: p.modelSupportsServiceTier,
       noStructuredOutputModels: p.noStructuredOutputModels,
       upstreamHttpVersion: p.upstreamHttpVersion,
       authMode: p.authMode,
       apiKeyTransport: p.apiKeyTransport,
-      tlsProfile: p.tlsProfile,
-      tlsProfileStatus: p.tlsProfile === undefined ? "disabled" : getProviderTlsProfileStatus(name, p),
       disabled: p.disabled === true,
       codexAccountMode: providerCodexAccountMode(name, p),
       ...(name === "xai" ? { xaiResponsesOptInState: xaiResponsesOptInState(p) } : {}),
-      discovery: isAzureIdentityProvider(p) || p.liveModels === false ? undefined : getProviderDiscoveryStatus(name),
+      discovery: p.liveModels === false ? undefined : getProviderDiscoveryStatus(name),
     })));
   }
 
@@ -507,7 +512,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return;
       }
       currentDiskConfig = current.diagnostics.config;
-      invalidateReplacedAzureCredential(config.providers[name], current.diagnostics.config.providers[name]);
       adoptPersistedProviderIntoLiveConfig(
         config,
         name,
@@ -519,7 +523,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return jsonResponse({ error: "provider reload source changed" }, 409);
     }
     reconcileLiveStateStores();
-    clearProviderTlsProfileStatus(name);
     // The complete disk snapshot owns display overlays, including providers that this
     // live routing instance deliberately does not adopt.
     refreshUserCostOverlays(currentDiskConfig);
@@ -545,9 +548,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const serviceTierError = providerServiceTierConfigError(name, body.provider);
     if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
     const prov = body.provider ? stripCodexRuntimeProviderFields(body.provider as OcxProviderConfig) : undefined;
-    if (prov?.azureCredential?.managedIdentityClientId !== undefined) {
-      prov.azureCredential.managedIdentityClientId = prov.azureCredential.managedIdentityClientId.trim();
-    }
     // PATCH already clears on null; POST persisted the body as submitted, so a `null` here
     // reached disk and the next loadConfig() refused it. Canonicalize to absent, which is what
     // "clear" means everywhere else.
@@ -583,13 +583,14 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // call can never fire.
     const submittedContextWindow = Object.hasOwn(prov, "contextWindow");
     const submittedModelContextWindows = Object.hasOwn(prov, "modelContextWindows");
+    const submittedModelAutoCompactTokenLimits = Object.hasOwn(prov, "modelAutoCompactTokenLimits");
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
     enrichProviderFromCatalog(name, prov);
     const { saveConfigPreservingClaudeCode: save } = await import("../../config");
     // Overwriting an existing provider must not drop its multi-key pool: carry it over, then
     // let the (possibly new) apiKey join the pool as the active entry.
     const existingPool = config.providers[name]?.apiKeyPool;
-    if (existingPool && !prov.apiKeyPool && !prov.azureCredential) prov.apiKeyPool = existingPool;
+    if (existingPool && !prov.apiKeyPool) prov.apiKeyPool = existingPool;
     // The same rule applies to user-configured price overlays: the dashboard's
     // add/edit form does not send modelCosts, so an overwrite must not silently
     // erase hand-edited per-model prices from Logs/Usage estimates.
@@ -615,12 +616,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         ? { ...existing.modelContextWindows, ...(prov.modelContextWindows ?? {}) }
         : { ...existing.modelContextWindows };
     }
-    const azureError = azureCredentialConfigError(prov);
-    if (azureError) return jsonResponse({ error: azureError }, 400);
-    const replacement = stripRegistryOnlyStaticHeaders(name, prov);
-    config.providers[name] = replacement;
-    invalidateReplacedAzureCredential(existing, replacement);
-    clearProviderTlsProfileStatus(name);
+    if (existing?.modelAutoCompactTokenLimits) {
+      prov.modelAutoCompactTokenLimits = submittedModelAutoCompactTokenLimits
+        ? { ...existing.modelAutoCompactTokenLimits, ...(prov.modelAutoCompactTokenLimits ?? {}) }
+        : { ...existing.modelAutoCompactTokenLimits };
+    }
+    config.providers[name] = stripRegistryOnlyStaticHeaders(name, prov);
     if (body.setDefault === true) config.defaultProvider = name;
     save(config);
     reconcileLiveStateStores();
@@ -643,6 +644,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const keys = Object.keys(rawBody);
     const hasMode = Object.hasOwn(rawBody, "codexAccountMode");
     const hasSetDefault = Object.hasOwn(rawBody, "setDefault");
+    const canonicalBudgetOnly = name === "openai"
+      && keys.length === 1
+      && keys[0] === "modelAutoCompactTokenLimits";
 
     // codexAccountMode keeps its dedicated side-effect path (quota cache clear, thread map
     // clear, pool prime) and is mutually exclusive with every other patch field.
@@ -705,12 +709,16 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
 
     const pacingOnly = keys.every(key => key === "requestPacing");
     if (applied.editorTouched && !pacingOnly) {
-      const providerError = providerManagementConfigError(name, next);
+      const providerError = canonicalBudgetOnly
+        ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
+        : providerManagementConfigError(name, next);
       if (providerError) return jsonResponse({ error: providerError }, 400);
-      const serviceTierError = providerServiceTierConfigError(name, next);
-      if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
-      const resolvedError = await providerDestinationResolvedError(name, next);
-      if (resolvedError) return jsonResponse({ error: resolvedError }, 400);
+      if (!canonicalBudgetOnly) {
+        const serviceTierError = providerServiceTierConfigError(name, next);
+        if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
+        const resolvedError = await providerDestinationResolvedError(name, next);
+        if (resolvedError) return jsonResponse({ error: resolvedError }, 400);
+      }
     } else if (applied.enablingOpenAi) {
       // Same DNS gate as POST: Clash fake-IP only. Never honor a persisted
       // allowPrivateNetwork on this path — it must not bypass the built-in guard.
@@ -734,15 +742,19 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return;
       }
       if (replay.editorTouched && !pacingOnly) {
-        const syncError = providerManagementConfigError(name, replay.next);
+        const syncError = canonicalBudgetOnly
+          ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, config)
+          : providerManagementConfigError(name, replay.next);
         if (syncError) {
           replayError = syncError;
           return;
         }
-        const serviceTierError = providerServiceTierConfigError(name, replay.next);
-        if (serviceTierError) {
-          replayError = serviceTierError;
-          return;
+        if (!canonicalBudgetOnly) {
+          const serviceTierError = providerServiceTierConfigError(name, replay.next);
+          if (serviceTierError) {
+            replayError = serviceTierError;
+            return;
+          }
         }
       } else if (replay.enablingOpenAi && !isCanonicalOpenAiForwardProvider(replay.next)) {
         replayError = "provider openai must be the canonical built-in provider";
@@ -750,15 +762,11 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       }
       // A PATCH that managed headers owns the resulting block: the clear path restores
       // registry static headers, so exact-match stripping must not erase them again.
-      const previous = config.providers[name];
-      const replacement = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
-      config.providers[name] = replacement;
+      config.providers[name] = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
       saveConfigPreservingClaudeCode(config);
-      invalidateReplacedAzureCredential(previous, replacement);
     });
     if (replayError !== undefined) return jsonResponse({ error: replayError }, 409);
     reconcileLiveStateStores();
-    if (applied.editorTouched && !pacingOnly) clearProviderTlsProfileStatus(name);
     if (applied.editorTouched && !pacingOnly) {
       const { clearModelCache } = await import("../../codex/model-cache");
       clearModelCache(name);
@@ -769,7 +777,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       name,
       disabled: config.providers[name]!.disabled === true,
       hasApiKey: !!config.providers[name]!.apiKey,
-      hasAzureCredential: isAzureIdentityProvider(config.providers[name]!),
       ...(name === "xai"
         ? { xaiResponsesOptInState: xaiResponsesOptInState(config.providers[name]!) }
         : {}),
@@ -790,8 +797,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (prov.disabled) {
       return jsonResponse({ ok: false, error: "Provider is disabled", latencyMs: 0 });
     }
-    const antigravityError = antigravityOAuthDestinationConfigError(name, prov);
-    if (antigravityError) return jsonResponse({ ok: false, error: antigravityError, latencyMs: 0 }, 400);
     if (prov.authMode === "forward") {
       return jsonResponse({
         ok: true,
@@ -799,19 +804,19 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         message: "Passthrough provider is configured (forwards your Codex login; no upstream /models).",
       });
     }
-    if (prov.liveModels === false || isAzureIdentityProvider(prov)) {
+    if (prov.liveModels === false) {
       // A static catalog has no live discovery endpoint to test. This is neither
       // positive connectivity evidence nor an outage, and it must stay before
       // credential resolution/network access for providers such as Antigravity.
       return jsonResponse({ applicable: false, reason: "static_catalog", latencyMs: 0 });
     }
     const { buildModelsRequest, getValidAccessTokenSnapshot, resolveModelsAuthToken } = await import("../../oauth");
-    const antigravity = isAntigravityOAuthProvider(name, prov);
+    const antigravity = effectiveGoogleMode(name, prov) === "cloud-code-assist";
     const snapshot = antigravity
       ? await getValidAccessTokenSnapshot(name).catch(() => undefined)
       : undefined;
     const apiKey = snapshot?.accessToken ?? await resolveModelsAuthToken(name, prov);
-    if ((prov.authMode === "oauth" || antigravity) && !apiKey) {
+    if (prov.authMode === "oauth" && !apiKey) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "static catalog only — upstream not verified (not logged in)" });
     }
     if (prov.adapter === "cursor") {
@@ -835,7 +840,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         message: `Connected. ${live.models.length} models.`,
       });
     }
-    const project = antigravity ? snapshot?.projectId : prov.project;
+    const project = prov.project ?? snapshot?.projectId;
     if (antigravity && !project) {
       return jsonResponse({ ok: false, latencyMs: 0, error: "Antigravity project unavailable — re-run `ocx login google-antigravity`" });
     }
@@ -917,7 +922,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         latencyMs: Date.now() - started,
         error: err instanceof ProviderOutboundPolicyError
           ? `upstream /models blocked by destination policy: ${err.message}`
-          : err instanceof Error ? redactErrorMessage(err.message) : "Connection test failed",
+          : err instanceof Error ? err.message : "Connection test failed",
       });
     }
   }
@@ -954,10 +959,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     }
     const { saveConfigPreservingClaudeCode: save } = await import("../../config");
     if (fallbackDefault) config.defaultProvider = fallbackDefault;
-    const removed = config.providers[name];
     delete config.providers[name];
-    invalidateReplacedAzureCredential(removed, undefined);
-    clearProviderTlsProfileStatus(name);
     const { dropProviderCustomModels } = await import("../../providers/provider-id-rewrite");
     const droppedCustomModels = dropProviderCustomModels(config, name);
     setProviderContextCap(config, name, false);

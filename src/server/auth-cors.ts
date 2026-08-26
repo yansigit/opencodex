@@ -28,6 +28,7 @@ import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { openRouterRoutingConfigError } from "../providers/openrouter-routing";
+import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compact-budget";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
 import { antigravityOAuthDestinationConfigError, getProviderTlsProfileStatus, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
@@ -568,6 +569,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     if (contextOverlayError) return contextOverlayError;
     delete canonicalCandidate.contextWindow;
     delete canonicalCandidate.modelContextWindows;
+    // User-owned soft compaction policy; it does not alter the canonical transport seed.
+    delete canonicalCandidate.modelAutoCompactTokenLimits;
     const canonical = seed && sameCanonicalProviderSeed(canonicalCandidate, seed);
     if (!canonical) {
       return `provider ${name} must equal the canonical built-in provider seed`;
@@ -618,6 +621,13 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (azureCredentialError) return `provider ${JSON.stringify(redactSecretString(name))} ${azureCredentialError}`;
   const maxInputError = positiveIntegerRecordConfigError(raw.modelMaxInputTokens, "modelMaxInputTokens");
   if (maxInputError) return `provider ${name} ${maxInputError}`;
+  const autoCompactError = modelAutoCompactTokenLimitsConfigError(
+    raw.modelAutoCompactTokenLimits,
+    { requireNativeIds: name === "openai" },
+  );
+  if (autoCompactError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${autoCompactError}`;
+  }
   const reasoningSummariesError = booleanRecordConfigError(raw.modelSupportsReasoningSummaries, "modelSupportsReasoningSummaries");
   if (reasoningSummariesError) return `provider ${name} ${reasoningSummariesError}`;
   const reasoningSummaryDeliveryError = reasoningSummaryDeliveryRecordConfigError(
@@ -720,6 +730,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "models",
       "contextWindow",
       "modelContextWindows",
+      "modelAutoCompactTokenLimits",
       "defaultMaxOutputTokens",
       "modelMaxOutputTokens",
       "openRouterRouting",
@@ -762,6 +773,9 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     defaultProvider: config.defaultProvider,
     codexAutoStart: codexAutoStartEnabled(config),
     websockets: config.websockets,
+    // The GUI's browser-open toggle reads and writes this; absent means the
+    // historical auto-open behavior.
+    oauthOpenBrowser: config.oauthOpenBrowser !== false,
     providers,
   };
 }
