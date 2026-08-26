@@ -17,7 +17,9 @@
       if (typeof chrome !== "undefined" && chrome.storage?.local) {
         chrome.storage.local.set({ relayStatus: status, lastSeen: Date.now() });
       }
-    } catch {}
+    } catch (err) {
+      void err;
+    }
   }
 
   function connect() {
@@ -39,7 +41,8 @@
       let msg;
       try {
         msg = JSON.parse(e.data);
-      } catch {
+      } catch (err) {
+        void err;
         return;
       }
 
@@ -110,10 +113,9 @@
     };
 
     ws.onerror = () => {
-      try { ws.close(); } catch {}
+      try { ws.close(); } catch (closeErr) { void closeErr; }
     };
   }
 
   connect();
 })();
-

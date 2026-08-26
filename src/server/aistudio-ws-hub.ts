@@ -137,7 +137,9 @@ export function createAiStudioRelayHub(): AiStudioRelayHub {
         signal.addEventListener("abort", () => {
           try {
             ws.send(JSON.stringify({ id: reqId, type: "abort" }));
-          } catch {}
+          } catch (err) {
+            void err;
+          }
           pending.fail(new Error("Request aborted by client"));
         });
       }
@@ -182,7 +184,8 @@ export function createAiStudioRelayHub(): AiStudioRelayHub {
       let data: any;
       try {
         data = JSON.parse(raw);
-      } catch {
+      } catch (err) {
+        void err;
         return;
       }
 
@@ -252,7 +255,9 @@ export function getAiStudioUserScript(listenPort: number): string {
             ws.send(JSON.stringify({ id, type: "error", payload: { error: String(err) } }));
           }
         }
-      } catch {}
+      } catch (err) {
+        void err;
+      }
     };
     ws.onclose = () => setTimeout(connect, 3000);
   }

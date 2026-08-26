@@ -1358,7 +1358,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
                 yield { type: "error", message: parsedErr.error.message };
                 return;
               }
-            } catch {}
+            } catch (err) {
+              void err;
+            }
             yield { type: "error", message: `upstream non-SSE response: ${residual.slice(0, 300)}` };
             return;
           } else if ((yield* handleDataLine(residual)) === "terminate") return;

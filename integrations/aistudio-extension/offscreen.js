@@ -6,21 +6,25 @@ const activeAbortControllers = new Map();
 
 function updateStatus(status, details = "") {
   try {
-    if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      chrome.storage.local.set({ relayStatus: status, relayDetails: details, lastSeen: Date.now() });
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        chrome.storage.local.set({ relayStatus: status, relayDetails: details, lastSeen: Date.now() });
+      }
+    } catch (err) {
+      void err;
     }
-  } catch {}
-}
+  }
 
-async function getPort() {
-  try {
-    if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      const data = await chrome.storage.local.get(["proxyPort"]);
-      if (data?.proxyPort) return Number(data.proxyPort);
+  async function getPort() {
+    try {
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        const data = await chrome.storage.local.get(["proxyPort"]);
+        if (data?.proxyPort) return Number(data.proxyPort);
+      }
+    } catch (err) {
+      void err;
     }
-  } catch {}
-  return DEFAULT_PORT;
-}
+    return DEFAULT_PORT;
+  }
 
 async function connect() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
@@ -43,7 +47,8 @@ async function connect() {
     let msg;
     try {
       msg = JSON.parse(e.data);
-    } catch {
+    } catch (err) {
+      void err;
       return;
     }
 
@@ -113,10 +118,9 @@ async function connect() {
   };
 
   ws.onerror = () => {
-    try { ws.close(); } catch {}
+    try { ws.close(); } catch (closeErr) { void closeErr; }
   };
 }
 
 // Start connection
 connect();
-
