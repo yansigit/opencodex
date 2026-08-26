@@ -1,6 +1,6 @@
 {
   "name": "@yansigit/opencodex",
-  "version": "2.32.0",
+  "version": "2.33.0",
   "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
@@ -28,7 +28,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=18"
   },
   "trustedDependencies": [
     "bun"
@@ -39,9 +39,7 @@
     "dev:gui": "cd gui && bun run dev",
     "start": "bun run src/cli/index.ts start",
     "test": "bun scripts/test.ts",
-    "test:replit-gateway": "cd integrations/replit-gateway && bun install --frozen-lockfile && bun run test",
-    "typecheck": "bun x tsc --noEmit && bun run typecheck:replit-gateway",
-    "typecheck:replit-gateway": "cd integrations/replit-gateway && bun install --frozen-lockfile && bun run typecheck",
+    "typecheck": "bun x tsc --noEmit",
     "audit:high": "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
     "privacy:scan": "bun scripts/privacy-scan.ts",
     "generate:model-metadata": "bun scripts/generate-model-metadata.ts",
@@ -61,16 +59,11 @@
     "setup:hooks": "bun scripts/setup-hooks.ts"
   },
   "dependencies": {
-    "@azure/identity": "^4.13.2",
-    "@azure/logger": "^1.4.0",
     "@bufbuild/protobuf": "^2.14.0",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@napi-rs/keyring": "1.3.0",
     "bun": "1.4.0",
     "zod": "4.4.3"
-  },
-  "optionalDependencies": {
-    "wreq-js": "2.3.1"
   },
   "devDependencies": {
     "@types/bun": "1.4.0",
@@ -103,11 +96,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yansigit/opencodex.git"
+    "url": "git+https://github.com/lidge-jun/opencodex.git"
   },
-  "homepage": "https://github.com/yansigit/opencodex",
+  "homepage": "https://lidge-jun.github.io/opencodex/",
   "bugs": {
-    "url": "https://github.com/yansigit/opencodex/issues"
+    "url": "https://github.com/lidge-jun/opencodex/issues"
   },
   "license": "MIT"
 }
