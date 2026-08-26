@@ -1189,6 +1189,7 @@ export const ja: Record<TKey, string> = {
   "pws.stats.quotaTracked": "レート制限は使用量タブで追跡されます。",
   "pws.stats.source": "ソース",
   "pws.usageLast30d": "使用量 (過去30日)",
+  "pws.allAccounts": "すべてのアカウント",
   "pws.metricRequests": "リクエスト",
   "pws.metricTokens": "トークン",
   "pws.usageUnavailable": "まだ使用量が記録されていません。",

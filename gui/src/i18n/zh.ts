@@ -1781,6 +1781,7 @@ export const zh: Record<TKey, string> = {
   "pws.stats.quotaTracked": "在用量标签查看限额。",
   "pws.stats.source": "来源",
   "pws.usageLast30d": "用量（最近 30 天）",
+  "pws.allAccounts": "全部账号",
   "pws.estimatedCost": "预估费用",
   "pws.costDisclaimer": "基于 API 公示价格的预估值，非实际计费金额。",
   "pws.modelBreakdown": "模型用量明细",

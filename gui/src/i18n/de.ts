@@ -1761,6 +1761,7 @@ export const de: Record<TKey, string> = {
   "pws.stats.quotaTracked": "Limits siehe Nutzungs-Tab.",
   "pws.stats.source": "Quelle",
   "pws.usageLast30d": "Nutzung (letzte 30 Tage)",
+  "pws.allAccounts": "Alle Konten",
   "pws.estimatedCost": "Geschätzte Kosten",
   "pws.costDisclaimer": "Schätzung basierend auf API-Listenpreisen, keine tatsächliche Abrechnung.",
   "pws.modelBreakdown": "Modellaufschlüsselung",

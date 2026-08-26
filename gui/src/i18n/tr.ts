@@ -1237,6 +1237,7 @@ export const tr: Record<TKey, string> = {
   "pws.stats.quotaTracked": "Oran limitleri Kullanım sekmesinde takip edilir.",
   "pws.stats.source": "Kaynak",
   "pws.usageLast30d": "Kullanım (son 30 gün)",
+  "pws.allAccounts": "Tüm hesaplar",
   "pws.estimatedCost": "Tahmini maliyet",
   "pws.costDisclaimer": "API liste fiyatı tahminidir.",
   "pws.modelBreakdown": "Model dağılımı",

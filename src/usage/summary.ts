@@ -94,6 +94,7 @@ export interface UsageProvider {
 
 export interface UsageAccount {
   accountLogLabel: string;
+  provider?: string;
   ambiguous: boolean;
   requests: number;
   attemptCount: number;
@@ -684,12 +685,25 @@ function legacyCodexAccountLabel(provider: string): string | null {
   return suffix ?? LEGACY_AMBIGUOUS_ACCOUNT_LABEL;
 }
 
-function accountLabelForAttribution(provider: string, explicit: unknown): string | null {
-  if (isCodexUsageAccountLogLabel(explicit)) return explicit;
-  return legacyCodexAccountLabel(provider);
+export function accountLabelForAttribution(
+  provider: string,
+  explicit: unknown,
+  fallbackAccountByProvider?: Record<string, string>,
+): string | null {
+  if (typeof explicit === "string" && explicit.trim().length > 0) return explicit.trim();
+  const legacy = legacyCodexAccountLabel(provider);
+  if (legacy) return legacy;
+  const base = baseProviderLabel(provider);
+  if (fallbackAccountByProvider && fallbackAccountByProvider[base]) {
+    return fallbackAccountByProvider[base];
+  }
+  return null;
 }
 
-function buildAccounts(entries: PersistedUsageEntry[]): UsageAccount[] {
+function buildAccounts(
+  entries: PersistedUsageEntry[],
+  fallbackAccountByProvider?: Record<string, string>,
+): UsageAccount[] {
   const byLabel = new Map<string, UsageAccount>();
   const requestIds = new Map<string, Set<string>>();
 
@@ -702,12 +716,13 @@ function buildAccounts(entries: PersistedUsageEntry[]): UsageAccount[] {
     totalTokens?: number;
     estimate: ReturnType<typeof estimateRequestCost>;
   }): void => {
-    const label = accountLabelForAttribution(input.provider, input.accountLogLabel);
+    const label = accountLabelForAttribution(input.provider, input.accountLogLabel, fallbackAccountByProvider);
     if (!label) return;
     let row = byLabel.get(label);
     if (!row) {
       row = {
         accountLogLabel: label,
+        provider: baseProviderLabel(input.provider),
         ambiguous: label === LEGACY_AMBIGUOUS_ACCOUNT_LABEL,
         requests: 0,
         attemptCount: 0,
@@ -808,6 +823,7 @@ export function summarizeUsage(
   range: UsageRange,
   now: number,
   surface: UsageSurface = "all",
+  fallbackAccountByProvider?: Record<string, string>,
 ): UsageSummary {
   const { since } = rangeWindow(range, now);
   const filteredEntries = entries.filter(entry => {
@@ -837,7 +853,7 @@ export function summarizeUsage(
     days: buildDayGrid(range, since, now, filteredEntries),
     models: buildModels(filteredEntries, totals.totalTokens),
     providers: buildProviders(filteredEntries, totals.totalTokens),
-    accounts: buildAccounts(filteredEntries),
+    accounts: buildAccounts(filteredEntries, fallbackAccountByProvider),
   };
 }
 
@@ -869,12 +885,14 @@ function normalizeFilterValue(input: string | null | undefined): string | null {
  */
 export function projectUsageSummary<T extends UsageSummary>(
   summary: T,
-  filter: { provider?: string | null; model?: string | null },
+  filter: { provider?: string | null; model?: string | null; account?: string | null },
   entries?: PersistedUsageEntry[],
+  fallbackAccountByProvider?: Record<string, string>,
 ): T & { filter?: UsageFilterEcho } {
   const provider = normalizeFilterValue(filter.provider);
   const model = normalizeFilterValue(filter.model);
-  if (provider === null && model === null) return summary;
+  const account = normalizeFilterValue(filter.account);
+  if (provider === null && model === null && account === null) return summary;
 
   // Re-summarise from the entries the summary was built from, rather than
   // projecting over its rows.
@@ -891,9 +909,13 @@ export function projectUsageSummary<T extends UsageSummary>(
   //
   // The entries are already in hand on every path that filters, so the honest
   // computation is also the simple one.
-  const matches = (rowProvider: string, rowModel: string): boolean => {
+  const matches = (rowProvider: string, rowModel: string, rowAccount?: string | null): boolean => {
     if (provider !== null && baseProviderLabel(rowProvider).toLowerCase() !== provider) return false;
     if (model !== null && rowModel.toLowerCase() !== model) return false;
+    if (account !== null && rowAccount !== undefined) {
+      const effectiveAccount = accountLabelForAttribution(rowProvider, rowAccount, fallbackAccountByProvider);
+      if (!effectiveAccount || effectiveAccount.toLowerCase() !== account) return false;
+    }
     return true;
   };
 
@@ -909,10 +931,10 @@ export function projectUsageSummary<T extends UsageSummary>(
   const filtered: PersistedUsageEntry[] = [];
   for (const entry of source) {
     if (!entry.attempts?.length) {
-      if (matches(entry.provider, antigravityUsageModel(entry.provider, entry.model))) filtered.push(entry);
+      if (matches(entry.provider, antigravityUsageModel(entry.provider, entry.model), entry.accountLogLabel)) filtered.push(entry);
       continue;
     }
-    const attempts = entry.attempts.filter(a => matches(a.provider, antigravityUsageModel(a.provider, a.model)));
+    const attempts = entry.attempts.filter(a => matches(a.provider, antigravityUsageModel(a.provider, a.model), a.accountLogLabel ?? entry.accountLogLabel));
     if (attempts.length === 0) continue;
     // A combo is still counted once per participating model, so a filtered
     // request count can exceed the number of distinct requests. That is the
@@ -921,7 +943,7 @@ export function projectUsageSummary<T extends UsageSummary>(
     filtered.push({ ...entry, attempts });
   }
 
-  const projected = summarizeUsage(filtered, summary.range, summary.generatedAt, summary.surface);
+  const projected = summarizeUsage(filtered, summary.range, summary.generatedAt, summary.surface, fallbackAccountByProvider);
   // matched reflects usage inside the requested WINDOW, not anywhere in the
   // log: summarizeUsage applies the range and surface predicates, and the CLI
   // uses this flag to decide between a table and "no usage recorded".
