@@ -12,6 +12,7 @@ import { commandCodeReasoningEfforts, refreshCommandCodeReasoningEfforts } from 
 import { identifyRoutedModel } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { parseDataUrl } from "./image";
+import { redactSecretString } from "../lib/redact";
 
 // Retain the short ids emitted by the first local integration. New requests use the live catalog's
 // provider-native IDs directly; this map is compatibility-only and is not a model fallback list.
@@ -24,6 +25,23 @@ const COMMAND_CODE_MODEL_ALIASES: Readonly<Record<string, string>> = {
 
 function canonicalCommandCodeModelId(modelId: string): string {
   return Object.hasOwn(COMMAND_CODE_MODEL_ALIASES, modelId) ? COMMAND_CODE_MODEL_ALIASES[modelId]! : modelId;
+}
+
+/** Surface Command Code's JSON error message to sidecar callers instead of a bare HTTP status. */
+export function formatCommandCodeErrorBody(_status: number, _headers: Headers, payloadText: string): string {
+  try {
+    const payload = JSON.parse(payloadText) as unknown;
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
+    const error = (payload as Record<string, unknown>).error;
+    const message = error && typeof error === "object" && !Array.isArray(error)
+      ? (error as Record<string, unknown>).message
+      : undefined;
+    return typeof message === "string" && message.trim()
+      ? redactSecretString(message.trim()).slice(0, 400)
+      : "";
+  } catch {
+    return "";
+  }
 }
 
 /** Flatten tool-result content for the text-only wire output, keeping an `[image]` marker per image part in content order. */
@@ -468,6 +486,7 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
   const executor = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
   return {
     name: "command-code",
+    formatErrorBody: formatCommandCodeErrorBody,
     async buildRequest(parsed: OcxParsedRequest): Promise<AdapterRequest> {
       if (!provider.apiKey) throw new Error("Command Code credential missing — run ocx login command-code");
       const cwd = currentWorkingDirectory();

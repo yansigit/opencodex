@@ -634,6 +634,7 @@ describe("request log metadata", () => {
   test("classifies status codes with optional upstream error context", () => {
     expect(requestLogErrorCode(200)).toBeUndefined();
     expect(requestLogErrorCode(400)).toBe("invalid_request_error");
+    expect(requestLogErrorCode(400, "Provider error 400: You have insufficient credits to make this request.")).toBe("insufficient_quota");
     expect(requestLogErrorCode(401)).toBe("invalid_api_key");
     expect(requestLogErrorCode(403)).toBe("permission_denied");
     expect(requestLogErrorCode(403, "Provider error 403")).toBe("permission_denied");

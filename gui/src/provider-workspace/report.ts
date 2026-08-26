@@ -54,6 +54,13 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
         }];
       })
     : [];
+  const credits = q.creditsUsd && typeof q.creditsUsd === "object" && !Array.isArray(q.creditsUsd)
+    ? q.creditsUsd as Record<string, unknown>
+    : null;
+  const creditsPercent = finite(credits?.percent);
+  if (creditsPercent !== undefined && !windows.some(window => /credits?/i.test(window.label))) {
+    windows.push({ label: "Total subscription credits", percent: creditsPercent });
+  }
   const out: AccountQuota = {
     ...(finite(q.fiveHourPercent) !== undefined ? { fiveHourPercent: q.fiveHourPercent as number } : {}),
     ...(finite(q.fiveHourResetAt) !== undefined ? { fiveHourResetAt: q.fiveHourResetAt as number } : {}),

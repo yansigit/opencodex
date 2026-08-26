@@ -266,6 +266,7 @@ compatibility pair: `agent.v1.AgentService/RunSSE` for server output and
 - **Skills:** XML bundle from project skill roots in order: `.commandcode/skills`, `.agents/skills`, `.pi/skills`. Each subdirectory with `SKILL.md` becomes one `<skill name="…">…</skill>` entry (name from YAML frontmatter `name:` or the directory name). Skips dotted names and non-directories; first-wins by resolved name; max 16 skills; total XML cap 32,768 bytes. Never reads `~/.commandcode/skills` or other home skill trees.
 - Path confinement uses realpath checks under cwd; symlink escapes are omitted. Each file operation has a 2-second timeout. Results are cached per cwd for 30 seconds (max 128 entries). Any failure omits that piece fail-softly.
 - `commandCodeVersion` pins `x-command-code-version` (default `0.52.1`). `permissionMode` stays `"standard"` and `mode` stays `"agent"`.
+- Command Code quota reports separate rolling 5-hour/weekly limits from subscription credits; the dashboard shows credit exhaustion independently, and upstream insufficient-credit messages are preserved as quota errors.
 
 ## `azure-openai` (alias: `azure`)
 

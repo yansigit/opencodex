@@ -190,6 +190,10 @@ export function classifyError(status: number, type: string, message: string): Oc
   }
   if (
     text.includes("insufficient_quota") ||
+    text.includes("insufficient credits") ||
+    text.includes("purchase more credits") ||
+    text.includes("run out of credits") ||
+    text.includes("out of credits") ||
     text.includes("exceeded your current quota") ||
     text.includes("quota exhausted") ||
     text.includes("account quota exceeded") ||
