@@ -990,7 +990,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
             vertexReplaySession,
             (compiled.body as { contents: unknown[] }).contents,
           );
-          ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents);
         }
         // Vertex AI: project/location endpoint with GCP ADC, or x-goog-api-key fast path.
         const apiKey = resolveVertexApiKey(provider.apiKey);
@@ -1035,9 +1034,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
       const compiled = compileGoogleWireBody(body);
       restoreGoogleToolName = compiled.restoreToolName;
-      if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
-        ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents);
-      }
       emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
       return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
     },
