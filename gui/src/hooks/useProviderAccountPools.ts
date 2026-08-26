@@ -223,6 +223,24 @@ export function useProviderAccountPools(deps: {
     notify(t("prov.aliasSaved"), true);
   };
 
+  const clearCooldown = async (provider: string, accountId: string) => {
+    try {
+      const res = await fetch(`${apiBase}/api/oauth/accounts/clear-cooldown`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, accountId }),
+      });
+      if (res.ok) {
+        notify(t("prov.cooldownCleared"), true);
+        await fetchAccountSets([provider]);
+      } else {
+        notify(t("prov.cooldownClearFailed"), false);
+      }
+    } catch {
+      notify(t("prov.cooldownClearFailed"), false);
+    }
+  };
+
   const removeAccount = async (provider: string, account: OAuthAccount) => {
     const label = oauthAccountDisplayLabel(accountSets[provider]?.accounts ?? [account], account, t);
     if (!window.confirm(t("prov.accountRemoveConfirm", { email: label }))) return;
@@ -275,7 +293,7 @@ export function useProviderAccountPools(deps: {
   return {
     accountSets, accountLoadStates, switchingAccount, openAccounts, keyPools, addingKeyFor, newKeyValue,
     setAccountSets, setAccountLoadStates, setSwitchingAccount, setOpenAccounts, setKeyPools, setAddingKeyFor, setNewKeyValue,
-    fetchAccountSets, fetchKeyPools, switchAccount, switchApiKey, removeApiKey, addApiKeyValue, addApiKey, editCredentialAlias, removeAccount,
+    fetchAccountSets, fetchKeyPools, switchAccount, switchApiKey, removeApiKey, addApiKeyValue, addApiKey, editCredentialAlias, removeAccount, clearCooldown,
     oauthCardProviders, keyCardProviders, activeAccountNeedsReauth,
   };
 }

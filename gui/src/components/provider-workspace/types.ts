@@ -83,6 +83,7 @@ export interface ProviderAuthHandlers {
   onSwitchApiKey: (provider: string, entry: ApiKeyRow) => void | Promise<void>;
   onRemoveApiKey: (provider: string, entry: ApiKeyRow) => void | Promise<void>;
   onEditAlias: (provider: string, type: "oauth" | "api-key", id: string, current?: string) => void | Promise<void>;
+  onClearCooldown?: (provider: string, accountId: string) => void | Promise<void>;
 }
 
 export type ProviderUpdatePatch = {
