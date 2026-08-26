@@ -1245,6 +1245,7 @@ export const en = {
   "pws.stats.quotaTracked": "Rate limits tracked on the Usage tab.",
   "pws.stats.source": "Source",
   "pws.usageLast30d": "Usage (last 30 days)",
+  "pws.allAccounts": "All accounts",
   "pws.estimatedCost": "Estimated cost",
   "pws.costDisclaimer": "API list-price estimate, not an actual charge.",
   "pws.modelBreakdown": "Model breakdown",

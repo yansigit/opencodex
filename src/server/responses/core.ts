@@ -2852,6 +2852,9 @@ async function handleResponsesInner(
           generation: resolved.generation,
         };
         if (isOAuth401ReplayProvider) sentOAuthSnapshot = resolved;
+        if (resolved.accountId) {
+          logCtx.accountLogLabel ??= resolved.accountId;
+        }
         route.provider = { ...route.provider, apiKey: resolved.accessToken };
         if (route.providerName === "kiro") {
           // `{}` is intentional: this is an account-scoped request with no stored routing metadata.

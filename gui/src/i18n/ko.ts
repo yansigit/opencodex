@@ -1788,6 +1788,7 @@ export const ko: Record<TKey, string> = {
   "pws.stats.quotaTracked": "사용량 탭에서 한도를 확인할 수 있습니다.",
   "pws.stats.source": "출처",
   "pws.usageLast30d": "사용량 (최근 30일)",
+  "pws.allAccounts": "모든 계정",
   "pws.estimatedCost": "추정 비용",
   "pws.costDisclaimer": "API 공시가 기준 추정치이며, 실제 청구 금액이 아닙니다.",
   "pws.modelBreakdown": "모델별 사용량",

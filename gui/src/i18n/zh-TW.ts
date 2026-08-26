@@ -1032,6 +1032,7 @@ export const zhTW: Record<TKey, string> = {
   "pws.stats.quotaTracked": "在用量標籤檢視限額。",
   "pws.stats.source": "來源",
   "pws.usageLast30d": "用量（最近 30 天）",
+  "pws.allAccounts": "全部帳號",
   "pws.estimatedCost": "預估費用",
   "pws.costDisclaimer": "基於 API 公示價格的預估值，非實際計費金額。",
   "pws.modelBreakdown": "模型用量明細",

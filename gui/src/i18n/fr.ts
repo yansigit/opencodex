@@ -1219,6 +1219,7 @@ export const fr: Record<TKey, string> = {
   "pws.stats.quotaTracked": "Limites de débit suivies dans l’onglet Utilisation.",
   "pws.stats.source": "Source",
   "pws.usageLast30d": "Utilisation (30 derniers jours)",
+  "pws.allAccounts": "Tous les comptes",
   "pws.estimatedCost": "Coût estimé",
   "pws.costDisclaimer": "Estimation fondée sur le tarif public de l’API, et non montant réellement facturé.",
   "pws.modelBreakdown": "Répartition par modèle",

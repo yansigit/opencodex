@@ -17,6 +17,10 @@ export function isCodexUsageAccountLogLabel(value: unknown): value is CodexUsage
   return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
 }
 
+export function isPersistableAccountLogLabel(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 128;
+}
+
 /**
  * Recovery kinds recorded per attempt in the usage log; the GUI renders localized labels
  * for these wire values.
@@ -52,8 +56,8 @@ export interface PersistedUsageAttempt {
   sendCount: number;
   recoveryKinds: AttemptRecoveryKind[];
   usageStatus: UsageStatus;
-  /** Stable non-PII identity for the Codex pool account that served this attempt. */
-  accountLogLabel?: CodexUsageAccountLogLabel;
+  /** Stable non-PII identity for the account that served this attempt. */
+  accountLogLabel?: string;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -81,8 +85,8 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
-  accountLogLabel?: CodexUsageAccountLogLabel;
+  /** Stable non-PII identity for account usage; absent for unauthenticated traffic. */
+  accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   resolvedModel?: string;
@@ -367,7 +371,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
-    ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
+    ...(isPersistableAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
       : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
@@ -454,7 +458,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+    ...(isPersistableAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()

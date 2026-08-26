@@ -1230,6 +1230,7 @@ export const ru: Record<TKey, string> = {
   "pws.stats.quotaTracked": "Лимиты запросов отслеживаются на вкладке «Использование».",
   "pws.stats.source": "Источник",
   "pws.usageLast30d": "Использование (последние 30 дней)",
+  "pws.allAccounts": "Все аккаунты",
   "pws.estimatedCost": "Ориентировочная стоимость",
   "pws.costDisclaimer": "Оценка на основе публичных цен API, не фактический счёт.",
   "pws.modelBreakdown": "Разбивка по моделям",

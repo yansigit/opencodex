@@ -37,6 +37,15 @@ export interface ProviderModelUsageRow {
   estimatedCostUsd?: number;
 }
 
+/** Per-account usage row from /api/usage. */
+export interface ProviderAccountUsageRow {
+  accountLogLabel: string;
+  provider?: string;
+  requests: number;
+  totalTokens: number;
+  estimatedCostUsd?: number;
+}
+
 // Auth types consumed by ProviderAuthPanel (WP091).
 export type OAuthAccountHealthStatus = "healthy" | "cooldown" | "reauth_required" | "warning";
 
