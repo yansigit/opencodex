@@ -58,7 +58,23 @@ describe("Cursor external model continuation context", () => {
     const turns = decodeTurns(bytes);
     const serialized = JSON.stringify(turns);
     expect(serialized).toContain("index.ts");
-    expect(serialized).toContain("name: exec");
+    expect(serialized).toContain("Tool output for exec");
     expect(serialized).toContain("call_exec_1");
+  });
+
+  test("external replay does not expose protocol markers that models can echo as final chat", () => {
+    const bytes = encodeCursorRunRequest({
+      modelId: "kimi-k3-max",
+      conversationId: "c_kimi_markers",
+      system: ["You are a helpful assistant."],
+      messages: [{ role: "user", content: "Continue" }],
+      rawMessages,
+    });
+
+    const serialized = JSON.stringify(decodeTurns(bytes));
+    expect(serialized).toContain("Tool output for exec");
+    expect(serialized).toContain("call_exec_1");
+    expect(serialized).not.toContain("[Tool Result]");
+    expect(serialized).not.toContain("[tool_result]");
   });
 });

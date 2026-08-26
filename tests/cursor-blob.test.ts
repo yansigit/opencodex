@@ -504,7 +504,7 @@ describe("Cursor blob handshake", () => {
 
     expect(run?.action?.action.case).toBe("userMessageAction");
     expect(rootBytes).toBeLessThanOrEqual(CURSOR_EXTERNAL_ROOT_BYTE_LIMIT);
-    expect(JSON.stringify(roots)).toContain("[Tool Result]");
+    expect(JSON.stringify(roots)).toContain("Tool output for read_file");
     expect(JSON.stringify(roots)).toContain("truncated for Cursor external replay budget");
   });
 
@@ -885,7 +885,7 @@ describe("Cursor blob handshake", () => {
     const roots = decodeRootMessages(bytes) as Array<{ role?: string; content?: unknown }>;
     const historicalUser = roots.find(root => root.role === "user");
     expect(historicalUser?.content).toEqual([{ type: "text", text: "read a file" }]);
-    const toolResultRoot = roots.find(root => JSON.stringify(root).includes("[Tool Result]"));
+    const toolResultRoot = roots.find(root => JSON.stringify(root).includes("Tool output for read_file"));
     expect(toolResultRoot?.role).toBe("assistant");
     expect(run?.action?.action.case).toBe("userMessageAction");
     expect(JSON.stringify(roots)).toContain("contents");
