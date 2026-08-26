@@ -39,6 +39,7 @@ export function createHttpCoordinator(
         method: "POST",
         headers,
         body,
+        signal: AbortSignal.timeout(30_000),
       });
       if (!response.ok) {
         throw new Error(

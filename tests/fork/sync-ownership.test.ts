@@ -42,14 +42,15 @@ describe("fork sync ownership", () => {
     const ours = JSON.stringify({
       name: "@yansigit/opencodex",
       version: "2.31.0",
-      scripts: { forkOnly: "keep out" },
+      scripts: { forkOnly: "keep out", shared: "fork value" },
+      forkOnlyTopLevel: { enabled: true },
       repository: { url: "https://github.com/yansigit/opencodex" },
     });
     const theirs = JSON.stringify({
       name: "opencodex",
       version: "2.32.0",
       description: "upstream release",
-      scripts: { start: "bun src/index.ts" },
+      scripts: { start: "bun src/index.ts", shared: "upstream value" },
       dependencies: { zod: "4.4.3" },
     });
 
@@ -57,8 +58,10 @@ describe("fork sync ownership", () => {
       name: "@yansigit/opencodex",
       version: "2.31.0",
       description: "upstream release",
-      scripts: { start: "bun src/index.ts" },
+      scripts: { start: "bun src/index.ts", shared: "upstream value" },
       dependencies: { zod: "4.4.3" },
+      forkOnlyTopLevel: { enabled: true },
+      repository: { url: "https://github.com/yansigit/opencodex" },
     });
   });
 });
