@@ -38,6 +38,7 @@ jobs:
           persist-credentials: false
 
       - name: Verify the CI head is still dev
+        id: verify
         env:
           EXPECTED_CI_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
         run: |
@@ -53,25 +54,32 @@ jobs:
             exit 1
           fi
           echo "Promoting verified dev commit $expected_ci_sha"
+          echo "verified_sha=$expected_ci_sha" >> "$GITHUB_OUTPUT"
 
       - name: Create or update the human promotion PR
         env:
           GH_TOKEN: ${{ github.token }}
+          VERIFIED_CI_SHA: ${{ steps.verify.outputs.verified_sha }}
         run: |
           set -euo pipefail
-          expected_ci_sha="$(git ls-remote origin refs/heads/dev | awk 'NR == 1 { print $1 }')"
+          live_dev_sha="$(git ls-remote origin refs/heads/dev | awk 'NR == 1 { print $1 }')"
+          if [ "$live_dev_sha" != "$VERIFIED_CI_SHA" ]; then
+            echo "::error::dev moved before the promotion PR mutation"
+            exit 1
+          fi
+          expected_ci_sha="$VERIFIED_CI_SHA"
           body_file="$RUNNER_TEMP/dev-promotion-body.md"
           cat > "$body_file" <<EOF
           ## Summary
 
-          Promote the verified \\`dev\\` integration branch to \\`main\\`.
+          Promote the verified dev integration branch to main.
 
-          Verified dev commit: \\`$expected_ci_sha\\`
+          Verified dev commit: $expected_ci_sha
 
           ## Verification
 
-          This PR was opened automatically after successful Cross-platform CI on \\`dev\\`.
-          A human maintainer must review and merge it. This automation never merges \\`main\\`.
+          This PR was opened automatically after successful Cross-platform CI on dev.
+          A human maintainer must review and merge it. This automation never merges main.
 
           ## Checklist
 
