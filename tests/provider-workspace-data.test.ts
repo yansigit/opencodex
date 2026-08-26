@@ -449,6 +449,12 @@ describe("provider-icons", () => {
     expect(formatProviderDisplayName("chatgpt", englishT)).toBe("ChatGPT");
   });
 
+  test("AI Studio has a distinct browser-relay display name and Google mark", () => {
+    expect(formatProviderDisplayName("google-aistudio", englishT)).toBe("Google AI Studio (Web)");
+    expect(providerIconSrc("google-aistudio")).toBe("/provider-icons/gemini-color.svg");
+    expect(isCatalogProviderId("google-aistudio")).toBe(true);
+  });
+
   test("Command Code account and API-key presets use distinct display names", () => {
     expect(formatProviderDisplayName("command-code", englishT)).toBe("Command Code - Auth");
     expect(formatProviderDisplayName("commandcode", englishT)).toBe("Command Code - API");

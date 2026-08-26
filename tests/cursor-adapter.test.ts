@@ -42,19 +42,29 @@ async function collect(gen: AsyncGenerator<AdapterEvent>): Promise<AdapterEvent[
 }
 
 describe("Cursor adapter live transport", () => {
-  test("validateRequest accepts structured output formats and downgrades them", () => {
+  test("validateRequest rejects both structured output formats", () => {
     const adapter = createCursorAdapter(provider);
     const validateRequest = (adapter as ProviderAdapter & {
       validateRequest: (request: OcxParsedRequest) => void;
     }).validateRequest;
 
     for (const type of ["json_object", "json_schema"] as const) {
-      expect(() => validateRequest?.({
+      expect(() => validateRequest({
         ...parsed,
         options: { textFormat: { type } },
-      })).not.toThrow();
+      })).toThrow("Cursor does not support structured output");
     }
-    expect(() => validateRequest?.({ ...parsed, _structuredOutput: true })).not.toThrow();
+  });
+
+  test("validateRequest rejects the internal structured-output flag", () => {
+    const adapter = createCursorAdapter(provider);
+    const validateRequest = (adapter as ProviderAdapter & {
+      validateRequest: (request: OcxParsedRequest) => void;
+    }).validateRequest;
+
+    expect(() => validateRequest({ ...parsed, _structuredOutput: true })).toThrow(
+      "Cursor does not support structured output",
+    );
   });
 
   test("runTurn emits a missing-token error before live network", async () => {

@@ -830,6 +830,21 @@ describe("server local API auth", () => {
     expect(dto.providers.nvidia.freeTier).toBe(true);
     expect(dto.providers.venice.freeTier).toBeUndefined();
   });
+
+  test("safeConfigDTO preserves non-secret Google transport mode for the provider UI", () => {
+    const dto = safeConfigDTO({
+      ...config("127.0.0.1"),
+      providers: {
+        "google-aistudio": {
+          adapter: "google",
+          baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+          authMode: "local",
+          googleMode: "ai-studio-web",
+        },
+      },
+    } as OcxConfig) as { providers: Record<string, { googleMode?: string }> };
+    expect(dto.providers["google-aistudio"].googleMode).toBe("ai-studio-web");
+  });
   test("management GET rejects non-local Origin even with a valid API key", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -1131,6 +1146,34 @@ describe("server local API auth", () => {
       expect(JSON.parse(response.body)).toMatchObject({
         error: { code: "origin_rejected" },
       });
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("AI Studio relay upgrade requires API auth on non-loopback binds", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
+    saveConfig({ ...config("0.0.0.0"), port: 0 });
+
+    const server = startServer(0);
+    try {
+      const missing = await fetch(new URL("/v1/ws/aistudio", server.url), {
+        headers: { connection: "Upgrade", upgrade: "websocket" },
+      });
+      expect(missing.status).toBe(401);
+
+      const hostile = await fetch(new URL("/v1/ws/aistudio", server.url), {
+        headers: {
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "x-opencodex-api-key": "local-secret",
+          origin: "https://attacker.test",
+        },
+      });
+      expect(hostile.status).toBe(403);
     } finally {
       await server.stop(true);
     }

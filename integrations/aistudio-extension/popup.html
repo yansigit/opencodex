@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>OpenCodex AI Studio Relay</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #18191c;
+        color: #e2e4e9;
+        margin: 0;
+        padding: 1rem;
+        width: 260px;
+      }
+      h3 {
+        margin: 0 0 0.5rem 0;
+        font-size: 1rem;
+      }
+      .badge {
+        display: inline-block;
+        padding: 0.2rem 0.5rem;
+        border-radius: 4px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        margin-bottom: 0.8rem;
+      }
+      .connected {
+        background: #143820;
+        color: #4ade80;
+      }
+      .disconnected {
+        background: #3d1414;
+        color: #f87171;
+      }
+      p {
+        margin: 0 0 0.5rem 0;
+        font-size: 0.85rem;
+        color: #9ca3af;
+      }
+      a {
+        color: #60a5fa;
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>OpenCodex AI Studio</h3>
+    <div id="status" class="badge disconnected">Checking...</div>
+    <p id="details">Connecting to local opencodex...</p>
+    <p><a href="https://aistudio.google.com" target="_blank">Open AI Studio ↗</a></p>
+    <script src="popup.js"></script>
+  </body>
+</html>
+

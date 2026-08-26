@@ -14,6 +14,7 @@ export interface ProvidersConfig {
     tlsProfileStatus?: "disabled" | "active" | "fallback";
     reasoningWireFormat?: "gateway-object";
     authMode?: string;
+    googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" | string;
     keyOptional?: boolean;
     disabled?: boolean;
     note?: string;
