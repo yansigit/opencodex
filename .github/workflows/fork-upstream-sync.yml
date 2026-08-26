@@ -105,13 +105,13 @@ jobs:
           set -eu
           git push origin refs/heads/vendor/main:refs/heads/vendor/main refs/heads/vendor/dev:refs/heads/vendor/dev
 
-      - name: Assert pin preserved default branch HEAD
+      - name: Assert pin preserved checked-out branch HEAD
         run: |
           set -eu
           current_branch="$(git rev-parse --abbrev-ref HEAD)"
-          default_branch="${{ github.event.repository.default_branch }}"
-          if [ "$current_branch" != "$default_branch" ]; then
-            echo "Pinning moved HEAD from $default_branch to $current_branch"
+          expected_branch="${{ github.ref_name }}"
+          if [ "$current_branch" != "$expected_branch" ]; then
+            echo "Pinning moved HEAD from $expected_branch to $current_branch"
             exit 1
           fi
 

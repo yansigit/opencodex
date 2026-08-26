@@ -137,9 +137,9 @@ describe("fork upstream sync workflow contract", () => {
     expect(issueStep).toContain("steps.prepare.outputs.status != 'hotspot-handoff'");
   });
 
-  test("asserts pinning did not move the default branch HEAD", () => {
+  test("asserts pinning did not move the checked-out branch HEAD", () => {
     expect(workflow).toContain("git rev-parse --abbrev-ref HEAD");
-    expect(workflow).toContain("github.event.repository.default_branch");
+    expect(workflow).toContain('expected_branch="${{ github.ref_name }}"');
   });
 
   test("does not merge or force-push from the action", () => {
