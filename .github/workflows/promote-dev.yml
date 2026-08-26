@@ -62,10 +62,22 @@ jobs:
             echo "::error::no successful Cross-platform CI push run exists for verified dev"
             exit 1
           fi
+          git fetch --no-tags origin "refs/heads/dev"
+          fetched_dev_sha="$(git rev-parse FETCH_HEAD)"
+          if [ "$fetched_dev_sha" != "$expected_ci_sha" ]; then
+            echo "::error::fetched dev ref did not match the verified CI commit"
+            exit 1
+          fi
+          trees_differ=true
+          if git diff --quiet HEAD "$fetched_dev_sha" --; then
+            trees_differ=false
+          fi
           echo "Promoting verified dev commit $expected_ci_sha"
           echo "verified_sha=$expected_ci_sha" >> "$GITHUB_OUTPUT"
+          echo "trees_differ=$trees_differ" >> "$GITHUB_OUTPUT"
 
       - name: Create or update the human promotion PR
+        if: steps.verify.outputs.trees_differ == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFIED_CI_SHA: ${{ steps.verify.outputs.verified_sha }}
