@@ -968,35 +968,58 @@ describe("antigravity history preserves tool-call thoughtSignature", () => {
     expect(fcPart?.thoughtSignature).toBe("sig-abcdef0123456789");
   });
 
-  test("a synthetic Responses item id (fc_...) is NOT forwarded as a thoughtSignature", async () => {
-    const p = {
-      modelId: "gemini-3-pro",
-      stream: false,
-      context: {
-        messages: [
-          { role: "user", content: "go" },
-          { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "get_x", namespace: "mcp__t", arguments: {}, thoughtSignature: "fc_d8df7548e31a4130b7624f3d27571cdd" }] },
-          { role: "toolResult", toolCallId: "c1", toolName: "get_x", content: "ok", isError: false },
-        ],
-        systemPrompt: [], tools: [],
-      },
-      options: {},
-    } as unknown as OcxParsedRequest;
-    const req = await createGoogleAdapter(provider).buildRequest(p);
-    const env = JSON.parse(req.body);
-    const modelTurn = (env.request.contents as { role: string; parts: Record<string, unknown>[] }[]).find(c => c.role === "model");
-    const fcPart = modelTurn?.parts.find(part => "functionCall" in part);
-    expect(fcPart?.thoughtSignature).toBeUndefined();
-  });
+ test("a synthetic Responses item id (fc_...) is NOT forwarded as a thoughtSignature", async () => {
+   const p = {
+     modelId: "gemini-3-pro",
+     stream: false,
+     context: {
+       messages: [
+         { role: "user", content: "go" },
+         { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "get_x", namespace: "mcp__t", arguments: {}, thoughtSignature: "fc_d8df7548e31a4130b7624f3d27571cdd" }] },
+         { role: "toolResult", toolCallId: "c1", toolName: "get_x", content: "ok", isError: false },
+       ],
+       systemPrompt: [], tools: [],
+     },
+     options: {},
+   } as unknown as OcxParsedRequest;
+   const req = await createGoogleAdapter(provider).buildRequest(p);
+   const env = JSON.parse(req.body);
+   const modelTurn = (env.request.contents as { role: string; parts: Record<string, unknown>[] }[]).find(c => c.role === "model");
+   const fcPart = modelTurn?.parts.find(part => "functionCall" in part);
+    expect(fcPart?.thoughtSignature).not.toBe("fc_d8df7548e31a4130b7624f3d27571cdd");
+    expect(fcPart?.thoughtSignature).toBe("skip_thought_signature_validator");
+ });
 
-  test("custom_tool_call item ids (ctc_...) from Claude/mixed history are NOT forwarded (issue #174)", async () => {
+ test("custom_tool_call item ids (ctc_...) from Claude/mixed history are NOT forwarded (issue #174)", async () => {
+   const p = {
+     modelId: "gemini-3-pro",
+     stream: false,
+     context: {
+       messages: [
+         { role: "user", content: "go" },
+         { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "get_x", namespace: "mcp__t", arguments: {}, thoughtSignature: "ctc_038f26d3f20962bc016a54f0fcfa208190a8ec0f289c2ba211" }] },
+         { role: "toolResult", toolCallId: "c1", toolName: "get_x", content: "ok", isError: false },
+       ],
+       systemPrompt: [], tools: [],
+     },
+     options: {},
+   } as unknown as OcxParsedRequest;
+   const req = await createGoogleAdapter(provider).buildRequest(p);
+   const env = JSON.parse(req.body);
+   const modelTurn = (env.request.contents as { role: string; parts: Record<string, unknown>[] }[]).find(c => c.role === "model");
+   const fcPart = modelTurn?.parts.find(part => "functionCall" in part);
+    expect(fcPart?.thoughtSignature).not.toBe("ctc_038f26d3f20962bc016a54f0fcfa208190a8ec0f289c2ba211");
+    expect(fcPart?.thoughtSignature).toBe("skip_thought_signature_validator");
+ });
+
+  test("unsigned historical toolCall on Gemini Antigravity falls back to skip_thought_signature_validator", async () => {
     const p = {
       modelId: "gemini-3-pro",
       stream: false,
       context: {
         messages: [
           { role: "user", content: "go" },
-          { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "get_x", namespace: "mcp__t", arguments: {}, thoughtSignature: "ctc_038f26d3f20962bc016a54f0fcfa208190a8ec0f289c2ba211" }] },
+          { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "get_x", namespace: "mcp__t", arguments: {} }] },
           { role: "toolResult", toolCallId: "c1", toolName: "get_x", content: "ok", isError: false },
         ],
         systemPrompt: [], tools: [],
@@ -1007,7 +1030,7 @@ describe("antigravity history preserves tool-call thoughtSignature", () => {
     const env = JSON.parse(req.body);
     const modelTurn = (env.request.contents as { role: string; parts: Record<string, unknown>[] }[]).find(c => c.role === "model");
     const fcPart = modelTurn?.parts.find(part => "functionCall" in part);
-    expect(fcPart?.thoughtSignature).toBeUndefined();
+    expect(fcPart?.thoughtSignature).toBe("skip_thought_signature_validator");
   });
 });
 

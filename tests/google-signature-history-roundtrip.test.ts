@@ -526,4 +526,12 @@ describe("#1735 thought signature survives history replay", () => {
     const fnPart = parts.find(p => (p as { functionCall?: unknown }).functionCall) as { thoughtSignature?: string } | undefined;
     expect(fnPart?.thoughtSignature).toBe(SIGNATURE);
   });
+
+  test("a large thought signature (>64 KiB) is remembered and re-signed on replay", async () => {
+    const largeSig = "sig-deep-reasoning-" + "x".repeat(200 * 1024);
+    rememberThoughtSignatureForReplay("call_large_1", largeSig, scopeFor());
+    await flushThoughtSignatureReplayForTests();
+    const retrieved = lookupReplayThoughtSignature("call_large_1", scopeFor());
+    expect(retrieved).toBe(largeSig);
+  });
 });

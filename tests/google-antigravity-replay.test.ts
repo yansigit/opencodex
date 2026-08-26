@@ -325,10 +325,18 @@ describe("antigravity reasoning-replay cache", () => {
     expect((contents[0].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBeUndefined();
   });
 
-  test("does not cache one oversized signature", () => {
-    setAntigravityReplayLimitsForTests({ maxSignatureBytes: 20 });
-    observeAntigravityReplay(MODEL, SESSION, [fcPart("huge", {}, "x".repeat(21))]);
-    expect(antigravityReplayMetrics()).toEqual({ sessions: 0, calls: 0, totalBytes: 0, largestSessionBytes: 0 });
+ test("does not cache one oversized signature", () => {
+   setAntigravityReplayLimitsForTests({ maxSignatureBytes: 20 });
+   observeAntigravityReplay(MODEL, SESSION, [fcPart("huge", {}, "x".repeat(21))]);
+   expect(antigravityReplayMetrics()).toEqual({ sessions: 0, calls: 0, totalBytes: 0, largestSessionBytes: 0 });
+ });
+
+  test("caches and replays large thought signatures (>64 KiB) from deep thinking models", () => {
+    const largeSig = "sig-large-" + "s".repeat(200 * 1024);
+    observeAntigravityReplay(MODEL, SESSION, [fcPart("deep_think_call", { step: 1 }, largeSig)]);
+    const contents = [{ role: "model", parts: [fcPart("deep_think_call", { step: 1 })] }];
+    applyAntigravityReplay(MODEL, SESSION, contents);
+    expect((contents[0].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBe(largeSig);
   });
 
   test("apply refreshes matched call recency without extending session TTL", () => {
@@ -771,24 +779,24 @@ describe("durable antigravity replay snapshot", () => {
   });
 
   test("load recomputes call sizes from the signature and ignores serialized sizeBytes", () => {
-    const now = Date.now();
-    const callKey = antigravityFunctionCallKeyForTests("get_x", { a: 1 });
-    const unicodeSig = "\u00e9".repeat(16);
-    const oversizedUnicodeSig = "\u{1f600}".repeat(16_500);
-    writeFileSync(snapshotPath(), JSON.stringify({
-      version: 1,
-      sessions: [
-        [antigravityReplayKeyForTests(MODEL, SESSION), {
-          expiresAtMs: now + 60_000,
-          // Forged tiny sizeBytes must not shrink the accounted UTF-8 bytes.
-          byCall: [[callKey, { signature: unicodeSig, sizeBytes: 1, touchedAtMs: now }]],
-        }],
-        [antigravityReplayKeyForTests(MODEL, "-forged"), {
-          expiresAtMs: now + 60_000,
-          // The UTF-16 length is below 64 KiB, but the UTF-8 byte length is not.
-          byCall: [[antigravityFunctionCallKeyForTests("get_y", {}), {
-            signature: oversizedUnicodeSig,
-            sizeBytes: 1,
+   const now = Date.now();
+   const callKey = antigravityFunctionCallKeyForTests("get_x", { a: 1 });
+   const unicodeSig = "\u00e9".repeat(16);
+    const oversizedUnicodeSig = "\u{1f600}".repeat(265_000);
+   writeFileSync(snapshotPath(), JSON.stringify({
+     version: 1,
+     sessions: [
+       [antigravityReplayKeyForTests(MODEL, SESSION), {
+         expiresAtMs: now + 60_000,
+         // Forged tiny sizeBytes must not shrink the accounted UTF-8 bytes.
+         byCall: [[callKey, { signature: unicodeSig, sizeBytes: 1, touchedAtMs: now }]],
+       }],
+       [antigravityReplayKeyForTests(MODEL, "-forged"), {
+         expiresAtMs: now + 60_000,
+          // The UTF-16 length is below 1 MiB, but the UTF-8 byte length is not.
+         byCall: [[antigravityFunctionCallKeyForTests("get_y", {}), {
+           signature: oversizedUnicodeSig,
+           sizeBytes: 1,
             touchedAtMs: now,
           }]],
         }],

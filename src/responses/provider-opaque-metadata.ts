@@ -24,11 +24,11 @@ function isObj(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * Same ceiling the Antigravity replay cache already enforces on a stored signature. An opaque
- * token this large is not a real signature, and accepting it would let a caller push unbounded
+ * Ceiling on stored thought signatures. Accommodates deep thinking models (e.g. Gemini 3.7
+ * Flash up to 64k tokens of reasoning, whose signatures can exceed 100 KiB) while bounding
  * state through history replay.
  */
-const MAX_SIGNATURE_BYTES = 64 * 1024;
+const MAX_SIGNATURE_BYTES = 1024 * 1024;
 
 export function isCarryableSignature(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0) return false;

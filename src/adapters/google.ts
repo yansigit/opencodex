@@ -22,7 +22,7 @@ import { fetchAntigravityWithRetry, fetchVertexWithRetry } from "./google-http";
 import { safeAntigravityHttpErrorMessage, safeVertexHttpErrorMessage } from "./google-errors";
 import { sanitizeUpstreamErrorText } from "./upstream-http-error";
 import { googleTruncationErrorMessage, isVertexTruncatedTurn, vertexTruncationErrorMessage } from "./google-truncation";
-import { ANTIGRAVITY_REQUEST_UA, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
+import { ANTIGRAVITY_REQUEST_UA, ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
 import { repairGoogleToolPairs, stripTrailingClaudePrefill } from "./google-antigravity-tools";
 import { canonicalAntigravityHttpsHost, isAntigravityHttpsHost } from "./google-antigravity-hosts";
 import { compileGoogleWireBody } from "./google-wire-compiler";
@@ -882,6 +882,19 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           const strippedModelTail = /claude/i.test(wireModelId) ? stripTrailingClaudePrefill(contents) : false;
           if (antigravityUsesReplayCache(wireModelId)) {
             applyAntigravityReplay(wireModelId, sessionId, contents);
+            // If any functionCall still lacks a thoughtSignature on Gemini Antigravity,
+            // supply the bypass sentinel so Antigravity does not reject the turn with HTTP 400.
+            for (const c of contents as { role?: string; parts?: unknown[] }[]) {
+              if (c?.role !== "model" || !Array.isArray(c.parts)) continue;
+              for (const p of c.parts) {
+                if (p && typeof p === "object") {
+                  const partObj = p as Record<string, unknown>;
+                  if (partObj.functionCall && !partObj.thoughtSignature && !partObj.thought_signature) {
+                    partObj.thoughtSignature = ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL;
+                  }
+                }
+              }
+            }
           } else {
             sanitizeAntigravityClaudeSignatures(contents);
           }
@@ -1051,6 +1064,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           const replaySession = provider.googleMode === "cloud-code-assist" ? antigravitySession : vertexReplaySession;
           if ((provider.googleMode === "cloud-code-assist" || provider.googleMode === "vertex")
             && replayModel && replaySession
+            && !/missing.*thought_signature/i.test(err?.message ?? "")
             && /signature|invalid_argument|invalid argument/i.test(err?.message ?? "")) {
             clearAntigravityReplay(replayModel, replaySession);
           }
@@ -1179,7 +1193,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         if (parts) {
           for (const part of parts) {
             const sig = googlePartThoughtSignature(part);
-            if (part.thought === true && sig && isLikelyRealThoughtSignature(sig)) {
+            if (sig && isLikelyRealThoughtSignature(sig) && (part.thought === true || !part.functionCall)) {
               pendingStreamThoughtSig = sig;
             }
             const textEvent = googlePartTextEvent(part, filterCcaSearchSuggestionHtml);
