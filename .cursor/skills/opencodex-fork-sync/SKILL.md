@@ -26,7 +26,8 @@ Workers must be **Composer 2.5** or **GPT 5.6 Luna**.
 ## Action stages 1–5
 
 The fork workflow polls released `v*` tags on `lidge-jun/opencodex`. It checks
-out the repository default branch for trusted scripts, fetches `upstream/main`,
+out the exact workflow revision for trusted scripts (manual dispatch is limited
+to the default branch or `dev`), then fetches `upstream/main`,
 `upstream/dev`, and tags, then prepares the merge in a worktree based on
 `origin/dev` and opens or updates a draft PR:
 

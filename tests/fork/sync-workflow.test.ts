@@ -13,11 +13,11 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("workflow_dispatch:");
   });
 
-  test("checks out the trusted default branch with the immutable checkout action", () => {
+  test("checks out the exact trusted workflow revision with the immutable action", () => {
     expect(workflow).toContain(
       "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
     );
-    expect(workflow).toContain("ref: ${{ github.event.repository.default_branch }}");
+    expect(workflow).toContain("ref: ${{ github.sha }}");
     expect(workflow).toContain("persist-credentials: true");
   });
 
@@ -62,8 +62,8 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain('git switch -C "$branch"');
   });
 
-  test("prepares from dev while keeping trusted scripts on the default branch", () => {
-    expect(workflow).toContain("ref: ${{ github.event.repository.default_branch }}");
+  test("prepares from dev while keeping scripts on the trusted workflow revision", () => {
+    expect(workflow).toContain("ref: ${{ github.sha }}");
     expect(workflow).toContain("git fetch origin dev");
     expect(workflow).toContain("git fetch --force upstream main dev --tags --prune");
     expect(workflow).toContain("git worktree add");
