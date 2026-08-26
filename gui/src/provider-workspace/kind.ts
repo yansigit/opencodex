@@ -10,6 +10,7 @@ export type ProviderKind = "cloud" | "local" | "selfHosted" | "login";
 
 /** Local runtime: explicit local auth mode or a loopback base URL. */
 export function isLocalProvider(item: WorkspaceProvider): boolean {
+  if (item.googleMode === "ai-studio-web") return false;
   return item.authMode === "local" || hasLoopbackBaseUrl(item.baseUrl);
 }
 

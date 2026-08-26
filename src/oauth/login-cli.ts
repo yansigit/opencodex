@@ -15,6 +15,7 @@ import { codexAccountNamespaceProviderCollisionError } from "../codex/account-na
 const LIVE_RELOAD_PROVIDERS = new Set<string>([
   ...listOAuthProviders(),
   ...Object.keys(KEY_LOGIN_PROVIDERS),
+  "google-aistudio",
 ]);
 
 export function runningProxyUpdateHeaders(): Headers {
@@ -65,14 +66,48 @@ export function warnIfLiveReloadSkipped(result: LocalProviderReloadResult | null
 
 export async function handleLogin(provider?: string): Promise<void> {
   const name = (provider ?? "").trim().toLowerCase();
+  if (name === "google-aistudio" || name === "aistudio" || name === "gemini-aistudio") {
+    return handleAiStudioBridgeLogin();
+  }
   if (isPublicOAuthProvider(name)) return handleOAuthLogin(name);
   if (isKeyLoginProvider(name)) return handleKeyLogin(name);
   console.error(
     `Usage: ocx login <provider>\n` +
-      `  OAuth login:   ${listOAuthProviders().join(", ")}\n` +
+      `  OAuth / Web:   ${[...listOAuthProviders(), "google-aistudio"].join(", ")}\n` +
       `  API-key login: ${Object.keys(KEY_LOGIN_PROVIDERS).join(", ")}`,
   );
   process.exit(1);
+}
+
+async function handleAiStudioBridgeLogin(): Promise<void> {
+  const live = await findLiveProxy();
+  const port = live?.port ?? 10100;
+  const bridgeUrl = "http://127.0.0.1:" + port + "/aistudio/bridge";
+
+  console.log("\n🌐 Google AI Studio Playground & Build Relay Setup:");
+  console.log("   1. Opening bridge page in your browser: " + bridgeUrl);
+  console.log("   2. Make sure you are logged into https://aistudio.google.com in that browser.");
+  console.log("   3. Keep the bridge tab open in the background to relay requests with your Pro quota.");
+
+  const config = loadConfig();
+  if (!config.providers["google-aistudio"]) {
+    config.providers["google-aistudio"] = {
+      adapter: "google",
+      googleMode: "ai-studio-web",
+      baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+      authMode: "local",
+      liveModels: false,
+      defaultModel: "gemini-3.7-flash",
+      models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
+    };
+    saveConfig(config);
+    console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
+  }
+
+  openUrl(bridgeUrl);
+  const reload = await notifyRunningProxy("google-aistudio");
+  console.log("\n✅ Ready! Use models with 'google-aistudio' provider in your coding agents.");
+  warnIfLiveReloadSkipped(reload);
 }
 
 async function handleOAuthLogin(name: string): Promise<void> {

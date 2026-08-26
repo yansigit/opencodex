@@ -48,6 +48,8 @@ import {
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../reasoning-effort";
 import { normalizeAntigravityProviderError } from "../oauth/antigravity-routing";
+import { buildAiStudioHeaders, parseGoogleCookieJar } from "../oauth/google-aistudio-auth";
+import { globalAiStudioRelayHub } from "../server/aistudio-ws-hub";
 
 const INLINE_ERROR_URL_USERINFO = /https?:\/\/[^\s"'<>]*@/gi;
 
@@ -758,7 +760,46 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
     // Direct AI-Studio uses the canonical server transport (fetchWithTransientRetry), which
     // retries transient 5xx responses through providerFetch while preserving multi-key pool
     // 429 rotation and raw error formatting.
-    ...(provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
+    ...(provider.googleMode === "ai-studio-web"
+      ? {
+          fetchResponse: async (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> => {
+            if (globalAiStudioRelayHub.hasActiveSessions()) {
+              const streamRes = await globalAiStudioRelayHub.dispatchStream(
+                {
+                  url: request.url,
+                  method: request.method,
+                  headers: request.headers,
+                  body: request.body,
+                },
+                ctx?.abortSignal,
+              );
+              const encoder = new TextEncoder();
+              const bodyStream = new ReadableStream({
+                async start(controller) {
+                  try {
+                    for await (const chunk of streamRes.chunks) {
+                      controller.enqueue(encoder.encode(chunk));
+                    }
+                    controller.close();
+                  } catch (err) {
+                    controller.error(err);
+                  }
+                },
+              });
+              return new Response(bodyStream, {
+                status: 200,
+                headers: { "Content-Type": "text/event-stream" },
+              });
+            }
+            return fetch(request.url, {
+              method: request.method,
+              headers: request.headers,
+              body: request.body,
+              signal: ctx?.abortSignal,
+            });
+          },
+        }
+      : provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
       ? {
           fetchResponse: (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> =>
             (provider.googleMode === "cloud-code-assist" ? fetchAntigravityWithRetry : fetchVertexWithRetry)(request, ctx),
@@ -969,6 +1010,19 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         const url = `https://${host}/v1/projects/${project}/locations/${location}/publishers/google/models/${parsed.modelId}:${method}${streamParam}`;
         const token = await getVertexAccessToken();
         headers["Authorization"] = `Bearer ${token}`;
+        emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
+        return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
+      }
+
+      if (provider.googleMode === "ai-studio-web") {
+        const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
+        const url = `${base}/v1internal:${method}${streamParam}`;
+        const cookieInput = provider.apiKey || provider.headers?.["Cookie"] || "";
+        const jar = parseGoogleCookieJar(cookieInput);
+        const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");
+        Object.assign(headers, aiStudioHeaders);
+        const compiled = compileGoogleWireBody({ ...body, model: routedModelId });
+        restoreGoogleToolName = compiled.restoreToolName;
         emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
         return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
       }
@@ -1298,7 +1352,14 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           if (residual.startsWith(":")) {
             yield { type: "heartbeat" };
           } else if (!residual.startsWith("data:")) {
-            yield { type: "error", message: "upstream stream ended with an incomplete SSE frame — possible truncation" };
+            try {
+              const parsedErr = JSON.parse(residual);
+              if (parsedErr.error?.message) {
+                yield { type: "error", message: parsedErr.error.message };
+                return;
+              }
+            } catch {}
+            yield { type: "error", message: `upstream non-SSE response: ${residual.slice(0, 300)}` };
             return;
           } else if ((yield* handleDataLine(residual)) === "terminate") return;
         }

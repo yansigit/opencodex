@@ -154,7 +154,7 @@ export default function ProviderModels({
     && configuredModels.length === 0
     && customModelIds.length === 0
     && !item.defaultModel;
-  const showingConfiguredFallback = availableModels.length === 0 && configuredModels.length > 0;
+  const showingConfiguredFallback = item.liveModels !== false && availableModels.length === 0 && configuredModels.length > 0;
   // Aggregators (OpenRouter etc.) can return thousands of ids; capping the mounted
   // chips keeps the tab responsive. Filtering narrows the list, so the cap only
   // bites on the unfiltered full catalog.

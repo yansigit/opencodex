@@ -26,6 +26,9 @@ export function statusLabel(p: WorkspaceProvider, t: TFn): string {
 }
 
 export function authModeLabel(item: WorkspaceItem, t: TFn): string {
+  if (item.googleMode === "ai-studio-web" || item.name === "google-aistudio") {
+    return t("modal.badge.local");
+  }
   switch (item.authMode) {
     case "oauth": return t("modal.badge.oauth");
     case "forward": return t("pws.auth.chatgptPassthrough");

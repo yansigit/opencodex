@@ -1,6 +1,7 @@
 import type { OcxProviderConfig } from "../types";
 import { deriveKeyLoginMap, enrichProviderFromRegistry, type DerivedKeyLoginProvider } from "../providers/derive";
 import { resolveProviderModelDiscoveryUrl } from "../providers/model-discovery";
+import { parseGoogleCookieJar, validateAiStudioCookies } from "./google-aistudio-auth";
 
 /**
  * API-key "login" providers: not OAuth — the flow opens the provider's dashboard so the user can
@@ -84,6 +85,13 @@ export async function validateApiKey(
       if (res.ok) return true;
       if (res.status === 401 || res.status === 403) return false;
       return "unknown";
+    }
+
+    if (provider.adapter === "google" && provider.googleMode === "ai-studio-web") {
+      const jar = parseGoogleCookieJar(key);
+      const val = validateAiStudioCookies(jar);
+      if (!val.valid) return false;
+      return true;
     }
 
     if (provider.adapter === "google" && (provider.googleMode ?? "ai-studio") === "ai-studio") {
