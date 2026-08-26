@@ -224,6 +224,31 @@ describe("google adapter — Antigravity structured stream errors", () => {
       expect(serialized).not.toContain("secret-password");
     }
   });
+
+  test("clear-on-invalid does NOT clear replay cache on 'missing a thought_signature' errors", async () => {
+    const { observeAntigravityReplay, applyAntigravityReplay } = await import("../src/adapters/google-antigravity-replay");
+    const { antigravitySessionId } = await import("../src/adapters/google-antigravity-wire");
+    const adapter = createGoogleAdapter({
+      adapter: "google",
+      googleMode: "cloud-code-assist",
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      apiKey: "key",
+      project: "project",
+    } as never);
+    const reqParsed = parsedWith([{ role: "user", content: "hello" }]);
+    reqParsed.stream = true;
+    await adapter.buildRequest(reqParsed, { headers: new Headers(), translatorBudget: createTranslatorBudget() });
+    const sessionId = antigravitySessionId(reqParsed);
+    observeAntigravityReplay("gemini-3-pro", sessionId, [{ functionCall: { name: "test_call", args: {} }, thoughtSignature: "sig-valid123456789" }]);
+
+    const payload = { error: { message: "Function call is missing a thought_signature in functionCall parts." } };
+    const stream = new Response(`data: ${JSON.stringify(payload)}\n\n`);
+    for await (const _ of adapter.parseStream(stream, createTranslatorBudget())) {}
+
+    const contents = [{ role: "model", parts: [{ functionCall: { name: "test_call", args: {} } }] }];
+    applyAntigravityReplay("gemini-3-pro", sessionId, contents);
+    expect((contents[0].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBe("sig-valid123456789");
+  });
 });
 
 describe("google adapter — tool-call ids on the wire", () => {

@@ -37,6 +37,7 @@ describe("generic HTTP coordinator", () => {
     expect(request?.url).toBe("https://agent.example/hooks/fork-sync");
     expect(request?.init?.method).toBe("POST");
     expect(request?.init?.body).toBe(body);
+    expect(request?.init?.signal).toBeInstanceOf(AbortSignal);
     expect(request?.init?.headers).toEqual({
       "content-type": "application/json",
       authorization: "Bearer agent-token",

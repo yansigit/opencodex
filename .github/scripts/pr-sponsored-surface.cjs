@@ -23,6 +23,7 @@
 
 const RESTRICTED_PREFIXES = [
   ".github/workflows/",
+  ".github/scripts/",
   "src/oauth/",
 ];
 

@@ -307,6 +307,10 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       const { resetAnthropicRoutingForManualSelection } = await import("../../oauth/anthropic-routing");
       resetAnthropicRoutingForManualSelection(body.accountId);
     }
+    if (provider === "google-antigravity") {
+      const { resetAntigravityRoutingForManualSelection } = await import("../../oauth/antigravity-routing");
+      resetAntigravityRoutingForManualSelection(body.accountId);
+    }
     const { clearModelCache } = await import("../../codex/model-cache");
     const { clearGatherRoutedModelsInflight } = await import("../../codex/catalog");
     clearModelCache(provider);

@@ -117,6 +117,30 @@ describe("workspace detail derived states (WP090)", () => {
       expect(accountQuotaFromReport({ updatedAt: 1, quota: { monthlyPercent: 5, updatedAt: 2 } })?.updatedAt).toBe(2);
       expect(accountQuotaFromReport({ updatedAt: 1, quota: { monthlyPercent: 5 } })?.updatedAt).toBe(1);
     });
+
+    test("credit balance becomes a visible subscription-credit quota row", () => {
+      expect(accountQuotaFromReport({
+        quota: {
+          fiveHourPercent: 0,
+          weeklyPercent: 0,
+          creditsUsd: { used: 89.9625, limit: 90, remaining: 0.0375, percent: 99.96 },
+        },
+      })).toMatchObject({
+        fiveHourPercent: 0,
+        weeklyPercent: 0,
+        customWindows: [{ label: "Total subscription credits", percent: 99.96 }],
+      });
+    });
+
+    test("does not duplicate an existing credit custom row", () => {
+      const quota = accountQuotaFromReport({
+        quota: {
+          customWindows: [{ label: "API credits ($1.00 of $10.00 remaining)", percent: 90 }],
+          creditsUsd: { used: 9, limit: 10, remaining: 1, percent: 90 },
+        },
+      });
+      expect(quota?.customWindows).toEqual([{ label: "API credits ($1.00 of $10.00 remaining)", percent: 90 }]);
+    });
   });
 
   describe("formatQuotaSourceLabel (missing-usage metadata)", () => {

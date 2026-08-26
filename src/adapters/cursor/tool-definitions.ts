@@ -48,6 +48,24 @@ export const CURSOR_EXEC_COMMAND_INPUT_SCHEMA = {
     tty: { type: "boolean", description: "True allocates a PTY for the command; false or omitted uses plain pipes." },
     yield_time_ms: { type: "number", description: "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms." },
     max_output_tokens: { type: "number", description: "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy." },
+    sandbox_permissions: {
+      type: "string",
+      enum: ["use_default", "require_escalated"],
+      description: "Per-command sandbox override. Defaults to use_default; use require_escalated for unsandboxed execution.",
+    },
+    justification: {
+      type: "string",
+      description: "User-facing approval question for require_escalated; omit otherwise.",
+    },
+    prefix_rule: {
+      type: "array",
+      items: { type: "string" },
+      description: "Reusable approval prefix for cmd, only with sandbox_permissions: require_escalated; for example [\"git\", \"pull\"].",
+    },
+    login: {
+      type: "boolean",
+      description: "True runs the shell with -l/-i semantics; false disables them. Defaults to true.",
+    },
   },
   required: ["cmd"],
   additionalProperties: false,
@@ -109,6 +127,10 @@ export const CODEX_SHELL_BRIDGE_ARG_NORMALIZE_SCHEMA = {
     yield_time_ms: { type: "number", description: "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms." },
     max_output_tokens: { type: "number", description: "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy." },
     max_output_chars: { type: "number", description: "Output character budget when the Responses tool uses chars instead of tokens." },
+    sandbox_permissions: { type: "string" },
+    justification: { type: "string" },
+    prefix_rule: { type: "array" },
+    login: { type: "boolean" },
   },
   required: ["command"],
 } as const;
@@ -651,7 +673,7 @@ export function buildCursorToolGuidanceSystemNote(
     // Code mode: shell/edit/MCP live inside freeform `exec` as nested helpers. Without this the
     // model probes for a top-level shell tool that is not there.
     codeMode
-      ? `\`${CODEX_UNIFIED_EXEC_TOOL}\` is Codex code mode: its body is JavaScript evaluated in a V8 isolate, not a shell command and not Node. Shell, file edits, and MCP are nested helpers called INSIDE that body as \`await tools.<name>(...)\`, for example \`await tools.exec_command({cmd: \"ls\"})\`. Read the tool description and the isolate global \`ALL_TOOLS\` (not \`tools.ALL_TOOLS\`) for helpers this turn provides; absence from the top-level catalog or from \`exec\`'s description is not absence. Those nested helpers are not themselves top-level tools, so do not call \`exec_command\` or \`shell_command\` at the top level here${codeModeOtherTopLevelNames.length > 0 ? `; every other tool this turn lists, including ${quotedNames(codeModeOtherTopLevelNames)}, remains callable at the top level as usual` : ""}. Nested \`tools.apply_patch(input)\` is host-executed: the string must begin exactly with \`*** Begin Patch\` and end with \`*** End Patch\` (no trailing \`***\` on those lines). OpenCodex does not rewrite JavaScript inside exec, so a decorated \`*** Begin Patch ***\` envelope is rejected by Codex before the file is touched.`
+      ? `\`${CODEX_UNIFIED_EXEC_TOOL}\` is Codex code mode: its body is JavaScript evaluated in a V8 isolate, not a shell command and not Node. Shell, file edits, and MCP are nested helpers called INSIDE that body as \`await tools.<name>(...)\`, for example \`await tools.exec_command({cmd: \"ls\"})\`. When commands require network access, file writes outside workspace, or fail due to sandbox/permission restrictions, pass \`sandbox_permissions: "require_escalated"\` and a clear \`justification: "..."\` to \`tools.exec_command\`. Read the tool description and the isolate global \`ALL_TOOLS\` (not \`tools.ALL_TOOLS\`) for helpers this turn provides; absence from the top-level catalog or from \`exec\`'s description is not absence. Those nested helpers are not themselves top-level tools, so do not call \`exec_command\` or \`shell_command\` at the top level here${codeModeOtherTopLevelNames.length > 0 ? `; every other tool this turn lists, including ${quotedNames(codeModeOtherTopLevelNames)}, remains callable at the top level as usual` : ""}. Your tool list may display tools under a longer \`mcp_opencodex-responses_*\` name; call whichever your list shows. Nested \`tools.apply_patch(input)\` is host-executed: the string must begin exactly with \`*** Begin Patch\` and end with \`*** End Patch\` (no trailing \`***\` on those lines). OpenCodex does not rewrite JavaScript inside exec, so a decorated \`*** Begin Patch ***\` envelope is rejected by Codex before the file is touched.`
       : undefined,
     codeMode
       ? "In code mode the isolate returns nothing on its own: call `text(...)` (or `notify(...)`) on any value you need to see, or the call completes with empty output. There is no `require`, no `module`, and no filesystem or network globals; reach the host only through the nested helpers."
@@ -664,6 +686,9 @@ export function buildCursorToolGuidanceSystemNote(
       : undefined,
     hasBareExec
       ? `Prefer the Codex shell bridge over Cursor-native Shell/Read. If a Cursor-native file read, directory listing, grep, or shell operation is rejected, continue with the listed catalog tool ${shellBridgeLabel}.`
+      : undefined,
+    hasBareExec
+      ? 'When a command requires network access, file writes outside workspace, or fails due to sandbox restrictions, include `sandbox_permissions: "require_escalated"` and `justification: "..."`.'
       : undefined,
     hostShellNote,
     "Cursor product features (Chronicle, screen recording, Notes, Plans, background agents) are available only if this turn's catalog lists a matching tool; do not offer or promise them otherwise.",

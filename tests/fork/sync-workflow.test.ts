@@ -18,7 +18,7 @@ describe("fork upstream sync workflow contract", () => {
       "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
     );
     expect(workflow).toContain("ref: ${{ github.ref }}");
-    expect(workflow).toContain("persist-credentials: true");
+    expect(workflow).toContain("persist-credentials: false");
   });
 
   test("grants vendor, issue, and draft PR write permissions", () => {
@@ -46,6 +46,10 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("/scripts/fork/sync/cli.ts\" draft-pr");
     expect(workflow).toContain("steps.prepare.outputs.status == 'merged'");
     expect(workflow).toContain("refs/heads/$branch:refs/heads/$branch");
+    expect(workflow).toContain('git ls-remote origin "refs/heads/$branch"');
+    expect(workflow).toContain("--force-with-lease=refs/heads/$branch:$remote_sha");
+    expect(workflow).toContain('GIT_ASKPASS="$askpass" git push');
+    expect(workflow).toContain("GH_TOKEN: ${{ github.token }}");
   });
 
   test("configures the temporary automation commit identity in the sync worktree", () => {
@@ -84,7 +88,7 @@ describe("fork upstream sync workflow contract", () => {
 
   test("keeps the upstream fetch step at the workflow step indentation", () => {
     expect(workflow).toContain(
-      "      - name: Fetch upstream release refs\n        run: |\n          set -eu",
+      "      - name: Fetch upstream release refs\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: |\n          set -eu",
     );
   });
 
@@ -139,13 +143,14 @@ describe("fork upstream sync workflow contract", () => {
 
   test("asserts pinning did not move the checked-out branch HEAD", () => {
     expect(workflow).toContain("git rev-parse --abbrev-ref HEAD");
-    expect(workflow).toContain('expected_branch="${{ github.ref_name }}"');
+    expect(workflow).toContain("EXPECTED_BRANCH: ${{ github.ref_name }}");
+    expect(workflow).toContain('expected_branch="$EXPECTED_BRANCH"');
   });
 
-  test("does not merge or force-push from the action", () => {
+  test("does not merge or use an unguarded force-push from the action", () => {
     expect(workflow).toContain("concurrency:");
     expect(workflow).toContain("cancel-in-progress: false");
-    expect(workflow).not.toMatch(/gh\s+pr\s+merge|git\s+push\s+.*--force|git\s+merge\s+-X/);
+    expect(workflow).not.toMatch(/gh\s+pr\s+merge|git\s+push\s+.*--force(?!-with-lease)|git\s+merge\s+-X/);
   });
 
   test("pushes only the two vendor refs after a successful pin", () => {

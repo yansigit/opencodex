@@ -208,6 +208,14 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
         };
 
         const runOnce = async (activeRequest: ReturnType<typeof createCursorRequest>) => {
+          const effort = _parsed.options.reasoning;
+          const isHeavyReasoning = effort === "high"
+            || effort === "max"
+            || effort === "xhigh"
+            || activeRequest.modelId.includes("grok-4.6")
+            || activeRequest.modelId.includes("kimi-k3")
+            || activeRequest.modelId.includes("opus-4-8");
+          const heartbeatOnlyMs = isHeavyReasoning ? 300_000 : 180_000;
           await runCursorTurnWithRetry(
             makeTransport,
             {
@@ -216,6 +224,7 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
               translatorBudget: incoming.translatorBudget,
               requestDeclaresFullAccess: cursorRequestDeclaresFullAccess(activeRequest),
               sessionId: activeRequest.conversationId,
+              streamHeartbeatOnlyFailMs: heartbeatOnlyMs,
               ...(incoming.providerFetch ? { fetch: incoming.providerFetch } : {}),
             },
             activeRequest,

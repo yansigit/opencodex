@@ -38,6 +38,7 @@ describe("agent maintenance workflow", () => {
     assert.match(workflow, /github\.event_name != 'workflow_dispatch' \|\|[\s\S]*?github\.ref == format/);
     assert.match(workflow, /context\.eventName === "workflow_dispatch"/);
     assert.match(workflow, /refs\/heads\/\$\{defaultBranch\}/);
+    assert.match(workflow, /context\.payload\.repository\?\.default_branch/);
     assert.match(workflow, /getCollaboratorPermissionLevel/);
     assert.match(workflow, /context\.payload\.sender\?\.login/);
     assert.match(workflow, /issues\.listEvents/);
@@ -51,6 +52,7 @@ describe("agent maintenance workflow", () => {
     assert.match(workflow, /requirePlanApproval/);
     assert.match(workflow, /issue\.title\.startsWith\("\[agent:docs\]"\)/);
     assert.match(workflow, /issue\.title\.startsWith\("\[agent:tests\]"\)/);
+    assert.match(workflow, /trustedGenerated && issue\.title\.startsWith\("\[agent:sync\]"\)/);
     assert.match(workflow, /AGENT_MAINTENANCE_MODE/);
     assert.match(workflow, /AGENT_MAINTENANCE_SCHEDULES/);
     assert.match(workflow, /Schedule dispatch is disabled/);

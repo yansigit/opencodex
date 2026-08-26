@@ -179,7 +179,7 @@ function maintenanceReadyEvidence({
 function trustedActiveMaintenanceCount(records) {
   return records.filter((record) =>
     record?.error ||
-    (record?.state?.sessionId && ["running", "reviewing"].includes(record.state.status))
+    (record?.state?.sessionId && ["planning", "running", "reviewing"].includes(record.state.status))
   ).length;
 }
 
@@ -197,7 +197,7 @@ function isExpectedJulesHeadAdvance({
     /^[0-9a-f]{40}$/i.test(currentSha ?? "") &&
     (reason === null || reason === `repair-requested:${previousSha}`) &&
     Number.isSafeInteger(expectedId) && expectedId > 0 &&
-    Number(observedPusherId) === expectedId &&
+    (observedPusherId == null || Number(observedPusherId) === expectedId) &&
     comparison?.status === "ahead" &&
     Number(comparison?.ahead_by) > 0 &&
     comparison?.merge_base_commit?.sha === previousSha &&

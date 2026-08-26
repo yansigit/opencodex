@@ -86,8 +86,15 @@ function githubClient(
   }
   return {
     async listOpen({ label }) {
-      const response = await request(`?state=open&labels=${encodeURIComponent(label)}`);
-      return await response.json() as Awaited<ReturnType<GitHubIssuesClient["listOpen"]>>;
+      const issues: Awaited<ReturnType<GitHubIssuesClient["listOpen"]>> = [];
+      for (let page = 1; ; page++) {
+        const response = await request(
+          `?state=open&labels=${encodeURIComponent(label)}&per_page=100&page=${page}`,
+        );
+        const pageIssues = await response.json() as Awaited<ReturnType<GitHubIssuesClient["listOpen"]>>;
+        issues.push(...pageIssues);
+        if (pageIssues.length < 100) return issues;
+      }
     },
     async create(options) {
       await request("", {

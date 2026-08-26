@@ -12,6 +12,13 @@ import { antigravityUserAgent } from "./client-fingerprint";
 export const ANTIGRAVITY_REQUEST_UA = antigravityUserAgent();
 
 /**
+ * Bypass sentinel for Google Cloud Code Assist (Antigravity).
+ * When a historical functionCall part lacks a thought_signature, Antigravity rejects
+ * the request with HTTP 400 unless this sentinel is provided.
+ */
+export const ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL = "skip_thought_signature_validator";
+
+/**
  * Whether a stored `OcxToolCall.thoughtSignature` is a REAL upstream Gemini signature versus a
  * foreign id that must not be forwarded to Gemini/Antigravity.
  *

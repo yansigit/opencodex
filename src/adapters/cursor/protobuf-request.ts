@@ -1,7 +1,7 @@
 import { create, fromBinary, toBinary, toJson } from "@bufbuild/protobuf";
 import { fromJson, type JsonValue } from "@bufbuild/protobuf";
 import { ValueSchema } from "@bufbuild/protobuf/wkt";
-import type { OcxAssistantContentPart, OcxMessage, OcxToolResultMessage } from "../../types";
+import type { OcxAssistantContentPart, OcxMessage, OcxRequestOptions, OcxToolResultMessage } from "../../types";
 import { namespacedToolName } from "../../types";
 import type { CursorRunRequest } from "./types";
 import { cursorNeedsExternalToolContinuation, isCursorExternalWireModel } from "./discovery";
@@ -165,9 +165,26 @@ function truncateToolResultBlob(entry: RootBlobCandidate, maxBytes: number): Roo
   return markerOnly.byteLength <= maxBytes ? markerOnly : null;
 }
 
+function structuredOutputPrompt(textFormat: OcxRequestOptions["textFormat"]): string | undefined {
+  if (!textFormat) return undefined;
+  if (textFormat.type === "json_schema" && textFormat.schema) {
+    return [
+      "Your response must be a single valid JSON object strictly conforming to this JSON schema:",
+      JSON.stringify(textFormat.schema),
+      "Do not include any surrounding markdown fences, preamble, or commentary; return raw JSON only.",
+    ].join("\n");
+  }
+  if (textFormat.type === "json_object") {
+    return "Your response must be a single valid JSON object. Do not include any markdown fences or commentary; return raw JSON only.";
+  }
+  return undefined;
+}
+
 function systemPromptBlobs(request: CursorRunRequest): RootBlobCandidate[] {
   const prompts = request.system.length > 0 ? [...request.system] : ["You are a helpful assistant."];
   if (cursorRequestHasShellAlias(request.tools)) prompts.push(CURSOR_SHELL_ALIAS_SYSTEM_NOTE);
+  const structuredPrompt = structuredOutputPrompt(request.textFormat);
+  if (structuredPrompt) prompts.push(structuredPrompt);
   const cursorToolGuidance = buildCursorToolGuidanceSystemNote(
     cursorToolsForActivePrompt(request.tools, activePromptText(request), request.toolChoice),
     request.toolChoice,
@@ -190,10 +207,11 @@ function assistantRootText(
 // Cursor builds the actual model prompt from rootPromptMessagesJson (turns[] is UI/display metadata),
 // so prior history must be replayed here or a ResumeAction has nothing model-visible to continue from.
 // The active user message is excluded because it travels in the action. When the continuation cannot
-// rely on native MCP turn state, tool results stay assistant-role text with a [Tool Result] /
-// [Tool Error] marker so Cursor does not wrap them as `<user_query>` (#1992). Native resume models
-// already carry the paired MCP result on turns[], so that marker is omitted from root replay — Auto
-// few-shot-mimics it as chat text otherwise. Each entry is a SHA-256 blob ID.
+// rely on native MCP turn state, tool results stay assistant-role text so Cursor does not wrap them
+// as `<user_query>` (#1992). External replay uses a neutral "Tool output" label; protocol markers
+// such as [Tool Result] are reserved for native wire encoding because external models echo them.
+// Native resume models already carry the paired MCP result on turns[], so it is omitted from root
+// replay. Each entry is a SHA-256 blob ID.
 function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobRequestScopeToken): {
   ids: Uint8Array[];
   byteLength: number;
@@ -246,14 +264,10 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
       }
       // Assistant tool CALLS are intentionally NOT replayed as visible "[Tool Call]" text here.
     } else if (message.role === "toolResult") {
-      // Native resume models already receive the paired MCP result through turns[]. Replaying
-      // the same payload as assistant-role "[Tool Result]" / "[tool_result]" text teaches Auto
-      // to echo that envelope as chat instead of continuing from the structured result.
+      // Native resume models already receive the paired MCP result through turns[]. External
+      // replay uses neutral text here so models do not echo protocol envelopes as chat.
       if (!echoToolResultInRoot) continue;
-      // #1920: the prefix must reflect the NORMALIZED error state (an empty
-      // node_repl result is an error even when the runtime said isError=false).
-      const prefix = normalizedToolResult(message, contentToText(message.content)).isError ? "[Tool Error]" : "[Tool Result]";
-      const text = `${prefix}\n${toolResultToText(message)}`;
+      const text = externalToolResultToText(message);
       entries.push(rootBlobCandidate(
         toolResultRootPayload(text),
         "toolResult",
@@ -538,6 +552,12 @@ function toolResultToText(message: OcxToolResultMessage): string {
   ].join("\n");
 }
 
+function externalToolResultToText(message: OcxToolResultMessage): string {
+  const normalized = normalizedToolResult(message, contentToText(message.content));
+  const label = normalized.isError ? "Tool error" : "Tool output";
+  return `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${message.toolCallId}, is_error: ${normalized.isError}):\n${normalized.text}`;
+}
+
 /**
  * Shared #1920 normalization entry: pure-text results only. Image-bearing or
  * encrypted results pass through untouched (their content is not plain text).
@@ -721,12 +741,10 @@ function conversationTurns(
         // #1920/#1866: this external-replay site bypasses toolResultToText, so it
         // must consume the normalizer directly — cursor/grok-4.6 is the exact
         // reported repro path for empty Computer Use results.
-        const normalized = normalizedToolResult(message, contentToText(message.content));
-        const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, { text: `${prefix}\n${normalized.text}` }),
+            value: create(AssistantMessageSchema, { text: externalToolResultToText(message) }),
           },
         })), requestScope));
         continue;

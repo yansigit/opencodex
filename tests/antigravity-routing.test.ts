@@ -10,6 +10,7 @@ import {
   getAntigravityAccountHealthSnapshot,
   recordAntigravityCooldown,
   recordAntigravitySyntheticFailure,
+  resetAntigravityRoutingForManualSelection,
   resolveAntigravityAccountForSession,
   retryableAntigravity429DelayMs,
 } from "../src/oauth/antigravity-routing";
@@ -55,6 +56,32 @@ describe("google antigravity strict account affinity", () => {
     expect(resolveAntigravityAccountForSession("conversation-1", 2000)).toMatchObject({ accountId: ids.a, reason: "affinity" });
     expect(getAntigravityAccountHealthSnapshot(ids.a, 2000)?.cooldownUntil).toBe(3000);
     expect(resolveAntigravityAccountForSession("conversation-2", 2000)).toMatchObject({ accountId: ids.b, reason: "active" });
+  });
+
+  test("manual account selection resets session affinity and clears cooldown for the selected account", async () => {
+    const ids = accountIds();
+    await setActiveAccount("google-antigravity", ids.a);
+    bindAntigravitySessionAffinity("conversation-1", ids.a, 1000);
+    recordAntigravityCooldown(ids.b, "60", 1000);
+
+    // Manually selecting account-b should clear existing affinities and clear account-b's cooldown
+    await setActiveAccount("google-antigravity", ids.b);
+    resetAntigravityRoutingForManualSelection(ids.b);
+
+    expect(getAntigravityAccountHealthSnapshot(ids.b, 2000)).toBeNull();
+    expect(resolveAntigravityAccountForSession("conversation-1", 2000)).toMatchObject({ accountId: ids.b, reason: "active" });
+  });
+
+  test("stale affinity to a deleted account falls back to the active account instead of returning missing-affinity", async () => {
+    const ids = accountIds();
+    await setActiveAccount("google-antigravity", ids.a);
+    bindAntigravitySessionAffinity("conversation-deleted", "non-existent-account-id", 1000);
+
+    // Resolving session with non-existent bound account should fall back to active account (ids.a)
+    expect(resolveAntigravityAccountForSession("conversation-deleted", 2000)).toMatchObject({
+      accountId: ids.a,
+      reason: "active",
+    });
   });
 
   test("a cooled active account is surfaced as bounded unavailable instead of rotating", async () => {

@@ -53,6 +53,7 @@ export function createDraftPullRequestClient(
   options: DraftPullRequestOptions,
 ): DraftPullRequestClient {
   const base = `https://api.github.com/repos/${options.repository}`;
+  const owner = options.repository.split("/", 1)[0];
   const headers = {
     accept: "application/vnd.github+json",
     authorization: `Bearer ${options.token}`,
@@ -80,7 +81,9 @@ export function createDraftPullRequestClient(
       if (!branch) throw new Error("merged prepare result is missing a branch");
       const title = `sync: upstream ${publicValue(event.latestTag) || "unknown-release"}`;
       const body = bodyFor(event, result);
-      const response = await request("/pulls?state=open&base=dev");
+      const response = await request(
+        `/pulls?head=${owner}:${branch}&state=open&base=dev`,
+      );
       const openPullRequests = await response.json() as GitHubPullRequest[];
       const matching = openPullRequests.find(pullRequest =>
         pullRequest.state === "open"

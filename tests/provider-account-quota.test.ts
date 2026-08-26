@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveCredential } from "../src/oauth/store";
+import { getAccountSet, saveCredential } from "../src/oauth/store";
 import type { OcxConfig } from "../src/types";
 import {
   clearAccountQuotaCache,
@@ -41,6 +41,7 @@ beforeEach(() => {
   process.env.OPENCODEX_HOME = opencodexHome;
   clearAccountQuotaCache();
   clearProviderQuotaCache();
+  resetProviderQuotaReconcileStateForTests();
 });
 
 afterEach(() => {
@@ -417,5 +418,34 @@ describe("fetchProviderAccountQuotas", () => {
     await reportPromise;
 
     expect(getCachedProviderAccountQuota("anthropic", first!.id)).toBeNull();
+  });
+
+  test("reports each Google Antigravity account's own rate limits", async () => {
+    const expires = Date.now() + 60 * 60_000;
+    await saveCredential("google-antigravity", { access: "token-g1", refresh: "refresh-g1", expires, accountId: "acct-g1", email: "g1@example.com", projectId: "proj-g1" });
+    await saveCredential("google-antigravity", { access: "token-g2", refresh: "refresh-g2", expires, accountId: "acct-g2", email: "g2@example.com", projectId: "proj-g2" });
+    const set = getAccountSet("google-antigravity")!;
+    const id1 = set.accounts.find(a => a.credential.accountId === "acct-g1")!.id;
+    const id2 = set.accounts.find(a => a.credential.accountId === "acct-g2")!.id;
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      const url = String(input);
+      if (url.endsWith(":retrieveUserQuota")) {
+        const fraction = auth?.includes("token-g1") ? 0.8 : 0.4;
+        return Response.json({
+          buckets: [
+            { modelId: "gemini-test", remainingFraction: fraction, resetTime: "2026-07-05T12:00:00Z" },
+          ],
+        });
+      }
+      return Response.json({}, { status: 404 });
+    }) as typeof fetch;
+
+    expect(supportsPerAccountQuota("google-antigravity")).toBe(true);
+    const rows = await fetchProviderAccountQuotas("google-antigravity");
+    expect(rows).toHaveLength(2);
+    expect(rows.find(r => r.accountId === id1)?.quota?.customWindows?.[0]?.percent).toBe(20);
+    expect(rows.find(r => r.accountId === id2)?.quota?.customWindows?.[0]?.percent).toBe(60);
   });
 });

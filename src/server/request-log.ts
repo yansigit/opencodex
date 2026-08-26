@@ -549,6 +549,7 @@ export function requestLogErrorCode(
   // Keep the high-confidence message fallback for runtimes/providers that stripped the
   // structured code before emitting response.failed.
   if (classifiedCode === CYBER_POLICY_ERROR_CODE) return CYBER_POLICY_ERROR_CODE;
+  if (classifiedCode === "insufficient_quota") return classifiedCode;
   if (status === 400 || status === 409) return "invalid_request_error";
   if (status === 401) return "invalid_api_key";
   if (status === 403) {
