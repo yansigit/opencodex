@@ -78,7 +78,11 @@ export async function runProviderSmoke(options: { provider: string; modelId?: st
       }
       const events = body.split(/\r?\n/).filter(line => line.startsWith("data: ")).flatMap(line => { try { return [JSON.parse(line.slice(6)) as Record<string, unknown>]; } catch { return []; } });
       let jsonPayload: Record<string, unknown> | undefined;
-      try { jsonPayload = JSON.parse(body); } catch {}
+      try {
+        jsonPayload = JSON.parse(body) as Record<string, unknown>;
+      } catch {
+        jsonPayload = undefined;
+      }
       const completed = events.find(event => event.type === "response.completed");
       const responseData = (completed?.response as Record<string, unknown> | undefined) ?? (jsonPayload?.status === "completed" ? jsonPayload : undefined);
       if (level === 1) level1Passed = events.some(event => event.type === "response.output_text.delta" || event.type === "response.output_item.added") || responseData?.status === "completed";
