@@ -1,3 +1,12 @@
+export interface AccountQuotaCreditsUsd {
+  used: number;
+  limit: number;
+  remaining: number;
+  percent: number;
+  expiresAt?: number;
+  unlimited?: boolean;
+}
+
 export interface AccountQuota {
   weeklyPercent?: number;
   fiveHourPercent?: number;
@@ -6,6 +15,7 @@ export interface AccountQuota {
   fiveHourResetAt?: number;
   monthlyResetAt?: number;
   customWindows?: { label: string; percent: number; resetAt?: number }[];
+  creditsUsd?: AccountQuotaCreditsUsd;
   resetCredits?: number;
   updatedAt: number;
 }
@@ -20,6 +30,7 @@ export function normalizeQuotaForPlan(quota: AccountQuota | null, plan: string |
   return {
     ...(quota.monthlyPercent !== undefined ? { monthlyPercent: quota.monthlyPercent } : {}),
     ...(quota.monthlyResetAt !== undefined ? { monthlyResetAt: quota.monthlyResetAt } : {}),
+    ...(quota.creditsUsd !== undefined ? { creditsUsd: quota.creditsUsd } : {}),
     ...(quota.resetCredits !== undefined ? { resetCredits: quota.resetCredits } : {}),
     updatedAt: quota.updatedAt,
   };

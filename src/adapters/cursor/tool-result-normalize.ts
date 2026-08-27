@@ -44,8 +44,24 @@ const RUNTIME_FAILURE_GUIDANCE: ReadonlyArray<{ marker: string; guidance: string
     guidance: "The node_repl session keeps earlier declarations; rename the variable or use var/reassignment instead of redeclaring.",
   },
   {
-    marker: "unsupported import in exec",
-    guidance: "Imports are not available in this exec context; use the injected globals instead.",
+   marker: "unsupported import in exec",
+   guidance: "Imports are not available in this exec context; use the injected globals instead.",
+ },
+  {
+    marker: "require is not defined",
+    guidance: "In Codex code-mode exec (a V8 isolate, not Node.js), require/fs/process are not available. Use await tools.exec_command({ cmd: '...' }) inside exec to inspect files or run CLI tools.",
+  },
+  {
+    marker: "fs is not defined",
+    guidance: "In Codex code-mode exec (a V8 isolate, not Node.js), require/fs/process are not available. Use await tools.exec_command({ cmd: '...' }) inside exec to inspect files or run CLI tools.",
+  },
+  {
+    marker: "process is not defined",
+    guidance: "In Codex code-mode exec (a V8 isolate, not Node.js), require/fs/process are not available. Use await tools.exec_command({ cmd: '...' }) inside exec to inspect files or run CLI tools.",
+  },
+  {
+    marker: "module is not defined",
+    guidance: "In Codex code-mode exec (a V8 isolate, not Node.js), require/fs/process are not available. Use await tools.exec_command({ cmd: '...' }) inside exec to inspect files or run CLI tools.",
   },
 ];
 
@@ -80,13 +96,10 @@ export function normalizeCursorToolResultText(
       changed: true,
     };
   }
-  if (!isError) {
-    for (const { marker, guidance } of RUNTIME_FAILURE_GUIDANCE) {
-      if (text.includes(marker)) {
-        return { text: `${text}\n[recovery: ${guidance}]`, isError: true, changed: true };
-      }
+  for (const { marker, guidance } of RUNTIME_FAILURE_GUIDANCE) {
+    if (text.includes(marker) && !text.includes("[recovery:") && !text.includes(guidance)) {
+      return { text: `${text}\n[recovery: ${guidance}]`, isError: true, changed: true };
     }
   }
   return { text, isError, changed: false };
 }
-

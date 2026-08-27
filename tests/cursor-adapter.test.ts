@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { externalToolContinuationText, CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT } from "../src/adapters/cursor/protobuf-request";
 import {
   createCursorAdapter as createCursorAdapterProduction,
   cursorExecDeniedMessage,
@@ -273,6 +274,20 @@ describe("Cursor adapter live transport", () => {
   test("legacy mock exec message names the unavailable case", () => {
     expect(cursorExecDeniedMessage("shellArgs")).toContain("shellArgs");
     expect(cursorExecDeniedMessage("shellArgs")).toContain("legacy mock transport cannot execute");
+  });
+
+  test("externalToolContinuationText adds directional clarity after empty discovery calls", () => {
+    const textEmptyList = externalToolContinuationText([
+      { role: "user", content: "hi", timestamp: 1 },
+      { role: "toolResult", toolName: "collaboration__list_agents", content: "[]", toolCallId: "c1", timestamp: 2 },
+    ]);
+    expect(textEmptyList).toContain("no sub-agents currently active");
+
+    const textNormal = externalToolContinuationText([
+      { role: "user", content: "hi", timestamp: 1 },
+      { role: "toolResult", toolName: "exec", content: "output from command", toolCallId: "c2", timestamp: 2 },
+    ]);
+    expect(textNormal).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
   });
 
   test("does not retry external tool-result invalid_argument with a fresh conversation id", async () => {

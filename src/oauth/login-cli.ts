@@ -84,10 +84,40 @@ async function handleAiStudioBridgeLogin(): Promise<void> {
   const port = live?.port ?? 10100;
   const bridgeUrl = "http://127.0.0.1:" + port + "/aistudio/bridge";
 
-  console.log("\n🌐 Google AI Studio Playground & Build Relay Setup:");
-  console.log("   1. Opening bridge page in your browser: " + bridgeUrl);
-  console.log("   2. Make sure you are logged into https://aistudio.google.com in that browser.");
-  console.log("   3. Keep the bridge tab open in the background to relay requests with your Pro quota.");
+  console.log("\n🌐 Google AI Studio Sign-In & Session Setup:");
+  console.log("   Option 1: Paste Session Token from the Brave/Chrome extension popup (Passkey-friendly)");
+  console.log("   Option 2: Open native macOS sign-in window");
+  console.log("   Option 3: Open browser bridge page (" + bridgeUrl + ")\n");
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const choice = await new Promise<string>((res) => {
+      rl.question("Paste Session Token (or press Enter for native window): ", (ans) => res(ans.trim()));
+    });
+
+    if (choice.length > 20) {
+      const { saveAiStudioSessionFromToken } = await import("./aistudio-session-sync");
+      saveAiStudioSessionFromToken(choice);
+      console.log("\n✅ Session token imported successfully! Saved to ~/.opencodex/aistudio-session.json");
+    } else if (process.platform === "darwin") {
+      const { getAiStudioNativeDaemonSourcePath } = await import("./aistudio-native-daemon");
+      const swiftSrc = getAiStudioNativeDaemonSourcePath();
+      console.log("\n🚀 Opening native Google AI Studio login window...");
+      const proc = Bun.spawn(["swift", swiftSrc, "--login"], {
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const code = await proc.exited;
+      if (code === 0) {
+        console.log("\n✅ Google AI Studio authenticated successfully! Session saved to ~/.opencodex/aistudio-session.json");
+      }
+    } else {
+      console.log("\n🌐 Opening bridge page in your browser: " + bridgeUrl);
+      openUrl(bridgeUrl);
+    }
+  } finally {
+    rl.close();
+  }
 
   const config = loadConfig();
   if (!config.providers["google-aistudio"]) {
@@ -98,7 +128,7 @@ async function handleAiStudioBridgeLogin(): Promise<void> {
       authMode: "local",
       liveModels: false,
       defaultModel: "gemini-3.7-flash",
-      models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash"],
+      models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
     };
     saveConfig(config);
     console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
