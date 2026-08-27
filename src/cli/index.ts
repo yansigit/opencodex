@@ -164,7 +164,7 @@ async function chooseListenPort(requestedPort?: number): Promise<number> {
       // Ghost LISTEN rows with a dead PID can outlive the process for a while.
       // SetTcpEntry(DELETE_TCB) needs elevation (often returns 317), so the only
       // reliable non-admin recovery is to wait for the OS to release the TCB.
-      timeoutMs: 60_000,
+      timeoutMs: process.platform === "win32" ? 60_000 : 10_000,
       intervalMs: 100,
       scanIntervalMs: 500,
       killOcxHolders: false,

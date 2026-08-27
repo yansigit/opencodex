@@ -148,6 +148,19 @@ export function scanListenPids(port: number): ListenPidScan {
         return { ok: true, pids: [] };
       }
       try {
+        const output = execFileSync("ss", ["-tlnp", `sport = :${port}`], {
+          encoding: "utf-8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 3000,
+        });
+        const pids = new Set<number>();
+        for (const match of output.matchAll(/pid=(\d+)/g)) {
+          const pid = Number(match[1]);
+          if (Number.isSafeInteger(pid) && pid > 0) pids.add(pid);
+        }
+        return { ok: true, pids: [...pids] };
+      } catch {}
+      try {
         const output = execFileSync("netstat", ["-anlp"], {
           encoding: "utf-8",
           stdio: ["ignore", "pipe", "ignore"],
@@ -157,7 +170,7 @@ export function scanListenPids(port: number): ListenPidScan {
       } catch (netstatErr) {
         return {
           ok: false,
-          error: `lsof/netstat unavailable: ${String(lsofErr)} / ${String(netstatErr)}`,
+          error: `lsof/ss/netstat unavailable: ${String(lsofErr)} / ${String(netstatErr)}`,
         };
       }
     }
