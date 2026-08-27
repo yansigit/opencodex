@@ -208,11 +208,14 @@ describe("Google AI Studio Web Provider — End-to-End Smoke Tests", () => {
     };
     saveConfig(config);
 
-    saveAiStudioSession({
-      selectedProject: "gen-lang-client-complex-agent",
-      windowId: "win-agent-999",
-      cookies: [{ name: "SAPISID", value: "sapisid_agent_token" }],
-    });
+    saveAiStudioSession(
+      {
+        selectedProject: "gen-lang-client-complex-agent",
+        windowId: "win-agent-999",
+        cookies: [{ name: "SAPISID", value: "sapisid_agent_token" }],
+      },
+      join(testDir, "aistudio-session.json"),
+    );
 
     let turnCount = 0;
     let lastRequestBody: any = null;
@@ -362,11 +365,14 @@ describe("Google AI Studio Web Provider — End-to-End Smoke Tests", () => {
     };
     saveConfig(config);
 
-    saveAiStudioSession({
-      selectedProject: "gen-lang-client-subagents",
-      windowId: "win-subagents-123",
-      cookies: [{ name: "SAPISID", value: "sapisid_multiagent" }],
-    });
+    saveAiStudioSession(
+      {
+        selectedProject: "gen-lang-client-subagents",
+        windowId: "win-subagents-123",
+        cookies: [{ name: "SAPISID", value: "sapisid_multiagent" }],
+      },
+      join(testDir, "aistudio-session.json"),
+    );
 
     let interceptedBody: any = null;
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
