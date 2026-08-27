@@ -368,14 +368,17 @@ export async function commandCodeConfig(cwd: string | undefined, sessionId?: str
   let structure: string[] = [];
   if (cwd) {
     try {
-      // Iterate and stop after the cap instead of materializing every entry: a directory with a
-      // huge number of names must not stall the request path for 64 metadata rows.
+      // Keep only the lexicographically smallest entries so filesystem enumeration order cannot
+      // change the bounded prompt prefix.
       const dir = await opendir(cwd);
       try {
         for await (const entry of dir) {
           if (entry.name.startsWith(".")) continue;
           structure.push(entry.name);
-          if (structure.length >= MAX_WORKSPACE_STRUCTURE_ENTRIES) break;
+          if (structure.length > MAX_WORKSPACE_STRUCTURE_ENTRIES) {
+            structure.sort();
+            structure.pop();
+          }
         }
       } finally {
         await dir.close().catch(() => undefined);

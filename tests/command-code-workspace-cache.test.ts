@@ -123,6 +123,32 @@ describe("commandCodeConfig structure and session freeze", () => {
     }
   });
 
+  test("selects the lexicographically smallest entries before applying the structure cap", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "ocx-cc-structure-cap-"));
+    const names = [...Array.from({ length: 64 }, (_, index) => `z-${index.toString().padStart(2, "0")}`), "a-first"];
+    opendirMock.mockImplementation(async () => ({
+      close: async () => undefined,
+      [Symbol.asyncIterator]() {
+        let index = 0;
+        return {
+          next: async () => {
+            if (index >= names.length) return { done: true as const, value: undefined };
+            return { done: false as const, value: { name: names[index++]! } };
+          },
+        };
+      },
+    }));
+
+    try {
+      const config = await commandCodeConfig(cwd);
+      expect(config.structure).toHaveLength(64);
+      expect(config.structure).toContain("a-first");
+      expect(config.structure).not.toContain("z-63");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
   test("session cache preserves initial date and structure across midnight", async () => {
     const sessionId = "session-midnight";
     const cwd = mkdtempSync(join(tmpdir(), "ocx-cc-midnight-"));
