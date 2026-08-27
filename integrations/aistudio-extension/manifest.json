@@ -5,12 +5,16 @@
   "description": "Background relay for Google AI Studio Web session with opencodex",
   "permissions": [
     "tabs",
-    "storage"
+    "storage",
+    "cookies",
+    "scripting"
   ],
   "host_permissions": [
     "https://aistudio.google.com/*",
+    "https://*.google.com/*",
     "https://*.clients6.google.com/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "http://127.0.0.1:*/*"
   ],
   "background": {
     "service_worker": "background.js"

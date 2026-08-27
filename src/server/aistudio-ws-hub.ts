@@ -31,6 +31,7 @@ export interface AiStudioRelayHub {
   getActiveSessionCount(): number;
   registerSession(id: string, ws: WebSocketLike): void;
   unregisterSession(id: string): void;
+  reset(): void;
   dispatchStream(req: WsRelayRequest, signal?: AbortSignal): Promise<WsRelayStreamResult>;
   handleClientMessage(sessionId: string, raw: string): void;
 }
@@ -42,6 +43,11 @@ export function createAiStudioRelayHub(): AiStudioRelayHub {
   let sessionRoundRobin = 0;
 
   function getNextSession(): { id: string; ws: WebSocketLike } | undefined {
+    for (const [id, ws] of sessions.entries()) {
+      if ((ws as any).readyState !== undefined && (ws as any).readyState > 1) {
+        sessions.delete(id);
+      }
+    }
     const arr = Array.from(sessions.values());
     if (arr.length === 0) return undefined;
     const id = Array.from(sessions.keys())[sessionRoundRobin % arr.length]!;
@@ -73,6 +79,16 @@ export function createAiStudioRelayHub(): AiStudioRelayHub {
         pendingRequests.get(requestId)?.fail(new Error("Google AI Studio browser session disconnected"));
       }
       pendingBySession.delete(id);
+    },
+
+    reset() {
+      for (const pending of pendingRequests.values()) {
+        pending.fail(new Error("AI Studio relay hub reset"));
+      }
+      sessions.clear();
+      pendingRequests.clear();
+      pendingBySession.clear();
+      sessionRoundRobin = 0;
     },
 
     async dispatchStream(req: WsRelayRequest, signal?: AbortSignal): Promise<WsRelayStreamResult> {
@@ -185,15 +201,22 @@ export function createAiStudioRelayHub(): AiStudioRelayHub {
       try {
         data = JSON.parse(raw);
       } catch (err) {
+        console.log("[AIStudioHub] failed to parse JSON message:", err);
         void err;
         return;
       }
 
       const { id, type, payload } = data || {};
-      if (!id) return;
+      if (!id) {
+        console.log("[AIStudioHub] message missing id");
+        return;
+      }
 
       const pending = pendingRequests.get(id);
-      if (!pending || !pendingBySession.get(sessionId)?.has(id)) return;
+      if (!pending || !pendingBySession.get(sessionId)?.has(id)) {
+        console.log("[AIStudioHub] no pending request for id:", id, "session:", sessionId);
+        return;
+      }
 
       if (type === "stream_chunk") {
         if (payload?.data) {
