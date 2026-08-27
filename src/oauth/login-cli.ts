@@ -134,7 +134,6 @@ async function handleAiStudioBridgeLogin(): Promise<void> {
     console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
   }
 
-  openUrl(bridgeUrl);
   const reload = await notifyRunningProxy("google-aistudio");
   console.log("\n✅ Ready! Use models with 'google-aistudio' provider in your coding agents.");
   warnIfLiveReloadSkipped(reload);
