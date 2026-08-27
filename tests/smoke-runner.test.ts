@@ -48,4 +48,32 @@ describe("provider smoke runner", () => {
       else process.env.OPENCODEX_HOME = originalHome;
     }
   });
+
+  test("accepts a direct non-streaming JSON completion response", async () => {
+    const originalFetch = globalThis.fetch;
+    const cachePath = "/tmp/ocx-smoke-json-" + Date.now() + ".json";
+    globalThis.fetch = async (_input, init) => {
+      const parsed = JSON.parse(String(init?.body));
+      const hasTools = Array.isArray(parsed.tools);
+      const isL3 = Array.isArray(parsed.input) && parsed.input.some((i: { type: string }) => i.type === "function_call_output");
+      if (isL3) {
+        return new Response(JSON.stringify({ id: "resp_3", status: "completed", output: [] }), { headers: { "content-type": "application/json" } });
+      }
+      if (hasTools) {
+        return new Response(JSON.stringify({
+          id: "resp_2",
+          status: "completed",
+          output: [{ type: "function_call", call_id: "call_1", name: "exec_command", arguments: JSON.stringify({ cmd: 'echo "smoke_test_123"' }) }],
+        }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ id: "resp_1", status: "completed", output: [{ type: "message", content: "hello" }] }), { headers: { "content-type": "application/json" } });
+    };
+    try {
+      const result = await runProviderSmoke({ provider: "openai", modelId: "test-model", force: true, cachePath });
+      expect(result.status).toBe("passed");
+      expect(result.level1Passed && result.level2Passed && result.level3Passed).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });

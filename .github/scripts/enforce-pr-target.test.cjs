@@ -56,6 +56,11 @@ describe("enforce-pr-target workflow", () => {
     assert.match(workflow, /syncGenerated && syncBaselineReady/);
   });
 
+  it("treats promotion PRs from dev to main as checklist-free", () => {
+    assert.match(workflow, /isPromotionPr/);
+    assert.match(workflow, /checklistRequired = !authorIsMaintainer && !syncGenerated && !promotionPr;/);
+  });
+
   it("soft-fails ready-for-review restoration the same way", () => {
     assert.match(workflow, /readyConversionFailed/);
     assert.match(workflow, /Could not mark pull request ready for review/);
