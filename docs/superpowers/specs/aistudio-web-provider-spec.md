@@ -1,3 +1,5 @@
+> **SUPERSEDED:** The relay architecture described in this spec is superseded by `docs/superpowers/specs/2026-08-27-aistudio-macos-direct-session-design.md` (macOS-native WebKit login, direct SAPISID-authenticated HTTP transport, and extraction-only browser extension).
+
 # AI Studio Web Provider Spec
 
 ## Overview

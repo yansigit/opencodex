@@ -108,15 +108,10 @@ of the HTTP retry loop.
 
 **Targets:** Google **Gemini**, **Vertex AI**, and Antigravity **Cloud Code Assist**. AI Studio uses
 `/v1beta/models/{model}:streamGenerateContent`; the other modes use their native Google endpoints.
-**Auth:** API key, Vertex ADC, Google Antigravity OAuth, or the local `ai-studio-web` browser relay,
+**Auth:** API key, Vertex ADC, Google Antigravity OAuth, or the local `ai-studio-web` direct session,
 selected by `googleMode`.
 
-`googleMode: "ai-studio-web"` routes through an active `http://127.0.0.1:<port>/aistudio/bridge`
-tab. It uses conservative request pacing and does not expose a public quota percentage; check the
-AI Studio UI for the authoritative Playground / Build quota. Keep the tab open while coding agents
-run. Keep the proxy bound to loopback for the no-token bridge page; non-loopback WebSocket upgrades
-require the proxy API key and an allowed Origin. Use the official API-key route when a browser relay
-is unavailable.
+`googleMode: "ai-studio-web"` routes directly through Google's internal MakerSuite endpoints using authenticated session tokens and SHA-1 `SAPISIDHASH` credentials. On macOS, sessions are established interactively via native WebKit login (`ocx login` or Connect in the dashboard). Sessions can also be exported via the OpenCodex AI Studio Session Exporter extension for Brave and Chrome. Inference uses direct authenticated HTTP transport rather than browser tabs or WebSocket relays.
 
 - System prompt → `systemInstruction`; messages → `contents[]` (assistant → `model`); tools →
   `functionDeclarations`. Data-URL images → `inline_data`.
