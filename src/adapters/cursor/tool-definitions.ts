@@ -112,6 +112,13 @@ export const CURSOR_MULTI_EDIT_INPUT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** Cursor requires freeform custom tools to advertise their body as one string input. */
+export const CURSOR_FREEFORM_INPUT_SCHEMA = {
+  type: "object",
+  properties: { input: { type: "string" } },
+  required: ["input"],
+} as const;
+
 /**
  * Responses/Codex-side schema used ONLY for arg-key normalization after Cursor returns a call.
  * Cursor models are trained to emit `cmd`; Codex `shell_command` / `exec_command` validate
@@ -386,6 +393,7 @@ export function responsesToolNameFromCursorWire(name: string, cursorToolNameMap?
 
 /** Schema advertised to Cursor for this tool (may use Cursor-preferred field names like `cmd`). */
 export function cursorToolInputSchema(tool: OcxTool): unknown {
+  if (tool.freeform) return CURSOR_FREEFORM_INPUT_SCHEMA;
   return isBareCodexExecCommandTool(tool) ? CURSOR_EXEC_COMMAND_INPUT_SCHEMA : (tool.parameters ?? {});
 }
 
@@ -395,6 +403,7 @@ export function cursorToolInputSchema(tool: OcxTool): unknown {
  * treating `cmd` as canonical prevents the `cmd` → `command` rewrite Codex requires (#399).
  */
 export function cursorToolArgNormalizeSchema(tool: OcxTool): unknown {
+  if (tool.freeform) return CURSOR_FREEFORM_INPUT_SCHEMA;
   if (isBareCodexShellBridgeTool(tool)) {
     return shellBridgeArgNormalizeSchema(tool);
   }

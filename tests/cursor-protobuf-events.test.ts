@@ -771,6 +771,55 @@ describe("Cursor protobuf tool-call events", () => {
     expect(delta && delta.type === "tool_call_delta" ? JSON.parse(delta.arguments) : null).toEqual({ path: "a.txt" });
   });
 
+  test("wraps raw and missing-input freeform arguments for Codex", () => {
+    const freeformSchema = {
+      type: "object",
+      properties: { input: { type: "string" } },
+      required: ["input"],
+    };
+    const state = createCursorProtobufEventState({
+      clientToolNames: ["exec"],
+      freeformToolNames: ["exec"],
+      toolSchemas: new Map([["exec", freeformSchema]]),
+    });
+    const toolCall = mcpToolCall("exec", {});
+
+    mapCursorProtobufServerMessage(interaction({
+      case: "toolCallStarted",
+      value: create(ToolCallStartedUpdateSchema, { callId: "call_raw", modelCallId: "model_1", toolCall }),
+    }), state);
+    const rawEvents = mapCursorProtobufServerMessage(interaction({
+      case: "partialToolCall",
+      value: create(PartialToolCallUpdateSchema, {
+        callId: "call_raw", modelCallId: "model_1", toolCall, argsTextDelta: "echo hi",
+      }),
+    }), state);
+    expect(rawEvents).toEqual([]);
+    const rawCompleted = mapCursorProtobufServerMessage(interaction({
+      case: "toolCallCompleted",
+      value: create(ToolCallCompletedUpdateSchema, { callId: "call_raw", modelCallId: "model_1", toolCall }),
+    }), state);
+    expect(rawCompleted.find(event => event.type === "error")).toBeUndefined();
+    expect(rawCompleted.find(event => event.type === "tool_call_delta")).toEqual({
+      type: "tool_call_delta",
+      arguments: JSON.stringify({ input: "echo hi" }),
+    });
+
+    const missingInput = create(McpArgsSchema, {
+      name: "exec",
+      toolName: "exec",
+      toolCallId: "call_missing",
+      providerIdentifier: "opencodex-responses",
+      args: { script: encoder.encode(JSON.stringify("echo bye")) },
+    });
+    const missingEvents = mapSyntheticMcpExecToToolEvents(missingInput, "fallback", { state });
+    expect(missingEvents.find(event => event.type === "error")).toBeUndefined();
+    expect(missingEvents.find(event => event.type === "tool_call_delta")).toEqual({
+      type: "tool_call_delta",
+      arguments: JSON.stringify({ input: "echo bye" }),
+    });
+  });
+
   test("rewrites shell_command cmd args to command for Codex Responses validation", () => {
     const toolSchemas = new Map<string, unknown>([
       ["shell_command", { type: "object", properties: { command: { type: "string" }, workdir: { type: "string" } }, required: ["command"] }],

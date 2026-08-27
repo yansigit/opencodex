@@ -102,6 +102,56 @@ describe("Cursor native exec bridge", () => {
   });
 
 
+  test("code mode native exec rejections steer to top-level exec and nested tools helpers", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocx-cursor-code-mode-"));
+    const path = join(dir, "note.txt");
+
+    const deniedRead = decode((await handleCursorNativeExec(execMessage({
+      case: "readArgs",
+      value: create(ReadArgsSchema, { path }),
+    }), { codeMode: true }))[0]);
+    expect(deniedRead.message.case).toBe("readResult");
+    expect(deniedRead.message.value.result.case).toBe("error");
+    if (deniedRead.message.value.result.case === "error") {
+      const error = deniedRead.message.value.result.value.error;
+      expect(error).toContain("top-level `exec` tool");
+      expect(error).toContain("await tools.<name>(args)");
+      expect(error).toContain("policy-redirected");
+      expect(error).toContain("Do not call `shell_command` or `exec_command` at the top level");
+      expect(error).not.toContain("Use a catalog tool for this work");
+    }
+
+    const deniedShell = decode((await handleCursorNativeExec(execMessage({
+      case: "shellArgs",
+      value: create(ShellArgsSchema, { command: "printf blocked", workingDirectory: dir }),
+    }), { codeMode: true }))[0]);
+    expect(deniedShell.message.case).toBe("shellResult");
+    expect(deniedShell.message.value.result.case).toBe("failure");
+    if (deniedShell.message.value.result.case === "failure") {
+      const stderr = deniedShell.message.value.result.value.stderr;
+      expect(stderr).toContain("top-level `exec` tool");
+      expect(stderr).toContain("await tools.exec_command");
+      expect(stderr).toContain("policy-redirected");
+      expect(stderr).toContain("Do not call `shell_command` or `exec_command` at the top level");
+      expect(stderr).not.toContain("Route this through the Codex bridge shell tool");
+    }
+
+    const deniedFetch = decode((await handleCursorNativeExec(execMessage({
+      case: "fetchArgs",
+      value: create(FetchArgsSchema, { url: "https://example.test/doc" }),
+    }), { codeMode: true }))[0]);
+    expect(deniedFetch.message.case).toBe("fetchResult");
+    expect(deniedFetch.message.value.result.case).toBe("error");
+    if (deniedFetch.message.value.result.case === "error") {
+      const error = deniedFetch.message.value.result.value.error;
+      expect(error).toContain("top-level `exec` tool");
+      expect(error).toContain("await tools.exec_command");
+      expect(error).toContain("policy-redirected");
+      expect(error).toContain("Do not call `shell_command` or `exec_command` at the top level");
+      expect(error).not.toContain("Use the Codex shell bridge tool");
+    }
+  });
+
   test("blocks built-in local fs, shell, and fetch execution by default", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ocx-cursor-exec-"));
     const path = join(dir, "note.txt");

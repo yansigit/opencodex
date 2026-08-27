@@ -1136,6 +1136,31 @@ function cursorFreeformWrapperValid(args: string): boolean {
   }
 }
 
+/**
+ * Cursor sometimes sends a freeform body as a JSON string or as a one-key object instead of the
+ * advertised `{input: string}` wrapper. Preserve incomplete JSON for the late native-args path,
+ * but wrap complete/raw bodies before the Responses bridge validates them.
+ */
+function normalizeFreeformArgs(args: string): string {
+  if (args.length === 0) return args;
+  try {
+    const parsed = JSON.parse(args) as unknown;
+    if (typeof parsed === "string") return JSON.stringify({ input: parsed });
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const object = parsed as Record<string, unknown>;
+      if ("input" in object || Object.keys(object).length === 0) return args;
+      const values = Object.values(object);
+      const input = values.length === 1 && typeof values[0] === "string" ? values[0] : JSON.stringify(object);
+      return JSON.stringify({ input });
+    }
+    return args;
+  } catch {
+    return args.trimStart().startsWith("{") || args.trimStart().startsWith("[")
+      ? args
+      : JSON.stringify({ input: args });
+  }
+}
+
 function dropInvalidFreeformCall(state: CursorProtobufEventState, callId: string, toolName: string): CursorServerMessage[] {
   state.openToolCalls.delete(callId);
   state.translatorBudget?.closeCall(callId);
@@ -1162,6 +1187,7 @@ function dropStructuredEditCall(state: CursorProtobufEventState, callId: string,
 function commitToolCall(state: CursorProtobufEventState, callId: string, finalArgs: string): CursorServerMessage[] {
   const open = state.openToolCalls.get(callId);
   if (!open) return [];
+  if (state.freeformToolNames?.has(open.name)) finalArgs = normalizeFreeformArgs(finalArgs);
   if (state.freeformToolNames?.has(open.name) && !cursorFreeformWrapperValid(finalArgs)) {
     return dropInvalidFreeformCall(state, callId, open.name);
   }
@@ -1436,7 +1462,7 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
         && (
           (name !== undefined && openBeforeStart.args.length === 0)
           || (state.freeformToolNames?.has(openBeforeStart.name) === true
-            && !cursorFreeformWrapperValid(openBeforeStart.args)
+            && !cursorFreeformWrapperValid(normalizeFreeformArgs(openBeforeStart.args))
           )
         )
       ) {
@@ -1460,7 +1486,7 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
       if (
         !openBeforeStart && open && !hasMcpArgBytes(args)
         && state.freeformToolNames?.has(open.name) === true
-        && !cursorFreeformWrapperValid(open.args)
+        && !cursorFreeformWrapperValid(normalizeFreeformArgs(open.args))
       ) {
         open.awaitingNativeArgs = true;
         return [];
