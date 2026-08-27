@@ -76,7 +76,10 @@ test("buildProviderWorkspace bins ai-studio-web by session/auth state", () => {
   expect(readySections.ready.some(p => p.name === "google-aistudio")).toBe(true);
 });
 
-async function renderOverview(item: import("../src/provider-workspace/catalog").WorkspaceItem) {
+async function renderOverview(
+  item: import("../src/provider-workspace/catalog").WorkspaceItem,
+  extra?: { onRefreshConfig?: () => void | Promise<void> },
+) {
   const container = document.createElement("div");
   document.body.append(container);
   const { createRoot } = await import("react-dom/client");
@@ -84,23 +87,40 @@ async function renderOverview(item: import("../src/provider-workspace/catalog").
   await act(async () => {
     root.render(
       <LanguageProvider>
-        <ProviderOverview item={item} apiBase="http://localhost:10100" />
+        <ProviderOverview item={item} apiBase="http://localhost:10100" onRefreshConfig={extra?.onRefreshConfig} />
       </LanguageProvider>
     );
   });
   return { container, root };
 }
 
-test("ProviderOverview renders connect CTA for needs-reauth", async () => {
-  const item = {
+async function flushUi(): Promise<void> {
+  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+}
+
+function checkingItem() {
+  return {
+    name: "google-aistudio",
+    adapter: "google",
+    baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+    googleMode: "ai-studio-web",
+    aiStudioAuthState: "checking",
+  } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
+}
+
+function needsReauthItem() {
+  return {
     name: "google-aistudio",
     adapter: "google",
     baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
     googleMode: "ai-studio-web",
     aiStudioAuthState: "needs_reauth",
   } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
+}
 
-  const { container, root } = await renderOverview(item);
+test("ProviderOverview renders connect CTA for needs-reauth", async () => {
+  const { container, root } = await renderOverview(needsReauthItem());
   const text = container.textContent ?? "";
   expect(/reauthentication required/i.test(text)).toBe(true);
   expect(/connect/i.test(text)).toBe(true);
@@ -136,18 +156,72 @@ test("ProviderOverview auto-tests once while checking", async () => {
     return originalFetch(input, init);
   }) as typeof fetch;
 
-  const item = {
-    name: "google-aistudio",
-    adapter: "google",
-    baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
-    googleMode: "ai-studio-web",
-    aiStudioAuthState: "checking",
-  } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
-
-  const { container, root } = await renderOverview(item);
-  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  const { container, root } = await renderOverview(checkingItem());
+  await flushUi();
   expect(calls.filter(url => url.includes("/api/providers/test")).length).toBe(1);
   expect(calls.some(url => url.includes("/aistudio/bridge"))).toBe(false);
+  await act(async () => { root.unmount(); });
+});
+
+test("ProviderOverview auto-test success shows connected and hides connect CTA", async () => {
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/providers/test")) {
+      return new Response(JSON.stringify({ ok: true, authState: "connected", message: "AI Studio session verified" }), { status: 200 });
+    }
+    return originalFetch(input);
+  }) as typeof fetch;
+
+  const { container, root } = await renderOverview(checkingItem());
+  await flushUi();
+  const text = container.textContent ?? "";
+  expect(/connected/i.test(text)).toBe(true);
+  expect(/checking session/i.test(text)).toBe(false);
+  expect(container.querySelector("button.btn-primary")).toBeNull();
+  expect(/browser relay/i.test(text)).toBe(false);
+  await act(async () => { root.unmount(); });
+});
+
+test("ProviderOverview auto-test reauth error shows connect CTA without connected success", async () => {
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/providers/test")) {
+      return new Response(JSON.stringify({ ok: false, error: "Session expired or missing — re-authentication required" }), { status: 200 });
+    }
+    return originalFetch(input);
+  }) as typeof fetch;
+
+  const { container, root } = await renderOverview(checkingItem());
+  await flushUi();
+  const text = container.textContent ?? "";
+  expect(/reauthentication required/i.test(text)).toBe(true);
+  expect(container.querySelector("button.btn-primary")).toBeTruthy();
+  expect(/connected/i.test(text)).toBe(false);
+  await act(async () => { root.unmount(); });
+});
+
+test("ProviderOverview native login success refreshes config and shows connected", async () => {
+  const refreshCalls: number[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/aistudio/login/native")) {
+      return new Response(JSON.stringify({ ok: true, sessionPath: "/tmp/session.json" }), { status: 200 });
+    }
+    return originalFetch(input);
+  }) as typeof fetch;
+
+  const { container, root } = await renderOverview(needsReauthItem(), {
+    onRefreshConfig: () => { refreshCalls.push(1); },
+  });
+  const button = container.querySelector("button.btn-primary") as HTMLButtonElement;
+  expect(button).toBeTruthy();
+  await act(async () => { button.click(); });
+  await flushUi();
+  const text = container.textContent ?? "";
+  expect(/connected/i.test(text)).toBe(true);
+  expect(/reauthenticated successfully/i.test(text)).toBe(true);
+  expect(container.querySelector("button.btn-primary")).toBeNull();
+  expect(refreshCalls.length).toBe(1);
   await act(async () => { root.unmount(); });
 });
 
@@ -158,20 +232,12 @@ test("ProviderOverview abort/cancel does not show success", async () => {
     return new Promise<Response>(() => {});
   }) as typeof fetch;
 
-  const item = {
-    name: "google-aistudio",
-    adapter: "google",
-    baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
-    googleMode: "ai-studio-web",
-    aiStudioAuthState: "needs_reauth",
-  } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
-
-  const { container, root } = await renderOverview(item);
+  const { container, root } = await renderOverview(needsReauthItem());
   const button = container.querySelector("button.btn-primary") as HTMLButtonElement;
   expect(button).toBeTruthy();
   await act(async () => { button.click(); });
   await act(async () => { abortSignal?.dispatchEvent(new Event("abort")); });
-  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  await flushUi();
   const text = container.textContent ?? "";
   expect(/reauthenticated successfully/i.test(text)).toBe(false);
   await act(async () => { root.unmount(); });

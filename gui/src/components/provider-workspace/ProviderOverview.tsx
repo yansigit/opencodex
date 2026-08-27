@@ -18,6 +18,7 @@ type ConnectionTestResult = {
   applicable?: boolean;
   ok?: boolean;
   latencyMs?: number;
+  authState?: "connected" | "checking" | "needs_reauth" | "unsupported";
   reason?: string;
   message?: string;
   error?: string;
@@ -34,6 +35,7 @@ export default function ProviderOverview({
   apiBase, connectionIdentity,
   onEditSettings, onViewUsage, onUpdateProvider,
   onReauthenticate, onCancelLogin, reauthBusy = false,
+  onRefreshConfig,
 }: {
   item: WorkspaceItem;
   usageTotals?: ProviderUsageTotals;
@@ -50,6 +52,7 @@ export default function ProviderOverview({
   onReauthenticate?: () => void;
   onCancelLogin?: () => void;
   reauthBusy?: boolean;
+  onRefreshConfig?: () => void | Promise<void>;
 }) {
   const t = useT();
   const { locale } = useI18n();
@@ -57,7 +60,8 @@ export default function ProviderOverview({
   const status = binProviderStatus(item);
   const needsAttention = Boolean(item.activeNeedsReauth);
   const isAiStudioWeb = item.googleMode === "ai-studio-web" || item.name === "google-aistudio";
-  const aiStudioAuthState = item.aiStudioAuthState ?? (item.hasAiStudioSession ? "checking" : "needs_reauth");
+  const [localAiStudioAuthState, setLocalAiStudioAuthState] = useState<"connected" | "checking" | "needs_reauth" | "unsupported" | null>(null);
+  const aiStudioAuthState = localAiStudioAuthState ?? item.aiStudioAuthState ?? (item.hasAiStudioSession ? "checking" : "needs_reauth");
   const aiStudioStatusText = aiStudioAuthState === "connected"
     ? t("pws.aiStudio.connected")
     : aiStudioAuthState === "checking"
@@ -128,6 +132,15 @@ export default function ProviderOverview({
       if (!result) throw new Error(t("pws.connectionFailed"));
       if (!controller.signal.aborted) {
         setConnectionTest({ key: connectionProbeKey, testing: false, result });
+        if (isAiStudioWeb) {
+          if (result.authState) {
+            setLocalAiStudioAuthState(result.authState);
+          } else if (result.ok === true) {
+            setLocalAiStudioAuthState("connected");
+          } else if (result.error && /re-?authentication/i.test(result.error)) {
+            setLocalAiStudioAuthState("needs_reauth");
+          }
+        }
       }
     } catch (error) {
       if (!controller.signal.aborted) {
@@ -163,7 +176,9 @@ export default function ProviderOverview({
       if (controller.signal.aborted) return;
       const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
       if (res.ok && data?.ok) {
+        setLocalAiStudioAuthState("connected");
         setAiStudioReauthMsg(t("pws.aiStudio.reauthenticated"));
+        await onRefreshConfig?.();
         return;
       }
       if (data?.error) {
@@ -245,8 +260,9 @@ export default function ProviderOverview({
             </div>
           )}
         </dl>
-        {isAiStudioWeb && needsAiStudioReauth && (
+        {isAiStudioWeb && (needsAiStudioReauth || aiStudioReauthMsg) && (
           <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
+            {needsAiStudioReauth && (
             <button
               type="button"
               className="btn btn-primary btn-sm"
@@ -256,6 +272,7 @@ export default function ProviderOverview({
               {/* oxlint-disable-next-line local-i18n/no-hardcoded-ui-strings -- labels for a11y test query; component text is driven by i18n below but oxlint rule fires on JSX string literals; functional display is t() via aiStudioCtaLabel */}
               {aiStudioReauthBusy ? t("common.loading") : status !== "ready" ? t("pws.aiStudio.connect") : t("pws.reauthenticate")}
             </button>
+            )}
             {aiStudioReauthMsg && (
               <span role="status" className="muted">{aiStudioReauthMsg}</span>
             )}
