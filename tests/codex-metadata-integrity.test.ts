@@ -40,6 +40,7 @@ describe("Codex metadata integrity", () => {
       "thread-id",
       "chatgpt-account-id",
       "x-codex-parent-thread-id",
+      "x-session-id",
     ]) {
       expect(FORWARD_HEADERS).toContain(name);
     }

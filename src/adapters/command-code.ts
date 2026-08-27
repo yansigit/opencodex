@@ -231,19 +231,35 @@ function projectSlug(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 64) || "workspace";
 }
 
+function firstUserText(parsed: OcxParsedRequest): string | undefined {
+  for (const msg of parsed.context.messages) {
+    if (msg.role !== "user") continue;
+    if (typeof msg.content === "string") return msg.content;
+    const first = msg.content.find(part => part.type === "text" && typeof part.text === "string");
+    if (first && first.type === "text") return first.text;
+  }
+  return undefined;
+}
+
 export function commandCodeSessionId(parsed: OcxParsedRequest): string {
   // Shared prompt-cache cohorts intentionally do not identify one conversation. Keep them out
   // of upstream session affinity or unrelated conversations can pin to the same worker.
   const threadId = parsed._clientThreadId?.trim();
   const replayId = parsed._reasoningReplayScope?.clientThreadId?.trim();
+  const cursorId = parsed._cursorConversationId?.trim();
   const cacheKey = !parsed._promptCacheKeyIsSharedCohort ? parsed.options.promptCacheKey?.trim() : undefined;
+  const rootText = firstUserText(parsed);
   const identity = threadId
     ? ["thread", threadId]
     : replayId
       ? ["replay", replayId]
-      : cacheKey
-        ? ["cache", cacheKey]
-        : undefined;
+      : cursorId
+        ? ["cursor", cursorId]
+        : cacheKey
+          ? ["cache", cacheKey]
+          : rootText
+            ? ["root", rootText]
+            : undefined;
   if (!identity) return randomUUID();
   const hex = createHash("sha256").update(`command-code:${identity[0]}\0${identity[1]}`).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;

@@ -581,9 +581,26 @@ describe("Command Code provider", () => {
     expect(threadTurn.headers["x-session-id"]).toBe(threadFollowup.headers["x-session-id"]);
     expect(threadTurn.headers["x-session-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
 
-    const first = await builtRequest(parsed());
-    const second = await builtRequest({ ...parsed(), context: { ...parsed().context, messages: [...parsed().context.messages, { role: "user", content: "followup", timestamp: 2 }] } });
-    expect(first.headers["x-session-id"]).not.toBe(second.headers["x-session-id"]);
+    const cursorTurn = await builtRequest({ ...parsed(), _cursorConversationId: "cursor-conv-1" });
+    const cursorFollowup = await builtRequest({
+      ...parsed(),
+      _cursorConversationId: "cursor-conv-1",
+      context: { ...parsed().context, messages: [...parsed().context.messages, { role: "user", content: "followup", timestamp: 2 }] },
+    });
+    expect(cursorTurn.headers["x-session-id"]).toBe(cursorFollowup.headers["x-session-id"]);
+
+    const rootTurn = await builtRequest(parsed());
+    const rootFollowup = await builtRequest({
+      ...parsed(),
+      context: { ...parsed().context, messages: [...parsed().context.messages, { role: "user", content: "followup", timestamp: 2 }] },
+    });
+    expect(rootTurn.headers["x-session-id"]).toBe(rootFollowup.headers["x-session-id"]);
+
+    const otherRoot = await builtRequest({
+      ...parsed(),
+      context: { ...parsed().context, messages: [{ role: "user", content: "different root", timestamp: 1 }] },
+    });
+    expect(rootTurn.headers["x-session-id"]).not.toBe(otherRoot.headers["x-session-id"]);
   });
 
   test("does not use a shared prompt-cache cohort for session affinity", async () => {
