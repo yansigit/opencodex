@@ -15,10 +15,10 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       issues: write
       pull-requests: write
-      workflows: write
     steps:
       - name: Reject untrusted manual refs
         if: >-
