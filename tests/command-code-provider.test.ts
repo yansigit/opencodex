@@ -394,6 +394,38 @@ describe("Command Code provider", () => {
     expect(JSON.parse(built.body).params.tools).toEqual([]);
   });
 
+  test("sorts tools deterministically so prompt cache prefix stays stable across input order", async () => {
+    const tool = (name: string, namespace?: string) => ({
+      name,
+      ...(namespace ? { namespace } : {}),
+      description: name,
+      parameters: { type: "object" },
+    });
+    const tools = [
+      tool("beta"),
+      tool("alpha"),
+      tool("gamma", "mcp"),
+    ];
+    const shuffled = [tools[1], tools[2], tools[0]];
+    const reversed = [...tools].reverse();
+    const base = parsed();
+    const builtA = await builtRequest({ ...base, context: { ...base.context, tools } });
+    const builtB = await builtRequest({ ...base, context: { ...base.context, tools: shuffled } });
+    const builtC = await builtRequest({ ...base, context: { ...base.context, tools: reversed } });
+    const bodyA = JSON.parse(builtA.body);
+    const bodyB = JSON.parse(builtB.body);
+    const bodyC = JSON.parse(builtC.body);
+    expect(bodyB.params.tools).toEqual(bodyA.params.tools);
+    expect(bodyC.params.tools).toEqual(bodyA.params.tools);
+    expect(bodyB.params.system).toBe(bodyA.params.system);
+    expect(bodyC.params.system).toBe(bodyA.params.system);
+    expect(bodyA.params.tools.map((row: { name: string }) => row.name)).toEqual([
+      "alpha",
+      "beta",
+      "mcp__gamma",
+    ]);
+  });
+
   test("matches a forced namespaced tool choice by dot or unique bare alias", async () => {
     const namespacedParsed = {
       ...parsed(),

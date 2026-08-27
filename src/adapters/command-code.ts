@@ -174,13 +174,17 @@ function visibleTools(parsed: OcxParsedRequest): OcxTool[] {
   if (choice === "none") return [];
   const tools = parsed.context.tools ?? [];
   if (isAllowedToolChoice(choice)) {
-    return tools.filter(toolChoiceToolPredicate(choice, tools));
+    return tools
+      .filter(toolChoiceToolPredicate(choice, tools))
+      .sort((left, right) => namespacedToolName(left.namespace, left.name).localeCompare(namespacedToolName(right.namespace, right.name)));
   }
   if (choice && typeof choice !== "string") {
     const selected = resolveToolChoiceWireName(tools, choice.name);
-    return tools.filter(tool => namespacedToolName(tool.namespace, tool.name) === selected);
+    return tools
+      .filter(tool => namespacedToolName(tool.namespace, tool.name) === selected)
+      .sort((left, right) => namespacedToolName(left.namespace, left.name).localeCompare(namespacedToolName(right.namespace, right.name)));
   }
-  return tools;
+  return [...tools].sort((left, right) => namespacedToolName(left.namespace, left.name).localeCompare(namespacedToolName(right.namespace, right.name)));
 }
 
 function toolChoiceInstruction(parsed: OcxParsedRequest): string | undefined {
