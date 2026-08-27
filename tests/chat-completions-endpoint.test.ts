@@ -111,14 +111,14 @@ function mockChatUpstreamCapturing() {
  * whole question behind the per-model override.
  */
 function mockDualWireUpstream() {
-  const captured: Array<{ pathname: string; body: Record<string, unknown> }> = [];
+  const captured: Array<{ pathname: string; body: Record<string, unknown>; headers: Headers }> = [];
   const server = Bun.serve({
     port: 0,
     async fetch(req) {
       const url = new URL(req.url);
       let body: Record<string, unknown> = {};
       try { body = await req.json() as Record<string, unknown>; } catch { /* keep going */ }
-      captured.push({ pathname: url.pathname, body });
+      captured.push({ pathname: url.pathname, body, headers: new Headers(req.headers) });
 
       if (url.pathname.endsWith("/responses")) {
         const frames = [
@@ -2704,6 +2704,64 @@ test("inbound chat-completions honors the override when stripping sampling (#404
   } finally {
     await server.stop(true);
     upstream.stop(true);
+  }
+});
+
+test("Chat to Responses bridge preserves all session and thread headers", async () => {
+  const { server: upstream, captured } = mockDualWireUpstream();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(requestUrl);
+    if (url.hostname === "chatgpt.com" && url.pathname.startsWith("/backend-api/codex")) {
+      return originalFetch(new URL(`${url.pathname.slice("/backend-api/codex".length)}${url.search}`, upstream.url), init);
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+  saveConfig({
+    port: 0,
+    defaultProvider: "mock",
+    providers: {
+      mock: {
+        adapter: "openai-responses",
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        authMode: "forward",
+      },
+    },
+  } as OcxConfig);
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/chat/completions", server.url), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        session_id: "session-underscore",
+        "session-id": "session-hyphen",
+        "x-session-id": "session-x",
+        "thread-id": "thread-client",
+      },
+      body: JSON.stringify({
+        model: "openai/gpt-test",
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.pathname).toContain("/responses");
+    for (const [name, value] of Object.entries({
+      session_id: "session-underscore",
+      "session-id": "session-hyphen",
+      "x-session-id": "session-x",
+      "thread-id": "thread-client",
+    })) {
+      expect(captured[0]!.headers.get(name)).toBe(value);
+    }
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+    globalThis.fetch = originalFetch;
   }
 });
 

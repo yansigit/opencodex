@@ -4,6 +4,7 @@ import {
   conversationIdFromClaudeCacheKey,
   conversationIdFromClaudeMetadata,
   conversationIdFromResponsesRequest,
+  inboundClientThreadIdFromRequest,
   matchesLogConversationId,
   normalizeLogConversationId,
   reasoningReplayConversationIdFromResponsesRequest,
@@ -69,6 +70,65 @@ describe("sessionIdHeaderFromRequest", () => {
       session_id: "underscore",
       "session-id": "hyphen",
     }))).toBe("underscore");
+  });
+
+  test("uses session_id before session-id, while x-session-id stays a separate bridge header", () => {
+    expect(sessionIdHeaderFromRequest(new Headers({ "x-session-id": "x-session" }))).toBeNull();
+    expect(sessionIdHeaderFromRequest(new Headers({
+      session_id: "underscore",
+      "session-id": "hyphen",
+      "x-session-id": "x-session",
+    }))).toBe("underscore");
+  });
+});
+
+describe("inboundClientThreadIdFromRequest", () => {
+  test("prefers x-codex-parent-thread-id over thread-id and session headers", () => {
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      "x-codex-parent-thread-id": "parent-thread",
+      "thread-id": "thread",
+      session_id: "session",
+    }))).toBe("parent-thread");
+  });
+
+  test("falls back to thread-id when parent thread header is absent", () => {
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      "thread-id": "desktop-thread",
+      session_id: "session",
+    }))).toBe("desktop-thread");
+  });
+
+  test("falls back to session_id or session-id when only session headers are present", () => {
+    expect(inboundClientThreadIdFromRequest(new Headers({ session_id: "underscore-session" }))).toBe("underscore-session");
+    expect(inboundClientThreadIdFromRequest(new Headers({ "session-id": "hyphen-session" }))).toBe("hyphen-session");
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      session_id: "underscore-session",
+      "session-id": "hyphen-session",
+    }))).toBe("underscore-session");
+  });
+
+  test("keeps core precedence explicit when all inbound aliases are present", () => {
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      "x-codex-parent-thread-id": "parent-thread",
+      "thread-id": "thread",
+      session_id: "underscore-session",
+      "session-id": "hyphen-session",
+      "x-session-id": "x-session",
+    }))).toBe("parent-thread");
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      "thread-id": "thread",
+      session_id: "underscore-session",
+      "x-session-id": "x-session",
+    }))).toBe("thread");
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      session_id: "underscore-session",
+      "x-session-id": "x-session",
+    }))).toBe("underscore-session");
+  });
+
+  test("returns undefined when no usable identity header is present", () => {
+    expect(inboundClientThreadIdFromRequest(new Headers())).toBeUndefined();
+    expect(inboundClientThreadIdFromRequest(new Headers({ "thread-id": "   " }))).toBeUndefined();
   });
 });
 

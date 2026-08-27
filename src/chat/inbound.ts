@@ -10,6 +10,21 @@ export class ChatCompletionsRequestError extends Error {}
 type Rec = Record<string, unknown>;
 type ChatCompletionsRoutingBody = Rec & { model: string; messages: unknown[] };
 
+/** Session/thread headers the Chat -> Responses bridge must preserve for provider affinity. */
+export const CHAT_RESPONSES_SESSION_HEADERS = [
+  "session_id",
+  "session-id",
+  "x-session-id",
+  "thread-id",
+] as const;
+
+export function copyChatResponsesSessionHeaders(source: Headers, target: Headers): void {
+  for (const name of CHAT_RESPONSES_SESSION_HEADERS) {
+    const value = source.get(name);
+    if (value) target.set(name, value);
+  }
+}
+
 function isRec(v: unknown): v is Rec {
   return !!v && typeof v === "object" && !Array.isArray(v);
 }

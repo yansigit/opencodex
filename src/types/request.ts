@@ -70,6 +70,8 @@ export interface OcxParsedRequest {
   _clientThreadId?: string;
   /** True when promptCacheKey is a shared cache cohort rather than a conversation identity. */
   _promptCacheKeyIsSharedCohort?: boolean;
+  /** Provider-private Command Code session affinity id, stable across in-process request mutation. */
+  _commandCodeSessionId?: string;
   /** Conversation/provider/account/model-bound namespace for reasoning replay state. */
   _reasoningReplayScope?: OcxReasoningReplayScopeRef;
   /**
