@@ -159,7 +159,9 @@ export function scanListenPids(port: number): ListenPidScan {
           if (Number.isSafeInteger(pid) && pid > 0) pids.add(pid);
         }
         return { ok: true, pids: [...pids] };
-      } catch {}
+      } catch {
+        /* ss unavailable or unsupported on this platform; try netstat */
+      }
       try {
         const output = execFileSync("netstat", ["-anlp"], {
           encoding: "utf-8",
