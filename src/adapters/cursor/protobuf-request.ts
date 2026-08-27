@@ -870,8 +870,10 @@ function buildPreparedCursorRunRequest(
     ? "userMessageAction"
     : "resumeAction";
   const actionText = externalToolContinuation
-    ? externalToolContinuationText(request.rawMessages)
-    : text;
+    ? (request.echoRetryContinuationText ?? externalToolContinuationText(request.rawMessages))
+    : request.echoRetryContinuationText
+      ? `${text}\n\n[correction] ${request.echoRetryContinuationText}`
+      : text;
   const action = create(ConversationActionSchema, {
     action: actionCase === "userMessageAction"
       ? {
