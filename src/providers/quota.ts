@@ -16,7 +16,6 @@ import { XAI_GROK_CLIENT_VERSION, XAI_GROK_COMPATIBILITY } from "./xai-transport
 import { getProviderRegistryEntry, providerCodexAccountMode, registryEntryForProviderDestination } from "./registry";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "./openai-tiers";
-import { globalAiStudioRelayHub } from "../server/aistudio-ws-hub";
 import {
   captureConfigGeneration,
   sweepExpiredOnWrite,
@@ -2252,15 +2251,12 @@ async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig
   });
 }
 
-async function fetchAiStudioQuota(name: string, provider: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
-  const active = globalAiStudioRelayHub.hasActiveSessions();
-  const sessionCount = globalAiStudioRelayHub.getActiveSessionCount();
+async function fetchAiStudioQuota(name: string, _provider: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
   const now = Date.now();
-
   return {
     provider: name,
     label: "Google AI Studio (Web)",
-    source: active ? `Browser Relay (${sessionCount} active tab${sessionCount > 1 ? "s" : ""})` : "Browser Relay (Disconnected)",
+    source: "Direct Session",
     updatedAt: now,
     quota: {
       updatedAt: now,

@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveAiStudioSession } from "../src/oauth/aistudio-session-sync";
-import { globalAiStudioRelayHub } from "../src/server/aistudio-ws-hub";
 import { createGoogleAdapter } from "../src/adapters/google";
 import type { OcxParsedRequest, OcxProviderConfig } from "../src/types";
 
@@ -39,7 +38,7 @@ function parsedWith(messages: unknown[], tools?: unknown[]): OcxParsedRequest {
   } as unknown as OcxParsedRequest;
 }
 
-describe("google adapter â€” ai-studio-web (cookie) mode", () => {
+describe("google adapter+§uçâçT ai-studio-web (cookie) mode", () => {
   test("builds request with alkalimakersuite endpoint and SAPISIDHASH headers", async () => {
     const adapter = createGoogleAdapter(cookieProvider);
     const parsed = parsedWith([
@@ -86,12 +85,7 @@ describe("google adapter â€” ai-studio-web (cookie) mode", () => {
     expect(req.headers["Authorization"]).toMatch(/^SAPISIDHASH \d+_[a-f0-9]{40}$/);
   });
 
-  test("uses direct transport even when a legacy relay session is active", () => {
-    globalAiStudioRelayHub.registerSession("legacy", { send() {}, close() {} } as any);
-    try {
-      expect(createGoogleAdapter(cookieProvider).fetchResponse).toBeUndefined();
-    } finally {
-      globalAiStudioRelayHub.reset();
-    }
+  test("uses direct transport (fetchResponse is undefined on google adapter)", () => {
+    expect(createGoogleAdapter(cookieProvider).fetchResponse).toBeUndefined();
   });
 });

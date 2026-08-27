@@ -35,8 +35,7 @@ export interface WsData {
   cancel?: () => void; // cancels the in-flight stream reader/fetch
   turnId?: number; // monotonically increasing per socket; prevents stale frames after replacement turns
   /** Discriminator: Responses reframing vs transparent live/realtime sideband relay. */
-  kind?: "responses" | "live-sideband" | "aistudio-relay";
-  aistudioSessionId?: string;
+  kind?: "responses" | "live-sideband";
   liveUpstream?: WebSocket;
   liveUpstreamUrl?: string;
   liveUpstreamHeaders?: Record<string, string>;

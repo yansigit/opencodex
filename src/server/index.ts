@@ -40,7 +40,6 @@ import {
   enforceAppOwnedMemoryBudget,
   resolveAppOwnedMemoryBudgetBytes,
 } from "../lib/app-owned-memory";
-import { getAiStudioBridgeHtml, getAiStudioUserScript, globalAiStudioRelayHub } from "./aistudio-ws-hub";
 import {
   registerAppOwnedMemorySweepFallback,
   registerDefaultAppOwnedMemoryStores,
@@ -948,29 +947,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
       }
 
-      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws") {
-        if (isDraining()) return drainingResponse(req, policy);
-        const admission = resolveApiAuth(req, policy);
-        if (!admission) {
-          return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
-        }
-        const origin = req.headers.get("Origin");
-        const isExtensionOrigin = origin?.startsWith("chrome-extension://");
-        if (!isAllowedRequestOrigin(req, policy) && origin !== "https://aistudio.google.com" && !isExtensionOrigin) {
-          return withCors(formatErrorResponse(403, "origin_rejected", "AI Studio relay WebSocket blocked: non-local Origin"), req, policy);
-        }
-        const sessionId = "aistudio_" + crypto.randomUUID().slice(0, 8);
-        if (requestServer.upgrade(req, {
-          data: { kind: "aistudio-relay", aistudioSessionId: sessionId },
-        })) return undefined as unknown as Response;
-       return withCors(formatErrorResponse(426, "upgrade_required", "AI Studio WebSocket upgrade failed"), req, policy);
-     }
-
-      if (url.pathname === "/v1/ws/aistudio/status" && req.method === "GET") {
-        return jsonResponse({
-          activeSessions: globalAiStudioRelayHub.getActiveSessionCount(),
-          hasActiveSessions: globalAiStudioRelayHub.hasActiveSessions(),
-        });
+      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws" || url.pathname === "/v1/ws/aistudio/status") {
+        return withCors(jsonResponse({
+          error: "gone",
+          message: "AI Studio browser relay endpoints are deprecated and return 410 Gone. Use native macOS login (ocx login) or the session exporter extension.",
+        }, 410), req, policy);
       }
 
       if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
@@ -1003,15 +984,33 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname === "/aistudio/bridge" && req.method === "GET") {
-        const listenPort = (server.port ?? config.port) || 10100;
-        const bridgeHtml = getAiStudioBridgeHtml(listenPort);
-        return new Response(bridgeHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+        const bridgeHtml = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Google AI Studio Relay Deprecated - OpenCodex</title>
+<style>body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; max-width: 680px; margin: 0 auto; line-height: 1.6; } h1 { font-size: 1.5rem; color: #f43f5e; } code { background: #1e293b; padding: 0.2rem 0.4rem; border-radius: 4px; font-family: monospace; } .card { background: #1e293b; padding: 1.25rem; border-radius: 8px; margin-top: 1rem; border: 1px solid #334155; }</style>
+</head>
+<body>
+<h1>HTTP 410 Gone: AI Studio Browser Relay Deprecated</h1>
+<p>The daily-browser WebSocket relay and userscript bridge have been retired in favor of native macOS authentication and direct session inference.</p>
+<div class="card">
+<h3>How to connect:</h3>
+<ol>
+<li><strong>macOS Native Login:</strong> Run <code>ocx login</code> in your terminal or click <strong>Connect</strong> in the dashboard overview.</li>
+<li><strong>Brave/Chrome Extension:</strong> Use the updated session exporter extension to auto-sync credentials to <code>/api/aistudio/session</code>.</li>
+</ol>
+</div>
+</body>
+</html>`;
+        return new Response(bridgeHtml, { status: 410, headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
 
       if (url.pathname === "/aistudio/bridge.user.js" && req.method === "GET") {
-        const listenPort = (server.port ?? config.port) || 10100;
-        const userScript = getAiStudioUserScript(listenPort);
-        return new Response(userScript, { headers: { "Content-Type": "application/javascript; charset=utf-8" } });
+        return new Response("// HTTP 410 Gone: OpenCodex AI Studio browser relay and userscripts are deprecated.\n", {
+          status: 410,
+          headers: { "Content-Type": "application/javascript; charset=utf-8" },
+        });
       }
 
       if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
@@ -1709,10 +1708,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       // Text frames. response.processed is a no-op ack. close() aborts the upstream (RC2 parity).
       // Live sideband sockets (kind=live-sideband) are a transparent bidirectional relay instead.
       open(ws: ServerWebSocket<WsData>) {
-        if (ws.data.kind === "aistudio-relay" && ws.data.aistudioSessionId) {
-          globalAiStudioRelayHub.registerSession(ws.data.aistudioSessionId, ws);
-          return;
-        }
         if (ws.data.kind === "live-sideband") {
           if (!ws.data.liveTurnAdmissionLease) {
             closeLiveSideband(ws, 1013, "server busy");
@@ -1729,18 +1724,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         registerCodexWebSocket(ws);
       },
       message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
-        if (ws.data.kind === "aistudio-relay" && ws.data.aistudioSessionId) {
-          const text = typeof raw === "string"
-            ? raw
-            : Buffer.isBuffer(raw)
-              ? raw.toString("utf-8")
-              : new TextDecoder().decode(raw as any);
-          globalAiStudioRelayHub.handleClientMessage(
-            ws.data.aistudioSessionId,
-            text
-          );
-          return;
-        }
         if (ws.data.kind === "live-sideband") {
           if (ws.data.liveClosing) return;
           const rawBytes = webSocketFrameBytes(raw);
@@ -1919,10 +1902,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })();
       },
       close(ws: ServerWebSocket<WsData>) {
-        if (ws.data.kind === "aistudio-relay" && ws.data.aistudioSessionId) {
-          globalAiStudioRelayHub.unregisterSession(ws.data.aistudioSessionId);
-          return;
-        }
         if (ws.data.kind === "live-sideband") {
           closeLiveSideband(ws);
           return;

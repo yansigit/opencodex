@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { getAiStudioBridgeHtml } from "../src/server/aistudio-ws-hub";
 
 const EXT_DIR = join(process.cwd(), "integrations/aistudio-extension");
 
-describe("Google AI Studio Chrome/Brave Extension", () => {
-  test("manifest.json has valid Manifest V3 structure and permissions", () => {
+describe("Google AI Studio Chrome/Brave Session Exporter Extension", () => {
+  test("manifest.json has valid Manifest V3 structure without background or content scripts", () => {
     const manifestPath = join(EXT_DIR, "manifest.json");
     expect(existsSync(manifestPath)).toBe(true);
 
@@ -20,9 +19,12 @@ describe("Google AI Studio Chrome/Brave Extension", () => {
     expect(manifest.host_permissions).toContain("https://aistudio.google.com/*");
     expect(manifest.host_permissions).toContain("https://*.clients6.google.com/*");
     expect(manifest.host_permissions).toContain("http://127.0.0.1/*");
+
+    expect(manifest.background).toBeUndefined();
+    expect(manifest.content_scripts).toBeUndefined();
   });
 
-  test("popup.js implements harvesting of SAPISID, selectedProject, windowId, btoa token and sync", () => {
+  test("popup.js implements harvesting of SAPISID, project/window, port persistence, and auto-sync", () => {
     const popupJsPath = join(EXT_DIR, "popup.js");
     expect(existsSync(popupJsPath)).toBe(true);
     const code = readFileSync(popupJsPath, "utf-8");
@@ -34,52 +36,33 @@ describe("Google AI Studio Chrome/Brave Extension", () => {
     expect(code).toContain("maker_suite_browser_window_id");
     // btoa serialization
     expect(code).toContain("btoa");
-    // Auto-sync: dynamic port via chrome.storage.local
+    // Dynamic port via chrome.storage.local with 10100 default
     expect(code).toContain("proxyPort");
-    expect(code).toContain("chrome.storage.local.get");
+    expect(code).toContain("getValidatedPort");
+    expect(code).toContain("10100");
     expect(code).toContain("/api/aistudio/session");
-    expect(code).toContain("`http://127.0.0.1:${port}/api/aistudio/session`");
     expect(code).toContain("btnAutoSync");
     expect(code).toContain("btnCopyBundle");
     expect(code).toContain("x-opencodex-api-key");
   });
 
-  test("popup.html contains auto-sync, copy, and status elements", () => {
+  test("popup.html contains port input, auto-sync, copy, and status elements without relay status", () => {
     const popupHtmlPath = join(EXT_DIR, "popup.html");
     expect(existsSync(popupHtmlPath)).toBe(true);
     const html = readFileSync(popupHtmlPath, "utf-8");
 
+    expect(html).toContain('id="proxyPort"');
     expect(html).toContain('id="btnAutoSync"');
     expect(html).toContain('id="btnCopyBundle"');
     expect(html).toContain('id="exportStatus"');
-    expect(html).toContain('id="status"');
     expect(html).toContain('id="proxyApiKey"');
+    expect(html).not.toContain('id="status"');
   });
 
-  test("content.js exists for direct aistudio.google.com page execution", () => {
-    const contentPath = join(EXT_DIR, "content.js");
-    expect(existsSync(contentPath)).toBe(true);
-    const code = readFileSync(contentPath, "utf-8");
-    expect(code).toContain("streamGenerateContent");
-    expect(code).toContain("chrome.storage.local.get");
-    expect(code).toContain("DEFAULT_PORT");
-    expect(code).toContain("content-length");
-    expect(code).toContain("method !== \"GET\"");
-    expect(code).toContain("method !== \"HEAD\"");
-  });
-
-  test("offscreen relay applies the same forbidden-header and body rules", () => {
-    const code = readFileSync(join(EXT_DIR, "offscreen.js"), "utf-8");
-    expect(code).toContain("content-length");
-    expect(code).toContain("method !== \"GET\"");
-    expect(code).toContain("method !== \"HEAD\"");
-    expect(code).toContain('credentials: "include"');
-  });
-
-  test("bridge html includes extension instructions and copy path", () => {
-    const html = getAiStudioBridgeHtml(10100);
-    expect(html).toContain("aistudio-extension");
-    expect(html).toContain("Load unpacked");
-    expect(html).toContain("brave://extensions");
+  test("obsolete background, content, and offscreen files are deleted", () => {
+    expect(existsSync(join(EXT_DIR, "background.js"))).toBe(false);
+    expect(existsSync(join(EXT_DIR, "content.js"))).toBe(false);
+    expect(existsSync(join(EXT_DIR, "offscreen.js"))).toBe(false);
+    expect(existsSync(join(EXT_DIR, "offscreen.html"))).toBe(false);
   });
 });
