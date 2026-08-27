@@ -60,4 +60,3 @@
 **Step 1:** Run `bun test tests/command-code-*.test.ts tests/commandcode-provider.test.ts`.
 **Step 2:** Run `bun run typecheck` to verify strict TypeScript typing.
 **Step 3:** Run `bun run privacy:scan` to ensure no secrets or PII are leaked.
-
