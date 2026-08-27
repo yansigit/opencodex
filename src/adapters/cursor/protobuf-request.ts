@@ -79,6 +79,21 @@ export const CURSOR_EXTERNAL_ROOT_BYTE_LIMIT = 512 * 1024;
 export const CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT =
   "Continue: the requested tool results are provided in the conversation history above.";
 
+export function externalToolContinuationText(rawMessages?: readonly OcxMessage[]): string {
+  const last = rawMessages?.at(-1);
+  if (last?.role === "toolResult") {
+    const raw = typeof last.content === "string" ? last.content : JSON.stringify(last.content ?? "");
+    const trimmed = raw.trim();
+    if (
+      (last.toolName?.includes("list_agents") || last.toolName?.includes("search"))
+      && (trimmed === "[]" || trimmed === "" || trimmed === "{}" || trimmed === "null")
+    ) {
+      return `${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT} If a prior discovery or list tool returned empty results (e.g. no sub-agents currently active), proceed directly with your next concrete action using available tools.`;
+    }
+  }
+  return CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT;
+}
+
 /** Runtime timezone for protobuf RequestContextEnv (dynamic, never hardcoded). */
 function runtimeTimeZone(): string {
   try {
@@ -855,7 +870,7 @@ function buildPreparedCursorRunRequest(
     ? "userMessageAction"
     : "resumeAction";
   const actionText = externalToolContinuation
-    ? CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT
+    ? externalToolContinuationText(request.rawMessages)
     : text;
   const action = create(ConversationActionSchema, {
     action: actionCase === "userMessageAction"

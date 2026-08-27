@@ -675,10 +675,13 @@ export function buildCursorToolGuidanceSystemNote(
     codeMode
       ? `\`${CODEX_UNIFIED_EXEC_TOOL}\` is Codex code mode: its body is JavaScript evaluated in a V8 isolate, not a shell command and not Node. Shell, file edits, and MCP are nested helpers called INSIDE that body as \`await tools.<name>(...)\`, for example \`await tools.exec_command({cmd: \"ls\"})\`. When commands require network access, file writes outside workspace, or fail due to sandbox/permission restrictions, pass \`sandbox_permissions: "require_escalated"\` and a clear \`justification: "..."\` to \`tools.exec_command\`. Read the tool description and the isolate global \`ALL_TOOLS\` (not \`tools.ALL_TOOLS\`) for helpers this turn provides; absence from the top-level catalog or from \`exec\`'s description is not absence. Those nested helpers are not themselves top-level tools, so do not call \`exec_command\` or \`shell_command\` at the top level here${codeModeOtherTopLevelNames.length > 0 ? `; every other tool this turn lists, including ${quotedNames(codeModeOtherTopLevelNames)}, remains callable at the top level as usual` : ""}. Your tool list may display tools under a longer \`mcp_opencodex-responses_*\` name; call whichever your list shows. Nested \`tools.apply_patch(input)\` is host-executed: the string must begin exactly with \`*** Begin Patch\` and end with \`*** End Patch\` (no trailing \`***\` on those lines). OpenCodex does not rewrite JavaScript inside exec, so a decorated \`*** Begin Patch ***\` envelope is rejected by Codex before the file is touched.`
       : undefined,
-    codeMode
-      ? "In code mode the isolate returns nothing on its own: call `text(...)` (or `notify(...)`) on any value you need to see, or the call completes with empty output. There is no `require`, no `module`, and no filesystem or network globals; reach the host only through the nested helpers."
-      : undefined,
-    hasBareExec
+  codeMode
+    ? "In code mode the isolate returns nothing on its own: call `text(...)` (or `notify(...)`) on any value you need to see, or the call completes with empty output. There is no `require`, no `module`, and no filesystem or network globals; reach the host only through the nested helpers."
+    : undefined,
+  codeMode
+    ? "To read, search, or inspect files or run CLI commands, call `await tools.exec_command({ cmd: '...' })` inside `exec`. Do not write Node.js scripts or `require('fs')`."
+    : undefined,
+   hasBareExec
       ? `${shellBridgeLabel} is the Codex Responses shell bridge for this turn, exposed through Cursor's tool protocol; it is not an external MCP server tool. \`shell_command\` and \`exec_command\` are aliases of the same bridge.`
       : undefined,
     hasBareExec
