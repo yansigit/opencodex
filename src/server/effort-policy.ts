@@ -116,6 +116,22 @@ export function stripEmptyLadderEffort(
   return Object.keys(next).length > 0 ? next : undefined;
 }
 
+/**
+ * Strip reasoning effort from parsed options and _rawBody when the routed model
+ * has an empty supported ladder (effortless models like Composer 2.5).
+ */
+export function sanitizeEffortForModel(
+  parsed: OcxParsedRequest,
+  ladder: readonly string[] | undefined,
+): void {
+  if (ladder === undefined || ladder.length > 0) return;
+  parsed.options.reasoning = undefined;
+  const raw = parsed._rawBody as { reasoning?: unknown } | undefined;
+  if (!raw || typeof raw !== "object" || !("reasoning" in raw)) return;
+  raw.reasoning = stripEmptyLadderEffort(raw.reasoning, ladder);
+  if (raw.reasoning === undefined) delete raw.reasoning;
+}
+
 export function supportedLadderFor(route: { provider: OcxProviderConfig; modelId: string }): string[] | undefined {
   const { provider, modelId } = route;
   if (modelInList(provider.noReasoningModels, modelId)) return [];

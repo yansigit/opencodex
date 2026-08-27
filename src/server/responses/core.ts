@@ -1789,6 +1789,19 @@ async function applyFinalRouteRequestNormalization(args: {
   }
 
   {
+    const { sanitizeEffortForModel, supportedLadderFor } = await import("../effort-policy");
+    const previousEffort = parsed.options.reasoning;
+    const ladder = supportedLadderFor(route);
+    if (ladder !== undefined && ladder.length === 0 && previousEffort) {
+      sanitizeEffortForModel(parsed, ladder);
+      logCtx.requestedEffort = `${logCtx.requestedEffort ?? previousEffort}->none`;
+      if (isInjectionDebugEnabled()) {
+        injectionDebugLog(`[opencodex] ${route.modelId}: stripped reasoning effort for effortless model`);
+      }
+    }
+  }
+
+  {
     const { nativeEffortClamp, shouldApplyNativeEffortClamp } = await import("../../codex/catalog");
     const clamped = shouldApplyNativeEffortClamp(route.providerName, route.provider, finalSelectedModelId)
       ? nativeEffortClamp(route.modelId, parsed.options.reasoning)
