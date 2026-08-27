@@ -202,6 +202,13 @@ function normalizeCursorModelId(modelId: string, reasoning?: string): {
       ],
     };
   }
+  if (id === "composer-2.5") {
+    return {
+      ...selection,
+      modelId: id,
+      requestedModelParameters: [{ id: "fast", value: "false" }],
+    };
+  }
   return { ...selection, modelId: suffix ? cursorRequestWireModelIdWithEffort(id, suffix) : id };
 }
 

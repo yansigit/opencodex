@@ -90,6 +90,21 @@ describe("Cursor tool definitions", () => {
     expect(toJson(ValueSchema, fromBinary(ValueSchema, defs[0]!.inputSchema))).toEqual(CURSOR_EXEC_COMMAND_INPUT_SCHEMA);
   });
 
+  test("advertises every freeform tool with the required string input schema", () => {
+    const defs = buildCursorToolDefinitions([{
+      name: "exec",
+      description: "Run code",
+      parameters: {},
+      freeform: true,
+    }]);
+
+    expect(toJson(ValueSchema, fromBinary(ValueSchema, defs[0]!.inputSchema))).toEqual({
+      type: "object",
+      properties: { input: { type: "string" } },
+      required: ["input"],
+    });
+  });
+
   test("normalizes advertised shell_command cmd args to Responses command before Codex sees them", () => {
     // Live #399 failure: Cursor advertisement requires `cmd`, models send `cmd`, but Codex
     // shell_command validates `command` → "missing field `command`". Normalization must use the

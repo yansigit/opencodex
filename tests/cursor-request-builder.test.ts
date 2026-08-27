@@ -38,6 +38,14 @@ describe("Cursor request builder", () => {
     expect(request.conversationId.startsWith("cursor_")).toBe(true);
   });
 
+  test("requests standard Composer without the fast variant and leaves Composer Fast unchanged", () => {
+    const standard = createCursorRequest({ ...base, modelId: "cursor/composer-2.5" });
+    const fast = createCursorRequest({ ...base, modelId: "cursor/composer-2.5-fast" });
+
+    expect(standard.requestedModelParameters).toEqual([{ id: "fast", value: "false" }]);
+    expect(fast.requestedModelParameters).toBeUndefined();
+  });
+
   test("uses resolved Cursor conversation id ahead of Responses response id", () => {
     const request = createCursorRequest({
       ...base,

@@ -77,7 +77,7 @@ export const CURSOR_EXTERNAL_ROOT_BYTE_LIMIT = 512 * 1024;
  * results already stored in history blobs are visible without a ResumeAction.
  */
 export const CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT =
-  "Continue: the requested tool results are provided in the conversation history above.";
+  "Continue: the requested tool results are provided in the conversation history above. Answer the user request or proceed with the next step directly without repeating status summaries or greetings.";
 
 /** Runtime timezone for protobuf RequestContextEnv (dynamic, never hardcoded). */
 function runtimeTimeZone(): string {

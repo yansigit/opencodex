@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { create, fromBinary } from "@bufbuild/protobuf";
 import { handleCursorNativeKv } from "../src/adapters/cursor/native-exec";
-import { encodeCursorRunRequest } from "../src/adapters/cursor/protobuf-request";
+import {
+  CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT,
+  encodeCursorRunRequest,
+} from "../src/adapters/cursor/protobuf-request";
 import {
   AgentClientMessageSchema,
   GetBlobArgsSchema,
@@ -286,5 +289,10 @@ describe("363-A: turn-1 termination for Responses client tool via exec mcpArgs",
     );
     expect(planB.finalizeWhenDrained).toBe(true);
     expect(finalizeAfterDrain(state).map(e => e.type)).toEqual(["done"]);
+  });
+
+  test("external tool continuation prompt instructs model to proceed without chatter", () => {
+    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("without repeating status summaries or greetings");
+    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("Answer the user request or proceed with the next step directly");
   });
 });
