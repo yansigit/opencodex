@@ -10,7 +10,22 @@ describe("aistudio bridge HTTP endpoint", () => {
     const html = getAiStudioBridgeHtml(10100);
     expect(html).toContain("Google AI Studio Bridge");
     expect(html).toContain("bridge.user.js");
-    expect(html).toContain("ws://127.0.0.1:10100/v1/ws/aistudio");
+  });
+  test("bridge HTML polls status via HTTP instead of registering dummy WebSocket worker", async () => {
+    const html = getAiStudioBridgeHtml(10100);
+    // must check status via HTTP polling
+    expect(html).toContain("/v1/ws/aistudio/status");
+    expect(html).toContain("fetch");
+    // must NOT open a WebSocket to the relay hub (inline script should not register as worker)
+    // extract executable script tags (ignore <pre><code> documentation example)
+    const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)].map((m) => m[1]).join("\n");
+    expect(scripts).not.toContain("new WebSocket");
+    // fetch polls /v1/ws/aistudio/status over HTTP - must not be a WebSocket URL
+    // status UI must reflect proxy online / relay active states
+    expect(html).toContain("🟢 Connected (Relay Active)");
+    expect(html).toContain("🟡 Proxy Online (No Relay Connected)");
+    expect(html).toContain("🔴 Disconnected");
+    expect(html).toContain("hasActiveSessions");
   });
   test("user script endpoint", async () => {
     const req = new Request("http://127.0.0.1:4000/aistudio/bridge.user.js");
