@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildSmokeScenarioRequest } from "../src/smoke/live-scenarios";
-import { runProviderSmoke } from "../src/smoke/runner";
+import { providerHasSmokeCredential, runProviderSmoke } from "../src/smoke/runner";
 
 describe("live smoke scenarios", () => {
   test("builds the three standard response requests", () => {
@@ -16,6 +16,12 @@ describe("live smoke scenarios", () => {
 });
 
 describe("provider smoke runner", () => {
+  test("skips providers without a usable credential before spending a live request", () => {
+    expect(providerHasSmokeCredential({ authMode: "local" })).toBe(false);
+    expect(providerHasSmokeCredential({ authMode: "oauth" }, { access: "token" })).toBe(true);
+    expect(providerHasSmokeCredential({ authMode: "forward" })).toBe(true);
+  });
+
   test("runs all levels sequentially and records a pass", async () => {
     const originalFetch = globalThis.fetch;
     const originalHome = process.env.OPENCODEX_HOME;

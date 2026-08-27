@@ -20,6 +20,10 @@ const DEFAULT_MODELS: Record<string, string> = {
   "openai": "gpt-5.6-luna",
 };
 
+export function smokeExitCode(results: Array<Pick<ProviderSmokeResult, "status">>): number {
+  return results.some(result => result.status === "failed") ? 1 : 0;
+}
+
 async function main() {
   const config = loadConfig();
   const configuredProviders = Object.keys(config.providers ?? {}).filter(
@@ -28,7 +32,7 @@ async function main() {
 
   const providersToTest = targetProvider
     ? [targetProvider]
-    : configuredProviders.filter(p => ["google-antigravity", "cursor", "command-code", "openai"].includes(p));
+    : configuredProviders.filter(p => ["google-antigravity", "google-aistudio", "cursor", "command-code", "openai"].includes(p));
 
   if (!jsonOutput) {
     console.log("🔥 OpenCodex Live Inference Smoke Test Runner");
@@ -91,9 +95,12 @@ async function main() {
     const failedCount = results.filter(r => r.status === "failed").length;
     console.log(`\nSummary: ${passedCount} passed, ${skippedCount} skipped, ${failedCount} failed.`);
   }
+  process.exitCode = smokeExitCode(results);
 }
 
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch(err => {
+    console.error(err);
+    process.exit(1);
+  });
+}

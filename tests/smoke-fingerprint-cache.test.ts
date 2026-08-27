@@ -24,12 +24,17 @@ describe("smoke fingerprint cache", () => {
   test("fingerprint includes mapped files deterministically", async () => {
     const root = await tempRoot();
     await mkdir(join(root, "src/adapters"), { recursive: true });
+    await mkdir(join(root, "src/smoke"), { recursive: true });
     await writeFile(join(root, "src/adapters/google.ts"), "google");
     await writeFile(join(root, "src/adapters/google-wire-compiler.ts"), "wire");
+    await writeFile(join(root, "src/smoke/runner.ts"), "runner");
+    await writeFile(join(root, "src/smoke/live-scenarios.ts"), "scenarios");
 
     const first = await computeProviderSourceFingerprint("google", root);
     await writeFile(join(root, "src/adapters/google-unmapped.ts"), "ignored");
     expect(await computeProviderSourceFingerprint("google", root)).toBe(first);
+    await writeFile(join(root, "src/smoke/runner.ts"), "changed runner");
+    expect(await computeProviderSourceFingerprint("google", root)).not.toBe(first);
     await writeFile(join(root, "src/adapters/google.ts"), "changed");
     const second = await computeProviderSourceFingerprint("google", root);
 
