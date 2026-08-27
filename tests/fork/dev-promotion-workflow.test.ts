@@ -27,6 +27,7 @@ describe("dev promotion workflow contract", () => {
     expect(workflow.jobs?.backmerge?.permissions).toEqual({
       contents: "write",
       actions: "read",
+      workflows: "write",
     });
     expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'main'");
     expect(workflowSource).toContain("github.event.workflow_run.event == 'push'");

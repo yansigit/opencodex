@@ -25,6 +25,7 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("contents: write");
     expect(workflow).toContain("issues: write");
     expect(workflow).toContain("pull-requests: write");
+    expect(workflow).toContain("workflows: write");
   });
 
   test("passes the two Cursor secrets only to emit", () => {
