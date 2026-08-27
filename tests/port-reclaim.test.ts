@@ -5,7 +5,7 @@ import {
   parseTcpQuadsForLocalPort,
   dropWindowsTcpRowsForLocalPort,
 } from "../src/server/windows-tcp-drop";
-import { parseListenPidsFromNetstat } from "../src/server/port-reclaim";
+import { parseListenPidsFromNetstat, scanListenPids } from "../src/server/port-reclaim";
 
 describe("parseListenPidsFromNetstat", () => {
   test("extracts Windows LISTENING owners for the local port", () => {
@@ -583,5 +583,11 @@ describe("reclaimListenPort", () => {
       },
     })).resolves.toBe(true);
     expect(killed).toEqual([4242, 4242]);
+  });
+
+  test("scanListenPids on unused port returns ok: true with empty pids", () => {
+    if (process.platform === "win32") return;
+    const scan = scanListenPids(59999);
+    expect(scan).toEqual({ ok: true, pids: [] });
   });
 });

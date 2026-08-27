@@ -54,6 +54,7 @@ describe("agent task recovery security", () => {
       "xai/grok-4.5",
       encryptedInput(),
       codexHeaders(accountId, {
+        authorization: `Bearer ${token}`,
         "openai-beta": "responses=experimental",
         "user-agent": "codex-test/1",
         cookie: "private-cookie",
