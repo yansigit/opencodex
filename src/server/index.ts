@@ -1655,9 +1655,14 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       },
       message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
         if (ws.data.kind === "aistudio-relay" && ws.data.aistudioSessionId) {
+          const text = typeof raw === "string"
+            ? raw
+            : Buffer.isBuffer(raw)
+              ? raw.toString("utf-8")
+              : new TextDecoder().decode(raw as any);
           globalAiStudioRelayHub.handleClientMessage(
             ws.data.aistudioSessionId,
-            typeof raw === "string" ? raw : raw.toString("utf-8")
+            text
           );
           return;
         }

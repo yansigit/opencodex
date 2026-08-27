@@ -11,7 +11,7 @@ import {
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getConfigDir } from "../src/config";
 
 describe("Google AI Studio Session Bundle Exporter & Importer", () => {
   const sampleData = {
@@ -108,7 +108,7 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
   });
 
   test("getAiStudioSessionPath returns path in user home directory", () => {
-    const expected = join(homedir(), ".opencodex", "aistudio-session.json");
+    const expected = join(getConfigDir(), "aistudio-session.json");
     expect(getAiStudioSessionPath()).toBe(expected);
   });
 });

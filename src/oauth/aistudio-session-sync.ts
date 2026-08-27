@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { getConfigDir } from "../config";
 
 export interface AiStudioCookieItem {
   name: string;
@@ -51,7 +51,7 @@ export function parseSessionBundle(encoded: string): AiStudioSessionData {
 }
 
 export function getAiStudioSessionPath(): string {
-  return join(homedir(), ".opencodex", "aistudio-session.json");
+  return join(getConfigDir(), "aistudio-session.json");
 }
 
 export function saveAiStudioSession(data: AiStudioSessionData, dest = getAiStudioSessionPath()): string {
