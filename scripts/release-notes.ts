@@ -125,9 +125,10 @@ export function previousReleaseNotesTag(version: string, tags: string[]): string
   const candidates = tags
     .map(tag => tag.trim())
     .filter(tag => /^v\d/.test(tag) && compareReleaseTags(tag, releaseTag) < 0);
-  const filtered = version.includes("-preview.")
+  const isPrerelease = version.includes("-preview.") || version.includes("-dev.");
+  const filtered = isPrerelease
     ? candidates
-    : candidates.filter(tag => !tag.includes("-preview."));
+    : candidates.filter(tag => !tag.includes("-preview.") && !tag.includes("-dev."));
   const sorted = sortVersionTagsAscending(filtered);
   return sorted.length === 0 ? null : sorted[sorted.length - 1]!;
 }

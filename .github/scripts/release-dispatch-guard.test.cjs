@@ -29,6 +29,13 @@ describe("release dispatch guard", () => {
     );
   });
 
+  it("accepts an exact audited SHA on dev", () => {
+    assert.equal(
+      validate({ ref: "refs/heads/dev" }),
+      null,
+    );
+  });
+
   it("rejects non-workflow_dispatch events", () => {
     assert.match(
       validate({ eventName: "push" }),
@@ -38,8 +45,8 @@ describe("release dispatch guard", () => {
 
   it("rejects release dispatches from unapproved refs", () => {
     assert.match(
-      validate({ ref: "refs/heads/dev" }),
-      /must run from main or preview/,
+      validate({ ref: "refs/heads/feature" }),
+      /must run from main, preview, or dev/,
     );
   });
 
