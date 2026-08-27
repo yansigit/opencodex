@@ -390,7 +390,10 @@ export async function multiAgentGuidanceText(
       + "use only models listed for this collaboration surface. "
       + "When setting either override, set fork_turns to \"none\" "
       + "(or a positive turn count such as \"3\"; full-history forks reject overrides) "
-      + "and make the task message self-contained.";
+      + "and make the task message self-contained. "
+      + "When specifying model overrides, omit agent_type or use \"worker\" to prevent enforcing locked default models. "
+      + "Subagent exec runs in a pure V8 isolate without require('fs'); "
+      + "escape nested template literals (` and ${...}) in tools.apply_patch to prevent JavaScript syntax errors.";
     let preferredText = "";
     if (preferred) {
       preferredText = ` Preferred sub-agent: model "${preferred.model}"`
@@ -426,7 +429,7 @@ export async function multiAgentGuidanceText(
 
 
 
-export const V2_GUIDANCE_CHAR_BUDGET = 700;
+export const V2_GUIDANCE_CHAR_BUDGET = 1200;
 
 export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, roles?: string): string {
   return prompt
