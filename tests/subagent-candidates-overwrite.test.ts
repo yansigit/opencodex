@@ -222,6 +222,14 @@ describe("subagentCandidates model overwrite and candidate failover", () => {
     noteSubagentModelFailure("cursor/composer-2.5", "Provider error 503: Service Unavailable", config);
     expect(isSubagentModelUnavailable("cursor/composer-2.5", config)).toBe(true);
 
+    resetSubagentModelFallbackStateForTests();
+    noteSubagentModelFailure("cursor/composer-2.5", "Provider error 500: Internal Server Error", config);
+    expect(isSubagentModelUnavailable("cursor/composer-2.5", config)).toBe(true);
+
+    resetSubagentModelFallbackStateForTests();
+    noteSubagentModelFailure("cursor/composer-2.5", "Provider error 502: upstream unavailable", config);
+    expect(isSubagentModelUnavailable("cursor/composer-2.5", config)).toBe(true);
+
     // Timeouts
     resetSubagentModelFallbackStateForTests();
     noteSubagentModelFailure("cursor/composer-2.5", "upstream JSON response stalled before completing", config);
@@ -253,6 +261,10 @@ describe("subagentCandidates model overwrite and candidate failover", () => {
     // Legacy ignored error preserved
     resetSubagentModelFallbackStateForTests();
     noteSubagentModelFailure("cursor/composer-2.5", "connection refused", config);
+    expect(isSubagentModelUnavailable("cursor/composer-2.5", config)).toBe(false);
+
+    resetSubagentModelFallbackStateForTests();
+    noteSubagentModelFailure("cursor/composer-2.5", "fetch failed: connection refused", config);
     expect(isSubagentModelUnavailable("cursor/composer-2.5", config)).toBe(false);
   });
 
@@ -289,4 +301,3 @@ describe("subagentCandidates model overwrite and candidate failover", () => {
     expect(parsed.modelId).toBe("gpt-5.6-luna");
   });
 });
-

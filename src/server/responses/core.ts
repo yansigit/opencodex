@@ -1235,7 +1235,6 @@ function subagentSpawnFailureMessageForTerminal(
   if (typeof statusCode === "number" && statusCode >= 500 && statusCode < 600) return statusCode;
   const terminalMessage = logCtx?.upstreamError?.trim();
   if (terminalMessage) return terminalMessage;
-  if (statusCode === 502) return "stream closed before response.completed";
   return undefined;
 }
 

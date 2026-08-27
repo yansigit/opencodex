@@ -298,17 +298,8 @@ export function selectAvailableSubagentModel(
 function isSubagentCandidateFailureMessage(message: string): boolean {
   const normalized = String(message ?? "").trim();
   if (!normalized) return false;
-  const numericStatus = Number(normalized);
-  if (Number.isInteger(numericStatus) && numericStatus >= 500 && numericStatus < 600) return true;
-  if (isRateLimitOrQuotaFailureMessage(normalized)) return true;
   const lower = normalized.toLowerCase();
-  if (lower.includes("stream closed before response.completed")) return true;
-  if (lower.includes("upstream json response stalled before completing")) return true;
-  if (lower.includes("etimedout") || lower.includes("timed out") || lower.includes("timeout")) return true;
-  if (lower.includes("fetch failed") || lower.includes("network error")) return true;
-  if (lower.includes("provider error 503") || lower.includes("service unavailable")) return true;
-  if (lower.includes("internal server error")) return true;
-  // Legacy ignored transport: connection refused is not a candidate cooldown signal.
+  // Legacy ignored transport and client errors must win over broader substring matches.
   if (lower.includes("connection refused")) return false;
   if (
     lower.includes("invalid_request_error")
@@ -317,6 +308,15 @@ function isSubagentCandidateFailureMessage(message: string): boolean {
   ) {
     return false;
   }
+  const numericStatus = Number(normalized);
+  if (Number.isInteger(numericStatus) && numericStatus >= 500 && numericStatus < 600) return true;
+  if (isRateLimitOrQuotaFailureMessage(normalized)) return true;
+  if (lower.includes("stream closed before response.completed")) return true;
+  if (lower.includes("upstream json response stalled before completing")) return true;
+  if (lower.includes("etimedout") || lower.includes("timed out") || lower.includes("timeout")) return true;
+  if (lower.includes("fetch failed") || lower.includes("network error")) return true;
+  if (/provider error 5\d\d/.test(lower) || lower.includes("service unavailable")) return true;
+  if (lower.includes("internal server error")) return true;
   return false;
 }
 
