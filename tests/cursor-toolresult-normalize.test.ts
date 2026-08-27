@@ -99,6 +99,9 @@ describe("normalizeCursorToolResultText (#1920/#1866 unit rows)", () => {
     ["ReferenceError: sky is not defined", "privileged node_repl"],
     ["SyntaxError: Identifier 'x' has already been declared", "redeclaring"],
     ["unsupported import in exec", "injected globals"],
+    ["ReferenceError: require is not defined", "exec_command"],
+    ["ReferenceError: fs is not defined", "exec_command"],
+    ["ReferenceError: process is not defined", "exec_command"],
   ])("runtime failure %p is marked as error with guidance", (payload, hint) => {
     const out = normalizeCursorToolResultText(payload, { toolName: "js", toolNamespace: "mcp__node_repl" });
     expect(out.isError).toBe(true);
@@ -119,8 +122,16 @@ describe("normalizeCursorToolResultText (#1920/#1866 unit rows)", () => {
     expect(out.text).toBe("42");
   });
 
-  test("an already-error result is not double-annotated", () => {
-    const out = normalizeCursorToolResultText("SkyComputerUseError: x", { toolName: "js", toolNamespace: "mcp__node_repl", isError: true });
+  test("an already-error result without guidance gets guidance appended", () => {
+    const out = normalizeCursorToolResultText("ReferenceError: require is not defined", { toolName: "exec", isError: true });
+    expect(out.changed).toBe(true);
+    expect(out.isError).toBe(true);
+    expect(out.text).toContain("exec_command");
+  });
+
+  test("an already-error result that already has guidance is not double-annotated", () => {
+    const withGuidance = "ReferenceError: require is not defined\n[recovery: in Codex code-mode exec]";
+    const out = normalizeCursorToolResultText(withGuidance, { toolName: "exec", isError: true });
     expect(out.changed).toBe(false);
     expect(out.isError).toBe(true);
   });
