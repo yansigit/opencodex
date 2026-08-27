@@ -1,79 +1,113 @@
 import { describe, expect, test } from "bun:test";
-import { getAiStudioBridgeHtml, getAiStudioUserScript, globalAiStudioRelayHub } from "../src/server/aistudio-ws-hub";
 import { startServer } from "../src/server";
 import { serializeSessionBundle } from "../src/oauth/aistudio-session-sync";
 
-describe("aistudio bridge HTTP endpoint", () => {
-  test("contains valid HTML and websocket bridge script", async () => {
-    const req = new Request("http://127.0.0.1:4000/aistudio/bridge");
-    expect(req.url).toContain("/aistudio/bridge");
-    const html = getAiStudioBridgeHtml(10100);
-    expect(html).toContain("Google AI Studio Bridge");
-    expect(html).toContain("bridge.user.js");
-    expect(html).toContain("ws://127.0.0.1:10100/v1/ws/aistudio");
-  });
-  test("user script endpoint", async () => {
-    const req = new Request("http://127.0.0.1:4000/aistudio/bridge.user.js");
-    expect(req.url).toContain("/aistudio/bridge.user.js");
-    const userScript = getAiStudioUserScript(10100);
-    expect(userScript).toContain("@match        https://aistudio.google.com/*");
-    expect(userScript).toContain("ws://127.0.0.1:10100/v1/ws/aistudio");
-    expect(userScript).toContain('credentials: "include"');
-  });
-
-  test("session ingest route is guarded by data-plane admission on non-loopback binds", async () => {
-    const source = await Bun.file(new URL("../src/server/index.ts", import.meta.url)).text();
-    const routeStart = source.indexOf('url.pathname === "/api/aistudio/session"');
-    const routeEnd = source.indexOf('url.pathname === "/aistudio/bridge"', routeStart);
-    expect(routeStart).toBeGreaterThanOrEqual(0);
-    expect(source.slice(routeStart, routeEnd)).toContain("resolveApiAuth(req, policy)");
-  });
-
-  test("server serves bridge HTML, userscript, status, and session ingest routes", async () => {
+describe("aistudio legacy routes and session ingest endpoint", () => {
+  test("GET /aistudio/bridge returns HTTP 410 HTML migration notice", async () => {
     const server = startServer(0);
     try {
-      // GET /aistudio/bridge
-      const bridgeRes = await fetch(new URL("/aistudio/bridge", server.url));
-      expect(bridgeRes.status).toBe(200);
-      expect(bridgeRes.headers.get("content-type")).toContain("text/html");
-      const bridgeBody = await bridgeRes.text();
-      expect(bridgeBody).toContain("Google AI Studio Bridge");
+      const res = await fetch(new URL("/aistudio/bridge", server.url));
+      expect(res.status).toBe(410);
+      expect(res.headers.get("content-type")).toContain("text/html");
+      const html = await res.text();
+      expect(html).toContain("HTTP 410 Gone");
+      expect(html).toContain("AI Studio Browser Relay Deprecated");
+      expect(html).toContain("ocx login");
+    } finally {
+      server.stop(true);
+    }
+  });
 
-      // GET /aistudio/bridge.user.js
-      const userJsRes = await fetch(new URL("/aistudio/bridge.user.js", server.url));
-      expect(userJsRes.status).toBe(200);
-      expect(userJsRes.headers.get("content-type")).toContain("javascript");
-      const userJsBody = await userJsRes.text();
-      expect(userJsBody).toContain("OpenCodex AI Studio Relay Bridge");
+  test("GET /aistudio/bridge.user.js returns HTTP 410 JS migration notice", async () => {
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/aistudio/bridge.user.js", server.url));
+      expect(res.status).toBe(410);
+      expect(res.headers.get("content-type")).toContain("javascript");
+      const text = await res.text();
+      expect(text).toContain("410 Gone");
+      expect(text).toContain("deprecated");
+    } finally {
+      server.stop(true);
+    }
+  });
 
-      // GET /v1/ws/aistudio/status
+  test("GET /v1/ws/aistudio/status and WebSocket endpoints return HTTP 410", async () => {
+    const server = startServer(0);
+    try {
       const statusRes = await fetch(new URL("/v1/ws/aistudio/status", server.url));
-      expect(statusRes.status).toBe(200);
+      expect(statusRes.status).toBe(410);
       const statusJson = await statusRes.json() as any;
-      expect(statusJson).toHaveProperty("activeSessions");
-      expect(statusJson).toHaveProperty("hasActiveSessions");
+      expect(statusJson.error).toBe("gone");
 
-      // POST /api/aistudio/session with invalid body -> 400
-      const badRes = await fetch(new URL("/api/aistudio/session", server.url), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ invalid: true }),
+      const wsRes = await fetch(new URL("/v1/ws/aistudio", server.url));
+      expect(wsRes.status).toBe(410);
+
+      const altWsRes = await fetch(new URL("/aistudio/ws", server.url));
+      expect(altWsRes.status).toBe(410);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("OPTIONS /api/aistudio/session preflight allows chrome-extension origin", async () => {
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "OPTIONS",
+        headers: {
+          Origin: "chrome-extension://test-extension-id",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "Content-Type, X-OpenCodex-API-Key",
+        },
       });
-      expect(badRes.status).toBe(400);
+      expect(res.status).toBe(204);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test-extension-id");
+      const allowHeaders = res.headers.get("Access-Control-Allow-Headers") || "";
+      expect(allowHeaders).toContain("Content-Type");
+      expect(allowHeaders).toContain("X-OpenCodex-API-Key");
+    } finally {
+      server.stop(true);
+    }
+  });
 
-      // POST /api/aistudio/session with valid token
+  test("OPTIONS /api/aistudio/session preflight allows https://aistudio.google.com origin", async () => {
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://aistudio.google.com",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "Content-Type",
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://aistudio.google.com");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("POST /api/aistudio/session reflects chrome-extension origin in CORS header and saves session", async () => {
+    const server = startServer(0);
+    try {
       const token = serializeSessionBundle({
         selectedProject: "projects/my-test-proj",
         windowId: "win_123",
         cookies: [{ name: "SAPISID", value: "test_sapisid_val" }],
       });
-      const postRes = await fetch(new URL("/api/aistudio/session", server.url), {
+      const res = await fetch(new URL("/api/aistudio/session", server.url), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "chrome-extension://test-extension-id",
+        },
         body: JSON.stringify({ token }),
       });
-      expect(postRes.status).toBe(200);
-      const postJson = await postRes.json() as any;
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test-extension-id");
+      const postJson = await res.json() as any;
       expect(postJson.ok).toBe(true);
     } finally {
       server.stop(true);

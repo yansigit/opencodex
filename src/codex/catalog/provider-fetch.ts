@@ -47,7 +47,6 @@ import { CODEX_GPT5_IDENTITY_LINE } from "../../adapters/identity";
 import { filterCursorConfiguredModelsByLiveDiscovery } from "../../adapters/cursor/discovery";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { isCanonicalOpenAiForwardProvider, OPENAI_API_PROVIDER_ID, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
-import { globalAiStudioRelayHub } from "../../server/aistudio-ws-hub";
 import {
   COMBO_NAMESPACE,
   comboModelId,
@@ -1246,39 +1245,6 @@ async function fetchProviderModelsWithAuth(
     }
     return merged;
   };
-  if (prov.googleMode === "ai-studio-web") {
-    clearProviderDiscoveryStatus(name);
-    if (globalAiStudioRelayHub.hasActiveSessions()) {
-      try {
-        const streamRes = await globalAiStudioRelayHub.dispatchStream({
-          url: "https://generativelanguage.googleapis.com/v1beta/models",
-          method: "GET",
-        });
-        let rawBody = "";
-        for await (const chunk of streamRes.chunks) {
-          rawBody += chunk;
-        }
-        const json = JSON.parse(rawBody);
-        if (Array.isArray(json?.models)) {
-          const liveModels: CatalogModel[] = json.models.map((m: any) => {
-            const rawId = typeof m.name === "string" ? m.name.replace(/^models\//, "") : "";
-            return {
-              id: rawId,
-              provider: name,
-              ...catalogHintsFromProviderConfig(name, prov, rawId, contextCap),
-            };
-          }).filter((m: any) => Boolean(m.id));
-          if (liveModels.length > 0) {
-            return observed(withConfiguredRetention(liveModels), "authoritative");
-          }
-        }
-      } catch {
-        /* fallback to configured models */
-      }
-    }
-    return observed(configured, "authoritative");
-  }
-
   // Static catalogs never need an OAuth refresh or an upstream model request. Clear any
   // discovery failure left by an older live configuration even when the account is logged out.
   if (prov.liveModels === false) {

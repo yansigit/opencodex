@@ -67,7 +67,7 @@ export function warnIfLiveReloadSkipped(result: LocalProviderReloadResult | null
 export async function handleLogin(provider?: string): Promise<void> {
   const name = (provider ?? "").trim().toLowerCase();
   if (name === "google-aistudio" || name === "aistudio" || name === "gemini-aistudio") {
-    return handleAiStudioBridgeLogin();
+    return handleAiStudioLogin();
   }
   if (isPublicOAuthProvider(name)) return handleOAuthLogin(name);
   if (isKeyLoginProvider(name)) return handleKeyLogin(name);
@@ -79,15 +79,10 @@ export async function handleLogin(provider?: string): Promise<void> {
   process.exit(1);
 }
 
-async function handleAiStudioBridgeLogin(): Promise<void> {
-  const live = await findLiveProxy();
-  const port = live?.port ?? 10100;
-  const bridgeUrl = "http://127.0.0.1:" + port + "/aistudio/bridge";
-
+async function handleAiStudioLogin(): Promise<void> {
   console.log("\n🌐 Google AI Studio Sign-In & Session Setup:");
   console.log("   Option 1: Paste Session Token from the Brave/Chrome extension popup (Passkey-friendly)");
-  console.log("   Option 2: Open native macOS sign-in window");
-  console.log("   Option 3: Open browser bridge page (" + bridgeUrl + ")\n");
+  console.log("   Option 2: Open native macOS sign-in window\n");
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
@@ -100,20 +95,25 @@ async function handleAiStudioBridgeLogin(): Promise<void> {
       saveAiStudioSessionFromToken(choice);
       console.log("\n✅ Session token imported successfully! Saved to ~/.opencodex/aistudio-session.json");
     } else if (process.platform === "darwin") {
-      const { getAiStudioNativeDaemonSourcePath } = await import("./aistudio-native-daemon");
-      const swiftSrc = getAiStudioNativeDaemonSourcePath();
+      const { runAiStudioNativeLogin } = await import("./aistudio-native-daemon");
       console.log("\n🚀 Opening native Google AI Studio login window...");
-      const proc = Bun.spawn(["swift", swiftSrc, "--login"], {
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      const code = await proc.exited;
-      if (code === 0) {
-        console.log("\n✅ Google AI Studio authenticated successfully! Session saved to ~/.opencodex/aistudio-session.json");
+      const result = await runAiStudioNativeLogin();
+      if (result.kind === "cancelled") {
+        console.log("\nNative Google AI Studio login cancelled.");
+        return;
       }
+      if (result.kind === "unsupported") {
+        console.error("\nGoogle AI Studio native login is only available on macOS.");
+        return;
+      }
+      if (result.kind === "failed") {
+        console.error(`\n${result.error}`);
+        return;
+      }
+      console.log("\n✅ Google AI Studio authenticated successfully! Session saved to ~/.opencodex/aistudio-session.json");
     } else {
-      console.log("\n🌐 Opening bridge page in your browser: " + bridgeUrl);
-      openUrl(bridgeUrl);
+      console.error("\nGoogle AI Studio native login is only available on macOS. Paste a session token from the extension instead.");
+      return;
     }
   } finally {
     rl.close();
@@ -134,7 +134,6 @@ async function handleAiStudioBridgeLogin(): Promise<void> {
     console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
   }
 
-  openUrl(bridgeUrl);
   const reload = await notifyRunningProxy("google-aistudio");
   console.log("\n✅ Ready! Use models with 'google-aistudio' provider in your coding agents.");
   warnIfLiveReloadSkipped(reload);

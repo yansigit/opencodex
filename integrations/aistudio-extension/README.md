@@ -1,20 +1,14 @@
-# OpenCodex AI Studio Browser Extension (Chrome & Brave)
+# OpenCodex AI Studio Session Exporter
 
-Seamless background relay for Google AI Studio Web / Pro session with `opencodex`.
+A lightweight Manifest V3 browser extension for Brave and Google Chrome that extracts your active Google AI Studio session credentials and exports them to OpenCodex.
 
-## Features
-- **Zero-Tab Overhead**: Relays requests via a Manifest V3 background offscreen worker. You do not need to keep an active AI Studio tab open.
-- **Direct Session Sharing**: Uses your browser's existing Google login cookies.
-- **Fast Local Bridge**: Connects to `opencodex` at `ws://127.0.0.1:10100/v1/ws/aistudio`.
+## Usage
 
-## Installation in Brave / Chrome
+1. Open `brave://extensions` or `chrome://extensions` and enable **Developer mode**.
+2. Click **Load unpacked** and select this directory (`integrations/aistudio-extension`).
+3. Log in to [AI Studio](https://aistudio.google.com).
+4. Click the extension icon and click **Auto-Sync to OpenCodex** (or **Copy Session Token** to paste into `ocx login`).
 
-1. Open `brave://extensions` (or `chrome://extensions`) in your browser.
-2. Enable **Developer mode** in the top-right corner.
-3. Click **Load unpacked**.
-4. Select this directory:
-   ```
-   <path-to-opencodex>/integrations/aistudio-extension
-   ```
-5. Verify the extension shows active. It will automatically connect to `opencodex`.
-
+## Security
+- Credentials are exported directly to your local loopback OpenCodex proxy (`http://127.0.0.1:10100`).
+- No background workers, tab automation, or relay tunnels are used.

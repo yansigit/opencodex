@@ -49,9 +49,8 @@ import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../reasoning-effort";
 import { normalizeAntigravityProviderError } from "../oauth/antigravity-routing";
 import { buildAiStudioHeaders, parseGoogleCookieJar } from "../oauth/google-aistudio-auth";
-import { cookieHeaderFromSession, loadAiStudioSession } from "../oauth/aistudio-session-sync";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 import { parseMakerSuiteChunk } from "./google-aistudio-parser";
-import { globalAiStudioRelayHub } from "../server/aistudio-ws-hub";
 
 const INLINE_ERROR_URL_USERINFO = /https?:\/\/[^\s"'<>]*@/gi;
 
@@ -763,46 +762,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
     // Direct AI-Studio uses the canonical server transport (fetchWithTransientRetry), which
     // retries transient 5xx responses through providerFetch while preserving multi-key pool
     // 429 rotation and raw error formatting.
-    ...(provider.googleMode === "ai-studio-web"
-      ? {
-          fetchResponse: async (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> => {
-            if (globalAiStudioRelayHub.hasActiveSessions()) {
-              const streamRes = await globalAiStudioRelayHub.dispatchStream(
-                {
-                  url: request.url,
-                  method: request.method,
-                  headers: request.headers,
-                  body: request.body,
-                },
-                ctx?.abortSignal,
-              );
-              const encoder = new TextEncoder();
-              const bodyStream = new ReadableStream({
-                async start(controller) {
-                  try {
-                    for await (const chunk of streamRes.chunks) {
-                      controller.enqueue(encoder.encode(chunk));
-                    }
-                    controller.close();
-                  } catch (err) {
-                    controller.error(err);
-                  }
-                },
-              });
-              return new Response(bodyStream, {
-                status: 200,
-                headers: { "Content-Type": "text/event-stream" },
-              });
-            }
-            return fetch(request.url, {
-              method: request.method,
-              headers: request.headers,
-              body: request.body,
-              signal: ctx?.abortSignal,
-            });
-          },
-        }
-      : provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
+    ...(provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
       ? {
           fetchResponse: (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> =>
             (provider.googleMode === "cloud-code-assist" ? fetchAntigravityWithRetry : fetchVertexWithRetry)(request, ctx),
@@ -1019,8 +979,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       if (provider.googleMode === "ai-studio-web") {
         const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
         const url = `${base}/v1internal:${method}${streamParam}`;
-        const cookieInput = provider.apiKey || provider.headers?.["Cookie"] || cookieHeaderFromSession(loadAiStudioSession()) || "";
-        const jar = parseGoogleCookieJar(cookieInput);
+        const credentials = resolveAiStudioCredentials(provider);
+        if (credentials.kind !== "ready") throw new Error(credentials.reason);
+        const jar = parseGoogleCookieJar(credentials.cookieHeader);
         const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");
         Object.assign(headers, aiStudioHeaders);
         const compiled = compileGoogleWireBody({ ...body, model: routedModelId });
@@ -1051,6 +1012,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const emitInTurnGroundingSources = emitInTurnGroundingSourcesQueue.shift() ?? false;
       const filterCcaSearchSuggestionHtml =
         provider.googleMode === "cloud-code-assist" && emitInTurnGroundingSources;
+      if (provider.googleMode === "ai-studio-web" && (response.status === 401 || response.status === 403 || (response.status >= 300 && response.status < 400))) {
+        try { await response.body?.cancel(); } catch { /* ignore */ }
+        yield { type: "error", message: "Google AI Studio session expired — re-authentication required" };
+        return;
+      }
       if (!response.body) {
         yield { type: "error", message: "No response body" };
         return;
@@ -1063,6 +1029,17 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       const budgetEncoder = new TextEncoder();
+      const contentType = response.headers.get("content-type") ?? "";
+      const isHtmlContentType = contentType.toLowerCase().includes("text/html");
+      const isHtmlRedirect = (text: string) => {
+        const lower = text.trim().toLowerCase();
+        return lower.startsWith("<!doctype") || lower.includes("accounts.google.com/v3/signin");
+      };
+      const reauthError = "Google AI Studio session expired — re-authentication required";
+      if (isHtmlContentType) {
+        yield { type: "error", message: reauthError };
+        return;
+      }
       let buffer = "";
       let bufferBytes = 0;
       // Raw unterminated-line bytes, independent of TextDecoder's pending UTF-8
@@ -1321,6 +1298,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           }
           incompleteLineBytes = lineScan.residual;
           const nextBuffer = buffer + decoder.decode(value, { stream: true });
+          if (isHtmlRedirect(nextBuffer)) {
+            yield { type: "error", message: reauthError };
+            try { await reader.cancel(); } catch { /* ignore */ }
+            return;
+          }
           const nextBufferBytes = budgetEncoder.encode(nextBuffer).byteLength;
           const appendReservation = budget.reserveTransient(nextBufferBytes, { kind: "live_transient" });
           buffer = nextBuffer;
@@ -1383,6 +1365,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
                 yield { type: "done" };
                 return;
               }
+            }
+            if (isHtmlContentType || isHtmlRedirect(residual)) {
+              yield { type: "error", message: reauthError };
+              return;
             }
             yield { type: "error", message: `upstream non-SSE response: ${residual.slice(0, 300)}` };
             return;

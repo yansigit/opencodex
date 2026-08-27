@@ -1,15 +1,3 @@
-function renderRelay() {
-  chrome.storage.local.get(["relayStatus", "relayDetails", "proxyPort"], (data) => {
-    const statusEl = document.getElementById("status");
-    const detailsEl = document.getElementById("details");
-    const isConnected = data.relayStatus === "connected";
-
-    statusEl.textContent = isConnected ? "ðŸŸ¢ Connected" : "ðŸ”´ Disconnected";
-    statusEl.className = "badge " + (isConnected ? "connected" : "disconnected");
-    detailsEl.textContent = data.relayDetails || (isConnected ? "Relay active" : "Relay idle");
-  });
-}
-
 async function harvestSession() {
   const statusEl = document.getElementById("exportStatus");
   statusEl.style.color = "#93c5fd";
@@ -62,22 +50,38 @@ async function harvestSession() {
   return { bundleObj, base64Token };
 }
 
+function getValidatedPort() {
+  const portInput = document.getElementById("proxyPort");
+  const raw = parseInt(portInput?.value || "", 10);
+  if (Number.isInteger(raw) && raw >= 1 && raw <= 65535) {
+    return raw;
+  }
+  return 10100;
+}
+
+function savePort() {
+  const port = getValidatedPort();
+  chrome.storage?.local?.set({ proxyPort: port });
+}
+
 document.getElementById("btnCopyBundle")?.addEventListener("click", async () => {
   const statusEl = document.getElementById("exportStatus");
   try {
+    savePort();
     const { base64Token } = await harvestSession();
     await navigator.clipboard.writeText(base64Token);
     statusEl.style.color = "#4ade80";
-    statusEl.textContent = "âœ… Session Token copied to clipboard!";
+    statusEl.textContent = "ºw^~)Þu Session Token copied to clipboard!";
   } catch (err) {
     statusEl.style.color = "#f87171";
-    statusEl.textContent = "âŒ " + (err.message || String(err));
+    statusEl.textContent = "ºw^~)Þt " + (err.message || String(err));
   }
 });
 
 document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
   const statusEl = document.getElementById("exportStatus");
   try {
+    savePort();
     const { bundleObj, base64Token } = await harvestSession();
     statusEl.textContent = "Syncing with local OpenCodex proxy...";
 
@@ -85,7 +89,8 @@ document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
     const headers = { "Content-Type": "application/json" };
     if (proxyApiKey) headers["x-opencodex-api-key"] = proxyApiKey;
 
-    const res = await fetch("http://127.0.0.1:10100/api/aistudio/session", {
+    const port = getValidatedPort();
+    const res = await fetch(`http://127.0.0.1:${port}/api/aistudio/session`, {
       method: "POST",
       headers,
       body: JSON.stringify({ token: base64Token, ...bundleObj })
@@ -95,12 +100,20 @@ document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
       throw new Error("Proxy returned HTTP " + res.status);
     }
     statusEl.style.color = "#4ade80";
-    statusEl.textContent = "âœ… Synced with OpenCodex successfully!";
+    statusEl.textContent = "éÝyø§yÕ Synced with OpenCodex successfully!";
   } catch (err) {
     statusEl.style.color = "#f87171";
-    statusEl.textContent = "âŒ Sync failed: " + (err.message || String(err)) + ". Use Copy button instead.";
+    statusEl.textContent = +§uçâçL Sync failed: " + (err.message || String(err)) + ". Use Copy button instead.";
   }
 });
 
-document.addEventListener("DOMContentLoaded", renderRelay);
-chrome.storage?.onChanged?.addListener(renderRelay);
+document.getElementById("proxyPort")?.addEventListener("change", savePort);
+
+document.addEventListener("DOMContentLoaded", () => {
+  chrome.storage?.local?.get(["proxyPort"], (data) => {
+    const portEl = document.getElementById("proxyPort");
+    if (portEl) {
+      portEl.value = (data && data.proxyPort) ? data.proxyPort : 10100;
+    }
+  });
+});

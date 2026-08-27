@@ -97,6 +97,8 @@ import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostR
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import type { ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
+import { resolveAiStudioCredentials } from "../../oauth/aistudio-credentials";
+import { buildAiStudioHeaders, parseGoogleCookieJar } from "../../oauth/google-aistudio-auth";
 
 type ProviderPatchApplication =
   | { error: string }
@@ -107,6 +109,93 @@ type ProviderPatchApplication =
       enablingOpenAi: boolean;
       headersTouched: boolean;
     };
+
+const AI_STUDIO_REAUTH_ERROR = "Session expired or missing — re-authentication required";
+const AI_STUDIO_PROBE_TIMEOUT_MS = 8_000;
+const AI_STUDIO_PROBE_MODEL = "gemini-2.5-flash";
+const AI_STUDIO_ORIGIN = "https://aistudio.google.com";
+
+let aiStudioProbeFetchForTests: typeof fetch | undefined;
+
+export function setAiStudioProbeFetchForTests(fetchImpl?: typeof fetch): void {
+  aiStudioProbeFetchForTests = fetchImpl;
+}
+
+function isAiStudioHtmlSignIn(text: string): boolean {
+  const lower = text.trim().toLowerCase();
+  return lower.startsWith("<!doctype") || lower.startsWith("<html") || lower.includes("accounts.google.com/v3/signin");
+}
+
+async function probeAiStudioLiveSession(
+  name: string,
+  prov: OcxProviderConfig,
+): Promise<{ ok: boolean; latencyMs: number; authState?: "connected" | "checking" | "needs_reauth" | "unsupported"; message?: string; error?: string }> {
+  const credentials = resolveAiStudioCredentials(prov);
+  if (credentials.kind !== "ready") {
+    return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
+  }
+  if (process.platform !== "darwin") {
+    return {
+      ok: true,
+      latencyMs: 0,
+      authState: "unsupported",
+      message: "AI Studio credentials configured; native login is unsupported on this platform",
+    };
+  }
+
+  const base = (prov.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
+  const url = base + "/v1internal:generateContent";
+  const jar = parseGoogleCookieJar(credentials.cookieHeader);
+  const headers = await buildAiStudioHeaders(jar, AI_STUDIO_ORIGIN);
+  const body = JSON.stringify({
+    model: AI_STUDIO_PROBE_MODEL,
+    contents: [{ role: "user", parts: [{ text: "ping" }] }],
+    generationConfig: { maxOutputTokens: 1 },
+  });
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_STUDIO_PROBE_TIMEOUT_MS);
+  const started = Date.now();
+  try {
+    const outboundProvider = aiStudioProbeFetchForTests
+      ? { ...prov, fetch: aiStudioProbeFetchForTests }
+      : prov;
+    const response = await providerOutboundPost(name, outboundProvider, url, {
+      headers,
+      body,
+      signal: controller.signal,
+    });
+    const latencyMs = Date.now() - started;
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    const text = await response.text().catch(() => "");
+
+    if ((response.status >= 300 && response.status < 400) || response.status === 401 || response.status === 403) {
+      return { ok: false, latencyMs, error: AI_STUDIO_REAUTH_ERROR };
+    }
+    if (contentType.includes("text/html") || isAiStudioHtmlSignIn(text)) {
+      return { ok: false, latencyMs, error: AI_STUDIO_REAUTH_ERROR };
+    }
+    if (response.status !== 200) {
+      return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
+    }
+    try {
+      JSON.parse(text);
+    } catch {
+      return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
+    }
+    return {
+      ok: true,
+      latencyMs,
+      authState: "connected",
+      message: "AI Studio session verified",
+    };
+  } catch {
+    return { ok: false, latencyMs: Date.now() - started, error: "AI Studio connection probe failed" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 
 /**
  * Apply the recognized PATCH field mask onto a provider copy. The caller runs this once
@@ -837,6 +926,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         latencyMs: 0,
         message: "Passthrough provider is configured (forwards your Codex login; no upstream /models).",
       });
+    }
+    if (prov.googleMode === "ai-studio-web" || name === "google-aistudio") {
+      return jsonResponse(await probeAiStudioLiveSession(name, prov));
     }
     if (prov.liveModels === false) {
       // A static catalog has no live discovery endpoint to test. This is neither

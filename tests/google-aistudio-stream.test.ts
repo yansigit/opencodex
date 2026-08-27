@@ -125,10 +125,10 @@ describe("google adapter — ai-studio-web stream parsing", () => {
     const adapter = createGoogleAdapter(cookieProvider);
     await adapter.buildRequest(parsedRequest());
 
-    const invalidResidual = "HTML 404 Not Found or unknown format";
+    const invalidResidual = "SOME_UNKNOWN_FORMAT_NOT_HTML";
     const response = new Response(invalidResidual, {
       status: 200,
-      headers: { "Content-Type": "text/html" },
+      headers: { "Content-Type": "application/octet-stream" },
     });
 
     const budget = createTranslatorBudget(100);
@@ -161,5 +161,87 @@ describe("google adapter — ai-studio-web stream parsing", () => {
     const errorEvent = events.find((e) => e.type === "error");
     expect(errorEvent).toBeDefined();
     expect((errorEvent as any).message).toBe("Quota exceeded or invalid token");
+  });
+  test("yields re-auth error on upstream HTML login redirect", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+
+    const html = '<!doctype html><html><head><base href="https://accounts.google.com/v3/signin"></head><body>redirect</body></html>';
+    const response = new Response(html, {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+
+    const budget = createTranslatorBudget(100);
+    const events = [];
+    for await (const event of adapter.parseStream(response, budget)) {
+      events.push(event);
+    }
+
+    const errorEvent = events.find((e) => e.type === "error");
+    expect(errorEvent).toBeDefined();
+    expect((errorEvent as any).message).toBe("Google AI Studio session expired — re-authentication required");
+  });
+
+  test("maps authentication statuses and redirects to re-authentication without exposing the body", async () => {
+    for (const status of [302, 401, 403]) {
+      const adapter = createGoogleAdapter(cookieProvider);
+      await adapter.buildRequest(parsedRequest());
+      const response = new Response("sensitive sign-in page", { status });
+      const events = [];
+      for await (const event of adapter.parseStream(response, createTranslatorBudget(100))) events.push(event);
+      expect(events).toEqual([{ type: "error", message: "Google AI Studio session expired — re-authentication required" }]);
+      expect(JSON.stringify(events)).not.toContain("sensitive");
+    }
+  });
+
+  test("keeps rate-limit and server failures as upstream failures", async () => {
+    for (const status of [429, 500]) {
+      const adapter = createGoogleAdapter(cookieProvider);
+      await adapter.buildRequest(parsedRequest());
+      const response = new Response(JSON.stringify({ error: { message: "upstream failure" } }), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+      const events = [];
+      for await (const event of adapter.parseStream(response, createTranslatorBudget(100))) events.push(event);
+      expect(events.find((event) => event.type === "error")).toMatchObject({ message: "upstream failure" });
+    }
+  });
+
+  test("detects multiline HTML before streaming line parsing", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+    const encoder = new TextEncoder();
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("<!doctype html>\n<html><head>\n"));
+        controller.enqueue(encoder.encode("<base href=\"https://accounts.google.com/v3/signin\">\n<body>expired</body></html>\n"));
+        controller.close();
+      },
+    }), { status: 200, headers: { "Content-Type": "text/html" } });
+    const events = [];
+    for await (const event of adapter.parseStream(response, createTranslatorBudget(100))) events.push(event);
+    expect(events.find((e) => e.type === "error")).toMatchObject({
+      message: "Google AI Studio session expired — re-authentication required",
+    });
+  });
+
+  test("detects headerless accounts login HTML split across chunks", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+    const encoder = new TextEncoder();
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("<html><head>\n<base href=\"https://accounts.google.com/v3/"));
+        controller.enqueue(encoder.encode("signin\">\n</head><body>expired</body></html>\n"));
+        controller.close();
+      },
+    }), { status: 200 });
+    const events = [];
+    for await (const event of adapter.parseStream(response, createTranslatorBudget(100))) events.push(event);
+    expect(events.find((e) => e.type === "error")).toMatchObject({
+      message: "Google AI Studio session expired — re-authentication required",
+    });
   });
 });
