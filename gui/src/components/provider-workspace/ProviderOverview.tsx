@@ -57,21 +57,26 @@ export default function ProviderOverview({
   const status = binProviderStatus(item);
   const needsAttention = Boolean(item.activeNeedsReauth);
   const isAiStudioWeb = item.googleMode === "ai-studio-web" || item.name === "google-aistudio";
-  const aiStudioRelayActive = item.aiStudioRelayActive === true;
-  const hasAiStudioSession = item.hasAiStudioSession === true;
-  const aiStudioStatusText = aiStudioRelayActive
-    ? t("pws.aiStudio.relayActive")
-    : hasAiStudioSession
-      ? t("pws.aiStudio.sessionActive")
-      : t("pws.aiStudio.disconnected");
-  const needsAiStudioReauth = isAiStudioWeb && (status !== "ready" || needsAttention);
+  const aiStudioAuthState = item.aiStudioAuthState ?? (item.hasAiStudioSession ? "checking" : "needs_reauth");
+  const aiStudioStatusText = aiStudioAuthState === "connected"
+    ? t("pws.aiStudio.connected")
+    : aiStudioAuthState === "checking"
+      ? t("pws.aiStudio.checking")
+      : aiStudioAuthState === "unsupported"
+        ? t("pws.aiStudio.unsupported")
+        : t("pws.aiStudio.needsReauth");
+  const needsAiStudioReauth = isAiStudioWeb && aiStudioAuthState === "needs_reauth";
   const [aiStudioReauthBusy, setAiStudioReauthBusy] = useState(false);
   const [aiStudioReauthMsg, setAiStudioReauthMsg] = useState<string | null>(null);
-  const statusText = status === "ready"
-    ? t("pws.status.connected")
-    : status === "needs-setup"
-      ? (needsAttention ? t("pws.status.needsAttention") : t("pws.status.needsSetup"))
-      : t("prov.disabledBadge");
+  const aiStudioReauthAbortRef = useRef<AbortController | null>(null);
+  const aiStudioAutoTestKeyRef = useRef<string | null>(null);
+  const statusText = isAiStudioWeb
+    ? aiStudioStatusText
+    : status === "ready"
+      ? t("pws.status.connected")
+      : status === "needs-setup"
+        ? (needsAttention ? t("pws.status.needsAttention") : t("pws.status.needsSetup"))
+        : t("prov.disabledBadge");
   const requests = usageTotals?.requests;
   const tokens = usageTotals?.totalTokens;
   const quota = accountQuotaFromReport(quotaReport);
@@ -89,8 +94,7 @@ export default function ProviderOverview({
     item.allowPrivateNetwork === true,
     item.keyOptional === true,
     item.activeNeedsReauth === true,
-    hasAiStudioSession,
-    aiStudioRelayActive,
+    aiStudioAuthState,
     connectionIdentity ?? null,
   ]);
   const [connectionTest, setConnectionTest] = useState<ConnectionTestState | null>(null);
@@ -104,6 +108,8 @@ export default function ProviderOverview({
         connectionAbortRef.current.controller.abort();
         connectionAbortRef.current = null;
       }
+      aiStudioReauthAbortRef.current?.abort();
+      aiStudioReauthAbortRef.current = null;
     };
   }, [connectionProbeKey]);
 
@@ -143,29 +149,51 @@ export default function ProviderOverview({
   }, [apiBase, connectionProbeKey, item.name, t]);
 
   const handleAiStudioReauth = useCallback(async () => {
-    const bridgeUrl = apiBase ? `${apiBase}/aistudio/bridge` : "/aistudio/bridge";
-    if (!apiBase) {
-      window.open(bridgeUrl, "_blank");
-      return;
-    }
+    if (!apiBase) return;
+    aiStudioReauthAbortRef.current?.abort();
+    const controller = new AbortController();
+    aiStudioReauthAbortRef.current = controller;
     setAiStudioReauthBusy(true);
     setAiStudioReauthMsg(null);
     try {
-      const res = await fetch(`${apiBase}/api/aistudio/login/native`, { method: "POST" });
+      const res = await fetch(`${apiBase}/api/aistudio/login/native`, {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted) return;
       const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
       if (res.ok && data?.ok) {
-        setAiStudioReauthMsg("Re-authenticated");
-      } else {
-        window.open(bridgeUrl, "_blank");
-        if (data?.error) setAiStudioReauthMsg(data.error);
+        setAiStudioReauthMsg(t("pws.aiStudio.reauthenticated"));
+        return;
       }
+      if (data?.error) {
+        setAiStudioReauthMsg(data.error);
+        return;
+      }
+      setAiStudioReauthMsg(t("pws.aiStudio.loginFailed"));
     } catch (e) {
-      window.open(bridgeUrl, "_blank");
-      setAiStudioReauthMsg(e instanceof Error ? e.message : String(e));
+      if (controller.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
+      setAiStudioReauthMsg(e instanceof Error ? e.message : t("pws.aiStudio.loginFailed"));
     } finally {
-      setAiStudioReauthBusy(false);
+      if (aiStudioReauthAbortRef.current === controller) {
+        aiStudioReauthAbortRef.current = null;
+      }
+      if (!controller.signal.aborted) {
+        setAiStudioReauthBusy(false);
+      }
     }
-  }, [apiBase]);
+  }, [apiBase, t]);
+
+  useEffect(() => {
+    if (!isAiStudioWeb || aiStudioAuthState !== "checking" || !apiBase) return;
+    const autoTestKey = `${item.name}:${connectionProbeKey}`;
+    if (aiStudioAutoTestKeyRef.current === autoTestKey) return;
+    aiStudioAutoTestKeyRef.current = autoTestKey;
+    const timer = window.setTimeout(() => {
+      void testConnection();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [aiStudioAuthState, apiBase, connectionProbeKey, isAiStudioWeb, item.name, testConnection]);
 
   const connectionState = connectionResult?.applicable === false
     ? "not-applicable"

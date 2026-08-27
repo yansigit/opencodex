@@ -212,6 +212,7 @@ import {
 import { SYSTEM_RESTART_CAPABILITY_VERSION } from "../lib/system-restart-contract";
 import { LOCAL_PROVIDER_RELOAD_CAPABILITY_VERSION } from "../lib/local-provider-reload-contract";
 import { createReadinessGate, type ReadinessGate } from "./readiness";
+import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
 const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
@@ -464,6 +465,8 @@ export interface StartServerDeps {
   localAttestationSecret?: string;
   /** Optional readiness gate; a fresh pending gate is created when omitted. */
   readinessGate?: ReadinessGate;
+  /** Test-only seam for the awaited native AI Studio login process. */
+  runAiStudioNativeLogin?: typeof runAiStudioNativeLogin;
 }
 
 function inspectStartupOwnership(
@@ -1017,19 +1020,29 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (!isAllowedRequestOrigin(req, policy)) {
           return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
         }
-        if (process.platform !== "darwin") {
-          return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
-        }
-        // Interactive login spawns a native window and waits for user — do not await completion
-        // in the request handler (it would hang the proxy for minutes). Spawn detached and
-        // return immediately; failures surface when the session file is not yet written.
         try {
-          const { getAiStudioNativeDaemonSourcePath } = await import("../oauth/aistudio-native-daemon");
-          const swiftSrc = getAiStudioNativeDaemonSourcePath();
-          const proc = Bun.spawn(["swift", swiftSrc, "--login"], { stdout: "inherit", stderr: "inherit" });
-          // Detach: do not await. If swift is missing, spawn throws synchronously and is caught below.
-          void proc;
-          return jsonResponse({ ok: true }, 200, req, policy);
+          const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
+          if (login.kind === "unsupported") {
+            return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
+          }
+          if (login.kind === "cancelled") {
+            return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
+          }
+          if (login.kind === "failed") {
+            return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
+          }
+
+          // Reuse the existing direct provider connection probe before claiming success.
+          const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
+            method: "POST",
+            headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
+          });
+          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, deps.managementApi);
+          const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+          if (!probe?.ok) {
+            return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
+          }
+          return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
         } catch (err) {
           return jsonResponse({ ok: false, error: String(err) }, 500, req, policy);
         }

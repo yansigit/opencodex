@@ -98,11 +98,61 @@ describe("AI Studio status & re-auth", () => {
   });
 
   test("POST /api/aistudio/login/native exists and is not 404", async () => {
-    const server = startServer(0);
+    const server = startServer(0, { runAiStudioNativeLogin: async () => ({ kind: "unsupported" }) });
     try {
       const res = await fetch(new URL("/api/aistudio/login/native", server.url), { method: "POST" });
       expect([200, 400, 500].includes(res.status)).toBe(true);
       expect(res.status).not.toBe(404);
+    } finally { server.stop(true); }
+  });
+
+  test("native login waits for completion and returns the validated session", async () => {
+    cfg();
+    const sessionPath = saveAiStudioSession({ selectedProject: "p", windowId: "w", cookies: [{ name: "SAPISID", value: "valid" }] });
+    let resolveLogin!: (result: { kind: "authenticated"; sessionPath: string }) => void;
+    const login = new Promise<{ kind: "authenticated"; sessionPath: string }>(resolve => { resolveLogin = resolve; });
+    const server = startServer(0, { runAiStudioNativeLogin: async () => login });
+    try {
+      const responsePromise = fetch(new URL("/api/aistudio/login/native", server.url), { method: "POST" });
+      await new Promise(resolve => setTimeout(resolve, 5));
+      resolveLogin({ kind: "authenticated", sessionPath });
+      const res = await responsePromise;
+      expect(res.status).toBe(200);
+      expect((await res.json()).ok).toBe(true);
+    } finally { server.stop(true); }
+  });
+
+  test("native login aborts the injected login when the request is cancelled", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const server = startServer(0, {
+      runAiStudioNativeLogin: async ({ signal }) => {
+        receivedSignal = signal;
+        await new Promise<void>(resolve => {
+          signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        return { kind: "cancelled" };
+      },
+    });
+    try {
+      const controller = new AbortController();
+      const responsePromise = fetch(new URL("/api/aistudio/login/native", server.url), {
+        method: "POST",
+        signal: controller.signal,
+      });
+      await new Promise(resolve => setTimeout(resolve, 5));
+      controller.abort();
+      let res: Response | undefined;
+      try {
+        res = await responsePromise;
+      } catch (error) {
+        expect(error).toBeInstanceOf(DOMException);
+        expect((error as DOMException).name).toBe("AbortError");
+      }
+      expect(receivedSignal?.aborted).toBe(true);
+      if (res) {
+        expect(res.status).toBe(499);
+        expect((await res.json()).ok).toBe(false);
+      }
     } finally { server.stop(true); }
   });
 

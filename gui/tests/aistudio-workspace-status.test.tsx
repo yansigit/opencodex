@@ -41,24 +41,28 @@ function aiStudioProvider(overrides: Partial<WorkspaceProvider> = {}): Workspace
   };
 }
 
-test("binProviderStatus for ai-studio-web is needs-setup when disconnected", () => {
+test("binProviderStatus for ai-studio-web is needs-setup when no session or auth state", () => {
   expect(binProviderStatus(aiStudioProvider({}))).toBe("needs-setup");
-  expect(binProviderStatus(aiStudioProvider({ hasAiStudioSession: false, aiStudioRelayActive: false }))).toBe("needs-setup");
-  expect(binProviderStatus(aiStudioProvider({ hasAiStudioSession: undefined, aiStudioRelayActive: undefined }))).toBe("needs-setup");
+  expect(binProviderStatus(aiStudioProvider({ hasAiStudioSession: false }))).toBe("needs-setup");
 });
 
 test("binProviderStatus for ai-studio-web is ready when session is present", () => {
   expect(binProviderStatus(aiStudioProvider({ hasAiStudioSession: true }))).toBe("ready");
-  expect(binProviderStatus(aiStudioProvider({ hasAiStudioSession: true, aiStudioRelayActive: false }))).toBe("ready");
 });
 
-test("binProviderStatus for ai-studio-web is ready when relay is active", () => {
-  expect(binProviderStatus(aiStudioProvider({ aiStudioRelayActive: true }))).toBe("ready");
-  expect(binProviderStatus(aiStudioProvider({ hasAiStudioSession: false, aiStudioRelayActive: true }))).toBe("ready");
-  expect(binProviderStatus(aiStudioProvider({ hasAiStudioSession: true, aiStudioRelayActive: true }))).toBe("ready");
+test("binProviderStatus exposes four auth states", () => {
+  expect(binProviderStatus(aiStudioProvider({ aiStudioAuthState: "connected" }))).toBe("ready");
+  expect(binProviderStatus(aiStudioProvider({ aiStudioAuthState: "checking" }))).toBe("ready");
+  expect(binProviderStatus(aiStudioProvider({ aiStudioAuthState: "needs_reauth" }))).toBe("needs-setup");
+  expect(binProviderStatus(aiStudioProvider({ aiStudioAuthState: "unsupported" }))).toBe("needs-setup");
 });
 
-test("buildProviderWorkspace bins ai-studio-web by session/relay", () => {
+test("binProviderStatus ignores leftover relay state", () => {
+  expect(binProviderStatus(aiStudioProvider({ aiStudioRelayActive: true } as WorkspaceProvider))).toBe("needs-setup");
+  expect(binProviderStatus(aiStudioProvider({ hasAiStudioSession: false, aiStudioRelayActive: true } as WorkspaceProvider))).toBe("needs-setup");
+});
+
+test("buildProviderWorkspace bins ai-studio-web by session/auth state", () => {
   const providers = {
     "google-aistudio": aiStudioProvider({ hasAiStudioSession: false }),
     "openai": { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1", hasApiKey: true } as WorkspaceProvider,
@@ -67,69 +71,108 @@ test("buildProviderWorkspace bins ai-studio-web by session/relay", () => {
   expect(sections.needsSetup.some(p => p.name === "google-aistudio")).toBe(true);
   expect(sections.ready.some(p => p.name === "google-aistudio")).toBe(false);
   const readySections = buildProviderWorkspace({
-    "google-aistudio": aiStudioProvider({ hasAiStudioSession: true }),
+    "google-aistudio": aiStudioProvider({ aiStudioAuthState: "connected" }),
   });
   expect(readySections.ready.some(p => p.name === "google-aistudio")).toBe(true);
 });
 
-test("ProviderOverview renders re-authenticate/connect button for ai-studio-web", async () => {
-  const item = {
-    name: "google-aistudio",
-    adapter: "google",
-    baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
-    googleMode: "ai-studio-web",
-    hasAiStudioSession: false,
-    aiStudioRelayActive: false,
-  } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
-
+async function renderOverview(item: import("../src/provider-workspace/catalog").WorkspaceItem) {
   const container = document.createElement("div");
   document.body.append(container);
   const { createRoot } = await import("react-dom/client");
-  let root: import("react-dom/client").Root;
+  const root = createRoot(container);
   await act(async () => {
-    root = createRoot(container);
     root.render(
       <LanguageProvider>
         <ProviderOverview item={item} apiBase="http://localhost:10100" />
       </LanguageProvider>
     );
   });
+  return { container, root };
+}
 
+test("ProviderOverview renders connect CTA for needs-reauth", async () => {
+  const item = {
+    name: "google-aistudio",
+    adapter: "google",
+    baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+    googleMode: "ai-studio-web",
+    aiStudioAuthState: "needs_reauth",
+  } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
+
+  const { container, root } = await renderOverview(item);
   const text = container.textContent ?? "";
-  const hasButton = !!container.querySelector("button") && (/re-authenticate/i.test(text) || /connect/i.test(text));
-  expect(hasButton).toBe(true);
-
-  // status text should reflect disconnected
-  expect(/disconnected|session active|browser relay active/i.test(text)).toBe(true);
-
+  expect(/reauthentication required/i.test(text)).toBe(true);
+  expect(/connect/i.test(text)).toBe(true);
+  expect(/browser relay/i.test(text)).toBe(false);
   await act(async () => { root.unmount(); });
 });
 
-test("ProviderOverview shows relay/session status when connected", async () => {
+test("ProviderOverview shows connected auth status without relay wording", async () => {
   const item = {
     name: "google-aistudio",
     adapter: "google",
     baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
     googleMode: "ai-studio-web",
     hasAiStudioSession: true,
-    aiStudioRelayActive: true,
+    aiStudioAuthState: "connected",
   } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
 
-  const container = document.createElement("div");
-  document.body.append(container);
-  const { createRoot } = await import("react-dom/client");
-  let root: import("react-dom/client").Root;
-  await act(async () => {
-    root = createRoot(container);
-    root.render(
-      <LanguageProvider>
-        <ProviderOverview item={item} apiBase="http://localhost:10100" />
-      </LanguageProvider>
-    );
-  });
-
+  const { container, root } = await renderOverview(item);
   const text = container.textContent ?? "";
-  expect(/browser relay active|session active/i.test(text)).toBe(true);
+  expect(/connected/i.test(text)).toBe(true);
+  expect(/browser relay/i.test(text)).toBe(false);
+  await act(async () => { root.unmount(); });
+});
 
+test("ProviderOverview auto-tests once while checking", async () => {
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes("/api/providers/test")) {
+      return new Response(JSON.stringify({ applicable: true, ok: true, message: "ok" }), { status: 200 });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  const item = {
+    name: "google-aistudio",
+    adapter: "google",
+    baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+    googleMode: "ai-studio-web",
+    aiStudioAuthState: "checking",
+  } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
+
+  const { container, root } = await renderOverview(item);
+  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  expect(calls.filter(url => url.includes("/api/providers/test")).length).toBe(1);
+  expect(calls.some(url => url.includes("/aistudio/bridge"))).toBe(false);
+  await act(async () => { root.unmount(); });
+});
+
+test("ProviderOverview abort/cancel does not show success", async () => {
+  let abortSignal: AbortSignal | undefined;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    abortSignal = init?.signal ?? undefined;
+    return new Promise<Response>(() => {});
+  }) as typeof fetch;
+
+  const item = {
+    name: "google-aistudio",
+    adapter: "google",
+    baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+    googleMode: "ai-studio-web",
+    aiStudioAuthState: "needs_reauth",
+  } as unknown as import("../src/provider-workspace/catalog").WorkspaceItem;
+
+  const { container, root } = await renderOverview(item);
+  const button = container.querySelector("button.btn-primary") as HTMLButtonElement;
+  expect(button).toBeTruthy();
+  await act(async () => { button.click(); });
+  await act(async () => { abortSignal?.dispatchEvent(new Event("abort")); });
+  await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+  const text = container.textContent ?? "";
+  expect(/reauthenticated successfully/i.test(text)).toBe(false);
   await act(async () => { root.unmount(); });
 });

@@ -63,8 +63,7 @@ export interface WorkspaceProvider {
   googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" | string;
   /** Live AI Studio session presence (from safeConfigDTO). */
   hasAiStudioSession?: boolean;
-  /** Live AI Studio relay activity (from safeConfigDTO). */
-  aiStudioRelayActive?: boolean;
+  aiStudioAuthState?: "connected" | "checking" | "needs_reauth" | "unsupported";
 }
 
 /** Three-way pricing/ownership tier for a ready provider row. */
@@ -81,7 +80,7 @@ export interface WorkspaceItem extends WorkspaceProvider {
   /** Set by `applyActiveAccountReauth` when live auth health overrides config readiness. */
   activeNeedsReauth?: boolean;
   hasAiStudioSession?: boolean;
-  aiStudioRelayActive?: boolean;
+  aiStudioAuthState?: "connected" | "checking" | "needs_reauth" | "unsupported";
 }
 
 /** The three sections rendered in the Providers workspace. */
@@ -145,7 +144,7 @@ export function hasLoopbackBaseUrl(baseUrl: string): boolean {
 }
 
 function isConfigurationReady(p: WorkspaceProvider): boolean {
-  if (p.googleMode === "ai-studio-web") return p.hasAiStudioSession === true || p.aiStudioRelayActive === true;
+  if (p.googleMode === "ai-studio-web") return p.aiStudioAuthState === "connected" || p.aiStudioAuthState === "checking" || p.hasAiStudioSession === true;
   return p.keyOptional === true ||
     p.authMode === "oauth" ||
     p.authMode === "forward" ||

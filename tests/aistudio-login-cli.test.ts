@@ -76,7 +76,7 @@ describe("google-aistudio provider registration & instructions", () => {
   });
 });
 
-describe("handleAiStudioBridgeLogin does not pop bridge page after native or token login", () => {
+describe("handleAiStudioLogin uses native login without bridge fallback", () => {
   let previousHome: string | undefined;
   let tempHome: string;
   let openUrlMod: typeof import("../src/lib/open-url");
@@ -98,8 +98,13 @@ describe("handleAiStudioBridgeLogin does not pop bridge page after native or tok
     if (tempHome) rmSync(tempHome, { recursive: true, force: true });
   });
 
-  async function runWithChoice(choice: string, opts: { platform?: string } = {}): Promise<string[]> {
+  async function runWithChoice(
+    choice: string,
+    opts: { platform?: string; nativeResult?: { kind: "authenticated" | "cancelled" | "failed"; error?: string } } = {},
+  ): Promise<{ opened: string[]; logs: string[]; errors: string[] }> {
     const opened: string[] = [];
+    const logs: string[] = [];
+    const errors: string[] = [];
     const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation((url: string) => { opened.push(url); });
     const findSpy = spyOn(proxyLivenessMod, "findLiveProxy").mockResolvedValue(null as any);
     const loadSpy = spyOn(configMod, "loadConfig").mockReturnValue({ providers: {} } as any);
@@ -110,8 +115,17 @@ describe("handleAiStudioBridgeLogin does not pop bridge page after native or tok
       question: (_prompt: string, cb: (ans: string) => void) => cb(choice),
       close: rlClose,
     } as any);
-    const bunSpy = spyOn(Bun as any, "spawn").mockReturnValue({ exited: Promise.resolve(0) } as any);
-    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const nativeResult = opts.nativeResult ?? { kind: "authenticated" as const };
+    const nativeSpy = spyOn(await import("../src/oauth/aistudio-native-daemon"), "runAiStudioNativeLogin")
+      .mockResolvedValue(
+        nativeResult.kind === "authenticated"
+          ? { kind: "authenticated", sessionPath: join(tempHome, "aistudio-session.json") }
+          : nativeResult.kind === "failed"
+            ? { kind: "failed", error: nativeResult.error ?? "Native AI Studio login failed" }
+            : { kind: "cancelled" },
+      );
+    const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logs.push(args.map(String).join(" ")); });
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => { errors.push(args.map(String).join(" ")); });
     const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
     let platformSpy: ReturnType<typeof spyOn> | null = null;
     if (opts.platform !== undefined) {
@@ -131,12 +145,13 @@ describe("handleAiStudioBridgeLogin does not pop bridge page after native or tok
       loadSpy.mockRestore();
       saveSpy.mockRestore();
       createSpy.mockRestore();
-      bunSpy.mockRestore();
+      nativeSpy.mockRestore();
       logSpy.mockRestore();
+      errorSpy.mockRestore();
       warnSpy.mockRestore();
       platformSpy?.mockRestore();
     }
-    return opened;
+    return { opened, logs, errors };
   }
 
   test("token paste does NOT open bridge URL", async () => {
@@ -146,20 +161,36 @@ describe("handleAiStudioBridgeLogin does not pop bridge page after native or tok
       cookies: [{ name: "SAPISID", value: "tok" }],
     });
     expect(token.length).toBeGreaterThan(20);
-    const opened = await runWithChoice(token);
+    const { opened } = await runWithChoice(token);
     const bridgeOpens = opened.filter(u => u.includes("/aistudio/bridge"));
     expect(bridgeOpens).toEqual([]);
   });
 
   test("native WebKit login (empty choice on darwin) does NOT open bridge URL", async () => {
-    const opened = await runWithChoice("", { platform: "darwin" });
+    const { opened } = await runWithChoice("", { platform: "darwin" });
     const bridgeOpens = opened.filter(u => u.includes("/aistudio/bridge"));
     expect(bridgeOpens).toEqual([]);
   });
 
-  test("bridge fallback (non-darwin empty choice) DOES open bridge URL", async () => {
-    const opened = await runWithChoice("", { platform: "linux" });
+  test("non-darwin empty choice does not open bridge URL", async () => {
+    const { opened, errors } = await runWithChoice("", { platform: "linux" });
     const bridgeOpens = opened.filter(u => u.includes("/aistudio/bridge"));
-    expect(bridgeOpens.length).toBe(1);
+    expect(bridgeOpens).toEqual([]);
+    expect(errors.join("\n")).toContain("only available on macOS");
+  });
+
+  test("failed native login does not print success", async () => {
+    const { logs, errors } = await runWithChoice("", {
+      platform: "darwin",
+      nativeResult: { kind: "failed", error: "Native AI Studio login failed (exit code 1)" },
+    });
+    expect(logs.join("\n")).not.toContain("authenticated successfully");
+    expect(errors.join("\n")).toContain("Native AI Studio login failed (exit code 1)");
+  });
+
+  test("cancelled native login does not print success", async () => {
+    const { logs } = await runWithChoice("", { platform: "darwin", nativeResult: { kind: "cancelled" } });
+    expect(logs.join("\n")).not.toContain("authenticated successfully");
+    expect(logs.join("\n")).toContain("cancelled");
   });
 });
