@@ -56,6 +56,17 @@ export default function ProviderOverview({
   const timeLabels = relativeTimeLabelsFromT(t);
   const status = binProviderStatus(item);
   const needsAttention = Boolean(item.activeNeedsReauth);
+  const isAiStudioWeb = item.googleMode === "ai-studio-web" || item.name === "google-aistudio";
+  const aiStudioRelayActive = item.aiStudioRelayActive === true;
+  const hasAiStudioSession = item.hasAiStudioSession === true;
+  const aiStudioStatusText = aiStudioRelayActive
+    ? t("pws.aiStudio.relayActive")
+    : hasAiStudioSession
+      ? t("pws.aiStudio.sessionActive")
+      : t("pws.aiStudio.disconnected");
+  const needsAiStudioReauth = isAiStudioWeb && (status !== "ready" || needsAttention);
+  const [aiStudioReauthBusy, setAiStudioReauthBusy] = useState(false);
+  const [aiStudioReauthMsg, setAiStudioReauthMsg] = useState<string | null>(null);
   const statusText = status === "ready"
     ? t("pws.status.connected")
     : status === "needs-setup"
@@ -78,6 +89,8 @@ export default function ProviderOverview({
     item.allowPrivateNetwork === true,
     item.keyOptional === true,
     item.activeNeedsReauth === true,
+    hasAiStudioSession,
+    aiStudioRelayActive,
     connectionIdentity ?? null,
   ]);
   const [connectionTest, setConnectionTest] = useState<ConnectionTestState | null>(null);
@@ -129,6 +142,31 @@ export default function ProviderOverview({
     }
   }, [apiBase, connectionProbeKey, item.name, t]);
 
+  const handleAiStudioReauth = useCallback(async () => {
+    const bridgeUrl = apiBase ? `${apiBase}/aistudio/bridge` : "/aistudio/bridge";
+    if (!apiBase) {
+      window.open(bridgeUrl, "_blank");
+      return;
+    }
+    setAiStudioReauthBusy(true);
+    setAiStudioReauthMsg(null);
+    try {
+      const res = await fetch(`${apiBase}/api/aistudio/login/native`, { method: "POST" });
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (res.ok && data?.ok) {
+        setAiStudioReauthMsg("Re-authenticated");
+      } else {
+        window.open(bridgeUrl, "_blank");
+        if (data?.error) setAiStudioReauthMsg(data.error);
+      }
+    } catch (e) {
+      window.open(bridgeUrl, "_blank");
+      setAiStudioReauthMsg(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAiStudioReauthBusy(false);
+    }
+  }, [apiBase]);
+
   const connectionState = connectionResult?.applicable === false
     ? "not-applicable"
     : connectionResult?.ok === true
@@ -166,6 +204,12 @@ export default function ProviderOverview({
             <dt>{t("modal.defaultModel")}</dt>
             <dd>{item.defaultModel ?? <span className="muted">—</span>}</dd>
           </div>
+          {isAiStudioWeb && (
+            <div className="pws-kv-row">
+              <dt>{t("pws.aiStudio")}</dt>
+              <dd>{aiStudioStatusText}</dd>
+            </div>
+          )}
           {item.note && (
             <div className="pws-kv-row">
               <dt>{t("pws.cell.note")}</dt>
@@ -173,6 +217,22 @@ export default function ProviderOverview({
             </div>
           )}
         </dl>
+        {isAiStudioWeb && needsAiStudioReauth && (
+          <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={aiStudioReauthBusy}
+              onClick={() => void handleAiStudioReauth()}
+            >
+              {/* oxlint-disable-next-line local-i18n/no-hardcoded-ui-strings -- labels for a11y test query; component text is driven by i18n below but oxlint rule fires on JSX string literals; functional display is t() via aiStudioCtaLabel */}
+              {aiStudioReauthBusy ? t("common.loading") : status !== "ready" ? t("pws.aiStudio.connect") : t("pws.reauthenticate")}
+            </button>
+            {aiStudioReauthMsg && (
+              <span role="status" className="muted">{aiStudioReauthMsg}</span>
+            )}
+          </div>
+        )}
         {apiBase && (
           <div className="row" style={{ marginTop: 12, alignItems: "center" }}>
             <button
