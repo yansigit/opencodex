@@ -360,8 +360,8 @@ async function gitWorkspaceInfo(cwd: string | undefined): Promise<GitWorkspaceIn
 export async function commandCodeConfig(cwd: string | undefined, sessionId?: string): Promise<Record<string, unknown>> {
   const cacheKey = sessionId ? `${sessionId}:${cwd ?? ""}` : (cwd ?? "");
   const now = Date.now();
+  const cached = cacheKey ? workspaceConfigCache.get(cacheKey) : undefined;
   if (cacheKey) {
-    const cached = workspaceConfigCache.get(cacheKey);
     const ttl = sessionId ? SESSION_WORKSPACE_CONFIG_TTL_MS : WORKSPACE_METADATA_TTL_MS;
     if (cached && now - cached.collectedAt < ttl) return cached.value;
   }
@@ -382,10 +382,13 @@ export async function commandCodeConfig(cwd: string | undefined, sessionId?: str
       }
     } catch { /* workspace metadata is optional */ }
   }
+  structure.sort();
   const git = await gitWorkspaceInfo(cwd);
   const value = {
     ...(cwd ? { workingDir: cwd } : {}),
-    date: new Date().toISOString().slice(0, 10),
+    date: sessionId && typeof cached?.value.date === "string"
+      ? cached.value.date
+      : new Date(now).toISOString().slice(0, 10),
     environment: process.platform,
     structure,
     ...git,
