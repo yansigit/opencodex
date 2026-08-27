@@ -19,7 +19,7 @@ import {
   isKnownAdmissionKind,
   isKnownInboundProtocol,
   isKnownUsageSurface,
-  isCodexUsageAccountLogLabel,
+  isPersistableAccountLogLabel,
   isValidReasoningWireValue,
   readRecentUsageEntries,
   usageForFinalLog,
@@ -255,7 +255,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
-    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+    ...(isPersistableAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
@@ -373,7 +373,7 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-      ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+      ...(isPersistableAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
@@ -945,7 +945,7 @@ export function addFinalRequestLog(
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
-    ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel)
+    ...(isPersistableAccountLogLabel(logCtx.accountLogLabel)
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
@@ -1170,7 +1170,7 @@ export function sealRequestAttemptIdentity(
   if (!attempt) return;
   attempt.provider = provider;
   attempt.adapter = adapter;
-  if (isCodexUsageAccountLogLabel(accountLogLabel)) attempt.accountLogLabel = accountLogLabel;
+  if (isPersistableAccountLogLabel(accountLogLabel)) attempt.accountLogLabel = accountLogLabel;
 }
 
 export function noteAttemptSend(
