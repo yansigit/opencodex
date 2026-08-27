@@ -684,6 +684,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     }
     if (path === "/v1/ws/aistudio/status") return req.method === "GET";
     if (path === "/api/aistudio/session") return req.method === "POST";
+    if (path === "/api/aistudio/login/native") return req.method === "POST";
     if (path === "/aistudio/bridge" || path === "/aistudio/bridge.user.js") return req.method === "GET";
     return false;
   }
@@ -873,6 +874,16 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (readyzPath !== undefined) {
           return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
         }
+        if (url.pathname === "/api/aistudio/login/native" && req.method === "OPTIONS") {
+          const origin = req.headers.get("Origin");
+          if (origin && isAllowedRequestOrigin(req, policy)) {
+            return new Response(null, {
+              status: 204,
+              headers: { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization, X-OpenCodex-API-Key", Vary: "Origin, Access-Control-Request-Headers" },
+            });
+          }
+          return new Response(null, { status: 204, headers: corsHeaders(req, policy) });
+        }
         if (url.pathname === "/api/aistudio/session") {
           const origin = req.headers.get("Origin");
           if (isAiStudioSessionOrigin(origin)) {
@@ -998,6 +1009,36 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         const listenPort = (server.port ?? config.port) || 10100;
         const userScript = getAiStudioUserScript(listenPort);
         return new Response(userScript, { headers: { "Content-Type": "application/javascript; charset=utf-8" } });
+      }
+
+      if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
+        const host = req.headers.get("Host");
+        const loopback = (() => {
+          try {
+            const h = new URL(`http://${host ?? ""}`).hostname.toLowerCase().replace(/\.$/, "");
+            return h === "" || h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+          } catch { return true; }
+        })();
+        if (!loopback) {
+          const admission = resolveApiAuth(req, policy);
+          if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        }
+        if (process.platform !== "darwin") {
+          return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
+        }
+        // Interactive login spawns a native window and waits for user — do not await completion
+        // in the request handler (it would hang the proxy for minutes). Spawn detached and
+        // return immediately; failures surface when the session file is not yet written.
+        try {
+          const { getAiStudioNativeDaemonSourcePath } = await import("../oauth/aistudio-native-daemon");
+          const swiftSrc = getAiStudioNativeDaemonSourcePath();
+          const proc = Bun.spawn(["swift", swiftSrc, "--login"], { stdout: "inherit", stderr: "inherit" });
+          // Detach: do not await. If swift is missing, spawn throws synchronously and is caught below.
+          void proc;
+          return jsonResponse({ ok: true }, 200, req, policy);
+        } catch (err) {
+          return jsonResponse({ ok: false, error: String(err) }, 500, req, policy);
+        }
       }
 
       if (url.pathname === "/healthz" && req.method === "GET") {

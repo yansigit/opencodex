@@ -32,6 +32,9 @@ import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compac
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
 import { antigravityOAuthDestinationConfigError, getProviderTlsProfileStatus, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
+import { globalAiStudioRelayHub } from "./aistudio-ws-hub";
+import { cookieHeaderFromSession, loadAiStudioSession } from "../oauth/aistudio-session-sync";
+import { parseGoogleCookieJar, validateAiStudioCookies } from "../oauth/google-aistudio-auth";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -766,6 +769,24 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     if (typeof registryNote === "string" && registryNote.trim()) dto.note = registryNote;
     const codexAccountMode = providerCodexAccountMode(name, provider);
     if (codexAccountMode) dto.codexAccountMode = codexAccountMode;
+    if (effectiveGoogleMode(name, provider) === "ai-studio-web" || name === "google-aistudio") {
+      let hasAiStudioSession = false;
+      try {
+        const sess = loadAiStudioSession();
+        const cookieHeader = sess ? cookieHeaderFromSession(sess) : (provider.apiKey ?? "");
+        const jar = parseGoogleCookieJar(cookieHeader);
+        hasAiStudioSession = validateAiStudioCookies(jar).valid;
+        if (!hasAiStudioSession && provider.apiKey && provider.apiKey.trim()) hasAiStudioSession = true;
+      } catch {
+        hasAiStudioSession = !!(provider.apiKey && provider.apiKey.trim());
+      }
+      dto.hasAiStudioSession = hasAiStudioSession;
+      try {
+        dto.aiStudioRelayActive = globalAiStudioRelayHub.hasActiveSessions();
+      } catch {
+        dto.aiStudioRelayActive = false;
+      }
+    }
     providers[name] = dto;
   }
   return {
