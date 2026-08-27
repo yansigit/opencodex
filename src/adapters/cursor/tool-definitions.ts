@@ -675,20 +675,26 @@ export function buildCursorToolGuidanceSystemNote(
     codeMode
       ? `\`${CODEX_UNIFIED_EXEC_TOOL}\` is Codex code mode: its body is JavaScript evaluated in a V8 isolate, not a shell command and not Node. Shell, file edits, and MCP are nested helpers called INSIDE that body as \`await tools.<name>(...)\`, for example \`await tools.exec_command({cmd: \"ls\"})\`. When commands require network access, file writes outside workspace, or fail due to sandbox/permission restrictions, pass \`sandbox_permissions: "require_escalated"\` and a clear \`justification: "..."\` to \`tools.exec_command\`. Read the tool description and the isolate global \`ALL_TOOLS\` (not \`tools.ALL_TOOLS\`) for helpers this turn provides; absence from the top-level catalog or from \`exec\`'s description is not absence. Those nested helpers are not themselves top-level tools, so do not call \`exec_command\` or \`shell_command\` at the top level here${codeModeOtherTopLevelNames.length > 0 ? `; every other tool this turn lists, including ${quotedNames(codeModeOtherTopLevelNames)}, remains callable at the top level as usual` : ""}. Your tool list may display tools under a longer \`mcp_opencodex-responses_*\` name; call whichever your list shows. Nested \`tools.apply_patch(input)\` is host-executed: the string must begin exactly with \`*** Begin Patch\` and end with \`*** End Patch\` (no trailing \`***\` on those lines). OpenCodex does not rewrite JavaScript inside exec, so a decorated \`*** Begin Patch ***\` envelope is rejected by Codex before the file is touched.`
       : undefined,
-  codeMode
-    ? "In code mode the isolate returns nothing on its own: call `text(...)` (or `notify(...)`) on any value you need to see, or the call completes with empty output. There is no `require`, no `module`, and no filesystem or network globals; reach the host only through the nested helpers."
-    : undefined,
-  codeMode
-    ? "To read, search, or inspect files or run CLI commands, call `await tools.exec_command({ cmd: '...' })` inside `exec`. Do not write Node.js scripts or `require('fs')`."
-    : undefined,
-   hasBareExec
+    codeMode
+      ? "In code mode the isolate returns nothing on its own: call `text(...)` (or `notify(...)`) on any value you need to see, or the call completes with empty output. There is no `require`, no `module`, and no filesystem or network globals; reach the host only through the nested helpers."
+      : undefined,
+    codeMode
+      ? "To read, search, or inspect files or run CLI commands, call `await tools.exec_command({ cmd: '...' })` inside `exec`. Do not write Node.js scripts or `require('fs')`."
+      : undefined,
+    codeMode
+      ? "NEVER attempt Cursor-native Shell, Read, Grep, List, or any tool absent from the catalog — they are not executed in this environment and every probe wastes a turn. The exec code cell (with its nested helpers) is the ONLY execution surface; go to it directly on the FIRST attempt and do not narrate switching surfaces."
+      : undefined,
+    hasBareExec
       ? `${shellBridgeLabel} is the Codex Responses shell bridge for this turn, exposed through Cursor's tool protocol; it is not an external MCP server tool. \`shell_command\` and \`exec_command\` are aliases of the same bridge.`
       : undefined,
     hasBareExec
       ? "Your tool list may display it under a longer `mcp_opencodex-responses_shell_command` / `mcp_opencodex-responses_exec_command` name; those are the SAME tool — call whichever your list shows, and do not comment on the naming difference to the user."
       : undefined,
     hasBareExec
-      ? `Prefer the Codex shell bridge over Cursor-native Shell/Read. If a Cursor-native file read, directory listing, grep, or shell operation is rejected, continue with the listed catalog tool ${shellBridgeLabel}.`
+      ? `NEVER attempt Cursor-native Shell, Read, Grep, List, or any tool not in the catalog above — they are not executed locally in this environment and every attempt wastes a turn and can stall the session. ${shellBridgeLabel} is the ONLY shell surface; go to it directly on the FIRST attempt, never as a fallback after probing a native tool. Do not narrate switching surfaces ("native is blocked, using the bridge instead") — there is exactly one surface.`
+      : undefined,
+    hasBareExec
+      ? "Tool-selection commentary is forbidden: for any shell, read, grep, list, or file operation, your FIRST visible action is the bridge call itself — never a sentence about which tool you will use, which tool was redirected, or switching surfaces. Words like 차단/전환/blocked/switching must not appear in your output for tool-routing reasons."
       : undefined,
     hasBareExec
       ? 'When a command requires network access, file writes outside workspace, or fails due to sandbox restrictions, include `sandbox_permissions: "require_escalated"` and `justification: "..."`.'
@@ -702,6 +708,9 @@ export function buildCursorToolGuidanceSystemNote(
       ? structuredEditNames.length > 0
         ? `For file edits, prefer the structured edit tools ${quotedNames(structuredEditNames)} — they take replacements that OpenCodex converts into Codex \`apply_patch\` changes. Include exact leading whitespace in old_string/new_string. Use \`apply_patch\` directly only with a \`*** Begin Patch\` envelope and bare \`@@\` hunks (never git-style \`@@ -n,m +n,m @@\`); never emit patch-like plain text as tool arguments.`
         : "For file edits, use the `apply_patch` tool, not built-in file write/delete tools."
+      : undefined,
+    hasApplyPatch
+      ? "Creating or modifying file CONTENT via shell redirection (`>`, `>>`, `printf`/`echo` into a file, `cat <<EOF`, `sed -i`) is forbidden while apply_patch or the structured edit tools are advertised — use those edit tools so the change is reviewable. Shell output redirection is fine for logs/scratch pipes that are not the deliverable file."
       : undefined,
     hasBareExec
       ? "For tool-count demos, each counted tool must be a separate Codex shell-bridge invocation/result; do not collapse several requested tools into one chained shell command."
