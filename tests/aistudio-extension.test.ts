@@ -34,8 +34,11 @@ describe("Google AI Studio Chrome/Brave Extension", () => {
     expect(code).toContain("maker_suite_browser_window_id");
     // btoa serialization
     expect(code).toContain("btoa");
-    // Auto-sync endpoint
-    expect(code).toContain("http://127.0.0.1:10100/api/aistudio/session");
+    // Auto-sync: dynamic port via chrome.storage.local
+    expect(code).toContain("proxyPort");
+    expect(code).toContain("chrome.storage.local.get");
+    expect(code).toContain("/api/aistudio/session");
+    expect(code).toContain("`http://127.0.0.1:${port}/api/aistudio/session`");
     expect(code).toContain("btnAutoSync");
     expect(code).toContain("btnCopyBundle");
     expect(code).toContain("x-opencodex-api-key");

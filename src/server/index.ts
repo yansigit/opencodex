@@ -158,6 +158,16 @@ import {
   withCors,
   withManagementCors,
 } from "./auth-cors";
+function isAiStudioSessionOrigin(origin: string | null): boolean {
+  return !!origin && (origin.startsWith("chrome-extension://") || origin === "https://aistudio.google.com");
+}
+
+function withAiStudioSessionCors(resp: Response, req: Request): Response {
+  const origin = req.headers.get("Origin");
+  if (isAiStudioSessionOrigin(origin) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
+  return resp;
+}
+
 export {
   assertServerAuthConfig,
   corsHeaders,
@@ -865,16 +875,14 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         }
         if (url.pathname === "/api/aistudio/session") {
           const origin = req.headers.get("Origin");
-          const isAistudioAllowedOrigin =
-            origin?.startsWith("chrome-extension://") || origin === "https://aistudio.google.com";
-          if (isAistudioAllowedOrigin && origin) {
+          if (isAiStudioSessionOrigin(origin)) {
             return new Response(null, {
               status: 204,
               headers: {
-                "Access-Control-Allow-Origin": origin,
-                "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                "Access-Control-Allow-Origin": origin as string,
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
                 "Access-Control-Allow-Headers": "Content-Type, Authorization, X-OpenCodex-API-Key",
-                Vary: "Origin",
+                Vary: "Origin, Access-Control-Request-Headers",
               },
             });
           }
@@ -954,12 +962,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
         const admission = resolveApiAuth(req, policy);
         if (!admission) {
-          return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+          return withAiStudioSessionCors(withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy), req);
         }
         const origin = req.headers.get("Origin");
-        const isExtensionOrigin = origin?.startsWith("chrome-extension://");
-        if (!isAllowedRequestOrigin(req, policy) && origin !== "https://aistudio.google.com" && !isExtensionOrigin) {
-          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
+        if (!isAllowedRequestOrigin(req, policy) && !isAiStudioSessionOrigin(origin)) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req);
         }
         try {
           const bodyJson = (await req.json()) as any;
@@ -973,22 +980,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
               cookies: bodyJson.cookies,
             });
           } else {
-            const resp = withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy);
-            const o = req.headers.get("Origin");
-            if (o?.startsWith("chrome-extension://") || o === "https://aistudio.google.com") resp.headers.set("Access-Control-Allow-Origin", o);
-            return resp;
+            return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req);
           }
-          {
-            const resp = withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy);
-            const o = req.headers.get("Origin");
-            if (o?.startsWith("chrome-extension://") || o === "https://aistudio.google.com") resp.headers.set("Access-Control-Allow-Origin", o);
-            return resp;
-          }
+          return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req);
         } catch (err) {
-          const resp = withCors(jsonResponse({ error: String(err) }, 400), req, policy);
-          const o = req.headers.get("Origin");
-          if (o?.startsWith("chrome-extension://") || o === "https://aistudio.google.com") resp.headers.set("Access-Control-Allow-Origin", o);
-          return resp;
+          return withAiStudioSessionCors(withCors(jsonResponse({ error: String(err) }, 400), req, policy), req);
         }
       }
 
