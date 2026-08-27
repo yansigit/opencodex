@@ -669,10 +669,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (path === "/v1/realtime" || path === "/v1/live") {
       return req.headers.get("upgrade")?.toLowerCase() === "websocket";
     }
-    if (path === "/v1/ws/aistudio") {
+    if (path === "/v1/ws/aistudio" || path === "/aistudio/ws") {
       return req.headers.get("upgrade")?.toLowerCase() === "websocket";
     }
     if (path === "/v1/ws/aistudio/status") return req.method === "GET";
+    if (path === "/api/aistudio/session") return req.method === "POST";
     if (path === "/aistudio/bridge" || path === "/aistudio/bridge.user.js") return req.method === "GET";
     return false;
   }
@@ -909,7 +910,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
       }
 
-      if (url.pathname === "/v1/ws/aistudio") {
+      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws") {
         if (isDraining()) return drainingResponse(req, policy);
         const admission = resolveApiAuth(req, policy);
         if (!admission) {
@@ -932,6 +933,32 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           activeSessions: globalAiStudioRelayHub.getActiveSessionCount(),
           hasActiveSessions: globalAiStudioRelayHub.hasActiveSessions(),
         });
+      }
+
+      if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
+        const origin = req.headers.get("Origin");
+        const isExtensionOrigin = origin?.startsWith("chrome-extension://");
+        if (!isAllowedRequestOrigin(req, policy) && origin !== "https://aistudio.google.com" && !isExtensionOrigin) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
+        }
+        try {
+          const bodyJson = (await req.json()) as any;
+          const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
+          if (bodyJson.token && typeof bodyJson.token === "string") {
+            saveAiStudioSessionFromToken(bodyJson.token);
+          } else if (Array.isArray(bodyJson.cookies)) {
+            saveAiStudioSession({
+              selectedProject: bodyJson.selectedProject || "",
+              windowId: bodyJson.windowId || "",
+              cookies: bodyJson.cookies,
+            });
+          } else {
+            return withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy);
+          }
+          return withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy);
+        } catch (err) {
+          return withCors(jsonResponse({ error: String(err) }, 400), req, policy);
+        }
       }
 
       if (url.pathname === "/aistudio/bridge" && req.method === "GET") {

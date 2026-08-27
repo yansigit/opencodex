@@ -105,4 +105,27 @@ describe("AiStudioRelayHub — connection management and request multiplexing", 
     hub.handleClientMessage("sess_1", JSON.stringify({ id: requestId, type: "stream_end", payload: {} }));
     await expect(next).resolves.toMatchObject({ done: true });
   });
+
+  test("aborts pending request when AbortSignal triggers", async () => {
+    const hub = createAiStudioRelayHub();
+    const sentMessages: string[] = [];
+    const ws = { send: (data: string) => { sentMessages.push(data); }, close: () => {} };
+    hub.registerSession("sess_1", ws as any);
+
+    const controller = new AbortController();
+    const streamResult = await hub.dispatchStream(
+      { url: "https://example.test/stream", method: "POST" },
+      controller.signal,
+    );
+
+    const initialMsg = JSON.parse(sentMessages[0]!);
+    expect(initialMsg.type).toBe("http_request");
+
+    controller.abort();
+
+    expect(sentMessages.length).toBe(2);
+    const abortMsg = JSON.parse(sentMessages[1]!);
+    expect(abortMsg.type).toBe("abort");
+    expect(abortMsg.id).toBe(initialMsg.id);
+  });
 });

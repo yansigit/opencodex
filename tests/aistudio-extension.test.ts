@@ -13,9 +13,42 @@ describe("Google AI Studio Chrome/Brave Extension", () => {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
     expect(manifest.manifest_version).toBe(3);
     expect(manifest.name).toContain("AI Studio");
+    expect(manifest.permissions).toContain("cookies");
+    expect(manifest.permissions).toContain("storage");
     expect(manifest.permissions).toContain("tabs");
+    expect(manifest.permissions).toContain("scripting");
     expect(manifest.host_permissions).toContain("https://aistudio.google.com/*");
     expect(manifest.host_permissions).toContain("https://*.clients6.google.com/*");
+    expect(manifest.host_permissions).toContain("http://127.0.0.1/*");
+  });
+
+  test("popup.js implements harvesting of SAPISID, selectedProject, windowId, btoa token and sync", () => {
+    const popupJsPath = join(EXT_DIR, "popup.js");
+    expect(existsSync(popupJsPath)).toBe(true);
+    const code = readFileSync(popupJsPath, "utf-8");
+
+    // SAPISID cookie check
+    expect(code).toContain("SAPISID");
+    // localStorage & sessionStorage harvesting
+    expect(code).toContain("selectedProject");
+    expect(code).toContain("maker_suite_browser_window_id");
+    // btoa serialization
+    expect(code).toContain("btoa");
+    // Auto-sync endpoint
+    expect(code).toContain("http://127.0.0.1:10100/api/aistudio/session");
+    expect(code).toContain("btnAutoSync");
+    expect(code).toContain("btnCopyBundle");
+  });
+
+  test("popup.html contains auto-sync, copy, and status elements", () => {
+    const popupHtmlPath = join(EXT_DIR, "popup.html");
+    expect(existsSync(popupHtmlPath)).toBe(true);
+    const html = readFileSync(popupHtmlPath, "utf-8");
+
+    expect(html).toContain('id="btnAutoSync"');
+    expect(html).toContain('id="btnCopyBundle"');
+    expect(html).toContain('id="exportStatus"');
+    expect(html).toContain('id="status"');
   });
 
   test("content.js exists for direct aistudio.google.com page execution", () => {
