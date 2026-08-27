@@ -144,6 +144,9 @@ export function scanListenPids(port: number): ListenPidScan {
           .filter(pid => Number.isSafeInteger(pid) && pid > 0),
       };
     } catch (lsofErr) {
+      if (lsofErr && typeof lsofErr === "object" && "status" in lsofErr && lsofErr.status === 1) {
+        return { ok: true, pids: [] };
+      }
       try {
         const output = execFileSync("netstat", ["-anlp"], {
           encoding: "utf-8",
