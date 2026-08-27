@@ -19,6 +19,7 @@ import {
   type ExecServerMessage,
 } from "./gen/agent_pb";
 import { errorText, execBytes, execStreamCloseBytes } from "./native-exec-common";
+export { nativeShellDisabledMessage, type CursorNativeExecPolicyContext } from "./native-exec-policy";
 import { nativeShellDisabledMessage, type CursorNativeExecPolicyContext } from "./native-exec-policy";
 import {
   createAdmissionGate,

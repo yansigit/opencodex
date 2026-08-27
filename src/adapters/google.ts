@@ -49,6 +49,8 @@ import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../reasoning-effort";
 import { normalizeAntigravityProviderError } from "../oauth/antigravity-routing";
 import { buildAiStudioHeaders, parseGoogleCookieJar } from "../oauth/google-aistudio-auth";
+import { cookieHeaderFromSession, loadAiStudioSession } from "../oauth/aistudio-session-sync";
+import { parseMakerSuiteChunk } from "./google-aistudio-parser";
 import { globalAiStudioRelayHub } from "../server/aistudio-ws-hub";
 
 const INLINE_ERROR_URL_USERINFO = /https?:\/\/[^\s"'<>]*@/gi;
@@ -1017,12 +1019,15 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       if (provider.googleMode === "ai-studio-web") {
         const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
         const url = `${base}/v1internal:${method}${streamParam}`;
-        const cookieInput = provider.apiKey || provider.headers?.["Cookie"] || "";
+        const cookieInput = provider.apiKey || provider.headers?.["Cookie"] || cookieHeaderFromSession(loadAiStudioSession()) || "";
         const jar = parseGoogleCookieJar(cookieInput);
         const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");
         Object.assign(headers, aiStudioHeaders);
         const compiled = compileGoogleWireBody({ ...body, model: routedModelId });
         restoreGoogleToolName = compiled.restoreToolName;
+        if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
+          ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents, routedModelId);
+        }
         emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
         return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
       }
@@ -1340,6 +1345,16 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
               if (result === "content") sawContentEvent = true;
               continue;
             }
+            if (provider.googleMode === "ai-studio-web") {
+              const parsed = parseMakerSuiteChunk(line);
+              if (parsed.text) {
+                sawAnyFrame = true;
+                sawTerminalSignal = true;
+                sawContentEvent = true;
+                yield { type: "text_delta", text: parsed.text };
+                continue;
+              }
+            }
             sawLiveness = true;
             if (line.startsWith(":") || !line.trim()) continue;
             debugDroppedFrame("google", line);
@@ -1360,6 +1375,14 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
               }
             } catch (err) {
               void err;
+            }
+            if (provider.googleMode === "ai-studio-web") {
+              const parsed = parseMakerSuiteChunk(residual);
+              if (parsed.text) {
+                yield { type: "text_delta", text: parsed.text };
+                yield { type: "done" };
+                return;
+              }
             }
             yield { type: "error", message: `upstream non-SSE response: ${residual.slice(0, 300)}` };
             return;
@@ -1413,7 +1436,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       // buffered adapter entry point, so collect the exact same events parseStream emits
       // instead of maintaining a second CCA JSON parser.
       const isSse = response.headers.get("content-type")?.includes("text/event-stream") ?? false;
-      if (provider.googleMode === "cloud-code-assist" && isSse) {
+      if ((provider.googleMode === "cloud-code-assist" && isSse) || provider.googleMode === "ai-studio-web") {
         const events: AdapterEvent[] = [];
         let previousTail: AdapterEvent | undefined;
         try {

@@ -38,6 +38,7 @@ export const FORWARD_HEADERS = [
   "x-codex-beta-features",
   "x-codex-installation-id",
   "x-codex-parent-thread-id",
+  "x-session-id",
   "x-codex-turn-metadata",
   "x-codex-turn-state",
   "x-codex-window-id",

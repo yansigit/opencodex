@@ -2,6 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { createAiStudioRelayHub, type AiStudioRelayHub } from "../src/server/aistudio-ws-hub";
 
 describe("AiStudioRelayHub — connection management and request multiplexing", () => {
+  test("does not log raw client payloads", () => {
+    const hub = createAiStudioRelayHub();
+    const original = console.log;
+    const lines: unknown[][] = [];
+    console.log = (...args: unknown[]) => { lines.push(args); };
+    try {
+      hub.handleClientMessage("missing", 'not-json-cookie=secret');
+    } finally {
+      console.log = original;
+    }
+    expect(JSON.stringify(lines)).not.toContain("cookie=secret");
+  });
   test("registers and unregisters browser websocket sessions", () => {
     const hub = createAiStudioRelayHub();
     expect(hub.hasActiveSessions()).toBe(false);
@@ -104,5 +116,28 @@ describe("AiStudioRelayHub — connection management and request multiplexing", 
     expect(outcome).toBe("pending");
     hub.handleClientMessage("sess_1", JSON.stringify({ id: requestId, type: "stream_end", payload: {} }));
     await expect(next).resolves.toMatchObject({ done: true });
+  });
+
+  test("aborts pending request when AbortSignal triggers", async () => {
+    const hub = createAiStudioRelayHub();
+    const sentMessages: string[] = [];
+    const ws = { send: (data: string) => { sentMessages.push(data); }, close: () => {} };
+    hub.registerSession("sess_1", ws as any);
+
+    const controller = new AbortController();
+    const streamResult = await hub.dispatchStream(
+      { url: "https://example.test/stream", method: "POST" },
+      controller.signal,
+    );
+
+    const initialMsg = JSON.parse(sentMessages[0]!);
+    expect(initialMsg.type).toBe("http_request");
+
+    controller.abort();
+
+    expect(sentMessages.length).toBe(2);
+    const abortMsg = JSON.parse(sentMessages[1]!);
+    expect(abortMsg.type).toBe("abort");
+    expect(abortMsg.id).toBe(initialMsg.id);
   });
 });

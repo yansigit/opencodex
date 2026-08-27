@@ -25,6 +25,9 @@ describe("Google AI Studio Native Hardened WebKit Daemon", () => {
     // 5. UserScript injection connecting to local opencodex ws hub
     expect(code).toContain("WKUserScript");
     expect(code).toContain("/v1/ws/aistudio");
+    expect(code).toContain("posixPermissions");
+    expect(code).toContain("JSONSerialization.data(withJSONObject:");
+    expect(code).toContain("cMap[\"domain\"]");
   });
 
   test.skipIf(process.platform !== "darwin")("swiftc compiles main.swift successfully", async () => {

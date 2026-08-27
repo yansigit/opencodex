@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8">
-    <title>OpenCodex AI Studio Relay</title>
+    <title>OpenCodex AI Studio Relay & Exporter</title>
     <style>
       body {
         font-family: system-ui, -apple-system, sans-serif;
@@ -10,7 +10,8 @@
         color: #e2e4e9;
         margin: 0;
         padding: 1rem;
-        width: 260px;
+        width: 300px;
+        line-height: 1.4;
       }
       h3 {
         margin: 0 0 0.5rem 0;
@@ -37,6 +38,34 @@
         font-size: 0.85rem;
         color: #9ca3af;
       }
+      .btn {
+        display: block;
+        width: 100%;
+        padding: 0.5rem;
+        background: #2563eb;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        margin-top: 0.6rem;
+        text-align: center;
+        box-sizing: border-box;
+      }
+      .btn:hover {
+        background: #1d4ed8;
+      }
+      .btn-secondary {
+        background: #374151;
+      }
+      .btn-secondary:hover {
+        background: #4b5563;
+      }
+      #exportStatus {
+        font-size: 0.8rem;
+        margin-top: 0.5rem;
+        min-height: 1.2rem;
+      }
       a {
         color: #60a5fa;
         text-decoration: none;
@@ -48,10 +77,22 @@
   </head>
   <body>
     <h3>OpenCodex AI Studio</h3>
-    <div id="status" class="badge disconnected">Checking...</div>
+    <div id="status" class="badge disconnected">Checking relay...</div>
     <p id="details">Connecting to local opencodex...</p>
-    <p><a href="https://aistudio.google.com" target="_blank">Open AI Studio ↗</a></p>
+
+    <hr style="border: 0; border-top: 1px solid #2d2f34; margin: 0.8rem 0;">
+
+    <p style="font-weight: 600; color: #f3f4f6; margin-bottom: 0.2rem;">⚡ 1-Click Session Exporter</p>
+    <p style="font-size: 0.78rem;">Export your active Brave Google session & project ID into OpenCodex with full Passkey support.</p>
+
+    <label for="proxyApiKey" style="font-size: 0.78rem; color: #9ca3af;">Proxy API key (only needed for remote binds)</label>
+    <input id="proxyApiKey" type="password" autocomplete="off" placeholder="Optional" style="display:block; width:100%; box-sizing:border-box; margin-top:0.25rem; padding:0.4rem; border-radius:4px; border:1px solid #374151; background:#111827; color:#e2e4e9;">
+    
+    <button id="btnAutoSync" class="btn">⚡ Auto-Sync to OpenCodex</button>
+    <button id="btnCopyBundle" class="btn btn-secondary">📋 Copy Session Token</button>
+    <div id="exportStatus"></div>
+
+    <p style="margin-top: 0.8rem;"><a href="https://aistudio.google.com/prompts/new_chat" target="_blank">Open AI Studio Tab ↗</a></p>
     <script src="popup.js"></script>
   </body>
 </html>
-
