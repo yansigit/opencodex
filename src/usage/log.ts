@@ -52,7 +52,7 @@ export interface PersistedUsageAttempt {
   sendCount: number;
   recoveryKinds: AttemptRecoveryKind[];
   usageStatus: UsageStatus;
-  /** Stable non-PII identity for the Codex pool account that served this attempt. */
+  /** Stable non-PII identity for the account that served this attempt. */
   accountLogLabel?: CodexUsageAccountLogLabel;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
@@ -81,7 +81,7 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
+  /** Stable non-PII identity for account usage; absent for unauthenticated traffic. */
   accountLogLabel?: CodexUsageAccountLogLabel;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;

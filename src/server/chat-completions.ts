@@ -9,6 +9,7 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import {
   assertChatCompletionsRoutingBody,
   ChatCompletionsRequestError,
+  copyChatResponsesSessionHeaders,
   chatCompletionsToResponsesBody,
 } from "../chat/inbound";
 import {
@@ -201,6 +202,7 @@ async function handleChatCompletionsWithBudget(
     const value = req.headers.get(name);
     if (value) headers.set(name, value);
   }
+  copyChatResponsesSessionHeaders(req.headers, headers);
   // Prefer main ChatGPT auth so OpenAI-backed sidecars remain reachable on routed turns.
   if (!directRoute) {
     // This enrichment is optional for routed/non-main providers. If native main

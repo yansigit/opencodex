@@ -24,10 +24,10 @@ async function waitForProxy(port: number): Promise<boolean> {
   // A cold detached proxy takes ~2s locally, but this test runs inside a CI
   // batch of twelve files on a shared runner, where the same boot has been
   // observed to blow a 15s budget and fail the whole shard. The test's own
-  // Bun timeout is 60s, so the readiness wait may use most of that: this
+  // Bun timeout is 90s, so the readiness wait may use most of that: this
   // deadline exists to stop a hung proxy, not to assert a boot deadline the
   // suite never intended to enforce.
-  const deadline = Date.now() + 45_000;
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     try {
       const response = await fetch(`http://127.0.0.1:${port}/healthz`, {
@@ -234,7 +234,7 @@ esac
         rmSync(root, { recursive: true, force: true });
       }
     },
-    60_000,
+    90_000,
   );
 
   test("both update paths surface an incomplete manifest-backed history restore after the stop", () => {

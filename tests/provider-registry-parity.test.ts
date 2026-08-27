@@ -501,13 +501,13 @@ describe("provider registry parity", () => {
     expect(moonshot?.preserveReasoningContentModels).toContain("kimi-k3");
   });
 
-  test("LiteLLM is the only registry seed with optional key authentication", () => {
+  test("optional-key registry seeds are explicitly opt-in", () => {
     const litellm = PROVIDER_REGISTRY.find(entry => entry.id === "litellm");
     const optionalKeyProviders = PROVIDER_REGISTRY.filter(entry => entry.keyOptional).map(entry => entry.id);
 
     expect(litellm?.authKind).toBe("key");
     expect(providerConfigSeed(litellm!).keyOptional).toBe(true);
-    expect(optionalKeyProviders).toEqual(["litellm", "opencode-free", "mimo-free"]);
+    expect(optionalKeyProviders).toEqual(["google-aistudio", "litellm", "opencode-free", "mimo-free"]);
   });
 
   test("NVIDIA NIM is free-tier priced but still requires an API key", () => {
@@ -760,7 +760,7 @@ describe("provider registry parity", () => {
     const featured = deriveFeaturedProviderIds();
     expect(featured).toEqual([
       "openai", "xai", "command-code", "anthropic", "anthropic-apikey", "kimi", "nous", "openai-apikey", "umans", "opencode-go", "openrouter",
-      "groq", "google", "azure-openai", "ollama", "vllm", "lm-studio", "opencode-free",
+      "groq", "google", "google-aistudio", "azure-openai", "ollama", "vllm", "lm-studio", "opencode-free",
       "mimo-free",
     ]);
 
@@ -838,6 +838,9 @@ describe("provider registry parity", () => {
       "google-antigravity": "google",
       "antigravity": "google",
       "gemini-antigravity": "google",
+      "google-aistudio": "google",
+      aistudio: "google",
+      "gemini-aistudio": "google",
       deepseek: "deepseek",
       moonshot: "moonshot",
       minimax: "minimax",

@@ -398,6 +398,9 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
     authMode: canonicalAuthMode,
     apiKey: resolvedApiKey,
     ...(staticModelCatalog ? { liveModels: false } : {}),
+    ...(provider.requestPacing === undefined && registryEntry.requestPacing
+      ? { requestPacing: structuredClone(registryEntry.requestPacing) }
+      : {}),
     ...(headers ? { headers } : {}),
     // Backfill the Google wire mode + Vertex project/location from the registry when the user
     // config omits them, so a minimal `google-vertex`/`google-antigravity` entry still routes

@@ -49,7 +49,7 @@ export interface DerivedKeyLoginProvider {
   thinkingBudgetModels?: string[];
   escapeBuiltinToolNames?: boolean;
   openaiChatEofTolerance?: boolean;
-  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
+  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web";
   project?: string;
   location?: string;
 }

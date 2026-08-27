@@ -721,6 +721,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "disabled",
       "allowPrivateNetwork",
       "authMode",
+      "googleMode",
       "apiKeyTransport",
       "keyOptional",
       "freeTier",

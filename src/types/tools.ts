@@ -47,15 +47,39 @@ export function normalizeDeclaredToolName(
   name: string,
   declared: ReadonlySet<string> | undefined,
 ): string {
-  if (!declared || !declared.has("exec")) return name;
+  if (!declared) return name;
   if (declared.has(name)) return name;
-  // When the catalog explicitly declares any legacy shell bridge name, the environment
-  // genuinely exposes that tool — turn normalization off so a call is never mis-routed
-  // to `exec`.
-  if ((LEGACY_SHELL_BRIDGE_TOOL_NAMES as readonly string[]).some(legacy => declared.has(legacy))) {
-    return name;
+  if (declared.has("exec")) {
+    // When the catalog explicitly declares any legacy shell bridge name, the environment
+    // genuinely exposes that tool — turn normalization off so a call is never mis-routed
+    // to exec.
+    if ((LEGACY_SHELL_BRIDGE_TOOL_NAMES as readonly string[]).some(legacy => declared.has(legacy))) {
+      return name;
+    }
+    if ((LEGACY_SHELL_BRIDGE_TOOL_NAMES as readonly string[]).includes(name)) {
+      return "exec";
+    }
   }
-  return (LEGACY_SHELL_BRIDGE_TOOL_NAMES as readonly string[]).includes(name) ? "exec" : name;
+  // When a model strips the namespace prefix (e.g. Gemini calling bare exec for default_api:exec),
+  // or replaces non-alphanumeric separators with underscores, resolve it if and only if exactly
+  // one declared tool matches.
+  {
+    let matched: string | undefined;
+    for (const dec of declared) {
+      const matchesSuffix = !name.includes(":") && !name.includes("__") && (dec.endsWith(":" + name) || dec.endsWith("__" + name));
+      const matchesSanitized = dec.replace(/[^A-Za-z0-9_-]/g, "_") === name;
+      if (matchesSuffix || matchesSanitized) {
+        if (matched !== undefined) {
+          return name;
+        }
+        matched = dec;
+      }
+    }
+    if (matched !== undefined) {
+      return matched;
+    }
+  }
+  return name;
 }
 
 export function toolChoiceAliases(tool: Pick<OcxTool, "namespace" | "name">): string[] {

@@ -89,6 +89,17 @@ const KIMI_PRICING = "https://platform.kimi.ai/docs/pricing (official table; cac
 // anywhere. Cache stays 0 rather than inheriting the reseller's 0.15 — a reseller number
 // under a vendor-price label would be a wrong value wearing a verified badge.
 const QWEN38_MAX_PRICING = "https://qwen.ai/blog?id=qwen3.8 (Qwen release announcement; no Model Studio billing row yet; cache rates unpublished -> 0)";
+const COMMAND_CODE_PRICING = "https://commandcode.ai/models + https://commandcode.ai/models.data (official model manifest)";
+const COMMAND_CODE_VERIFIED_AT = "2026-08-26";
+const CURSOR_DOCS_PRICING = "https://cursor.com/docs/models-and-pricing";
+const CURSOR_GROK_46: Cost4 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
+const CURSOR_GROK_45: Cost4 = { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 };
+const CURSOR_COMPOSER_1: Cost4 = { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 };
+const CURSOR_COMPOSER_25: Cost4 = { input: 0.5, output: 2.5, cacheRead: 0.2, cacheWrite: 0 };
+const CURSOR_COMPOSER_25_FAST: Cost4 = { input: 3, output: 15, cacheRead: 0.5, cacheWrite: 0 };
+const CURSOR_GROK_46_FAST: Cost4 = { input: 4, output: 12, cacheRead: 1, cacheWrite: 0 };
+const CURSOR_GROK_45_FAST: Cost4 = { input: 4, output: 18, cacheRead: 1, cacheWrite: 0 };
+const CLAUDE_OPUS_FAST: Cost4 = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 };
 
 export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   // claude-opus-5 is exposed by three providers but absent from the jawcode bundle, so
@@ -179,6 +190,16 @@ export const EXPECTED_PRICE_OVERLAYS: readonly ExpectedPriceOverlay[] = [
   { provider: "alibaba-token-plan-intl", modelId: "qwen3.8-max", cost4: QWEN38_MAX, source: QWEN38_MAX_PRICING, verifiedAt: "2026-08-04", status: "verified" },
   // Cursor Auto router — Cursor's published fixed token price (verified).
   { provider: "cursor", modelId: "auto", cost4: { input: 1.25, output: 6, cacheRead: 0.25, cacheWrite: 1.25 }, source: "https://docs.cursor.com/account/pricing + https://cursor.com/blog/aug-2025-pricing", verifiedAt: "2026-07-20", status: "verified" },
+  // Cursor-specific native models (verified from official docs).
+  { provider: "cursor", modelId: "grok-4.6", cost4: CURSOR_GROK_46, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "grok-4.5", cost4: CURSOR_GROK_45, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "composer-1", cost4: CURSOR_COMPOSER_1, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "composer-2.5", cost4: CURSOR_COMPOSER_25, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "composer-2.5-fast", cost4: CURSOR_COMPOSER_25_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "grok-4.6-fast", cost4: CURSOR_GROK_46_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "grok-4.5-fast", cost4: CURSOR_GROK_45_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "claude-opus-5-fast", cost4: CLAUDE_OPUS_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
+  { provider: "cursor", modelId: "claude-opus-4-8-fast", cost4: CLAUDE_OPUS_FAST, source: CURSOR_DOCS_PRICING, verifiedAt: "2026-08-26", status: "verified" },
 ];
 
 /**
@@ -195,6 +216,68 @@ export const VERIFIED_PRICE_OVERRIDES: readonly ExpectedPriceOverlay[] = [
     verifiedAt: "2026-08-18",
     status: "verified",
   },
+  // Command Code official model catalog rates (sourced from https://commandcode.ai/models.data).
+  { provider: "command-code", modelId: "zai-org/GLM-5.3", cost4: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "zai-org/glm-5.3", cost4: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified-derived" },
+  { provider: "command-code", modelId: "zai-org/GLM-5.2", cost4: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "zai-org/glm-5.2", cost4: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified-derived" },
+  { provider: "command-code", modelId: "zai-org/GLM-5.2-Fast", cost4: { input: 3, output: 10.25, cacheRead: 0.5, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "zai-org/glm-5.2-fast", cost4: { input: 3, output: 10.25, cacheRead: 0.5, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified-derived" },
+  { provider: "command-code", modelId: "zai-org/GLM-5.1", cost4: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "zai-org/glm-5.1", cost4: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified-derived" },
+  { provider: "command-code", modelId: "zai-org/GLM-5", cost4: { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "zai-org/glm-5", cost4: { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified-derived" },
+  { provider: "command-code", modelId: "meta/muse-spark-1.2-contributor", cost4: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "meta/muse-spark-1.2", cost4: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "meta/muse-spark-1.1", cost4: { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "google/gemini-3.7-flash", cost4: { input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.04167 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "google/gemini-3.6-flash", cost4: { input: 1.5, output: 7.5, cacheRead: 0.15, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "google/gemini-3.5-flash", cost4: { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "google/gemini-3.5-flash-lite", cost4: { input: 0.3, output: 2.5, cacheRead: 0.03, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "google/gemini-3.1-flash-lite", cost4: { input: 0.25, output: 1.5, cacheRead: 0.03, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "deepseek/deepseek-v4-pro", cost4: { input: 0.66, output: 1.98, cacheRead: 0.022, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "deepseek/deepseek-v4-flash", cost4: { input: 0.22, output: 0.66, cacheRead: 0.007, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "deepseek/deepseek-v4-flash-vision-exp", cost4: { input: 0.22, output: 0.66, cacheRead: 0.007, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "Qwen/Qwen3.8-Max", cost4: { input: 2, output: 6, cacheRead: 0.25, cacheWrite: 2.5 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "Qwen/Qwen3.8-27B", cost4: { input: 0.4, output: 3, cacheRead: 0.04, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "Qwen/Qwen3.7-Max", cost4: { input: 2.5, output: 7.5, cacheRead: 0.5, cacheWrite: 3.13 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "Qwen/Qwen3.7-Plus", cost4: { input: 0.4, output: 1.6, cacheRead: 0.08, cacheWrite: 0.5 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "Qwen/Qwen3.7-Flash", cost4: { input: 0.03, output: 0.13, cacheRead: 0.006, cacheWrite: 0.038 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "Qwen/Qwen3.6-Max-Preview", cost4: { input: 1.3, output: 7.8, cacheRead: 0.26, cacheWrite: 1.63 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "Qwen/Qwen3.6-Plus", cost4: { input: 0.5, output: 3, cacheRead: 0.1, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "MiniMaxAI/MiniMax-M3", cost4: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "MiniMaxAI/MiniMax-M2.7", cost4: { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "MiniMaxAI/MiniMax-M2.5", cost4: { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "stepfun/Step-3.7-Flash", cost4: { input: 0.2, output: 1.15, cacheRead: 0.04, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "stepfun/Step-3.5-Flash", cost4: { input: 0.1, output: 0.3, cacheRead: 0.02, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "xiaomi/mimo-v2.5-pro", cost4: { input: 0.435, output: 0.87, cacheRead: 0.0036, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "xiaomi/mimo-v2.5", cost4: { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "nvidia/nemotron-3-ultra-550b-a55b", cost4: { input: 0.6, output: 2.4, cacheRead: 0.12, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "tencent/hy3-paid", cost4: { input: 0.14, output: 0.58, cacheRead: 0.035, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "moonshotai/Kimi-K3", cost4: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "moonshotai/Kimi-K2.7-Code", cost4: { input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "moonshotai/Kimi-K2.7-Code-Highspeed", cost4: { input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "moonshotai/Kimi-K2.6", cost4: { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "moonshotai/Kimi-K2.5", cost4: { input: 0.6, output: 3, cacheRead: 0.1, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "claude-fable-5", cost4: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "claude-opus-5", cost4: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "claude-opus-4-8", cost4: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "claude-opus-4-7", cost4: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "claude-sonnet-5", cost4: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "claude-sonnet-4-6", cost4: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "claude-haiku-4-5", cost4: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "gpt-5.6-sol", cost4: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 6.25 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "gpt-5.6-terra", cost4: { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 2.5 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "gpt-5.6-luna", cost4: { input: 0.2, output: 1.2, cacheRead: 0.02, cacheWrite: 0.25 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "gpt-5.5", cost4: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "gpt-5.4", cost4: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "gpt-5.4-mini", cost4: { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "gpt-5.3-codex", cost4: { input: 2, output: 8, cacheRead: 0.5, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "sakana/fugu-ultra", cost4: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "xai/grok-4.6", cost4: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "xai/grok-4.5", cost4: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "thinkingmachines/inkling", cost4: { input: 1, output: 4.05, cacheRead: 0.17, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
+  { provider: "command-code", modelId: "thinkingmachines/inkling-small", cost4: { input: 0.5, output: 1.2, cacheRead: 0.1, cacheWrite: 0 }, source: COMMAND_CODE_PRICING, verifiedAt: COMMAND_CODE_VERIFIED_AT, status: "verified" },
 ];
 
 export function findVerifiedPriceOverride(

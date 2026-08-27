@@ -60,6 +60,7 @@ export interface WorkspaceProvider {
   codexAccountMode?: "direct" | "pool";
   /** Derived state of the two xAI Grok Responses model-adapter entries. */
   xaiResponsesOptInState?: boolean | "mixed";
+  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" | string;
 }
 
 /** Three-way pricing/ownership tier for a ready provider row. */
@@ -142,6 +143,7 @@ function isConfigurationReady(p: WorkspaceProvider): boolean {
     p.authMode === "oauth" ||
     p.authMode === "forward" ||
     p.authMode === "local" ||
+    p.googleMode === "ai-studio-web" ||
     hasLoopbackBaseUrl(p.baseUrl) ||
     p.hasApiKey === true;
 }

@@ -5,7 +5,7 @@ import {
   advertisedBareCodexShellBridgeName,
   planNativeExecBridge,
 } from "../src/adapters/cursor/native-exec-bridge";
-import { nativeShellDisabledMessage } from "../src/adapters/cursor/native-exec-shell";
+import { nativeShellDisabledMessage } from "../src/adapters/cursor/native-exec-policy";
 import { createCursorProtobufEventState } from "../src/adapters/cursor/protobuf-events";
 import type { CursorServerMessage } from "../src/adapters/cursor/types";
 import type { OcxProviderConfig } from "../src/types";

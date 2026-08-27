@@ -115,14 +115,16 @@ jobs:
           if [ -n "$existing_pr" ]; then
             gh pr edit "$existing_pr" \
               --title "promote: dev to main" \
-              --body-file "$body_file"
+              --body-file "$body_file" \
+              --add-label "maintainer-sponsored"
             echo "Updated promotion PR #$existing_pr"
           else
             gh pr create \
               --base main \
               --head dev \
               --title "promote: dev to main" \
-              --body-file "$body_file"
+              --body-file "$body_file" \
+              --label "maintainer-sponsored"
           fi
           promotion_head="$(gh pr list --base main --head dev --state open --json headRefOid --jq '.[0].headRefOid // empty')"
           if [ "$promotion_head" != "$VERIFIED_CI_SHA" ]; then

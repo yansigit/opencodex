@@ -182,7 +182,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const {
     accountSets, setAccountSets, accountLoadStates, switchingAccount, keyPools, fetchAccountSets,
     switchAccount, switchApiKey, removeApiKey, addApiKeyValue, editCredentialAlias,
-    removeAccount, activeAccountNeedsReauth,
+    removeAccount, clearCooldown, activeAccountNeedsReauth,
   } = pools;
   const jsonEditor = useJsonConfigEditor({
     apiBase, config,
@@ -346,6 +346,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             item={item}
             usageTotals={data.usageTotals}
             modelUsage={data.modelUsage}
+            accountUsage={data.accountUsage}
             quotaReport={data.quotaReport}
             availableModels={data.availableModels}
             hasLiveModels={data.hasLiveModels}
@@ -377,6 +378,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
               onSwitchApiKey: switchApiKey,
               onRemoveApiKey: removeApiKey,
               onEditAlias: editCredentialAlias,
+              onClearCooldown: clearCooldown,
             }}
             isDefault={item.name === config.defaultProvider}
             onRemoveProvider={removeProvider}

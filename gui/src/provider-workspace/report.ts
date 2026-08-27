@@ -60,8 +60,13 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
     ? q.creditsUsd as Record<string, unknown>
     : null;
   const creditsPercent = finite(credits?.percent);
+  const creditsExpiresAt = finite(credits?.expiresAt);
   if (creditsPercent !== undefined && !windows.some(window => /credits?/i.test(window.label))) {
-    windows.push({ label: "Total subscription credits", percent: creditsPercent });
+    windows.push({
+      label: "Total subscription credits",
+      percent: creditsPercent,
+      ...(creditsExpiresAt !== undefined ? { resetAt: creditsExpiresAt } : {}),
+    });
   }
   const out: AccountQuota = {
     ...(finite(q.fiveHourPercent) !== undefined ? { fiveHourPercent: q.fiveHourPercent as number } : {}),
@@ -71,12 +76,14 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
     ...(finite(q.monthlyPercent) !== undefined ? { monthlyPercent: q.monthlyPercent as number } : {}),
     ...(finite(q.monthlyResetAt) !== undefined ? { monthlyResetAt: q.monthlyResetAt as number } : {}),
     ...(windows.length > 0 ? { customWindows: windows } : {}),
+    ...(credits && creditsPercent !== undefined ? { creditsUsd: credits as unknown as AccountQuota["creditsUsd"] } : {}),
     updatedAt: finite(q.updatedAt) ?? fallbackUpdatedAt ?? Date.now(),
   };
   return out.fiveHourPercent !== undefined
     || out.weeklyPercent !== undefined
     || out.monthlyPercent !== undefined
     || (out.customWindows?.length ?? 0) > 0
+    || out.creditsUsd !== undefined
     ? out
     : null;
 }

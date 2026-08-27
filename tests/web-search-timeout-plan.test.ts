@@ -71,7 +71,21 @@ describe("routed-model web-search inactivity timeout", () => {
     }
   });
 
-  test("plan resolves default, explicit, and malformed values without materializing a missing field", () => {
+  test("resolver scales adaptively for large prompts when unconfigured", () => {
+    expect(resolveRoutedModelStallTimeoutMs(undefined, 50_000)).toBe(200_000);
+    expect(resolveRoutedModelStallTimeoutMs(undefined, 100_000)).toBe(200_000);
+    // 100k-200k (+1 block): 200s + 60s = 260s
+    expect(resolveRoutedModelStallTimeoutMs(undefined, 150_000)).toBe(260_000);
+    // 200k-300k (+2 blocks): 200s + 120s = 320s
+    expect(resolveRoutedModelStallTimeoutMs(undefined, 250_000)).toBe(320_000);
+    // 400k-500k (+4 blocks): 200s + 240s = 440s
+    expect(resolveRoutedModelStallTimeoutMs(undefined, 475_000)).toBe(440_000);
+
+    // Explicit configuration always wins over adaptive scaling
+    expect(resolveRoutedModelStallTimeoutMs(150_000, 475_000)).toBe(150_000);
+  });
+
+ test("plan resolves default, explicit, and malformed values without materializing a missing field", () => {
     const defaults = config({ webSearchSidecar: {} });
     expect(plan(defaults)?.routedModelStallTimeoutMs).toBe(200_000);
     expect(defaults.webSearchSidecar).not.toHaveProperty("routedModelStallTimeoutMs");
@@ -105,5 +119,31 @@ describe("routed-model web-search inactivity timeout", () => {
       routedModelStallTimeoutMs: 240_000,
       stallTimeoutSec: 330,
     });
+  });
+
+  test("plan dynamically adapts timeout for large prompt context", () => {
+    const largeInput = "x".repeat(1_500_000);
+    const parsedLarge = parseRequest({
+      model: "routed/model",
+      input: largeInput,
+      stream: true,
+      tools: [{ type: "web_search" }],
+    });
+    const largePlan = planWebSearch(
+      config(),
+      parsedLarge,
+      false,
+      routedProvider,
+      "model",
+      {
+        providerName: "openai",
+        provider: forwardProvider,
+        accountMode: "direct",
+        authContext: { kind: "main", accountId: null },
+        headers: new Headers({ authorization: "Bearer chatgpt" }),
+      },
+    );
+    expect(largePlan?.routedModelStallTimeoutMs).toBeGreaterThan(200_000);
+    expect(largePlan?.stallTimeoutSec).toBeGreaterThan(330);
   });
 });

@@ -61,6 +61,18 @@ export function sessionIdHeaderFromRequest(headers: Headers): string | null {
   return headers.get("session_id") ?? headers.get("session-id");
 }
 
+/**
+ * Codex thread identity from inbound Responses headers when the parent-thread header is absent.
+ * Priority: x-codex-parent-thread-id > thread-id > session_id / session-id.
+ */
+export function inboundClientThreadIdFromRequest(headers: Headers): string | undefined {
+  return firstSanitizedConversationId(
+    headers.get("x-codex-parent-thread-id"),
+    headers.get("thread-id"),
+    sessionIdHeaderFromRequest(headers),
+  );
+}
+
 function firstSanitizedConversationId(
   ...values: Array<string | null | undefined>
 ): string | undefined {

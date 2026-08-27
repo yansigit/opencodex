@@ -20,7 +20,7 @@ import type { CodexAccountPoolController } from "../../hooks/useCodexAccountPool
 import ProviderSettings from "./ProviderSettings";
 import { UnsavedLeaveDialog } from "./ProviderDialogs";
 import type { ProviderQuotaReportView } from "../../provider-workspace/report";
-import type { AccountLoadState, ProviderModelUsageRow, ProviderUsageTotals, OAuthAccountRow, ApiKeyRow, LoginHint, ProviderAuthHandlers, ProviderUpdatePatch, ProviderUpdateResult } from "./types";
+import type { AccountLoadState, ProviderModelUsageRow, ProviderAccountUsageRow, ProviderUsageTotals, OAuthAccountRow, ApiKeyRow, LoginHint, ProviderAuthHandlers, ProviderUpdatePatch, ProviderUpdateResult } from "./types";
 
 type Tab = "overview" | "models" | "usage" | "accounts" | "settings";
 
@@ -28,6 +28,7 @@ export default function ProviderDetails({
   item,
   usageTotals,
   modelUsage,
+  accountUsage,
   quotaReport,
   availableModels,
   hasLiveModels,
@@ -59,6 +60,7 @@ export default function ProviderDetails({
   item: WorkspaceItem;
   usageTotals?: ProviderUsageTotals;
   modelUsage?: ProviderModelUsageRow[];
+  accountUsage?: ProviderAccountUsageRow[];
   quotaReport?: ProviderQuotaReportView;
   availableModels: string[];
   /** Server-reported live-catalog provenance; see filterModels(). */
@@ -296,7 +298,7 @@ export default function ProviderDetails({
           />
         )}
         {tab === "usage" && (
-          <ProviderUsage item={item} usageTotals={usageTotals} quotaReport={quotaReport} modelUsage={modelUsage} />
+          <ProviderUsage item={item} usageTotals={usageTotals} quotaReport={quotaReport} modelUsage={modelUsage} accounts={accounts} accountUsage={accountUsage} />
         )}
         {tab === "accounts" && (
           <ProviderAuthPanel
@@ -304,6 +306,7 @@ export default function ProviderDetails({
             apiBase={apiBase}
             oauth={oauth}
             accounts={accounts}
+            accountUsage={accountUsage}
             keys={keys}
             accountLoadState={accountLoadState}
             switchingAccountId={switchingAccountId}

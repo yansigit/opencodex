@@ -1,19 +1,17 @@
 import { create } from "@bufbuild/protobuf";
 import { FetchErrorSchema, FetchResultSchema, FetchSuccessSchema, type ExecServerMessage } from "./gen/agent_pb";
 import { errorText, execBytes } from "./native-exec-common";
+import { nativeFetchDisabledMessage, type CursorNativeExecPolicyContext } from "./native-exec-policy";
 
 export interface CursorNativeNetworkDeps {
   fetch?: typeof fetch;
 }
 
-const NATIVE_FETCH_DISABLED =
-  "Cursor-native fetch is not executed locally. Use the Codex shell bridge tool `shell_command` (aliases: `exec_command`, `mcp_opencodex-responses_shell_command`, `mcp_opencodex-responses_exec_command`) with curl or wget.";
-
-export function rejectFetchExecForPolicy(execMsg: ExecServerMessage): Uint8Array {
+export function rejectFetchExecForPolicy(execMsg: ExecServerMessage, opts: CursorNativeExecPolicyContext = {}): Uint8Array {
   if (execMsg.message.case !== "fetchArgs") throw new Error("invalid fetch exec");
   const args = execMsg.message.value;
   return execBytes(execMsg, "fetchResult", create(FetchResultSchema, {
-    result: { case: "error", value: create(FetchErrorSchema, { url: args.url, error: NATIVE_FETCH_DISABLED }) },
+    result: { case: "error", value: create(FetchErrorSchema, { url: args.url, error: nativeFetchDisabledMessage(opts) }) },
   }));
 }
 

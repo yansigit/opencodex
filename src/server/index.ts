@@ -40,6 +40,7 @@ import {
   enforceAppOwnedMemoryBudget,
   resolveAppOwnedMemoryBudgetBytes,
 } from "../lib/app-owned-memory";
+import { getAiStudioBridgeHtml, getAiStudioUserScript, globalAiStudioRelayHub } from "./aistudio-ws-hub";
 import {
   registerAppOwnedMemorySweepFallback,
   registerDefaultAppOwnedMemoryStores,
@@ -668,6 +669,12 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (path === "/v1/realtime" || path === "/v1/live") {
       return req.headers.get("upgrade")?.toLowerCase() === "websocket";
     }
+    if (path === "/v1/ws/aistudio" || path === "/aistudio/ws") {
+      return req.headers.get("upgrade")?.toLowerCase() === "websocket";
+    }
+    if (path === "/v1/ws/aistudio/status") return req.method === "GET";
+    if (path === "/api/aistudio/session") return req.method === "POST";
+    if (path === "/aistudio/bridge" || path === "/aistudio/bridge.user.js") return req.method === "GET";
     return false;
   }
 
@@ -901,6 +908,73 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
+      }
+
+      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws") {
+        if (isDraining()) return drainingResponse(req, policy);
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) {
+          return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        }
+        const origin = req.headers.get("Origin");
+        const isExtensionOrigin = origin?.startsWith("chrome-extension://");
+        if (!isAllowedRequestOrigin(req, policy) && origin !== "https://aistudio.google.com" && !isExtensionOrigin) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "AI Studio relay WebSocket blocked: non-local Origin"), req, policy);
+        }
+        const sessionId = "aistudio_" + crypto.randomUUID().slice(0, 8);
+        if (requestServer.upgrade(req, {
+          data: { kind: "aistudio-relay", aistudioSessionId: sessionId },
+        })) return undefined as unknown as Response;
+       return withCors(formatErrorResponse(426, "upgrade_required", "AI Studio WebSocket upgrade failed"), req, policy);
+     }
+
+      if (url.pathname === "/v1/ws/aistudio/status" && req.method === "GET") {
+        return jsonResponse({
+          activeSessions: globalAiStudioRelayHub.getActiveSessionCount(),
+          hasActiveSessions: globalAiStudioRelayHub.hasActiveSessions(),
+        });
+      }
+
+      if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) {
+          return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        }
+        const origin = req.headers.get("Origin");
+        const isExtensionOrigin = origin?.startsWith("chrome-extension://");
+        if (!isAllowedRequestOrigin(req, policy) && origin !== "https://aistudio.google.com" && !isExtensionOrigin) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
+        }
+        try {
+          const bodyJson = (await req.json()) as any;
+          const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
+          if (bodyJson.token && typeof bodyJson.token === "string") {
+            saveAiStudioSessionFromToken(bodyJson.token);
+          } else if (Array.isArray(bodyJson.cookies)) {
+            saveAiStudioSession({
+              selectedProject: bodyJson.selectedProject || "",
+              windowId: bodyJson.windowId || "",
+              cookies: bodyJson.cookies,
+            });
+          } else {
+            return withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy);
+          }
+          return withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy);
+        } catch (err) {
+          return withCors(jsonResponse({ error: String(err) }, 400), req, policy);
+        }
+      }
+
+      if (url.pathname === "/aistudio/bridge" && req.method === "GET") {
+        const listenPort = (server.port ?? config.port) || 10100;
+        const bridgeHtml = getAiStudioBridgeHtml(listenPort);
+        return new Response(bridgeHtml, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+
+      if (url.pathname === "/aistudio/bridge.user.js" && req.method === "GET") {
+        const listenPort = (server.port ?? config.port) || 10100;
+        const userScript = getAiStudioUserScript(listenPort);
+        return new Response(userScript, { headers: { "Content-Type": "application/javascript; charset=utf-8" } });
       }
 
       if (url.pathname === "/healthz" && req.method === "GET") {
@@ -1564,6 +1638,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       // Text frames. response.processed is a no-op ack. close() aborts the upstream (RC2 parity).
       // Live sideband sockets (kind=live-sideband) are a transparent bidirectional relay instead.
       open(ws: ServerWebSocket<WsData>) {
+        if (ws.data.kind === "aistudio-relay" && ws.data.aistudioSessionId) {
+          globalAiStudioRelayHub.registerSession(ws.data.aistudioSessionId, ws);
+          return;
+        }
         if (ws.data.kind === "live-sideband") {
           if (!ws.data.liveTurnAdmissionLease) {
             closeLiveSideband(ws, 1013, "server busy");
@@ -1580,6 +1658,18 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         registerCodexWebSocket(ws);
       },
       message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
+        if (ws.data.kind === "aistudio-relay" && ws.data.aistudioSessionId) {
+          const text = typeof raw === "string"
+            ? raw
+            : Buffer.isBuffer(raw)
+              ? raw.toString("utf-8")
+              : new TextDecoder().decode(raw as any);
+          globalAiStudioRelayHub.handleClientMessage(
+            ws.data.aistudioSessionId,
+            text
+          );
+          return;
+        }
         if (ws.data.kind === "live-sideband") {
           if (ws.data.liveClosing) return;
           const rawBytes = webSocketFrameBytes(raw);
@@ -1758,6 +1848,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })();
       },
       close(ws: ServerWebSocket<WsData>) {
+        if (ws.data.kind === "aistudio-relay" && ws.data.aistudioSessionId) {
+          globalAiStudioRelayHub.unregisterSession(ws.data.aistudioSessionId);
+          return;
+        }
         if (ws.data.kind === "live-sideband") {
           closeLiveSideband(ws);
           return;

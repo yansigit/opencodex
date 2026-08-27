@@ -75,6 +75,7 @@ import { desktopDepsFromConfig } from "./native-exec-desktop";
 import {
   buildCursorToolDefinitions,
   cursorRequestAdvertisesApplyPatch,
+  cursorRequestUsesCodeMode,
   cursorRequestHasShellAlias,
   cursorToolArgNormalizeSchema,
   cursorToolWireName,
@@ -646,6 +647,7 @@ class LiveCursorTransport implements CursorTransport {
     this.execContext = {
       ...this.execContext,
       clientToolDefs,
+      codeMode: cursorRequestUsesCodeMode(request.tools, request.toolChoice),
       rejectNativeFileMutations: cursorRequestAdvertisesApplyPatch(request.tools, request.toolChoice),
       structuredEditAvailable: syntheticStructuredEditToolNames.size > 0,
     };
@@ -1509,7 +1511,7 @@ class LiveCursorTransport implements CursorTransport {
     const awaitedNativeArgsBeforeMapping = update?.case === "toolCallCompleted"
       && state.openToolCalls.get(update.value.callId)?.awaitingNativeArgs === true;
     const mapped = mapCursorProtobufServerMessage(message, state);
-    if (mapped.some(event => event.type === "text")) this.sawAssistantText = true;
+    if (mapped.some(event => event.type === "text" || event.type === "thinking" || event.type === "tool_call_start" || event.type === "tool_call_end")) this.sawAssistantText = true;
     const beganAwaitingNativeClientToolArgs = update?.case === "toolCallCompleted"
       && !awaitedNativeArgsBeforeMapping
       && state.openToolCalls.get(update.value.callId)?.awaitingNativeArgs === true;

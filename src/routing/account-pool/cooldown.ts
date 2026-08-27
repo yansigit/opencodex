@@ -63,6 +63,14 @@ export function clearCooldownState(poolKey?: string): void {
   registryByPool.delete(poolKey);
 }
 
+export function clearPoolAccountCooldown(poolKey: string, accountId: string): boolean {
+  const registry = registryByPool.get(poolKey);
+  if (!registry) return false;
+  const existed = registry.get(accountId) !== null;
+  registry.clear(accountId);
+  return existed;
+}
+
 export function parseRetryAfterMs(
   value: string | null | undefined,
   now = Date.now(),

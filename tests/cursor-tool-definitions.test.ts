@@ -90,6 +90,21 @@ describe("Cursor tool definitions", () => {
     expect(toJson(ValueSchema, fromBinary(ValueSchema, defs[0]!.inputSchema))).toEqual(CURSOR_EXEC_COMMAND_INPUT_SCHEMA);
   });
 
+  test("advertises every freeform tool with the required string input schema", () => {
+    const defs = buildCursorToolDefinitions([{
+      name: "exec",
+      description: "Run code",
+      parameters: {},
+      freeform: true,
+    }]);
+
+    expect(toJson(ValueSchema, fromBinary(ValueSchema, defs[0]!.inputSchema))).toEqual({
+      type: "object",
+      properties: { input: { type: "string" } },
+      required: ["input"],
+    });
+  });
+
   test("normalizes advertised shell_command cmd args to Responses command before Codex sees them", () => {
     // Live #399 failure: Cursor advertisement requires `cmd`, models send `cmd`, but Codex
     // shell_command validates `command` → "missing field `command`". Normalization must use the
@@ -334,8 +349,11 @@ describe("Cursor tool definitions", () => {
     expect(note).toContain("current tool catalog as ground truth");
     expect(note).toContain("This turn does not expose neighboring-agent tool names `Read`, `Grep`, `Glob`, `Bash`, `LS`");
     expect(note).toContain("not an external MCP server tool");
-    expect(note).toContain("Prefer the Codex shell bridge over Cursor-native Shell/Read");
-    expect(note).toContain("continue with the listed catalog tool `exec_command`");
+    expect(note).toContain("NEVER attempt Cursor-native Shell, Read, Grep, List");
+    expect(note).toContain("`exec_command` is the ONLY shell surface");
+    expect(note).toContain("never as a fallback after probing a native tool");
+    expect(note).toContain("Tool-selection commentary is forbidden");
+    expect(note).toContain("FIRST visible action is the bridge call itself");
     expect(note).not.toContain("such as `shell_command` / `exec_command`");
     expect(note).not.toContain("Never tell the user");
     expect(note).not.toContain("silently call");
@@ -353,8 +371,8 @@ describe("Cursor tool definitions", () => {
     expect(note).toContain("`shell_command`");
     expect(note).toContain("`shell_command` and `exec_command` are aliases of the same bridge");
     expect(note).toContain("mcp_opencodex-responses_shell_command");
-    expect(note).toContain("Prefer the Codex shell bridge over Cursor-native Shell/Read");
-    expect(note).toContain("continue with the listed catalog tool `shell_command`");
+    expect(note).toContain("NEVER attempt Cursor-native Shell, Read, Grep, List");
+    expect(note).toContain("`shell_command` is the ONLY shell surface");
     expect(note).not.toContain("Never tell the user");
     expect(note).not.toContain("silently call");
   });

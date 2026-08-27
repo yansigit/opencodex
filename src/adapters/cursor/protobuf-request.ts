@@ -77,7 +77,22 @@ export const CURSOR_EXTERNAL_ROOT_BYTE_LIMIT = 512 * 1024;
  * results already stored in history blobs are visible without a ResumeAction.
  */
 export const CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT =
-  "Continue: the requested tool results are provided in the conversation history above.";
+  "Continue: the requested tool results are provided in the conversation history above. Answer the user request or proceed with the next step directly without repeating status summaries or greetings.";
+
+export function externalToolContinuationText(rawMessages?: readonly OcxMessage[]): string {
+  const last = rawMessages?.at(-1);
+  if (last?.role === "toolResult") {
+    const raw = typeof last.content === "string" ? last.content : JSON.stringify(last.content ?? "");
+    const trimmed = raw.trim();
+    if (
+      (last.toolName?.includes("list_agents") || last.toolName?.includes("search"))
+      && (trimmed === "[]" || trimmed === "" || trimmed === "{}" || trimmed === "null")
+    ) {
+      return `${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT} If a prior discovery or list tool returned empty results (e.g. no sub-agents currently active), proceed directly with your next concrete action using available tools.`;
+    }
+  }
+  return CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT;
+}
 
 /** Runtime timezone for protobuf RequestContextEnv (dynamic, never hardcoded). */
 function runtimeTimeZone(): string {
@@ -855,8 +870,10 @@ function buildPreparedCursorRunRequest(
     ? "userMessageAction"
     : "resumeAction";
   const actionText = externalToolContinuation
-    ? CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT
-    : text;
+    ? (request.echoRetryContinuationText ?? externalToolContinuationText(request.rawMessages))
+    : request.echoRetryContinuationText
+      ? `${text}\n\n[correction] ${request.echoRetryContinuationText}`
+      : text;
   const action = create(ConversationActionSchema, {
     action: actionCase === "userMessageAction"
       ? {

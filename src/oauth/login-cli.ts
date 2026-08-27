@@ -15,6 +15,7 @@ import { codexAccountNamespaceProviderCollisionError } from "../codex/account-na
 const LIVE_RELOAD_PROVIDERS = new Set<string>([
   ...listOAuthProviders(),
   ...Object.keys(KEY_LOGIN_PROVIDERS),
+  "google-aistudio",
 ]);
 
 export function runningProxyUpdateHeaders(): Headers {
@@ -65,14 +66,78 @@ export function warnIfLiveReloadSkipped(result: LocalProviderReloadResult | null
 
 export async function handleLogin(provider?: string): Promise<void> {
   const name = (provider ?? "").trim().toLowerCase();
+  if (name === "google-aistudio" || name === "aistudio" || name === "gemini-aistudio") {
+    return handleAiStudioBridgeLogin();
+  }
   if (isPublicOAuthProvider(name)) return handleOAuthLogin(name);
   if (isKeyLoginProvider(name)) return handleKeyLogin(name);
   console.error(
     `Usage: ocx login <provider>\n` +
-      `  OAuth login:   ${listOAuthProviders().join(", ")}\n` +
+      `  OAuth / Web:   ${[...listOAuthProviders(), "google-aistudio"].join(", ")}\n` +
       `  API-key login: ${Object.keys(KEY_LOGIN_PROVIDERS).join(", ")}`,
   );
   process.exit(1);
+}
+
+async function handleAiStudioBridgeLogin(): Promise<void> {
+  const live = await findLiveProxy();
+  const port = live?.port ?? 10100;
+  const bridgeUrl = "http://127.0.0.1:" + port + "/aistudio/bridge";
+
+  console.log("\n🌐 Google AI Studio Sign-In & Session Setup:");
+  console.log("   Option 1: Paste Session Token from the Brave/Chrome extension popup (Passkey-friendly)");
+  console.log("   Option 2: Open native macOS sign-in window");
+  console.log("   Option 3: Open browser bridge page (" + bridgeUrl + ")\n");
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const choice = await new Promise<string>((res) => {
+      rl.question("Paste Session Token (or press Enter for native window): ", (ans) => res(ans.trim()));
+    });
+
+    if (choice.length > 20) {
+      const { saveAiStudioSessionFromToken } = await import("./aistudio-session-sync");
+      saveAiStudioSessionFromToken(choice);
+      console.log("\n✅ Session token imported successfully! Saved to ~/.opencodex/aistudio-session.json");
+    } else if (process.platform === "darwin") {
+      const { getAiStudioNativeDaemonSourcePath } = await import("./aistudio-native-daemon");
+      const swiftSrc = getAiStudioNativeDaemonSourcePath();
+      console.log("\n🚀 Opening native Google AI Studio login window...");
+      const proc = Bun.spawn(["swift", swiftSrc, "--login"], {
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      const code = await proc.exited;
+      if (code === 0) {
+        console.log("\n✅ Google AI Studio authenticated successfully! Session saved to ~/.opencodex/aistudio-session.json");
+      }
+    } else {
+      console.log("\n🌐 Opening bridge page in your browser: " + bridgeUrl);
+      openUrl(bridgeUrl);
+    }
+  } finally {
+    rl.close();
+  }
+
+  const config = loadConfig();
+  if (!config.providers["google-aistudio"]) {
+    config.providers["google-aistudio"] = {
+      adapter: "google",
+      googleMode: "ai-studio-web",
+      baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+      authMode: "local",
+      liveModels: false,
+      defaultModel: "gemini-3.7-flash",
+      models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
+    };
+    saveConfig(config);
+    console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
+  }
+
+  openUrl(bridgeUrl);
+  const reload = await notifyRunningProxy("google-aistudio");
+  console.log("\n✅ Ready! Use models with 'google-aistudio' provider in your coding agents.");
+  warnIfLiveReloadSkipped(reload);
 }
 
 async function handleOAuthLogin(name: string): Promise<void> {

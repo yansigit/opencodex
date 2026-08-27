@@ -448,4 +448,67 @@ describe("fetchProviderAccountQuotas", () => {
     expect(rows.find(r => r.accountId === id1)?.quota?.customWindows?.[0]?.percent).toBe(20);
     expect(rows.find(r => r.accountId === id2)?.quota?.customWindows?.[0]?.percent).toBe(60);
   });
+
+  test("reports each Command Code account's own rate limits", async () => {
+    const expires = Date.now() + 60 * 60_000;
+    await saveCredential("command-code", { access: "token-cc1", refresh: "refresh-cc1", expires, accountId: "acct-cc1", email: "cc1@example.com" });
+    await saveCredential("command-code", { access: "token-cc2", refresh: "refresh-cc2", expires, accountId: "acct-cc2", email: "cc2@example.com" });
+    const set = getAccountSet("command-code")!;
+    const id1 = set.accounts.find(a => a.credential.accountId === "acct-cc1")!.id;
+    const id2 = set.accounts.find(a => a.credential.accountId === "acct-cc2")!.id;
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      const url = String(input);
+      if (url.includes("/alpha/whoami")) {
+        return Response.json({ org: { id: "test-org" } });
+      }
+      if (url.includes("/alpha/billing/credits")) {
+        const used = auth?.includes("token-cc1") ? 45 : 85;
+        return Response.json({
+          windowLimits: {
+            fiveHour: { cap: 100, used, resetAt: 1750000000 },
+            weekly: { cap: 100, used: 20, resetAt: 1750000000 },
+          },
+        });
+      }
+      return Response.json({}, { status: 404 });
+    }) as typeof fetch;
+
+    expect(supportsPerAccountQuota("command-code")).toBe(true);
+    const rows = await fetchProviderAccountQuotas("command-code");
+    expect(rows).toHaveLength(2);
+    expect(rows.find(r => r.accountId === id1)?.quota?.fiveHourPercent).toBe(45);
+    expect(rows.find(r => r.accountId === id2)?.quota?.fiveHourPercent).toBe(85);
+  });
+
+  test("reports each Cursor account's own rate limits", async () => {
+    const expires = Date.now() + 60 * 60_000;
+    await saveCredential("cursor", { access: "token-cur1", refresh: "refresh-cur1", expires, accountId: "acct-cur1", email: "cur1@example.com" });
+    await saveCredential("cursor", { access: "token-cur2", refresh: "refresh-cur2", expires, accountId: "acct-cur2", email: "cur2@example.com" });
+    const set = getAccountSet("cursor")!;
+    const id1 = set.accounts.find(a => a.credential.accountId === "acct-cur1")!.id;
+    const id2 = set.accounts.find(a => a.credential.accountId === "acct-cur2")!.id;
+
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const auth = new Headers(init?.headers).get("authorization");
+      const url = String(input);
+      if (url.includes("GetCurrentPeriodUsage")) {
+        const totalPercent = auth?.includes("token-cur1") ? 35 : 75;
+        return Response.json({
+          planUsage: {
+            totalPercentUsed: totalPercent,
+            billingCycleEnd: "2026-07-05T12:00:00Z",
+          },
+        });
+      }
+      return Response.json({}, { status: 404 });
+    }) as typeof fetch;
+
+    expect(supportsPerAccountQuota("cursor")).toBe(true);
+    const rows = await fetchProviderAccountQuotas("cursor");
+    expect(rows).toHaveLength(2);
+    expect(rows.find(r => r.accountId === id1)?.quota?.monthlyPercent).toBe(35);
+    expect(rows.find(r => r.accountId === id2)?.quota?.monthlyPercent).toBe(75);
+  });
 });

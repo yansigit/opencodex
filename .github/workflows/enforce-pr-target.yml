@@ -258,10 +258,11 @@ jobs:
               isChangedFileListTruncated,
               extractReviewReadiness,
               appendReviewReadinessSection,
-              stripReviewReadinessSection,
+             stripReviewReadinessSection,
               uncheckReviewReadinessBoxes,
               REVIEW_READINESS_CLAIM_INDEX,
-              resetReviewReadinessSection
+              resetReviewReadinessSection,
+              isPromotionPr
             } = require(
               path.join(process.cwd(), ".github", "scripts", "pr-quality.cjs"),
             );
@@ -762,6 +763,7 @@ jobs:
             const bugbotAppId = Number(process.env.CURSOR_BUGBOT_APP_ID);
             let bugbotEvidence = null;
             let bugbotWaived = false;
+            const promotionPr = isPromotionPr(pr.base.ref, pr.title);
             const syncGenerated =
               pr.base.ref === "dev" &&
               /^sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64}$/i.test(pr.head.ref ?? "");
@@ -891,7 +893,7 @@ jobs:
             // lookup fails closed — the PR is treated as a contributor PR.
             const authorIsMaintainer =
               !permissionLookupFailed && authorHasPushPermission(authorPermission);
-            const checklistRequired = !authorIsMaintainer && !syncGenerated;
+            const checklistRequired = !authorIsMaintainer && !syncGenerated && !promotionPr;
 
             // A confirmed maintainer does not need the bot's checklist: retire
             // the injected section from the body so it stops rendering as a
@@ -1241,7 +1243,8 @@ jobs:
             const readyMoment =
               failures.length === 0 &&
               ((checklistRequired && checklistComplete) ||
-                (syncGenerated && syncReady));
+                (syncGenerated && syncReady) ||
+                promotionPr);
             const reviewReadyDesired = readyMoment;
             const hasReviewReadyLabel = (pr.labels ?? []).some(
               label => label.name === REVIEW_READY_LABEL
@@ -1490,7 +1493,8 @@ jobs:
             const shouldMarkReady =
               (gateState.active && gateState.autoDraftedByBot) ||
               (checklistRequired && checklistComplete) ||
-              (syncGenerated && syncReady);
+              (syncGenerated && syncReady) ||
+              promotionPr;
             if (shouldMarkReady && pr.draft) {
               try {
                 await markReadyForReview();
@@ -1509,7 +1513,8 @@ jobs:
             };
             if (
               (checklistRequired && checklistComplete) ||
-              (syncGenerated && syncReady)
+              (syncGenerated && syncReady) ||
+              promotionPr
             ) {
               const maintainers = readMaintainerLogins().filter(
                 login => login !== pr.user.login
@@ -1545,9 +1550,11 @@ jobs:
 
               await upsertGateComment(readyState, {
                 status: "READY",
-                statusReason: syncGenerated
-                  ? "all exact-head sync PR quality gates passed; ready for human merge."
-                  : "all PR quality gates passed; the review readiness checklist is complete.",
+                statusReason: promotionPr
+                  ? "all promotion PR quality gates passed; ready for human review and merge."
+                  : (syncGenerated
+                      ? "all exact-head sync PR quality gates passed; ready for human merge."
+                      : "all PR quality gates passed; the review readiness checklist is complete."),
                 actions: [],
                 readiness,
                 checklistRequired,

@@ -249,6 +249,7 @@ import {
 } from "../request-log";
 import {
   conversationIdFromResponsesRequest,
+  inboundClientThreadIdFromRequest,
   normalizeLogConversationId,
   reasoningReplayConversationIdFromResponsesRequest,
   sessionIdHeaderFromRequest,
@@ -1803,7 +1804,7 @@ export async function handleComboResponses(
   // Expand previous_response_id before image policy and child dispatch so a
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
-  const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
+  const inboundClientThreadId = inboundClientThreadIdFromRequest(req.headers);
   const body = expandPreviousResponseInput(rawBody, inboundClientThreadId);
   const scopeMismatch = previousResponseScopeMismatch(body);
   if (scopeMismatch) {
@@ -2254,7 +2255,7 @@ async function handleResponsesInner(
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
   );
-  const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
+  const inboundClientThreadId = inboundClientThreadIdFromRequest(req.headers);
   const originalBody = body;
   if (options.comboReplaySnapshot) {
     copyPreviousResponseReplayProvenance(options.comboReplaySnapshot.sourceBody, body);
@@ -4519,7 +4520,7 @@ async function handleResponsesInner(
         }
       },
       recordSidecarOutcome: wsPlan.forwardSidecar?.recordOutcome,
-      connectTimeoutMs: config.connectTimeoutMs ?? 200_000,
+      connectTimeoutMs: config.connectTimeoutMs ?? Math.max(200_000, wsPlan.routedModelStallTimeoutMs),
       routedModelStallTimeoutMs: wsPlan.routedModelStallTimeoutMs,
       stallTimeoutSec: wsPlan.stallTimeoutSec,
       streamRoutedModelOutput: wsPlan.streamRoutedModelOutput,

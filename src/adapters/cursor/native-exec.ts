@@ -51,6 +51,7 @@ import {
   type CursorNativeToolDeps,
 } from "./native-exec-tools";
 import { clientBytes, execBytes, execStreamCloseBytes, execThrowBytes } from "./native-exec-common";
+import { type CursorNativeExecPolicyContext } from "./native-exec-policy";
 import type { McpToolDefinition } from "./gen/agent_pb";
 import { OCX_RESPONSES_TOOL_PROVIDER } from "./tool-definitions";
 
@@ -72,10 +73,16 @@ export interface CursorNativeExecContext extends CursorNativeExecDeps {
   rejectNativeFileMutations?: boolean;
   /** The synthetic exact-match edit tools (edit_file / multi_edit) are advertised this request. */
   structuredEditAvailable?: boolean;
+  /** Codex code mode advertises one freeform exec tool; native rejections must steer to nested helpers. */
+  codeMode?: boolean;
 }
 
 export function cursorUnsafeNativeLocalExecEnabled(input: Pick<CursorNativeExecContext, "unsafeAllowNativeLocalExec"> = {}): boolean {
   return input.unsafeAllowNativeLocalExec === true;
+}
+
+function nativeExecPolicyContext(deps: CursorNativeExecContext): CursorNativeExecPolicyContext {
+  return deps.codeMode === true ? { codeMode: true } : {};
 }
 
 /**
@@ -556,16 +563,17 @@ export async function handleCursorNativeExec(execMsg: ExecServerMessage, deps: C
     }))];
   }
   if (!cursorUnsafeNativeLocalExecEnabled(deps)) {
-    if (execCase === "readArgs") return [rejectReadExecForPolicy(execMsg)];
-    if (execCase === "writeArgs") return [rejectWriteExecForPolicy(execMsg)];
-    if (execCase === "deleteArgs") return [rejectDeleteExecForPolicy(execMsg)];
-    if (execCase === "lsArgs") return [rejectLsExecForPolicy(execMsg)];
-    if (execCase === "grepArgs") return [rejectGrepExecForPolicy(execMsg)];
-    if (execCase === "shellArgs") return [rejectShellExecForPolicy(execMsg)];
-    if (execCase === "shellStreamArgs") return rejectShellStreamExecForPolicy(execMsg);
-    if (execCase === "backgroundShellSpawnArgs") return [rejectBackgroundShellSpawnExecForPolicy(execMsg)];
-    if (execCase === "writeShellStdinArgs") return [rejectWriteShellStdinExecForPolicy(execMsg)];
-    if (execCase === "fetchArgs") return [rejectFetchExecForPolicy(execMsg)];
+    const policy = nativeExecPolicyContext(deps);
+    if (execCase === "readArgs") return [rejectReadExecForPolicy(execMsg, policy)];
+    if (execCase === "writeArgs") return [rejectWriteExecForPolicy(execMsg, policy)];
+    if (execCase === "deleteArgs") return [rejectDeleteExecForPolicy(execMsg, policy)];
+    if (execCase === "lsArgs") return [rejectLsExecForPolicy(execMsg, policy)];
+    if (execCase === "grepArgs") return [rejectGrepExecForPolicy(execMsg, policy)];
+    if (execCase === "shellArgs") return [rejectShellExecForPolicy(execMsg, policy)];
+    if (execCase === "shellStreamArgs") return rejectShellStreamExecForPolicy(execMsg, policy);
+    if (execCase === "backgroundShellSpawnArgs") return [rejectBackgroundShellSpawnExecForPolicy(execMsg, policy)];
+    if (execCase === "writeShellStdinArgs") return [rejectWriteShellStdinExecForPolicy(execMsg, policy)];
+    if (execCase === "fetchArgs") return [rejectFetchExecForPolicy(execMsg, policy)];
   }
   if (execCase === "readArgs") return [readExec(execMsg)];
   if (execCase === "writeArgs") return [deps.rejectNativeFileMutations ? rejectWriteExecForApplyPatch(execMsg, deps.structuredEditAvailable === true) : writeExec(execMsg)];

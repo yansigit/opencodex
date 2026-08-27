@@ -26,6 +26,7 @@ export {
   STICK_WAIT_MAX_MS,
   classifyPoolHttpStatus,
   clearCooldownState,
+  clearPoolAccountCooldown,
   getPoolCooldownRegistry,
   isAccountInCooldown,
   isAccountPoolEligible,

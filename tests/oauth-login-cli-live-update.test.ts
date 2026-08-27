@@ -178,6 +178,38 @@ describe("CLI OAuth live-update credential preservation", () => {
       await server.stop(true);
     }
   }, LIVE_UPDATE_TIMEOUT_MS);
+
+  test("AI Studio login participates in attested live reload", async () => {
+    const localAttestationSecret = createLocalAttestationSecret();
+    const server = startServer(0, { localAttestationSecret });
+    try {
+      const port = server.port!;
+      writeRuntimePort({
+        pid: process.pid,
+        port,
+        hostname: "127.0.0.1",
+        attestationSecret: localAttestationSecret,
+      });
+      writePid(process.pid);
+      const boot = loadConfig();
+      boot.port = port;
+      boot.providers["google-aistudio"] = {
+        adapter: "google",
+        googleMode: "ai-studio-web",
+        baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+        authMode: "local",
+      };
+      saveConfig(boot);
+
+      const result = await notifyRunningProxy("google-aistudio");
+      expect(result?.kind).toBe("reloaded");
+
+      const listed = await fetch(new URL("/api/providers", server.url)).then(r => r.json()) as Array<{ name: string }>;
+      expect(listed.some(entry => entry.name === "google-aistudio")).toBe(true);
+    } finally {
+      await server.stop(true);
+    }
+  }, LIVE_UPDATE_TIMEOUT_MS);
 });
 
 /**

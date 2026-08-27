@@ -48,6 +48,10 @@ import {
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../reasoning-effort";
 import { normalizeAntigravityProviderError } from "../oauth/antigravity-routing";
+import { buildAiStudioHeaders, parseGoogleCookieJar } from "../oauth/google-aistudio-auth";
+import { cookieHeaderFromSession, loadAiStudioSession } from "../oauth/aistudio-session-sync";
+import { parseMakerSuiteChunk } from "./google-aistudio-parser";
+import { globalAiStudioRelayHub } from "../server/aistudio-ws-hub";
 
 const INLINE_ERROR_URL_USERINFO = /https?:\/\/[^\s"'<>]*@/gi;
 
@@ -540,6 +544,21 @@ function googlePartThoughtSignature(part: GoogleResponsePart): string | undefine
   return typeof nested === "string" && nested.length > 0 ? nested : undefined;
 }
 
+function ensureThoughtSignatureBypassSentinel(contents: unknown[], modelId?: string): void {
+  if (modelId && !/gemini-(?:3.7|2.5)|thinking/i.test(modelId)) return;
+  for (const c of contents as { role?: string; parts?: unknown[] }[]) {
+    if (c?.role !== "model" || !Array.isArray(c.parts)) continue;
+    for (const p of c.parts) {
+      if (p && typeof p === "object") {
+        const partObj = p as Record<string, unknown>;
+        if (partObj.functionCall && !partObj.thoughtSignature && !partObj.thought_signature) {
+          partObj.thoughtSignature = ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL;
+        }
+      }
+    }
+  }
+}
+
 /**
  * Carry a Gemini thought signature with the exact function-call part that produced it. Google
  * validates the signature against that specific part, so it must ride the individual tool call
@@ -744,7 +763,46 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
     // Direct AI-Studio uses the canonical server transport (fetchWithTransientRetry), which
     // retries transient 5xx responses through providerFetch while preserving multi-key pool
     // 429 rotation and raw error formatting.
-    ...(provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
+    ...(provider.googleMode === "ai-studio-web"
+      ? {
+          fetchResponse: async (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> => {
+            if (globalAiStudioRelayHub.hasActiveSessions()) {
+              const streamRes = await globalAiStudioRelayHub.dispatchStream(
+                {
+                  url: request.url,
+                  method: request.method,
+                  headers: request.headers,
+                  body: request.body,
+                },
+                ctx?.abortSignal,
+              );
+              const encoder = new TextEncoder();
+              const bodyStream = new ReadableStream({
+                async start(controller) {
+                  try {
+                    for await (const chunk of streamRes.chunks) {
+                      controller.enqueue(encoder.encode(chunk));
+                    }
+                    controller.close();
+                  } catch (err) {
+                    controller.error(err);
+                  }
+                },
+              });
+              return new Response(bodyStream, {
+                status: 200,
+                headers: { "Content-Type": "text/event-stream" },
+              });
+            }
+            return fetch(request.url, {
+              method: request.method,
+              headers: request.headers,
+              body: request.body,
+              signal: ctx?.abortSignal,
+            });
+          },
+        }
+      : provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
       ? {
           fetchResponse: (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> =>
             (provider.googleMode === "cloud-code-assist" ? fetchAntigravityWithRetry : fetchVertexWithRetry)(request, ctx),
@@ -882,19 +940,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           const strippedModelTail = /claude/i.test(wireModelId) ? stripTrailingClaudePrefill(contents) : false;
           if (antigravityUsesReplayCache(wireModelId)) {
             applyAntigravityReplay(wireModelId, sessionId, contents);
-            // If any functionCall still lacks a thoughtSignature on Gemini Antigravity,
-            // supply the bypass sentinel so Antigravity does not reject the turn with HTTP 400.
-            for (const c of contents as { role?: string; parts?: unknown[] }[]) {
-              if (c?.role !== "model" || !Array.isArray(c.parts)) continue;
-              for (const p of c.parts) {
-                if (p && typeof p === "object") {
-                  const partObj = p as Record<string, unknown>;
-                  if (partObj.functionCall && !partObj.thoughtSignature && !partObj.thought_signature) {
-                    partObj.thoughtSignature = ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL;
-                  }
-                }
-              }
-            }
+            ensureThoughtSignatureBypassSentinel(contents);
           } else {
             sanitizeAntigravityClaudeSignatures(contents);
           }
@@ -970,6 +1016,22 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
       }
 
+      if (provider.googleMode === "ai-studio-web") {
+        const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
+        const url = `${base}/v1internal:${method}${streamParam}`;
+        const cookieInput = provider.apiKey || provider.headers?.["Cookie"] || cookieHeaderFromSession(loadAiStudioSession()) || "";
+        const jar = parseGoogleCookieJar(cookieInput);
+        const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");
+        Object.assign(headers, aiStudioHeaders);
+        const compiled = compileGoogleWireBody({ ...body, model: routedModelId });
+        restoreGoogleToolName = compiled.restoreToolName;
+        if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
+          ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents, routedModelId);
+        }
+        emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
+        return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
+      }
+
       // ai-studio (default): Generative Language API + x-goog-api-key.
       const url = `${provider.baseUrl}/v1beta/models/${routedModelId}:${method}${streamParam}`;
       const apiKey = provider.apiKey?.trim();
@@ -978,6 +1040,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
       const compiled = compileGoogleWireBody(body);
       restoreGoogleToolName = compiled.restoreToolName;
+      if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
+        ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents, routedModelId);
+      }
       emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
       return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
     },
@@ -1280,6 +1345,16 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
               if (result === "content") sawContentEvent = true;
               continue;
             }
+            if (provider.googleMode === "ai-studio-web") {
+              const parsed = parseMakerSuiteChunk(line);
+              if (parsed.text) {
+                sawAnyFrame = true;
+                sawTerminalSignal = true;
+                sawContentEvent = true;
+                yield { type: "text_delta", text: parsed.text };
+                continue;
+              }
+            }
             sawLiveness = true;
             if (line.startsWith(":") || !line.trim()) continue;
             debugDroppedFrame("google", line);
@@ -1292,7 +1367,24 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           if (residual.startsWith(":")) {
             yield { type: "heartbeat" };
           } else if (!residual.startsWith("data:")) {
-            yield { type: "error", message: "upstream stream ended with an incomplete SSE frame — possible truncation" };
+            try {
+              const parsedErr = JSON.parse(residual);
+              if (parsedErr.error?.message) {
+                yield { type: "error", message: parsedErr.error.message };
+                return;
+              }
+            } catch (err) {
+              void err;
+            }
+            if (provider.googleMode === "ai-studio-web") {
+              const parsed = parseMakerSuiteChunk(residual);
+              if (parsed.text) {
+                yield { type: "text_delta", text: parsed.text };
+                yield { type: "done" };
+                return;
+              }
+            }
+            yield { type: "error", message: `upstream non-SSE response: ${residual.slice(0, 300)}` };
             return;
           } else if ((yield* handleDataLine(residual)) === "terminate") return;
         }
@@ -1344,7 +1436,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       // buffered adapter entry point, so collect the exact same events parseStream emits
       // instead of maintaining a second CCA JSON parser.
       const isSse = response.headers.get("content-type")?.includes("text/event-stream") ?? false;
-      if (provider.googleMode === "cloud-code-assist" && isSse) {
+      if ((provider.googleMode === "cloud-code-assist" && isSse) || provider.googleMode === "ai-studio-web") {
         const events: AdapterEvent[] = [];
         let previousTail: AdapterEvent | undefined;
         try {

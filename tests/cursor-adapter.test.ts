@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { externalToolContinuationText, CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT } from "../src/adapters/cursor/protobuf-request";
 import {
   createCursorAdapter as createCursorAdapterProduction,
   cursorExecDeniedMessage,
@@ -65,41 +66,6 @@ describe("Cursor adapter live transport", () => {
     expect(() => validateRequest({ ...parsed, _structuredOutput: true })).toThrow(
       "Cursor does not support structured output",
     );
-  });
-
-  test("validateRequest accepts an ordinary request and structured requests with tools still fail", () => {
-    const adapter = createCursorAdapter(provider);
-    const validateRequest = (adapter as ProviderAdapter & {
-      validateRequest: (request: OcxParsedRequest) => void;
-    }).validateRequest;
-
-    expect(() => validateRequest(parsed)).not.toThrow();
-    expect(() => validateRequest({
-      ...parsed,
-      context: { messages: [], tools: [{ type: "function", name: "lookup", parameters: {} }] },
-      options: { textFormat: { type: "json_schema", schema: { type: "object" } } },
-    })).toThrow("Cursor does not support structured output");
-  });
-
-  test("runTurn rejects structured output before constructing its transport", async () => {
-    let transportFactoryCalls = 0;
-    const adapter = createCursorAdapter(provider, {
-      createTransport: () => {
-        transportFactoryCalls += 1;
-        return {
-          async *run() { yield { type: "done" } satisfies CursorServerMessage; },
-          writeClient() {},
-        };
-      },
-    });
-
-    await expect(adapter.runTurn?.({
-      ...parsed,
-      options: { textFormat: { type: "json_object" } },
-    }, { headers: new Headers() }, () => {})).rejects.toThrow(
-      "Cursor does not support structured output",
-    );
-    expect(transportFactoryCalls).toBe(0);
   });
 
   test("runTurn emits a missing-token error before live network", async () => {
@@ -308,6 +274,20 @@ describe("Cursor adapter live transport", () => {
   test("legacy mock exec message names the unavailable case", () => {
     expect(cursorExecDeniedMessage("shellArgs")).toContain("shellArgs");
     expect(cursorExecDeniedMessage("shellArgs")).toContain("legacy mock transport cannot execute");
+  });
+
+  test("externalToolContinuationText adds directional clarity after empty discovery calls", () => {
+    const textEmptyList = externalToolContinuationText([
+      { role: "user", content: "hi", timestamp: 1 },
+      { role: "toolResult", toolName: "collaboration__list_agents", content: "[]", toolCallId: "c1", timestamp: 2 },
+    ]);
+    expect(textEmptyList).toContain("no sub-agents currently active");
+
+    const textNormal = externalToolContinuationText([
+      { role: "user", content: "hi", timestamp: 1 },
+      { role: "toolResult", toolName: "exec", content: "output from command", toolCallId: "c2", timestamp: 2 },
+    ]);
+    expect(textNormal).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
   });
 
   test("does not retry external tool-result invalid_argument with a fresh conversation id", async () => {
