@@ -215,6 +215,9 @@ function currentWorkingDirectory(): string | undefined {
 
 /** Cap the workspace listing so a large directory does not ship every entry name upstream. */
 const MAX_WORKSPACE_STRUCTURE_ENTRIES = 64;
+/** Cap directory entries scanned while selecting the stable workspace prefix. */
+export const MAX_WORKSPACE_STRUCTURE_SCAN_ENTRIES = 4096;
+// ponytail: the bounded scan trades complete directory coverage for request latency; raise only with measured need.
 /** Cap how many recent commit subjects the config carries. */
 const MAX_RECENT_COMMITS = 8;
 /** Cap each recent commit entry to keep the request bounded even for long subjects. */
@@ -382,11 +385,15 @@ export async function commandCodeConfig(cwd: string | undefined, sessionId?: str
   let structure: string[] = [];
   if (cwd) {
     try {
-      // Keep only the lexicographically smallest entries so filesystem enumeration order cannot
-      // change the bounded prompt prefix.
+      // Keep only the lexicographically smallest entries within the bounded scan so filesystem
+      // enumeration order cannot change the selected prefix for the scanned portion.
       const dir = await opendir(cwd);
       try {
-        for await (const entry of dir) {
+        const entries = dir[Symbol.asyncIterator]();
+        for (let scanned = 0; scanned < MAX_WORKSPACE_STRUCTURE_SCAN_ENTRIES; scanned += 1) {
+          const next = await entries.next();
+          if (next.done) break;
+          const entry = next.value;
           if (entry.name.startsWith(".")) continue;
           structure.push(entry.name);
           if (structure.length > MAX_WORKSPACE_STRUCTURE_ENTRIES) {

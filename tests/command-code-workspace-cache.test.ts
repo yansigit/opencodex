@@ -16,6 +16,7 @@ import {
   workspaceConfigCache,
   pruneWorkspaceMetadataCache,
   MAX_WORKSPACE_METADATA_ENTRIES,
+  MAX_WORKSPACE_STRUCTURE_SCAN_ENTRIES,
   SESSION_WORKSPACE_CONFIG_TTL_MS,
   commandCodeConfig,
 } from "../src/adapters/command-code";
@@ -145,6 +146,32 @@ describe("commandCodeConfig structure and session freeze", () => {
       expect(config.structure).toHaveLength(64);
       expect(config.structure).toContain("a-first");
       expect(config.structure).not.toContain("z-63");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("bounds directory enumeration while selecting a stable structure prefix", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "ocx-cc-structure-scan-cap-"));
+    const names = Array.from({ length: MAX_WORKSPACE_STRUCTURE_SCAN_ENTRIES + 100 }, (_, index) => `entry-${index}`);
+    let scanned = 0;
+    opendirMock.mockImplementation(async () => ({
+      close: async () => undefined,
+      [Symbol.asyncIterator]() {
+        let index = 0;
+        return {
+          next: async () => {
+            scanned += 1;
+            if (index >= names.length) return { done: true as const, value: undefined };
+            return { done: false as const, value: { name: names[index++]! } };
+          },
+        };
+      },
+    }));
+
+    try {
+      await commandCodeConfig(cwd);
+      expect(scanned).toBeLessThanOrEqual(MAX_WORKSPACE_STRUCTURE_SCAN_ENTRIES + 1);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
