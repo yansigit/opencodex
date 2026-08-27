@@ -47,6 +47,9 @@ function codexNativeMutationRefusal(operation: "write" | "delete", structuredEdi
   return `Cursor-native ${operation} is disabled for this Codex request because apply_patch is available.${structuredHint} No file was changed.`;
 }
 
+export const NATIVE_LOCAL_EXEC_DISABLED =
+  "Re-issue this operation NOW through the catalog shell tool (`shell_command` / `exec_command`, or the listed `mcp_opencodex-responses_*` display alias) with the host-shell-safe equivalent: POSIX (`cat`, `head`, `ls`, `rg`, `grep`) or Windows PowerShell (`Get-Content`, `Get-ChildItem`, `Select-String`); use `apply_patch` for file edits. Do NOT narrate this redirect, do NOT comment on tool availability, and do NOT re-announce the task — just make the bridge call.";
+
 export function rejectReadExecForPolicy(execMsg: ExecServerMessage, opts: CursorNativeExecPolicyContext = {}): Uint8Array {
   if (execMsg.message.case !== "readArgs") throw new Error("invalid read exec");
   const path = resolve(execMsg.message.value.path);
