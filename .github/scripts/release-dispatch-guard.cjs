@@ -3,6 +3,7 @@
 const ALLOWED_RELEASE_REFS = new Set([
   "refs/heads/main",
   "refs/heads/preview",
+  "refs/heads/dev",
 ]);
 
 function validateReleaseDispatch({
@@ -16,7 +17,7 @@ function validateReleaseDispatch({
   }
 
   if (!ALLOWED_RELEASE_REFS.has(ref)) {
-    return `Release must run from main or preview; got ${ref || "(empty)"}.`;
+    return `Release must run from main, preview, or dev; got ${ref || "(empty)"}.`;
   }
 
   if (!expectedSha) {

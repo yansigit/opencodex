@@ -18,6 +18,7 @@ on:
         options:
           - latest
           - preview
+          - dev
         default: latest
       dry-run:
         description: "Dry run (build + pack, no actual publish)"
@@ -135,10 +136,17 @@ jobs:
         run: |
           PKG=$(node -p "require('./package.json').version")
           echo "package.json=$PKG  input=${RELEASE_VERSION}"
-          test "$PKG" = "$RELEASE_VERSION" || {
-            echo "::error::package.json ($PKG) != requested (${RELEASE_VERSION}) — bump package.json on main first";
-            exit 1;
-          }
+          if [ "$GITHUB_REF" = "refs/heads/dev" ]; then
+            if [ "$PKG" != "$RELEASE_VERSION" ]; then
+              echo "Setting package.json version to $RELEASE_VERSION for dev publish"
+              npm version "$RELEASE_VERSION" --no-git-tag-version --allow-same-version
+            fi
+          else
+            test "$PKG" = "$RELEASE_VERSION" || {
+              echo "::error::package.json ($PKG) != requested (${RELEASE_VERSION}) — bump package.json first";
+              exit 1;
+            }
+          fi
 
       # The exact-SHA CI gate includes the hosted Linux, Windows, and macOS
       # keyring smoke matrix. Do not duplicate its Linux bootstrap here.
@@ -165,8 +173,15 @@ jobs:
                 exit 1
               fi
               ;;
+            refs/heads/dev)
+              expected_tag="dev"
+              if [[ "$RELEASE_VERSION" != *-dev.* ]]; then
+                echo "::error::dev releases must use a dev prerelease version; got ${RELEASE_VERSION}"
+                exit 1
+              fi
+              ;;
             *)
-              echo "::error::Release must run from main or preview; got ${GITHUB_REF}"
+              echo "::error::Release must run from main, preview, or dev; got ${GITHUB_REF}"
               exit 1
               ;;
           esac
@@ -369,7 +384,7 @@ jobs:
           fi
 
           prerelease_flag=""
-          if [[ "$RELEASE_VERSION" == *-preview.* ]]; then
+          if [[ "$RELEASE_VERSION" == *-preview.* || "$RELEASE_VERSION" == *-dev.* ]]; then
             prerelease_flag="--prerelease"
           fi
 

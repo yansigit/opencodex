@@ -772,9 +772,10 @@ describe("GitHub Actions hardening", () => {
     expect(gate.test("docs-site/src/pages/index.astro")).toBe(false);
 
     // Channel guards stay branch-exact.
-    expect(workflow).toContain("Release must run from main or preview");
+    expect(workflow).toContain("Release must run from main, preview, or dev");
     expect(workflow).toContain("main releases must use a stable semver version");
     expect(workflow).toContain("preview releases must use a preview prerelease version");
+    expect(workflow).toContain("dev releases must use a dev prerelease version");
 
     // Release notes are built and coverage-validated before npm publish. The
     // builder owns Git-history/PR coverage; the workflow only wires the validated

@@ -26,6 +26,7 @@ interface ReleaseScenario {
   branch?: string;
   npmLatest?: string;
   npmPreview?: string;
+  npmDev?: string;
   headSha?: string;
   remoteHeadSha?: string;
   privacyExitCode?: number;
@@ -133,6 +134,7 @@ if (args[0] === "view" && args.includes("dist-tags")) {
   process.stdout.write(JSON.stringify({
     latest: process.env.FAKE_NPM_LATEST ?? "0.0.1",
     preview: process.env.FAKE_NPM_PREVIEW ?? "0.0.1-preview.0",
+    dev: process.env.FAKE_NPM_DEV ?? "0.0.1-dev.0",
   }) + "\\n");
   process.exit(0);
 }
@@ -255,6 +257,7 @@ function runRelease(version: string, scenario: ReleaseScenario = {}) {
       FAKE_BUN_PRIVACY_EXIT_CODE: String(scenario.privacyExitCode ?? 0),
       ...(scenario.npmLatest ? { FAKE_NPM_LATEST: scenario.npmLatest } : {}),
       ...(scenario.npmPreview ? { FAKE_NPM_PREVIEW: scenario.npmPreview } : {}),
+      ...(scenario.npmDev ? { FAKE_NPM_DEV: scenario.npmDev } : {}),
       ...(scenario.releaseSshKey ? { OCX_RELEASE_SSH_KEY: scenario.releaseSshKey } : {}),
       ...(scenario.releaseSshRepo ? { OCX_RELEASE_SSH_REPO: scenario.releaseSshRepo } : {}),
       ...(scenario.pendingBump ? { FAKE_GIT_PENDING_BUMP: " M package.json" } : {}),
@@ -382,6 +385,12 @@ describe("release helper", () => {
     expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
   });
 
+  test("dev releases compare against the dev channel, not latest", () => {
+    const { result } = runRelease("9.9.9-dev.2", { branch: "dev", npmLatest: "10.0.0", npmDev: "9.9.9-dev.1" });
+
+    expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
+  });
+
   test("failed privacy scan aborts before version bump, commit, and push", () => {
     const { calls, result } = runRelease("9.9.9", { privacyExitCode: 1 });
 
@@ -401,6 +410,19 @@ describe("release helper", () => {
       && call.args[1] === "run"
       && call.args.includes("release.yml")
       && call.args.includes("tag=preview")
+      && call.args.includes("dry-run=true"),
+    )).toBeGreaterThanOrEqual(0);
+  });
+
+  test("dev branch defaults to dev tag and dry-run dispatch", () => {
+    const { calls, result } = runRelease("9.9.9-dev.1", { branch: "dev" });
+
+    expect(result.status).toBe(0);
+    expect(findCallIndex(calls, "gh", call =>
+      call.args[0] === "workflow"
+      && call.args[1] === "run"
+      && call.args.includes("release.yml")
+      && call.args.includes("tag=dev")
       && call.args.includes("dry-run=true"),
     )).toBeGreaterThanOrEqual(0);
   });
