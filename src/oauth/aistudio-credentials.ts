@@ -41,12 +41,18 @@ export function resolveAiStudioCredentials(
   const invalidSources: string[] = [];
   const apiKey = validCookieHeader(provider.apiKey);
   if (apiKey) return ready(apiKey, "provider-api-key");
-  if (provider.apiKey?.trim()) invalidSources.push("provider apiKey");
+  if ((typeof provider.apiKey === "string" && provider.apiKey.trim())
+    || (provider.apiKey !== undefined && provider.apiKey !== null && typeof provider.apiKey !== "string")) {
+    invalidSources.push("provider apiKey");
+  }
 
   const cookieEntry = Object.entries(provider.headers ?? {}).find(([name]) => name.toLowerCase() === "cookie");
   const headerCookie = validCookieHeader(cookieEntry?.[1]);
   if (headerCookie) return ready(headerCookie, "provider-header");
-  if (cookieEntry?.[1]?.trim()) invalidSources.push("provider Cookie header");
+  if ((typeof cookieEntry?.[1] === "string" && cookieEntry[1].trim())
+    || (cookieEntry !== undefined && typeof cookieEntry[1] !== "string")) {
+    invalidSources.push("provider Cookie header");
+  }
 
   const savedSession = session === undefined ? loadAiStudioSession() : session;
   const sessionCookie = validCookieHeader(cookieHeaderFromSession(savedSession));

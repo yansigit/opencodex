@@ -88,4 +88,17 @@ describe("AI Studio credential resolution", () => {
   test("reports missing when no candidate is configured", () => {
     expect(resolveAiStudioCredentials(baseProvider, null).kind).toBe("missing");
   });
+
+  test("returns invalid instead of throwing for malformed persisted runtime values", () => {
+    expect(() => resolveAiStudioCredentials({
+      ...baseProvider,
+      apiKey: 123 as unknown as string,
+      headers: { Cookie: 456 as unknown as string },
+    }, null)).not.toThrow();
+    expect(resolveAiStudioCredentials({
+      ...baseProvider,
+      apiKey: 123 as unknown as string,
+      headers: { Cookie: 456 as unknown as string },
+    }, null).kind).toBe("invalid");
+  });
 });
