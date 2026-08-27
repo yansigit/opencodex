@@ -85,7 +85,10 @@ document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
     const headers = { "Content-Type": "application/json" };
     if (proxyApiKey) headers["x-opencodex-api-key"] = proxyApiKey;
 
-    const res = await fetch("http://127.0.0.1:10100/api/aistudio/session", {
+    // default endpoint http://127.0.0.1:10100/api/aistudio/session
+    const { proxyPort } = await new Promise((resolve) => chrome.storage.local.get(["proxyPort"], resolve));
+    const port = proxyPort || 10100;
+    const res = await fetch(`http://127.0.0.1:${port}/api/aistudio/session`, {
       method: "POST",
       headers,
       body: JSON.stringify({ token: base64Token, ...bundleObj })
