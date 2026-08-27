@@ -44,6 +44,68 @@ describe("aistudio bridge HTTP endpoint", () => {
     expect(source.slice(routeStart, routeEnd)).toContain("resolveApiAuth(req, policy)");
   });
 
+  test("OPTIONS /api/aistudio/session preflight allows chrome-extension origin", async () => {
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "OPTIONS",
+        headers: {
+          Origin: "chrome-extension://test-extension-id",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "Content-Type, X-OpenCodex-API-Key",
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test-extension-id");
+      const allowHeaders = res.headers.get("Access-Control-Allow-Headers") || "";
+      expect(allowHeaders).toContain("Content-Type");
+      expect(allowHeaders).toContain("X-OpenCodex-API-Key");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("OPTIONS /api/aistudio/session preflight allows https://aistudio.google.com origin", async () => {
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://aistudio.google.com",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "Content-Type",
+        },
+      });
+      expect(res.status).toBe(204);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://aistudio.google.com");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("POST /api/aistudio/session reflects chrome-extension origin in CORS header", async () => {
+    const server = startServer(0);
+    try {
+      const token = serializeSessionBundle({
+        selectedProject: "projects/my-test-proj",
+        windowId: "win_123",
+        cookies: [{ name: "SAPISID", value: "test_sapisid_val" }],
+      });
+      const res = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "chrome-extension://test-extension-id",
+        },
+        body: JSON.stringify({ token }),
+      });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test-extension-id");
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("server serves bridge HTML, userscript, status, and session ingest routes", async () => {
     const server = startServer(0);
     try {
