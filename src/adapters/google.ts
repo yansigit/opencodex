@@ -1063,6 +1063,13 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       const budgetEncoder = new TextEncoder();
+      const contentType = response.headers.get("content-type") ?? "";
+      const isHtmlContentType = contentType.toLowerCase().includes("text/html");
+      const isHtmlRedirect = (text: string) => {
+        const lower = text.trim().toLowerCase();
+        return lower.startsWith("<!doctype") || text.includes("accounts.google.com/v3/signin");
+      };
+      const reauthError = "Google AI Studio session expired — re-authentication required";
       let buffer = "";
       let bufferBytes = 0;
       // Raw unterminated-line bytes, independent of TextDecoder's pending UTF-8
@@ -1383,6 +1390,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
                 yield { type: "done" };
                 return;
               }
+            }
+            if (isHtmlContentType || isHtmlRedirect(residual)) {
+              yield { type: "error", message: reauthError };
+              return;
             }
             yield { type: "error", message: `upstream non-SSE response: ${residual.slice(0, 300)}` };
             return;

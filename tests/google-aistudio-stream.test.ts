@@ -125,10 +125,10 @@ describe("google adapter — ai-studio-web stream parsing", () => {
     const adapter = createGoogleAdapter(cookieProvider);
     await adapter.buildRequest(parsedRequest());
 
-    const invalidResidual = "HTML 404 Not Found or unknown format";
+    const invalidResidual = "SOME_UNKNOWN_FORMAT_NOT_HTML";
     const response = new Response(invalidResidual, {
       status: 200,
-      headers: { "Content-Type": "text/html" },
+      headers: { "Content-Type": "application/octet-stream" },
     });
 
     const budget = createTranslatorBudget(100);
@@ -161,5 +161,25 @@ describe("google adapter — ai-studio-web stream parsing", () => {
     const errorEvent = events.find((e) => e.type === "error");
     expect(errorEvent).toBeDefined();
     expect((errorEvent as any).message).toBe("Quota exceeded or invalid token");
+  });
+  test("yields re-auth error on upstream HTML login redirect", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+
+    const html = '<!doctype html><html><head><base href="https://accounts.google.com/v3/signin"></head><body>redirect</body></html>';
+    const response = new Response(html, {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+
+    const budget = createTranslatorBudget(100);
+    const events = [];
+    for await (const event of adapter.parseStream(response, budget)) {
+      events.push(event);
+    }
+
+    const errorEvent = events.find((e) => e.type === "error");
+    expect(errorEvent).toBeDefined();
+    expect((errorEvent as any).message).toBe("Google AI Studio session expired — re-authentication required");
   });
 });
