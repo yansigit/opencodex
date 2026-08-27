@@ -83,4 +83,83 @@ describe("google adapter — ai-studio-web stream parsing", () => {
     const toolDelta = events.find((e) => e.type === "tool_call_delta");
     expect(JSON.parse((toolDelta as any).arguments)).toEqual({ id: 123 });
   });
+
+  test("parses non-SSE MakerSuite protobuf chunks into text deltas and completes", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+
+    const rawMakerSuite = '[[[[[[[[null,"Pong"]],"model"]]],null,[11,1,63],null,null,null,null,"token"]]]';
+    const response = new Response(rawMakerSuite, {
+      status: 200,
+      headers: { "Content-Type": "application/json+protobuf" },
+    });
+
+    const budget = createTranslatorBudget(100);
+    const events = [];
+    for await (const event of adapter.parseStream(response, budget)) {
+      events.push(event);
+    }
+
+    const textEvents = events.filter((e) => e.type === "text_delta");
+    expect(textEvents.map((e: any) => e.text).join("")).toBe("Pong");
+    expect(events.some((e) => e.type === "done")).toBe(true);
+  });
+
+  test("parseResponse collects events into unary completed response", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+
+    const rawMakerSuite = '[[[[[[[[null,"Hello from unary"]],"model"]]],null,[11,1,63],null,null,null,null,"token"]]]';
+    const response = new Response(rawMakerSuite, {
+      status: 200,
+      headers: { "Content-Type": "application/json+protobuf" },
+    });
+
+    const budget = createTranslatorBudget(100);
+    const events = await adapter.parseResponse!(response, budget);
+    const textEvents = events.filter((e) => e.type === "text_delta");
+    expect(textEvents.map((e: any) => e.text).join("")).toBe("Hello from unary");
+  });
+
+  test("yields error event on non-SSE residual that cannot be parsed", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+
+    const invalidResidual = "HTML 404 Not Found or unknown format";
+    const response = new Response(invalidResidual, {
+      status: 200,
+      headers: { "Content-Type": "text/html" },
+    });
+
+    const budget = createTranslatorBudget(100);
+    const events = [];
+    for await (const event of adapter.parseStream(response, budget)) {
+      events.push(event);
+    }
+
+    const errorEvent = events.find((e) => e.type === "error");
+    expect(errorEvent).toBeDefined();
+    expect((errorEvent as any).message).toContain("upstream non-SSE response");
+  });
+
+  test("yields error event on non-SSE JSON error payload", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+
+    const errorJson = JSON.stringify({ error: { message: "Quota exceeded or invalid token" } });
+    const response = new Response(errorJson, {
+      status: 429,
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const budget = createTranslatorBudget(100);
+    const events = [];
+    for await (const event of adapter.parseStream(response, budget)) {
+      events.push(event);
+    }
+
+    const errorEvent = events.find((e) => e.type === "error");
+    expect(errorEvent).toBeDefined();
+    expect((errorEvent as any).message).toBe("Quota exceeded or invalid token");
+  });
 });
