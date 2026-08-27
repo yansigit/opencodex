@@ -48,25 +48,26 @@ function walkTs(root: string, relDir: string): string[] {
 }
 
 function collectProviderSourcePaths(provider: string, root: string): string[] {
+  const smokePaths = ["src/smoke/runner.ts", "src/smoke/live-scenarios.ts"];
   let paths: string[];
   switch (provider) {
     case "google":
     case "google-antigravity":
     case "google-aistudio":
-      paths = ["src/adapters/google.ts", "src/adapters/google-wire-compiler.ts", "src/adapters/google-tool-schema.ts", "src/adapters/google-antigravity-wire.ts", "src/types/tools.ts", "src/server/responses-undeclared-tool-guard.ts"];
+      paths = [...smokePaths, "src/adapters/google.ts", "src/adapters/google-wire-compiler.ts", "src/adapters/google-tool-schema.ts", "src/adapters/google-antigravity-wire.ts", "src/types/tools.ts", "src/server/responses-undeclared-tool-guard.ts"];
       break;
     case "cursor":
-      paths = ["src/adapters/cursor.ts", ...walkTs(root, "src/adapters/cursor")];
+      paths = [...smokePaths, "src/adapters/cursor.ts", ...walkTs(root, "src/adapters/cursor")];
       break;
     case "command-code":
-      paths = ["src/adapters/command-code.ts", "src/adapters/command-code-project-context.ts", "src/providers/command-code-efforts.ts"];
+      paths = [...smokePaths, "src/adapters/command-code.ts", "src/adapters/command-code-project-context.ts", "src/providers/command-code-efforts.ts"];
       break;
     case "openai":
     case "openai-responses":
-      paths = ["src/adapters/openai-responses.ts", "src/adapters/responses-tool-schema.ts"];
+      paths = [...smokePaths, "src/adapters/openai-responses.ts", "src/adapters/responses-tool-schema.ts"];
       break;
     default:
-      paths = [`src/adapters/${provider}.ts`];
+      paths = [...smokePaths, `src/adapters/${provider}.ts`];
       break;
   }
   return [...new Set(paths)].filter(path => existsSync(join(root, path))).sort();

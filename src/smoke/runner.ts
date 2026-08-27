@@ -1,4 +1,7 @@
-import { loadConfig } from "../config";
+import { loadConfig, resolveEnvValue } from "../config";
+import { getCredential } from "../oauth/store";
+import type { OAuthCredentials } from "../oauth/types";
+import type { OcxProviderConfig } from "../types";
 import { computeProviderSourceFingerprint, loadSmokeCache, recordSmokeResult, shouldRunSmokeForProvider } from "./fingerprint-cache";
 import { buildSmokeScenarioRequest } from "./live-scenarios";
 
@@ -18,6 +21,16 @@ function result(provider: string, modelId: string, started: number, extra: Parti
   return { provider, modelId, status: "failed", level1Passed: false, level2Passed: false, level3Passed: false, durationMs: Date.now() - started, ...extra };
 }
 
+export function providerHasSmokeCredential(
+  provider: Partial<Pick<OcxProviderConfig, "apiKey" | "authMode" | "headers">>,
+  credential?: OAuthCredentials | null,
+): boolean {
+  if (resolveEnvValue(provider.apiKey)?.trim()) return true;
+  if (Object.entries(provider.headers ?? {}).some(([name, value]) => /authorization|cookie|api[-_]?key/i.test(name) && typeof value === "string" && value.trim().length > 0)) return true;
+  if (provider.authMode === "forward") return true;
+  return provider.authMode === "oauth" && Boolean(credential?.access?.trim() || credential?.refresh?.trim());
+}
+
 function classifyHttp(status: number, body: string): "not_authenticated" | "quota_exhausted" | undefined {
   if (status === 401 || status === 403) return "not_authenticated";
   if (status === 429 || /credit|quota|insufficient.?balance|billing/i.test(body)) return "quota_exhausted";
@@ -30,6 +43,8 @@ export async function runProviderSmoke(options: { provider: string; modelId?: st
   const providerConfig = config.providers[options.provider];
   const modelId = options.modelId ?? config.subagentModels?.[0] ?? "gpt-5";
   if (!providerConfig || providerConfig.disabled === true) return result(options.provider, modelId, started, { status: "skipped", reason: "not_authenticated" });
+  const credential = providerConfig.authMode === "oauth" ? getCredential(options.provider) : null;
+  if (!providerHasSmokeCredential(providerConfig, credential)) return result(options.provider, modelId, started, { status: "skipped", reason: "not_authenticated" });
   const fingerprint = await computeProviderSourceFingerprint(options.provider);
   const cache = await loadSmokeCache(options.cachePath);
   if (!shouldRunSmokeForProvider(options.provider, fingerprint, { force: options.force, cache })) return result(options.provider, modelId, started, { status: "skipped", reason: "cached_pass" });
