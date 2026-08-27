@@ -38,6 +38,7 @@ describe("Google AI Studio Chrome/Brave Extension", () => {
     expect(code).toContain("http://127.0.0.1:10100/api/aistudio/session");
     expect(code).toContain("btnAutoSync");
     expect(code).toContain("btnCopyBundle");
+    expect(code).toContain("x-opencodex-api-key");
   });
 
   test("popup.html contains auto-sync, copy, and status elements", () => {
@@ -49,6 +50,7 @@ describe("Google AI Studio Chrome/Brave Extension", () => {
     expect(html).toContain('id="btnCopyBundle"');
     expect(html).toContain('id="exportStatus"');
     expect(html).toContain('id="status"');
+    expect(html).toContain('id="proxyApiKey"');
   });
 
   test("content.js exists for direct aistudio.google.com page execution", () => {

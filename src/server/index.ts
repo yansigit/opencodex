@@ -936,6 +936,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) {
+          return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        }
         const origin = req.headers.get("Origin");
         const isExtensionOrigin = origin?.startsWith("chrome-extension://");
         if (!isAllowedRequestOrigin(req, policy) && origin !== "https://aistudio.google.com" && !isExtensionOrigin) {

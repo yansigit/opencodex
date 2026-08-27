@@ -81,9 +81,13 @@ document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
     const { bundleObj, base64Token } = await harvestSession();
     statusEl.textContent = "Syncing with local OpenCodex proxy...";
 
+    const proxyApiKey = document.getElementById("proxyApiKey")?.value.trim();
+    const headers = { "Content-Type": "application/json" };
+    if (proxyApiKey) headers["x-opencodex-api-key"] = proxyApiKey;
+
     const res = await fetch("http://127.0.0.1:10100/api/aistudio/session", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify({ token: base64Token, ...bundleObj })
     });
 
@@ -100,4 +104,3 @@ document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
 
 document.addEventListener("DOMContentLoaded", renderRelay);
 chrome.storage?.onChanged?.addListener(renderRelay);
-

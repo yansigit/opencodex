@@ -21,6 +21,14 @@ describe("aistudio bridge HTTP endpoint", () => {
     expect(userScript).toContain('credentials: "include"');
   });
 
+  test("session ingest route is guarded by data-plane admission on non-loopback binds", async () => {
+    const source = await Bun.file(new URL("../src/server/index.ts", import.meta.url)).text();
+    const routeStart = source.indexOf('url.pathname === "/api/aistudio/session"');
+    const routeEnd = source.indexOf('url.pathname === "/aistudio/bridge"', routeStart);
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    expect(source.slice(routeStart, routeEnd)).toContain("resolveApiAuth(req, policy)");
+  });
+
   test("server serves bridge HTML, userscript, status, and session ingest routes", async () => {
     const server = startServer(0);
     try {

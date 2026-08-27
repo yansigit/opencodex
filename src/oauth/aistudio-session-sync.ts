@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 
@@ -56,7 +56,8 @@ export function getAiStudioSessionPath(): string {
 
 export function saveAiStudioSession(data: AiStudioSessionData, dest = getAiStudioSessionPath()): string {
   mkdirSync(join(dest, ".."), { recursive: true });
-  writeFileSync(dest, JSON.stringify(data, null, 2), "utf-8");
+  writeFileSync(dest, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o600 });
+  try { chmodSync(dest, 0o600); } catch { /* best-effort on platforms without POSIX modes */ }
   return dest;
 }
 

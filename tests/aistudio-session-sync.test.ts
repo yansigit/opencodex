@@ -8,7 +8,7 @@ import {
   saveAiStudioSessionFromToken,
   serializeSessionBundle,
 } from "../src/oauth/aistudio-session-sync";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigDir } from "../src/config";
@@ -54,6 +54,12 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
     const loaded = JSON.parse(readFileSync(dest, "utf-8"));
     expect(loaded.selectedProject).toBe("gen-lang-client-123456");
     expect(loaded.cookies.some((c: any) => c.name === "SAPISID")).toBe(true);
+  });
+
+  test("writes session credentials with owner-only permissions", () => {
+    const dest = join(mkdtempSync(join(tmpdir(), "aistudio-session-")), "aistudio-session.json");
+    saveAiStudioSession(sampleData, dest);
+    expect(statSync(dest).mode & 0o777).toBe(0o600);
   });
 
   test("saveAiStudioSessionFromToken decodes base64 bundle and writes session file", () => {

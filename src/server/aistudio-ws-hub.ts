@@ -201,14 +201,14 @@ export function createAiStudioRelayHub(): AiStudioRelayHub {
       try {
         data = JSON.parse(raw);
       } catch (err) {
-        console.log("[AIStudioHub] failed to parse JSON message:", err, raw);
+        console.log("[AIStudioHub] failed to parse JSON message:", err);
         void err;
         return;
       }
 
       const { id, type, payload } = data || {};
       if (!id) {
-        console.log("[AIStudioHub] message missing id:", raw);
+        console.log("[AIStudioHub] message missing id");
         return;
       }
 

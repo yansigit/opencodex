@@ -2,6 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { createAiStudioRelayHub, type AiStudioRelayHub } from "../src/server/aistudio-ws-hub";
 
 describe("AiStudioRelayHub — connection management and request multiplexing", () => {
+  test("does not log raw client payloads", () => {
+    const hub = createAiStudioRelayHub();
+    const original = console.log;
+    const lines: unknown[][] = [];
+    console.log = (...args: unknown[]) => { lines.push(args); };
+    try {
+      hub.handleClientMessage("missing", 'not-json-cookie=secret');
+    } finally {
+      console.log = original;
+    }
+    expect(JSON.stringify(lines)).not.toContain("cookie=secret");
+  });
   test("registers and unregisters browser websocket sessions", () => {
     const hub = createAiStudioRelayHub();
     expect(hub.hasActiveSessions()).toBe(false);

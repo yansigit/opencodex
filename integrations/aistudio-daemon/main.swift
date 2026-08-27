@@ -20,6 +20,11 @@ let opencodexDir = homeDir.appendingPathComponent(".opencodex")
 try? fileManager.createDirectory(at: opencodexDir, withIntermediateDirectories: true)
 let sessionFile = opencodexDir.appendingPathComponent("aistudio-session.json")
 
+func writeSecureSession(_ data: Data, to url: URL) throws {
+    try data.write(to: url, options: [.atomic])
+    try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+}
+
 // -------------------------------------------------------------
 // Interactive Login Mode: Pops up native window for Google login
 // -------------------------------------------------------------
@@ -95,7 +100,7 @@ if isLoginMode {
                                     "cookies": cookieMaps
                                 ]
                                 if let data = try? JSONSerialization.data(withJSONObject: sessionObj, options: [.prettyPrinted]) {
-                                    try? data.write(to: self.sessionFile)
+                                    try? writeSecureSession(data, to: self.sessionFile)
                                     print("✅ Successfully harvested Google AI Studio session to \(self.sessionFile.path)")
                                     fflush(stdout)
                                     exit(0)
@@ -130,6 +135,8 @@ guard let sessionData = try? Data(contentsOf: sessionFile),
 let selectedProject = json["selectedProject"] as? String ?? ""
 let windowId = json["windowId"] as? String ?? ""
 let rawCookies = json["cookies"] as? [[String: String]] ?? []
+let jsSelectedProject = String(data: try! JSONSerialization.data(withJSONObject: selectedProject, options: [.fragmentsAllowed]), encoding: .utf8)!
+let jsWindowId = String(data: try! JSONSerialization.data(withJSONObject: windowId, options: [.fragmentsAllowed]), encoding: .utf8)!
 
 let headlessConfig = WKWebViewConfiguration()
 let headlessStore = WKWebsiteDataStore.nonPersistent()
@@ -260,8 +267,8 @@ let injectionJs = """
   }
 
   try {
-      sessionStorage.setItem('maker_suite_browser_window_id', '\(windowId)');
-      localStorage.setItem('selectedProject', '\(selectedProject)');
+      sessionStorage.setItem('maker_suite_browser_window_id', \(jsWindowId));
+      localStorage.setItem('selectedProject', \(jsSelectedProject));
       localStorage.setItem('ais_glcr', '{"timestamp":1787783491975,"result":"true"}');
   } catch(err) { void err; }
 
@@ -274,12 +281,20 @@ headlessConfig.userContentController.addUserScript(userScript)
 
 let cookieStore = headlessStore.httpCookieStore
 var injected = 0
+let validCookies = rawCookies.filter { cMap in
+    guard cMap["name"] != nil, cMap["value"] != nil else { return false }
+    let domain = (cMap["domain"] ?? ".google.com").lowercased()
+    return domain == "google.com" || domain.hasSuffix(".google.com")
+}
 
-for cMap in rawCookies {
+for cMap in validCookies {
     guard let name = cMap["name"], let value = cMap["value"] else { continue }
+    let rawDomain = (cMap["domain"] ?? ".google.com").lowercased()
+    guard rawDomain == "google.com" || rawDomain.hasSuffix(".google.com") else { continue }
+    let cookiePath = cMap["path"]?.hasPrefix("/") == true ? cMap["path"]! : "/"
     let cookie = HTTPCookie(properties: [
-        .domain: ".google.com",
-        .path: "/",
+        .domain: rawDomain,
+        .path: cookiePath,
         .name: name,
         .value: value,
         .secure: "TRUE",
@@ -287,7 +302,7 @@ for cMap in rawCookies {
     ])!
     cookieStore.setCookie(cookie) {
         injected += 1
-        if injected == rawCookies.count {
+        if injected == validCookies.count {
             print("All cookies injected. Loading AI Studio workspace...")
             fflush(stdout)
             
@@ -323,4 +338,3 @@ for cMap in rawCookies {
 print("OpenCodex Native Hardened WebKit Relay started on port \(proxyPort)")
 fflush(stdout)
 RunLoop.main.run()
-
