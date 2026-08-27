@@ -393,7 +393,7 @@ export async function multiAgentGuidanceText(
       + "and make the task message self-contained. "
       + "When specifying model overrides, omit agent_type or use \"worker\" to prevent enforcing locked default models. "
       + "Subagent exec runs in a pure V8 isolate without require('fs'); "
-      + "escape nested template literals (` and ${...}) in tools.apply_patch to prevent JavaScript syntax errors.";
+      + "escape nested template literals in tools.apply_patch to prevent JavaScript syntax errors (e.g., write \\` and \\\${var}).";
     let preferredText = "";
     if (preferred) {
       preferredText = ` Preferred sub-agent: model "${preferred.model}"`

@@ -54,6 +54,8 @@ describe("v2 multi-agent guidance: subagent code-mode & role guidance", () => {
     // Code-mode isolate guidance: pure V8 isolate, no require('fs'), template literal escaping for apply_patch
     expect(text).toContain("require('fs')");
     expect(text).toContain("apply_patch");
+    expect(text).toContain("\\`");
+    expect(text).toContain("\\\${");
   });
 
   test("renders both role advice, isolate guidance, preferred model and roster without truncation under raised budget", async () => {
@@ -84,6 +86,8 @@ describe("v2 multi-agent guidance: subagent code-mode & role guidance", () => {
     expect(text).toContain("worker");
     expect(text).toContain("require('fs')");
     expect(text).toContain("apply_patch");
+    expect(text).toContain("\\`");
+    expect(text).toContain("\\\${");
     expect(text).toContain('model "cursor/composer-2.5"');
     expect(text).toContain("Available models");
   });
