@@ -339,6 +339,12 @@ export interface OcxConfig {
    */
   subagentModelFallbackByModel?: Record<string, string[]>;
   /**
+   * Candidate models for spawned sub-agents. Supports either a global list of
+   * model candidates (evaluated in order) or a mapping keyed by subagent role or
+   * requested primary model.
+   */
+  subagentCandidates?: string[] | Record<string, string[]>;
+  /**
    * TTL (ms) for cached sub-agent model availability probes. Default 60_000.
    */
   subagentModelFallbackPollMs?: number;

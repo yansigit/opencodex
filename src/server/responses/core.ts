@@ -229,7 +229,7 @@ import { isThreadSpawnRequest } from "../effort-policy";
 import {
   applySubagentModelFallback,
   maybePrimeSubagentQuota,
-  recordSubagentQuotaFailureForThreadSpawn,
+  recordSubagentFailureForThreadSpawn,
 } from "../../codex/subagent-model-fallback";
 import { isNativeMainTrafficBlocked } from "../../codex/native-profile-startup";
 import {
@@ -1224,6 +1224,34 @@ export function codexForwardTerminalOutcomeRecorder(
   };
 }
 
+function subagentSpawnFailureMessageForTerminal(
+  status: ResponsesTerminalStatus,
+  httpStatusOverride?: number,
+  logCtx?: RequestLogContext,
+): string | number | undefined {
+  if (status !== "failed") return undefined;
+  const statusCode = httpStatusOverride ?? logCtx?.terminalHttpStatus;
+  if (statusCode === 429 || statusCode === 402) return statusCode;
+  if (typeof statusCode === "number" && statusCode >= 500 && statusCode < 600) return statusCode;
+  const terminalMessage = logCtx?.upstreamError?.trim();
+  if (terminalMessage) return terminalMessage;
+  return undefined;
+}
+
+function recordSubagentSpawnFailureForTerminal(
+  headers: Headers,
+  model: string,
+  status: ResponsesTerminalStatus,
+  config: OcxConfig,
+  accountId: string | null,
+  httpStatusOverride?: number,
+  logCtx?: RequestLogContext,
+): void {
+  const failureMessage = subagentSpawnFailureMessageForTerminal(status, httpStatusOverride, logCtx);
+  if (failureMessage === undefined) return;
+  recordSubagentFailureForThreadSpawn(headers, model, failureMessage, config, accountId);
+}
+
 
 
 export function decodeRequestErrorResponse(err: unknown, label: string): Response {
@@ -1757,6 +1785,19 @@ async function applyFinalRouteRequestNormalization(args: {
       }
     } else if (isInjectionDebugEnabled() && (config.effortCap || config.subagentEffortCap)) {
       injectionDebugLog(`[opencodex] ${route.modelId}: effort cap skipped (surface=${surface ?? "none"}, v2 feature only)`);
+    }
+  }
+
+  {
+    const { sanitizeEffortForModel, supportedLadderFor } = await import("../effort-policy");
+    const previousEffort = parsed.options.reasoning;
+    const ladder = supportedLadderFor(route);
+    if (ladder !== undefined && ladder.length === 0 && previousEffort) {
+      sanitizeEffortForModel(parsed, ladder);
+      logCtx.requestedEffort = `${logCtx.requestedEffort ?? previousEffort}->none`;
+      if (isInjectionDebugEnabled()) {
+        injectionDebugLog(`[opencodex] ${route.modelId}: stripped reasoning effort for effortless model`);
+      }
     }
   }
 
@@ -3830,18 +3871,15 @@ async function handleResponsesInner(
         options.setTerminalOutcomeRecorder?.((status, httpStatusOverride) => {
           terminalRecorder(status, httpStatusOverride);
           if (status === "failed") {
-            const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
-              || logCtx.terminalHttpStatus === 429
-              || logCtx.terminalHttpStatus === 402
-              ? (httpStatusOverride ?? logCtx.terminalHttpStatus)
-              : undefined;
-            if (!isFixedCodexAccount(authCtx) && quotaFailureMessage !== undefined) {
-              recordSubagentQuotaFailureForThreadSpawn(
+            if (!isFixedCodexAccount(authCtx)) {
+              recordSubagentSpawnFailureForTerminal(
                 req.headers,
                 subagentQuotaFailureModel,
-                quotaFailureMessage,
+                status,
                 config,
                 subagentFallbackAccountId,
+                httpStatusOverride,
+                logCtx,
               );
             }
           }
@@ -4014,18 +4052,15 @@ async function handleResponsesInner(
           ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
             terminalRecorder?.(status, httpStatusOverride);
             if (status === "failed") {
-              const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
-                || logCtx.terminalHttpStatus === 429
-                || logCtx.terminalHttpStatus === 402
-                ? (httpStatusOverride ?? logCtx.terminalHttpStatus)
-                : undefined;
-              if (!isFixedCodexAccount(authCtx) && quotaFailureMessage !== undefined) {
-                recordSubagentQuotaFailureForThreadSpawn(
+              if (!isFixedCodexAccount(authCtx)) {
+                recordSubagentSpawnFailureForTerminal(
                   req.headers,
                   subagentQuotaFailureModel,
-                  quotaFailureMessage,
+                  status,
                   config,
                   subagentFallbackAccountId,
+                  httpStatusOverride,
+                  logCtx,
                 );
               }
             }
@@ -4097,18 +4132,15 @@ async function handleResponsesInner(
         const reportNativeTerminal = (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
           terminalRecorder?.(status, httpStatusOverride);
           if (status === "failed") {
-            const quotaFailureMessage = httpStatusOverride === 429 || httpStatusOverride === 402
-              || logCtx.terminalHttpStatus === 429
-              || logCtx.terminalHttpStatus === 402
-              ? (httpStatusOverride ?? logCtx.terminalHttpStatus)
-              : undefined;
-            if (!isFixedCodexAccount(authCtx) && quotaFailureMessage !== undefined) {
-              recordSubagentQuotaFailureForThreadSpawn(
+            if (!isFixedCodexAccount(authCtx)) {
+              recordSubagentSpawnFailureForTerminal(
                 req.headers,
                 subagentQuotaFailureModel,
-                quotaFailureMessage,
+                status,
                 config,
                 subagentFallbackAccountId,
+                httpStatusOverride,
+                logCtx,
               );
             }
           }
@@ -5368,7 +5400,7 @@ async function handleResponsesInner(
         cleanupUpstreamAbort();
       }
       if (!isFixedCodexAccount(authCtx)) {
-        recordSubagentQuotaFailureForThreadSpawn(
+        recordSubagentFailureForThreadSpawn(
           req.headers,
           subagentQuotaFailureModel,
           upstreamResponse.status === 429 || upstreamResponse.status === 402
