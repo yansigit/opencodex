@@ -71,6 +71,15 @@ describe("sessionIdHeaderFromRequest", () => {
       "session-id": "hyphen",
     }))).toBe("underscore");
   });
+
+  test("uses session_id before session-id, while x-session-id stays a separate bridge header", () => {
+    expect(sessionIdHeaderFromRequest(new Headers({ "x-session-id": "x-session" }))).toBeNull();
+    expect(sessionIdHeaderFromRequest(new Headers({
+      session_id: "underscore",
+      "session-id": "hyphen",
+      "x-session-id": "x-session",
+    }))).toBe("underscore");
+  });
 });
 
 describe("inboundClientThreadIdFromRequest", () => {
@@ -95,6 +104,25 @@ describe("inboundClientThreadIdFromRequest", () => {
     expect(inboundClientThreadIdFromRequest(new Headers({
       session_id: "underscore-session",
       "session-id": "hyphen-session",
+    }))).toBe("underscore-session");
+  });
+
+  test("keeps core precedence explicit when all inbound aliases are present", () => {
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      "x-codex-parent-thread-id": "parent-thread",
+      "thread-id": "thread",
+      session_id: "underscore-session",
+      "session-id": "hyphen-session",
+      "x-session-id": "x-session",
+    }))).toBe("parent-thread");
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      "thread-id": "thread",
+      session_id: "underscore-session",
+      "x-session-id": "x-session",
+    }))).toBe("thread");
+    expect(inboundClientThreadIdFromRequest(new Headers({
+      session_id: "underscore-session",
+      "x-session-id": "x-session",
     }))).toBe("underscore-session");
   });
 
