@@ -1025,6 +1025,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         Object.assign(headers, aiStudioHeaders);
         const compiled = compileGoogleWireBody({ ...body, model: routedModelId });
         restoreGoogleToolName = compiled.restoreToolName;
+        if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
+          ensureThoughtSignatureBypassSentinel((compiled.body as { contents: unknown[] }).contents, routedModelId);
+        }
         emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
         return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
       }
