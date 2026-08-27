@@ -4,6 +4,7 @@ import { ValueSchema } from "@bufbuild/protobuf/wkt";
 import type { OcxAssistantContentPart, OcxMessage, OcxRequestOptions, OcxToolResultMessage } from "../../types";
 import { namespacedToolName } from "../../types";
 import type { CursorRunRequest } from "./types";
+import { decodeCursorCallId } from "./call-id";
 import { cursorNeedsExternalToolContinuation, isCursorExternalWireModel } from "./discovery";
 import { normalizeCursorToolResultText } from "./tool-result-normalize";
 import { debugProviderDiagnostic } from "../../lib/debug";
@@ -250,6 +251,42 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
   const echoToolResultInRoot = cursorNeedsExternalToolContinuation(request.modelId);
   const lastRawIsToolResult = messages.at(-1)?.role === "toolResult";
   const activeUserIndex = lastRawIsToolResult ? -1 : lastActionIndex(messages);
+  // Repetition breaker (devlog 260826 gap-9): external full-replay flattens history to text,
+  // so N identical assistant/tool-result rounds replay as N identical lines and PRIME the model
+  // to emit the same line again (self-reinforcing loop: S2a 180x, identical-probe repetition).
+  // Collapse consecutive duplicates into one entry + a count marker, and count collapses so a
+  // strategy-change note can be appended when the pattern is severe.
+  let lastReplayText: string | undefined;
+  let lastReplayEntry: RootBlobCandidate | undefined;
+  let collapsedRepeats = 0;
+  let maxRunLength = 1;
+  let currentRun = 1;
+  const pushDeduped = (
+    payload: { role: string; content: [{ type: "text"; text: string }] },
+    role: RootBlobCandidate["role"],
+    opts: { messageIndex: number; text?: string },
+    normalized: string,
+  ): void => {
+    if (externalModel && lastReplayText !== undefined && normalized === lastReplayText && lastReplayEntry) {
+      collapsedRepeats++;
+      currentRun++;
+      if (currentRun > maxRunLength) maxRunLength = currentRun;
+      const marked = `${normalized}\n[note: this exact output was produced ${currentRun} times in a row]`;
+      const replacement = rootBlobCandidate(
+        { role: payload.role, content: [{ type: "text", text: marked }] },
+        role,
+        opts,
+      );
+      entries[entries.indexOf(lastReplayEntry)] = replacement;
+      lastReplayEntry = replacement;
+      return;
+    }
+    currentRun = 1;
+    const entry = rootBlobCandidate(payload, role, opts);
+    entries.push(entry);
+    lastReplayText = normalized;
+    lastReplayEntry = entry;
+  };
 
   for (let i = 0; i < messages.length; i++) {
     if (i === activeUserIndex) break;
@@ -261,6 +298,9 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
       // A bare string survives blob hydration but external workers reject the completed replay
       // before tokenization (`usedTokens: 0`, then invalid_argument).
       if (text.length > 0) {
+        lastReplayText = undefined;
+        lastReplayEntry = undefined;
+        currentRun = 1;
         entries.push(rootBlobCandidate({
           role: "user",
           content: [{ type: "text", text }],
@@ -271,11 +311,12 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
       // Native Composer state can preserve it through ThinkingMessage/history structures.
       const text = assistantRootText(message, !externalModel).trim();
       if (text.length > 0) {
-        entries.push(rootBlobCandidate(
+        pushDeduped(
           { role: "assistant", content: [{ type: "text", text }] },
           "assistant",
           { messageIndex: i },
-        ));
+          text,
+        );
       }
       // Assistant tool CALLS are intentionally NOT replayed as visible "[Tool Call]" text here.
     } else if (message.role === "toolResult") {
@@ -283,12 +324,20 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
       // replay uses neutral text here so models do not echo protocol envelopes as chat.
       if (!echoToolResultInRoot) continue;
       const text = externalToolResultToText(message);
-      entries.push(rootBlobCandidate(
+      pushDeduped(
         toolResultRootPayload(text),
         "toolResult",
         { messageIndex: i, text },
-      ));
+        text,
+      );
     }
+  }
+  // Severe repetition: tell the model ONCE, imperatively, to change strategy.
+  if (externalModel && maxRunLength >= 3) {
+    entries.push(rootBlobCandidate({
+      role: "user",
+      content: [{ type: "text", text: `[context note] The transcript above contains the same output repeated ${maxRunLength} times in a row. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
+    }, "user", {}));
   }
 
   let selected = entries;
@@ -559,7 +608,7 @@ function toolResultToText(message: OcxToolResultMessage): string {
   const normalized = normalizedToolResult(message, contentToText(message.content));
   return [
     "[tool_result]",
-    `call_id: ${message.toolCallId}`,
+    `call_id: ${decodeCursorCallId(message.toolCallId)}`,
     `name: ${namespacedToolName(message.toolNamespace, message.toolName)}`,
     `is_error: ${normalized.isError}`,
     "output:",
@@ -570,7 +619,7 @@ function toolResultToText(message: OcxToolResultMessage): string {
 function externalToolResultToText(message: OcxToolResultMessage): string {
   const normalized = normalizedToolResult(message, contentToText(message.content));
   const label = normalized.isError ? "Tool error" : "Tool output";
-  return `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${message.toolCallId}, is_error: ${normalized.isError}):\n${normalized.text}`;
+  return `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${decodeCursorCallId(message.toolCallId)}, is_error: ${normalized.isError}):\n${normalized.text}`;
 }
 
 /**
@@ -626,7 +675,7 @@ function toolCallStep(
             args: create(McpArgsSchema, {
               name: toolName,
               toolName,
-              toolCallId: part.id,
+              toolCallId: decodeCursorCallId(part.id),
               providerIdentifier: OCX_RESPONSES_TOOL_PROVIDER,
               args,
             }),
