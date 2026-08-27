@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveAiStudioSession } from "../src/oauth/aistudio-session-sync";
+import { globalAiStudioRelayHub } from "../src/server/aistudio-ws-hub";
 import { createGoogleAdapter } from "../src/adapters/google";
 import type { OcxParsedRequest, OcxProviderConfig } from "../src/types";
 
@@ -83,5 +84,14 @@ describe("google adapter — ai-studio-web (cookie) mode", () => {
     const req = await adapter.buildRequest(parsed);
     expect(req.headers["Cookie"]).toContain("SAPISID=saved_session_sapisid_xyz");
     expect(req.headers["Authorization"]).toMatch(/^SAPISIDHASH \d+_[a-f0-9]{40}$/);
+  });
+
+  test("uses direct transport even when a legacy relay session is active", () => {
+    globalAiStudioRelayHub.registerSession("legacy", { send() {}, close() {} } as any);
+    try {
+      expect(createGoogleAdapter(cookieProvider).fetchResponse).toBeUndefined();
+    } finally {
+      globalAiStudioRelayHub.reset();
+    }
   });
 });

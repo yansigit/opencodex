@@ -32,9 +32,7 @@ import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compac
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
 import { antigravityOAuthDestinationConfigError, getProviderTlsProfileStatus, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
-import { globalAiStudioRelayHub } from "./aistudio-ws-hub";
-import { cookieHeaderFromSession, loadAiStudioSession } from "../oauth/aistudio-session-sync";
-import { parseGoogleCookieJar, validateAiStudioCookies } from "../oauth/google-aistudio-auth";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -770,21 +768,11 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     const codexAccountMode = providerCodexAccountMode(name, provider);
     if (codexAccountMode) dto.codexAccountMode = codexAccountMode;
     if (effectiveGoogleMode(name, provider) === "ai-studio-web" || name === "google-aistudio") {
-      let hasAiStudioSession = false;
-      try {
-        const sess = loadAiStudioSession();
-        const cookieHeader = cookieHeaderFromSession(sess) || provider.apiKey || "";
-        const jar = parseGoogleCookieJar(cookieHeader);
-        hasAiStudioSession = validateAiStudioCookies(jar).valid;
-      } catch {
-        hasAiStudioSession = false;
-      }
-      dto.hasAiStudioSession = hasAiStudioSession;
-      try {
-        dto.aiStudioRelayActive = globalAiStudioRelayHub.hasActiveSessions();
-      } catch {
-        dto.aiStudioRelayActive = false;
-      }
+      const credentials = resolveAiStudioCredentials(provider);
+      dto.hasAiStudioSession = credentials.kind === "ready";
+      dto.aiStudioAuthState = process.platform !== "darwin"
+        ? "unsupported"
+        : credentials.kind === "ready" ? "checking" : "needs_reauth";
     }
     providers[name] = dto;
   }

@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { safeConfigDTO } from "../src/server/auth-cors";
 import { handleManagementAPI } from "../src/server/management-api";
-import { globalAiStudioRelayHub } from "../src/server/aistudio-ws-hub";
 import { saveAiStudioSession } from "../src/oauth/aistudio-session-sync";
 import { saveConfig } from "../src/config";
 import type { OcxConfig } from "../src/types";
@@ -17,11 +16,9 @@ beforeEach(() => {
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
   mkdirSync(TEST_DIR, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
-  globalAiStudioRelayHub.reset();
 });
 
 afterEach(() => {
-  globalAiStudioRelayHub.reset();
   if (prevHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = prevHome;
   rmSync(TEST_DIR, { recursive: true, force: true });
@@ -44,22 +41,21 @@ function cfg(): OcxConfig {
   return c;
 }
 
-describe("Task 5: live AI Studio status & re-auth", () => {
-  test("safeConfigDTO exposes hasAiStudioSession and aiStudioRelayActive for google-aistudio", () => {
+describe("AI Studio status & re-auth", () => {
+  test("safeConfigDTO exposes compatibility session state and needs-reauth auth state", () => {
     const dto = safeConfigDTO(cfg()) as any;
     const prov = dto.providers["google-aistudio"];
     expect(typeof prov.hasAiStudioSession).toBe("boolean");
-    expect(typeof prov.aiStudioRelayActive).toBe("boolean");
+    expect(prov.aiStudioAuthState).toBe("needs_reauth");
     expect(prov.hasAiStudioSession).toBe(false);
-    expect(prov.aiStudioRelayActive).toBe(false);
+    expect(prov).not.toHaveProperty("aiStudioRelayActive");
   });
 
-  test("safeConfigDTO reflects saved session and active relay", () => {
+  test("safeConfigDTO reports syntactically valid saved credentials as checking", () => {
     saveAiStudioSession({ selectedProject: "p", windowId: "w", cookies: [{ name: "SAPISID", value: "abc" }] });
-    globalAiStudioRelayHub.registerSession("s1", { send() {}, close() {} } as any);
     const dto = safeConfigDTO(cfg()) as any;
     expect(dto.providers["google-aistudio"].hasAiStudioSession).toBe(true);
-    expect(dto.providers["google-aistudio"].aiStudioRelayActive).toBe(true);
+    expect(dto.providers["google-aistudio"].aiStudioAuthState).toBe("checking");
   });
 
   test("safeConfigDTO does not treat an invalid apiKey as an AI Studio session", () => {
@@ -67,17 +63,19 @@ describe("Task 5: live AI Studio status & re-auth", () => {
     c.providers["google-aistudio"]!.apiKey = "not-a-cookie";
     const dto = safeConfigDTO(c) as any;
     expect(dto.providers["google-aistudio"].hasAiStudioSession).toBe(false);
+    expect(dto.providers["google-aistudio"].aiStudioAuthState).toBe("needs_reauth");
     expect(JSON.stringify(dto)).not.toContain("not-a-cookie");
   });
 
-  test("POST /api/providers/test for google-aistudio reports relay when active", async () => {
-    globalAiStudioRelayHub.registerSession("s1", { send() {}, close() {} } as any);
+  test("POST /api/providers/test for google-aistudio never reports a relay", async () => {
     const c = cfg();
+    c.providers["google-aistudio"]!.apiKey = "SAPISID=valid";
     const req = new Request("http://127.0.0.1/api/providers/test?name=google-aistudio", { method: "POST", headers: { Host: "127.0.0.1" } });
     const res = await handleManagementAPI(req, new URL(req.url), c, {});
     const body = await res!.json() as any;
     expect(body.ok).toBe(true);
-    expect(body.message).toContain("browser relay");
+    expect(body.authState).toBe("checking");
+    expect(body.message).not.toContain("relay");
   });
 
   test("POST /api/providers/test reports missing session when no relay or cookies", async () => {
@@ -96,7 +94,7 @@ describe("Task 5: live AI Studio status & re-auth", () => {
     const res = await handleManagementAPI(req, new URL(req.url), c, {});
     const body = await res!.json() as any;
     expect(body.ok).toBe(true);
-    expect(String(body.message)).toContain("saved session");
+    expect(body.authState).toBe("checking");
   });
 
   test("POST /api/aistudio/login/native exists and is not 404", async () => {
