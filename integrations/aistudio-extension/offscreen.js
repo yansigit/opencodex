@@ -68,14 +68,23 @@ async function connect() {
       const controller = new AbortController();
       activeAbortControllers.set(id, controller);
 
+      const fetchOpts = {
+        method: payload.method,
+        credentials: "include",
+        signal: controller.signal
+      };
+      if (payload.headers) {
+        const h = { ...payload.headers };
+        delete h["cookie"]; delete h["Cookie"];
+        delete h["origin"]; delete h["Origin"];
+        delete h["referer"]; delete h["Referer"];
+        fetchOpts.headers = h;
+      }
+      if (payload.method !== "GET" && payload.method !== "HEAD" && payload.body) {
+        fetchOpts.body = payload.body;
+      }
       try {
-        const res = await fetch(payload.url, {
-          method: payload.method,
-          headers: payload.headers,
-          body: payload.body,
-          credentials: "include",
-          signal: controller.signal
-        });
+        const res = await fetch(payload.url, fetchOpts);
 
         if (payload.url.includes("streamGenerateContent") && res.body) {
           const reader = res.body.getReader();

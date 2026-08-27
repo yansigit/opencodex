@@ -167,7 +167,7 @@ export function createAiStudioRelayHub(): AiStudioRelayHub {
           url: req.url,
           method: req.method,
           headers: req.headers ?? {},
-          body: req.body ?? "",
+          ...(req.body !== undefined ? { body: req.body } : {}),
         },
       };
 
