@@ -2836,6 +2836,9 @@ async function handleResponsesInner(
         promoteAnthropicActiveAccount(selection.accountId);
         route.provider = { ...route.provider, apiKey: accessToken };
         logCtx.provider = formatAnthropicProviderForLog("anthropic", selection.accountId, config);
+        if (selection.accountId) {
+          logCtx.accountLogLabel = selection.accountId;
+        }
       } else if (
         route.providerName === "cursor"
         && route.provider.authMode === "oauth"
@@ -2866,6 +2869,9 @@ async function handleResponsesInner(
         };
         route.provider = { ...route.provider, apiKey: resolved.accessToken };
         logCtx.provider = formatCursorProviderForLog("cursor", selection.accountId);
+        if (selection.accountId) {
+          logCtx.accountLogLabel = selection.accountId;
+        }
       } else {
         let resolved: OAuthAccessSnapshot;
         if (isAntigravityOAuth) {
@@ -2895,6 +2901,9 @@ async function handleResponsesInner(
         };
         if (isOAuth401ReplayProvider) sentOAuthSnapshot = resolved;
         route.provider = { ...route.provider, apiKey: resolved.accessToken };
+        if (resolved.accountId) {
+          logCtx.accountLogLabel = resolved.accountId;
+        }
         if (route.providerName === "kiro") {
           // `{}` is intentional: this is an account-scoped request with no stored routing metadata.
           // Only genuinely accountless adapter calls leave the context undefined and use local/env fallback.
@@ -5227,6 +5236,7 @@ async function handleResponsesInner(
           invalidateSameTargetRequest();
           promoteAnthropicActiveAccount(nextAccountId);
           logCtx.provider = formatAnthropicProviderForLog("anthropic", nextAccountId, config);
+          logCtx.accountLogLabel = nextAccountId;
           activeAdapter = resolveAdapter(
             resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
             config.cacheRetention,
@@ -5285,6 +5295,7 @@ async function handleResponsesInner(
             forwardHeaders: selectedForwardHeaders,
           });
           logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
+          logCtx.accountLogLabel = nextAccountId;
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
           const result = await rebuildAndRefetch("cursor-oauth-auth");
           if ("failed" in result) return result.failed;
@@ -5330,6 +5341,7 @@ async function handleResponsesInner(
             forwardHeaders: selectedForwardHeaders,
           });
           logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
+          logCtx.accountLogLabel = nextAccountId;
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
           const result = await rebuildAndRefetch("cursor-oauth-429");
           if ("failed" in result) return result.failed;
@@ -5722,6 +5734,7 @@ async function handleResponsesInner(
             invalidateSameTargetRequest();
             promoteAnthropicActiveAccount(nextAccountId);
             logCtx.provider = formatAnthropicProviderForLog("anthropic", nextAccountId, config);
+            logCtx.accountLogLabel = nextAccountId;
             activeAdapter = resolveAdapter(
               resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire),
               config.cacheRetention,
@@ -5784,6 +5797,7 @@ async function handleResponsesInner(
               adapterName: activeAdapter.name,
             });
             logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
+            logCtx.accountLogLabel = nextAccountId;
             sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
             nextContinuationRecoveryKind = "cursor-oauth-auth";
             continue;
@@ -5833,6 +5847,7 @@ async function handleResponsesInner(
               adapterName: activeAdapter.name,
             });
             logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
+            logCtx.accountLogLabel = nextAccountId;
             sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
             nextContinuationRecoveryKind = "cursor-oauth-429";
             continue;
