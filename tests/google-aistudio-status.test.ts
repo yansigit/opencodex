@@ -6,6 +6,7 @@ import { safeConfigDTO } from "../src/server/auth-cors";
 import { handleManagementAPI } from "../src/server/management-api";
 import { globalAiStudioRelayHub } from "../src/server/aistudio-ws-hub";
 import { saveAiStudioSession } from "../src/oauth/aistudio-session-sync";
+import { resolveAiStudioCredentials } from "../src/oauth/aistudio-credentials";
 import { saveConfig } from "../src/config";
 import type { OcxConfig } from "../src/types";
 import { startServer } from "../src/server";
@@ -58,7 +59,9 @@ describe("Task 5: live AI Studio status & re-auth", () => {
   test("safeConfigDTO reflects a valid saved session as checking", () => {
     saveAiStudioSession({ selectedProject: "p", windowId: "w", cookies: [{ name: "SAPISID", value: "abc" }] });
     globalAiStudioRelayHub.registerSession("s1", { send() {}, close() {} } as any);
-    const dto = safeConfigDTO(cfg()) as any;
+    const config = cfg();
+    expect(resolveAiStudioCredentials(config.providers["google-aistudio"]!).source).toBe("session");
+    const dto = safeConfigDTO(config) as any;
     expect(dto.providers["google-aistudio"].hasAiStudioSession).toBe(true);
     expect(dto.providers["google-aistudio"].aiStudioAuthState).toBe(process.platform === "darwin" ? "checking" : "unsupported");
     expect(dto.providers["google-aistudio"].aiStudioRelayActive).toBeUndefined();

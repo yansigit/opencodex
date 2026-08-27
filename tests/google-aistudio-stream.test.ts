@@ -1,7 +1,17 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { createGoogleAdapter } from "../src/adapters/google";
 import type { OcxParsedRequest, OcxProviderConfig } from "../src/types";
 import { createTranslatorBudget } from "../src/lib/translator-budget";
+import { handleResponses } from "../src/server/responses/core";
+import type { OcxConfig } from "../src/types";
+import { globalAiStudioRelayHub } from "../src/server/aistudio-ws-hub";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  globalAiStudioRelayHub.reset();
+});
 
 const cookieProvider: OcxProviderConfig = {
   adapter: "google",
@@ -37,6 +47,99 @@ function mockSseResponse(chunks: string[]): Response {
 }
 
 describe("google adapter — ai-studio-web stream parsing", () => {
+  function responsesConfig(apiKey?: string): OcxConfig {
+    return {
+      port: 0,
+      defaultProvider: "google-aistudio",
+      providers: {
+        "google-aistudio": {
+          adapter: "google",
+          googleMode: "ai-studio-web",
+          baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+          authMode: "local",
+          defaultModel: "gemini-2.5-pro",
+          models: ["gemini-2.5-pro"],
+          liveModels: false,
+          requestPacing: { enabled: false },
+          ...(apiKey === undefined ? {} : { apiKey }),
+        },
+      },
+    } as OcxConfig;
+  }
+
+  function responsesRequest(): Request {
+    return new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "google-aistudio/gemini-2.5-pro", input: "hello", stream: false }),
+    });
+  }
+
+  test("Responses errors use AI Studio redaction for auth and HTML bodies", async () => {
+    for (const status of [401, 403]) {
+      globalThis.fetch = (async () => new Response(
+        `<!doctype html><html><body>secret-${status}</body></html>`,
+        { status, headers: { "content-type": "text/html" } },
+      )) as typeof fetch;
+      const response = await handleResponses(responsesRequest(), responsesConfig("SAPISID=test"), { model: "", provider: "" });
+      const body = await response.text();
+      expect(response.status).toBe(status);
+      expect(body).toContain("Google AI Studio session expired — re-authentication required");
+      expect(body).not.toContain("secret-");
+      expect(body).not.toContain("<html");
+    }
+  });
+
+  test("Responses HTML rate limits and server failures retain status classification", async () => {
+    for (const status of [429, 500]) {
+      globalThis.fetch = (async () => new Response(
+        `<!doctype html><html><body>secret-${status}</body></html>`,
+        { status, headers: { "content-type": "text/html" } },
+      )) as typeof fetch;
+      const response = await handleResponses(responsesRequest(), responsesConfig("SAPISID=test"), { model: "", provider: "" });
+      const body = await response.text();
+      expect(response.status).toBe(status);
+      expect(body).not.toContain("re-authentication");
+      expect(body).not.toContain("secret-");
+      expect(body).not.toContain("<html");
+    }
+  });
+
+  test("Responses exposes an AI Studio sign-in redirect instead of following it", async () => {
+    let redirect: RequestInit["redirect"];
+    let requestSent = false;
+    globalAiStudioRelayHub.registerSession("relay", { send() {}, close() {} } as any);
+    globalThis.fetch = (async (_input, init) => {
+      requestSent = true;
+      redirect = init?.redirect;
+      return new Response("redirect body", {
+        status: 302,
+        headers: { "content-type": "text/html", location: "https://accounts.google.com/v3/signin" },
+      });
+    }) as typeof fetch;
+
+    const response = await handleResponses(responsesRequest(), responsesConfig("SAPISID=test"), { model: "", provider: "" });
+    const body = await response.text();
+    expect(requestSent).toBe(true);
+    expect(redirect).toBe("manual");
+    expect(response.status).toBe(302);
+    expect(body).toContain("Google AI Studio session expired — re-authentication required");
+  });
+
+  test("Responses maps missing AI Studio credentials to authentication_error", async () => {
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return new Response("unexpected", { status: 200 });
+    }) as typeof fetch;
+    const response = await handleResponses(responsesRequest(), responsesConfig(), { model: "", provider: "" });
+    const body = await response.json() as { error?: { type?: string; message?: string } };
+    expect(response.status).toBe(401);
+    expect(body.error?.type).toBe("authentication_error");
+    expect(body.error?.message).toContain("re-authentication required");
+    expect(fetchCalled).toBe(false);
+  });
+
   test("parses standard text delta SSE stream from AI Studio", async () => {
     const adapter = createGoogleAdapter(cookieProvider);
     await adapter.buildRequest(parsedRequest());

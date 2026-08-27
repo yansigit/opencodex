@@ -53,6 +53,7 @@ import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 import { parseMakerSuiteChunk } from "./google-aistudio-parser";
 
 const INLINE_ERROR_URL_USERINFO = /https?:\/\/[^\s"'<>]*@/gi;
+const AI_STUDIO_REAUTH_ERROR = "Google AI Studio session expired — re-authentication required";
 
 function safeAntigravityInlineErrorMessage(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
@@ -772,14 +773,15 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         ? {
             formatErrorBody: (status: number, headers: Headers, payloadText: string): string => {
               const lower = payloadText.toLowerCase();
-              if (status === 401 || status === 403
-                || (status >= 300 && status < 400)
-                || headers.get("content-type")?.toLowerCase().includes("text/html")
-                || lower.includes("accounts.google.com/v3/signin")
-                || lower.trimStart().startsWith("<!doctype")) {
-                return "Google AI Studio session expired — re-authentication required";
+              if (status === 401 || status === 403 || (status >= 300 && status < 400)) {
+                return AI_STUDIO_REAUTH_ERROR;
               }
-              return sanitizeUpstreamErrorText(payloadText).slice(0, 500);
+              return (status >= 400 && status < 600
+                && (headers.get("content-type")?.toLowerCase().includes("text/html")
+                  || lower.includes("accounts.google.com/v3/signin")
+                  || lower.trimStart().startsWith("<!doctype")))
+                ? `Google AI Studio upstream returned HTTP ${status}`
+                : sanitizeUpstreamErrorText(payloadText).slice(0, 500);
             },
           }
       : {}),
@@ -993,7 +995,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
         const url = `${base}/v1internal:${method}${streamParam}`;
         const credentials = resolveAiStudioCredentials(provider);
-        if (credentials.kind !== "ready") throw new Error(credentials.reason);
+        if (credentials.kind !== "ready") throw new Error(AI_STUDIO_REAUTH_ERROR);
         const jar = parseGoogleCookieJar(credentials.cookieHeader);
         const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");
         Object.assign(headers, aiStudioHeaders);
@@ -1043,7 +1045,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         const lower = text.trim().toLowerCase();
         return lower.startsWith("<!doctype") || lower.includes("accounts.google.com/v3/signin");
       };
-      const reauthError = "Google AI Studio session expired — re-authentication required";
+      const reauthError = AI_STUDIO_REAUTH_ERROR;
       if (isHtmlContentType) {
         yield { type: "error", message: reauthError };
         return;

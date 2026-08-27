@@ -58,6 +58,32 @@ describe("google adapter — ai-studio-web (cookie) mode", () => {
     expect(adapter.formatErrorBody?.(429, new Headers(), "rate limited")).not.toContain("re-authentication");
   });
 
+  test("keeps HTML rate limits and server failures out of reauthentication", () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    for (const status of [429, 500]) {
+      const detail = adapter.formatErrorBody?.(
+        status,
+        new Headers({ "Content-Type": "text/html" }),
+        `<!doctype html><body>secret-${status}</body>`,
+      ) ?? "";
+      expect(detail).not.toContain("re-authentication");
+      expect(detail).not.toContain("secret-");
+      expect(detail).not.toContain("<html");
+    }
+  });
+
+  test("maps missing local credentials to the canonical reauthentication error", async () => {
+    const adapter = createGoogleAdapter({
+      adapter: "google",
+      googleMode: "ai-studio-web",
+      baseUrl: cookieProvider.baseUrl,
+    });
+
+    await expect(adapter.buildRequest(parsedWith([{ role: "user", content: "hello" }]))).rejects.toThrow(
+      "Google AI Studio session expired — re-authentication required",
+    );
+  });
+
   test("builds request with alkalimakersuite endpoint and SAPISIDHASH headers", async () => {
     const adapter = createGoogleAdapter(cookieProvider);
     const parsed = parsedWith([

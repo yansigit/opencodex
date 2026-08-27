@@ -719,6 +719,19 @@ export async function readDisplaySafeErrorText(
   }
 }
 
+const AI_STUDIO_REAUTH_ERROR = "Google AI Studio session expired — re-authentication required";
+
+function responseBuildError(
+  provider: OcxProviderConfig,
+  message: string,
+): Response {
+  const safeMessage = redactSecretString(message);
+  if (provider.adapter === "google" && provider.googleMode === "ai-studio-web" && safeMessage === AI_STUDIO_REAUTH_ERROR) {
+    return formatErrorResponse(401, "authentication_error", AI_STUDIO_REAUTH_ERROR);
+  }
+  return formatErrorResponse(400, "invalid_request_error", safeMessage);
+}
+
 function prepareOpaqueBlobRecovery(parsed: OcxParsedRequest): void {
   parsed._stripReasoningEncryptedContent = true;
 }
@@ -4839,7 +4852,7 @@ async function handleResponsesInner(
     upstream.abort();
     if (options.abortSignal?.aborted) return clientCancelledResponse();
     const msg = err instanceof Error ? err.message : String(err);
-    return formatErrorResponse(400, "invalid_request_error", redactSecretString(msg));
+    return responseBuildError(route.provider, msg);
   }
   // The catch path above always returns, so the request is definitely assigned here.
   // Capture it in a const so the fetch callbacks read a narrowed, immutable value
@@ -4888,7 +4901,7 @@ async function handleResponsesInner(
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
               providerName: route.providerName,
               modelId: route.modelId,
-            }));
+            }), route.provider.adapter === "google" && route.provider.googleMode === "ai-studio-web");
         },
         { abortSignal: upstream.signal, label: safeHostLabel(builtInitialRequest.url) },
       );
@@ -4959,7 +4972,7 @@ async function handleResponsesInner(
           upstream.abort();
           if (options.abortSignal?.aborted) return { failed: clientCancelledResponse() };
           const msg = err instanceof Error ? err.message : String(err);
-          return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(msg)) };
+          return { failed: responseBuildError(route.provider, msg) };
         }
         sameTargetRequest = retryRequest;
         sameTargetParsed = parsed;
@@ -4995,7 +5008,7 @@ async function handleResponsesInner(
             providerFetch(route.provider, options.codexWsRuntimeIdentity, {
               providerName: route.providerName,
               modelId: route.modelId,
-            }));
+            }), route.provider.adapter === "google" && route.provider.googleMode === "ai-studio-web");
         } finally {
           retryRequest.releaseBodyObservation?.();
         }
@@ -5381,8 +5394,13 @@ async function handleResponsesInner(
       // Upstreams occasionally echo request details in error bodies — scrub token-shaped
       // material before it reaches the client-facing error surface.
       const upstreamRetryAfter = upstreamResponse.headers.get("retry-after");
+      const formattedErrorText = activeAdapter.formatErrorBody?.(
+        upstreamResponse.status,
+        upstreamResponse.headers,
+        errorText,
+      ) ?? redactSecretString(errorText.slice(0, 500));
       const message = enrichOpenCodeZenRateLimitMessage(
-        `Provider error ${upstreamResponse.status}: ${redactSecretString(errorText.slice(0, 500))}`,
+        `Provider error ${upstreamResponse.status}: ${formattedErrorText}`,
         {
           status: upstreamResponse.status,
           providerName: route.providerName,
@@ -5524,6 +5542,7 @@ async function handleResponsesInner(
                 providerName: route.providerName,
                 modelId: nextParsed.modelId,
               }),
+              route.provider.adapter === "google" && route.provider.googleMode === "ai-studio-web",
             );
           },
           { abortSignal: upstream.signal, label: safeHostLabel(builtContinuationRequest.url) },
