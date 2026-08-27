@@ -39,6 +39,25 @@ function parsedWith(messages: unknown[], tools?: unknown[]): OcxParsedRequest {
 }
 
 describe("google adapter — ai-studio-web (cookie) mode", () => {
+  test("uses direct HTTP even when a relay session exists", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+
+    expect(adapter.fetchResponse).toBeUndefined();
+  });
+
+  test("maps AI Studio auth responses to reauthentication without exposing the body", () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    const detail = adapter.formatErrorBody?.(
+      401,
+      new Headers({ "Content-Type": "text/html" }),
+      "<!doctype html>private login details",
+    );
+
+    expect(detail).toBe("Google AI Studio session expired — re-authentication required");
+    expect(detail).not.toContain("private login details");
+    expect(adapter.formatErrorBody?.(429, new Headers(), "rate limited")).not.toContain("re-authentication");
+  });
+
   test("builds request with alkalimakersuite endpoint and SAPISIDHASH headers", async () => {
     const adapter = createGoogleAdapter(cookieProvider);
     const parsed = parsedWith([

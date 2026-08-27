@@ -68,6 +68,12 @@ export function parseGoogleCookieJar(cookieInput: string): GoogleCookieJar {
  * Validate whether a cookie jar contains sufficient authentication credentials.
  */
 export function validateAiStudioCookies(jar: GoogleCookieJar): { valid: boolean; error?: string } {
+  if (/[\u0000-\u001f\u007f]/.test(jar.cookieHeader) || (jar.sapisid !== undefined && /[\u0000-\u001f\u007f]/.test(jar.sapisid))) {
+    return {
+      valid: false,
+      error: "Google AI Studio cookie credentials contain prohibited control characters.",
+    };
+  }
   if (!jar.sapisid || !jar.cookieHeader) {
     return {
       valid: false,

@@ -38,6 +38,7 @@ import {
 } from "../../lib/provider-tls-profile";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost, providerRedirectError } from "../../lib/provider-outbound";
+import { resolveAiStudioCredentials } from "../../oauth/aistudio-credentials";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
 import { parseAntigravityAvailableModels } from "../../providers/antigravity-models";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
@@ -838,30 +839,19 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         message: "Passthrough provider is configured (forwards your Codex login; no upstream /models).",
       });
     }
-    // google-aistudio (ai-studio-web): no /v1beta/models discovery endpoint — report real relay/session health.
+    // google-aistudio (ai-studio-web): no /v1beta/models discovery endpoint. Task 2 adds the
+    // bounded live probe; for now only report whether the shared resolver found usable cookies.
     if (prov.googleMode === "ai-studio-web" || name === "google-aistudio") {
-      const { globalAiStudioRelayHub } = await import("../aistudio-ws-hub");
-      if (globalAiStudioRelayHub.hasActiveSessions()) {
-        return jsonResponse({ ok: true, latencyMs: 0, message: "Connected via browser relay" });
-      }
-      try {
-        const { loadAiStudioSession, cookieHeaderFromSession } = await import("../../oauth/aistudio-session-sync");
-        const { parseGoogleCookieJar, validateAiStudioCookies } = await import("../../oauth/google-aistudio-auth");
-        const sess = loadAiStudioSession();
-        const cookieHeader = sess ? cookieHeaderFromSession(sess) : (prov.apiKey ?? "");
-        const effectiveCookie = cookieHeader || (prov.apiKey ?? "");
-        if (!effectiveCookie || !effectiveCookie.trim()) {
-          return jsonResponse({ ok: false, latencyMs: 0, error: "Session expired or missing — re-authentication required" });
-        }
-        const jar = parseGoogleCookieJar(effectiveCookie);
-        const v = validateAiStudioCookies(jar);
-        if (!v.valid) {
-          return jsonResponse({ ok: false, latencyMs: 0, error: "Session expired or missing — re-authentication required" });
-        }
-        return jsonResponse({ ok: true, latencyMs: 0, message: "Connected via saved session" });
-      } catch {
+      const credentials = resolveAiStudioCredentials(prov);
+      if (credentials.kind !== "ready") {
         return jsonResponse({ ok: false, latencyMs: 0, error: "Session expired or missing — re-authentication required" });
       }
+      return jsonResponse({
+        ok: true,
+        latencyMs: 0,
+        authState: process.platform !== "darwin" ? "unsupported" : "checking",
+        message: "AI Studio credentials configured; live authentication probe pending",
+      });
     }
     if (prov.liveModels === false) {
       // A static catalog has no live discovery endpoint to test. This is neither

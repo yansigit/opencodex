@@ -27,7 +27,7 @@ afterEach(() => {
   rmSync(TEST_DIR, { recursive: true, force: true });
 });
 
-function cfg(): OcxConfig {
+function cfg(overrides: Record<string, unknown> = {}): OcxConfig {
   const c = {
     port: 0,
     hostname: "127.0.0.1",
@@ -39,37 +39,51 @@ function cfg(): OcxConfig {
         googleMode: "ai-studio-web" as const,
       },
     },
+    ...overrides,
   } as OcxConfig;
   saveConfig(c);
   return c;
 }
 
 describe("Task 5: live AI Studio status & re-auth", () => {
-  test("safeConfigDTO exposes hasAiStudioSession and aiStudioRelayActive for google-aistudio", () => {
+  test("safeConfigDTO exposes auth state and retains hasAiStudioSession without relay state", () => {
     const dto = safeConfigDTO(cfg()) as any;
     const prov = dto.providers["google-aistudio"];
     expect(typeof prov.hasAiStudioSession).toBe("boolean");
-    expect(typeof prov.aiStudioRelayActive).toBe("boolean");
     expect(prov.hasAiStudioSession).toBe(false);
-    expect(prov.aiStudioRelayActive).toBe(false);
+    expect(prov.aiStudioAuthState).toBe(process.platform === "darwin" ? "needs_reauth" : "unsupported");
+    expect(prov.aiStudioRelayActive).toBeUndefined();
   });
 
-  test("safeConfigDTO reflects saved session and active relay", () => {
+  test("safeConfigDTO reflects a valid saved session as checking", () => {
     saveAiStudioSession({ selectedProject: "p", windowId: "w", cookies: [{ name: "SAPISID", value: "abc" }] });
     globalAiStudioRelayHub.registerSession("s1", { send() {}, close() {} } as any);
     const dto = safeConfigDTO(cfg()) as any;
     expect(dto.providers["google-aistudio"].hasAiStudioSession).toBe(true);
-    expect(dto.providers["google-aistudio"].aiStudioRelayActive).toBe(true);
+    expect(dto.providers["google-aistudio"].aiStudioAuthState).toBe(process.platform === "darwin" ? "checking" : "unsupported");
+    expect(dto.providers["google-aistudio"].aiStudioRelayActive).toBeUndefined();
   });
 
-  test("POST /api/providers/test for google-aistudio reports relay when active", async () => {
+  test("POST /api/providers/test never reports a relay", async () => {
     globalAiStudioRelayHub.registerSession("s1", { send() {}, close() {} } as any);
     const c = cfg();
+    c.providers["google-aistudio"]!.apiKey = "SAPISID=probe-sapisid";
     const req = new Request("http://127.0.0.1/api/providers/test?name=google-aistudio", { method: "POST", headers: { Host: "127.0.0.1" } });
     const res = await handleManagementAPI(req, new URL(req.url), c, {});
     const body = await res!.json() as any;
     expect(body.ok).toBe(true);
-    expect(body.message).toContain("browser relay");
+    expect(body.authState).toBe(process.platform === "darwin" ? "checking" : "unsupported");
+    expect(body.message).not.toContain("relay");
+  });
+
+  test("POST /api/providers/test rejects arbitrary apiKey values", async () => {
+    const c = cfg({ providers: {
+      "google-aistudio": { ...(cfg().providers["google-aistudio"]!), apiKey: "arbitrary-api-key" },
+    } });
+    const req = new Request("http://127.0.0.1/api/providers/test?name=google-aistudio", { method: "POST", headers: { Host: "127.0.0.1" } });
+    const body = await (await handleManagementAPI(req, new URL(req.url), c, {}))!.json() as any;
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("re-authentication required");
   });
 
   test("POST /api/providers/test reports missing session when no relay or cookies", async () => {
@@ -84,11 +98,12 @@ describe("Task 5: live AI Studio status & re-auth", () => {
   test("POST /api/providers/test reports saved session when cookies valid", async () => {
     saveAiStudioSession({ selectedProject: "p", windowId: "w", cookies: [{ name: "SAPISID", value: "valid" }] });
     const c = cfg();
+    c.providers["google-aistudio"]!.apiKey = "SAPISID=valid";
     const req = new Request("http://127.0.0.1/api/providers/test?name=google-aistudio", { method: "POST", headers: { Host: "127.0.0.1" } });
     const res = await handleManagementAPI(req, new URL(req.url), c, {});
     const body = await res!.json() as any;
     expect(body.ok).toBe(true);
-    expect(String(body.message)).toContain("saved session");
+    expect(body.authState).toBe(process.platform === "darwin" ? "checking" : "unsupported");
   });
 
   test("POST /api/aistudio/login/native exists and is not 404", async () => {
