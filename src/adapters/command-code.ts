@@ -280,7 +280,7 @@ interface GitWorkspaceInfo {
 }
 
 export const workspaceMetadataCache = new Map<string, { collectedAt: number; value: GitWorkspaceInfo }>();
-export const workspaceConfigCache = new Map<string, { collectedAt: number; value: Record<string, unknown> }>();
+export const workspaceConfigCache = new Map<string, { collectedAt: number; value: Record<string, unknown>; sessionId?: string }>();
 export const SESSION_WORKSPACE_CONFIG_TTL_MS = 60 * 60_000;
 
 /**
@@ -310,7 +310,7 @@ export function pruneWorkspaceMetadataCache(now: number): void {
 
 export function pruneWorkspaceConfigCache(now: number): void {
   for (const [key, entry] of workspaceConfigCache) {
-    if (now - entry.collectedAt >= SESSION_WORKSPACE_CONFIG_TTL_MS) {
+    if (!entry.sessionId && now - entry.collectedAt >= WORKSPACE_METADATA_TTL_MS) {
       workspaceConfigCache.delete(key);
     }
   }
@@ -318,9 +318,18 @@ export function pruneWorkspaceConfigCache(now: number): void {
     let oldestKey: string | null = null;
     let oldestAt = Infinity;
     for (const [key, entry] of workspaceConfigCache) {
+      if (entry.sessionId) continue;
       if (entry.collectedAt < oldestAt) {
         oldestAt = entry.collectedAt;
         oldestKey = key;
+      }
+    }
+    if (oldestKey === null) {
+      for (const [key, entry] of workspaceConfigCache) {
+        if (entry.collectedAt < oldestAt) {
+          oldestAt = entry.collectedAt;
+          oldestKey = key;
+        }
       }
     }
     if (oldestKey !== null) workspaceConfigCache.delete(oldestKey);
@@ -368,8 +377,7 @@ export async function commandCodeConfig(cwd: string | undefined, sessionId?: str
   const now = Date.now();
   const cached = cacheKey ? workspaceConfigCache.get(cacheKey) : undefined;
   if (cacheKey) {
-    const ttl = sessionId ? SESSION_WORKSPACE_CONFIG_TTL_MS : WORKSPACE_METADATA_TTL_MS;
-    if (cached && now - cached.collectedAt < ttl) return cached.value;
+    if (cached && (sessionId || now - cached.collectedAt < WORKSPACE_METADATA_TTL_MS)) return cached.value;
   }
   let structure: string[] = [];
   if (cwd) {
@@ -404,7 +412,7 @@ export async function commandCodeConfig(cwd: string | undefined, sessionId?: str
   };
   if (cacheKey) {
     if (!workspaceConfigCache.has(cacheKey)) pruneWorkspaceConfigCache(now);
-    workspaceConfigCache.set(cacheKey, { collectedAt: now, value });
+    workspaceConfigCache.set(cacheKey, { collectedAt: now, value, ...(sessionId ? { sessionId } : {}) });
   }
   return value;
 }

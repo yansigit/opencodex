@@ -16,6 +16,7 @@ import {
   workspaceConfigCache,
   pruneWorkspaceMetadataCache,
   MAX_WORKSPACE_METADATA_ENTRIES,
+  SESSION_WORKSPACE_CONFIG_TTL_MS,
   commandCodeConfig,
 } from "../src/adapters/command-code";
 
@@ -183,12 +184,44 @@ describe("commandCodeConfig structure and session freeze", () => {
       currentIso = afterMidnightIso;
 
       const second = await commandCodeConfig(cwd, sessionId);
-      expect(second).not.toBe(first);
+      expect(second).toBe(first);
       expect(second.date).toBe("2026-01-01");
       expect(second.structure).toEqual(["alpha", "beta"]);
     } finally {
       nowSpy.mockRestore();
       dateSpy.mockRestore();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test("session snapshot stays byte-stable after its TTL when workspace metadata changes", async () => {
+    const sessionId = "session-immutable";
+    const cwd = mkdtempSync(join(tmpdir(), "ocx-cc-immutable-"));
+    let names = ["initial.txt"];
+    opendirMock.mockImplementation(async () => ({
+      close: async () => undefined,
+      [Symbol.asyncIterator]() {
+        let index = 0;
+        return {
+          next: async () => {
+            if (index >= names.length) return { done: true as const, value: undefined };
+            return { done: false as const, value: { name: names[index++]! } };
+          },
+        };
+      },
+    }));
+
+    const start = Date.now();
+    const nowSpy = spyOn(Date, "now").mockReturnValue(start);
+    try {
+      const first = await commandCodeConfig(cwd, sessionId);
+      names = ["changed.txt"];
+      nowSpy.mockReturnValue(start + SESSION_WORKSPACE_CONFIG_TTL_MS + 1);
+
+      const second = await commandCodeConfig(cwd, sessionId);
+      expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+    } finally {
+      nowSpy.mockRestore();
       rmSync(cwd, { recursive: true, force: true });
     }
   });
