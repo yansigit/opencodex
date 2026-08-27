@@ -773,12 +773,11 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       let hasAiStudioSession = false;
       try {
         const sess = loadAiStudioSession();
-        const cookieHeader = sess ? cookieHeaderFromSession(sess) : (provider.apiKey ?? "");
+        const cookieHeader = cookieHeaderFromSession(sess) || provider.apiKey || "";
         const jar = parseGoogleCookieJar(cookieHeader);
         hasAiStudioSession = validateAiStudioCookies(jar).valid;
-        if (!hasAiStudioSession && provider.apiKey && provider.apiKey.trim()) hasAiStudioSession = true;
       } catch {
-        hasAiStudioSession = !!(provider.apiKey && provider.apiKey.trim());
+        hasAiStudioSession = false;
       }
       dto.hasAiStudioSession = hasAiStudioSession;
       try {

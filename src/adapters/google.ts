@@ -1067,9 +1067,13 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const isHtmlContentType = contentType.toLowerCase().includes("text/html");
       const isHtmlRedirect = (text: string) => {
         const lower = text.trim().toLowerCase();
-        return lower.startsWith("<!doctype") || text.includes("accounts.google.com/v3/signin");
+        return lower.startsWith("<!doctype") || lower.includes("accounts.google.com/v3/signin");
       };
       const reauthError = "Google AI Studio session expired — re-authentication required";
+      if (isHtmlContentType) {
+        yield { type: "error", message: reauthError };
+        return;
+      }
       let buffer = "";
       let bufferBytes = 0;
       // Raw unterminated-line bytes, independent of TextDecoder's pending UTF-8
@@ -1328,6 +1332,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           }
           incompleteLineBytes = lineScan.residual;
           const nextBuffer = buffer + decoder.decode(value, { stream: true });
+          if (isHtmlRedirect(nextBuffer)) {
+            yield { type: "error", message: reauthError };
+            try { await reader.cancel(); } catch { /* ignore */ }
+            return;
+          }
           const nextBufferBytes = budgetEncoder.encode(nextBuffer).byteLength;
           const appendReservation = budget.reserveTransient(nextBufferBytes, { kind: "live_transient" });
           buffer = nextBuffer;

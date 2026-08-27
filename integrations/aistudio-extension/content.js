@@ -3,7 +3,7 @@
 
 (function() {
   'use strict';
-  const WS_URL = "ws://127.0.0.1:10100/v1/ws/aistudio";
+  const DEFAULT_PORT = 10100;
   let ws = null;
   let retryTimer = null;
   const activeAbortControllers = new Map();
@@ -22,10 +22,30 @@
     }
   }
 
-  function connect() {
-    if (retryTimer) clearTimeout(retryTimer);
+  async function getPort() {
     try {
-      ws = new WebSocket(WS_URL);
+      if (typeof chrome !== "undefined" && chrome.storage?.local) {
+        const data = await chrome.storage.local.get(["proxyPort"]);
+        const port = Number(data?.proxyPort);
+        if (Number.isInteger(port) && port > 0 && port < 65536) return port;
+      }
+    } catch (err) {
+      void err;
+    }
+    return DEFAULT_PORT;
+  }
+
+  function stripForbiddenHeaders(headers) {
+    const forbidden = new Set(["accept-charset", "accept-encoding", "access-control-request-headers", "access-control-request-method", "connection", "content-length", "cookie", "cookie2", "date", "dnt", "expect", "host", "keep-alive", "origin", "proxy-connection", "referer", "te", "trailer", "transfer-encoding", "upgrade", "via"]);
+    return Object.fromEntries(Object.entries(headers || {}).filter(([name]) => !forbidden.has(name.toLowerCase()) && !name.toLowerCase().startsWith("sec-")));
+  }
+
+  async function connect() {
+    if (retryTimer) clearTimeout(retryTimer);
+    const port = await getPort();
+    const wsUrl = `ws://127.0.0.1:${port}/v1/ws/aistudio`;
+    try {
+      ws = new WebSocket(wsUrl);
     } catch (e) {
       updateStatus("disconnected");
       retryTimer = setTimeout(connect, 3000);
@@ -68,13 +88,9 @@
           signal: controller.signal
         };
         if (payload.headers) {
-          const h = { ...payload.headers };
-          delete h["cookie"]; delete h["Cookie"];
-          delete h["origin"]; delete h["Origin"];
-          delete h["referer"]; delete h["Referer"];
-          fetchOpts.headers = h;
+          fetchOpts.headers = stripForbiddenHeaders(payload.headers);
         }
-        if (payload.method !== "GET" && payload.method !== "HEAD" && payload.body) {
+        if (payload.method !== "GET" && payload.method !== "HEAD" && payload.body !== undefined) {
           fetchOpts.body = payload.body;
         }
         try {

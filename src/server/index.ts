@@ -1012,16 +1012,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
-        const host = req.headers.get("Host");
-        const loopback = (() => {
-          try {
-            const h = new URL(`http://${host ?? ""}`).hostname.toLowerCase().replace(/\.$/, "");
-            return h === "" || h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
-          } catch { return true; }
-        })();
-        if (!loopback) {
-          const admission = resolveApiAuth(req, policy);
-          if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        if (!isAllowedRequestOrigin(req, policy)) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
         }
         if (process.platform !== "darwin") {
           return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);

@@ -62,6 +62,14 @@ describe("Task 5: live AI Studio status & re-auth", () => {
     expect(dto.providers["google-aistudio"].aiStudioRelayActive).toBe(true);
   });
 
+  test("safeConfigDTO does not treat an invalid apiKey as an AI Studio session", () => {
+    const c = cfg();
+    c.providers["google-aistudio"]!.apiKey = "not-a-cookie";
+    const dto = safeConfigDTO(c) as any;
+    expect(dto.providers["google-aistudio"].hasAiStudioSession).toBe(false);
+    expect(JSON.stringify(dto)).not.toContain("not-a-cookie");
+  });
+
   test("POST /api/providers/test for google-aistudio reports relay when active", async () => {
     globalAiStudioRelayHub.registerSession("s1", { send() {}, close() {} } as any);
     const c = cfg();
@@ -97,6 +105,40 @@ describe("Task 5: live AI Studio status & re-auth", () => {
       const res = await fetch(new URL("/api/aistudio/login/native", server.url), { method: "POST" });
       expect([200, 400, 500].includes(res.status)).toBe(true);
       expect(res.status).not.toBe(404);
+    } finally { server.stop(true); }
+  });
+
+  test("native login does not trust a forged loopback Host on a remote bind", async () => {
+    const c = cfg();
+    c.hostname = "0.0.0.0";
+    c.apiKeys = [{ id: "test-key", name: "test", key: "remote-secret", createdAt: new Date().toISOString() }];
+    saveConfig(c);
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/aistudio/login/native", server.url), {
+        method: "POST",
+        headers: { Host: "127.0.0.1" },
+      });
+      expect(res.status).toBe(401);
+    } finally { server.stop(true); }
+  });
+
+  test("native login rejects a cross-origin request even with valid admission", async () => {
+    const c = cfg();
+    c.hostname = "0.0.0.0";
+    c.apiKeys = [{ id: "test-key", name: "test", key: "remote-secret", createdAt: new Date().toISOString() }];
+    saveConfig(c);
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/aistudio/login/native", server.url), {
+        method: "POST",
+        headers: {
+          Host: "0.0.0.0",
+          Origin: "https://attacker.example",
+          "X-OpenCodex-API-Key": "remote-secret",
+        },
+      });
+      expect(res.status).toBe(403);
     } finally { server.stop(true); }
   });
 });

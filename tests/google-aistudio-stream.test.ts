@@ -182,4 +182,40 @@ describe("google adapter — ai-studio-web stream parsing", () => {
     expect(errorEvent).toBeDefined();
     expect((errorEvent as any).message).toBe("Google AI Studio session expired — re-authentication required");
   });
+
+  test("detects multiline HTML before streaming line parsing", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+    const encoder = new TextEncoder();
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("<!doctype html>\n<html><head>\n"));
+        controller.enqueue(encoder.encode("<base href=\"https://accounts.google.com/v3/signin\">\n<body>expired</body></html>\n"));
+        controller.close();
+      },
+    }), { status: 200, headers: { "Content-Type": "text/html" } });
+    const events = [];
+    for await (const event of adapter.parseStream(response, createTranslatorBudget(100))) events.push(event);
+    expect(events.find((e) => e.type === "error")).toMatchObject({
+      message: "Google AI Studio session expired — re-authentication required",
+    });
+  });
+
+  test("detects headerless accounts login HTML split across chunks", async () => {
+    const adapter = createGoogleAdapter(cookieProvider);
+    await adapter.buildRequest(parsedRequest());
+    const encoder = new TextEncoder();
+    const response = new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode("<html><head>\n<base href=\"https://accounts.google.com/v3/"));
+        controller.enqueue(encoder.encode("signin\">\n</head><body>expired</body></html>\n"));
+        controller.close();
+      },
+    }), { status: 200 });
+    const events = [];
+    for await (const event of adapter.parseStream(response, createTranslatorBudget(100))) events.push(event);
+    expect(events.find((e) => e.type === "error")).toMatchObject({
+      message: "Google AI Studio session expired — re-authentication required",
+    });
+  });
 });

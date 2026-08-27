@@ -61,6 +61,19 @@ describe("Google AI Studio Chrome/Brave Extension", () => {
     expect(existsSync(contentPath)).toBe(true);
     const code = readFileSync(contentPath, "utf-8");
     expect(code).toContain("streamGenerateContent");
+    expect(code).toContain("chrome.storage.local.get");
+    expect(code).toContain("DEFAULT_PORT");
+    expect(code).toContain("content-length");
+    expect(code).toContain("method !== \"GET\"");
+    expect(code).toContain("method !== \"HEAD\"");
+  });
+
+  test("offscreen relay applies the same forbidden-header and body rules", () => {
+    const code = readFileSync(join(EXT_DIR, "offscreen.js"), "utf-8");
+    expect(code).toContain("content-length");
+    expect(code).toContain("method !== \"GET\"");
+    expect(code).toContain("method !== \"HEAD\"");
+    expect(code).toContain('credentials: "include"');
   });
 
   test("bridge html includes extension instructions and copy path", () => {
