@@ -242,6 +242,7 @@ function firstUserText(parsed: OcxParsedRequest): string | undefined {
 }
 
 export function commandCodeSessionId(parsed: OcxParsedRequest): string {
+  if (parsed._commandCodeSessionId) return parsed._commandCodeSessionId;
   // Shared prompt-cache cohorts intentionally do not identify one conversation. Keep them out
   // of upstream session affinity or unrelated conversations can pin to the same worker.
   const threadId = parsed._clientThreadId?.trim();
@@ -260,9 +261,14 @@ export function commandCodeSessionId(parsed: OcxParsedRequest): string {
           : rootText
             ? ["root", rootText]
             : undefined;
-  if (!identity) return randomUUID();
-  const hex = createHash("sha256").update(`command-code:${identity[0]}\0${identity[1]}`).digest("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+  const sessionId = !identity
+    ? randomUUID()
+    : (() => {
+      const hex = createHash("sha256").update(`command-code:${identity[0]}\0${identity[1]}`).digest("hex");
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+    })();
+  parsed._commandCodeSessionId = sessionId;
+  return sessionId;
 }
 
 interface GitWorkspaceInfo {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createCommandCodeAdapter } from "../src/adapters/command-code";
+import { commandCodeSessionId, createCommandCodeAdapter } from "../src/adapters/command-code";
 import { loginCommandCode, parseCommandCodeCallback, shouldImportLocalCommandCodeAuth } from "../src/oauth/command-code";
 import { buildModelsRequest, OAUTH_PROVIDERS } from "../src/oauth";
 import { commandCodeReasoningEfforts, resetCommandCodeReasoningEffortsForTest } from "../src/providers/command-code-efforts";
@@ -607,6 +607,13 @@ describe("Command Code provider", () => {
     const first = await builtRequest({ ...parsed(), options: { ...parsed().options, promptCacheKey: "shared" }, _promptCacheKeyIsSharedCohort: true });
     const second = await builtRequest({ ...parsed(), options: { ...parsed().options, promptCacheKey: "shared" }, context: { ...parsed().context, messages: [{ role: "user", content: "different", timestamp: 1 }] }, _promptCacheKeyIsSharedCohort: true });
     expect(first.headers["x-session-id"]).not.toBe(second.headers["x-session-id"]);
+  });
+
+  test("memoizes the session identity on a parsed request across compaction", () => {
+    const request = parsed();
+    const first = commandCodeSessionId(request);
+    request.context.messages = [{ role: "user", content: "compacted history", timestamp: 2 }];
+    expect(commandCodeSessionId(request)).toBe(first);
   });
 
   test("formats credit depletion 400 and classifies as insufficient_quota", () => {
