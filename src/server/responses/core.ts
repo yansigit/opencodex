@@ -368,6 +368,26 @@ import { preflightComboStreamResponse } from "./combo-stream-preflight";
 // already-committed event boundary and can replay custom adapter work.
 const runTurnAdapterSseResponses = new WeakSet<Response>();
 
+function hasV2RoutedDelegationSurface(raw: unknown): boolean {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const body = raw as { input?: unknown };
+  if (!Array.isArray(body.input)) return false;
+  for (const item of body.input) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const tools = (item as { type?: unknown; tools?: unknown }).type === "additional_tools"
+      ? (item as { tools?: unknown }).tools : undefined;
+    if (!Array.isArray(tools)) continue;
+    for (const group of tools) {
+      if (!group || typeof group !== "object" || Array.isArray(group)) continue;
+      const value = group as { type?: unknown; name?: unknown; tools?: unknown };
+      if (value.type !== "namespace" || value.name !== "collaboration" || !Array.isArray(value.tools)) continue;
+      const names = new Set(value.tools.map(tool => tool && typeof tool === "object" ? (tool as { name?: unknown }).name : undefined));
+      if (names.has("spawn_agent") && (names.has("send_message") || names.has("followup_task"))) return true;
+    }
+  }
+  return false;
+}
+
 function diagnoseAdapterEvents(
   events: AsyncIterable<AdapterEvent>,
   adapterName: string,
@@ -2500,7 +2520,7 @@ async function handleResponsesInner(
     && config.multiAgentMode === "v2"
     && isMultiAgentV2Enabled()
     && isCanonicalOpenAiForwardProvider(route.provider)
-    && collabSurface(parsed) === "v2"
+    && (collabSurface(parsed) === "v2" || hasV2RoutedDelegationSurface(parsed._rawBody))
     && !isThreadSpawnRequest(req.headers)
     && !req.headers.has("x-openai-subagent")
     && !options.comboAttempt

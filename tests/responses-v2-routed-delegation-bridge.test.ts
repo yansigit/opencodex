@@ -117,6 +117,59 @@ describe("Responses V2 routed delegation bridge runtime", () => {
     }
   });
 
+  test("mirrors additional_tools and rebuilds the parsed authorization catalog", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return Response.json({ id: "resp_additional", status: "completed", output: [{
+        type: "function_call", id: "fc_additional", call_id: "call_additional", namespace: "ocx_agents", name: "spawn_agent", arguments: "{}",
+      }] });
+    }) as typeof fetch;
+    try {
+      const native = { type: "namespace", name: "collaboration", tools: [{ type: "function", name: "spawn_agent", parameters: { type: "object" } }, { type: "function", name: "send_message", parameters: { type: "object" } }] };
+      const response = await handleResponses(request(rootBody({ tools: [], input: [{ type: "additional_tools", tools: [native] }] })), config(), { model: "", provider: "" });
+      const outbound = requests[0]!;
+      expect((outbound.input as Array<Record<string, unknown>>)[0]?.tools).toEqual([native, {
+        type: "namespace", name: "ocx_agents", tools: [{ type: "function", name: "spawn_agent", description: "Use this routed-child mirror for collaboration operations. spawn_agent.", parameters: { type: "object" } }, { type: "function", name: "send_message", description: "Use this routed-child mirror for collaboration operations. send_message.", parameters: { type: "object" } }],
+      }]);
+      expect((await response.json() as { output: Array<Record<string, unknown>> }).output[0]).toMatchObject({ namespace: "collaboration", encrypted_function_args: [] });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("replays an authorized completed call natively", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    let turn = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      turn += 1;
+      return Response.json(turn === 1 ? { id: "resp_replay_native", status: "completed", output: [{
+        type: "function_call", id: "fc_replay", call_id: "call_replay", namespace: "ocx_agents", name: "spawn_agent", arguments: "{}",
+      }] } : { id: "resp_after", status: "completed", output: [] });
+    }) as typeof fetch;
+    try {
+      await handleResponses(request(rootBody()), config(), { model: "", provider: "" });
+      await handleResponses(request(rootBody({ previous_response_id: "resp_replay_native" })), config(), { model: "", provider: "" });
+      const replay = JSON.stringify(requests[1]?.input);
+      expect(replay).toContain('"namespace":"collaboration"');
+      expect(replay).toContain('"encrypted_function_args":[]');
+      expect(replay).not.toContain('"namespace":"ocx_agents"');
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("does not modify a genuine native collaboration response", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({ id: "resp_native", status: "completed", output: [{
+      type: "function_call", id: "fc_native", call_id: "call_native", namespace: "collaboration", name: "spawn_agent", arguments: "{}",
+    }] })) as typeof fetch;
+    try {
+      const call = (await (await handleResponses(request(rootBody()), config(), { model: "", provider: "" })).json() as { output: Array<Record<string, unknown>> }).output[0]!;
+      expect(call.encrypted_function_args).toBeUndefined();
+      expect(call.namespace).toBe("collaboration");
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
   test("fails a mirror namespace collision before upstream I/O", async () => {
     let fetches = 0;
     const originalFetch = globalThis.fetch;
