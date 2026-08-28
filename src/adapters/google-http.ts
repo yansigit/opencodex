@@ -67,6 +67,7 @@ function probeCcaSseEvent(bytes: Uint8Array): CcaSseProbe {
       }
       const serialized = JSON.stringify(frame);
       if (isQuotaExhaustedBody(serialized)) return "quota_exhausted";
+      if (errorRecord.code === 429 || status === "RESOURCE_EXHAUSTED") return "rate_limit";
       if (/rate[- ]limit|too many requests|per[- ]minute|requests per minute|concurrent request/i.test(serialized)) return "rate_limit";
       if (isAntigravityGeoBlockedBody(serialized)) return "geo_blocked";
       return "terminal";

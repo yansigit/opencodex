@@ -3031,6 +3031,16 @@ async function handleResponsesInner(
     if (snapshot.projectId) rotatedProvider = { ...rotatedProvider, project: snapshot.projectId };
     route.provider = rotatedProvider;
     if (route.providerName === "kiro") parsed._kiroAuthContext = { ...(snapshot.kiro ?? {}) };
+    if (isAntigravityOAuth) {
+      antigravityAccountId = snapshot.accountId;
+      sentOAuthSnapshot = snapshot;
+      replayOAuthCredentialSnapshot = {
+        accountId: snapshot.accountId,
+        generation: snapshot.generation,
+      };
+      logCtx.accountLogLabel = snapshot.accountId ?? genericFailoverAccountId;
+      bindAntigravitySessionAffinity(antigravitySessionKey, snapshot.accountId ?? genericFailoverAccountId);
+    }
     return true;
   };
   const oauthSessionKeyParts = {
@@ -5553,9 +5563,8 @@ async function handleResponsesInner(
         upstreamResponse = result;
       }
 
-      // Antigravity never rotates accounts. Record the account cooldown and allow only one
-      // short, abort-aware replay on the same credential; longer Retry-After values surface to
-      // the client so a conversation cannot churn through accounts or requests.
+      // Antigravity-specific recovery allows only one short, abort-aware replay on the same
+      // credential. The generic OAuth failover below may still rotate when another account exists.
       if (upstreamResponse.status === 403 && isAntigravityOAuth && antigravityAccountId) {
         recordAntigravityCooldown(antigravityAccountId, upstreamResponse.headers.get("retry-after"), Date.now(), "geoblock");
       }
