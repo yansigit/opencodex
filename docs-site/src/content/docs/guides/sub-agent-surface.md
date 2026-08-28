@@ -37,6 +37,7 @@ surface and makes that root's child tasks plaintext, but it is independent of bo
 | `keepNativeChatGptOnV1` | Preserves the native ChatGPT parent, but advertises it on v1. | The native v2 task-encryption problem is avoided by leaving v2, and it applies to new sessions. |
 | `agentTaskRecovery` | Preserves the native v2 parent and recovers a routed child task through ChatGPT. | The extra authenticated ChatGPT request consumes quota, adds latency, and returns model-produced plaintext. |
 | `v2NativeParentOverride` | Preserves v2 tools while executing eligible native roots on one configured routed model. | The routed provider receives the root data; availability, context, behavior, latency, cost, and privacy differ by provider. |
+| `v2RoutedDelegationBridge` | Preserves an eligible native V2 root while exposing plaintext mirror collaboration tools for routed children. | Default off; root-only. A native child creating a routed grandchild can still cross the encrypted boundary. |
 
 The override is off unless explicitly enabled, requires an explicitly forced v2 surface and the
 upstream V2 flag, and is unavailable while **Keep ChatGPT on v1** is on. There is no automatic
@@ -49,6 +50,20 @@ model and provider show what OpenCodex actually executes.
 The target and enabled selection may remain persisted while `active` is false. Changing the mode,
 upstream V2 flag, or Keep ChatGPT on v1 makes subsequent parent requests skip the override until
 the prerequisites are restored.
+
+### Routed delegation bridge
+
+`v2RoutedDelegationBridge` is a separate experimental, default-off boolean. When armed, it activates
+only for eligible native V2 roots after parent-override routing. It exposes mirror collaboration tools
+so the routed child receives plaintext task, repository-context, and tool-result flow; it does not add
+a model picker or choose tools. Tool choice remains model-directed. Disabling takes effect on the next
+request immediately.
+
+The native Codex UI can still display the original model. Routed prompts, repository context, and tool
+results follow the selected provider's availability, context window, behavior, billing, and privacy
+terms. The bridge differs from native GPT-to-GPT delegation (which keeps native collaboration), the
+parent override (which reroutes the root), and recovery (which makes an additional ChatGPT request for
+an already encrypted child task). It cannot rewrite a native child delegating to a routed grandchild.
 
 :::tip[Not sure?]
 Start with **base**. Choose **v1** when cross-provider delegation must work predictably. Force **v2**
@@ -232,7 +247,7 @@ The management API exposes matching `GET` and `PUT` endpoints:
 
 | Endpoint | Manages |
 | --- | --- |
-| `/api/v2` | Surface mode, native feature flag, thread settings, and the V2 native parent override |
+| `/api/v2` | Surface mode, native feature flag, thread settings, V2 native parent override, and routed delegation bridge |
 | `/api/injection-model` | Preferred model, effort, custom prompt, guidance, and native-default sync |
 | `/api/effort-caps` | Main-agent and sub-agent effort ceilings |
 | `/api/subagent-models` | Ordered roster of up to five models |
@@ -256,11 +271,16 @@ The override is managed through the dashboard or this endpoint; it has no CLI co
 curl -X PUT http://localhost:10100/api/v2 \
   -H 'Content-Type: application/json' \
   -d '{"v2NativeParentOverride":{"enabled":true,"model":"anthropic/claude-sonnet-5"}}'
+
+curl -X PUT http://localhost:10100/api/v2 \
+  -H 'Content-Type: application/json' \
+  -d '{"v2RoutedDelegationBridge":true}'
 ```
 
-See [Agent configuration](/reference/configuration/agents/#v2-native-parent-override) and the
-[Management API reference](/reference/management-api/#v2-native-parent-override) for the exact
-contracts and validation rules.
+See the configuration references for the [native-parent override](/reference/configuration/agents/#v2-native-parent-override)
+and [routed delegation bridge](/reference/configuration/agents/#routed-v2-delegation-bridge), plus
+their [management API contracts](/reference/management-api/#v2-native-parent-override) and
+[bridge validation rules](/reference/management-api/#routed-v2-delegation-bridge).
 
 ## FAQ
 

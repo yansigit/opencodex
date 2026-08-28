@@ -26,6 +26,7 @@ routes, and limits delegated work.
 | `effortCap?` | `string` | — | Hard ceiling for qualifying v2 main turns and marked spawned-child turns. Accepts `low` through `ultra`. |
 | `subagentEffortCap?` | `string` | — | Additional ceiling for spawned-child turns only. When both caps apply, the lower wins. |
 | `v2NativeParentOverride?` | `{ enabled?: boolean; model?: string }` | off | Experimental V2-only routed replacement for an eligible ChatGPT-native root parent. See [V2 native parent override](#v2-native-parent-override). |
+| `v2RoutedDelegationBridge?` | `boolean` | `false` | Experimental root-only plaintext mirror bridge for eligible native V2 roots. See [Routed V2 delegation bridge](#routed-v2-delegation-bridge). |
 | `agentTaskRecovery?` | `object` | — | Experimental opt-in recovery for backend-encrypted v2 tasks sent to routed providers. Disabled unless `enabled: true`; see [Encrypted v2 task recovery](#encrypted-v2-task-recovery). |
 
 Manage the surface with the dashboard or
@@ -89,6 +90,26 @@ The Codex UI can continue to display the originally selected native model even w
 executes the root on the routed target. Prompts, repository context, conversation history, and tool
 results are sent to that provider and inherit its availability, context window, instruction/tool
 behavior, latency, cost, and privacy characteristics.
+
+## Routed V2 delegation bridge
+
+`v2RoutedDelegationBridge` is an experimental default-off boolean. It does not replace the native
+GPT-to-GPT tools or reroute a parent like `v2NativeParentOverride`; after parent-override routing,
+it exposes plaintext mirror collaboration tools only for eligible native V2 roots so routed children
+can receive task, repository-context, and tool-result flow without `agentTaskRecovery`'s additional
+ChatGPT request. The model selects the tool; this setting has no model picker or automatic fallback.
+
+It can be armed while the current surface is not explicit V2, but is inactive until an eligible root
+arrives. A false value disables it immediately for subsequent requests. The original native model can
+remain visible in Codex while the selected provider receives the routed content and its availability,
+context, behavior, billing, and privacy rules apply. The bridge is root-only: a native child that
+delegates to a routed grandchild can still encounter the encrypted-task boundary.
+
+```json
+{
+  "v2RoutedDelegationBridge": true
+}
+```
 
 The Codex Auth page can also toggle Codex's own `default_mode_request_user_input`
 feature flag (`GET`/`PUT /api/codex-auth/features/default-mode-request-user-input`). Enabling it

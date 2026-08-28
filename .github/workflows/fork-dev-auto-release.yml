@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   dev-auto-release:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -173,4 +173,3 @@ jobs:
             -f "tag=dev" \
             -f "expected-sha=$HEAD_SHA" \
             -f "dry-run=false"
-

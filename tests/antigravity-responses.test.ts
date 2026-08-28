@@ -7,7 +7,8 @@ import type { RequestLogContext } from "../src/server/request-log";
 import { OAUTH_PROVIDERS } from "../src/oauth";
 import { saveCredential } from "../src/oauth/store";
 import { clearAntigravityRoutingState, getAntigravityAccountHealthSnapshot, recordAntigravityCooldown } from "../src/oauth/antigravity-routing";
-import { getAccountSet } from "../src/oauth/store";
+import { getAccountSet, setActiveAccount } from "../src/oauth/store";
+import { clearGenericFailoverHealth } from "../src/oauth/generic-account-failover";
 import {
   resetProviderRequestPacingForTest,
   setProviderRequestPacingRuntimeForTest,
@@ -59,11 +60,13 @@ beforeEach(async () => {
   home = mkdtempSync(join(tmpdir(), "ocx-antigravity-responses-"));
   process.env.OPENCODEX_HOME = home;
   clearAntigravityRoutingState();
+  clearGenericFailoverHealth("google-antigravity");
   await saveCredential("google-antigravity", {
     access: "access-a",
     refresh: "refresh-a",
     expires: Date.now() + 3600_000,
     projectId: "project-a",
+    accountId: "account-a",
   });
 });
 
@@ -71,6 +74,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   resetProviderRequestPacingForTest();
   clearAntigravityRoutingState();
+  clearGenericFailoverHealth("google-antigravity");
   rmSync(home, { recursive: true, force: true });
   delete process.env.OPENCODEX_HOME;
 });
@@ -187,6 +191,47 @@ describe("Antigravity Responses integration", () => {
     const accountId = getAccountSet("google-antigravity")!.activeAccountId;
     expect(getAntigravityAccountHealthSnapshot(accountId)).toMatchObject({ cooldownSource: "synthetic", cooldownKind: "quota" });
   });
+
+  test("fails over to another account when CCA embeds a pre-output rate_limit_exceeded", async () => {
+    const accountA = getAccountSet("google-antigravity")!.activeAccountId;
+    await saveCredential("google-antigravity", {
+      access: "access-b",
+      refresh: "refresh-b",
+      expires: Date.now() + 3600_000,
+      projectId: "project-b",
+      accountId: "account-b",
+    });
+    await setActiveAccount("google-antigravity", accountA);
+    const bearers: string[] = [];
+    const projects: string[] = [];
+    let inferenceCalls = 0;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      inferenceCalls += 1;
+      bearers.push(new Headers(init?.headers).get("authorization") ?? "");
+      projects.push((JSON.parse(String(init?.body)) as { project?: string }).project ?? "");
+      if (inferenceCalls === 1) {
+        return new Response('data: {"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"rate_limit_exceeded"}}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return completed();
+    }) as typeof fetch;
+    const sessionHeaders = { "session-id": "stable-antigravity-session" };
+    const response = await handleResponses(request(true, sessionHeaders), fastConfig(), { model: "", provider: "" }, {});
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("hello");
+    expect(bearers).toEqual(["Bearer access-a", "Bearer access-b"]);
+    expect(projects).toEqual(["project-a", "project-b"]);
+    expect(inferenceCalls).toBe(2);
+
+    const second = await handleResponses(request(false, sessionHeaders), fastConfig(), { model: "", provider: "" }, {});
+    expect(second.status).toBe(200);
+    expect(await second.text()).toContain("hello");
+    expect(bearers).toEqual(["Bearer access-a", "Bearer access-b", "Bearer access-b"]);
+    expect(projects).toEqual(["project-a", "project-b", "project-b"]);
+    expect(inferenceCalls).toBe(3);
+  }, 15_000);
 
   test("preserves 403 after a geoblock arrives as a 200 SSE error", async () => {
     let calls = 0;

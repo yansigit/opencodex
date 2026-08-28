@@ -92,6 +92,17 @@ let grokApplyTestHooks: { now?: () => number; run?: () => Promise<unknown> } | n
 type V2NativeParentOverrideInput = { enabled: boolean; model: string | null };
 type AgentTaskRecoveryInput = { enabled: boolean; model: string | null };
 
+function persistV2RoutedDelegationBridge(config: OcxConfig, enabled: boolean): { ok: true } | { ok: false; reason: string } {
+  const outcome = mutatePersistedConfig(persisted => {
+    const changed = persisted.v2RoutedDelegationBridge !== enabled;
+    if (changed) persisted.v2RoutedDelegationBridge = enabled;
+    return { changed, value: true };
+  });
+  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
+  config.v2RoutedDelegationBridge = enabled;
+  return { ok: true };
+}
+
 function agentTaskRecoveryDto(
   config: OcxConfig,
 ): { enabled: boolean; model: string | null } {
@@ -342,6 +353,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       // server-side so no client can present it as an effective V2 limit.
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
       v2NativeParentOverride,
+      v2RoutedDelegationBridge: config.v2RoutedDelegationBridge === true,
       agentTaskRecovery: agentTaskRecoveryDto(config),
     });
   }
@@ -356,6 +368,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       subagentDeveloperInstructions?: unknown;
       multiAgentModeHintText?: unknown;
       v2NativeParentOverride?: unknown;
+      v2RoutedDelegationBridge?: unknown;
       agentTaskRecovery?: unknown;
     };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
@@ -368,9 +381,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     const wantsSubagentInstructions = body.subagentDeveloperInstructions !== undefined;
     const wantsModeHintText = body.multiAgentModeHintText !== undefined;
     const wantsV2NativeParentOverride = body.v2NativeParentOverride !== undefined;
+    const wantsV2RoutedDelegationBridge = body.v2RoutedDelegationBridge !== undefined;
     const wantsAgentTaskRecovery = body.agentTaskRecovery !== undefined;
-    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride && !wantsAgentTaskRecovery) {
-      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, multiAgentModeHintText, v2NativeParentOverride, and/or agentTaskRecovery" }, 400);
+    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride && !wantsV2RoutedDelegationBridge && !wantsAgentTaskRecovery) {
+      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, multiAgentModeHintText, v2NativeParentOverride, v2RoutedDelegationBridge, and/or agentTaskRecovery" }, 400);
     }
     if (wantsFlag && typeof body.enabled !== "boolean") return jsonResponse({ error: "body.enabled must be a boolean" }, 400);
     if (wantsMode && body.multiAgentMode !== "v1" && body.multiAgentMode !== "default" && body.multiAgentMode !== "v2") {
@@ -378,6 +392,9 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     }
     if (wantsKeepNative && typeof body.keepNativeChatGptOnV1 !== "boolean") {
       return jsonResponse({ error: "body.keepNativeChatGptOnV1 must be a boolean" }, 400);
+    }
+    if (wantsV2RoutedDelegationBridge && typeof body.v2RoutedDelegationBridge !== "boolean") {
+      return jsonResponse({ error: "body.v2RoutedDelegationBridge must be a boolean" }, 400);
     }
     if (wantsThreads && (typeof body.maxConcurrentThreadsPerSession !== "number" || !Number.isInteger(body.maxConcurrentThreadsPerSession) || body.maxConcurrentThreadsPerSession < 1)) {
       return jsonResponse({ error: "body.maxConcurrentThreadsPerSession must be an integer >= 1" }, 400);
@@ -493,6 +510,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         model: candidate.model === null || candidate.model === undefined ? null : (candidate.model as string).trim(),
       };
     }
+    if (wantsV2RoutedDelegationBridge && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
+        && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride && !wantsAgentTaskRecovery) {
+      const persisted = persistV2RoutedDelegationBridge(config, body.v2RoutedDelegationBridge as boolean);
+      if (!persisted.ok) return jsonResponse({ error: `persisting v2RoutedDelegationBridge failed: ${persisted.reason}` }, 502);
+      return jsonResponse({ ok: true, v2RoutedDelegationBridge: config.v2RoutedDelegationBridge === true });
+    }
     if (agentTaskRecovery && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
         && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride) {
       const persisted = persistAgentTaskRecovery(config, agentTaskRecovery);
@@ -593,6 +616,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const persisted = persistV2NativeParentOverride(config, v2NativeParentOverride);
       if (!persisted.ok) return jsonResponse({ error: `persisting v2NativeParentOverride failed: ${persisted.reason}` }, 502);
     }
+    if (wantsV2RoutedDelegationBridge) {
+      const persisted = persistV2RoutedDelegationBridge(config, body.v2RoutedDelegationBridge as boolean);
+      if (!persisted.ok) return jsonResponse({ error: `persisting v2RoutedDelegationBridge failed: ${persisted.reason}` }, 502);
+    }
     if (agentTaskRecovery) {
       const persisted = persistAgentTaskRecovery(config, agentTaskRecovery);
       if (!persisted.ok) return jsonResponse({ error: `persisting agentTaskRecovery failed: ${persisted.reason}` }, 502);
@@ -613,6 +640,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       multiAgentModeHintText: getMultiAgentModeHintText(),
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
       v2NativeParentOverride: v2NativeParentOverrideDto(config, enabled),
+      v2RoutedDelegationBridge: config.v2RoutedDelegationBridge === true,
       agentTaskRecovery: agentTaskRecoveryDto(config),
       warnings,
       catalogRefresh,

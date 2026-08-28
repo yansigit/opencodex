@@ -221,14 +221,19 @@ describe("Codex startup health", () => {
       expect(serialized).not.toContain(secretName);
     }
 
-    await Bun.sleep(30_050);
-    const refreshed = await handleManagementAPI(
-      new Request(url),
-      url,
-      { port: 10100, providers: {}, defaultProvider: "openai", codexAutoStart: true } as OcxConfig,
-    );
-    const refreshedBody = await refreshed!.json() as Record<string, unknown>;
-    expect(refreshedBody.diagnosticStale).toBe(false);
+    const realNow = Date.now;
+    try {
+      Date.now = () => realNow() + 30_050;
+      const refreshed = await handleManagementAPI(
+        new Request(url),
+        url,
+        { port: 10100, providers: {}, defaultProvider: "openai", codexAutoStart: true } as OcxConfig,
+      );
+      const refreshedBody = await refreshed!.json() as Record<string, unknown>;
+      expect(refreshedBody.diagnosticStale).toBe(false);
+    } finally {
+      Date.now = realNow;
+    }
   }, 40_000);
 });
 import { ManagementRequest as Request } from "./helpers/management-auth";
