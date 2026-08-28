@@ -172,6 +172,7 @@ import {
 } from "../../codex/auth-context";
 import {
   entitledCodexAccountIdsForModel,
+  isDirectCallerEntitledToCodexModel,
   invalidateCodexModelEntitlementsForAccount,
   resolveCodexModelEntitlements,
 } from "../../codex/model-entitlements";
@@ -1385,6 +1386,8 @@ export interface HandleResponsesOptions {
   onCodexAuthContextResolved?: (context: CodexAuthContext | undefined) => void;
   /** Internal deterministic seam for account-gated native fallback tests. */
   resolveCodexModelEntitlements?: typeof resolveCodexModelEntitlements;
+  /** Internal deterministic seam for Direct account-gated native auth tests. */
+  isDirectCallerEntitledToCodexModel?: typeof isDirectCallerEntitledToCodexModel;
   recordTerminalOutcomes?: boolean;
   setTerminalOutcomeRecorder?: (recorder: ((status: ResponsesTerminalStatus, httpStatusOverride?: number) => void) | undefined) => void;
   onNativePassthroughTerminal?: (status: ResponsesTerminalStatus) => void;
@@ -1685,6 +1688,7 @@ async function resolveResponsesCodexAuth(
         substituteMainCredentialForDirect: substituteMainCredential,
         beginCodexAccountSelection: codexAccountSelectionForTurn(options.turnAdmissionLease),
         resolveCodexModelEntitlements: options.resolveCodexModelEntitlements,
+        isDirectCallerEntitledToCodexModel: options.isDirectCallerEntitledToCodexModel,
       });
       options.onCodexAuthContextResolved?.(authCtx);
     } else {
