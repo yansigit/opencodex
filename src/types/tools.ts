@@ -39,7 +39,9 @@ export function namespacedToolName(namespace: string | undefined, name: string):
  * DeepSeek in particular — sometimes echo that helper name as the tool-call name, emitting
  * `exec_command` or `apply_patch` instead of the declared `exec`. Accept these nested helper
  * names only when the request catalog actually declares `exec` and does not itself declare the
- * emitted name (an MCP server may legitimately advertise one under its own namespace).
+ * emitted name (an MCP server may legitimately advertise one under its own namespace). Some
+ * hosted adapters also strip a unique namespace prefix or replace its separator with `_`; those
+ * forms are accepted only when one declaration can be identified unambiguously.
  */
 const LEGACY_SHELL_BRIDGE_TOOL_NAMES = ["exec_command", "shell_command"] as const;
 const CODE_MODE_HELPER_TOOL_NAMES = [...LEGACY_SHELL_BRIDGE_TOOL_NAMES, "apply_patch"] as const;
@@ -48,16 +50,31 @@ export function normalizeDeclaredToolName(
   name: string,
   declared: ReadonlySet<string> | undefined,
 ): string {
-  if (!declared || !declared.has("exec")) return name;
+  if (!declared) return name;
   if (declared.has(name)) return name;
-  if (name === "apply_patch") return "exec";
-  // When the catalog explicitly declares any legacy shell bridge name, the environment
-  // genuinely exposes that tool — turn normalization off so a call is never mis-routed
-  // to `exec`.
-  if ((LEGACY_SHELL_BRIDGE_TOOL_NAMES as readonly string[]).some(legacy => declared.has(legacy))) {
-    return name;
+  if (declared.has("exec")) {
+    // When the catalog explicitly declares any legacy shell bridge name, the environment
+    // genuinely exposes that tool — turn normalization off so a call is never mis-routed
+    // to `exec`.
+    if ((LEGACY_SHELL_BRIDGE_TOOL_NAMES as readonly string[]).some(legacy => declared.has(legacy))) {
+      return name;
+    }
+    if ((CODE_MODE_HELPER_TOOL_NAMES as readonly string[]).includes(name)) {
+      return "exec";
+    }
   }
-  return (CODE_MODE_HELPER_TOOL_NAMES as readonly string[]).includes(name) ? "exec" : name;
+  // Models may strip a namespace prefix or replace separators with underscores. Resolve only
+  // when exactly one declaration matches, so an ambiguous bare name remains fail-closed.
+  let matched: string | undefined;
+  for (const dec of declared) {
+    const matchesSuffix = !name.includes(":") && !name.includes("__")
+      && (dec.endsWith(`:${name}`) || dec.endsWith(`__${name}`));
+    const matchesSanitized = dec.replace(/[^A-Za-z0-9_-]/g, "_") === name;
+    if (!matchesSuffix && !matchesSanitized) continue;
+    if (matched !== undefined) return name;
+    matched = dec;
+  }
+  return matched ?? name;
 }
 
 export function toolChoiceAliases(tool: Pick<OcxTool, "namespace" | "name">): string[] {
