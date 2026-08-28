@@ -1382,6 +1382,8 @@ describe("codex-auth API", () => {
       expect(quota).toMatchObject({
         weeklyPercent: 1,
         weeklyResetAt: 2_000_586_800,
+        fiveHourPercent: 0,
+        fiveHourResetAt: 2_000_000_000,
         shortPercent: 0,
         shortResetAt: 2_000_000_000,
         shortWindowSeconds: 18_000,

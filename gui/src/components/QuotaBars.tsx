@@ -48,15 +48,17 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
   if (!displayQuota) return [];
   // Intrinsic ranks for the standard slots; custom windows rank on their RAW labels.
   const ranked: Array<{ rank: number; row: QuotaBarRow }> = [];
-  if (typeof displayQuota.fiveHourPercent === "number") {
+  const fiveHourPercent = displayQuota.fiveHourPercent ?? displayQuota.shortPercent;
+  const fiveHourResetAt = displayQuota.fiveHourResetAt ?? displayQuota.shortResetAt;
+  if (typeof fiveHourPercent === "number") {
     ranked.push({
       rank: 0,
       row: {
         windowKey: "fiveHour",
         label: t("codexAuth.fiveHour"),
         limitLabel: t("quota.fiveHourLimit"),
-        percent: displayQuota.fiveHourPercent,
-        resetAt: displayQuota.fiveHourResetAt,
+        percent: fiveHourPercent,
+        resetAt: fiveHourResetAt,
       },
     });
   }
@@ -119,7 +121,7 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
 /** Max utilisation across known windows (for sorting providers by urgency). */
 export function maxQuotaUtilisation(quota: AccountQuota | null): number {
   if (!quota) return -1;
-  const vals = [quota.fiveHourPercent, quota.weeklyPercent, quota.monthlyPercent]
+  const vals = [quota.fiveHourPercent ?? quota.shortPercent, quota.weeklyPercent, quota.monthlyPercent]
     .filter((n): n is number => typeof n === "number");
   for (const w of quota.customWindows ?? []) {
     if (typeof w.percent === "number") vals.push(w.percent);

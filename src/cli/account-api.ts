@@ -141,6 +141,8 @@ export interface FamilyRows {
 }
 
 export interface CodexQuotaDto {
+  fiveHourPercent?: number;
+  fiveHourResetAt?: number;
   weeklyPercent?: number;
   monthlyPercent?: number;
   weeklyResetAt?: number;
@@ -187,7 +189,7 @@ interface CodexAccountDto {
 function projectQuota(quota: CodexQuotaDto | null | undefined): CodexQuotaDto | null {
   if (!quota) return null;
   const projected: CodexQuotaDto = {};
-  for (const key of ["weeklyPercent", "monthlyPercent", "weeklyResetAt", "monthlyResetAt", "shortPercent", "shortResetAt", "shortWindowSeconds"] as const) {
+  for (const key of ["fiveHourPercent", "fiveHourResetAt", "weeklyPercent", "monthlyPercent", "weeklyResetAt", "monthlyResetAt", "shortPercent", "shortResetAt", "shortWindowSeconds"] as const) {
     if (typeof quota[key] === "number" && Number.isFinite(quota[key])) projected[key] = quota[key];
   }
   return projected;
