@@ -57,7 +57,7 @@ describe("Responses abort guards", () => {
        // equality), so the flood still fills the backlog one event per push
        // now that adjacent same-phase text deltas merge.
        for (let i = 0; i <= 1_024; i++) {
-         emit({ type: "text_delta", text: String(i), phase: i % 2 === 0 ? "final" : "commentary" });
+         emit({ type: "text_delta", text: String(i), phase: i % 2 === 0 ? "final_answer" : "commentary" });
        }
        abortedAfterOverflow = incoming.abortSignal?.aborted === true;
      },
