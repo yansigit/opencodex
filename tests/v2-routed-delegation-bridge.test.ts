@@ -191,6 +191,18 @@ describe("V2 routed delegation bridge", () => {
     expect(rewrite(late)).toBe(late);
   });
 
+  test("does not reopen a closed id when its added snapshot repeats", () => {
+    const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
+    const added = JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_duplicate" } });
+    rewrite(added);
+    rewrite(JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_duplicate", arguments: "{}" }));
+    rewrite(JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_duplicate" } }));
+
+    expect(rewrite(added)).toBe(added);
+    const late = JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_duplicate", delta: "late" });
+    expect(rewrite(late)).toBe(late);
+  });
+
   test("keeps capped ids rejected after a slot frees", () => {
     const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
     const added = (id: string) => JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id } });

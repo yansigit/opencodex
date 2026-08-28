@@ -165,7 +165,8 @@ export function createV2RoutedDelegationSseRewrite(
   const openArgumentIds = new Set<string>();
   const bind = (itemId: unknown): boolean => {
     if (typeof itemId !== "string" || itemId.trim().length === 0) return false;
-    if (!admittedIds.has(itemId) && admittedIds.size >= MAX_SSE_BINDINGS) return false;
+    if (admittedIds.has(itemId)) return openArgumentIds.has(itemId);
+    if (admittedIds.size >= MAX_SSE_BINDINGS) return false;
     admittedIds.add(itemId);
     openArgumentIds.add(itemId);
     return true;
