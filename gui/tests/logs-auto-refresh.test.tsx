@@ -482,6 +482,31 @@ test("Logs: inside-card clicks keep the detail dialog open; backdrop dismiss clo
   await act(async () => { root.unmount(); });
 });
 
+test("Logs: agent badges identify the row and its detail dialog, including unknown origins", async () => {
+  const mainLog = { ...sampleLog, requestId: "req-main", agentKind: "main" };
+  const unknownLog = { ...sampleLog, requestId: "req-unknown", model: "unknown-model", agentKind: "unexpected-origin" };
+  globalThis.fetch = (async (input) => {
+    if (!String(input).includes("/api/logs")) return new Response(null, { status: 404 });
+    return jsonResponse([mainLog, unknownLog]);
+  }) as typeof fetch;
+
+  const { root, container } = await mountLogs();
+  await flushMicrotasks();
+
+  const rows = [...container.querySelectorAll<HTMLTableRowElement>(".logs-table tbody tr")];
+  expect(rows.some(row => row.textContent?.includes("Main"))).toBe(true);
+  expect(rows.some(row => row.textContent?.includes("Unknown"))).toBe(true);
+
+  const unknownRow = rows.find(row => row.textContent?.includes("req-unknown"));
+  expect(unknownRow).toBeTruthy();
+  await act(async () => { unknownRow!.querySelector<HTMLButtonElement>(".log-detail-btn")!.click(); });
+  const dialog = container.querySelector("dialog");
+  expect(dialog?.textContent).toContain("Agent");
+  expect(dialog?.textContent).toContain("Unknown");
+
+  await act(async () => { root.unmount(); });
+});
+
 // #2157: the Codex App sends helper requests on every message and turn completion. That
 // traffic is the App's, not ours -- what is ours is making an INTERCEPTED one identifiable, so
 // the reporter can tell recurring helper spend from their own work.

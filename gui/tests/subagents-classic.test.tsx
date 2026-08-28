@@ -4,13 +4,14 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import Subagents from "../src/pages/Subagents";
 import { LanguageProvider } from "../src/i18n/provider";
+import { clearClientResourceStoresForTests } from "../src/client-resource";
 
 /**
  * Behavioural contract for the denser Subagents workspace: five-slot cap,
  * add/remove via the rail, and the exact save request.
  */
 
-const globals = ["document", "window", "navigator", "localStorage", "fetch", "IS_REACT_ACT_ENVIRONMENT"] as const;
+const globals = ["document", "window", "navigator", "localStorage", "fetch", "confirm", "alert", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
 let testWindow: Window;
 let container: HTMLElement;
@@ -19,6 +20,9 @@ let requests: { url: string; init?: RequestInit }[] = [];
 let available: string[] = [];
 let chosen: string[] = [];
 let injectionModel = "";
+let catalogState: "fresh" | "stale" | "not_running" | "unknown" | undefined;
+let rosterAfterRefresh: string[] | null = null;
+let subagentCatalogReads = 0;
 
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map((k) => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
@@ -36,6 +40,12 @@ beforeEach(() => {
   available = ["a-1", "a-2", "a-3", "a-4", "a-5", "a-6"];
   chosen = [];
   injectionModel = "";
+  catalogState = undefined;
+  rosterAfterRefresh = null;
+  subagentCatalogReads = 0;
+  clearClientResourceStoresForTests();
+  Object.defineProperty(globalThis, "confirm", { configurable: true, value: () => true });
+  Object.defineProperty(globalThis, "alert", { configurable: true, value: () => {} });
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (url: string, init?: RequestInit) => {
@@ -48,7 +58,26 @@ beforeEach(() => {
           json: async () => ({ model: injectionModel, effort: "high", available: available.map(model => ({ provider: "openai", model, namespaced: model })) }),
         } as unknown as Response;
       }
-      const body = JSON.stringify({ available, chosen });
+      if (String(url).includes("/api/system/codex-restart")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            stateBefore: "stale",
+            synced: true,
+            requested: [123],
+            stopped: [123],
+            surviving: [],
+            failed: [],
+            code: "stopped",
+          }),
+        } as unknown as Response;
+      }
+      const isSubagentCatalog = String(url).includes("/api/subagent-models");
+      const refreshed = isSubagentCatalog && rosterAfterRefresh !== null && subagentCatalogReads++ > 0;
+      const roster = refreshed ? rosterAfterRefresh : available;
+      const body = JSON.stringify({ available: roster, chosen: refreshed ? [] : chosen, ...(catalogState ? { catalogState: { state: catalogState } } : {}) });
       return {
         ok: true,
         status: 200,
@@ -71,6 +100,7 @@ afterEach(async () => {
   for (const key of globals) {
     Object.defineProperty(globalThis, key, { configurable: true, value: previousGlobals[key] });
   }
+  clearClientResourceStoresForTests();
 });
 
 async function mount() {
@@ -171,4 +201,23 @@ test("marks the preferred model and lets Prefer update it without changing roste
   const patch = requests.find(row => row.init?.method === "PUT" && String(row.url).includes("/api/injection-model"));
   expect(JSON.parse(String(patch!.init!.body))).toEqual({ model: "a-1", effort: "high" });
   expect(removeButtons().map(button => button.getAttribute("aria-label"))).toEqual(["Remove a-1"]);
+});
+
+test("stale catalog shows the existing restart control and refreshes the roster after restart", async () => {
+  catalogState = "stale";
+  available = ["stale-model"];
+  rosterAfterRefresh = ["fresh-model"];
+
+  await mount();
+  expect(container.textContent).toContain("Stale");
+  const restart = container.querySelector<HTMLButtonElement>(".codex-stale-banner button");
+  expect(restart).toBeTruthy();
+
+  await act(async () => { restart!.click(); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+
+  expect(requests.some(request => request.url.includes("/api/system/codex-restart"))).toBe(true);
+  expect(requests.filter(request => request.url.includes("/api/subagent-models") && !request.init?.method).length).toBeGreaterThan(1);
+  expect(container.textContent).toContain("fresh-model");
+  expect(container.textContent).not.toContain("stale-model");
 });
