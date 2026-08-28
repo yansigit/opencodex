@@ -153,12 +153,15 @@ export function createV2RoutedDelegationSseRewrite(
   if (!active || active.names.size === 0) return undefined;
   const bindings = new Map<string, number | undefined>();
   const outputIndexes = new Map<number, string>();
-  const bind = (itemId: string | undefined, outputIndex: number | undefined): void => {
-    if (itemId === undefined && outputIndex === undefined) return;
+  const bind = (itemId: string | undefined, outputIndex: number | undefined): boolean => {
+    if (itemId === undefined && outputIndex === undefined) return false;
     const key = itemId ?? `@${outputIndex}`;
-    if (!bindings.has(key) && bindings.size >= MAX_SSE_BINDINGS) return;
+    if (!bindings.has(key) && bindings.size >= MAX_SSE_BINDINGS) return false;
+    const previousIndex = bindings.get(key);
+    if (previousIndex !== undefined && outputIndexes.get(previousIndex) === key) outputIndexes.delete(previousIndex);
     bindings.set(key, outputIndex);
     if (outputIndex !== undefined) outputIndexes.set(outputIndex, key);
+    return true;
   };
   const retire = (itemId: unknown, outputIndex: unknown): void => {
     const key = typeof itemId === "string"
@@ -177,17 +180,15 @@ export function createV2RoutedDelegationSseRewrite(
     const item = isRecord(event.item) ? event.item : undefined;
     const armed = !!item && item.type === "function_call" && item.namespace === MIRROR_NAMESPACE
       && typeof item.name === "string" && active.names.has(item.name);
-    if (armed) {
-      bind(
+    const bound = armed && bind(
         typeof item.id === "string" ? item.id : undefined,
         typeof event.output_index === "number" && Number.isInteger(event.output_index) ? event.output_index : undefined,
       );
-    }
     const argumentEvent = type === "response.function_call_arguments.delta" || type === "response.function_call_arguments.done";
     const matchedArgument = argumentEvent && (typeof event.item_id === "string"
       ? bindings.has(event.item_id)
       : typeof event.output_index === "number" && outputIndexes.has(event.output_index));
-    const rewritten = rewriteValue(event, active);
+    const rewritten = armed && !bound ? { value: event, changed: false } : rewriteValue(event, active);
     if (type === "response.function_call_arguments.done" || (type === "response.output_item.done" && armed)) {
       retire(event.item_id ?? item?.id, event.output_index);
     }
