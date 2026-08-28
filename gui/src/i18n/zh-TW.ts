@@ -1978,7 +1978,7 @@ export const zhTW: Record<TKey, string> = {
   "sub.settings": "設定",
   "sub.sections": "子代理分區",
   "sub.delegation.model": "偏好子代理模型",
-  "sub.delegation.modelHint": "Codex 分派工作時最先調用的模型。上面的推薦是可調用的名單，這裡選的是其中第一順位。",
+  "sub.delegation.modelHint": "OpenCodex 為委派推薦的模型。它獨立於廣告覆寫的順序。",
   "debug.loadFailed": "無法載入偵錯設定。",
   "provider.name.volcengine": "Volcengine Ark",
   "provider.name.volcengineCodingPlan": "Volcengine Ark Coding Plan",

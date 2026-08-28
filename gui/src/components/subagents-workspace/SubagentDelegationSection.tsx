@@ -79,6 +79,11 @@ export default function SubagentDelegationSection({
   // Proactive message, so it must render as OFF (and the toggle can install the
   // preset). Only a nonblank hint is "on".
   const ultraOn = (ultraMode.hintText ?? "").trim().length > 0;
+  const safeNativeDefaultState = nativeDefaultState === "active"
+    || nativeDefaultState === "pending"
+    || nativeDefaultState === "blocked"
+    ? nativeDefaultState
+    : "disabled";
   const nativeParentTargets = available.filter(option => option.canonical !== true);
   const nativeParentCanActivate = ultraMode.multiAgentV2Enabled && !keepNativeChatGptOnV1 && nativeParentOverride.model !== null;
 
@@ -148,7 +153,7 @@ export default function SubagentDelegationSection({
         <div className="setting-copy">
           <div className="font-semibold">{t("dash.syncCodexSubagentDefaults")}</div>
           <div className="muted setting-hint">{t("dash.syncCodexSubagentDefaultsHint")}</div>
-          <div className="muted setting-hint">{t(`sub.nativeDefaultState.${nativeDefaultState}`)}</div>
+          <div className="muted setting-hint">{t(`sub.nativeDefaultState.${safeNativeDefaultState}`)}</div>
         </div>
         <button
           type="button"
