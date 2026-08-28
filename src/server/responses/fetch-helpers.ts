@@ -3,6 +3,7 @@ import {
   codexWsUpstreamFetch,
   currentBunRuntimeIdentity,
   shouldUseCodexWsUpstream,
+  type CodexWsUpstreamOptions,
   type BunRuntimeGateInput,
 } from "./ws-upstream";
 import type { OcxProviderConfig } from "../../types";
@@ -79,13 +80,17 @@ export function providerFetch(
   // ChatGPT Codex backend: streaming turns ride the responses_websockets
   // transport (measured ~3s faster TTFT than the SSE POST queue); everything
   // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
+  const wsOptions: CodexWsUpstreamOptions = {
+    wsUpstream: provider.wsUpstream,
+    maxWsFrameBytes: provider.maxWsFrameBytes,
+  };
   const unpaced = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
-    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime)) {
+    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, wsOptions)) {
       // The fallback has to be the same HTTP fetch the non-WS branch would have
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOptions);
     }
     return httpFetch(input, init);
   };
