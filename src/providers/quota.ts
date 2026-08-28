@@ -1111,7 +1111,12 @@ async function fetchChatGptForwardQuota(
   if (providerCodexAccountMode(provider, providerConfig) === "direct") {
     const snapshot = await fetchMainAccountInfoSnapshot(forceRefresh);
     const quota = snapshot.info.quota
-      ? { ...snapshot.info.quota, updatedAt: Date.now() } as ProviderQuota
+      ? {
+          ...snapshot.info.quota,
+          fiveHourPercent: snapshot.info.quota.fiveHourPercent ?? snapshot.info.quota.shortPercent,
+          fiveHourResetAt: snapshot.info.quota.fiveHourResetAt ?? snapshot.info.quota.shortResetAt,
+          updatedAt: Date.now(),
+        } as ProviderQuota
       : null;
     return quota
       ? tagNativeMainReport(report(provider, "chatgpt:wham", quota), snapshot.mainIdentityGeneration)
@@ -1139,7 +1144,12 @@ async function fetchChatGptForwardQuota(
   }
   const activeUsable = !!active && !active.paused && active.needsReauth !== true;
   const quota = activeUsable && active?.quota
-    ? { ...active.quota, updatedAt: active.quota.updatedAt ?? Date.now() } as CodexCapacityQuota
+    ? {
+        ...active.quota,
+        fiveHourPercent: active.quota.fiveHourPercent ?? active.quota.shortPercent,
+        fiveHourResetAt: active.quota.fiveHourResetAt ?? active.quota.shortResetAt,
+        updatedAt: active.quota.updatedAt ?? Date.now(),
+      } as CodexCapacityQuota
     : null;
   const quotaFresh = !!quota
     && Number.isFinite(quota.updatedAt)

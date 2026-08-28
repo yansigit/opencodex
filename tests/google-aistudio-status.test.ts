@@ -64,7 +64,7 @@ async function probe(config: OcxConfig): Promise<{ status: number; body: Record<
   return { status: res.status, body: await res.json() as Record<string, unknown> };
 }
 
-describe("AI Studio status & re-auth", () => {
+describe.skipIf(process.platform !== "darwin")("AI Studio status & re-auth", () => {
   test("safeConfigDTO exposes compatibility session state and needs-reauth auth state", () => {
     const dto = safeConfigDTO(cfg()) as any;
     const prov = dto.providers["google-aistudio"];

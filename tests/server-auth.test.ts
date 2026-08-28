@@ -1151,7 +1151,7 @@ describe("server local API auth", () => {
     }
   });
 
-  test("AI Studio relay upgrade requires API auth on non-loopback binds", async () => {
+  test("AI Studio relay endpoints return 410 Gone and session sync requires API auth", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -1160,15 +1160,19 @@ describe("server local API auth", () => {
 
     const server = startServer(0);
     try {
-      const missing = await fetch(new URL("/v1/ws/aistudio", server.url), {
+      const gone = await fetch(new URL("/v1/ws/aistudio", server.url), {
         headers: { connection: "Upgrade", upgrade: "websocket" },
+      });
+      expect(gone.status).toBe(410);
+
+      const missing = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "POST",
       });
       expect(missing.status).toBe(401);
 
-      const hostile = await fetch(new URL("/v1/ws/aistudio", server.url), {
+      const hostile = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "POST",
         headers: {
-          connection: "Upgrade",
-          upgrade: "websocket",
           "x-opencodex-api-key": "local-secret",
           origin: "https://attacker.test",
         },

@@ -219,6 +219,8 @@ function quotaForPlan<T extends Omit<StoredAccountQuota, "updatedAt"> | StoredAc
     ...(quota.monthlyResetAt !== undefined ? { monthlyResetAt: quota.monthlyResetAt } : {}),
     // A 30-day plan can still carry a burst window, and it blocks the account on its own.
     // Dropping it here would show a healthy card for an account upstream is refusing (#1791).
+    ...(quota.fiveHourPercent !== undefined ? { fiveHourPercent: quota.fiveHourPercent } : {}),
+    ...(quota.fiveHourResetAt !== undefined ? { fiveHourResetAt: quota.fiveHourResetAt } : {}),
     ...(quota.shortPercent !== undefined ? { shortPercent: quota.shortPercent } : {}),
     ...(quota.shortResetAt !== undefined ? { shortResetAt: quota.shortResetAt } : {}),
     ...(quota.shortWindowSeconds !== undefined ? { shortWindowSeconds: quota.shortWindowSeconds } : {}),
