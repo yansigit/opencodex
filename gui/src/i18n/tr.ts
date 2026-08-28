@@ -596,6 +596,8 @@ export const tr: Record<TKey, string> = {
   "models.customEditBtn": "Güncelle",
   "models.customEdit": "Düzenle",
   "models.customDelete": "Sil",
+  "models.customEditNamed": "{name} modelini düzenle",
+  "models.customDeleteNamed": "{name} modelini sil",
   "models.customDeleteConfirm": "{name} modeli silinsin mi?",
   "models.customBadge": "Özel",
   "models.customSummary": "{count} özel",

@@ -2340,6 +2340,8 @@ export const ja: Record<TKey, string> = {
   "models.customEditBtn": "Update",
   "models.customEdit": "Edit",
   "models.customDelete": "Delete",
+  "models.customEditNamed": "{name}を編集",
+  "models.customDeleteNamed": "{name}を削除",
   "models.customDeleteConfirm": "Delete the {name} model?",
   "models.customBadge": "Custom",
   "models.customSummary": "{count} custom",

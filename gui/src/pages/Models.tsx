@@ -4,7 +4,7 @@ import type { AppServerStateOutcome } from "../codex-app-server-state";
 import { useCodexRestart } from "../use-codex-restart";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Switch, Notice, EmptyState, Select, Tooltip } from "../ui";
-import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil } from "../icons";
+import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil, IconTrash } from "../icons";
 import { useT } from "../i18n/shared";
 import type { TFn, TKey } from "../i18n/shared";
 import { modelLabel } from "../model-display";
@@ -69,7 +69,7 @@ import {
   type V2Status,
 } from "./models-shared";
 import { EmptyProviderHint } from "./models-provider-hints";
-import { shadowCallModelOptions } from "./dashboard-shared";
+import { shadowCallModelOptions, useModalDialog } from "./dashboard-shared";
 import { shadowSourceModelBadge, shadowSourceModelLabel } from "./shadow-call-source";
 
 type CachedModelsPage = {
@@ -265,7 +265,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [threadsCustom, setThreadsCustom] = useState("");
   const [showThreadsCustom, setShowThreadsCustom] = useState(false);
   const [v2HelpOpen, setV2HelpOpen] = useState(false);
+  const v2HelpTriggerRef = useRef<HTMLButtonElement>(null);
+  const v2HelpDialogRef = useModalDialog(v2HelpOpen, v2HelpTriggerRef);
   const [customModalOpen, setCustomModalOpen] = useState(false);
+  const customModalTriggerRef = useRef<HTMLButtonElement>(null);
+  const customDialogRef = useModalDialog(customModalOpen, customModalTriggerRef);
 
   const reloadAliases = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(`${apiBase}/api/aliases`, { signal });
@@ -338,6 +342,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [contextDefaultTouched, setContextDefaultTouched] = useState(false);
   const [contextSaving, setContextSaving] = useState(false);
   const [contextError, setContextError] = useState("");
+  const contextModalTriggerRef = useRef<HTMLButtonElement>(null);
+  const contextDialogRef = useModalDialog(contextModalProvider !== null, contextModalTriggerRef);
   const [hoveredModel, setHoveredModel] = useState<{ namespaced: string; rect: DOMRect } | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [shadowCall, setShadowCall] = useState<ShadowCallData | null>(null);
@@ -538,7 +544,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
    */
   const catalogCountReady = models.length > 0 || catalogState.data !== undefined;
 
-  const openContextSettings = (group: ProviderModelGroup<ModelRow>) => {
+  const openContextSettings = (group: ProviderModelGroup<ModelRow>, trigger: HTMLButtonElement) => {
+    contextModalTriggerRef.current = trigger;
     const modelIds = [...new Set([
       ...group.rows.map(model => model.id),
       ...group.configuredModels,
@@ -1045,10 +1052,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     hoverTimerRef.current = setTimeout(() => setHoveredModel(null), 120);
   };
 
-  const keepRowTipOpen = () => {
-    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
-  };
-
   const addCustomModel = async (
     provider: string,
     modelId: string,
@@ -1235,7 +1238,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
              <button
                type="button"
                className="btn btn-ghost btn-sm text-caption"
-               onClick={() => openContextSettings(group)}
+               onClick={event => openContextSettings(group, event.currentTarget)}
                aria-haspopup="dialog"
              >{t("models.contextSettings")}</button>
              {
@@ -1244,6 +1247,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                 className="btn btn-ghost btn-sm text-caption"
                 onClick={(e) => {
                   e.stopPropagation();
+                  customModalTriggerRef.current = e.currentTarget;
                   setCustomModalMode("add");
                    setCustomModalProvider(provider);
                    setCustomModalId("");
@@ -1434,24 +1438,69 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                      {m.contextCapped && <span className="models-chip muted mono text-caption">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
                      {sourceKey && <span className="models-chip muted mono text-caption">{t(sourceKey)}</span>}
                      {m.metadataStale && <span className="models-chip muted mono text-caption">{t("models.contextMetadataStale")}</span>}
+                     {m.custom && m.customId && (
+                       <>
+                         <button
+                           type="button"
+                           className="btn btn-ghost btn-sm text-caption"
+                           aria-label={t("models.customEditNamed", { name: m.displayName ?? m.id })}
+                           onClick={event => {
+                             customModalTriggerRef.current = event.currentTarget;
+                             setCustomModalMode("edit");
+                             setCustomModalProvider(m.provider);
+                             setCustomModalId(m.customId!);
+                             setCustomFormModelId(m.id);
+                             setCustomFormDisplayName(m.displayName ?? "");
+                             setCustomFormContextWindow(m.contextWindow ? String(m.contextWindow) : "");
+                             setCustomFormShowCustomCtx(false);
+                             setCustomFormModalities(m.inputModalities ?? ["text"]);
+                             setCustomFormReasoning(Array.isArray(m.reasoningEfforts));
+                             setCustomFormReasoningEfforts(m.reasoningEfforts ?? []);
+                             customFormReasoningInitializedRef.current = Array.isArray(m.reasoningEfforts);
+                             setCustomError("");
+                             setCustomModalOpen(true);
+                             setHoveredModel(null);
+                           }}
+                         ><IconPencil width={13} height={13} aria-hidden="true" /></button>
+                         <button
+                           type="button"
+                           className="btn btn-ghost btn-sm text-caption"
+                           aria-label={t("models.customDeleteNamed", { name: m.displayName ?? m.id })}
+                           style={{ color: "var(--red)" }}
+                           onClick={() => {
+                             if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
+                               void deleteCustomModel(m.customId!);
+                             }
+                             setHoveredModel(null);
+                           }}
+                         ><IconTrash width={13} height={13} aria-hidden="true" /></button>
+                       </>
+                     )}
                    </div>
                    {hoveredModel?.namespaced === m.namespaced && (() => {
                      const r = hoveredModel.rect;
-                     const tipTop = r.bottom + 4;
-                     const flipUp = tipTop + 360 > window.innerHeight;
+                     const tipWidth = Math.max(0, Math.min(480, window.innerWidth - 16));
+                     const tipLeft = Math.max(8, Math.min(r.left + 24, window.innerWidth - tipWidth - 8));
+                     const tipTop = Math.max(8, r.bottom + 4);
+                     const roomBelow = Math.max(0, window.innerHeight - tipTop - 8);
+                     const roomAbove = Math.max(0, r.top - 12);
+                     const flipUp = roomBelow < Math.min(360, roomAbove);
+                     const tipMaxHeight = Math.min(360, flipUp ? roomAbove : roomBelow);
                      return (
                        <div
-                         className={`model-tip${m.custom ? " has-actions" : ""}${flipUp ? " flip-up" : ""}`}
+                         className={`model-tip${flipUp ? " flip-up" : ""}`}
                          role="tooltip"
                          style={{
                            position: "fixed",
-                           left: r.left + 24,
+                           left: tipLeft,
+                           width: "max-content",
+                           minWidth: Math.min(320, tipWidth),
+                           maxWidth: tipWidth,
+                           maxHeight: tipMaxHeight,
                            ...(flipUp
-                             ? { bottom: window.innerHeight - r.top + 4 }
+                             ? { bottom: Math.max(8, window.innerHeight - r.top + 4) }
                              : { top: tipTop }),
                          }}
-                         onMouseEnter={keepRowTipOpen}
-                         onMouseLeave={onRowLeave}
                        >
                           <div className="model-tip-id">{m.native ? m.id : m.namespaced}</div>
                          {m.displayName && <div className="model-tip-display">{m.displayName}</div>}
@@ -1484,46 +1533,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                            <span className="model-tip-key">{t("models.tipStatus")}</span>
                            <span className="model-tip-val">{off ? t("models.tipDisabled") : t("models.tipActive")}</span>
                          </div>
-                         {m.custom && m.customId && (
-                           <div className="model-tip-actions">
-                             <button
-                               type="button"
-                               className="btn btn-ghost btn-sm text-caption"
-                               onClick={() => {
-                                 setCustomModalMode("edit");
-                                 setCustomModalProvider(m.provider);
-                                 setCustomModalId(m.customId!);
-                                 setCustomFormModelId(m.id);
-                                 setCustomFormDisplayName(m.displayName ?? "");
-                                 setCustomFormContextWindow(m.contextWindow ? String(m.contextWindow) : "");
-                                 setCustomFormShowCustomCtx(false);
-                                 setCustomFormModalities(m.inputModalities ?? ["text"]);
-                                 // Only a STORED ladder counts as "configured": an inherited one
-                                 // would show a phantom override that saves "inherit" over the
-                                 // provider row's current metadata.
-                                 setCustomFormReasoning(Array.isArray(m.reasoningEfforts));
-                                 setCustomFormReasoningEfforts(m.reasoningEfforts ?? []);
-                                 // A stored ladder — even an explicit empty one — is a real
-                                 // configuration: re-enabling must preserve it, not reseed.
-                                 customFormReasoningInitializedRef.current = Array.isArray(m.reasoningEfforts);
-                                 setCustomError("");
-                                 setCustomModalOpen(true);
-                                 setHoveredModel(null);
-                               }}
-                             >{t("models.customEdit")}</button>
-                             <button
-                               type="button"
-                               className="btn btn-ghost btn-sm text-caption"
-                               style={{ color: "var(--red)" }}
-                               onClick={() => {
-                                 if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
-                                   void deleteCustomModel(m.customId!);
-                                 }
-                                 setHoveredModel(null);
-                               }}
-                             >{t("models.customDelete")}</button>
-                           </div>
-                         )}
                        </div>
                      );
                    })()}
@@ -1593,7 +1602,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               className="btn btn-ghost btn-sm"
               style={{ width: 24, height: 24, minWidth: 24, flex: "0 0 24px", padding: 0, borderRadius: "var(--radius-pill)", color: "var(--muted)" }}
               disabled={!v2}
-              onClick={() => setV2HelpOpen(true)}
+              onClick={event => {
+                v2HelpTriggerRef.current = event.currentTarget;
+                setV2HelpOpen(true);
+              }}
               aria-label={t("models.v2Label")}
               aria-haspopup="dialog"
             >
@@ -1749,10 +1761,11 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const modalsBlock = (
     <>
       {v2HelpOpen && (
-        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={t("models.v2Label")} onClick={() => setV2HelpOpen(false)} onKeyDown={e => { if (e.key === "Escape") setV2HelpOpen(false); }}>
+        <dialog ref={v2HelpDialogRef} className="modal-overlay" aria-labelledby="models-v2-help-title" onCancel={event => { event.preventDefault(); setV2HelpOpen(false); }}>
+          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} onClick={() => setV2HelpOpen(false)} />
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3>{t("models.v2Label")}</h3>
+              <h3 id="models-v2-help-title">{t("models.v2Label")}</h3>
               <button type="button" className="btn btn-ghost btn-sm" onClick={() => setV2HelpOpen(false)} aria-label={t("common.close")}>&times;</button>
             </div>
             <div className="modal-desc leading-relaxed" style={{ whiteSpace: "pre-line" }}>
@@ -1767,23 +1780,23 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               <button type="button" className="btn btn-primary" onClick={() => setV2HelpOpen(false)}>{t("common.ok")}</button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
 
       {contextModalProvider && (
-        <div
+        <dialog
+          ref={contextDialogRef}
           className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("models.contextSettings")}
-          onClick={() => { if (!contextSaving) setContextModalProvider(null); }}
-          onKeyDown={(event) => {
-            if (event.key === "Escape" && !contextSaving) setContextModalProvider(null);
+          aria-labelledby="models-context-dialog-title"
+          onCancel={event => {
+            event.preventDefault();
+            if (!contextSaving) setContextModalProvider(null);
           }}
         >
+          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={contextSaving} onClick={() => setContextModalProvider(null)} />
           <div className="modal-card" onClick={event => event.stopPropagation()}>
             <div className="modal-head">
-              <h3>{t("models.contextSettingsTitle", {
+              <h3 id="models-context-dialog-title">{t("models.contextSettingsTitle", {
                 provider: formatProviderDisplayName(contextModalProvider, t),
               })}</h3>
               <button
@@ -1865,23 +1878,23 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               </button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
 
       {customModalOpen && (
-        <div
+        <dialog
+          ref={customDialogRef}
           className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          aria-label={t("models.customAdd")}
-          onClick={() => { if (!customSaving) setCustomModalOpen(false); }}
-          onKeyDown={(e) => {
-            if (e.key === "Escape" && !customSaving) setCustomModalOpen(false);
+          aria-labelledby="models-custom-dialog-title"
+          onCancel={event => {
+            event.preventDefault();
+            if (!customSaving) setCustomModalOpen(false);
           }}
         >
+          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={customSaving} onClick={() => setCustomModalOpen(false)} />
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3>
+              <h3 id="models-custom-dialog-title">
                 {customModalMode === "add"
                   ? t("models.customAddTitle", { provider: formatProviderDisplayName(customModalProvider, t) })
                   : t("models.customEditTitle", { provider: formatProviderDisplayName(customModalProvider, t) })}
@@ -2077,7 +2090,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               </button>
             </div>
           </div>
-        </div>
+        </dialog>
       )}
     </>
   );

@@ -2393,7 +2393,7 @@ button.prov-account-row.active { cursor: default; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 12px 16px;
-  min-width: 320px;
+  min-width: 0;
   max-width: 480px;
   max-height: 360px;
   overflow-y: auto;
@@ -2401,15 +2401,13 @@ button.prov-account-row.active { cursor: default; }
   pointer-events: none;
   font-size: var(--text-control);
   line-height: var(--leading-relaxed);
-  white-space: nowrap;
+  white-space: normal;
 }
-.model-tip.has-actions { pointer-events: auto; }
 .model-tip-id { font-family: var(--mono); font-size: var(--text-body); font-weight: var(--weight-semibold); color: var(--text); margin-bottom: 2px; white-space: normal; word-break: break-all; }
 .model-tip-display { color: var(--muted); margin-bottom: 6px; }
 .model-tip-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin-bottom: 6px; }
 .model-tip-key { color: var(--muted); }
-.model-tip-val { color: var(--text); font-family: var(--mono); font-size: var(--text-label); }
-.model-tip-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-soft); }
+.model-tip-val { color: var(--text); font-family: var(--mono); font-size: var(--text-label); overflow-wrap: anywhere; }
 
 /* ---- hover tooltip (styled replacement for native title) ---- */
 .ocx-tooltip { position: relative; display: inline-flex; align-items: center; }

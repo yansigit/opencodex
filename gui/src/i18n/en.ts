@@ -605,6 +605,8 @@ export const en = {
   "models.customEditBtn": "Update",
   "models.customEdit": "Edit",
   "models.customDelete": "Delete",
+  "models.customEditNamed": "Edit {name}",
+  "models.customDeleteNamed": "Delete {name}",
   "models.customDeleteConfirm": "Delete the {name} model?",
   "models.customBadge": "Custom",
   "models.customSummary": "{count} custom",

@@ -593,6 +593,8 @@ export const ru: Record<TKey, string> = {
   "models.customEditBtn": "Обновить",
   "models.customEdit": "Изменить",
   "models.customDelete": "Удалить",
+  "models.customEditNamed": "Изменить {name}",
+  "models.customDeleteNamed": "Удалить {name}",
   "models.customDeleteConfirm": "Удалить модель {name}?",
   "models.customBadge": "Пользовательская",
   "models.customSummary": "Пользовательских: {count}",

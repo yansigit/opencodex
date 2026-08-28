@@ -445,14 +445,12 @@ export function useModalDialog(open: boolean, triggerRef: RefObject<HTMLButtonEl
 
   useEffect(() => {
     const dialog = dialogRef.current;
-    if (!dialog) return;
-
     if (open) {
-      if (!dialog.open) dialog.showModal();
+      if (dialog && !dialog.open) dialog.showModal();
       return;
     }
 
-    if (dialog.open) dialog.close();
+    if (dialog?.open) dialog.close();
     focusTriggerQuietly(triggerRef.current);
   }, [open, triggerRef]);
 
