@@ -300,6 +300,7 @@ describe("github-copilot security repairs (absorb hardening)", () => {
   });
 
   test("persistent identity failure fails the login instead of persisting an anonymous credential", async () => {
+    const waits = fastTimers();
     routeFetch((url) => {
       if (url.includes("/copilot_internal/v2/token")) {
         return new Response(JSON.stringify({ token: COPILOT_TOKEN, refresh_in: 1500 }), { status: 200 });
@@ -309,9 +310,11 @@ describe("github-copilot security repairs (absorb hardening)", () => {
     });
 
     await expect(refreshGithubCopilotToken(GH_ACCESS)).rejects.toThrow(/identity/i);
+    expect(waits).toEqual([500]);
   });
 
   test("a transient identity failure recovers on the single retry", async () => {
+    const waits = fastTimers();
     let userCalls = 0;
     routeFetch((url) => {
       if (url.includes("/copilot_internal/v2/token")) {
@@ -328,6 +331,7 @@ describe("github-copilot security repairs (absorb hardening)", () => {
     const cred = await refreshGithubCopilotToken(GH_ACCESS);
     expect(cred.accountId).toBe("99");
     expect(userCalls).toBe(2);
+    expect(waits).toEqual([500]);
   });
 });
 
