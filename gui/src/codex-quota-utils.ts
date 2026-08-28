@@ -8,8 +8,6 @@ export interface AccountQuota {
   fiveHourResetAt?: number;
   shortResetAt?: number;
   monthlyResetAt?: number;
-  shortPercent?: number;
-  shortResetAt?: number;
   shortWindowSeconds?: number;
   customWindows?: { label: string; percent: number; resetAt?: number }[];
   creditsUsd?: {
