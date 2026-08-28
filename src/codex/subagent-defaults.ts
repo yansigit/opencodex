@@ -29,6 +29,7 @@ export type NativeDefaultState = "active" | "disabled" | "pending" | "blocked";
 export interface NativeDefaultStateDeps {
   configPath?: string;
   readConfig?: () => string;
+  processIo?: import("./app-server-processes").CodexAppServerProcessIo;
   collectCatalogState?: () => {
     state: "fresh" | "stale" | "not_running" | "unknown";
   } | Promise<{ state: "fresh" | "stale" | "not_running" | "unknown" }>;
@@ -466,7 +467,7 @@ export async function resolveNativeDefaultState(
   try {
     catalogState = await (deps.collectCatalogState ?? (async () => {
       const { collectCodexAppServerCatalogStateForRequest } = await import("./app-server-processes");
-      return collectCodexAppServerCatalogStateForRequest();
+      return collectCodexAppServerCatalogStateForRequest({ ...deps.processIo, freshnessTarget: "config" });
     }))();
   } catch {
     return "pending";
