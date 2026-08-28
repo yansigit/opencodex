@@ -140,7 +140,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     setQuotaRefresh(previous => ({ epoch: previous.epoch + 1, force }));
   }, []);
   const { fetchConfig, fetchOauth, fetchProviderQuotas } = useProvidersFetch({
-    apiBase, t, setConfig, setOauthProviders, setOauthStatus, notify, setConfigLoadFailed,
+    apiBase, setConfig, setOauthProviders, setOauthStatus, setConfigLoadFailed,
     invalidateProviderQuotas,
     configCacheKey,
   });

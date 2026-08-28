@@ -66,3 +66,47 @@ Required validation:
 ## Concerns
 
 None. The Vite build retains its pre-existing chunk-size advisory, and the full suite retains only known unrelated `act(...)` warnings.
+
+## Fix round 1
+
+### Changes
+
+- Config-load failures are now owned exclusively by the inline Providers Notice; the persistent toast path is not used for this failure, so a successful retry removes the failure state without stale duplicate copy.
+- `useProvidersFetch` now uses a request epoch. Only the newest config request may commit config, cache, or failure state; an older failure cannot overwrite a newer success.
+- Expanded `gui/tests/dashboard-providers-resilience.test.tsx` with rendered Dashboard success → failed poll → reconnecting Notice → recovery assertions, cached Providers content/recovery assertions, repeated retry behavior, and Add Provider Retry refetch/clear assertions.
+
+### Exact TDD evidence
+
+RED, with the review defects restored before the fix:
+
+```text
+bun test tests/dashboard-providers-resilience.test.tsx
+4 pass, 3 fail, 16 expect() calls
+Providers exposes an inline retry: expected one “Failed to load config”, received two
+Providers keeps cached content: expected one “Failed to load config”, received two
+Providers ignores an older config failure: expected false, received true
+```
+
+GREEN:
+
+```text
+bun test tests/dashboard-providers-resilience.test.tsx
+7 pass, 0 fail, 19 expect() calls
+```
+
+### Fix-round validation
+
+- `bun run lint` — passed.
+- `bun run lint:i18n` — passed.
+- `bun run build` — passed (`tsc -b && vite build`; only the existing large-chunk advisory).
+- `bun test tests` — passed: 1,147 tests, 0 failures, 10,190 assertions. Existing unrelated React `act(...)` warnings remain; no new warnings came from the focused tests.
+- `git diff --check` — passed.
+
+### Fix-round self-review
+
+- Config request authority is scoped to the hook instance and checked on both success and failure paths.
+- Config cache writes happen only after the newest response passes validation.
+- Rendered tests exercise visible stale Dashboard content, reconnecting copy, recovery clearing, cached Providers content, repeated retries, and Add Provider recovery.
+- No new user-facing copy or dependencies were introduced in this fix round.
+
+Fix-round concerns: none.
