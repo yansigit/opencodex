@@ -911,15 +911,14 @@ describe("warnIfStaleCodexAppServersAfterStartupWrite (#1046)", () => {
   /*
    * The masking risk this layer has to defend against, stated honestly.
    *
-   * `collectCodexAppServerCatalogState` memoizes for 5s, but ONLY when every io
-   * field is defaulted (`fullyDefault`). That has two consequences:
+   * `collectCodexAppServerCatalogState` memoizes process evidence for 5s and keeps
+   * target-specific status objects separately. That has two consequences:
    *
    * - Production startup runs on the default path, so a `fresh` reading taken
    *   before the catalog write CAN be replayed after it, and the helper drops the
    *   memo first for exactly that reason.
-   * - Any test that injects io bypasses the cache, so it cannot reproduce the
-   *   masking and would pass with or without the reset. Writing one anyway would
-   *   be a test that looks like proof and is not.
+   * - Injected process seams participate in the evidence cache when their identity
+   *   is stable, while the freshness mtime is still read for each target.
    *
    * So this asserts the mechanism the fix depends on — that a defaulted read is
    * memoized and an explicit invalidation clears it — rather than pretending to
