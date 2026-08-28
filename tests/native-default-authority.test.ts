@@ -1,6 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { MANAGED_SUBAGENT_DEFAULT_MARKER, resolveNativeDefaultState } from "../src/codex/subagent-defaults";
 import { multiAgentGuidanceText } from "../src/server/responses/collaboration";
+import { handleResponses } from "../src/server/responses/core";
+import { CODEX_CONFIG_PATH } from "../src/codex/paths";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
 import { ManagementRequest as Request } from "./helpers/management-auth";
@@ -11,6 +14,9 @@ const config = (overrides: Partial<OcxConfig> = {}): OcxConfig => ({
   defaultProvider: "openai",
   ...overrides,
 }) as OcxConfig;
+
+const originalFetch = globalThis.fetch;
+afterEach(() => { globalThis.fetch = originalFetch; });
 
 const managed = (model = "gpt-5.6-sol", effort = "high"): string =>
   `[agents]\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_model = "${model}"\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_reasoning_effort = "${effort}"\n`;
@@ -91,5 +97,71 @@ describe("native default authority", () => {
     });
     expect(text).toContain('Preferred sub-agent: model "gpt-5.6-sol"');
     expect(text).toContain("nativeDefaultState: active");
+  });
+
+  test("Responses core passes native sync state into production V2 guidance", async () => {
+    const previousCatalogState = process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE;
+    process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE = "fresh";
+    let upstreamBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      upstreamBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      return new Response(JSON.stringify({
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const current = config({
+      defaultProvider: "gw",
+      multiAgentMode: "v2",
+      multiAgentGuidanceEnabled: true,
+      injectionModel: "gw/model",
+      syncCodexSubagentDefaults: true,
+      injectionPrompt: "authority={{nativeDefaultState}}",
+      providers: {
+        gw: { adapter: "openai-chat", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test-key" },
+      },
+    });
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "gw/model",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "delegate" }] }],
+        tools: [
+          { type: "function", name: "spawn_agent", parameters: { type: "object" } },
+          { type: "function", name: "send_message", parameters: { type: "object" } },
+        ],
+      }),
+    }), current, { model: "", provider: "" });
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(upstreamBody)).toContain("authority=pending");
+    expect(JSON.stringify(upstreamBody)).not.toContain("authority=disabled");
+    if (previousCatalogState === undefined) delete process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE;
+    else process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE = previousCatalogState;
+  });
+
+  test("native authority uses config.toml freshness even when catalog freshness would pass", async () => {
+    const existed = existsSync(CODEX_CONFIG_PATH);
+    const before = existed ? readFileSync(CODEX_CONFIG_PATH) : undefined;
+    try {
+      writeFileSync(CODEX_CONFIG_PATH, managed(), "utf8");
+      // The app-server started before this config-only native-default write.
+      utimesSync(CODEX_CONFIG_PATH, 2, 2);
+      const state = await resolveNativeDefaultState(config({
+        injectionModel: "gpt-5.6-sol",
+        injectionEffort: "high",
+        syncCodexSubagentDefaults: true,
+      }), {
+        configPath: CODEX_CONFIG_PATH,
+        processIo: {
+          listSnapshots: () => [{ pid: 42, commandLine: "/usr/local/bin/codex app-server" }],
+          readStartMs: () => 1,
+          now: () => 3_000,
+        },
+      });
+      expect(state).toBe("pending");
+    } finally {
+      if (before === undefined) unlinkSync(CODEX_CONFIG_PATH);
+      else writeFileSync(CODEX_CONFIG_PATH, before);
+    }
   });
 });
