@@ -156,7 +156,7 @@ test("ProviderOverview auto-tests once while checking", async () => {
     return originalFetch(input, init);
   }) as typeof fetch;
 
-  const { container, root } = await renderOverview(checkingItem());
+  const { root } = await renderOverview(checkingItem());
   await flushUi();
   expect(calls.filter(url => url.includes("/api/providers/test")).length).toBe(1);
   expect(calls.some(url => url.includes("/aistudio/bridge"))).toBe(false);
@@ -222,6 +222,26 @@ test("ProviderOverview native login success refreshes config and shows connected
   expect(/reauthenticated successfully/i.test(text)).toBe(true);
   expect(container.querySelector("button.btn-primary")).toBeNull();
   expect(refreshCalls.length).toBe(1);
+  await act(async () => { root.unmount(); });
+});
+
+test("ProviderOverview native login shows the server error for a non-2xx response", async () => {
+  const serverError = "Native AI Studio login failed (exit code 1)";
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/api/aistudio/login/native")) {
+      return new Response(JSON.stringify({ ok: false, error: serverError }), { status: 500 });
+    }
+    return originalFetch(input);
+  }) as typeof fetch;
+
+  const { container, root } = await renderOverview(needsReauthItem());
+  const button = container.querySelector("button.btn-primary") as HTMLButtonElement;
+  expect(button).toBeTruthy();
+  await act(async () => { button.click(); });
+  await flushUi();
+  expect(container.textContent).toContain(serverError);
+  expect(container.textContent).not.toContain("Reauthenticated successfully");
   await act(async () => { root.unmount(); });
 });
 

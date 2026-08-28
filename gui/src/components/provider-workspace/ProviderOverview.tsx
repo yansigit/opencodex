@@ -174,8 +174,13 @@ export default function ProviderOverview({
         signal: controller.signal,
       });
       if (controller.signal.aborted) return;
+      if (!res.ok) {
+        const data = (await res.json().catch(() => null)) as { error?: string } | null;
+        setAiStudioReauthMsg(data?.error || t("pws.aiStudio.loginFailed"));
+        return;
+      }
       const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
-      if (res.ok && data?.ok) {
+      if (data?.ok) {
         setLocalAiStudioAuthState("connected");
         setAiStudioReauthMsg(t("pws.aiStudio.reauthenticated"));
         await onRefreshConfig?.();
