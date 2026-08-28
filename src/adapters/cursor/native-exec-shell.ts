@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { resolve } from "node:path";
 import { create } from "@bufbuild/protobuf";
 import {
@@ -19,6 +19,7 @@ import {
   type ExecServerMessage,
 } from "./gen/agent_pb";
 import { errorText, execBytes, execStreamCloseBytes } from "./native-exec-common";
+import { resolveTrustedWindowsTaskkillExe } from "../../lib/windows-elevation";
 export { nativeShellDisabledMessage, type CursorNativeExecPolicyContext } from "./native-exec-policy";
 import { nativeShellDisabledMessage, type CursorNativeExecPolicyContext } from "./native-exec-policy";
 import {
@@ -44,10 +45,13 @@ export interface BackgroundShellTerminationReport {
 
 export interface BackgroundShellRuntime {
   spawn: typeof spawn;
+  platform: NodeJS.Platform;
   now(): number;
   setTimer(callback: () => void, delayMs: number): BackgroundShellTimer;
   clearTimer(timer: BackgroundShellTimer): void;
   kill(child: ChildProcessWithoutNullStreams, signal?: NodeJS.Signals): boolean;
+  killProcessGroup(pid: number, signal?: NodeJS.Signals): boolean;
+  killTree(child: ChildProcessWithoutNullStreams): boolean;
 }
 
 interface BackgroundShellEntry {
@@ -67,10 +71,22 @@ interface BackgroundShellEntry {
 
 const defaultBackgroundShellRuntime: BackgroundShellRuntime = {
   spawn,
+  platform: process.platform,
   now: () => Date.now(),
   setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimer: timer => clearTimeout(timer),
   kill: (child, signal) => child.kill(signal),
+  killProcessGroup: (pid, signal) => {
+    process.kill(-pid, signal);
+    return true;
+  },
+  killTree: child => {
+    execFileSync(resolveTrustedWindowsTaskkillExe(), ["/PID", String(child.pid), "/T", "/F"], {
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    return true;
+  },
 };
 
 let backgroundShellRuntime = defaultBackgroundShellRuntime;
@@ -351,6 +367,23 @@ function tryKillBackgroundShell(entry: BackgroundShellEntry, signal?: NodeJS.Sig
   }
 }
 
+function tryKillBackgroundShellProcessGroup(entry: BackgroundShellEntry, signal?: NodeJS.Signals): boolean {
+  if (typeof entry.child.pid !== "number") return false;
+  try {
+    return backgroundShellRuntime.killProcessGroup(entry.child.pid, signal);
+  } catch {
+    return false;
+  }
+}
+
+function tryKillBackgroundShellTree(entry: BackgroundShellEntry): boolean {
+  try {
+    return backgroundShellRuntime.killTree(entry.child);
+  } catch {
+    return false;
+  }
+}
+
 async function terminateBackgroundShell(
   entry: BackgroundShellEntry,
   reason: BackgroundShellTerminationReason,
@@ -368,11 +401,21 @@ async function terminateBackgroundShell(
     try { entry.child.stderr.resume(); } catch { /* keep draining when supported */ }
 
     let attemptKillFailures = 0;
-    if (!tryKillBackgroundShell(entry)) attemptKillFailures += 1;
+    let treeTerminationStarted = false;
+    if (backgroundShellRuntime.platform === "win32") {
+      treeTerminationStarted = tryKillBackgroundShellTree(entry);
+      if (!treeTerminationStarted && !tryKillBackgroundShell(entry)) attemptKillFailures += 1;
+    } else if (!tryKillBackgroundShellProcessGroup(entry, "SIGTERM")) {
+      if (!tryKillBackgroundShell(entry)) attemptKillFailures += 1;
+    }
     let closed = await waitForBackgroundShellClose(entry);
     if (!closed && backgroundShells.get(entry.shellId) !== entry) closed = true;
-    if (!closed) {
-      if (!tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
+    if (!closed && !treeTerminationStarted) {
+      if (backgroundShellRuntime.platform === "win32") {
+        if (!tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
+      } else if (!tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) {
+        if (!tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
+      }
       closed = await waitForBackgroundShellClose(entry);
       if (!closed && backgroundShells.get(entry.shellId) !== entry) closed = true;
     }
@@ -459,7 +502,11 @@ export function backgroundShellSpawnExec(execMsg: ExecServerMessage, sessionId: 
   if (!admissionLease) return backgroundShellSpawnError(execMsg, args.command, cwd, "background shell limit reached");
   let child: ChildProcessWithoutNullStreams;
   try {
-    child = backgroundShellRuntime.spawn(args.command, { cwd, shell: true });
+    child = backgroundShellRuntime.spawn(args.command, {
+      cwd,
+      shell: true,
+      ...(backgroundShellRuntime.platform === "win32" ? {} : { detached: true }),
+    });
   } catch (err) {
     admissionLease.release();
     return backgroundShellSpawnError(execMsg, args.command, cwd, errorText(err));

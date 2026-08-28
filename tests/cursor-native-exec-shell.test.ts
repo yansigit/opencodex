@@ -117,6 +117,42 @@ function installFakeShellRuntime(options: {
   return { clock, children, signals, spawnCalls: () => spawnCalls };
 }
 
+test("background shells are detached and terminate their POSIX process group", async () => {
+  const fake = installFakeShellRuntime();
+  const spawnOptions: unknown[] = [];
+  setBackgroundShellRuntimeForTests({
+    platform: "linux",
+    spawn: ((...args: unknown[]) => {
+      spawnOptions.push(args[1]);
+      return fake.children.push(new FakeChild()), fake.children.at(-1)! as unknown as ChildProcessWithoutNullStreams;
+    }) as typeof import("node:child_process").spawn,
+    killProcessGroup: (pid: number, signal?: NodeJS.Signals) => {
+      fake.signals.push(signal);
+      if (signal === "SIGKILL") queueMicrotask(() => fake.children[0]!.emit("close", null, signal));
+      return true;
+    },
+  } as never);
+  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
+  const cleanup = terminateBackgroundShellsForSession("session-a");
+  await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
+  await cleanup;
+  expect(spawnOptions).toEqual([{ cwd: process.cwd(), shell: true, detached: true }]);
+  expect(fake.signals).toEqual(["SIGTERM", "SIGKILL"]);
+});
+
+test("Windows termination uses one whole-tree operation instead of the shell wrapper", async () => {
+  const fake = installFakeShellRuntime();
+  let treeKills = 0;
+  setBackgroundShellRuntimeForTests({
+    platform: "win32",
+    killTree: child => { treeKills += 1; queueMicrotask(() => (child as unknown as FakeChild).emit("close", null, "SIGKILL")); return true; },
+  } as never);
+  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
+  await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ attempted: 1, closed: 1 });
+  expect(treeKills).toBe(1);
+  expect(fake.signals).toEqual([]);
+});
+
 function spawnSuccess(bytes: Uint8Array): number {
   const message = decodedExec(bytes);
   expect(message.case).toBe("backgroundShellSpawnResult");
