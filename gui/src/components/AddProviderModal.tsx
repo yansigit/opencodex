@@ -2,6 +2,7 @@ import { usageSummary30dResourceKey } from "../usage-summary-resource";
 import { useEffect, useMemo, useReducer, useRef } from "react";
 import { IconX } from "../icons";
 import { useT } from "../i18n/shared";
+import { Notice } from "../ui";
 import { useKeyedClientResource } from "../client-resource";
 import {
   buildProviderPostBody,
@@ -97,6 +98,7 @@ export default function AddProviderModal({
   const oauthSupported = oauthPoll.data ?? [];
   const presets = presetsPoll.data ?? fallbackPresets;
   const presetsLoading = presetsPoll.loading;
+  const presetsError = presetsPoll.error !== undefined;
   const usageRank = Object.fromEntries((usagePoll.data?.providers ?? []).map(row => [row.provider, row.requests]));
   const {
     preset, form, saving, error, oauthBusy, oauthMsg, oauthMsgTone, oauthUrl, oauthUrlProvider,
@@ -247,10 +249,17 @@ export default function AddProviderModal({
         </div>
 
         {!preset ? (
+          <>
+          {presetsError && (
+            <Notice tone="err">
+              {t("modal.catalogLoadFailed")} <button type="button" className="btn btn-ghost btn-sm" onClick={() => presetsPoll.refresh()}>{t("common.retry")}</button>
+            </Notice>
+          )}
           <ProviderCatalog
             presets={presets}
             usageRank={usageRank}
             presetsLoading={presetsLoading}
+            presetsError={presetsError}
             initialTier={initialTier}
             onSelectPreset={p => choosePreset(p)}
             onSelectCustom={() => choosePreset(fallbackPresets[0]!)}
@@ -271,6 +280,7 @@ export default function AddProviderModal({
               onSubmit: providerId => { void submitManualCode(providerId); },
             }}
           />
+          </>
         ) : form && (
           preset.auth === "oauth" && form.authMode === "oauth" ? (
             <AddProviderOAuthPane

@@ -12,6 +12,7 @@ export function useProvidersFetch({
   setOauthStatus,
   notify,
   invalidateProviderQuotas,
+  setConfigLoadFailed,
   configCacheKey,
 }: {
   apiBase: string;
@@ -22,6 +23,8 @@ export function useProvidersFetch({
   notify: (msg: string, ok: boolean) => void;
   /** Bump the shell's quota revision; `force` adds `?refresh=1` to its next read. */
   invalidateProviderQuotas: (force?: boolean) => void;
+  /** Mirrors config fetch health so the page can offer an inline retry without replacing cached data. */
+  setConfigLoadFailed?: (failed: boolean) => void;
   /** Session seed key for instant Providers shell paint (no secrets — hasApiKey flags only). */
   configCacheKey?: string;
 }) {
@@ -29,12 +32,17 @@ export function useProvidersFetch({
     try {
       const res = await fetch(`${apiBase}/api/config`);
       const data = await readJsonOrThrow<ProvidersConfig>(res);
+      if (!data || typeof data !== "object" || !data.providers || typeof data.providers !== "object") {
+        throw new Error("empty config response");
+      }
       setConfig(data ?? null);
       if (configCacheKey && data) writeSessionListCache(configCacheKey, data);
+      setConfigLoadFailed?.(false);
     } catch {
+      setConfigLoadFailed?.(true);
       notify(t("prov.loadConfigFail"), false);
     }
-  }, [apiBase, configCacheKey, notify, setConfig, t]);
+  }, [apiBase, configCacheKey, notify, setConfig, setConfigLoadFailed, t]);
 
   const fetchOauth = useCallback(async () => {
     try {

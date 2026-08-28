@@ -34,6 +34,7 @@ export default function ProviderCatalog({
   presets,
   usageRank = EMPTY_USAGE_RANK,
   presetsLoading = false,
+  presetsError = false,
   initialTier = "free",
   onSelectPreset,
   onSelectCustom,
@@ -50,6 +51,7 @@ export default function ProviderCatalog({
   presets: CatalogPreset[];
   usageRank?: Record<string, number>;
   presetsLoading?: boolean;
+  presetsError?: boolean;
   initialTier?: CatalogTier;
   onSelectPreset: (preset: CatalogPreset) => void;
   onSelectCustom: () => void;
@@ -156,7 +158,7 @@ export default function ProviderCatalog({
             <div className="provider-catalog-badges">{badges(p)}</div>
           </button>
         ))}
-        {tier !== "accounts" && !presetsLoading && rows.length === 0 && (
+        {tier !== "accounts" && !presetsLoading && !presetsError && rows.length === 0 && (
           <div className="muted text-control provider-catalog-empty">{t("modal.noMatch")}</div>
         )}
 
@@ -249,7 +251,7 @@ export default function ProviderCatalog({
             </div>
           );
         })}
-        {tier === "accounts" && accountRows.length === 0 && !presetsLoading && (
+        {tier === "accounts" && accountRows.length === 0 && !presetsLoading && !presetsError && (
           <div className="muted text-control provider-catalog-empty">{t("modal.noMatch")}</div>
         )}
       </div>
