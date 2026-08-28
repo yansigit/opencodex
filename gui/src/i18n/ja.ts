@@ -2270,4 +2270,9 @@ export const ja: Record<TKey, string> = {
   "dash.visionTimeout": "タイムアウト",
   "dash.visionTimeoutInvalid": "{min} から {max} ミリ秒の整数を入力してください。",
   "dash.visionAdvancedPopover": "詳細なビジョン設定",
+  "sub.routedDelegationBridge": "Routed V2 delegation bridge",
+  "sub.routedDelegationBridgeHint": "Experimental. Codex may still show the original model; routed prompts, repository context, tool results, availability, context, behavior, billing, and privacy follow the selected provider. The model chooses tools.",
+  "sub.routedDelegationBridgeInactive": "Armed; activates only for eligible native V2 roots.",
+  "sub.routedDelegationBridgeSaveFail": "Failed to save routed V2 delegation bridge",
+  "sub.routedDelegationBridgeSaved": "Routed V2 delegation bridge saved. Disabling applies immediately.",
 };

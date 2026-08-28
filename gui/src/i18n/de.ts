@@ -2249,4 +2249,9 @@ export const de: Record<TKey, string> = {
   "dash.visionTimeout": "Timeout",
   "dash.visionTimeoutInvalid": "Geben Sie eine ganze Zahl von {min} bis {max} Millisekunden ein.",
   "dash.visionAdvancedPopover": "Erweiterte Vision-Einstellungen",
+  "sub.routedDelegationBridge": "Routed V2 delegation bridge",
+  "sub.routedDelegationBridgeHint": "Experimental. Codex may still show the original model; routed prompts, repository context, tool results, availability, context, behavior, billing, and privacy follow the selected provider. The model chooses tools.",
+  "sub.routedDelegationBridgeInactive": "Armed; activates only for eligible native V2 roots.",
+  "sub.routedDelegationBridgeSaveFail": "Failed to save routed V2 delegation bridge",
+  "sub.routedDelegationBridgeSaved": "Routed V2 delegation bridge saved. Disabling applies immediately.",
 };

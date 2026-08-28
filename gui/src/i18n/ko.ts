@@ -2271,4 +2271,9 @@ export const ko: Record<TKey, string> = {
   "dash.visionTimeout": "제한 시간",
   "dash.visionTimeoutInvalid": "{min}에서 {max} 밀리초 사이의 정수를 입력하세요.",
   "dash.visionAdvancedPopover": "고급 비전 설정",
+  "sub.routedDelegationBridge": "Routed V2 delegation bridge",
+  "sub.routedDelegationBridgeHint": "Experimental. Codex may still show the original model; routed prompts, repository context, tool results, availability, context, behavior, billing, and privacy follow the selected provider. The model chooses tools.",
+  "sub.routedDelegationBridgeInactive": "Armed; activates only for eligible native V2 roots.",
+  "sub.routedDelegationBridgeSaveFail": "Failed to save routed V2 delegation bridge",
+  "sub.routedDelegationBridgeSaved": "Routed V2 delegation bridge saved. Disabling applies immediately.",
 };

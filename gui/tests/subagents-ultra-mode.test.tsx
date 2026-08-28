@@ -18,6 +18,8 @@ let injectionAvailable: Array<{ provider: string; model: string; namespaced: str
 let nativeOverrideServer = { enabled: false, model: null as string | null, active: false };
 let nativeOverridePutError: string | null = null;
 let nativeOverrideAfterPut: Partial<typeof nativeOverrideServer> | null = null;
+let routedBridgeServer = false;
+let routedBridgePutError: string | null = null;
 
 function response(body: unknown, ok = true, status = 200): Response {
   return {
@@ -47,6 +49,8 @@ beforeEach(() => {
   nativeOverrideServer = { enabled: false, model: null, active: false };
   nativeOverridePutError = null;
   nativeOverrideAfterPut = null;
+  routedBridgeServer = false;
+  routedBridgePutError = null;
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (url: string, init?: RequestInit) => {
@@ -54,7 +58,12 @@ beforeEach(() => {
       const path = new URL(String(url), "http://localhost/").pathname;
       if (path === "/api/v2") {
         if (init?.method === "PUT") {
-          const body = JSON.parse(String(init.body ?? "{}")) as { v2NativeParentOverride?: { enabled?: boolean; model?: string | null } };
+          const body = JSON.parse(String(init.body ?? "{}")) as { v2NativeParentOverride?: { enabled?: boolean; model?: string | null }; v2RoutedDelegationBridge?: boolean };
+          if (typeof body.v2RoutedDelegationBridge === "boolean") {
+            if (routedBridgePutError) return response({ error: routedBridgePutError }, false, 400);
+            routedBridgeServer = body.v2RoutedDelegationBridge;
+            return response({ ok: true, v2RoutedDelegationBridge: routedBridgeServer });
+          }
           if (body.v2NativeParentOverride) {
             if (nativeOverridePutError) return response({ error: nativeOverridePutError }, false, 400);
             nativeOverrideServer = { ...nativeOverrideServer, ...body.v2NativeParentOverride, ...nativeOverrideAfterPut };
@@ -66,8 +75,8 @@ beforeEach(() => {
         }
         const next = v2Responses[Math.min(v2Call++, Math.max(v2Responses.length - 1, 0))];
         if (!next) return response({ enabled: false, v2NativeParentOverride: nativeOverrideServer });
-        const body = next.body && typeof next.body === "object" && !Array.isArray(next.body) && !Object.hasOwn(next.body, "v2NativeParentOverride")
-          ? { ...next.body, v2NativeParentOverride: nativeOverrideServer }
+        const body = next.body && typeof next.body === "object" && !Array.isArray(next.body) && !Object.hasOwn(next.body, "v2NativeParentOverride") && !Object.hasOwn(next.body, "v2RoutedDelegationBridge")
+          ? { ...next.body, v2NativeParentOverride: nativeOverrideServer, v2RoutedDelegationBridge: routedBridgeServer }
           : next.body;
         return response(body, next.ok, next.status ?? (next.ok ? 200 : 500));
       }
@@ -123,6 +132,63 @@ function nativeParentSelect(): HTMLButtonElement {
   if (!button) throw new Error("Native parent model select not found");
   return button;
 }
+
+function routedBridgeSwitch(): HTMLButtonElement {
+  const button = Array.from(container.querySelectorAll("button"))
+    .find(candidate => candidate.getAttribute("aria-label") === "Routed V2 delegation bridge");
+  if (!button) throw new Error("Routed delegation bridge switch not found");
+  return button as HTMLButtonElement;
+}
+
+function routedBridgePuts(): unknown[] {
+  return requests
+    .filter(row => row.url.endsWith("/api/v2") && row.init?.method === "PUT")
+    .map(row => JSON.parse(String(row.init?.body ?? "{}")))
+    .filter(body => Object.hasOwn(body, "v2RoutedDelegationBridge"));
+}
+
+test("loads the routed delegation bridge off by default with an accessible switch", async () => {
+  v2Responses = [{ ok: true, body: { enabled: false, multiAgentMode: "default" } }];
+  await mount();
+
+  expect(routedBridgeSwitch().getAttribute("aria-pressed")).toBe("false");
+  expect(routedBridgeSwitch().disabled).toBe(false);
+});
+
+test("saves only the routed delegation bridge scalar and refreshes server state", async () => {
+  v2Responses = [
+    { ok: true, body: { enabled: false, multiAgentMode: "default" } },
+    { ok: true, body: { enabled: false, multiAgentMode: "default", v2RoutedDelegationBridge: false } },
+  ];
+  await mount();
+
+  await act(async () => { routedBridgeSwitch().click(); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+  expect(routedBridgePuts()).toEqual([{ v2RoutedDelegationBridge: true }]);
+  expect(routedBridgeSwitch().getAttribute("aria-pressed")).toBe("false");
+});
+
+test("retains the loaded routed delegation bridge state after a failed save", async () => {
+  routedBridgeServer = true;
+  routedBridgePutError = "bridge update rejected";
+  v2Responses = [{ ok: true, body: { enabled: true, multiAgentMode: "v2" } }];
+  await mount();
+
+  await act(async () => { routedBridgeSwitch().click(); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+  expect(routedBridgeSwitch().getAttribute("aria-pressed")).toBe("true");
+  expect(container.textContent).toContain("bridge update rejected");
+});
+
+test("shows armed-but-inactive guidance outside explicit V2", async () => {
+  routedBridgeServer = true;
+  v2Responses = [{ ok: true, body: { enabled: false, multiAgentMode: "default" } }];
+  await mount();
+
+  expect(container.textContent).toContain("Armed; activates only for eligible native V2 roots");
+});
 
 function nativeParentPuts(): Array<{ enabled: boolean; model: string | null }> {
   return requests
