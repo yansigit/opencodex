@@ -367,6 +367,19 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
     return assertSession(await request(`/sessions/${encodeURIComponent(id)}`));
   }
 
+  async function sendMessage(id, prompt) {
+    if (!/^[^/]+$/.test(id)) throw new Error("invalid Jules session resource id");
+    if (!prompt || typeof prompt !== "string") throw new Error("sendMessage requires a prompt string");
+    return request(`/sessions/${encodeURIComponent(id)}:sendMessage`, { method: "POST", body: { prompt }, retryReads: false });
+  }
+
+  async function listSessionActivities(id) {
+    if (!/^[^/]+$/.test(id)) throw new Error("invalid Jules session resource id");
+    const result = await request(`/sessions/${encodeURIComponent(id)}/activities`);
+    if (!result || !Array.isArray(result.activities)) return [];
+    return result.activities;
+  }
+
   async function createSessionIdempotently(payload) {
     try {
       return await createSession(payload);
@@ -401,6 +414,8 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
     createSession,
     createSessionIdempotently,
     getSession,
+    listSessionActivities,
+    sendMessage,
     listSessions,
     listSources,
   };

@@ -467,6 +467,26 @@ jobs:
                 continue;
               }
               if (disposition === "needs-human") {
+                // Soft-resolve stalled sync-hotspot feedback loops: Jules often lands on
+                // AWAITING_USER_FEEDBACK with a clarifying question on the already-merged
+                // sync branch. For sync-hotspot only, auto-nudge once via sendMessage;
+                // otherwise require a human.
+                const isAwaitingFeedback = String(sessionState || "").toUpperCase() === "AWAITING_USER_FEEDBACK";
+                const alreadyNudged = String(state.reason || "").startsWith("auto-nudged:");
+                if (state.taskKind === "sync-hotspot" && isAwaitingFeedback && !alreadyNudged) {
+                  try {
+                    await client.sendMessage(state.sessionId, `Continue from the existing hotspot sync branch already checked out. Do not re-merge vendor/main (it is already merged with upstream-owned files resolved). Resolve only the shared-hotspot files listed in Resolutions per docs/fork/OWNED.md and push to the same branch. If you asked a yes/no question (e.g. notifications), answer it yourself and continue.`);
+                    state.reason = `auto-nudged:${sessionState}:${new Date().toISOString()}`;
+                    state.status = "running";
+                    await setLifecycle(issue.number, "agent:running");
+                    await saveRecord(issue.number, comment, state);
+                    core.info(`Auto-nudged Jules session ${state.sessionId} from AWAITING_USER_FEEDBACK.`);
+                    continue;
+                  } catch (error) {
+                    core.warning(`Auto-nudge failed for ${state.sessionId}: ${error.message}`);
+                    // Fall through to human escalation
+                  }
+                }
                 state.status = "needs-human";
                 state.reason = `Jules session requires human attention: ${sessionState || "UNKNOWN"}`;
                 await saveRecord(issue.number, comment, state);
