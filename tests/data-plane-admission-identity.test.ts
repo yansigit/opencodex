@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { logsFromApiBody } from "./helpers/logs-api";
 import {
   hasValidApiAuth,
   isDataPlaneAdmissionSecret,
@@ -177,6 +178,55 @@ describe("loopback binds", () => {
     expect(resolveResponsesApiAuth(request(), config)).toEqual({ kind: "loopback", source: "loopback" });
     expect(hasValidApiAuth(request(), config)).toBe(true);
     expect(requireResponsesApiAuth(request(), config)).toBeNull();
+  });
+});
+
+describe("Responses HTTP ingress", () => {
+  test("finalizes an unknown origin for malformed body before normal parsing/routing", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-agent-kind-http-"));
+    const previousHome = process.env.OPENCODEX_HOME;
+    const previousAdmin = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    const managementToken = ["management", "test", "value", "agent", "kind", "http"].join("-");
+    process.env.OPENCODEX_HOME = home;
+    process.env.OPENCODEX_ADMIN_AUTH_TOKEN = managementToken;
+    saveConfig(remoteConfig());
+    const server = startServer(0);
+    try {
+      const response = await fetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opencodex-api-key": "ocx_data_secondsecret",
+          "x-codex-turn-metadata": "{bad",
+        },
+        body: "{bad",
+      });
+      expect(response.status).toBe(400);
+      const spawnedResponse = await fetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opencodex-api-key": "ocx_data_secondsecret",
+          "x-openai-subagent": "collab_spawn",
+        },
+        body: "{bad",
+      });
+      expect(spawnedResponse.status).toBe(400);
+      const body = await fetch(new URL("/api/logs?tail=2", server.url), {
+        headers: { authorization: `Bearer ${managementToken}` },
+      }).then(result => result.json());
+      const logs = logsFromApiBody(body);
+      expect(logs[0]).toMatchObject({ status: 400, inboundProtocol: "responses" });
+      expect(logs[0]).not.toHaveProperty("agentKind");
+      expect(logs[1]).toMatchObject({ status: 400, inboundProtocol: "responses", agentKind: "subagent" });
+    } finally {
+      await server.stop(true);
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      if (previousAdmin === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+      else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdmin;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });
 
