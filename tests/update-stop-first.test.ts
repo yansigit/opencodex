@@ -20,23 +20,9 @@ function freePort(): Promise<number> {
   return promise;
 }
 
-/**
- * Budget for the whole recovery case, and the arithmetic that keeps it honest.
- *
- * A cold detached proxy takes ~2s locally, but this test runs inside a CI batch of twelve files
- * on a shared runner where the same boot has blown a 15s budget. Raising the readiness wait to
- * 45s fixed that and introduced a worse failure: the case ALSO spawns `node launcher update`
- * (up to 30s) before the wait even starts, and `node launcher stop` (up to 30s) after it. With
- * a 60s Bun timeout, a 45s wait leaves the readiness probe unable to finish inside the case at
- * all — observed failing at 46-47s on macOS, which reads as a product defect and is not one.
- *
- * So the budget is derived from the timeout rather than guessed against it: the wait gets what
- * remains after the spawns, and the Bun timeout is stated as the sum of its parts. The deadline
- * exists to stop a HUNG proxy, not to assert a boot deadline the suite never intended to
- * enforce — a slow-but-live proxy must still pass.
- */
+/** The fixture CLI is intentionally tiny; this test covers launcher recovery, not proxy boot. */
 const UPDATE_SPAWN_TIMEOUT_MS = 30_000;
-const PROXY_READY_TIMEOUT_MS = 45_000;
+const PROXY_READY_TIMEOUT_MS = 10_000;
 /** Spawn + readiness + teardown spawn, plus headroom for fixture IO on a loaded runner. */
 const RECOVERY_CASE_TIMEOUT_MS = UPDATE_SPAWN_TIMEOUT_MS + PROXY_READY_TIMEOUT_MS + UPDATE_SPAWN_TIMEOUT_MS + 15_000;
 
@@ -191,7 +177,53 @@ describe("update stops the running proxy before replacing files", () => {
         mkdirSync(cache, { recursive: true });
         copyFileSync(join(repoRoot, "bin", "ocx.mjs"), launcher);
         chmodSync(launcher, 0o755);
-        symlinkSync(join(repoRoot, "src"), join(packageRoot, "src"), "dir");
+        for (const relative of [
+          "src/lib/bun-binary-validator.mjs",
+          "src/update/npm-invocation.mjs",
+          "src/update/npm-cache-preflight.mjs",
+          "src/update/tray-update-plan.mjs",
+          "src/update/transactional-install.mjs",
+        ]) {
+          const fixturePath = join(packageRoot, relative);
+          mkdirSync(dirname(fixturePath), { recursive: true });
+          symlinkSync(join(repoRoot, relative), fixturePath);
+        }
+        mkdirSync(join(packageRoot, "src", "cli"), { recursive: true });
+        writeFileSync(join(packageRoot, "src", "cli", "index.ts"), `#!/usr/bin/env bun
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const args = process.argv.slice(2).filter(arg => !arg.startsWith("--ocx-internal-launch-proof="));
+const home = process.env.OPENCODEX_HOME!;
+const pidPath = join(home, "ocx.pid");
+const runtimePath = join(home, "runtime-port.json");
+
+if (args[0] === "stop") {
+  let pid = 0;
+  try { pid = Number(JSON.parse(readFileSync(runtimePath, "utf8")).pid); } catch { pid = 0; }
+  if (Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid) {
+    try { process.kill(pid, "SIGTERM"); } catch { pid = 0; }
+  }
+  rmSync(pidPath, { force: true });
+  rmSync(runtimePath, { force: true });
+  process.exit(0);
+}
+
+if (args[0] !== "start") process.exit(1);
+const port = Number(args[args.indexOf("--port") + 1]);
+const server = Bun.serve({
+  hostname: "127.0.0.1",
+  port,
+  fetch(request) {
+    return new URL(request.url).pathname === "/healthz"
+      ? Response.json({ status: "ok", service: "opencodex", pid: process.pid, port })
+      : new Response("Not found", { status: 404 });
+  },
+});
+writeFileSync(pidPath, String(process.pid));
+writeFileSync(runtimePath, JSON.stringify({ port: server.port, pid: process.pid, hostname: "127.0.0.1" }));
+await new Promise(() => {});
+`);
         symlinkSync(bundledBun, join(packageRoot, "node_modules", "bun"), "dir");
         writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
           name: "@bitkyc08/opencodex",
@@ -228,23 +260,21 @@ esac
         expect(runtime.pid).toBeGreaterThan(0);
         recoveredPid = runtime.pid;
       } finally {
-        const stopped = existsSync(launcher)
-          ? Bun.spawnSync(["node", launcher, "stop"], {
-              cwd: root,
-              env,
-              stdout: "ignore",
-              stderr: "ignore",
-              timeout: UPDATE_SPAWN_TIMEOUT_MS,
-            })
-          : null;
-        if (stopped?.exitCode !== 0) {
-          if (!recoveredPid) {
-            try {
-              recoveredPid = JSON.parse(readFileSync(join(opencodexHome, "runtime-port.json"), "utf8")).pid;
-            } catch { /* the proxy never wrote runtime state */ }
-          }
-          if (Number.isSafeInteger(recoveredPid) && recoveredPid! > 0) killProxy(recoveredPid!);
+        if (!recoveredPid) {
+          try {
+            recoveredPid = JSON.parse(readFileSync(join(opencodexHome, "runtime-port.json"), "utf8")).pid;
+          } catch { recoveredPid = undefined; }
         }
+        if (existsSync(launcher)) {
+          Bun.spawnSync(["node", launcher, "stop"], {
+            cwd: root,
+            env,
+            stdout: "ignore",
+            stderr: "ignore",
+            timeout: UPDATE_SPAWN_TIMEOUT_MS,
+          });
+        }
+        if (Number.isSafeInteger(recoveredPid) && recoveredPid! > 0) killProxy(recoveredPid!);
         rmSync(root, { recursive: true, force: true });
       }
     },

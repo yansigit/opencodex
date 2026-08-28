@@ -10,8 +10,15 @@ import { BOUNDED_BODY_MAX_BYTES } from "../src/lib/bounded-body";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-nous-oauth-test");
 const TEST_PORTAL = "https://portal.test";
+const realSetTimeout = globalThis.setTimeout;
+const realDateNow = Date.now;
 let previousOpencodexHome: string | undefined;
 let previousPortalBase: string | undefined;
+
+afterEach(() => {
+  globalThis.setTimeout = realSetTimeout;
+  Date.now = realDateNow;
+});
 
 function jwtWithClaims(claims: Record<string, unknown>): string {
   // A real Nous inference JWT carries the inference:invoke scope; callers that
@@ -37,6 +44,21 @@ function writeRawIntent(refreshToken: string, raw: string): void {
   const path = refreshIntentPathFor(refreshToken);
   mkdirSync(join(path, ".."), { recursive: true });
   writeFileSync(path, raw, "utf8");
+}
+
+function fastDeviceFlowTimers(): number[] {
+  const waits: number[] = [];
+  let now = realDateNow();
+  globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: unknown[]) => {
+    const delay = Number(timeout ?? 0);
+    waits.push(delay);
+    return realSetTimeout(() => {
+      now += delay;
+      if (typeof handler === "function") handler(...args);
+    }, 0);
+  }) as typeof setTimeout;
+  Date.now = () => now;
+  return waits;
 }
 
 describe("Nous OAuth JWT identity", () => {
@@ -104,6 +126,7 @@ describe("Nous token-response wiring", () => {
   });
 
   test("loginNous runs the device grant and returns credentials with the verification code surfaced", async () => {
+    const waits = fastDeviceFlowTimers();
     let pollCount = 0;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -148,6 +171,7 @@ describe("Nous token-response wiring", () => {
     expect(jwtPayloadOf(cred.access).sub).toBe("device-user");
     expect(cred.refresh).toBe("device-refresh");
     expect(cred.accountId).toBe("device-user");
+    expect(waits).toEqual([1_000]);
   });
 
   test.each([200, 400])("rejects oversized device-authorization responses with HTTP %i", async (status) => {
@@ -323,6 +347,7 @@ describe("Nous device-flow error handling", () => {
   });
 
   test("slow_down backs off and resumes polling until success", async () => {
+    const waits = fastDeviceFlowTimers();
     let pollCount = 0;
     const access = jwtWithClaims({ sub: "device-user", exp: Math.floor(Date.now() / 1000) + 3600 });
     globalThis.fetch = deviceFlowFetch(() => {
@@ -342,9 +367,12 @@ describe("Nous device-flow error handling", () => {
     expect(cred.access).toBe(access);
     expect(cred.refresh).toBe("device-refresh");
     expect(cred.accountId).toBe("device-user");
+    expect(waits).toEqual([6_000]);
   }, 15_000);
 
   test("device flow times out when the server never authorizes before the deadline", async () => {
+    const waits = fastDeviceFlowTimers();
+    let tokenPolls = 0;
     // The deadline comes from the device-code response: keep it tiny so the
     // polling loop exits quickly instead of running for the full server TTL.
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -358,10 +386,13 @@ describe("Nous device-flow error handling", () => {
           interval: 1,
         }), { status: 200 });
       }
+      tokenPolls += 1;
       return new Response(JSON.stringify({ error: "authorization_pending" }), { status: 400 });
     }) as typeof fetch;
     const ctrl: OAuthController = { onAuth() {} };
     await expect(loginNous(ctrl)).rejects.toThrow("Nous Portal device flow timed out");
+    expect(waits).toEqual([1_000]);
+    expect(tokenPolls).toBe(1);
   }, 15_000);
 
   test("a successful device-code response with empty/non-JSON body yields the clear validation error, not a JSON parse leak", async () => {
