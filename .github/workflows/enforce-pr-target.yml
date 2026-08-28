@@ -325,8 +325,8 @@ jobs:
             );
             const {
               exactHeadBugbotEvidence,
-              hasExactHeadMaintainerWaiver,
-              requiredChecksSuccessful
+              generatedSyncBaselineDisposition,
+              hasExactHeadMaintainerWaiver
             } = require(
               path.join(
                 process.cwd(),
@@ -768,6 +768,7 @@ jobs:
               pr.base.ref === "dev" &&
               /^sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64}$/i.test(pr.head.ref ?? "");
             let syncBaselineReady = !syncGenerated;
+            let syncBaselineFailed = false;
             if (bugbotPolicy === "required" || bugbotPolicy === "shadow") {
               try {
                 const checkRuns = await github.paginate(
@@ -784,15 +785,18 @@ jobs:
                   // its previous result here would deadlock a draft after the
                   // first run fails only because CI/hygiene were incomplete;
                   // this run becomes the successful enforce-target result.
-                  syncBaselineReady = requiredChecksSuccessful(
+                  const syncBaselineStatus = generatedSyncBaselineDisposition({
+                    syncGenerated,
                     checkRuns,
-                    pr.head.sha,
-                    ["ci", "hygiene"],
-                    15368
-                  );
+                    headSha: pr.head.sha,
+                    expectedAppId: 15368,
+                  });
+                  syncBaselineReady = syncBaselineStatus === "success";
+                  syncBaselineFailed = syncBaselineStatus === "failed";
                 }
               } catch (error) {
                 core.warning(`Could not verify Cursor Bugbot: ${error.message}`);
+                syncBaselineFailed = syncGenerated;
               }
               if (!bugbotEvidence && labelNames.includes("review-bot-waived")) {
                 try {
@@ -816,7 +820,7 @@ jobs:
                 core.info("Cursor Bugbot exact-head evidence is absent (shadow mode).");
               }
             }
-            if (syncGenerated && !syncBaselineReady) {
+            if (syncGenerated && syncBaselineFailed) {
               failures.push({ code: "sync_baseline" });
             }
 
