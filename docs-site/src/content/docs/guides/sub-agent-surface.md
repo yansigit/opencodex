@@ -277,9 +277,10 @@ curl -X PUT http://localhost:10100/api/v2 \
   -d '{"v2RoutedDelegationBridge":true}'
 ```
 
-See [Agent configuration](/reference/configuration/agents/#v2-native-parent-override) and the
-[Management API reference](/reference/management-api/#v2-native-parent-override) for the exact
-contracts and validation rules.
+See the configuration references for the [native-parent override](/reference/configuration/agents/#v2-native-parent-override)
+and [routed delegation bridge](/reference/configuration/agents/#routed-v2-delegation-bridge), plus
+their [management API contracts](/reference/management-api/#v2-native-parent-override) and
+[bridge validation rules](/reference/management-api/#routed-v2-delegation-bridge).
 
 ## FAQ
 
