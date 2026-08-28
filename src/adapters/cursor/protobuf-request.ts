@@ -306,10 +306,7 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
       // the same payload as assistant-role "[Tool Result]" / "[tool_result]" text teaches Auto
       // to echo that envelope as chat instead of continuing from the structured result.
       if (!echoToolResultInRoot) continue;
-      // #1920: the prefix must reflect the NORMALIZED error state (an empty
-      // node_repl result is an error even when the runtime said isError=false).
-      const prefix = normalizedToolResult(message, contentToText(message.content)).isError ? "[Tool Error]" : "[Tool Result]";
-      const text = `${prefix}\n${toolResultToText(message)}`;
+      const text = externalToolResultToText(message);
       pushDeduped(toolResultRootPayload(text), "toolResult", { messageIndex: i, text }, text);
     }
   }
@@ -598,6 +595,12 @@ function toolResultToText(message: OcxToolResultMessage): string {
   ].join("\n");
 }
 
+function externalToolResultToText(message: OcxToolResultMessage): string {
+  const normalized = normalizedToolResult(message, contentToText(message.content));
+  const label = normalized.isError ? "Tool error" : "Tool output";
+  return `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${decodeCursorCallId(message.toolCallId)}, is_error: ${normalized.isError}):\n${normalized.text}`;
+}
+
 /**
  * Shared #1920 normalization entry: pure-text results only. Image-bearing or
  * encrypted results pass through untouched (their content is not plain text).
@@ -781,12 +784,10 @@ function conversationTurns(
         // #1920/#1866: this external-replay site bypasses toolResultToText, so it
         // must consume the normalizer directly — cursor/grok-4.6 is the exact
         // reported repro path for empty Computer Use results.
-        const normalized = normalizedToolResult(message, contentToText(message.content));
-        const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, { text: `${prefix}\n${normalized.text}` }),
+            value: create(AssistantMessageSchema, { text: externalToolResultToText(message) }),
           },
         })), requestScope));
         continue;
