@@ -912,6 +912,8 @@ const configSchema = z.object({
   providerContextCaps: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
+  // Invalid hand edits disable only this experimental opt-in.
+  v2RoutedDelegationBridge: z.boolean().optional().catch(undefined),
   // Invalid hand edits disable only this experimental opt-in subtree.
   v2NativeParentOverride: v2NativeParentOverrideSchema.optional().catch(undefined),
   // Invalid optional recovery config must not discard unrelated provider/account state.
@@ -2184,6 +2186,15 @@ function agentTaskRecoveryError(value: unknown): string | null {
   return `schema_invalid: agentTaskRecovery${field ? `.${field}` : ""}: ${issue?.message ?? "invalid configuration"}`;
 }
 
+function v2RoutedDelegationBridgeError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "v2RoutedDelegationBridge")) return null;
+  const enabled = raw.v2RoutedDelegationBridge;
+  return enabled === undefined || typeof enabled === "boolean"
+    ? null
+    : "schema_invalid: v2RoutedDelegationBridge: must be a boolean or omitted";
+}
+
 function v2NativeParentOverrideError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
   if (!raw || !Object.hasOwn(raw, "v2NativeParentOverride") || raw.v2NativeParentOverride === undefined) return null;
@@ -2307,6 +2318,7 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
     ?? appOwnedMemoryBudgetError(value)
     ?? upstreamHostCircuitThresholdError(value)
     ?? agentTaskRecoveryError(value)
+    ?? v2RoutedDelegationBridgeError(value)
     ?? v2NativeParentOverrideError(value)
     ?? googleAntigravityStaticCatalogVersionError(value)
     ?? codexAccountPrioritiesError(value)

@@ -562,3 +562,51 @@ describe("/api/v2 agentTaskRecovery", () => {
     expect(res?.status).toBe(400);
   });
 });
+
+describe("/api/v2 v2RoutedDelegationBridge", () => {
+  test("GET defaults false and PUT persists only the scalar setting", async () => {
+    isolateHomes();
+    const config = {
+      providers: { relay: { adapter: "openai-chat", baseUrl: "https://relay.example/v1" } },
+      port: 10100,
+      defaultProvider: "relay",
+      multiAgentMode: "v2",
+      agentTaskRecovery: { enabled: true, model: "gpt-5.6-luna" },
+      unrelated: "preserve",
+    } as OcxConfig;
+    saveConfig(config);
+
+    const initial = await handleManagementAPI(getV2(), new URL("http://localhost/api/v2"), config);
+    expect((await initial?.json()).v2RoutedDelegationBridge).toBe(false);
+
+    const saved = await handleManagementAPI(
+      putV2({ v2RoutedDelegationBridge: true }), new URL("http://localhost/api/v2"), config,
+    );
+    expect(saved?.status).toBe(200);
+    expect((await saved?.json()).v2RoutedDelegationBridge).toBe(true);
+    expect(loadConfig()).toMatchObject({
+      v2RoutedDelegationBridge: true,
+      agentTaskRecovery: { enabled: true, model: "gpt-5.6-luna" },
+      unrelated: "preserve",
+    });
+  });
+
+  test("PUT rejects a non-boolean bridge before writing any requested setting", async () => {
+    isolateHomes();
+    const config = {
+      providers: { relay: { adapter: "openai-chat", baseUrl: "https://relay.example/v1" } },
+      port: 10100,
+      defaultProvider: "relay",
+      unrelated: "preserve",
+    } as OcxConfig;
+    saveConfig(config);
+    const before = JSON.stringify(loadConfig());
+
+    const response = await handleManagementAPI(
+      putV2({ keepNativeChatGptOnV1: true, v2RoutedDelegationBridge: "yes" }),
+      new URL("http://localhost/api/v2"), config,
+    );
+    expect(response?.status).toBe(400);
+    expect(JSON.stringify(loadConfig())).toBe(before);
+  });
+});
