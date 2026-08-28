@@ -212,3 +212,17 @@ export function modelAdapterRecordConfigError(
   }
   return null;
 }
+
+export function wsUpstreamConfigError(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "boolean") return "wsUpstream must be a boolean";
+  return null;
+}
+
+export function maxWsFrameBytesConfigError(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    return "maxWsFrameBytes must be a positive finite integer";
+  }
+  return null;
+}

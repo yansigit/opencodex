@@ -10,6 +10,7 @@ const {
   changedFileListComplete,
   exactHeadBugbotEvidence,
   maintenanceReadyEvidence,
+  autonomousMergeEvidence,
   findGithubSource,
   hasExactHeadMaintainerWaiver,
   isExpectedJulesHeadAdvance,
@@ -174,6 +175,66 @@ describe("maintenance PR readiness", () => {
     });
     assert.equal(result.ready, true);
     assert.equal(result.bugbotWaived, true);
+  });
+});
+
+describe("autonomous merge evidence", () => {
+  const pr = {
+    number: 42,
+    state: "open",
+    base: { ref: "dev" },
+    user: { id: 77 },
+    head: { sha: SHA },
+    labels: [{ name: "autonomous-fix" }],
+  };
+  const checks = [
+    ...["ci", "enforce-target", "hygiene"].map((name, id) => ({
+      id: id + 1, name, app: { id: 15368 }, head_sha: SHA,
+      status: "completed", conclusion: "success",
+    })),
+    { id: 4, name: "Cursor Bugbot", app: { id: 99 }, head_sha: SHA,
+      status: "completed", conclusion: "success" },
+  ];
+  const valid = {
+    pr,
+    checkRuns: checks,
+    headCommit: { sha: SHA, author: { id: 77 }, committer: { id: 77 } },
+    expectedJulesUserId: 77,
+    expectedBugbotAppId: 99,
+    authorizedSessionId: "sessions/abc",
+    sessionId: "sessions/abc",
+  };
+
+  it("accepts a labeled exact-head Jules fix with all required checks", () => {
+    const result = autonomousMergeEvidence(valid);
+    assert.equal(result.ready, true);
+    assert.equal(result.bugbotEvidence.checkRunId, 4);
+  });
+
+  it("rejects a waiver or missing autonomous-fix label", () => {
+    assert.equal(autonomousMergeEvidence({
+      ...valid,
+      checkRuns: checks.slice(0, 3),
+      labels: ["review-bot-waived"],
+      reviews: [
+        { id: 1, user: { login: "alice" }, commit_id: SHA, state: "APPROVED" },
+        { id: 2, user: { login: "carol" }, commit_id: SHA, state: "APPROVED" },
+      ],
+      maintainers: ["alice", "carol"],
+    }).ready, false);
+    assert.equal(autonomousMergeEvidence({ ...valid, pr: { ...pr, labels: [] } }).ready, false);
+  });
+
+  it("rejects stale checks, unauthorized session, and non-Jules head authorship", () => {
+    assert.equal(autonomousMergeEvidence({ ...valid, sessionId: "sessions/other" }).ready, false);
+    assert.equal(autonomousMergeEvidence({
+      ...valid,
+      headCommit: { ...valid.headCommit, sha: "b".repeat(40) },
+    }).ready, false);
+    assert.equal(autonomousMergeEvidence({
+      ...valid,
+      checkRuns: checks.map(check => check.name === "ci" ? { ...check, conclusion: "failure" } : check),
+    }).ready, false);
   });
 });
 
