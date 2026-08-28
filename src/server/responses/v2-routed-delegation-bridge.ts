@@ -108,11 +108,15 @@ export function injectV2RoutedDelegationBridge(
   return names.size > 0 ? { names } : undefined;
 }
 
-function rewriteValue(value: unknown, active: V2RoutedDelegationBridgeContext): { value: unknown; changed: boolean } {
+function rewriteValue(
+  value: unknown,
+  active: V2RoutedDelegationBridgeContext,
+  authorizedIds?: ReadonlySet<string>,
+): { value: unknown; changed: boolean } {
   if (Array.isArray(value)) {
     let changed = false;
     const next = value.map(entry => {
-      const rewritten = rewriteValue(entry, active);
+      const rewritten = rewriteValue(entry, active, authorizedIds);
       changed ||= rewritten.changed;
       return rewritten.value;
     });
@@ -121,12 +125,18 @@ function rewriteValue(value: unknown, active: V2RoutedDelegationBridgeContext): 
   if (!isRecord(value)) return { value, changed: false };
   let changed = false;
   const entries = Object.entries(value).map(([key, entry]) => {
-    const rewritten = rewriteValue(entry, active);
+    const rewritten = rewriteValue(entry, active, authorizedIds);
     changed ||= rewritten.changed;
     return [key, rewritten.value];
   });
   const next: RecordValue = Object.fromEntries(entries);
-  if (value.type === "function_call" && value.namespace === MIRROR_NAMESPACE && typeof value.name === "string" && active.names.has(value.name)) {
+  if (
+    value.type === "function_call"
+    && value.namespace === MIRROR_NAMESPACE
+    && typeof value.name === "string"
+    && active.names.has(value.name)
+    && (authorizedIds === undefined || (typeof value.id === "string" && authorizedIds.has(value.id)))
+  ) {
     next.namespace = NATIVE_NAMESPACE;
     next.encrypted_function_args = [];
     changed = true;
@@ -151,26 +161,12 @@ export function createV2RoutedDelegationSseRewrite(
   active: V2RoutedDelegationBridgeContext | undefined,
 ): SsePayloadRewrite | undefined {
   if (!active || active.names.size === 0) return undefined;
-  const bindings = new Map<string, number | undefined>();
-  const outputIndexes = new Map<number, string>();
-  const bind = (itemId: string | undefined, outputIndex: number | undefined): boolean => {
-    if (itemId === undefined && outputIndex === undefined) return false;
-    const key = itemId ?? `@${outputIndex}`;
-    if (!bindings.has(key) && bindings.size >= MAX_SSE_BINDINGS) return false;
-    const previousIndex = bindings.get(key);
-    if (previousIndex !== undefined && outputIndexes.get(previousIndex) === key) outputIndexes.delete(previousIndex);
-    bindings.set(key, outputIndex);
-    if (outputIndex !== undefined) outputIndexes.set(outputIndex, key);
+  const authorizedIds = new Set<string>();
+  const bind = (itemId: unknown): boolean => {
+    if (typeof itemId !== "string" || itemId.trim().length === 0) return false;
+    if (!authorizedIds.has(itemId) && authorizedIds.size >= MAX_SSE_BINDINGS) return false;
+    authorizedIds.add(itemId);
     return true;
-  };
-  const retire = (itemId: unknown, outputIndex: unknown): void => {
-    const key = typeof itemId === "string"
-      ? itemId
-      : typeof outputIndex === "number" ? outputIndexes.get(outputIndex) : undefined;
-    if (!key) return;
-    const index = bindings.get(key);
-    bindings.delete(key);
-    if (index !== undefined && outputIndexes.get(index) === key) outputIndexes.delete(index);
   };
   return payload => {
     let event: unknown;
@@ -180,22 +176,15 @@ export function createV2RoutedDelegationSseRewrite(
     const item = isRecord(event.item) ? event.item : undefined;
     const armed = !!item && item.type === "function_call" && item.namespace === MIRROR_NAMESPACE
       && typeof item.name === "string" && active.names.has(item.name);
-    const bound = armed && bind(
-        typeof item.id === "string" ? item.id : undefined,
-        typeof event.output_index === "number" && Number.isInteger(event.output_index) ? event.output_index : undefined,
-      );
+    const bound = armed && bind(item?.id);
     const argumentEvent = type === "response.function_call_arguments.delta" || type === "response.function_call_arguments.done";
-    const matchedArgument = argumentEvent && (typeof event.item_id === "string"
-      ? bindings.has(event.item_id)
-      : typeof event.output_index === "number" && outputIndexes.has(event.output_index));
-    const rewritten = armed && !bound ? { value: event, changed: false } : rewriteValue(event, active);
-    if (type === "response.function_call_arguments.done" || (type === "response.output_item.done" && armed)) {
-      retire(event.item_id ?? item?.id, event.output_index);
-    }
-    if (type === "response.completed" || type === "response.failed" || type === "response.incomplete") {
-      bindings.clear();
-      outputIndexes.clear();
-    }
+    const matchedArgument = argumentEvent && typeof event.item_id === "string" && authorizedIds.has(event.item_id);
+    const failedTerminal = type === "response.failed" || type === "response.incomplete";
+    const rewritten = armed && !bound
+      ? { value: event, changed: false }
+      : failedTerminal ? { value: event, changed: false } : rewriteValue(event, active, authorizedIds);
+    if (type === "response.function_call_arguments.done" && matchedArgument) authorizedIds.delete(event.item_id as string);
+    if (type === "response.completed" || failedTerminal) authorizedIds.clear();
     if (matchedArgument) {
       const next = rewritten.changed && isRecord(rewritten.value) ? rewritten.value : { ...event };
       next.encrypted_function_args = [];

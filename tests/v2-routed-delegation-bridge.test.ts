@@ -136,6 +136,15 @@ describe("V2 routed delegation bridge", () => {
     expect(JSON.parse(rewrite(unrelated))).toMatchObject({ item: { namespace: "ocx_agents", name: "list_agents" } });
   });
 
+  test("leaves ID-less mirror snapshots and index-only arguments untouched", () => {
+    const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
+    const snapshot = JSON.stringify({ type: "response.output_item.added", output_index: 3, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent" } });
+
+    expect(rewrite(snapshot)).toBe(snapshot);
+    const argument = JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 3, delta: "{}" });
+    expect(rewrite(argument)).toBe(argument);
+  });
+
   test("caps retained SSE mirror bindings", () => {
     const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
     for (let index = 0; index < 129; index++) {
@@ -146,15 +155,28 @@ describe("V2 routed delegation bridge", () => {
     expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_128", output_index: 128, delta: "{}" }))).encrypted_function_args).toBeUndefined();
   });
 
-  test("rebinds an item id without leaving a stale output-index binding", () => {
+  test("keeps only authorized nonblank ids through completed aggregates", () => {
     const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
-    const snapshot = (output_index: number) => JSON.stringify({ type: "response.output_item.added", output_index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_repeat" } });
-    rewrite(snapshot(1));
-    rewrite(snapshot(2));
-    rewrite(JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_repeat", output_index: 2, arguments: "{}" }));
+    const snapshot = (id: string, output_index: number) => JSON.stringify({ type: "response.output_item.added", output_index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id } });
+    for (let index = 0; index < 128; index++) rewrite(snapshot(`fc_${index}`, index));
+    expect(rewrite(snapshot("fc_capped", 128))).toContain('"namespace":"ocx_agents"');
+    expect(rewrite(snapshot(" ", 129))).toContain('"namespace":"ocx_agents"');
+    const completed = JSON.parse(rewrite(JSON.stringify({ type: "response.completed", response: { output: [
+      { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_0" },
+      { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_capped" },
+      { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: " " },
+    ] } })));
 
-    for (const output_index of [1, 2]) {
-      expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", output_index, delta: "late" }))).encrypted_function_args).toBeUndefined();
-    }
+    expect(completed.response.output.map((item: { namespace: string }) => item.namespace)).toEqual(["collaboration", "ocx_agents", "ocx_agents"]);
+    expect(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_0", delta: "late" }))).toContain('"item_id":"fc_0"');
+  });
+
+  test("an unknown item-id terminal does not affect an authorized call", () => {
+    const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
+    rewrite(JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_known" } }));
+    const unknown = JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_unknown", arguments: "{}" });
+
+    expect(rewrite(unknown)).toBe(unknown);
+    expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_known", delta: "{}" }))).encrypted_function_args).toEqual([]);
   });
 });
