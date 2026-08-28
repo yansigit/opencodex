@@ -77,13 +77,6 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
         ...(typeof creditsRaw?.unlimited === "boolean" ? { unlimited: creditsRaw.unlimited } : {}),
       }
     : undefined;
-  if (creditsPercent !== undefined && !windows.some(window => /credits?/i.test(window.label))) {
-    windows.push({
-      label: "Total subscription credits",
-      percent: creditsPercent,
-      ...(creditsExpiresAt !== undefined ? { resetAt: creditsExpiresAt } : {}),
-    });
-  }
   const fiveHourPercent = finite(q.fiveHourPercent) ?? finite(q.shortPercent);
   const fiveHourResetAt = finite(q.fiveHourResetAt) ?? finite(q.shortResetAt);
   const out: AccountQuota = {
