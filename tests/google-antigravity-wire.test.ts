@@ -912,6 +912,29 @@ describe("antigravity parseResponse unwraps response (non-streaming)", () => {
     expect((contents[0].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBe("sig-nonstream0000000");
   });
 
+  test("observing the validator-bypass sentinel does not cache it in replay cache", async () => {
+    const { __resetAntigravityReplayCache, antigravityReplayMetrics } = await import("../src/adapters/google-antigravity-replay");
+    __resetAntigravityReplayCache();
+    const adapter = createGoogleAdapter(provider);
+    await adapter.buildRequest(parsed("hello world"));
+    const body = {
+      response: {
+        candidates: [{
+          content: {
+            parts: [
+              { functionCall: { name: "do_x", args: { a: 1 } }, thoughtSignature: "skip_thought_signature_validator" },
+            ],
+          },
+        }],
+      },
+    };
+    await adapter.parseResponse!(sseResponse([
+      body,
+      { response: { candidates: [{ finishReason: "STOP" }] } },
+    ]));
+    expect(antigravityReplayMetrics()).toEqual({ sessions: 0, calls: 0, totalBytes: 0, largestSessionBytes: 0 });
+  });
+
   // Guard for #1503: routing `thought: true` text to the reasoning channel must not disturb
   // signature observation. Gemini 3 rejects a follow-up turn whose first function-call part
   // lost its signature, so a classification change that also dropped replay would trade a
@@ -1054,6 +1077,7 @@ describe("isLikelyRealThoughtSignature", () => {
     expect(isLikelyRealThoughtSignature("short")).toBe(false);
     expect(isLikelyRealThoughtSignature("has spaces in it here")).toBe(false);
     expect(isLikelyRealThoughtSignature(undefined)).toBe(false);
+    expect(isLikelyRealThoughtSignature("skip_thought_signature_validator")).toBe(false);
   });
   test("accepts an opaque base64/base64url signature blob", () => {
     expect(isLikelyRealThoughtSignature("CisBVKhc7+abcDEF0123456789/xyz==")).toBe(true);

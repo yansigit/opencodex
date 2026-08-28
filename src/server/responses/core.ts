@@ -15,6 +15,7 @@ import {
 } from "../../config";
 import { parseRequest } from "../../responses/parser";
 import { googleProviderOptionsRouteError } from "../../responses/google-provider-options";
+import { interceptRuntimeFailure } from "../../telemetry/hook";
 import type { ProviderAdapter } from "../../adapters/base";
 import {
   bindReasoningReplayScope,
@@ -4278,6 +4279,7 @@ async function handleResponsesInner(
         const reportNativeTerminal = recordTerminalOutcomes
           ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
             terminalRecorder?.(status, httpStatusOverride);
+            if (status === "failed") interceptRuntimeFailure(new Error(logCtx.upstreamError ?? "upstream response stream failed"), { provider: route.providerName, model: route.modelId, config: config.autonomousRemediation });
             if (status === "failed") {
               if (!isFixedCodexAccount(authCtx)) {
                 recordSubagentSpawnFailureForTerminal(
@@ -4358,6 +4360,7 @@ async function handleResponsesInner(
         // client-cancel (no terminal seen) is finalized separately via consumeForInspection's onCancel.
         const reportNativeTerminal = (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
           terminalRecorder?.(status, httpStatusOverride);
+          if (status === "failed") interceptRuntimeFailure(new Error(logCtx.upstreamError ?? "upstream response stream failed"), { provider: route.providerName, model: route.modelId, config: config.autonomousRemediation });
           if (status === "failed") {
             if (!isFixedCodexAccount(authCtx)) {
               recordSubagentSpawnFailureForTerminal(

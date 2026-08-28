@@ -871,6 +871,12 @@ const v2NativeParentOverrideSchema = z.object({
 
 const configSchema = z.object({
   port: z.number().int().min(0).max(65535).default(10100),
+  autonomousRemediation: z.object({
+    enabled: z.boolean().optional(),
+    instanceId: z.string().trim().min(1).optional(),
+    threshold: z.number().int().positive().optional(),
+    rollingWindowMs: z.number().int().positive().optional(),
+  }).strict().optional().catch(undefined),
   managementUsageMaxReadBytes: z.number().int().positive().default(64 * 1024 * 1024),
   // Invalid hand edits disable only this opt-in circuit. Live writes remain strict.
   upstreamHostCircuitThreshold: z.number().int()
