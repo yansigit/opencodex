@@ -654,6 +654,36 @@ describe("google provider hardening", () => {
     }
   });
 
+  test("CCA inline rate_limit_exceeded error becomes a 429 for account failover", async () => {
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return sseResponse([{
+        error: {
+          code: 429,
+          status: "RESOURCE_EXHAUSTED",
+          message: "rate_limit_exceeded",
+        },
+      }]);
+    }) as typeof fetch;
+    try {
+      const request = {
+        url: "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
+        method: "POST",
+        headers: {},
+        body: "{}",
+      };
+      const response = await fetchAntigravityWithRetry(request, {
+        timeoutMs: 5_000,
+      });
+      expect(response.status).toBe(429);
+      expect(calls).toBe(1);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   test("CCA peer HTTP 200 RESOURCE_EXHAUSTED after first-host 404 becomes a 429", async () => {
     const calls: string[] = [];
     const realFetch = globalThis.fetch;
