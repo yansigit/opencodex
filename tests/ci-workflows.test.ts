@@ -1059,6 +1059,7 @@ describe("GitHub Actions hardening", () => {
       "pull_request_target",
       "status",
       "workflow_dispatch",
+      "workflow_run",
     ]);
 
     // And the trigger is exactly a `types:` list — nothing else.
@@ -1073,6 +1074,10 @@ describe("GitHub Actions hardening", () => {
     expect(Object.keys(workflow.on?.pull_request_target ?? {})).toEqual(["types"]);
     expect(Object.prototype.hasOwnProperty.call(workflow.on ?? {}, "status")).toBe(true);
     expect(workflow.on?.check_run).toEqual({ types: ["completed"] });
+    expect(workflow.on?.workflow_run).toEqual({
+      workflows: ["Cross-platform CI"],
+      types: ["completed"],
+    });
     expect(Object.keys(workflow.on?.workflow_dispatch?.inputs ?? {})).toEqual(["pull_number"]);
 
     // Exactly the scopes this gate needs. `pull-requests: write` covers title and
@@ -1107,6 +1112,10 @@ describe("GitHub Actions hardening", () => {
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.state == 'success'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.sender.login == 'coderabbitai[bot]'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.sender.id == 136622811");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.name == 'Cross-platform CI'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.event == 'pull_request'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.status == 'completed'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.repository.full_name == github.repository");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'gui-screenshot-waived'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'intake: hygiene-blocked'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'maintainer-sponsored'");
@@ -3237,6 +3246,129 @@ describe("GitHub Actions hardening", () => {
         "Could not list PRs associated with commit",
       );
       expect(result.warnings.join(" ")).toContain("Could not list open PRs");
+    });
+
+    test("the resolver maps a completed same-repository Cross-platform CI run to its one current open PR", async () => {
+      const headSha = "7d42d17f213a632fc2def56053f0cd574b13d459";
+      const result = await runResolver({
+        pr: { base: { ref: "dev" }, number: 4242, head: { sha: headSha } },
+        eventName: "workflow_run",
+        workflowRun: {
+          name: "Cross-platform CI",
+          event: "pull_request",
+          status: "completed",
+          conclusion: "success",
+          head_sha: headSha,
+          repository: { full_name: "lidge-jun/opencodex" },
+          head_repository: { full_name: "lidge-jun/opencodex" },
+        },
+        openPulls: [
+          { number: 4242, state: "open", head: { sha: headSha } },
+          { number: 7777, state: "open", head: { sha: "other" } },
+        ],
+      });
+
+      expect(result.outputs).toEqual([{ name: "pull-number", value: "4242" }]);
+      expect(callsTo(result, "pulls.list")).toHaveLength(1);
+      expect(callsTo(result, "repos.listPullRequestsAssociatedWithCommit")).toEqual([]);
+    });
+
+    test("the workflow_run resolver fails closed for untrusted, stale, or non-unique completions", async () => {
+      const headSha = "7d42d17f213a632fc2def56053f0cd574b13d459";
+      const baseWorkflowRun = {
+        name: "Cross-platform CI",
+        event: "pull_request",
+        status: "completed",
+        conclusion: "success" as const,
+        head_sha: headSha,
+        repository: { full_name: "lidge-jun/opencodex" },
+        head_repository: { full_name: "contributor/opencodex" },
+      };
+      const cases = [
+        {
+          name: "wrong workflow name",
+          workflowRun: { ...baseWorkflowRun, name: "Untrusted CI" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "wrong original event",
+          workflowRun: { ...baseWorkflowRun, event: "push" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "non-completed status",
+          workflowRun: { ...baseWorkflowRun, status: "in_progress" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "wrong repository",
+          workflowRun: {
+            ...baseWorkflowRun,
+            repository: { full_name: "attacker/opencodex" },
+          },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "missing head SHA",
+          workflowRun: (() => {
+            const { head_sha: _headSha, ...missing } = baseWorkflowRun;
+            return missing;
+          })(),
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "blank head SHA",
+          workflowRun: { ...baseWorkflowRun, head_sha: "" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "stale head",
+          workflowRun: { ...baseWorkflowRun, head_sha: "stale-head" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "closed candidate",
+          workflowRun: baseWorkflowRun,
+          openPulls: [{ number: 4242, state: "closed", head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "merged candidate",
+          workflowRun: baseWorkflowRun,
+          openPulls: [{ number: 4242, state: "open", merged: true, head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "ambiguous same-head candidates",
+          workflowRun: baseWorkflowRun,
+          openPulls: [
+            { number: 4242, state: "open", head: { sha: headSha } },
+            { number: 7777, state: "open", head: { sha: headSha } },
+          ],
+          listed: 1,
+        },
+      ] as const;
+
+      for (const scenario of cases) {
+        const result = await runResolver({
+          pr: { base: { ref: "dev" }, number: 4242, head: { sha: headSha } },
+          eventName: "workflow_run",
+          workflowRun: scenario.workflowRun,
+          openPulls: scenario.openPulls,
+        });
+        expect(result.outputs, scenario.name).toEqual([]);
+        expect(callsTo(result, "pulls.list"), scenario.name).toHaveLength(scenario.listed);
+        expect(callsTo(result, "pulls.get"), scenario.name).toEqual([]);
+        expect(callsTo(result, "issues.createComment"), scenario.name).toEqual([]);
+        expect(callsTo(result, "issues.updateComment"), scenario.name).toEqual([]);
+      }
     });
 
     test("a non-maintainer issue_comment does not re-run the gate", async () => {
