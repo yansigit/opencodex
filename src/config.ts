@@ -16,7 +16,9 @@ import {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "./config/provider-validation";
 import {
   bumpConfigGenerationAtPath,
@@ -519,6 +521,8 @@ const providerConfigSchema = z.object({
   preserveResponsesReasoningContent: z.boolean().optional(),
   decodesNativeCompactionBlobs: z.boolean().optional(),
   allowPrivateNetwork: z.boolean().optional(),
+  wsUpstream: z.boolean().nullish().transform(value => value ?? undefined),
+  maxWsFrameBytes: z.number().int().positive().nullish().transform(value => value ?? undefined),
   // The management API accepts `null` as "clear this", so a config written before the POST
   // canonicalization below can hold one on disk. Rejecting it here would send the operator
   // through invalid-config recovery for a value the API told them was fine.
@@ -561,7 +565,9 @@ export {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "./config/provider-validation";
 
 function providerResponsesPathConfigError(responsesPath: string | undefined): string | null {
@@ -1095,6 +1101,22 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "responsesPath"],
         message: responsesPathError,
+      });
+    }
+    const wsUpstreamError = wsUpstreamConfigError((provider as { wsUpstream?: unknown }).wsUpstream);
+    if (wsUpstreamError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "wsUpstream"],
+        message: wsUpstreamError,
+      });
+    }
+    const maxWsFrameBytesError = maxWsFrameBytesConfigError((provider as { maxWsFrameBytes?: unknown }).maxWsFrameBytes);
+    if (maxWsFrameBytesError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "maxWsFrameBytes"],
+        message: maxWsFrameBytesError,
       });
     }
     const tlsProfileError = providerTlsProfileConfigError(name, provider);

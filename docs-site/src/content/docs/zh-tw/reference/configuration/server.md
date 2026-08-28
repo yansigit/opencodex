@@ -16,7 +16,7 @@ description: 監聽器、遠端存取、許可金鑰、逾時、儲存、sidecar
 | `stallTimeoutSec?` | `number` | `300` | 在 `response.incomplete` 前無上游資料的秒數。最小 1。 |
 | `connectTimeoutMs?` | `number` | `200000` | 每次嘗試的 DNS/TCP/TLS/final-header 截止時間；它在 body 生成前結束。 |
 | `shutdownTimeoutMs?` | `number` | `5000` | 在中止活躍回合前的優雅排空截止時間。 |
-| `websockets?` | `boolean` | `false` | 廣告並允許面向 client 的 Responses WebSocket 路徑。False 時 client 使用 HTTP/SSE；不會停用符合條件的 canonical ChatGPT upstream WS 最佳化。 |
+| `websockets?` | `boolean` | `false` | 廣告並允許面向 client 的 Responses WebSocket 路徑。False 時 client 使用 HTTP/SSE。canonical ChatGPT upstream WS 需另外選擇啟用：設定供應商 `wsUpstream` 時以其為準（`true` 啟用、`false` 停用）；省略時以 `OCX_CODEX_WS_UPSTREAM=true` 或 `1` 啟用，`false`/`0`、未設定或無效值會維持 HTTP/SSE。 |
 | `corsAllowOrigins?` | `string[]` | `[]` | 額外的精確 CORS 來源。回送來源恆被允許。 |
 | `apiKeys?` | `OcxApiKey[]` | `[]` | 生成的 `ocx_…` 憑證，在非回送綁定上被管理與 data-plane 認證接受。由儀表板管理。 |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | 停用 | 選擇加入的已封存 session 清理政策。永不隱含啟用。 |

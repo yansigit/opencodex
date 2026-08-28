@@ -13,6 +13,7 @@ import {
   azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
+  maxWsFrameBytesConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
   positiveIntegerRecordConfigError,
@@ -20,6 +21,7 @@ import {
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
   isAzureIdentityProvider,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
@@ -572,6 +574,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     delete canonicalCandidate.modelContextWindows;
     // User-owned soft compaction policy; it does not alter the canonical transport seed.
     delete canonicalCandidate.modelAutoCompactTokenLimits;
+    // Transport controls are user-owned overlays, not part of the immutable seed.
+    delete canonicalCandidate.wsUpstream;
+    delete canonicalCandidate.maxWsFrameBytes;
     const canonical = seed && sameCanonicalProviderSeed(canonicalCandidate, seed);
     if (!canonical) {
       return `provider ${name} must equal the canonical built-in provider seed`;
@@ -610,6 +615,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (upstreamHttpVersionError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${upstreamHttpVersionError}`;
   }
+  const wsUpstreamError = wsUpstreamConfigError(raw.wsUpstream);
+  if (wsUpstreamError) return `provider ${name} ${wsUpstreamError}`;
+  const maxWsFrameBytesError = maxWsFrameBytesConfigError(raw.maxWsFrameBytes);
+  if (maxWsFrameBytesError) return `provider ${name} ${maxWsFrameBytesError}`;
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
   if (modelCostsError) {
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
@@ -736,6 +745,8 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "contextWindow",
       "modelContextWindows",
       "modelAutoCompactTokenLimits",
+      "wsUpstream",
+      "maxWsFrameBytes",
       "defaultMaxOutputTokens",
       "modelMaxOutputTokens",
       "openRouterRouting",
