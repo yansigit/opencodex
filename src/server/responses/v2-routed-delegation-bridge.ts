@@ -42,7 +42,7 @@ function mirrorChildren(group: RecordValue): RecordValue[] {
 }
 
 function mirrorGroup(group: RecordValue): RecordValue {
-  return { type: "namespace", name: MIRROR_NAMESPACE, tools: mirrorChildren(group) };
+  return { type: "namespace", name: MIRROR_NAMESPACE, description: GUIDANCE, tools: mirrorChildren(group) };
 }
 
 /**

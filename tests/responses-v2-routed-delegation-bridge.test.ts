@@ -132,7 +132,7 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       const response = await handleResponses(request(rootBody({ tools: [], input: [{ type: "additional_tools", tools: [native] }] })), config(), { model: "", provider: "" });
       const outbound = requests[0]!;
       expect((outbound.input as Array<Record<string, unknown>>)[0]?.tools).toEqual([native, {
-        type: "namespace", name: "ocx_agents", tools: [{ type: "function", name: "spawn_agent", description: "Use this routed-child mirror for collaboration operations. spawn_agent.", parameters: { type: "object" } }, { type: "function", name: "send_message", description: "Use this routed-child mirror for collaboration operations. send_message.", parameters: { type: "object" } }],
+        type: "namespace", name: "ocx_agents", description: "Use this routed-child mirror for collaboration operations.", tools: [{ type: "function", name: "spawn_agent", description: "Use this routed-child mirror for collaboration operations. spawn_agent.", parameters: { type: "object" } }, { type: "function", name: "send_message", description: "Use this routed-child mirror for collaboration operations. send_message.", parameters: { type: "object" } }],
       }]);
       expect((await response.json() as { output: Array<Record<string, unknown>> }).output[0]).toMatchObject({ namespace: "collaboration", encrypted_function_args: [] });
     } finally { globalThis.fetch = originalFetch; }

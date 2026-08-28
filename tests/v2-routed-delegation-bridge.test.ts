@@ -39,6 +39,7 @@ describe("V2 routed delegation bridge", () => {
     expect(body.tools[1]).toEqual({
       type: "namespace",
       name: "ocx_agents",
+      description: GUIDANCE,
       tools: [
         { ...spawn, description: `${GUIDANCE} spawn_agent.` },
         { ...send, description: `${GUIDANCE} send_message.` },
@@ -65,7 +66,13 @@ describe("V2 routed delegation bridge", () => {
     expect(second?.names).toEqual(first?.names);
     expect(body).toEqual(raw);
     expect((body.tools[1] as { tools: unknown[] }).tools).toHaveLength(1);
-    expect(((body.input[0] as { tools: unknown[] }).tools[1] as { tools: unknown[] }).tools).toHaveLength(2);
+    const inputMirror = (body.input[0] as { tools: Array<Record<string, unknown>> }).tools[1]!;
+    expect(inputMirror).toMatchObject({
+      type: "namespace",
+      name: "ocx_agents",
+      description: GUIDANCE,
+    });
+    expect(inputMirror.tools).toHaveLength(2);
   });
 
   test("fails closed for a conflicting ocx_agents namespace", () => {
