@@ -39,6 +39,7 @@ describe("fork dev auto-release workflow contract", () => {
       branches: ["dev"],
     });
     expect(workflow.jobs?.["dev-auto-release"]?.if).toContain("conclusion == 'success'");
+    expect(workflow.jobs?.["dev-auto-release"]?.if).toContain("workflow_run.event == 'push'");
   });
 
   test("uses minimum dispatch permissions and bounded non-canceling concurrency", () => {
@@ -90,4 +91,3 @@ describe("fork dev auto-release workflow contract", () => {
     expect(workflowText).toContain("node .github/scripts/fork-dev-auto-release.cjs");
   });
 });
-
