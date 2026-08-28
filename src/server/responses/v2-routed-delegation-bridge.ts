@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { OcxParsedRequest, OcxTool } from "../../types";
 import type { SsePayloadRewrite } from "../sse-payload-rewrite";
 
@@ -5,6 +6,7 @@ const MIRROR_NAMESPACE = "ocx_agents";
 const NATIVE_NAMESPACE = "collaboration";
 const MIRRORED_NAMES = new Set(["spawn_agent", "send_message", "followup_task"]);
 const GUIDANCE = "Use this routed-child mirror for collaboration operations.";
+const MAX_SSE_BINDINGS = 128;
 
 type RecordValue = Record<string, unknown>;
 
@@ -43,10 +45,6 @@ function mirrorGroup(group: RecordValue): RecordValue {
   return { type: "namespace", name: MIRROR_NAMESPACE, tools: mirrorChildren(group) };
 }
 
-function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
 /**
  * Add request-local plaintext collaboration mirrors to raw and parsed Responses catalogs.
  * The caller has already proved this request is eligible; this helper owns no routing policy.
@@ -66,10 +64,16 @@ export function injectV2RoutedDelegationBridge(
   }
   if (nativeGroups.length === 0) return undefined;
 
+  const names = new Set<string>();
+  for (const { group } of nativeGroups) {
+    for (const child of mirrorChildren(group)) names.add(child.name as string);
+  }
+  if (names.size === 0) return undefined;
+
   const expected = nativeGroups.map(({ list, index, group }) => ({ list, index: index + 1, group: mirrorGroup(group) }));
   const idempotent = existing.length === expected.length && expected.every(candidate => {
     const actual = candidate.list[candidate.index];
-    return isRecord(actual) && sameJson(actual, candidate.group);
+    return isRecord(actual) && isDeepStrictEqual(actual, candidate.group);
   });
   if (existing.length > 0 && !idempotent) {
     throw new Error("v2 routed delegation bridge namespace collision");
@@ -78,10 +82,6 @@ export function injectV2RoutedDelegationBridge(
     for (const { list, index, group } of [...expected].reverse()) list.splice(index, 0, group);
   }
 
-  const names = new Set<string>();
-  for (const { group } of nativeGroups) {
-    for (const child of mirrorChildren(group)) names.add(child.name as string);
-  }
   const mirrorTools: OcxTool[] = [];
   for (const name of names) {
     const source = parsed.context.tools?.find(tool => tool.namespace === NATIVE_NAMESPACE && tool.name === name);
@@ -120,12 +120,12 @@ function rewriteValue(value: unknown, active: V2RoutedDelegationBridgeContext): 
   }
   if (!isRecord(value)) return { value, changed: false };
   let changed = false;
-  const next: RecordValue = {};
-  for (const [key, entry] of Object.entries(value)) {
+  const entries = Object.entries(value).map(([key, entry]) => {
     const rewritten = rewriteValue(entry, active);
-    next[key] = rewritten.value;
     changed ||= rewritten.changed;
-  }
+    return [key, rewritten.value];
+  });
+  const next: RecordValue = Object.fromEntries(entries);
   if (value.type === "function_call" && value.namespace === MIRROR_NAMESPACE && typeof value.name === "string" && active.names.has(value.name)) {
     next.namespace = NATIVE_NAMESPACE;
     next.encrypted_function_args = [];
@@ -151,8 +151,24 @@ export function createV2RoutedDelegationSseRewrite(
   active: V2RoutedDelegationBridgeContext | undefined,
 ): SsePayloadRewrite | undefined {
   if (!active || active.names.size === 0) return undefined;
-  const itemIds = new Set<string>();
-  const outputIndexes = new Set<number>();
+  const bindings = new Map<string, number | undefined>();
+  const outputIndexes = new Map<number, string>();
+  const bind = (itemId: string | undefined, outputIndex: number | undefined): void => {
+    if (itemId === undefined && outputIndex === undefined) return;
+    const key = itemId ?? `@${outputIndex}`;
+    if (!bindings.has(key) && bindings.size >= MAX_SSE_BINDINGS) return;
+    bindings.set(key, outputIndex);
+    if (outputIndex !== undefined) outputIndexes.set(outputIndex, key);
+  };
+  const retire = (itemId: unknown, outputIndex: unknown): void => {
+    const key = typeof itemId === "string"
+      ? itemId
+      : typeof outputIndex === "number" ? outputIndexes.get(outputIndex) : undefined;
+    if (!key) return;
+    const index = bindings.get(key);
+    bindings.delete(key);
+    if (index !== undefined && outputIndexes.get(index) === key) outputIndexes.delete(index);
+  };
   return payload => {
     let event: unknown;
     try { event = JSON.parse(payload); } catch { return payload; }
@@ -162,15 +178,23 @@ export function createV2RoutedDelegationSseRewrite(
     const armed = !!item && item.type === "function_call" && item.namespace === MIRROR_NAMESPACE
       && typeof item.name === "string" && active.names.has(item.name);
     if (armed) {
-      if (typeof item.id === "string") itemIds.add(item.id);
-      if (typeof event.output_index === "number" && Number.isInteger(event.output_index)) outputIndexes.add(event.output_index);
+      bind(
+        typeof item.id === "string" ? item.id : undefined,
+        typeof event.output_index === "number" && Number.isInteger(event.output_index) ? event.output_index : undefined,
+      );
     }
     const argumentEvent = type === "response.function_call_arguments.delta" || type === "response.function_call_arguments.done";
-    const matchedArgument = argumentEvent && (
-      (typeof event.item_id === "string" && itemIds.has(event.item_id))
-      || (typeof event.output_index === "number" && outputIndexes.has(event.output_index))
-    );
+    const matchedArgument = argumentEvent && (typeof event.item_id === "string"
+      ? bindings.has(event.item_id)
+      : typeof event.output_index === "number" && outputIndexes.has(event.output_index));
     const rewritten = rewriteValue(event, active);
+    if (type === "response.function_call_arguments.done" || (type === "response.output_item.done" && armed)) {
+      retire(event.item_id ?? item?.id, event.output_index);
+    }
+    if (type === "response.completed" || type === "response.failed" || type === "response.incomplete") {
+      bindings.clear();
+      outputIndexes.clear();
+    }
     if (matchedArgument) {
       const next = rewritten.changed && isRecord(rewritten.value) ? rewritten.value : { ...event };
       next.encrypted_function_args = [];
