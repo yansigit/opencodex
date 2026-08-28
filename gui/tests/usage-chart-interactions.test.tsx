@@ -71,7 +71,7 @@ async function mount(node: React.ReactNode): Promise<HTMLElement> {
   return container;
 }
 
-function usagePayload() {
+function usagePayload(models: Array<{ provider: string; model: string; requests: number; totalTokens: number }> = []) {
   const yesterday = isoDay(-1);
   const today = isoDay();
   return {
@@ -86,7 +86,7 @@ function usagePayload() {
     },
     days: [
       { date: yesterday, requests: 2, measuredRequests: 2, reportedRequests: 2, totalTokens: 25, models: [] },
-      { date: today, requests: 5, measuredRequests: 5, reportedRequests: 5, totalTokens: 75, models: [] },
+      { date: today, requests: 5, measuredRequests: 5, reportedRequests: 5, totalTokens: 75, models },
     ],
     models: [], providers: [], historyTruncated: false, truncatedPrefixBytes: 0,
     entriesTruncated: false, entriesDropped: 0,
@@ -155,11 +155,17 @@ test("Usage heatmap exposes one roving entry and day/week keyboard movement", as
   const container = await mount(<Usage apiBase="http://usage-chart-test" />);
   await waitFor(() => container.querySelector(".heatmap-grid") !== null);
 
+  expect(container.querySelector(".heatmap-grid")?.getAttribute("role")).toBe("group");
+  expect(container.querySelectorAll(".heatmap-grid [role='gridcell']")).toHaveLength(0);
   expect(container.querySelectorAll(".heatmap-grid [tabindex='0']")).toHaveLength(1);
   const initial = container.querySelector<HTMLElement>(".heatmap-grid [tabindex='0']")!;
+  expect(initial.tagName).toBe("BUTTON");
   const initialDate = initial.dataset.date!;
   await act(async () => { initial.focus(); });
-  expect(container.querySelector(".heatmap-tip")?.textContent).toContain("requests");
+  const heatmapTip = document.querySelector(".heatmap-tip");
+  expect(heatmapTip?.textContent).toContain("requests");
+  expect(heatmapTip?.parentNode === document.body).toBe(true);
+  expect(container.contains(heatmapTip)).toBe(false);
 
   await act(async () => {
     initial.dispatchEvent(new win.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
@@ -191,7 +197,7 @@ test("seven-day bars expose the same detail on focus and touch", async () => {
 
   const today = bars[6]!;
   await act(async () => { today.focus(); });
-  const focused = container.querySelector(".daybar-tip")?.textContent;
+  const focused = document.querySelector(".daybar-tip")?.textContent;
   expect(focused).toContain("5 requests");
   expect(focused).toContain("75 tokens");
 
@@ -199,5 +205,41 @@ test("seven-day bars expose the same detail on focus and touch", async () => {
   await act(async () => {
     today.dispatchEvent(new win.PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
   });
-  expect(container.querySelector(".daybar-tip")?.textContent).toBe(focused);
+  expect(document.querySelector(".daybar-tip")?.textContent).toBe(focused);
+});
+
+test("Usage tooltip portals stay inside viewport gutters at the lower-right edge", async () => {
+  Object.defineProperties(win, {
+    innerWidth: { configurable: true, value: 320 },
+    innerHeight: { configurable: true, value: 240 },
+  });
+  const models = Array.from({ length: 8 }, (_, index) => ({
+    provider: "openai",
+    model: `model-${index}`,
+    requests: 1,
+    totalTokens: index + 1,
+  }));
+  globalThis.fetch = (async () => Response.json(usagePayload(models))) as typeof fetch;
+  const container = await mount(<Usage apiBase="http://usage-tip-bounds-test" />);
+  await waitFor(() => container.querySelector(".heatmap-grid") !== null);
+  const sevenDay = Array.from(container.querySelectorAll<HTMLButtonElement>(".usage-segmented-btn"))
+    .find(button => button.textContent === "7d")!;
+  await act(async () => { sevenDay.click(); });
+  await waitFor(() => container.querySelectorAll(".daybar").length === 7);
+
+  const today = container.querySelectorAll<HTMLElement>(".daybar")[6]!;
+  Object.defineProperty(today, "getBoundingClientRect", {
+    configurable: true,
+    value: () => ({ top: 220, right: 320, bottom: 240, left: 300, width: 20, height: 20, x: 300, y: 220, toJSON() {} }),
+  });
+  await act(async () => { today.focus(); });
+
+  const tooltip = document.querySelector<HTMLElement>(".daybar-tip")!;
+  expect(tooltip.parentNode === document.body).toBe(true);
+  expect(container.contains(tooltip)).toBe(false);
+  expect(tooltip.querySelectorAll(".daybar-tip-row")).toHaveLength(9);
+  expect(parseFloat(tooltip.style.left)).toBeGreaterThanOrEqual(8);
+  expect(parseFloat(tooltip.style.left) + parseFloat(tooltip.style.maxWidth)).toBeLessThanOrEqual(312);
+  expect(parseFloat(tooltip.style.bottom)).toBeGreaterThanOrEqual(8);
+  expect(parseFloat(tooltip.style.maxHeight) + parseFloat(tooltip.style.bottom)).toBeLessThanOrEqual(232);
 });
