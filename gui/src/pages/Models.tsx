@@ -272,11 +272,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const data = await readJsonIfOk<AliasView>(response);
     if (data && !signal?.aborted) setAliases(data);
   }, [apiBase]);
-  useEffect(() => {
-    const controller = new AbortController();
-    void reloadAliases(controller.signal);
-    return () => controller.abort();
-  }, [reloadAliases]);
 
   const saveProviderAlias = async (provider: string) => {
     const entered = window.prompt(t("models.aliasPrompt"), aliases.providers[provider] ?? "");
@@ -489,6 +484,25 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   }, [applyCatalog, cacheKey, fetchCatalog]);
 
   // Shadow/v2 controls must not wait on the models catalog (live discovery can be slow).
+  /** #2465: load the per-provider preset preview. */
+  const loadPresets = useCallback(async () => {
+    try {
+      const bounded = createBoundedFetch(15_000);
+      const r = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
+      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(r);
+      setPresets(data?.providers ?? {});
+    } catch {
+      setPresets({});
+    }
+  }, [apiBase]);
+
+  const loadModelDiscovery = useCallback(async () => {
+    try {
+      const r = await fetch(`${apiBase}/api/model-discovery`);
+      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(r)) ?? null);
+    } catch { setModelDiscovery(null); }
+  }, [apiBase]);
+
   useEffect(() => {
     // Both belong to the catalog tab; a hidden panel polling /api/v2 every ten seconds
     // is the same leak as the catalog poll above.
@@ -496,6 +510,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const timeout = window.setTimeout(() => {
       void loadShadowCall();
       void loadV2();
+      void reloadAliases();
       // Preset previews belong to the same tab. Loaded once rather than polled: the rules are
       // shipped code and the catalog poll above already refreshes the rows they describe.
       void loadPresets();
@@ -509,18 +524,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       window.clearTimeout(timeout);
       stop();
     };
-    // oxlint-disable-next-line react/react-compiler -- existing exhaustive-deps exception is intentional
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadPresets is a plain async loader
-    // like the rest of this file's; a useCallback wrapper trips PreserveManualMemo, and the
-    // effect only ever needs the current closure. Verified 2026-08-27: converting both loaders
-    // to useCallback and completing the dep array turns ONE warning into five react-compiler
-    // errors - two PreserveManualMemo, two Immutability (they are declared ~430 lines below this
-    // effect), and one EffectSetState - so the note above still holds against oxlint 1.78.
-    // Both gates suppress this one rule for this one file by config rather than by comment:
-    // gui/.oxlintrc.json (override) and gui/doctor.config.json (ignore.overrides). An in-file
-    // react-doctor-disable comment was tried and removed - it changed nothing, and
-    // react/react-compiler penalises a component for carrying suppressions at all.
-  }, [catalogActive, loadShadowCall, loadV2]);
+  }, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2, reloadAliases]);
 
   const groups = useMemo(
     () => buildProviderModelGroups(models, providers),
@@ -929,32 +933,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     if (!v2 || v2.multiAgentMode === mode) return;
     await putV2Setting({ multiAgentMode: mode });
   };
-
-
-  /**
-   * #2465: load the per-provider preset preview. Rules are evaluated server-side against the
-   * CURRENT catalog, so the count shown is the count an apply would produce.
-   */
-  const loadPresets = async () => {
-    try {
-      const bounded = createBoundedFetch(15_000);
-      const r = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
-      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(r);
-      setPresets(data?.providers ?? {});
-    } catch {
-      // A preset preview is decoration on top of a working Models page; failing to load it must
-      // not take the page down.
-      setPresets({});
-    }
-  };
-
-  const loadModelDiscovery = async () => {
-    try {
-      const r = await fetch(`${apiBase}/api/model-discovery`);
-      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(r)) ?? null);
-    } catch { setModelDiscovery(null); }
-  };
-
   const saveModelDiscovery = async (policy: "on" | "off", provider?: string) => {
     const r = await fetch(`${apiBase}/api/model-discovery`, {
       method: "PUT", headers: { "content-type": "application/json" },
