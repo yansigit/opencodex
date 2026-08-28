@@ -227,13 +227,20 @@ test("ProviderOverview native login success refreshes config and shows connected
 
 test("ProviderOverview native login shows a nested server error for a non-2xx response", async () => {
   const serverError = "Native AI Studio login failed (exit code 1)";
+  let statusRead = false;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/api/aistudio/login/native")) {
-      return new Response(JSON.stringify({
-        ok: false,
-        error: { message: serverError, type: "native_login_failed", code: "native_login_failed" },
-      }), { status: 500 });
+      return {
+        get ok() {
+          statusRead = true;
+          return false;
+        },
+        async json() {
+          if (!statusRead) throw new Error("response body parsed before status");
+          return { ok: false, error: { message: serverError, type: "native_login_failed", code: "native_login_failed" } };
+        },
+      } as Response;
     }
     return originalFetch(input);
   }) as typeof fetch;
