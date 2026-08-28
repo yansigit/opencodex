@@ -400,7 +400,7 @@ describe("handleResponses Codex WS relay selection", () => {
       const response = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST",
         headers: { "content-type": "application/json", authorization: "Bearer test" },
-        body: JSON.stringify({ model: "gpt-5.6-luna", stream: true, input: "delegate", tools: [{
+        body: JSON.stringify({ model: "gpt-5.5", stream: true, input: "delegate", tools: [{
           type: "namespace", name: "collaboration", tools: [
             { type: "function", name: "spawn_agent", parameters: { type: "object" } },
             { type: "function", name: "send_message", parameters: { type: "object" } },
