@@ -20,8 +20,8 @@ import {
 } from "./gen/agent_pb";
 import { errorText, execBytes, execStreamCloseBytes } from "./native-exec-common";
 import { resolveTrustedWindowsTaskkillExe } from "../../lib/windows-elevation";
-export { nativeShellDisabledMessage, type CursorNativeExecPolicyContext } from "./native-exec-policy";
 import { nativeShellDisabledMessage, type CursorNativeExecPolicyContext } from "./native-exec-policy";
+export { nativeShellDisabledMessage, type CursorNativeExecPolicyContext };
 import {
   createAdmissionGate,
   type AdmissionLease,
@@ -431,6 +431,7 @@ async function terminateBackgroundShell(
     let attemptKillFailures = 0;
     let treeTerminationStarted = false;
     let processGroupTerminationStarted = false;
+    let processGroupGone = false;
     let processGroupTerminationAttempted = false;
     let treeTerminationFailed = false;
     if (backgroundShellRuntime.platform === "win32") {
@@ -444,14 +445,15 @@ async function terminateBackgroundShell(
       processGroupTerminationAttempted = true;
       if (tryKillBackgroundShellProcessGroup(entry, "SIGTERM")) {
         processGroupTerminationStarted = true;
+        processGroupGone = isBackgroundShellProcessGroupAlive(entry) === "gone";
       } else {
         attemptKillFailures += 1;
         if (!tryKillBackgroundShell(entry)) attemptKillFailures += 1;
       }
     }
-    let closed = processGroupTerminationStarted ? false : await waitForBackgroundShellClose(entry);
+    let closed = processGroupTerminationStarted ? processGroupGone : await waitForBackgroundShellClose(entry);
     if (!closed && backgroundShells.get(entry.shellId) !== entry) closed = true;
-    if (processGroupTerminationStarted) {
+    if (processGroupTerminationStarted && !processGroupGone) {
       await waitForBackgroundShellGrace();
       if (isBackgroundShellProcessGroupAlive(entry) !== "gone" && !tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) {
         attemptKillFailures += 1;
