@@ -220,6 +220,14 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
         };
 
         const runOnce = async (activeRequest: ReturnType<typeof createCursorRequest>) => {
+          const effort = _parsed.options.reasoning;
+          const isHeavyReasoning = effort === "high"
+            || effort === "max"
+            || effort === "xhigh"
+            || activeRequest.modelId.includes("grok-4.6")
+            || activeRequest.modelId.includes("kimi-k3")
+            || activeRequest.modelId.includes("opus-4-8");
+          const heartbeatOnlyMs = isHeavyReasoning ? 300_000 : 180_000;
           // Envelope echo quarantine (devlog 260826 gap-10): external full-replay continuations
           // whose trailing input is a tool result sometimes ECHO the replayed "[Tool Result]"
           // envelope as assistant text (kimi-k3 ~30-40% of multi-round probes). Hold the first
@@ -260,6 +268,7 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
               translatorBudget: incoming.translatorBudget,
               requestDeclaresFullAccess: cursorRequestDeclaresFullAccess(activeRequest),
               sessionId: activeRequest.conversationId,
+              streamHeartbeatOnlyFailMs: heartbeatOnlyMs,
               ...(incoming.providerFetch ? { fetch: incoming.providerFetch } : {}),
             },
             activeRequest,

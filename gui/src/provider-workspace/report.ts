@@ -17,6 +17,7 @@ export interface ProviderQuotaReportView {
 export interface CapacityWindowView {
   usedPercent: number;
   incomplete?: boolean;
+  includedAccounts?: number;
   excludedAccounts?: number;
   nextRecoveryAt?: number;
   nextRecoveryPercent?: number;
@@ -25,6 +26,7 @@ export interface CapacityWindowView {
 export interface ProviderCapacityAggregationView {
   presentation: "aggregate" | "effective-account-fallback" | "coverage-only";
   incomplete: boolean;
+  includedAccounts: number;
   excludedAccounts: number;
   unknownPlanAccounts: number;
   partialWindowAccounts: number;
@@ -75,13 +77,6 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
         ...(typeof creditsRaw?.unlimited === "boolean" ? { unlimited: creditsRaw.unlimited } : {}),
       }
     : undefined;
-  if (creditsPercent !== undefined && !windows.some(window => /credits?/i.test(window.label))) {
-    windows.push({
-      label: "Total subscription credits",
-      percent: creditsPercent,
-      ...(creditsExpiresAt !== undefined ? { resetAt: creditsExpiresAt } : {}),
-    });
-  }
   const fiveHourPercent = finite(q.fiveHourPercent) ?? finite(q.shortPercent);
   const fiveHourResetAt = finite(q.fiveHourResetAt) ?? finite(q.shortResetAt);
   const out: AccountQuota = {
@@ -120,6 +115,7 @@ function capacityWindow(value: unknown): CapacityWindowView | undefined {
   return {
     usedPercent,
     ...(typeof row.incomplete === "boolean" ? { incomplete: row.incomplete } : {}),
+    ...(finite(row.includedAccounts) !== undefined ? { includedAccounts: row.includedAccounts as number } : {}),
     ...(finite(row.excludedAccounts) !== undefined ? { excludedAccounts: row.excludedAccounts as number } : {}),
     ...(finite(row.nextRecoveryAt) !== undefined ? { nextRecoveryAt: row.nextRecoveryAt as number } : {}),
     ...(finite(row.nextRecoveryPercent) !== undefined ? { nextRecoveryPercent: row.nextRecoveryPercent as number } : {}),
@@ -134,6 +130,7 @@ export function capacityAggregationFromReport(report?: ProviderQuotaReportView):
   if (row.kind !== "capacity-weighted-v1" || row.scope !== "routable-known") return null;
   const excludedAccounts = finite(row.excludedAccounts);
   const unknownPlanAccounts = finite(row.unknownPlanAccounts);
+  const includedAccounts = finite(row.includedAccounts) ?? 0;
   if (excludedAccounts === undefined || unknownPlanAccounts === undefined || typeof row.incomplete !== "boolean") return null;
   const currentRaw = row.currentAccount && typeof row.currentAccount === "object" && !Array.isArray(row.currentAccount)
     ? row.currentAccount as Record<string, unknown>
@@ -158,6 +155,7 @@ export function capacityAggregationFromReport(report?: ProviderQuotaReportView):
   return {
     presentation,
     incomplete: row.incomplete,
+    includedAccounts,
     excludedAccounts,
     unknownPlanAccounts,
     partialWindowAccounts: finite(row.partialWindowAccounts) ?? 0,

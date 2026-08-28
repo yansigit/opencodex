@@ -39,9 +39,16 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
   const primaryQuota = accountQuotaFromReport(report);
   const credits = primaryQuota?.creditsUsd;
   const showsAggregate = aggregation?.presentation === "aggregate";
+  const totalPoolAccounts = (aggregation?.includedAccounts ?? 0) + (aggregation?.excludedAccounts ?? 0);
+  const isMultiAccountPool = Boolean(showsAggregate && totalPoolAccounts > 1);
+  const displayQuota = (!isMultiAccountPool && aggregation?.currentAccount?.quota)
+    ? aggregation.currentAccount.quota
+    : primaryQuota;
+  const displayPlan = !isMultiAccountPool ? aggregation?.currentAccount?.plan : undefined;
+  const showsCurrentAccountBreakdown = Boolean(showsAggregate && isMultiAccountPool && aggregation?.currentAccount?.quota);
   const incompleteWindowKeys = new Set<QuotaWindowKey>();
   const incompleteCustomWindowLabels = new Set<string>();
-  if (showsAggregate && aggregation) {
+  if (showsAggregate && isMultiAccountPool && aggregation) {
     if (aggregation.fiveHour?.incomplete) incompleteWindowKeys.add("fiveHour");
     if (aggregation.weekly?.incomplete) incompleteWindowKeys.add("weekly");
     if (aggregation.monthly?.incomplete) incompleteWindowKeys.add("monthly");
@@ -49,7 +56,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
       if (window.incomplete) incompleteCustomWindowLabels.add(window.label);
     }
   }
-  const recoveryRows: Array<{ key: number; label: string; window: CapacityWindowView }> = showsAggregate && aggregation ? [
+  const recoveryRows: Array<{ key: number; label: string; window: CapacityWindowView }> = showsAggregate && isMultiAccountPool && aggregation ? [
     ...(aggregation.fiveHour ? [{ key: 0, label: t("codexAuth.fiveHour"), window: aggregation.fiveHour }] : []),
     ...(aggregation.weekly ? [{ key: 1, label: t("codexAuth.weekly"), window: aggregation.weekly }] : []),
     ...(aggregation.monthly ? [{ key: 2, label: t("codexAuth.monthly"), window: aggregation.monthly }] : []),
@@ -71,16 +78,17 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
 
   return (
     <>
-      {showsAggregate && <div className="pws-capacity-label">{t("pws.capacity.estimate")}</div>}
-      {(primaryQuota || pending) && (
+      {showsAggregate && isMultiAccountPool && <div className="pws-capacity-label">{t("pws.capacity.estimate")}</div>}
+      {(displayQuota || pending) && (
         <QuotaBars
-          quota={primaryQuota}
+          quota={displayQuota}
+          plan={displayPlan}
           threshold={80}
           t={t}
           layout="stacked"
           pending={pending}
-          incompleteWindowKeys={showsAggregate ? incompleteWindowKeys : undefined}
-          incompleteCustomWindowLabels={showsAggregate ? incompleteCustomWindowLabels : undefined}
+          incompleteWindowKeys={showsAggregate && isMultiAccountPool ? incompleteWindowKeys : undefined}
+          incompleteCustomWindowLabels={showsAggregate && isMultiAccountPool ? incompleteCustomWindowLabels : undefined}
         />
       )}
       {(credits || aggregation) && (
@@ -104,7 +112,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
                 </div>]
               : []
           ))}
-          {showsAggregate && aggregation && aggregation.currentAccount?.quota && (
+          {showsCurrentAccountBreakdown && aggregation?.currentAccount?.quota && (
             <div className="pws-capacity-current">
               <span className="pws-capacity-label">
                 {t("pws.capacity.currentAccount")}

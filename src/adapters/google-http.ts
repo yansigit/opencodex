@@ -39,7 +39,7 @@ function requestForHost(request: AdapterRequest, host: string): AdapterRequest {
   return { ...request, url: target.toString() };
 }
 
-type CcaSseProbe = "empty" | "candidate" | "unavailable" | "quota_exhausted" | "geo_blocked" | "terminal";
+type CcaSseProbe = "empty" | "candidate" | "unavailable" | "quota_exhausted" | "rate_limit" | "geo_blocked" | "terminal";
 
 function probeCcaSseEvent(bytes: Uint8Array): CcaSseProbe {
   const text = new TextDecoder().decode(bytes);
@@ -67,6 +67,7 @@ function probeCcaSseEvent(bytes: Uint8Array): CcaSseProbe {
       }
       const serialized = JSON.stringify(frame);
       if (isQuotaExhaustedBody(serialized)) return "quota_exhausted";
+      if (/rate[- ]limit|too many requests|per[- ]minute|requests per minute|concurrent request/i.test(serialized)) return "rate_limit";
       if (isAntigravityGeoBlockedBody(serialized)) return "geo_blocked";
       return "terminal";
     }
@@ -209,15 +210,15 @@ async function prepareCcaSseResponse(
           if (probe === "unavailable") {
             return failoverOrPassthrough();
           }
-          if (probe === "quota_exhausted" || probe === "geo_blocked") {
+          if (probe === "quota_exhausted" || probe === "rate_limit" || probe === "geo_blocked") {
             if (accountId) {
               recordAntigravitySyntheticFailure(accountId, {
-                code: probe === "quota_exhausted" ? 429 : 403,
-                status: probe === "quota_exhausted" ? "RESOURCE_EXHAUSTED" : "PERMISSION_DENIED",
-                message: probe === "quota_exhausted" ? "quota exceeded" : "user location is not supported",
+                code: probe === "geo_blocked" ? 403 : 429,
+                status: probe === "geo_blocked" ? "PERMISSION_DENIED" : "RESOURCE_EXHAUSTED",
+                message: probe === "quota_exhausted" ? "quota exceeded" : probe === "rate_limit" ? "rate limit exceeded" : "user location is not supported",
               });
             }
-            const status = probe === "quota_exhausted" ? 429 : 403;
+            const status = probe === "geo_blocked" ? 403 : 429;
             return passthrough(undefined, status);
           }
         }
@@ -244,15 +245,15 @@ async function prepareCcaSseResponse(
           }
           return failoverOrPassthrough();
         }
-        if (probe === "quota_exhausted" || probe === "geo_blocked") {
+        if (probe === "quota_exhausted" || probe === "rate_limit" || probe === "geo_blocked") {
           if (accountId) {
             recordAntigravitySyntheticFailure(accountId, {
-              code: probe === "quota_exhausted" ? 429 : 403,
-              status: probe === "quota_exhausted" ? "RESOURCE_EXHAUSTED" : "PERMISSION_DENIED",
-              message: probe === "quota_exhausted" ? "quota exceeded" : "user location is not supported",
+              code: probe === "geo_blocked" ? 403 : 429,
+              status: probe === "geo_blocked" ? "PERMISSION_DENIED" : "RESOURCE_EXHAUSTED",
+              message: probe === "quota_exhausted" ? "quota exceeded" : probe === "rate_limit" ? "rate limit exceeded" : "user location is not supported",
             });
           }
-          const status = probe === "quota_exhausted" ? 429 : 403;
+          const status = probe === "geo_blocked" ? 403 : 429;
           return passthrough(overflow, status);
         }
         if (probe === "terminal") return passthrough(overflow);

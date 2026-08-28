@@ -207,6 +207,17 @@ import {
   type PackageTreeIntegrityGuard,
 } from "../lib/package-tree-integrity";
 import { detectInstall } from "../update/index";
+import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
+
+function isAiStudioSessionOrigin(origin: string | null): boolean {
+  return !!origin && (origin.startsWith("chrome-extension://") || origin === "https://aistudio.google.com");
+}
+
+function withAiStudioSessionCors(resp: Response, req: Request): Response {
+  const origin = req.headers.get("Origin");
+  if (isAiStudioSessionOrigin(origin) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
+  return resp;
+}
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
 const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
@@ -461,6 +472,8 @@ export interface StartServerDeps {
   readinessGate?: ReadinessGate;
   /** Test-only package-tree observation; production captures package.json identity at boot. */
   packageTreeIntegrity?: PackageTreeIntegrityGuard;
+  /** Test-only seam for the awaited native AI Studio login process. */
+  runAiStudioNativeLogin?: typeof runAiStudioNativeLogin;
 }
 
 function inspectStartupOwnership(
@@ -898,6 +911,20 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (readyzPath !== undefined) {
           return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
         }
+        if (url.pathname === "/api/aistudio/session") {
+          const origin = req.headers.get("Origin");
+          if (isAiStudioSessionOrigin(origin)) {
+            return new Response(null, {
+              status: 204,
+              headers: {
+                "Access-Control-Allow-Origin": origin as string,
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-OpenCodex-API-Key",
+                Vary: "Origin, Access-Control-Request-Headers",
+              },
+            });
+          }
+        }
         const managementPreflight = url.pathname.startsWith("/api/");
         const allowed = managementPreflight
           ? isAllowedManagementOrigin(req, config)
@@ -948,6 +975,82 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
+      }
+
+      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws" || url.pathname === "/v1/ws/aistudio/status") {
+        return withCors(jsonResponse({
+          error: "gone",
+          message: "AI Studio browser relay endpoints are deprecated and return 410 Gone. Use native macOS login (ocx login) or the session exporter extension.",
+        }, 410), req, policy);
+      }
+
+      if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy), req);
+        }
+        const origin = req.headers.get("Origin");
+        if (!isAllowedRequestOrigin(req, policy) && !isAiStudioSessionOrigin(origin)) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req);
+        }
+        try {
+          const bodyJson = await req.json() as any;
+          const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
+          if (typeof bodyJson.token === "string" && bodyJson.token) {
+            saveAiStudioSessionFromToken(bodyJson.token);
+          } else if (Array.isArray(bodyJson.cookies)) {
+            saveAiStudioSession({
+              selectedProject: bodyJson.selectedProject || "",
+              windowId: bodyJson.windowId || "",
+              cookies: bodyJson.cookies,
+            });
+          } else {
+            return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req);
+          }
+          return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req);
+        } catch (error) {
+          return withAiStudioSessionCors(withCors(jsonResponse({ error: String(error) }, 400), req, policy), req);
+        }
+      }
+
+      if (url.pathname === "/aistudio/bridge" && req.method === "GET") {
+        const bridgeHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Google AI Studio Relay Deprecated - OpenCodex</title></head>
+<body><h1>HTTP 410 Gone: AI Studio Browser Relay Deprecated</h1>
+<p>The browser relay has been retired. Use native macOS authentication or the session exporter extension.</p>
+<p>Run <code>ocx login</code> to connect.</p></body></html>`;
+        return new Response(bridgeHtml, { status: 410, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+
+      if (url.pathname === "/aistudio/bridge.user.js" && req.method === "GET") {
+        return new Response("// HTTP 410 Gone: OpenCodex AI Studio browser relay and userscripts are deprecated.\n", {
+          status: 410,
+          headers: { "Content-Type": "application/javascript; charset=utf-8" },
+        });
+      }
+
+      if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        if (!isAllowedRequestOrigin(req, policy)) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
+        }
+        try {
+          const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
+          if (login.kind === "unsupported") return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
+          if (login.kind === "cancelled") return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
+          if (login.kind === "failed") return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
+          const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
+            method: "POST",
+            headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
+          });
+          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, deps.managementApi);
+          const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+          if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
+          return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
+        } catch (error) {
+          return jsonResponse({ ok: false, error: String(error) }, 500, req, policy);
+        }
       }
 
       if (url.pathname === "/healthz" && req.method === "GET") {
