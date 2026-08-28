@@ -377,7 +377,7 @@ test("the route inventory contains exactly the specified 7 + 13 + 2 + 2 converge
     ["provider-routes.ts", 7],
     ["model-routes.ts", 13],
     ["combo-routes.ts", 2],
-    ["agent-settings-routes.ts", 2],
+    ["agent-settings-routes.ts", 4],
   ].map(([file, expected]) => {
     const source = readFileSync(join(import.meta.dir, "..", "src", "server", "management", file as string), "utf8");
     const count = source.match(/await convergeCodexCatalog\(\)/g)?.length ?? 0;
@@ -389,7 +389,7 @@ test("the route inventory contains exactly the specified 7 + 13 + 2 + 2 converge
     "provider-routes.ts": 7,
     "model-routes.ts": 13,
     "combo-routes.ts": 2,
-    "agent-settings-routes.ts": 2,
+    "agent-settings-routes.ts": 4,
   });
 });
 

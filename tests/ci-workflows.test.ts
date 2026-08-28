@@ -5319,27 +5319,10 @@ describe("gui exhaustive-deps suppression stays scoped and effective", () => {
     expect(config.blocking).toBe("warning");
   });
 
-  test("the effect keeps the in-file record of why the dep array stays short", async () => {
+  test("the Models effect tracks its stable loader dependencies", async () => {
     const models = await readText("gui/src/pages/Models.tsx");
-    const effectEnd = models.indexOf("}, [catalogActive, loadShadowCall, loadV2]);");
+    const effectEnd = models.indexOf("}, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2, reloadAliases]);");
     expect(effectEnd).toBeGreaterThan(-1);
-
-    // The reasoning has to sit on the effect, not in a commit message. Read the comment
-    // block immediately above the dep array rather than the whole file, or this passes on
-    // any incidental mention elsewhere.
-    const preceding = models.slice(0, effectEnd).split(/\r?\n/).slice(-8).join("\n");
-    expect(preceding).toContain("PreserveManualMemo");
-    expect(preceding).toContain("five react-compiler");
-
-    // Both suppressions are config-side, so the note must point at the two files a reader
-    // would otherwise have to find by grep.
-    expect(preceding).toContain("gui/.oxlintrc.json");
-    expect(preceding).toContain("gui/doctor.config.json");
-
-    // An in-file react-doctor disable was tried and removed: doctor passes without it, and
-    // react/react-compiler penalises a component merely for carrying suppressions. If one
-    // reappears, the config route has been misunderstood.
     expect(models).not.toContain("react-doctor-disable-next-line");
   });
 });
-

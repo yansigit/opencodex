@@ -5,7 +5,11 @@ import { isModelCacheGenerationCurrent } from "../model-cache";
 import type { GenerationContext } from "../../lib/state-store-sweeper";
 import { captureConfigGeneration } from "../../lib/state-store-sweeper";
 import { assertNotRealHomeUnderTest } from "../../lib/test-home-guard";
-import { CURSOR_STATIC_MODELS } from "../../adapters/cursor/discovery";
+import {
+  CURSOR_KNOWN_UNCALLABLE_MODEL_IDS,
+  CURSOR_STATIC_MODELS,
+  inferCursorContextWindow,
+} from "../../adapters/cursor/discovery";
 import { cursorModelEffortLadder } from "../../adapters/cursor/effort-map";
 import { generatedModelMetadata, type CatalogModel } from "./parsing";
 
@@ -492,6 +496,14 @@ export function registryLayerForModel(provider: string, modelId: string): ModelM
         ...(cursorModel.supportsReasoningEffort
           ? { reasoningEfforts: cursorModelEffortLadder(cursorModel.id) ?? [] }
           : {}),
+      };
+    }
+    // Quarantined models stay out of the routed catalog, but retain metadata for
+    // existing configurations and diagnostics.
+    if (CURSOR_KNOWN_UNCALLABLE_MODEL_IDS.has(modelId)) {
+      return {
+        contextWindow: inferCursorContextWindow(modelId),
+        reasoningEfforts: cursorModelEffortLadder(modelId) ?? [],
       };
     }
   }
