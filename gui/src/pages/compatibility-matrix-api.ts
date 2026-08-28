@@ -342,13 +342,13 @@ export async function fetchLabPageData(
   }
   const [verdictPage, subjects] = await Promise.all([
     fetchVerdictPage(apiBase, filters, undefined, signal),
-    fetchAllSubjects(apiBase, signal),
+    fetchSubjectPage(apiBase, undefined, signal),
   ]);
   return {
     status,
     verdicts: verdictPage.verdicts,
-    subjects: subjects.rows,
-    subjectsTruncated: subjects.truncated,
+    subjects: subjects.subjects,
+    subjectsTruncated: subjects.hasMore,
     hasMore: verdictPage.hasMore,
     nextCursor: verdictPage.nextCursor,
     community,
