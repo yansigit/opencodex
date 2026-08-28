@@ -43,6 +43,10 @@ export type AgentTaskRecoveryState = {
   model: string | null;
 };
 
+export type V2RoutedDelegationBridgeState = {
+  enabled: boolean;
+};
+
 type DelegationResponse = {
   multiAgentGuidanceEnabled?: boolean;
   syncCodexSubagentDefaults?: boolean;

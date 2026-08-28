@@ -70,7 +70,7 @@ route-specific results rather than repeating this table.
 
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
-| `GET, PUT /api/v2` | Read or change native multi-agent v2 mode, thread settings, and the V2 native parent override | 400 invalid settings/target; 502 transition or persistence failure |
+| `GET, PUT /api/v2` | Read or change native multi-agent v2 mode, thread settings, V2 native parent override, and routed delegation bridge | 400 invalid settings/target; 502 transition or persistence failure |
 | `GET, PUT /api/injection-model` | Read or set the injected sub-agent model, effort, prompt, and guidance settings | 400 invalid model, effort, or body |
 | `GET, PUT /api/effort-caps` | Read or set global and sub-agent reasoning-effort ceilings | 400 invalid ladder value |
 | `GET, PUT /api/subagent-models` | Read or order the models advertised to sub-agents | 400 invalid list or more than five models |
@@ -133,6 +133,23 @@ stored target and enabled selection remain available for reactivation. Native ch
 rewritten, so a native child can still create a routed grandchild with an unreadable encrypted task.
 This API exposes no automatic selection, nested override, protocol decryption, per-thread pin, or
 CLI operation.
+
+### Routed V2 delegation bridge
+
+`GET /api/v2` returns `v2RoutedDelegationBridge` as a boolean, defaulting to `false`. `PUT /api/v2`
+accepts the scalar boolean as a partial update:
+
+```json
+{ "v2RoutedDelegationBridge": true }
+```
+
+It can be armed outside explicit V2 but activates only for eligible native V2 roots. It preserves
+native GPT-to-GPT delegation and is distinct from parent override and encrypted-task recovery. The
+bridge is root-only; a native child creating a routed grandchild remains subject to the encrypted
+boundary. There is no model selector: tool choice is model-directed. The native Codex UI can show the
+original model while routed prompts, repository context, and tool results follow the selected
+provider's availability, context, behavior, billing, and privacy terms. `false` disables subsequent
+requests immediately.
 
 ### Combos
 

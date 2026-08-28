@@ -253,6 +253,29 @@ describe("opencodex config defaults", () => {
     }
   });
 
+  test("v2 routed delegation bridge is strict on writes and degrades malformed hand edits", () => {
+    const defaults = getDefaultConfig();
+    expect(validateConfigCandidate({ ...defaults, v2RoutedDelegationBridge: true })).toMatchObject({
+      ok: true,
+      config: { v2RoutedDelegationBridge: true },
+    });
+    expect(validateConfigCandidate({ ...defaults, v2RoutedDelegationBridge: "true" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("v2RoutedDelegationBridge"),
+    });
+
+    writeConfig({
+      port: 12345,
+      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1" } },
+      defaultProvider: "custom",
+      v2RoutedDelegationBridge: "true",
+    });
+    const loaded = loadConfig();
+    expect(loaded.v2RoutedDelegationBridge).toBeUndefined();
+    expect(loaded.providers.custom).toBeDefined();
+    expect(loaded.port).toBe(12345);
+  });
+
   test("usage and MCP config overrides change the effective bound while defaults remain compatible", () => {
     const defaults = getDefaultConfig();
     expect(defaults.managementUsageMaxReadBytes).toBe(64 * 1024 * 1024);
