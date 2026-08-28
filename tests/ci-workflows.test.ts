@@ -1044,6 +1044,7 @@ describe("GitHub Actions hardening", () => {
       "pull_request_target",
       "status",
       "workflow_dispatch",
+      "workflow_run",
     ]);
 
     // And the trigger is exactly a `types:` list — nothing else.
@@ -1058,6 +1059,10 @@ describe("GitHub Actions hardening", () => {
     expect(Object.keys(workflow.on?.pull_request_target ?? {})).toEqual(["types"]);
     expect(Object.prototype.hasOwnProperty.call(workflow.on ?? {}, "status")).toBe(true);
     expect(workflow.on?.check_run).toEqual({ types: ["completed"] });
+    expect(workflow.on?.workflow_run).toEqual({
+      workflows: ["Cross-platform CI"],
+      types: ["completed"],
+    });
     expect(Object.keys(workflow.on?.workflow_dispatch?.inputs ?? {})).toEqual(["pull_number"]);
 
     // Exactly the scopes this gate needs. `pull-requests: write` covers title and
@@ -1092,6 +1097,10 @@ describe("GitHub Actions hardening", () => {
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.state == 'success'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.sender.login == 'coderabbitai[bot]'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.sender.id == 136622811");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.name == 'Cross-platform CI'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.event == 'pull_request'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.status == 'completed'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.repository.full_name == github.repository");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'gui-screenshot-waived'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'intake: hygiene-blocked'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'maintainer-sponsored'");
@@ -3222,6 +3231,31 @@ describe("GitHub Actions hardening", () => {
         "Could not list PRs associated with commit",
       );
       expect(result.warnings.join(" ")).toContain("Could not list open PRs");
+    });
+
+    test("the resolver maps a completed same-repository Cross-platform CI run to its one current open PR", async () => {
+      const headSha = "7d42d17f213a632fc2def56053f0cd574b13d459";
+      const result = await runResolver({
+        pr: { base: { ref: "dev" }, number: 4242, head: { sha: headSha } },
+        eventName: "workflow_run",
+        workflowRun: {
+          name: "Cross-platform CI",
+          event: "pull_request",
+          status: "completed",
+          conclusion: "success",
+          head_sha: headSha,
+          repository: { full_name: "lidge-jun/opencodex" },
+          head_repository: { full_name: "lidge-jun/opencodex" },
+        },
+        openPulls: [
+          { number: 4242, state: "open", head: { sha: headSha } },
+          { number: 7777, state: "open", head: { sha: "other" } },
+        ],
+      });
+
+      expect(result.outputs).toEqual([{ name: "pull-number", value: "4242" }]);
+      expect(callsTo(result, "pulls.list")).toHaveLength(1);
+      expect(callsTo(result, "repos.listPullRequestsAssociatedWithCommit")).toEqual([]);
     });
 
     test("a non-maintainer issue_comment does not re-run the gate", async () => {

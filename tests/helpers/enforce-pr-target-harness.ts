@@ -114,6 +114,16 @@ export type RunOptions = {
   statusContext?: string;
   /** Legacy commit-status state. Defaults to `success`. */
   statusState?: string;
+  /** Completed Cross-platform CI workflow_run payload fields. */
+  workflowRun?: {
+    name?: string;
+    event?: string;
+    status?: string;
+    conclusion?: string | null;
+    head_sha?: string;
+    repository?: { full_name?: string };
+    head_repository?: { full_name?: string };
+  };
   /** Shorthand for a single associated-PR response page. */
   associatedPullRequests?: unknown[];
   /** Page-specific PRs returned by repos.listPullRequestsAssociatedWithCommit. */
@@ -1025,6 +1035,22 @@ export async function runEnforcePrTarget(
               context: options.statusContext ?? "CodeRabbit",
               state: options.statusState ?? "success",
             }
+          : options.eventName === "workflow_run"
+            ? {
+                workflow_run: {
+                  name: options.workflowRun?.name ?? "Cross-platform CI",
+                  event: options.workflowRun?.event ?? "pull_request",
+                  status: options.workflowRun?.status ?? "completed",
+                  conclusion: options.workflowRun?.conclusion ?? "success",
+                  head_sha: options.workflowRun?.head_sha ?? pr.head.sha,
+                  repository: {
+                    full_name: options.workflowRun?.repository?.full_name ?? "lidge-jun/opencodex",
+                  },
+                  head_repository: {
+                    full_name: options.workflowRun?.head_repository?.full_name ?? "lidge-jun/opencodex",
+                  },
+                },
+              }
           : options.eventName === "workflow_dispatch"
             ? { inputs: { pull_number: String(options.resolvedPullNumber ?? pr.number) } }
           : { pull_request: eventPr }),
