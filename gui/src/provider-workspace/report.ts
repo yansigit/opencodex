@@ -75,9 +75,21 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
         ...(typeof creditsRaw?.unlimited === "boolean" ? { unlimited: creditsRaw.unlimited } : {}),
       }
     : undefined;
+  if (creditsPercent !== undefined && !windows.some(window => /credits?/i.test(window.label))) {
+    windows.push({
+      label: "Total subscription credits",
+      percent: creditsPercent,
+      ...(creditsExpiresAt !== undefined ? { resetAt: creditsExpiresAt } : {}),
+    });
+  }
+  const fiveHourPercent = finite(q.fiveHourPercent) ?? finite(q.shortPercent);
+  const fiveHourResetAt = finite(q.fiveHourResetAt) ?? finite(q.shortResetAt);
   const out: AccountQuota = {
-    ...(finite(q.fiveHourPercent) !== undefined ? { fiveHourPercent: q.fiveHourPercent as number } : {}),
-    ...(finite(q.fiveHourResetAt) !== undefined ? { fiveHourResetAt: q.fiveHourResetAt as number } : {}),
+    ...(fiveHourPercent !== undefined ? { fiveHourPercent } : {}),
+    ...(fiveHourResetAt !== undefined ? { fiveHourResetAt } : {}),
+    ...(finite(q.shortPercent) !== undefined ? { shortPercent: q.shortPercent as number } : {}),
+    ...(finite(q.shortResetAt) !== undefined ? { shortResetAt: q.shortResetAt as number } : {}),
+    ...(finite(q.shortWindowSeconds) !== undefined ? { shortWindowSeconds: q.shortWindowSeconds as number } : {}),
     ...(finite(q.weeklyPercent) !== undefined ? { weeklyPercent: q.weeklyPercent as number } : {}),
     ...(finite(q.weeklyResetAt) !== undefined ? { weeklyResetAt: q.weeklyResetAt as number } : {}),
     ...(finite(q.monthlyPercent) !== undefined ? { monthlyPercent: q.monthlyPercent as number } : {}),

@@ -141,18 +141,12 @@ export interface FamilyRows {
 }
 
 export interface CodexQuotaDto {
+  fiveHourPercent?: number;
+  fiveHourResetAt?: number;
   weeklyPercent?: number;
   monthlyPercent?: number;
   weeklyResetAt?: number;
   monthlyResetAt?: number;
-  /**
-   * Five-hour window, as the per-account provider probe reports it
-   * (`/api/oauth/accounts?quota=1`). Distinct from `shortPercent`, which is the Codex pool's
-   * self-declared burst window; the two surfaces name the same idea differently and both reach
-   * this DTO.
-   */
-  fiveHourPercent?: number;
-  fiveHourResetAt?: number;
   /** Sub-day burst window, when upstream declares one (#1791). */
   shortPercent?: number;
   shortResetAt?: number;
@@ -166,8 +160,6 @@ export interface ProviderQuotaWindowDto {
 }
 
 export interface ProviderQuotaDto extends CodexQuotaDto {
-  fiveHourPercent?: number;
-  fiveHourResetAt?: number;
   customWindows?: ProviderQuotaWindowDto[];
   updatedAt?: number;
 }
@@ -195,7 +187,7 @@ interface CodexAccountDto {
 function projectQuota(quota: CodexQuotaDto | null | undefined): CodexQuotaDto | null {
   if (!quota) return null;
   const projected: CodexQuotaDto = {};
-  for (const key of ["weeklyPercent", "monthlyPercent", "weeklyResetAt", "monthlyResetAt", "shortPercent", "shortResetAt", "shortWindowSeconds"] as const) {
+  for (const key of ["fiveHourPercent", "fiveHourResetAt", "weeklyPercent", "monthlyPercent", "weeklyResetAt", "monthlyResetAt", "shortPercent", "shortResetAt", "shortWindowSeconds"] as const) {
     if (typeof quota[key] === "number" && Number.isFinite(quota[key])) projected[key] = quota[key];
   }
   return projected;

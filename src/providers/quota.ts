@@ -1165,7 +1165,12 @@ async function fetchChatGptForwardQuota(
   }
   const activeUsable = !!active && !active.paused && active.needsReauth !== true;
   const quota = activeUsable && active?.quota
-    ? { ...active.quota, updatedAt: active.quota.updatedAt ?? Date.now() } as CodexCapacityQuota
+    ? {
+        ...active.quota,
+        fiveHourPercent: active.quota.fiveHourPercent ?? active.quota.shortPercent,
+        fiveHourResetAt: active.quota.fiveHourResetAt ?? active.quota.shortResetAt,
+        updatedAt: active.quota.updatedAt ?? Date.now(),
+      } as CodexCapacityQuota
     : null;
   const quotaFresh = !!quota
     && Number.isFinite(quota.updatedAt)

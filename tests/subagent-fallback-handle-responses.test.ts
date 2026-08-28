@@ -1632,10 +1632,10 @@ describe("native passthrough terminal finalization", () => {
       expect(result.healthBlocked).toBe(true);
     });
 
-    test(`${streamMode}: generic 500 failure invokes terminal callback without health block`, async () => {
+    test(`${streamMode}: client invalid request failure invokes terminal callback without health block`, async () => {
       const result = await runStreamingSpawn(
         streamMode,
-        failedSse("internal server error", "server_error"),
+        failedSse("invalid request: missing field", "invalid_request_error"),
       );
       expect(result.terminals).toEqual(["failed"]);
       expect(result.healthBlocked).toBe(false);

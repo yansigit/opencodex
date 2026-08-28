@@ -51,6 +51,7 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "provider.name.commandCodeAuth",
   "provider.name.commandCodeApi",
   "provider.name.volcengine",
+  "pws.aiStudio",
   "provider.name.volcengineCodingPlan",
   "provider.name.volcengineAgentPlan",
   "routing.unavailable",

@@ -664,11 +664,21 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     let body: { name?: unknown; provider?: unknown; setDefault?: boolean };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const name = typeof body.name === "string" ? body.name.trim() : "";
-    const providerError = providerManagementConfigError(name, body.provider);
+    const submittedProvider = isPlainRecord(body.provider)
+      ? structuredClone(body.provider) as Record<string, unknown>
+      : body.provider;
+    const submittedCredential = isPlainRecord(submittedProvider)
+      && isPlainRecord(submittedProvider.azureCredential)
+      ? submittedProvider.azureCredential as Record<string, unknown>
+      : undefined;
+    if (typeof submittedCredential?.managedIdentityClientId === "string") {
+      submittedCredential.managedIdentityClientId = submittedCredential.managedIdentityClientId.trim();
+    }
+    const providerError = providerManagementConfigError(name, submittedProvider);
     if (providerError) return jsonResponse({ error: providerError }, 400);
-    const serviceTierError = providerServiceTierConfigError(name, body.provider);
+    const serviceTierError = providerServiceTierConfigError(name, submittedProvider);
     if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
-    const prov = body.provider ? stripCodexRuntimeProviderFields(body.provider as OcxProviderConfig) : undefined;
+    const prov = submittedProvider ? stripCodexRuntimeProviderFields(submittedProvider as OcxProviderConfig) : undefined;
     // PATCH already clears on null; POST persisted the body as submitted, so a `null` here
     // reached disk and the next loadConfig() refused it. Canonicalize to absent, which is what
     // "clear" means everywhere else.

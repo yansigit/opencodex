@@ -155,11 +155,11 @@ export default function ProviderOverview({
         });
       }
     } finally {
-      if (connectionAbortRef.current?.controller === controller) {
-        connectionAbortRef.current = null;
-      }
-    }
-  }, [apiBase, connectionProbeKey, item.name, t]);
+     if (connectionAbortRef.current?.controller === controller) {
+       connectionAbortRef.current = null;
+     }
+   }
+  }, [apiBase, connectionProbeKey, isAiStudioWeb, item.name, t]);
 
   const handleAiStudioReauth = useCallback(async () => {
     if (!apiBase) return;
@@ -189,15 +189,15 @@ export default function ProviderOverview({
     } catch (e) {
       if (controller.signal.aborted || (e instanceof DOMException && e.name === "AbortError")) return;
       setAiStudioReauthMsg(e instanceof Error ? e.message : t("pws.aiStudio.loginFailed"));
-    } finally {
-      if (aiStudioReauthAbortRef.current === controller) {
-        aiStudioReauthAbortRef.current = null;
-      }
-      if (!controller.signal.aborted) {
-        setAiStudioReauthBusy(false);
-      }
-    }
-  }, [apiBase, t]);
+   } finally {
+     if (aiStudioReauthAbortRef.current === controller) {
+       aiStudioReauthAbortRef.current = null;
+     }
+     if (!controller.signal.aborted) {
+       setAiStudioReauthBusy(false);
+     }
+   }
+  }, [apiBase, onRefreshConfig, t]);
 
   useEffect(() => {
     if (!isAiStudioWeb || aiStudioAuthState !== "checking" || !apiBase) return;
