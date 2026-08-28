@@ -384,9 +384,10 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
           const next = createCursorRequest(_parsed, { forceFreshConversation: true });
           rekeyContextUsage(failedConversationId, next.conversationId);
           _parsed._cursorConversationId = next.conversationId;
-          if (_parsed._clientThreadId && _parsed._cursorIsolateConversation !== true) {
+          const threadOwner = cursorClientThreadOwner(_parsed);
+          if (threadOwner && _parsed._cursorIsolateConversation !== true) {
             rememberCursorThreadConversation(
-              _parsed._clientThreadId,
+              threadOwner,
               next.conversationId,
               _parsed._cursorIdentityScope,
             );
