@@ -119,7 +119,11 @@ export interface SidecarPatch {
   };
 }
 export interface ShadowCallData { enabled: boolean; model: string; sourceModels?: string[] }
-export interface UsageSummary30d { summary: { requests: number; totalTokens: number; coverageRatio: number } }
+export interface UsageSummary30d {
+  summary: { requests: number; totalTokens: number; coverageRatio: number };
+  /** Optional because older proxies return only the summary. */
+  days?: Array<{ date: string; requests: number; totalTokens: number }>;
+}
 export type UpdateChannel = "latest" | "preview";
 export type Installer = "npm" | "bun" | "source";
 export type UpdateJobStatus = "running" | "restarting" | "succeeded" | "failed";

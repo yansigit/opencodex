@@ -224,6 +224,11 @@ export const en = {
   "dash.uptime": "Uptime",
   "dash.providers": "Providers",
   "dash.tokens30d": "Tokens (30d)",
+  "dash.activity.title": "30-day activity",
+  "dash.activity.requests": "Requests",
+  "dash.activity.tokens": "Tokens",
+  "dash.activity.chartLabel": "30-day activity. Use Left and Right to select a day; Home and End jump to the range bounds.",
+  "dash.activity.viewUsage": "View usage",
   "dash.coverage": "{pct} coverage",
   // memory observability card (read-only /api/system/memory)
   "dash.mem.title": "Memory observability",
@@ -957,6 +962,8 @@ export const en = {
   "usage.dayFri": "Fri",
   "usage.heatmap.tooltipTokens": "{tokens} tokens",
   "usage.heatmap.tooltipRequests": "{requests} requests",
+  "usage.chart.dayDetail": "{date}: {requests} requests, {tokens} tokens",
+  "usage.heatmap.keyboardLabel": "Use Up and Down to move by day; Left and Right to move by week.",
 
   "nav.storage": "Storage",
   "storage.title": "Storage",
