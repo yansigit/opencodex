@@ -102,6 +102,21 @@ describe("Responses V2 routed delegation bridge runtime", () => {
     }
   });
 
+  test("uses the same JSON normalization for the canonical websocket path", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({ id: "resp_ws", status: "completed", output: [{
+      type: "function_call", id: "fc_ws", call_id: "call_ws", namespace: "ocx_agents", name: "spawn_agent", arguments: "{}",
+    }] })) as typeof fetch;
+    try {
+      const response = await handleResponses(request(rootBody()), config(), { model: "", provider: "" }, { inboundTransport: "websocket" });
+      expect((await response.json() as { output: Array<Record<string, unknown>> }).output[0]).toMatchObject({
+        namespace: "collaboration", encrypted_function_args: [],
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("fails a mirror namespace collision before upstream I/O", async () => {
     let fetches = 0;
     const originalFetch = globalThis.fetch;
@@ -140,6 +155,37 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       expect(text).toContain('"namespace":"collaboration"');
       expect(text).toContain('"encrypted_function_args":[]');
       expect(text).not.toContain('"namespace":"ocx_agents"');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("keeps a capped SSE mirror out of both the client and replay normalization", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    let turn = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      turn += 1;
+      if (turn === 1) return new Response([
+        ...Array.from({ length: 128 }, (_, index) => `data: ${JSON.stringify({
+          type: "response.output_item.added", item: {
+            type: "function_call", id: `fc_${index}`, call_id: `call_${index}`, namespace: "ocx_agents", name: "spawn_agent", arguments: "",
+          },
+        })}\n\n`),
+        "data: ", JSON.stringify({ type: "response.completed", response: { id: "resp_idless", status: "completed", output: [{
+          type: "function_call", id: "fc_cap", call_id: "call_cap", namespace: "ocx_agents", name: "spawn_agent", arguments: "{}",
+        }] } }), "\n\n",
+      ].join(""), { headers: { "content-type": "text/event-stream" } });
+      return Response.json({ id: "resp_second", status: "completed", output: [] });
+    }) as typeof fetch;
+    try {
+      const first = await handleResponses(request(rootBody({ stream: true })), config(), { model: "", provider: "" });
+      expect(await first.text()).toContain('"namespace":"ocx_agents"');
+      await handleResponses(request(rootBody({ previous_response_id: "resp_idless" })), config(), { model: "", provider: "" });
+
+      expect(JSON.stringify(requests[1]?.input)).toContain('"namespace":"ocx_agents"');
+      expect(JSON.stringify(requests[1]?.input)).not.toContain('"encrypted_function_args":[]');
     } finally {
       globalThis.fetch = originalFetch;
     }

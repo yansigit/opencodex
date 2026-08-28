@@ -3366,18 +3366,7 @@ async function handleResponsesInner(
     // check sees nothing undeclared, and the refused turn enters continuation state anyway. So the
     // rejection is sticky for the whole turn, set from every parsed payload on the inspection side.
     let inspectionSawUndeclaredTool = false;
-    const normalizeV2RoutedDelegationPayload = <T>(payload: T): T => {
-      if (!v2RoutedDelegationBridge) return payload;
-      try {
-        return JSON.parse(rewriteV2RoutedDelegationCallsInJson(
-          JSON.stringify(payload), v2RoutedDelegationBridge,
-        )) as T;
-      } catch {
-        return payload;
-      }
-    };
     const noteInspectedPayload = (payload: unknown) => {
-      payload = normalizeV2RoutedDelegationPayload(payload);
       if (isAntigravityOAuth && antigravityAccountId) {
         recordAntigravitySyntheticFailure(antigravityAccountId, payload);
       }
@@ -3408,7 +3397,7 @@ async function handleResponsesInner(
         ) {
           return;
         }
-        rememberPassthroughResponse(normalizeV2RoutedDelegationPayload(response));
+        rememberPassthroughResponse(response);
       }
       : undefined;
     recordAdapterReasoning(logCtx, request);
@@ -4019,6 +4008,17 @@ async function handleResponsesInner(
           options.responsesTerminalRepairScheduler,
         )
         : upstreamResponse.body;
+      // The bridge owns request-scoped item-id admission. Apply it before the
+      // stream is split so the client, inspector, and continuation cache see
+      // the same authorized event history.
+      const bridgeSseRewrite = createV2RoutedDelegationSseRewrite(v2RoutedDelegationBridge);
+      const normalizedPassthroughSseBody = bridgeSseRewrite
+        ? relaySseWithBlockRewrite(
+          passthroughSseBody,
+          payloadRewriteAsBlockRewrite(bridgeSseRewrite),
+          translatorBudget,
+        )
+        : passthroughSseBody;
       const repairConfig = route.provider.responsesItemIdRepair;
       const snapshotRepairEnabled = hasResponsesSnapshotRepair(route.provider.responsesSnapshotRepair);
       const githubCopilotRepairEnabled = route.providerName === "github-copilot";
@@ -4032,7 +4032,6 @@ async function handleResponsesInner(
         routedNamespaceToolAliases.size > 0
           ? createRoutedNamespaceCallRestoreRewrite(routedNamespaceToolAliases)
           : undefined,
-        createV2RoutedDelegationSseRewrite(v2RoutedDelegationBridge),
         hasResponsesItemIdRepair(repairConfig)
           ? createResponsesItemIdPayloadRewrite(repairConfig!, translatorBudget)
           : undefined,
@@ -4080,7 +4079,7 @@ async function handleResponsesInner(
       const clientBlockRewrite = blockRewrites.length > 0
         ? composeSseBlockRewrites(...blockRewrites)
         : undefined;
-      const needsClientRewrite = clientBlockRewrite !== undefined;
+      const needsClientRewrite = bridgeSseRewrite !== undefined || clientBlockRewrite !== undefined;
       // #864: win32 rewrite traffic must never enter the tee()+JS-pull chain
       // (Bun#32111 JS-sink segfault — text frames pass, the terminal block is
       // lost). The eager single reader applies the same rewrites inline.
@@ -4129,7 +4128,7 @@ async function handleResponsesInner(
           onFirstOutput: options.onFirstOutput,
           pinCompletedResponseIdToFirstSeen: githubCopilotRepairEnabled,
         });
-        const eagerBody = relaySseEagerBounded(passthroughSseBody, turnAc, {
+        const eagerBody = relaySseEagerBounded(normalizedPassthroughSseBody, turnAc, {
           inspectChunk: chunk => inspector.feed(chunk),
           finishInspection: () => inspector.finish(),
           disposeInspection: () => inspector.dispose(),
@@ -4166,7 +4165,7 @@ async function handleResponsesInner(
           })),
         );
       }
-      const [nativeBody, inspectBody] = passthroughSseBody.tee();
+      const [nativeBody, inspectBody] = normalizedPassthroughSseBody.tee();
       const turnAc = new AbortController();
       const clientGone = new AbortController();
       linkAbortSignal(upstream, turnAc.signal);
