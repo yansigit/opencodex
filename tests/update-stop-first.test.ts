@@ -263,7 +263,7 @@ esac
         if (!recoveredPid) {
           try {
             recoveredPid = JSON.parse(readFileSync(join(opencodexHome, "runtime-port.json"), "utf8")).pid;
-          } catch { /* the recovered fixture never wrote runtime state */ }
+          } catch { recoveredPid = undefined; }
         }
         if (existsSync(launcher)) {
           Bun.spawnSync(["node", launcher, "stop"], {
