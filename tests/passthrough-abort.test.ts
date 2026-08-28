@@ -49,12 +49,14 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     expect(sseBranch).toContain("const terminalRepairPolicy = providerModelResponsesTerminalRepair(");
     expect(sseBranch).toContain("const passthroughSseBody = terminalRepairPolicy");
     expect(sseBranch).toContain(": upstreamResponse.body;");
-    expect(sseBranch).toContain("passthroughSseBody.tee()");
+    expect(sseBranch).toContain("const normalizedPassthroughSseBody = bridgeSseRewrite");
+    expect(sseBranch).toContain(": passthroughSseBody;");
+    expect(sseBranch).toContain("normalizedPassthroughSseBody.tee()");
     // Rewrite traffic is derived from the finalized block chain so every
     // provider-specific transform participates in the platform gate.
     expect(sseBranch).toContain("const repairConfig = route.provider.responsesItemIdRepair;");
     expect(sseBranch).toContain('const githubCopilotRepairEnabled = route.providerName === "github-copilot";');
-    expect(sseBranch).toContain("const needsClientRewrite = clientBlockRewrite !== undefined;");
+    expect(sseBranch).toContain("const needsClientRewrite = bridgeSseRewrite !== undefined || clientBlockRewrite !== undefined;");
     expect(sseBranch).toContain("new Response(eagerBody");
     expect(sseBranch).toContain("const rewrittenBody = clientBlockRewrite !== undefined");
     expect(sseBranch).toContain("isCodexWsUpstreamResponse(upstreamResponse)");
@@ -75,7 +77,7 @@ describe("passthrough relayWithAbort (RC2, passthrough path)", () => {
     expect(sseBranch).toContain("config.streamMode ?? \"auto\",");
     expect(selector).toContain('platform !== "win32" && platform !== "darwin"');
     expect(selector).toContain('decision.reason === "config-eager"');
-    expect(sseBranch).toContain("relaySseEagerBounded(passthroughSseBody, turnAc,");
+    expect(sseBranch).toContain("relaySseEagerBounded(normalizedPassthroughSseBody, turnAc,");
     expect(sseBranch).not.toContain("relaySseWithHeartbeat(");
     expect(sseBranch).not.toContain("trackStreamLifetime(");
     expect(logWrapper.indexOf("isNativePassthroughSseResponse(response)")).toBeGreaterThanOrEqual(0);
