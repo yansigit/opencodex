@@ -175,19 +175,21 @@ export default function ProviderOverview({
       });
       if (controller.signal.aborted) return;
       if (!res.ok) {
-        const data = (await res.json().catch(() => null)) as { error?: string } | null;
-        setAiStudioReauthMsg(data?.error || t("pws.aiStudio.loginFailed"));
+        const data = (await res.json().catch(() => null)) as { error?: string | { message?: string } } | null;
+        const error = typeof data?.error === "string" ? data.error : data?.error?.message;
+        setAiStudioReauthMsg(error || t("pws.aiStudio.loginFailed"));
         return;
       }
-      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string | { message?: string } } | null;
+      const error = typeof data?.error === "string" ? data.error : data?.error?.message;
       if (data?.ok) {
         setLocalAiStudioAuthState("connected");
         setAiStudioReauthMsg(t("pws.aiStudio.reauthenticated"));
         await onRefreshConfig?.();
         return;
       }
-      if (data?.error) {
-        setAiStudioReauthMsg(data.error);
+      if (error) {
+        setAiStudioReauthMsg(error);
         return;
       }
       setAiStudioReauthMsg(t("pws.aiStudio.loginFailed"));

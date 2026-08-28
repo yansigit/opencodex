@@ -225,12 +225,15 @@ test("ProviderOverview native login success refreshes config and shows connected
   await act(async () => { root.unmount(); });
 });
 
-test("ProviderOverview native login shows the server error for a non-2xx response", async () => {
+test("ProviderOverview native login shows a nested server error for a non-2xx response", async () => {
   const serverError = "Native AI Studio login failed (exit code 1)";
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/api/aistudio/login/native")) {
-      return new Response(JSON.stringify({ ok: false, error: serverError }), { status: 500 });
+      return new Response(JSON.stringify({
+        ok: false,
+        error: { message: serverError, type: "native_login_failed", code: "native_login_failed" },
+      }), { status: 500 });
     }
     return originalFetch(input);
   }) as typeof fetch;
