@@ -9,6 +9,7 @@ const {
   defaultAgentMaintenanceState,
   changedFileListComplete,
   exactHeadBugbotEvidence,
+  generatedSyncBaselineDisposition,
   maintenanceReadyEvidence,
   findGithubSource,
   hasExactHeadMaintainerWaiver,
@@ -17,7 +18,6 @@ const {
   latestActiveLabelActor,
   parseAgentMaintenanceState,
   quotaExhaustionExpired,
-  requiredChecksDisposition,
   requiredChecksSuccessful,
   repairMarker,
   stateMarker,
@@ -121,13 +121,17 @@ describe("baseline CI evidence", () => {
       { id: 1, name: "hygiene", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
       { id: 2, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "queued", conclusion: null },
     ];
-    assert.equal(requiredChecksDisposition(pending, SHA, ["ci", "hygiene"], 15368), "pending");
-    assert.equal(requiredChecksDisposition(
-      pending.map(check => check.name === "ci" ? { ...check, status: "completed", conclusion: "failure" } : check),
-      SHA,
-      ["ci", "hygiene"],
-      15368,
-    ), "failed");
+    assert.equal(generatedSyncBaselineDisposition({ syncGenerated: true, checkRuns: pending, headSha: SHA }), "pending");
+    assert.equal(generatedSyncBaselineDisposition({
+      syncGenerated: true,
+      checkRuns: pending.filter(check => check.name !== "ci"),
+      headSha: SHA,
+    }), "pending");
+    assert.equal(generatedSyncBaselineDisposition({
+      syncGenerated: true,
+      checkRuns: pending.map(check => check.name === "ci" ? { ...check, status: "completed", conclusion: "failure" } : check),
+      headSha: SHA,
+    }), "failed");
   });
 
   it("requires latest successful exact-head evidence for every configured check", () => {
