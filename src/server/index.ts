@@ -973,12 +973,14 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         // binding. They are the same object for the public listener, but the
         // unauthenticated loopback listener (#1102) is a second Bun.serve, and handing its
         // request to the public server's upgrade would fail or cross sockets.
+        const agentKind = classifyAgentKind(req.headers, "responses");
         if (requestServer.upgrade(req, {
           data: buildResponsesWsData(
             selectForwardHeaders(req.headers),
             admission,
             websocketLease,
             sessionLaneIdFromRequest(req.headers),
+            agentKind,
           ),
         })) return undefined as unknown as Response;
         websocketLease.release();

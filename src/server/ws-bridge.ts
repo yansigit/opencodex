@@ -69,12 +69,14 @@ export function buildResponsesWsData(
   admission: DataPlaneAdmission,
   admissionLease?: AdmissionReservation<ServerWebSocket<WsData>>,
   sessionLaneId?: string,
+  agentKind?: AgentKind,
 ): WsData {
   // Auth is handshake-time only on this path: the per-frame contexts have no
   // request headers left to re-resolve from, so the decision rides along here.
+  const resolvedAgentKind = arguments.length >= 5 ? agentKind : classifyAgentKind(headers, "responses");
   return {
     headers,
-    agentKind: classifyAgentKind(headers, "responses"),
+    agentKind: resolvedAgentKind,
     admission,
     ...(admissionLease ? { admissionLease } : {}),
     ...(sessionLaneId ? { sessionLaneId } : {}),
