@@ -53,9 +53,9 @@ GUI session 簽發到服務的頁面中，並在到期或代理重啟時靜默�
 
 ### 連結到某個部分
 
-佈局只有一種且會自適應，無需切換。桌面版使用側邊欄進行主要導覽；窄螢幕時點選 **Open menu** 可展開相同的頁面連結。Dashboard 的各個部分都有自己的地址：`#dashboard` 開啟 Overview，`#dashboard/providers` 與 `#dashboard/models` 開啟另外兩個。重新整理、收藏和後退都會保留目前所在的部分。**Logs** 同理，使用 `#logs` 與 `#logs/debug`。舊的 `#providers/workspace` 書籤現在會跳轉到 `#providers`。
+佈局只有一種且會自適應，無需切換。桌面版使用側邊欄進行主要導覽；窄螢幕時點選 **開啟選單** 可展開相同的頁面連結。Dashboard 的各個部分都有自己的地址：`#dashboard` 開啟 Overview，`#dashboard/providers` 與 `#dashboard/models` 開啟另外兩個。重新整理、收藏和後退都會保留目前所在的部分。**Logs** 同理，使用 `#logs` 與 `#logs/debug`。舊的 `#providers/workspace` 書籤現在會跳轉到 `#providers`。
 
-Overview 也提供 **30-day activity** 面板，顯示 30 天的請求和 token 趨勢。在任一迷你折線圖中選取某一天即可查看當日總量，點選 **View usage** 可開啟完整的 Usage 頁面。Overview 載入後若重新整理被中斷，頁面會保留最近一次成功的資料並顯示重新連線提示與 **Retry**；首次連線失敗時則顯示 `ocx start` 指引和相同的重試操作。
+Overview 也提供 **30 天活動** 面板，顯示 30 天的請求和 token 趨勢。在任一迷你折線圖中選取某一天即可查看當日總量，點選 **檢視用量** 可開啟完整的 Usage 頁面。Overview 載入後若重新整理被中斷，頁面會保留最近一次成功的資料並顯示重新連線提示與 **重試**；首次連線失敗時則顯示 `ocx start` 指引和相同的重試操作。
 
 **Logs** 和 **Usage** 中的費用是根據已報告 token 計算的 API 標價折算值，不是帳單，也不能證明
 實際發生了扣費；實際可能計入訂閱用量或消耗服務商額度。

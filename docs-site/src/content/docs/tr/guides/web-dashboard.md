@@ -63,18 +63,18 @@ kararıdır.
 ### Bir bölüme bağlantı verme
 
 Tek bir duyarlı düzen vardır, bu nedenle yapılandırılacak bir düzen anahtarı yoktur. Masaüstünde ana
-navigasyon kenar çubuğundadır; dar ekranlarda aynı sayfa bağlantılarını **Open menu** ile açın.
+navigasyon kenar çubuğundadır; dar ekranlarda aynı sayfa bağlantılarını **Menüyü aç** ile açın.
 Bunun yerine kontrol paneli bölümleri adreslenebilirdir: `#dashboard` Genel
 Bakış'ı açar, `#dashboard/providers` ve `#dashboard/models` diğer ikisini açar.
 Yeniden Yükle, yer imi ve Geri işlemlerinin tümü bulunduğunuz bölümü korur.
 **Günlükler** `#logs` ve `#logs/debug` ile aynı şekilde çalışır. Daha eski bir
 `#providers/workspace` yer imi artık `#providers` üzerine iner.
 
-Genel Bakış ayrıca 30 günlük istek ve belirteç eğilimlerini gösteren **30-day
-activity** panelini içerir. Gün toplamlarını görmek için kıvılcım grafiklerinden
-birinde bir gün seçin veya tam Kullanım sayfasını açmak için **View usage**'ı
+Genel Bakış ayrıca 30 günlük istek ve belirteç eğilimlerini gösteren **30 günlük
+etkinlik** panelini içerir. Gün toplamlarını görmek için kıvılcım grafiklerinden
+birinde bir gün seçin veya tam Kullanım sayfasını açmak için **Kullanımı görüntüle**'yi
 seçin. Genel Bakış yüklendikten sonra yenileme kesilirse son başarılı veriler
-görünür kalır ve yeniden bağlanma bildirimi **Retry** seçeneği sunar. İlk
+görünür kalır ve yeniden bağlanma bildirimi **Tekrar Dene** seçeneği sunar. İlk
 bağlantı başarısız olursa `ocx start` yönergeleri ve aynı yeniden deneme işlemi
 gösterilir.
 
