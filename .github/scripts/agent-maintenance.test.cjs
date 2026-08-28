@@ -17,6 +17,7 @@ const {
   latestActiveLabelActor,
   parseAgentMaintenanceState,
   quotaExhaustionExpired,
+  requiredChecksDisposition,
   requiredChecksSuccessful,
   repairMarker,
   stateMarker,
@@ -115,6 +116,20 @@ describe("Cursor Bugbot evidence", () => {
 });
 
 describe("baseline CI evidence", () => {
+  it("keeps a generated sync gate pending until CI completes, but rejects a completed failure", () => {
+    const pending = [
+      { id: 1, name: "hygiene", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
+      { id: 2, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "queued", conclusion: null },
+    ];
+    assert.equal(requiredChecksDisposition(pending, SHA, ["ci", "hygiene"], 15368), "pending");
+    assert.equal(requiredChecksDisposition(
+      pending.map(check => check.name === "ci" ? { ...check, status: "completed", conclusion: "failure" } : check),
+      SHA,
+      ["ci", "hygiene"],
+      15368,
+    ), "failed");
+  });
+
   it("requires latest successful exact-head evidence for every configured check", () => {
     const checks = [
       { id: 1, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
