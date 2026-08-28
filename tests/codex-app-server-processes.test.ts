@@ -256,6 +256,64 @@ afterAll(() => stallingFakePowerShell?.cleanup());
     }
   });
 
+  test("target mtime failure does not shorten healthy process evidence TTL", async () => {
+    resetCodexAppServerCatalogStateCache();
+    let now = 1_000;
+    let enumerations = 0;
+    let mtime: number | null = null;
+    const io = {
+      platform: "win32" as const,
+      now: () => now,
+      listSnapshotsAsync: async () => {
+        enumerations += 1;
+        return [{ pid: 42, commandLine: APP_SERVER_CMD }];
+      },
+      readStartMsBatchAsync: async (pids: readonly number[]) => new Map(pids.map(pid => [pid, 2_000] as const)),
+      catalogMtimeMs: () => mtime,
+    };
+    await expect(collectCodexAppServerCatalogStateForRequest({ ...io, freshnessTarget: "config" }))
+      .resolves.toMatchObject({ state: "unknown" });
+    now += 300;
+    mtime = 1_000;
+    await expect(collectCodexAppServerCatalogStateForRequest({ ...io, freshnessTarget: "catalog" }))
+      .resolves.toMatchObject({ state: "fresh" });
+    expect(enumerations).toBe(1);
+    resetCodexAppServerCatalogStateCache();
+  });
+
+  test("target-adjusted unknown is not served stale while refreshing", async () => {
+    resetCodexAppServerCatalogStateCache();
+    let now = 1_000;
+    let mtime: number | null = 1_000;
+    let enumerations = 0;
+    let releaseRefresh: (() => void) | undefined;
+    const io = {
+      platform: "win32" as const,
+      now: () => now,
+      listSnapshotsAsync: async () => {
+        enumerations += 1;
+        if (enumerations > 1) await new Promise<void>(resolve => { releaseRefresh = resolve; });
+        return [{ pid: 42, commandLine: APP_SERVER_CMD }];
+      },
+      readStartMsBatchAsync: async (pids: readonly number[]) => new Map(pids.map(pid => [pid, 2_000] as const)),
+      catalogMtimeMs: () => mtime,
+    };
+    await expect(collectCodexAppServerCatalogStateForRequest({ ...io, freshnessTarget: "catalog" }))
+      .resolves.toMatchObject({ state: "fresh" });
+    now += catalogStateTtlMs("fresh") + 1;
+    mtime = null;
+    const config = collectCodexAppServerCatalogStateForRequest({ ...io, freshnessTarget: "config" });
+    const settled = await Promise.race([
+      config.then(() => "settled" as const),
+      new Promise<"waiting">(resolve => setTimeout(() => resolve("waiting"), 25)),
+    ]);
+    expect(settled).toBe("waiting");
+    releaseRefresh?.();
+    await expect(config).resolves.toMatchObject({ state: "unknown" });
+    expect(enumerations).toBe(2);
+    resetCodexAppServerCatalogStateCache();
+  });
+
   test("cache invalidation cannot be undone by an older in-flight Windows refresh (#1852)", async () => {
     resetCodexAppServerCatalogStateCache();
     let calls = 0;
