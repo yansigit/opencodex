@@ -123,7 +123,8 @@ function hasExactHeadMaintainerWaiver({ labels = [], reviews = [], maintainers =
   return [...latest.values()].filter((review) => review.state === "APPROVED").length >= 2;
 }
 
-function requiredChecksSuccessful(checkRuns, headSha, requiredNames, expectedAppId) {
+function requiredChecksDisposition(checkRuns, headSha, requiredNames, expectedAppId) {
+  let pending = false;
   return requiredNames.every((name) => {
     const latest = checkRuns
       .filter((check) =>
@@ -131,8 +132,16 @@ function requiredChecksSuccessful(checkRuns, headSha, requiredNames, expectedApp
         check?.head_sha === headSha &&
         Number(check?.app?.id) === Number(expectedAppId))
       .sort((a, b) => Number(b.id) - Number(a.id))[0];
-    return latest?.status === "completed" && latest?.conclusion === "success";
-  });
+    if (!latest || latest.status !== "completed") {
+      pending = true;
+      return true;
+    }
+    return latest.conclusion === "success";
+  }) ? (pending ? "pending" : "success") : "failed";
+}
+
+function requiredChecksSuccessful(checkRuns, headSha, requiredNames, expectedAppId) {
+  return requiredChecksDisposition(checkRuns, headSha, requiredNames, expectedAppId) === "success";
 }
 
 function maintenanceReadyEvidence({
@@ -481,6 +490,7 @@ module.exports = {
   latestActiveLabelActor,
   parseAgentMaintenanceState,
   quotaExhaustionExpired,
+  requiredChecksDisposition,
   requiredChecksSuccessful,
   repairMarker,
   stateMarker,
