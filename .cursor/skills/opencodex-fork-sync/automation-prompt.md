@@ -41,7 +41,8 @@ Execute only the unresolved handoff stages:
    never create a new one. Run
    `gh pr view <number> --json mergeable -q .mergeable` and do not stop or ping
    the human until it reports `MERGEABLE`.
-8. When all gates are `MERGEABLE` and hygiene is green, flip Draft -> Ready
+8. Until `MERGEABLE` and hygiene green, stay and supervise. After every push, poll `gh pr view <number> --json mergeable` and `gh pr checks` every 60s for 10m. If `not a descendant of origin/dev`, run `git fetch origin dev && git merge --no-edit origin/dev && git push` yourself. For `macos-launchd` timeout-only flakes, run `gh run rerun --failed` once. Update the sticky PR-body section and the single `<!-- cursor-sync-progress -->` comment in place (never a new comment) with the 4-line checklist and exact failing codes. Only `new_suppression` / `unsponsored_surface` need `suppression-approved` / `maintainer-sponsored` human waive - report the blocker but do not auto-waive.
+9. When all gates are `MERGEABLE` and hygiene green, flip Draft -> Ready
    for review and post `Ready for human merge - do not squash/rebase.` Stop.
    The human performs the merge commit, never squash or rebase. Do not merge
    the PR, close issues, change repository settings, or force-push
