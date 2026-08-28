@@ -13,7 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
 import { startServer } from "../src/server";
-import { buildResponsesWsData } from "../src/server/ws-bridge";
+import { buildResponsesWsData, selectForwardHeaders } from "../src/server/ws-bridge";
+import { classifyAgentKind } from "../src/server/effort-policy";
+import { handleResponses } from "../src/server/responses";
+import { addFinalRequestLog, type RequestLogEntry, type RequestLogContext } from "../src/server/request-log";
 import type { OcxConfig } from "../src/types";
 
 // The admission path already knew WHICH key matched and threw it away. These
@@ -243,6 +246,51 @@ describe("the Responses WebSocket handshake", () => {
       { kind: "configured", keyId: "second-key", source: "dedicated" },
     );
     expect(payload.agentKind).toBe("subagent");
+  });
+
+  test("raw HTTP and filtered WS headers preserve origin classification", () => {
+    const cases: Array<[string, Record<string, string>, "main" | "subagent" | "internal" | undefined]> = [
+      ["absent", {}, "main"],
+      ["empty", { "x-openai-subagent": "" }, undefined],
+      ["malformed metadata", { "x-codex-turn-metadata": "{bad" }, undefined],
+      ["contradictory", {
+        "x-openai-subagent": "review",
+        "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "compact" }),
+      }, undefined],
+    ];
+    for (const [, rawInit, expected] of cases) {
+      const raw = new Headers(rawInit);
+      const httpKind = classifyAgentKind(raw, "responses");
+      const wsKind = buildResponsesWsData(
+        selectForwardHeaders(raw),
+        { kind: "configured", keyId: "second-key", source: "dedicated" },
+        undefined,
+        undefined,
+        httpKind,
+      ).agentKind;
+      expect(httpKind).toBe(expected);
+      expect(wsKind).toBe(expected);
+    }
+  });
+
+  test("classification survives a body parse failure finalized before routing", async () => {
+    const headers = new Headers({ "x-openai-subagent": "collab_spawn" });
+    const start = Date.now();
+    const logCtx: RequestLogContext = {
+      model: "unknown",
+      provider: "unknown",
+      inboundProtocol: "responses",
+      agentKind: classifyAgentKind(headers, "responses"),
+    };
+    const response = await handleResponses(
+      new Request("http://localhost/v1/responses", { method: "POST", headers, body: "{bad" }),
+      remoteConfig(),
+      logCtx,
+    );
+    const captured: RequestLogEntry[] = [];
+    addFinalRequestLog("ocx-early-agent-kind", start, logCtx, response.status, undefined, entry => captured.push(entry));
+    expect(response.status).toBe(400);
+    expect(captured[0]?.agentKind).toBe("subagent");
   });
 
   // The phase-2 guard that asserted no telemetry symbols existed yet has served
