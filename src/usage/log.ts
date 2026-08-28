@@ -39,6 +39,7 @@ export type AttemptRecoveryKind =
   | "anthropic-oauth-429"
   | "cursor-oauth-auth"
   | "cursor-oauth-429"
+  | "oauth-account-429"
   | "image-413"
   | "opaque-blob-rejection"
   | "empty-completion";
@@ -79,6 +80,7 @@ export interface PersistedUsageAttempt {
 }
 
 export interface PersistedUsageEntry {
+  requestedAlias?: string;
   requestId: string;
   timestamp: number;
   provider: string;
@@ -90,7 +92,7 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  /** Stable non-PII identity for account usage; absent for unauthenticated traffic. */
+  /** Stable non-PII identity for the account that served this request. */
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
@@ -229,8 +231,7 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "key-429",
   "rate-limit-429",
   "anthropic-oauth-429",
-  "cursor-oauth-auth",
-  "cursor-oauth-429",
+  "oauth-account-429",
   "image-413",
   "opaque-blob-rejection",
   "empty-completion",

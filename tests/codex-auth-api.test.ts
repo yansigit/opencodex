@@ -3487,7 +3487,7 @@ describe("codex-auth API", () => {
       listOpenAiForwardSidecarCandidates(config),
       new Headers(),
       config,
-      { exactAccount: { accountId: "pool-delete", modelId: "gpt-5.6-sol" } },
+      { exactAccount: { accountId: "pool-delete", modelId: "gpt-5.5" } },
     );
     expect(exactSidecar?.authContext).toMatchObject({
       accountId: "pool-delete",

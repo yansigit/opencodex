@@ -255,6 +255,11 @@ export interface OcxSubagentRole {
   enabled?: boolean;
 }
 
+export interface OcxConfigRebaseProvenance {
+  version: 1;
+  deletedTopLevelKeys: string[];
+}
+
 export interface OcxConfig {
   port: number;
   autonomousRemediation?: {
@@ -282,6 +287,22 @@ export interface OcxConfig {
   managementUsageMaxReadBytes?: number;
   providers: Record<string, OcxProviderConfig>;
   defaultProvider: string;
+  /** Persisted state for newly discovered provider models (#2464). Absent keeps legacy "on" behavior. */
+  modelDiscovery?: {
+    newModelPolicy?: "on" | "off";
+    knownModels?: Record<string, {
+      ids: string[];
+      removed: string[];
+      updatedAt: string;
+      /** Consecutive successful discoveries in which an active id was absent. */
+      missing?: Record<string, number>;
+    }>;
+    recentArrivals?: Record<string, Array<{ id: string; at: string }>>;
+  };
+  /** Enable the shipped model alias patterns for providers without an override. */
+  defaultModelAliases?: boolean;
+  /** Explicit top-level deletion intent used by stale whole-config rebases. */
+  configRebaseProvenance?: OcxConfigRebaseProvenance | Record<string, unknown>;
   /** OpenAI provider-contract migration marker (v2 = single `openai` provider with account mode). */
   openaiProviderTierVersion?: 1 | 2;
   /** One-time migration marker for Antigravity's static-catalog defaults. */
@@ -300,12 +321,7 @@ export interface OcxConfig {
    * into a selector-qualified group; Codex still advertises only the first 5 visible rows.
    */
   subagentModels?: string[];
-  /**
-   * Named specialist roles the parent may spawn: id, when-to-use description,
-   * model, optional effort, and child developer instructions. Max 8 roles and
-   * 5 unique enabled models (the spawn picker window). Do not store
-   * `model_fallback` here — use `subagentModelFallbackByModel`.
-   */
+  /** Named specialist roles the parent may spawn by id. */
   subagentRoles?: OcxSubagentRole[];
   /**
    * Project enabled roles into marker-owned `$CODEX_HOME/agents/ocx-<id>.toml`.
@@ -345,9 +361,7 @@ export interface OcxConfig {
    */
   subagentModelFallbackByModel?: Record<string, string[]>;
   /**
-   * Candidate models for spawned sub-agents. Supports either a global list of
-   * model candidates (evaluated in order) or a mapping keyed by subagent role or
-   * requested primary model.
+   * Ordered candidates for spawned sub-agents, globally or keyed by role/model.
    */
   subagentCandidates?: string[] | Record<string, string[]>;
   /**
@@ -414,9 +428,7 @@ export interface OcxConfig {
    * remain unchanged),
    * `{{effort}}` -> injectionEffort, `{{roster}}` -> the resolved sub-agent roster
    * block ("" when nothing resolves), `{{fallback}}` -> the configured subagent
-   * model fallback guidance block ("" when unset), `{{roles}}` -> the compact
-   * enabled role catalog ("" when none). A custom prompt replaces the built-in
-   * body; include `{{roles}}` to keep the catalog.
+   * model fallback guidance block ("" when unset).
    */
   injectionPrompt?: string;
   /**
@@ -482,12 +494,12 @@ export interface OcxConfig {
   keepNativeChatGptOnV1?: boolean;
   /** Experimental plaintext delegation bridge for eligible native V2 roots. */
   v2RoutedDelegationBridge?: boolean;
-  /** Experimental routed target for eligible native V2 root parents. */
+  /** Optional v2-native parent override for spawn_agent routing. */
   v2NativeParentOverride?: { enabled?: boolean; model?: string };
   /** Experimental, default-off ChatGPT recovery for encrypted V2 routed tasks. */
   agentTaskRecovery?: {
     enabled?: boolean;
-    /** ChatGPT model used by the recovery request. Default: gpt-5.6-luna. */
+    /** ChatGPT model used by the recovery request. Default: gpt-5.6-sol. */
     model?: string;
     /** Recovery request timeout in milliseconds. Default: 45000. */
     timeoutMs?: number;
@@ -530,6 +542,13 @@ export interface OcxConfig {
    * those are unset — Bun's fetch honors them for all outbound calls; localhost is excluded.
    */
   proxy?: string;
+  /**
+   * Hosts that bypass `proxy` for OpenCodex's own outbound provider calls, merged into
+   * NO_PROXY at startup. Accepts a comma-separated string (NO_PROXY syntax) or an array.
+   * Loopback is always excluded regardless of this setting, and an inherited NO_PROXY is
+   * preserved — this ADDS entries, it never replaces the environment.
+   */
+  noProxy?: string | string[];
   /**
    * Upstream stall timeout (seconds). After this many seconds of no upstream data, emits
    * response.incomplete. Default 300. Min 1.
@@ -601,6 +620,15 @@ export interface OcxConfig {
    * selector map remains visible for compatibility with hand-written configurations.
    */
   codexAccountPickerEnabled?: boolean;
+  /**
+   * Show the GPT-5.3-Codex-Spark weekly window on Codex quota surfaces. Default false.
+   *
+   * Spark is a single-model window that reads 0% for most operators, and on a multi-account
+   * pool it doubles the bar count for information almost nobody acts on. Hidden by default and
+   * revealed by an explicit `true`; a malformed value reads as hidden rather than rejecting the
+   * whole config.
+   */
+  showCodexSparkQuota?: boolean;
   /** Active pool account id for next session. undefined = main (passthrough as-is). */
   activeCodexAccountId?: string;
   /** Auto-switch threshold (0-100). Default 80. 0 = disabled. */
@@ -631,10 +659,22 @@ export interface OcxConfig {
     stickyLimit?: number;
   };
   /**
-   * Opt-in Cursor OAuth account pool. Default OFF.
-   * Sticky `_clientThreadId` affinity + bounded 429/auth failover when ≥2 OAuth accounts exist.
-   * Does not wire weighted-round-robin `CursorCredentialRouter`.
+   * Generic OAuth multi-account 429 failover (#2568). Presence-driven by default.
+   *
+   * Rotates to another logged-in account of the SAME provider when one is rate-limited, for
+   * OAuth providers that have no pool of their own — xAI, Cursor, Kimi, GitHub Copilot,
+   * Antigravity, Nous. The Codex pool and the Anthropic pool own their own rotation and are
+   * excluded; this setting changes neither.
+   *
+   * With the key absent, rotation activates when a provider has 2 or more eligible stored
+   * accounts — the same consent rule API-key pools already apply to a 2+ key pool (#2568d). A
+   * single account is a strict no-op. Set `false` to keep strict single-account behaviour;
+   * `providers.<name>.oauthAccountFailover` overrides this per provider.
    */
+  oauthAccountFailover?: {
+    enabled?: boolean;
+  };
+  /** Cursor OAuth account pool rotation for api2.cursor.sh. */
   cursorAccountPool?: {
     enabled?: boolean;
   };

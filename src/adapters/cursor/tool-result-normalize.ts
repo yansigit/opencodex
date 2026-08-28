@@ -43,6 +43,9 @@ function isCodexExecBridgeTool(toolName?: string, toolNamespace?: string): boole
     lower === "exec"
     || lower === "exec_command"
     || lower === "shell_command"
+    // Codex CLI/desktop native tool names: the multi-round "이전 출력이 비어 있어 처음부터"
+    // restart loop reproduced via codex exec because `shell` was not in this set
+    // (devlog 260826 gap-8 QA round 2).
     || lower === "shell"
     || lower === "local_shell"
     || lower === "container.exec"
@@ -66,9 +69,9 @@ const RUNTIME_FAILURE_GUIDANCE: ReadonlyArray<{ marker: string; guidance: string
     guidance: "The node_repl session keeps earlier declarations; rename the variable or use var/reassignment instead of redeclaring.",
   },
   {
-   marker: "unsupported import in exec",
-   guidance: "Imports are not available in this exec context; use the injected globals instead.",
- },
+    marker: "unsupported import in exec",
+    guidance: "Imports are not available in this exec context; use the injected globals instead.",
+  },
   {
     marker: "require is not defined",
     guidance: "In Codex code-mode exec (a V8 isolate, not Node.js), require/fs/process are not available. Use await tools.exec_command({ cmd: '...' }) inside exec to inspect files or run CLI tools.",

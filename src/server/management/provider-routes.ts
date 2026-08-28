@@ -689,11 +689,21 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     let body: { name?: unknown; provider?: unknown; setDefault?: boolean };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const name = typeof body.name === "string" ? body.name.trim() : "";
-    const providerError = providerManagementConfigError(name, body.provider);
+    const submittedProvider = isPlainRecord(body.provider)
+      ? structuredClone(body.provider) as Record<string, unknown>
+      : body.provider;
+    const submittedCredential = isPlainRecord(submittedProvider)
+      && isPlainRecord(submittedProvider.azureCredential)
+      ? submittedProvider.azureCredential as Record<string, unknown>
+      : undefined;
+    if (typeof submittedCredential?.managedIdentityClientId === "string") {
+      submittedCredential.managedIdentityClientId = submittedCredential.managedIdentityClientId.trim();
+    }
+    const providerError = providerManagementConfigError(name, submittedProvider);
     if (providerError) return jsonResponse({ error: providerError }, 400);
-    const serviceTierError = providerServiceTierConfigError(name, body.provider);
+    const serviceTierError = providerServiceTierConfigError(name, submittedProvider);
     if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
-    const prov = body.provider ? stripCodexRuntimeProviderFields(body.provider as OcxProviderConfig) : undefined;
+    const prov = submittedProvider ? stripCodexRuntimeProviderFields(submittedProvider as OcxProviderConfig) : undefined;
     // PATCH already clears on null; POST persisted the body as submitted, so a `null` here
     // reached disk and the next loadConfig() refused it. Canonicalize to absent, which is what
     // "clear" means everywhere else.
@@ -743,6 +753,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // erase hand-edited per-model prices from Logs/Usage estimates.
     const existingCosts = config.providers[name]?.modelCosts;
     if (existingCosts && !prov.modelCosts) prov.modelCosts = existingCosts;
+    // And to the per-provider account-failover opt-out (#2568d). `ProviderPayload` has no
+    // member for it either, so an add/edit save structurally cannot carry it — and dropping it
+    // silently ENABLES rotation, because activation is presence-driven once the knob is gone.
+    // An overwrite must not spend a second subscription account's quota as a side effect.
+    const existingFailover = config.providers[name]?.oauthAccountFailover;
+    if (existingFailover && !prov.oauthAccountFailover) prov.oauthAccountFailover = existingFailover;
     // ...and to hand-edited context windows. `ProviderPayload` (gui/src/provider-payload.ts)
     // has no member for either field, so the add/edit form structurally cannot send them:
     // absence in the request means "not carried", never "the user deleted it". Deletion goes

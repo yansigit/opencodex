@@ -60,25 +60,22 @@ describe("upsertOAuthProvider credential preservation", () => {
     expect(config.providers.xai!.modelCosts).toEqual(costs);
   });
 
-  test("carries Command Code projectContext across a re-login upsert", () => {
-    const config = {
-      port: 10100,
-      defaultProvider: "command-code",
-      providers: {
-        "command-code": {
-          adapter: "command-code",
-          baseUrl: "https://api.commandcode.ai",
-          authMode: "oauth",
-          commandCodeVersion: "0.52.1",
-          projectContext: "on",
-        },
-      },
-    } as unknown as OcxConfig;
+  test("carries the per-provider account-failover opt-out across a re-login upsert (#2568d)", () => {
+    // The sequence that makes this load-bearing: an operator switches rotation off, then logs in
+    // a SECOND account. That login rebuilds this row from the preset and simultaneously creates
+    // the 2-account quorum that turns presence-driven rotation on — so losing the opt-out here
+    // enables the exact behaviour the operator declined, during an unrelated action.
+    const config = configWithKey("xai", "openai-chat", "https://api.x.ai/v1");
+    config.providers.xai!.oauthAccountFailover = { enabled: false };
+    upsertOAuthProvider(config, "xai");
+    expect(config.providers.xai!.oauthAccountFailover).toEqual({ enabled: false });
+  });
 
-    upsertOAuthProvider(config, "command-code");
-
-    expect(config.providers["command-code"]?.commandCodeVersion).toBe("0.52.1");
-    expect(config.providers["command-code"]?.projectContext).toBe("on");
+  test("an opt-IN survives too: preservation is about operator intent, not a preferred answer", () => {
+    const config = configWithKey("xai", "openai-chat", "https://api.x.ai/v1");
+    config.providers.xai!.oauthAccountFailover = { enabled: true };
+    upsertOAuthProvider(config, "xai");
+    expect(config.providers.xai!.oauthAccountFailover).toEqual({ enabled: true });
   });
 
   test("carries the key over without changing oauth billing when the user did not pick key mode", () => {

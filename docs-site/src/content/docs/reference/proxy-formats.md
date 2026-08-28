@@ -114,6 +114,11 @@ not create, inspect, or delete the provider cache through this field.
 
 Unknown item types are accepted as loose typed items for forward compatibility. Translated adapters
 handle only the item types they recognize, and may reject a feature their provider cannot represent.
+On the canonical ChatGPT Codex forward route, text-only `system` input messages are folded into
+top-level `instructions`, and `truncation` is removed because that destination rejects both public
+Responses shapes. Other Responses destinations preserve them.
+The same canonical boundary removes nested client-only `prompt_cache_breakpoint` markers and drops
+`item_reference` entries only on `store: false` continuations; tool call/result pairing is unchanged.
 
 ### JSON and SSE output
 

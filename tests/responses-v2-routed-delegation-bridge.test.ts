@@ -52,7 +52,7 @@ function request(body: Record<string, unknown>, headers: Record<string, string> 
 
 function rootBody(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    model: "gpt-5.6-luna",
+    model: "gpt-5.5",
     input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "delegate" }] }],
     tools: [{
       type: "namespace",
@@ -219,8 +219,8 @@ describe("Responses V2 routed delegation bridge runtime", () => {
 
       const shadowed = config();
       shadowed.providers.gw = { adapter: "openai-chat", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
-      shadowed.shadowCallIntercept = { enabled: true, model: "gw/routed" };
-      await handleResponses(request(rootBody()), shadowed, { model: "", provider: "" });
+      shadowed.shadowCallIntercept = { enabled: true, model: "gw/routed", sourceModels: ["gpt-5.4-mini"] };
+      await handleResponses(request(rootBody({ model: "gpt-5.4-mini" })), shadowed, { model: "", provider: "" });
 
       const recoveredChild = config();
       recoveredChild.agentTaskRecovery = { enabled: true };
@@ -234,7 +234,7 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       compact.v2NativeParentOverride = { enabled: true, model: "gw/routed" };
       compact.providers.gw = { adapter: "openai-responses", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
       await handleResponsesCompact(request({
-        model: "gpt-5.6-luna", stream: false,
+        model: "gpt-5.5", stream: false,
         input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "compact" }] }, { type: "compaction_trigger" }],
       }), compact, { model: "", provider: "" });
 

@@ -1,4 +1,5 @@
 import { markActivity } from "../lib/sidecar-tracker";
+import { knownModelIdsForProvider } from "../router";
 import {
   buildWarmupCompletionFrames,
   buildWsErrorFrame,
@@ -47,7 +48,6 @@ import {
 } from "../lib/app-owned-memory-stores";
 import { acquireServerBackgroundLifecycle } from "./background-lifecycle";
 import { activateLab, labActivationRequired } from "../lib/lab-activation";
-import { registerFork } from "../fork/register";
 import { runOpenAiTierStartupMigration } from "../providers/openai-tier-startup";
 import { runAlibabaRegionStartupMigration } from "../providers/alibaba-region-startup";
 import { runModelRenameStartupMigration } from "../providers/model-rename-startup";
@@ -110,6 +110,7 @@ import {
   type RequestLogContext,
   type RequestLogEntry,
 } from "./request-log";
+import { sessionLaneIdFromRequest } from "./request-log-conversation";
 export {
   addFinalRequestLog,
   filterRequestLogs,
@@ -157,16 +158,6 @@ import {
   withCors,
   withManagementCors,
 } from "./auth-cors";
-function isAiStudioSessionOrigin(origin: string | null): boolean {
-  return !!origin && (origin.startsWith("chrome-extension://") || origin === "https://aistudio.google.com");
-}
-
-function withAiStudioSessionCors(resp: Response, req: Request): Response {
-  const origin = req.headers.get("Origin");
-  if (isAiStudioSessionOrigin(origin) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
-  return resp;
-}
-
 export {
   assertServerAuthConfig,
   corsHeaders,
@@ -211,7 +202,22 @@ import {
 import { SYSTEM_RESTART_CAPABILITY_VERSION } from "../lib/system-restart-contract";
 import { LOCAL_PROVIDER_RELOAD_CAPABILITY_VERSION } from "../lib/local-provider-reload-contract";
 import { createReadinessGate, type ReadinessGate } from "./readiness";
+import {
+  createRuntimePackageTreeIntegrityGuard,
+  type PackageTreeIntegrityGuard,
+} from "../lib/package-tree-integrity";
+import { detectInstall } from "../update/index";
 import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
+
+function isAiStudioSessionOrigin(origin: string | null): boolean {
+  return !!origin && (origin.startsWith("chrome-extension://") || origin === "https://aistudio.google.com");
+}
+
+function withAiStudioSessionCors(resp: Response, req: Request): Response {
+  const origin = req.headers.get("Origin");
+  if (isAiStudioSessionOrigin(origin) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
+  return resp;
+}
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
 const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
@@ -464,6 +470,8 @@ export interface StartServerDeps {
   localAttestationSecret?: string;
   /** Optional readiness gate; a fresh pending gate is created when omitted. */
   readinessGate?: ReadinessGate;
+  /** Test-only package-tree observation; production captures package.json identity at boot. */
+  packageTreeIntegrity?: PackageTreeIntegrityGuard;
   /** Test-only seam for the awaited native AI Studio login process. */
   runAiStudioNativeLogin?: typeof runAiStudioNativeLogin;
 }
@@ -681,13 +689,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (path === "/v1/realtime" || path === "/v1/live") {
       return req.headers.get("upgrade")?.toLowerCase() === "websocket";
     }
-    if (path === "/v1/ws/aistudio" || path === "/aistudio/ws") {
-      return req.headers.get("upgrade")?.toLowerCase() === "websocket";
-    }
-    if (path === "/v1/ws/aistudio/status") return req.method === "GET";
-    if (path === "/api/aistudio/session") return req.method === "POST";
-    if (path === "/api/aistudio/login/native") return req.method === "POST";
-    if (path === "/aistudio/bridge" || path === "/aistudio/bridge.user.js") return req.method === "GET";
     return false;
   }
 
@@ -717,12 +718,21 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     }), req, policy);
   }
 
+  function packageTreeChangedResponse(req: Request, policy: RequestPolicyView, message: string): Response {
+    return withCors(new Response(JSON.stringify({
+      error: { type: "server_error", code: "package_tree_changed", message },
+    }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" },
+    }), req, policy);
+  }
+
   async function runAdmittedHttpTurn(
     req: Request,
     policy: RequestPolicyView,
     work: (lease: ActiveTurnLease) => Promise<Response>,
   ): Promise<Response> {
-    const lease = tryAdmitTurn();
+    const lease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
     if (!lease) return serverBusyResponse(req, "active turns", policy);
     let response: Response;
     try {
@@ -743,6 +753,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   // passes it in, and transitions it after the post-startup sync settles. When
   // no gate is supplied (tests, ad-hoc starts) a fresh pending gate is created.
   const readinessGate = deps.readinessGate ?? createReadinessGate();
+  const packageTreeIntegrity = deps.packageTreeIntegrity
+    ?? createRuntimePackageTreeIntegrityGuard(detectInstall());
   // Actual bound port, filled in after Bun.serve binds so /readyz reports the
   // real ephemeral port for startServer(0). /healthz keeps its existing port
   // field (the requested listenPort) byte-for-byte.
@@ -869,22 +881,35 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (decoded === "/readyz" || decoded === "/readyz/") readyzPath = decoded;
       } catch { /* malformed encoding — not a readiness path */ }
 
+      const packageTreeStatus = packageTreeIntegrity.status();
+      if (!packageTreeStatus.ok && (
+        url.pathname === "/healthz"
+        || readyzPath !== undefined
+        || url.pathname.startsWith("/v1/")
+      )) {
+        const message = "OpenCodex package files changed while this proxy was running; restart OpenCodex before retrying.";
+        const response = url.pathname === "/healthz" || readyzPath !== undefined
+          ? jsonResponse({
+              status: "restart_required",
+              service: "opencodex",
+              version: VERSION,
+              uptime: process.uptime(),
+              pid: process.pid,
+              port: boundPort ?? requestServer.port ?? listenPort,
+              error: { code: "package_tree_changed", message },
+            }, 503, req, policy)
+          : packageTreeChangedResponse(req, policy, message);
+        const headers = new Headers(response.headers);
+        headers.set("Retry-After", "5");
+        return new Response(response.body, { status: 503, headers });
+      }
+
       if (req.method === "OPTIONS") {
         // /readyz is exact-GET only; OPTIONS (like POST and the trailing-slash
         // path) must answer the deterministic JSON 404, never the generic 204
         // preflight response that the SPA fallback would otherwise allow.
         if (readyzPath !== undefined) {
           return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
-        }
-        if (url.pathname === "/api/aistudio/login/native" && req.method === "OPTIONS") {
-          const origin = req.headers.get("Origin");
-          if (origin && isAllowedRequestOrigin(req, policy)) {
-            return new Response(null, {
-              status: 204,
-              headers: { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Methods": "POST, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization, X-OpenCodex-API-Key", Vary: "Origin, Access-Control-Request-Headers" },
-            });
-          }
-          return new Response(null, { status: 204, headers: corsHeaders(req, policy) });
         }
         if (url.pathname === "/api/aistudio/session") {
           const origin = req.headers.get("Origin");
@@ -941,7 +966,12 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         // unauthenticated loopback listener (#1102) is a second Bun.serve, and handing its
         // request to the public server's upgrade would fail or cross sockets.
         if (requestServer.upgrade(req, {
-          data: buildResponsesWsData(selectForwardHeaders(req.headers), admission, websocketLease),
+          data: buildResponsesWsData(
+            selectForwardHeaders(req.headers),
+            admission,
+            websocketLease,
+            sessionLaneIdFromRequest(req.headers),
+          ),
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
@@ -964,9 +994,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req);
         }
         try {
-          const bodyJson = (await req.json()) as any;
+          const bodyJson = await req.json() as any;
           const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
-          if (bodyJson.token && typeof bodyJson.token === "string") {
+          if (typeof bodyJson.token === "string" && bodyJson.token) {
             saveAiStudioSessionFromToken(bodyJson.token);
           } else if (Array.isArray(bodyJson.cookies)) {
             saveAiStudioSession({
@@ -978,31 +1008,17 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req);
           }
           return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req);
-        } catch (err) {
-          return withAiStudioSessionCors(withCors(jsonResponse({ error: String(err) }, 400), req, policy), req);
+        } catch (error) {
+          return withAiStudioSessionCors(withCors(jsonResponse({ error: String(error) }, 400), req, policy), req);
         }
       }
 
       if (url.pathname === "/aistudio/bridge" && req.method === "GET") {
         const bridgeHtml = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>Google AI Studio Relay Deprecated - OpenCodex</title>
-<style>body { font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; max-width: 680px; margin: 0 auto; line-height: 1.6; } h1 { font-size: 1.5rem; color: #f43f5e; } code { background: #1e293b; padding: 0.2rem 0.4rem; border-radius: 4px; font-family: monospace; } .card { background: #1e293b; padding: 1.25rem; border-radius: 8px; margin-top: 1rem; border: 1px solid #334155; }</style>
-</head>
-<body>
-<h1>HTTP 410 Gone: AI Studio Browser Relay Deprecated</h1>
-<p>The daily-browser WebSocket relay and userscript bridge have been retired in favor of native macOS authentication and direct session inference.</p>
-<div class="card">
-<h3>How to connect:</h3>
-<ol>
-<li><strong>macOS Native Login:</strong> Run <code>ocx login</code> in your terminal or click <strong>Connect</strong> in the dashboard overview.</li>
-<li><strong>Brave/Chrome Extension:</strong> Use the updated session exporter extension to auto-sync credentials to <code>/api/aistudio/session</code>.</li>
-</ol>
-</div>
-</body>
-</html>`;
+<html><head><meta charset="utf-8"><title>Google AI Studio Relay Deprecated - OpenCodex</title></head>
+<body><h1>HTTP 410 Gone: AI Studio Browser Relay Deprecated</h1>
+<p>The browser relay has been retired. Use native macOS authentication or the session exporter extension.</p>
+<p>Run <code>ocx login</code> to connect.</p></body></html>`;
         return new Response(bridgeHtml, { status: 410, headers: { "Content-Type": "text/html; charset=utf-8" } });
       }
 
@@ -1021,29 +1037,19 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         }
         try {
           const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
-          if (login.kind === "unsupported") {
-            return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
-          }
-          if (login.kind === "cancelled") {
-            return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
-          }
-          if (login.kind === "failed") {
-            return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
-          }
-
-          // Reuse the existing direct provider connection probe before claiming success.
+          if (login.kind === "unsupported") return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
+          if (login.kind === "cancelled") return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
+          if (login.kind === "failed") return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
           const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
             method: "POST",
             headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
           });
           const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, deps.managementApi);
           const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
-          if (!probe?.ok) {
-            return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
-          }
+          if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
           return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
-        } catch (err) {
-          return jsonResponse({ ok: false, error: String(err) }, 500, req, policy);
+        } catch (error) {
+          return jsonResponse({ ok: false, error: String(error) }, 500, req, policy);
         }
       }
 
@@ -1172,6 +1178,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           : [];
         const disabledNatives = disabledNativeSlugs(config);
         const disabledModels = new Set(config.disabledModels ?? []);
+        const exactComboSlugs = exactComboCatalogSlugs(config);
         const shadowedNativeSlugs = configuredNativeAliasSlugs(config);
         const suppressedBareNativeSlugs = new Set([
           ...desktopAllowlistSuppressedNativeSlugs(config),
@@ -1257,7 +1264,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             config.subagentModels,
             websocketsEnabled(config),
             maMode as "v1" | "default" | "v2",
-            exactComboCatalogSlugs(config),
+            exactComboSlugs,
             accountSelectors,
             suppressedBareNativeSlugs,
             new Set(),
@@ -1334,12 +1341,29 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         const data = [
           ...visibleNatives.map(id => nativeModelRow(id)),
           ...visibleAccountNatives.map(({ id, metadataId }) => nativeModelRow(id, metadataId)),
-          ...uniqueCatalogModelsForRawPublicList(goOrdered).map(m => ({
-            id: m.alias ?? `${m.provider}/${m.id}`,
-            object: "model",
-            created: 0,
-            owned_by: m.owned_by ?? m.provider,
-            ...grokEffortFields(m.reasoningEfforts ?? [], m.defaultReasoningEffort),
+          ...await Promise.all(uniqueCatalogModelsForRawPublicList(goOrdered).map(async m => {
+            const publicId = m.alias ?? `${m.provider}/${m.id}`;
+            const isCombo = m.provider === "combo" && exactComboSlugs.has(publicId);
+            const provider = config.providers[m.provider];
+            const effective = provider
+              ? (await import("../providers/default-aliases")).effectiveModelAliases(
+                  config,
+                  provider,
+                  knownModelIdsForProvider(m.provider, provider, config),
+                ).get(m.id)
+              : undefined;
+            return {
+              id: publicId,
+              object: "model",
+              created: 0,
+              // This endpoint is an OpenAI-compatible inbound contract. Some clients use
+              // owned_by as an adapter selector, so a virtual combo must name that wire
+              // adapter rather than the internal catalog authority marker.
+              owned_by: isCombo ? "openai" : (m.owned_by ?? m.provider),
+              ...(isCombo ? { is_combo: true } : {}),
+              ...(effective ? { alias_of: `${provider?.alias || m.provider}/${effective.alias}` } : {}),
+              ...grokEffortFields(m.reasoningEfforts ?? [], m.defaultReasoningEffort),
+            };
           })),
         ];
         return jsonResponse({ object: "list", data }, 200, req, policy);
@@ -1646,7 +1670,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
         };
-        const turnAdmissionLease = tryAdmitTurn();
+        const turnAdmissionLease = tryAdmitTurn(sessionLaneIdFromRequest(req.headers));
         if (!turnAdmissionLease) return serverBusyResponse(req, "active turns", policy);
         let resolved;
         try {
@@ -1798,7 +1822,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           return;
         }
 
-        const turnAdmissionLease = tryAdmitTurn();
+        const turnAdmissionLease = tryAdmitTurn(ws.data.sessionLaneId);
         if (!turnAdmissionLease) {
           sendJsonFrame(ws, buildWsErrorFrame(503, {
             type: "server_error",
@@ -2031,8 +2055,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   if (labActivationRequired(config, labConfigDir)) {
     activateLab(config, labConfigDir);
   }
-
-  registerFork();
 
   return server;
 }

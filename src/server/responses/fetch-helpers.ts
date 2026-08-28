@@ -74,7 +74,7 @@ export function providerFetch(
     : base;
   const httpFetch = Object.assign(
     (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
-      transport(input, withUpstreamHttpVersion(input, init, provider)),
+      transport(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 }),
     { preconnect },
   ) as typeof globalThis.fetch;
   // ChatGPT Codex backend: eligible streaming turns stay on HTTP/SSE by
@@ -150,6 +150,7 @@ export async function fetchWithHeaderTimeout(
       // indistinguishable from a pre-connection failure (#914).
       ...(manualRedirect ? { redirect: "manual" as const } : {}),
       signal: AbortSignal.any([abortSignal, timeout.signal]),
+      timeout: 0,
     });
   } finally {
     clearTimeout(timer);

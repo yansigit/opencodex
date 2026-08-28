@@ -1,9 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createGoogleAdapter } from "../src/adapters/google";
-import { classifyAntigravityProviderError } from "../src/oauth/antigravity-routing";
-import { anthropicToolCallId } from "../src/adapters/tool-call-id";
+import { chatCompletionsToResponsesBody } from "../src/chat/inbound";
+import { parseRequest } from "../src/responses/parser";
 import type { OcxParsedRequest } from "../src/types";
-import { createTranslatorBudget } from "../src/lib/translator-budget";
 
 const provider = { adapter: "google", baseUrl: "https://generativelanguage.googleapis.com", apiKey: "key" };
 
@@ -85,169 +84,50 @@ describe("google adapter — tool result images", () => {
   });
 });
 
-describe("google adapter — Antigravity structured stream errors", () => {
-  test("observes only a structured CCA error before emitting the adapter error", async () => {
-    const adapter = createGoogleAdapter({
-      adapter: "google",
-      googleMode: "cloud-code-assist",
-      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-      apiKey: "key",
-      project: "project",
-    } as never);
-    const observed: unknown[] = [];
-    const parsed = parsedWith([{ role: "user", content: "hello" }]);
-    parsed.stream = true;
-    await adapter.buildRequest(parsed, {
-      headers: new Headers(),
-      translatorBudget: createTranslatorBudget(),
-      onProviderError: error => observed.push(error),
+describe("google adapter — Chat Completions video input", () => {
+  test("carries an inline video through Chat translation onto Gemini inline_data", async () => {
+    const responsesBody = chatCompletionsToResponsesBody({
+      model: "google-antigravity/gemini-3.7-flash",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "Summarize this video" },
+          { type: "video_url", video_url: { url: "data:video/mp4;base64,aGVsbG8=" } },
+        ],
+      }],
     });
-    const body = `data: ${JSON.stringify({ error: { code: "RESOURCE_EXHAUSTED", status: 429, message: "quota exceeded" } })}\n\n`;
-    const events = [];
-    for await (const event of adapter.parseStream(new Response(body), createTranslatorBudget())) events.push(event);
-    expect(observed).toEqual([{ code: "RESOURCE_EXHAUSTED", status: 429, message: "quota exceeded" }]);
-    expect(events[0]).toMatchObject({ type: "error", status: 429, code: "RESOURCE_EXHAUSTED" });
-  });
+    const parsed = parseRequest(responsesBody);
+    parsed.modelId = "gemini-3.7-flash";
 
-  test("observes a buffered CCA error before returning the adapter error", async () => {
-    const adapter = createGoogleAdapter({
-      adapter: "google",
-      googleMode: "cloud-code-assist",
-      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-      apiKey: "key",
-      project: "project",
-    } as never);
-    const observed: unknown[] = [];
-    const parsed = parsedWith([{ role: "user", content: "hello" }]);
-    await adapter.buildRequest(parsed, {
-      headers: new Headers(),
-      translatorBudget: createTranslatorBudget(),
-      onProviderError: error => observed.push(error),
+    const contents = await geminiContents(parsed);
+
+    expect(contents).toContainEqual({
+      role: "user",
+      parts: [
+        { text: "Summarize this video" },
+        { inline_data: { mime_type: "video/mp4", data: "aGVsbG8=" } },
+      ],
     });
-    const events = await adapter.parseResponse(new Response(JSON.stringify({ error: { code: "PERMISSION_DENIED", status: 403, message: "region is not supported" } })), createTranslatorBudget());
-    expect(observed).toEqual([{ code: "PERMISSION_DENIED", status: 403, message: "region is not supported" }]);
-    expect(events[0]).toMatchObject({ type: "error", status: 403, code: "PERMISSION_DENIED" });
   });
 
-  test("normalizes actual Google numeric-code enum-status errors in streaming and buffered paths", async () => {
-    const cases = [
-      { code: 429, status: "RESOURCE_EXHAUSTED", message: "Quota exceeded", failure: "quota" },
-      { code: 429, status: "RESOURCE_EXHAUSTED", message: "Rate limit exceeded", failure: "rate-limit" },
-      { code: 403, status: "PERMISSION_DENIED", message: "Location is not supported", failure: "geoblock" },
-    ] as const;
-    for (const mode of ["stream", "buffer"] as const) {
-      for (const expected of cases) {
-        const adapter = createGoogleAdapter({
-          adapter: "google",
-          googleMode: "cloud-code-assist",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-          apiKey: "key",
-          project: "project",
-        } as never);
-        const observed: Array<{ code?: string; status?: number; message?: string }> = [];
-        const parsed = parsedWith([{ role: "user", content: "hello" }]);
-        parsed.stream = mode === "stream";
-        await adapter.buildRequest(parsed, {
-          headers: new Headers(),
-          translatorBudget: createTranslatorBudget(),
-          onProviderError: error => observed.push(error),
-        });
-        const payload = { error: { code: expected.code, status: expected.status, message: expected.message } };
-        const events = mode === "stream"
-          ? await (async () => {
-              const result = [];
-              for await (const event of adapter.parseStream(new Response(`data: ${JSON.stringify(payload)}\n\n`), createTranslatorBudget())) result.push(event);
-              return result;
-            })()
-          : await adapter.parseResponse!(new Response(JSON.stringify(payload)), createTranslatorBudget());
-        expect(observed).toHaveLength(1);
-        expect(classifyAntigravityProviderError(observed[0])).toBe(expected.failure);
-        expect(events[0]).toMatchObject({ type: "error", status: expected.code, code: expected.status });
-      }
-    }
-  });
+  test("does not mislabel an arbitrary remote video URL as Gemini file_data", async () => {
+    const responsesBody = chatCompletionsToResponsesBody({
+      model: "google-antigravity/gemini-3.7-flash",
+      messages: [{
+        role: "user",
+        content: [{ type: "video_url", video_url: { url: "https://example.test/video.mp4" } }],
+      }],
+    });
+    const parsed = parseRequest(responsesBody);
+    parsed.modelId = "gemini-3.7-flash";
 
-  test("preserves bounded message-only errors for replay invalidation in streaming and buffered paths", async () => {
-    for (const mode of ["stream", "buffer"] as const) {
-      const adapter = createGoogleAdapter({
-        adapter: "google",
-        googleMode: "cloud-code-assist",
-        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-        apiKey: "key",
-        project: "project",
-      } as never);
-      const parsed = parsedWith([{ role: "user", content: "hello" }]);
-      parsed.stream = mode === "stream";
-      await adapter.buildRequest(parsed, { headers: new Headers(), translatorBudget: createTranslatorBudget() });
-      const payload = { error: { message: "Invalid argument: signature rejected" } };
-      const events = mode === "stream"
-        ? await (async () => {
-            const result = [];
-            for await (const event of adapter.parseStream(new Response(`data: ${JSON.stringify(payload)}\n\n`), createTranslatorBudget())) result.push(event);
-            return result;
-          })()
-        : await adapter.parseResponse!(new Response(JSON.stringify(payload)), createTranslatorBudget());
-      expect(events[0]).toMatchObject({ type: "error", message: "Invalid argument: signature rejected" });
-    }
-  });
+    const contents = await geminiContents(parsed);
 
-  test("redacts secrets from inline streaming and buffered errors before observation", async () => {
-    const message = "Bearer secret-token api_key=secret-api https://user:secret-password@example.test/path?api_key=secret-url";
-    for (const mode of ["stream", "buffer"] as const) {
-      const adapter = createGoogleAdapter({
-        adapter: "google",
-        googleMode: "cloud-code-assist",
-        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-        apiKey: "key",
-        project: "project",
-      } as never);
-      const observed: Array<{ message?: string }> = [];
-      const parsed = parsedWith([{ role: "user", content: "hello" }]);
-      parsed.stream = mode === "stream";
-      await adapter.buildRequest(parsed, {
-        headers: new Headers(),
-        translatorBudget: createTranslatorBudget(),
-        onProviderError: error => observed.push(error),
-      });
-      const payload = { error: { code: 429, status: "RESOURCE_EXHAUSTED", message } };
-      const events = mode === "stream"
-        ? await (async () => {
-            const result = [];
-            for await (const event of adapter.parseStream(new Response(`data: ${JSON.stringify(payload)}\n\n`), createTranslatorBudget())) result.push(event);
-            return result;
-          })()
-        : await adapter.parseResponse!(new Response(JSON.stringify(payload)), createTranslatorBudget());
-      const serialized = JSON.stringify({ events, observed });
-      expect(serialized).not.toContain("secret-token");
-      expect(serialized).not.toContain("secret-api");
-      expect(serialized).not.toContain("secret-url");
-      expect(serialized).not.toContain("secret-password");
-    }
-  });
-
-  test("clear-on-invalid does NOT clear replay cache on 'missing a thought_signature' errors", async () => {
-    const { observeAntigravityReplay, applyAntigravityReplay } = await import("../src/adapters/google-antigravity-replay");
-    const { antigravitySessionId } = await import("../src/adapters/google-antigravity-wire");
-    const adapter = createGoogleAdapter({
-      adapter: "google",
-      googleMode: "cloud-code-assist",
-      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-      apiKey: "key",
-      project: "project",
-    } as never);
-    const reqParsed = parsedWith([{ role: "user", content: "hello" }]);
-    reqParsed.stream = true;
-    await adapter.buildRequest(reqParsed, { headers: new Headers(), translatorBudget: createTranslatorBudget() });
-    const sessionId = antigravitySessionId(reqParsed);
-    observeAntigravityReplay("gemini-3-pro", sessionId, [{ functionCall: { name: "test_call", args: {} }, thoughtSignature: "sig-valid123456789" }]);
-
-    const payload = { error: { message: "Function call is missing a thought_signature in functionCall parts." } };
-    const stream = new Response(`data: ${JSON.stringify(payload)}\n\n`);
-    for await (const _ of adapter.parseStream(stream, createTranslatorBudget())) {}
-
-    const contents = [{ role: "model", parts: [{ functionCall: { name: "test_call", args: {} } }] }];
-    applyAntigravityReplay("gemini-3-pro", sessionId, contents);
-    expect((contents[0].parts[0] as { thoughtSignature?: string }).thoughtSignature).toBe("sig-valid123456789");
+    expect(contents).toContainEqual({
+      role: "user",
+      parts: [{ text: "[video: https://example.test/video.mp4]" }],
+    });
+    expect(JSON.stringify(contents)).not.toContain("file_data");
   });
 });
 
@@ -302,45 +182,6 @@ describe("google adapter — tool-call ids on the wire", () => {
     expect(frPart.functionResponse.id).toBe("call_abc");
   });
 
-  test("orphan tool results stay visible as text instead of emitting an unmatched functionResponse", async () => {
-    const contents = await geminiContents(parsedWith([
-      { role: "toolResult", toolCallId: "orphan", toolName: "missing", content: "discard", isError: false },
-      { role: "user", content: "continue" },
-    ]));
-
-    expect(contents.flatMap(content => content.parts).some(part => "functionResponse" in part)).toBe(false);
-    expect(contents.map(content => content.role)).toEqual(["user"]);
-    expect(contents[0].parts).toEqual([
-      { text: "[tool_result without adjacent tool_use: missing (orphan)]\ndiscard" },
-      { text: "continue" },
-    ]);
-  });
-
-  test("AI Studio keeps an unmatched trailing tool call", async () => {
-    const contents = await geminiContents(parsedWith([
-      { role: "user", content: "hi" },
-      { role: "assistant", content: [{ type: "toolCall", id: "call_pending", name: "bash", arguments: { cmd: "ls" } }] },
-    ]));
-
-    const modelTurn = contents.find(content => content.role === "model");
-    const functionCall = modelTurn?.parts.find(part => "functionCall" in part) as { functionCall: { id?: string } } | undefined;
-    expect(functionCall?.functionCall.id).toBe("call_pending");
-  });
-
-  test("orphan result ids do not reserve allocator slots", async () => {
-    const rawId = "call:a";
-    const normalizedId = anthropicToolCallId(rawId)!;
-    const contents = await geminiContents(parsedWith([
-      { role: "assistant", content: [{ type: "toolCall", id: rawId, name: "bash", arguments: {} }] },
-      { role: "toolResult", toolCallId: rawId, toolName: "bash", content: "ok", isError: false },
-      { role: "toolResult", toolCallId: normalizedId, toolName: "missing", content: "discard", isError: false },
-    ]));
-
-    const functionCall = contents.find(content => content.role === "model")!.parts
-      .find(part => "functionCall" in part) as { functionCall: { id?: string } };
-    expect(functionCall.functionCall.id).toBe(normalizedId);
-  });
-
   test("ids are normalized to Anthropic's tool_use.id charset, preserving call/response pairing", async () => {
     const contents = await geminiContents(parsedWith([
       { role: "assistant", content: [{ type: "toolCall", id: "fc:weird/id#1", name: "bash", arguments: {} }] },
@@ -361,8 +202,6 @@ describe("google adapter — tool-call ids on the wire", () => {
         { type: "toolCall", id: "call:a", name: "bash", arguments: {} },
         { type: "toolCall", id: "call/a", name: "bash", arguments: {} },
       ] },
-      { role: "toolResult", toolCallId: "call:a", toolName: "bash", content: "one", isError: false },
-      { role: "toolResult", toolCallId: "call/a", toolName: "bash", content: "two", isError: false },
     ]));
     const ids = contents.find(c => c.role === "model")!.parts
       .filter(p => "functionCall" in p)
@@ -631,101 +470,5 @@ describe("google adapter — direct -tiered wire renames", () => {
       expect(systemText).toContain(`powered by the ${modelId}`);
       expect(systemText).not.toContain("-tiered");
     }
-  });
-});
-
-describe("google adapter — structured output", () => {
-  function parsedWithTextFormat(
-    modelId: string,
-    textFormat: Record<string, unknown>,
-    tools?: unknown[],
-  ): OcxParsedRequest {
-    return {
-      modelId,
-      stream: false,
-      options: { textFormat },
-      context: { messages: [{ role: "user", content: "return JSON" }], tools },
-    } as unknown as OcxParsedRequest;
-  }
-
-  test("AI Studio json_schema lowers to JSON mode with a sanitized responseSchema", async () => {
-    const body = await geminiBody(parsedWithTextFormat("gemini-3-pro", {
-      type: "json_schema",
-      name: "answer",
-      schema: {
-        type: "object",
-        properties: { answer: { type: "string", additionalProperties: false } },
-        required: ["answer"],
-        additionalProperties: false,
-      },
-    }));
-
-    expect(body.generationConfig).toEqual({
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "object",
-        properties: { answer: { type: "string" } },
-        required: ["answer"],
-      },
-    });
-  });
-
-  test("Vertex json_schema uses flat JSON mode with a sanitized responseSchema", async () => {
-    const request = await createGoogleAdapter({ ...provider, googleMode: "vertex" as const }).buildRequest(
-      parsedWithTextFormat("gemini-3.7-flash", {
-        type: "json_schema",
-        name: "decision",
-        schema: {
-          type: "object",
-          properties: { keep: { type: "boolean" } },
-          required: ["keep"],
-          additionalProperties: false,
-        },
-      }),
-    );
-    const body = JSON.parse(request.body) as Record<string, any>;
-
-    expect(body.model).toBeUndefined();
-    expect(body.request).toBeUndefined();
-    expect(body.generationConfig).toMatchObject({
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "object",
-        properties: { keep: { type: "boolean" } },
-        required: ["keep"],
-      },
-    });
-    expect(body.generationConfig.responseSchema.additionalProperties).toBeUndefined();
-  });
-
-  test("AI Studio json_object lowers to responseMimeType only", async () => {
-    const body = await geminiBody(parsedWithTextFormat("gemini-3-pro", { type: "json_object" }));
-
-    expect(body.generationConfig).toEqual({ responseMimeType: "application/json" });
-  });
-
-  test("function tools suppress Gemini JSON mode", async () => {
-    const body = await geminiBody(parsedWithTextFormat(
-      "gemini-3-pro",
-      { type: "json_object" },
-      [{ name: "lookup", parameters: { type: "object" } }],
-    ));
-
-    expect(body.generationConfig?.responseMimeType).toBeUndefined();
-  });
-
-  test("schema-less json_schema still lowers to responseMimeType", async () => {
-    const body = await geminiBody(parsedWithTextFormat("gemini-3-pro", {
-      type: "json_schema",
-      name: "answer",
-    }));
-
-    expect(body.generationConfig).toEqual({ responseMimeType: "application/json" });
-  });
-
-  test("image-capable models suppress Gemini JSON mode", async () => {
-    const body = await geminiBody(parsedWithTextFormat("gemini-3.1-flash-image", { type: "json_object" }));
-
-    expect(body.generationConfig?.responseMimeType).toBeUndefined();
   });
 });

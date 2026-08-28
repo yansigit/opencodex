@@ -160,8 +160,6 @@ export interface ProviderQuotaWindowDto {
 }
 
 export interface ProviderQuotaDto extends CodexQuotaDto {
-  fiveHourPercent?: number;
-  fiveHourResetAt?: number;
   customWindows?: ProviderQuotaWindowDto[];
   updatedAt?: number;
 }
@@ -242,10 +240,22 @@ interface OAuthAccountDto {
   email?: string;
   active?: boolean;
   needsReauth?: boolean;
+  quota?: CodexQuotaDto | null;
+  quotaUnavailable?: boolean;
 }
 
-async function fetchOAuthRows(deps: AccountDeps, baseUrl: string, name: string): Promise<FamilyRows> {
-  const res = await apiJson(deps, baseUrl, "GET", `/api/oauth/accounts?provider=${encodeURIComponent(name)}`);
+async function fetchOAuthRows(
+  deps: AccountDeps,
+  baseUrl: string,
+  name: string,
+  quota?: { refresh?: boolean },
+): Promise<FamilyRows> {
+  // Quota is opt-in: the server probes the upstream once per stored credential when `quota=1`
+  // is present, so the default listing must stay a cheap local read (#2566).
+  const query = quota
+    ? `?provider=${encodeURIComponent(name)}&quota=1${quota.refresh ? "&refresh=1" : ""}`
+    : `?provider=${encodeURIComponent(name)}`;
+  const res = await apiJson(deps, baseUrl, "GET", `/api/oauth/accounts${query}`);
   if (res.status === 0) return { rows: [], activeId: null, status: 0, networkDown: true };
   if (res.status !== 200) return { rows: [], activeId: null, status: res.status, errorJson: res.json };
   const activeId = typeof res.json.activeAccountId === "string" ? res.json.activeAccountId : null;
@@ -258,6 +268,8 @@ async function fetchOAuthRows(deps: AccountDeps, baseUrl: string, name: string):
     email: a.email,
     active: a.active ?? a.id === activeId,
     needsReauth: a.needsReauth,
+    ...(a.quota !== undefined ? { quota: a.quota } : {}),
+    ...(a.quotaUnavailable !== undefined ? { quotaUnavailable: a.quotaUnavailable } : {}),
   }));
   return { rows, activeId, status: 200 };
 }
@@ -286,9 +298,15 @@ async function fetchKeyRows(deps: AccountDeps, baseUrl: string, name: string): P
   return { rows, activeId, status: 200 };
 }
 
-export function fetchRows(deps: AccountDeps, baseUrl: string, name: string, type: AccountType): Promise<FamilyRows> {
+export function fetchRows(
+  deps: AccountDeps,
+  baseUrl: string,
+  name: string,
+  type: AccountType,
+  quota?: { refresh?: boolean },
+): Promise<FamilyRows> {
   if (type === "codex") return fetchCodexRows(deps, baseUrl);
-  if (type === "oauth") return fetchOAuthRows(deps, baseUrl, name);
+  if (type === "oauth") return fetchOAuthRows(deps, baseUrl, name, quota);
   return fetchKeyRows(deps, baseUrl, name);
 }
 
