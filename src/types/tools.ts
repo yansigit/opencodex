@@ -32,16 +32,19 @@ export function namespacedToolName(namespace: string | undefined, name: string):
 }
 
 /**
- * Codex 0.149 unified-exec name normalization.
+ * Codex unified-exec name normalization.
  *
  * Codex's code-mode shell tool is declared as `exec` (a freeform custom tool whose own
  * description mentions the nested `await tools.exec_command(...)` helper). Routed models —
  * DeepSeek in particular — sometimes echo that helper name as the tool-call name, emitting
- * `exec_command` instead of the declared `exec`. Accept the legacy shell bridge names only
- * when the request catalog actually declares `exec` and does not itself declare the legacy
- * name (an MCP server may legitimately advertise `exec_command` under its own namespace).
+ * `exec_command` or `apply_patch` instead of the declared `exec`. Accept these nested helper
+ * names only when the request catalog actually declares `exec` and does not itself declare the
+ * emitted name (an MCP server may legitimately advertise one under its own namespace). Some
+ * hosted adapters also strip a unique namespace prefix or replace its separator with `_`; those
+ * forms are accepted only when one declaration can be identified unambiguously.
  */
 const LEGACY_SHELL_BRIDGE_TOOL_NAMES = ["exec_command", "shell_command"] as const;
+const CODE_MODE_HELPER_TOOL_NAMES = [...LEGACY_SHELL_BRIDGE_TOOL_NAMES, "apply_patch"] as const;
 
 export function normalizeDeclaredToolName(
   name: string,
@@ -52,34 +55,26 @@ export function normalizeDeclaredToolName(
   if (declared.has("exec")) {
     // When the catalog explicitly declares any legacy shell bridge name, the environment
     // genuinely exposes that tool — turn normalization off so a call is never mis-routed
-    // to exec.
+    // to `exec`.
     if ((LEGACY_SHELL_BRIDGE_TOOL_NAMES as readonly string[]).some(legacy => declared.has(legacy))) {
       return name;
     }
-    if ((LEGACY_SHELL_BRIDGE_TOOL_NAMES as readonly string[]).includes(name)) {
+    if ((CODE_MODE_HELPER_TOOL_NAMES as readonly string[]).includes(name)) {
       return "exec";
     }
   }
-  // When a model strips the namespace prefix (e.g. Gemini calling bare exec for default_api:exec),
-  // or replaces non-alphanumeric separators with underscores, resolve it if and only if exactly
-  // one declared tool matches.
-  {
-    let matched: string | undefined;
-    for (const dec of declared) {
-      const matchesSuffix = !name.includes(":") && !name.includes("__") && (dec.endsWith(":" + name) || dec.endsWith("__" + name));
-      const matchesSanitized = dec.replace(/[^A-Za-z0-9_-]/g, "_") === name;
-      if (matchesSuffix || matchesSanitized) {
-        if (matched !== undefined) {
-          return name;
-        }
-        matched = dec;
-      }
-    }
-    if (matched !== undefined) {
-      return matched;
-    }
+  // Models may strip a namespace prefix or replace separators with underscores. Resolve only
+  // when exactly one declaration matches, so an ambiguous bare name remains fail-closed.
+  let matched: string | undefined;
+  for (const dec of declared) {
+    const matchesSuffix = !name.includes(":") && !name.includes("__")
+      && (dec.endsWith(`:${name}`) || dec.endsWith(`__${name}`));
+    const matchesSanitized = dec.replace(/[^A-Za-z0-9_-]/g, "_") === name;
+    if (!matchesSuffix && !matchesSanitized) continue;
+    if (matched !== undefined) return name;
+    matched = dec;
   }
-  return name;
+  return matched ?? name;
 }
 
 export function toolChoiceAliases(tool: Pick<OcxTool, "namespace" | "name">): string[] {

@@ -77,4 +77,36 @@ describe("Cursor external model continuation context", () => {
     expect(serialized).not.toContain("[Tool Result]");
     expect(serialized).not.toContain("[tool_result]");
   });
+
+  test("external replay preserves actionable normalization for empty exec output", () => {
+    const bytes = encodeCursorRunRequest({
+      modelId: "gpt-5.6-sol-xhigh",
+      conversationId: "c_empty_exec",
+      system: ["You are a helpful assistant."],
+      messages: [{ role: "user", content: "Continue" }],
+      rawMessages: [
+        { role: "user", content: "inspect the repository", timestamp: 1 },
+        {
+          role: "assistant",
+          model: "cursor/gpt-5.6-sol",
+          timestamp: 2,
+          content: [{ type: "toolCall", id: "call_exec_empty", name: "exec", arguments: { cmd: "true" } }],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call_exec_empty",
+          toolName: "exec",
+          content: "",
+          isError: false,
+          timestamp: 3,
+        },
+      ],
+    });
+
+    const serialized = JSON.stringify(decodeTurns(bytes));
+    expect(serialized).toContain("NOT lost context");
+    expect(serialized).toContain("Tool output for exec");
+    expect(serialized).not.toContain("[Tool Result]");
+    expect(serialized).not.toContain("[tool_result]");
+  });
 });

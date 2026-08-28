@@ -64,6 +64,7 @@ import { providerDestinationConfigError } from "./lib/destination-policy";
 import { redactSecretString } from "./lib/redact";
 import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "./lib/provider-tls-profile";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
+import { MODEL_ALIAS_PATTERN } from "./providers/default-aliases";
 import {
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
   OPENAI_PROVIDER_TIER_VERSION,
@@ -147,6 +148,15 @@ export {
   writeRuntimePort,
   type RuntimePortState,
 } from "./config/process-state";
+import {
+  clearPendingConfigTopLevelDeletions,
+  configHasRebaseProvenance,
+  configRebaseDeletionKeys,
+  CONFIG_REBASE_PROVENANCE_KEY,
+  deleteConfigTopLevelKey,
+  projectConfigRebaseProvenance,
+} from "./config/rebase-provenance";
+export { deleteConfigTopLevelKey } from "./config/rebase-provenance";
 
 export class OpenAiTierBackupCleanupError extends Error {
   constructor() { super("OpenAI tier backup temporary cleanup failed"); this.name = "OpenAiTierBackupCleanupError"; }
@@ -494,8 +504,10 @@ const providerConfigSchema = z.object({
   }).strict().transform(value => value.managedIdentityClientId === undefined
     ? value
     : { ...value, managedIdentityClientId: value.managedIdentityClientId.trim() }).optional(),
+  alias: z.string().optional(),
+  modelAliases: z.record(z.string(), z.string()).optional(),
+  defaultAliases: z.boolean().optional(),
   requestPacing: requestPacingSchema.optional().catch(undefined),
-  tlsProfile: z.literal("antigravity-browser").optional(),
   mcpMaxTools: z.number().int().positive().optional(),
   mcpMaxSchemaBytes: z.number().int().positive().optional(),
   mcpMaxResultBytes: z.number().int().positive().optional(),
@@ -528,8 +540,8 @@ const providerConfigSchema = z.object({
   // accepted, persisted, and then silently resolved to the `code_mode_only` default — the
   // operator asked for shell mode, got code mode, and was told nothing (#2106).
   codexToolMode: z.enum(["code_mode_only", "shell"]).optional(),
-  // Validated rather than passed through: same rationale as codexToolMode above.
   projectContext: z.enum(["off", "on"]).optional(),
+  tlsProfile: z.literal("antigravity-browser").optional(),
   responsesItemIdRepair: z.object({
     message: z.array(z.string().min(1)).optional(),
     reasoning: z.array(z.string().min(1)).optional(),
@@ -900,6 +912,10 @@ const configSchema = z.object({
   ]).optional().catch(undefined),
   providers: z.record(z.string(), providerConfigSchema),
   defaultProvider: z.string().min(1).default("openai"),
+  defaultModelAliases: z.boolean().optional(),
+  // Future versions remain opaque through passthrough-compatible whole-config saves.
+  // Only version 1 grants deletion authority in the rebase path.
+  configRebaseProvenance: z.unknown().optional(),
   // A retry can be billable, so absence and malformed hand edits both stay off.
   emptyCompletionRetry: z.boolean().optional().catch(false),
   // A malformed hand edit must not silently stop opening the browser: fall back
@@ -912,7 +928,6 @@ const configSchema = z.object({
   providerContextCaps: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
-  // Invalid hand edits disable only this experimental opt-in subtree.
   v2NativeParentOverride: v2NativeParentOverrideSchema.optional().catch(undefined),
   // Invalid optional recovery config must not discard unrelated provider/account state.
   agentTaskRecovery: agentTaskRecoverySchema.optional().catch(undefined),
@@ -924,7 +939,6 @@ const configSchema = z.object({
   injectionEffort: z.string().optional().catch(undefined),
   syncCodexSubagentDefaults: z.boolean().optional().catch(undefined),
   syncCodexAgentRoles: z.boolean().optional().catch(undefined),
-  // Salvage element by element. A malformed neighbour must not wipe the catalog.
   subagentRoles: z.unknown().optional(),
   // Per-primary-model fallback chains. Values must be non-empty string arrays;
   // malformed entries degrade to undefined rather than rejecting the whole config.
@@ -932,8 +946,6 @@ const configSchema = z.object({
     z.string(),
     z.array(z.string().trim().min(1)).min(1),
   ).optional().catch(undefined),
-  // Candidate models for spawned sub-agents. Supports string array or string
-  // record of string arrays, gracefully degrading to undefined on malformed hand-edits.
   subagentCandidates: z.union([
     z.array(z.string().trim().min(1)).min(1),
     z.record(z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)),
@@ -950,6 +962,9 @@ const configSchema = z.object({
   // A malformed hand edit must degrade to false without discarding providers, accounts,
   // or the exact selector map. Live writes remain strict.
   codexAccountPickerEnabled: z.boolean().optional().catch(false),
+  // Same degrade-not-reject rule: a malformed hand edit hides Spark rather than discarding the
+  // whole config. Hidden is also the default, so `catch(false)` and the default agree.
+  showCodexSparkQuota: z.boolean().optional().catch(false),
   // Model ids excluded from the Grok Build managed block (dashboard switches).
   grokExcludedModels: z.array(z.string()).optional(),
   // Invalid values degrade to undefined ("auto") instead of failing the whole
@@ -1203,6 +1218,17 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "modelSupportsReasoningSummaries"],
         message: reasoningSummariesError,
+      });
+    }
+    const verbositySupportError = booleanRecordConfigError(
+      (provider as { modelSupportsVerbosity?: unknown }).modelSupportsVerbosity,
+      "modelSupportsVerbosity",
+    );
+    if (verbositySupportError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "modelSupportsVerbosity"],
+        message: verbositySupportError,
       });
     }
     const serviceTierModelsError = booleanRecordConfigError(
@@ -1717,8 +1743,9 @@ function malformedSyncCodexAgentRolesWarning(rawParsed: unknown): string | null 
 }
 
 function normalizeSyncCodexAgentRoles(config: OcxConfig, rawParsed: unknown): OcxConfig {
-  if (!malformedSyncCodexAgentRolesWarning(rawParsed)) return config;
-  return { ...config, syncCodexAgentRoles: false };
+  return malformedSyncCodexAgentRolesWarning(rawParsed)
+    ? { ...config, syncCodexAgentRoles: false }
+    : config;
 }
 
 function warnDegradedSyncCodexAgentRoles(rawParsed: unknown): void {
@@ -1736,8 +1763,7 @@ function subagentRolesError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
   if (!raw || !Object.hasOwn(raw, "subagentRoles")) return null;
   const parsed = parseSubagentRoles(raw.subagentRoles);
-  if (parsed.ok) return null;
-  return `schema_invalid: ${parsed.error}`;
+  return parsed.ok ? null : `schema_invalid: ${parsed.error}`;
 }
 
 function malformedUpstreamHostCircuitThresholdWarning(rawParsed: unknown): string | null {
@@ -1908,6 +1934,7 @@ export function loadConfig(): OcxConfig {
   try {
     const raw = readFileSync(configPath, "utf-8").replace(/^\uFEFF/, "");
     const parsed = JSON.parse(raw);
+    sanitizeAliasesForLoad(parsed);
     sanitizeRetryOn429ForLoad(parsed);
     sanitizeModelCostsForLoad(parsed);
     const result = configSchema.safeParse(parsed);
@@ -1985,6 +2012,43 @@ export function loadConfig(): OcxConfig {
   }
 }
 
+/** Hand-edited alias mistakes disable only the bad alias; providers and routing survive. */
+function sanitizeAliasesForLoad(raw: unknown): void {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const root = raw as Record<string, unknown>;
+  if (!root.providers || typeof root.providers !== "object" || Array.isArray(root.providers)) return;
+  const providers = root.providers as Record<string, Record<string, unknown>>;
+  const providerNames = new Set(Object.keys(providers).map(name => name.toLowerCase()));
+  const claimedProviders = new Set<string>();
+  const comboAliases = new Set(Object.values((root.combos as Record<string, { alias?: unknown }> | undefined) ?? {})
+    .map(combo => typeof combo?.alias === "string" ? combo.alias.toLowerCase() : "").filter(Boolean));
+  const accountNamespaces = new Set(Object.keys((root.codexAccountNamespaces as Record<string, unknown> | undefined) ?? {}).map(name => name.toLowerCase()));
+  for (const provider of Object.values(providers)) {
+    const alias = provider.alias;
+    if (typeof alias !== "string" || !isValidProviderName(alias)
+      || providerNames.has(alias.toLowerCase()) || claimedProviders.has(alias.toLowerCase())
+      || comboAliases.has(alias.toLowerCase()) || accountNamespaces.has(alias.toLowerCase())) {
+      if (alias !== undefined) console.warn("Ignoring invalid or colliding provider alias in config.json");
+      delete provider.alias;
+    } else claimedProviders.add(alias.toLowerCase());
+    if (!provider.modelAliases || typeof provider.modelAliases !== "object" || Array.isArray(provider.modelAliases)) {
+      if (provider.modelAliases !== undefined) delete provider.modelAliases;
+      continue;
+    }
+    const aliases = provider.modelAliases as Record<string, unknown>;
+    const nativeIds = new Set((Array.isArray(provider.models) ? provider.models : []).filter((id): id is string => typeof id === "string").map(id => id.toLowerCase()));
+    const claimed = new Set<string>();
+    for (const [id, value] of Object.entries(aliases)) {
+      const lower = typeof value === "string" ? value.toLowerCase() : "";
+      if (typeof value !== "string" || !MODEL_ALIAS_PATTERN.test(value) || claimed.has(lower)
+        || nativeIds.has(lower) || comboAliases.has(lower) || /^(?:gpt-|o1-|o3-|o4-|codex-)/i.test(value)) {
+        console.warn(`Ignoring invalid or colliding model alias for ${id} in config.json`);
+        delete aliases[id];
+      } else claimed.add(lower);
+    }
+  }
+}
+
 /** Refresh the user cost-overlay registry from `config` and return it unchanged. */
 function withRefreshedCostOverlays(config: OcxConfig): OcxConfig {
   refreshUserCostOverlays(config);
@@ -2057,8 +2121,9 @@ export function subagentDefaultSyncEffective(
 }
 
 /**
- * Resolves and normalizes subagent candidate models from config.
- * Supports global candidate arrays, role-specific mappings, and primary model mappings.
+ * Resolve and normalize configured candidates for one spawned sub-agent.
+ * Supports a global ordered list or a record keyed by role/model, with
+ * `default` and `*` fallbacks for unmatched requests.
  */
 export function resolveSubagentCandidates(
   config: Pick<OcxConfig, "subagentCandidates"> | OcxConfig,
@@ -2083,31 +2148,22 @@ export function resolveSubagentCandidates(
     return result;
   };
 
-  if (Array.isArray(candidates)) {
-    return normalizeList(candidates);
-  }
+  if (Array.isArray(candidates)) return normalizeList(candidates);
+  if (typeof candidates !== "object") return [];
 
-  if (typeof candidates === "object") {
-    const trimmed = roleOrModel?.trim();
-    let selected: unknown;
-    if (trimmed) {
-      if (Object.hasOwn(candidates, trimmed)) {
-        selected = (candidates as Record<string, unknown>)[trimmed];
-      } else {
-        const matchingKey = Object.keys(candidates).find(k => slugsEquivalent(k, trimmed));
-        if (matchingKey) {
-          selected = (candidates as Record<string, unknown>)[matchingKey];
-        }
-      }
+  const record = candidates as Record<string, unknown>;
+  const trimmed = roleOrModel?.trim();
+  let selected: unknown;
+  if (trimmed) {
+    if (Object.hasOwn(record, trimmed)) {
+      selected = record[trimmed];
+    } else {
+      const matchingKey = Object.keys(record).find(key => slugsEquivalent(key, trimmed));
+      if (matchingKey) selected = record[matchingKey];
     }
-    if (!selected) {
-      const record = candidates as Record<string, unknown>;
-      selected = record["default"] ?? record["*"];
-    }
-    return normalizeList(selected);
   }
-
-  return [];
+  if (!selected) selected = record.default ?? record["*"];
+  return normalizeList(selected);
 }
 
 function mergeConfigDefaults(parsed: unknown): unknown {
@@ -2654,7 +2710,12 @@ function persistConfigUnlocked(config: OcxConfig): boolean {
   // External editors can add provider rows the live config deliberately does
   // not route with yet; merge them at the serialization boundary so an
   // unrelated in-process save cannot erase the provider or its overlay.
+  // Provider preservation reads symbol-keyed live-owner state, which structuredClone
+  // intentionally drops. Resolve that ownership before projecting JSON provenance.
+  const provenanceProjection = projectConfigRebaseProvenance(config);
   const persisted = withPreservedDiskOnlyProviders(config);
+  if (provenanceProjection.configRebaseProvenance === undefined) delete persisted.configRebaseProvenance;
+  else persisted.configRebaseProvenance = provenanceProjection.configRebaseProvenance;
   const bytes = JSON.stringify(persisted, null, 2) + "\n";
   let unchanged = false;
   try {
@@ -2682,9 +2743,15 @@ export function saveConfig(config: OcxConfig): void {
   // Keep the real-home assertion ahead of even lock-directory preparation.
   assertNotRealHomeUnderTest(getConfigDir());
   withConfigMutationLockSync(() => {
-    const projected = projectCustomModelCatalogMigration(readRawConfigJson(), config);
-    if (persistConfigUnlocked(projected)) bumpGenerationForCooperatingConfigWrite();
-    adoptCustomModelCatalogMigration(config, projected);
+    const withProvenance = projectCustomModelCatalogMigration(
+      readRawConfigJson(),
+      projectConfigRebaseProvenance(config),
+    );
+    if (persistConfigUnlocked(withProvenance)) bumpGenerationForCooperatingConfigWrite();
+    adoptCustomModelCatalogMigration(config, withProvenance);
+    if (withProvenance.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+    else config.configRebaseProvenance = structuredClone(withProvenance.configRebaseProvenance);
+    clearPendingConfigTopLevelDeletions(config);
   });
 }
 
@@ -2803,7 +2870,6 @@ const claudeCodeBaseline = new WeakMap<OcxConfig, unknown>();
  * reconciliation paths below.
  */
 const liveConfigBaseline = new WeakMap<OcxConfig, OcxConfig>();
-
 /**
  * The live config retains the address of the socket Bun actually opened, while
  * this map retains the operator's desired address for the next process start.
@@ -3107,6 +3173,8 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
     if (baseline && onDisk !== undefined) {
       const persistedDiagnostics = configDiagnosticsFromRaw(JSON.stringify(onDisk));
       if (persistedDiagnostics.source === "file") {
+        const deletedKeys = configRebaseDeletionKeys(config);
+        const provenanceExists = configHasRebaseProvenance(config);
         // Only keys this live config is actually known to have diverged on may be
         // rebased. The baseline is captured once when the server arms it, so any key
         // that appeared on disk afterwards — through saveConfig(), a hand edit, or
@@ -3120,8 +3188,11 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
         const rebaseableKeys = new Set([
           ...Object.keys(baseline as unknown as Record<string, unknown>),
           ...Object.keys(config as unknown as Record<string, unknown>),
+          ...(provenanceExists
+            ? Object.keys(persistedDiagnostics.config as unknown as Record<string, unknown>)
+            : []),
         ]);
-        const skipped = new Set(["hostname", "port", "claudeCode"]);
+        const skipped = new Set(["hostname", "port", "claudeCode", CONFIG_REBASE_PROVENANCE_KEY]);
         for (const key of Object.keys(persistedDiagnostics.config as unknown as Record<string, unknown>)) {
           if (!rebaseableKeys.has(key)) skipped.add(key);
         }
@@ -3131,6 +3202,7 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
           persistedDiagnostics.config as unknown as Record<string, unknown>,
           skipped,
         );
+        for (const key of deletedKeys) delete (config as unknown as Record<string, unknown>)[key];
       }
     }
     if (claudeCodeBaseline.has(config)) {
@@ -3144,10 +3216,13 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
         }
       }
     }
+    const provenanceProjection = projectConfigRebaseProvenance(config);
     const projectedConfig = projectCustomModelCatalogMigration(
       onDisk,
       config,
     );
+    if (provenanceProjection.configRebaseProvenance === undefined) delete projectedConfig.configRebaseProvenance;
+    else projectedConfig.configRebaseProvenance = provenanceProjection.configRebaseProvenance;
     const persistedBinding = bindingBaseline && onDisk
       ? readPersistedServerBinding(onDisk, bindingBaseline)
       : bindingBaseline;
@@ -3165,8 +3240,11 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
       claudeCodeBaseline.set(config, structuredClone(config.claudeCode));
     }
     if (liveConfigBaseline.has(config)) {
-      liveConfigBaseline.set(config, structuredClone(config));
+      if (projectedConfig.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+      else config.configRebaseProvenance = structuredClone(projectedConfig.configRebaseProvenance);
+      liveConfigBaseline.set(config, structuredClone(projectedConfig));
     }
+    clearPendingConfigTopLevelDeletions(config);
   });
 }
 
@@ -3242,10 +3320,17 @@ export function applyProxyEnv(config: OcxConfig): void {
   const existing = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
   const entries = existing.split(",").map(s => s.trim()).filter(Boolean);
   const seen = new Set(entries.map(e => e.toLowerCase()));
-  for (const host of ["localhost", "127.0.0.1", "::1", "[::1]"]) {
-    if (!seen.has(host)) {
+  // Configured entries first, then loopback: loopback is unconditional, so appending it last
+  // keeps it present even when the operator lists a loopback host themselves.
+  const raw = config.noProxy;
+  const configured = (Array.isArray(raw) ? raw : (resolveEnvValue(raw) ?? "").split(","))
+    .map(entry => entry.trim())
+    .filter(Boolean);
+  for (const host of [...configured, "localhost", "127.0.0.1", "::1", "[::1]"]) {
+    const key = host.toLowerCase();
+    if (!seen.has(key)) {
       entries.push(host);
-      seen.add(host);
+      seen.add(key);
     }
   }
   process.env.NO_PROXY = entries.join(",");

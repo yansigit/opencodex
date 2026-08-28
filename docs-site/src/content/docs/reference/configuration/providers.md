@@ -75,12 +75,12 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | `supportsServiceTier?` | `boolean` | Tri-state canonical Fast capability fallback. `true` publishes Fast in the catalog, satisfies service-tier routing requirements, contributes a supported fingerprint, and lets fast mode inject the provider's canonical wire value on a compatible final adapter. `false` strips the field and never injects, and exact model declarations cannot reopen it. Absent leaves the provider unclassified: fast mode does not inject or normalize a canonical caller value, and caller values obey the final wire's forwarding permission (`chatServiceTier` on Chat; passthrough on Responses). The registry classifies canonical OpenAI (`true`), DeepSeek, and Volcengine Ark (`false`); set it explicitly only for custom gateways that genuinely support tiers. |
 | `modelSupportsServiceTier?` | `Record<string, boolean>` | Exact upstream model capability overrides. Exact `true` enables canonical Fast for that model; exact `false` narrows provider defaults. An explicit provider-level `supportsServiceTier: false` remains fail-closed and cannot be reopened. Exact `true` does not authorize foreign caller-tier forwarding on Chat. Undeclared models fall back to provider-wide behavior. Management `PATCH /api/providers` merges entries and accepts `null` to clear one. |
 | `chatServiceTier?` | `boolean` | Provider-wide Chat-wire opt-in for forwarding caller `service_tier` values. On a classified route it governs foreign values such as `flex`, not proxy-owned canonical Fast after capability validation; on an unclassified route it governs every caller value because no Fast capability has been validated. Exact model capability does not authorize foreign forwarding. Responses routes retain their capability-based caller forwarding behavior. |
+| `promptCacheKey?` | `boolean` | Provider-wide `openai-chat` opt-in for forwarding a `prompt_cache_key`. The adapter forwards the key it is given and never invents one, but the key is not always the caller's: Claude Messages translation derives one from `metadata.user_id`, or from a model/system/tools cohort when no metadata is sent. Default off. Enable only when the upstream documents support, because strict gateways may reject the unknown field with HTTP 400. |
 | `preserveResponsesReasoningContent?` | `boolean` | Keep plaintext reasoning content on replayed Responses reasoning items instead of blanking it (blanking is the ChatGPT backend's rule). Enable for upstreams whose contract accepts reasoning replay, such as DeepSeek. Proxy-minted `ocxr1` envelopes are always stripped. |
 | `disabled?` | `boolean` | Keep the provider on disk but exclude it from routing and model/catalog listings. |
 | `apiKey?` | `string` | API key, or an `${ENV_VAR}` / `$ENV_VAR` reference resolved at request time. |
 | `apiKeyTransport?` | `"x-api-key" \| "bearer"` | Anthropic key header style. Defaults to native `x-api-key`; valid only for key-auth `anthropic` providers. |
 | `apiKeyPool?` | `ApiKeyPoolEntry[]` | Multi-key pool. `apiKey` mirrors the active entry; each item has `id`, `key`, optional `label`, and optional numeric `addedAt`. |
-| `azureCredential?` | `{ type: "default-azure-credential"; managedIdentityClientId?: string }` | Azure identity mode for `azure-openai`/`azure`. Mutually exclusive with `apiKey` and `apiKeyPool`; uses `DefaultAzureCredential` with scope `https://cognitiveservices.azure.com/.default`. The optional client ID is write-only and only selects the managed-identity leg. Identity providers use static configured models and must not use generic `/models` discovery. |
 | `defaultModel?` | `string` | Model used when this provider is selected without an explicit model. |
 | `models?` | `string[]` | Seed/fallback model list. With `liveModels: false`, these are the only discovered models. |
 | `liveModels?` | `boolean` | Fetch the live catalog on start/sync (default `true`). Custom providers use `${baseUrl}/models`; built-ins may use a registry URL and filter. |
@@ -127,7 +127,7 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | `noVisionModels?` | `string[]` | Text-only models sent through the vision sidecar; matching tolerates an Ollama `:size` tag. |
 | `escapeBuiltinToolNames?` | `boolean` | Escape built-in tool names for Anthropic-compatible gateways and restore them in returned calls. |
 | `anthropicEofTolerance?` | `boolean` | Let an Anthropic-compatible gateway complete a stream that ends before `message_stop`, only when visible text or a complete JSON-object tool input was received. Off by default. |
-| `googleMode?` | `"ai-studio" \| "vertex" \| "cloud-code-assist" \| "ai-studio-web"` | Google transport/auth mode. Default `ai-studio`. `ai-studio-web` uses direct SAPISID-authenticated requests with native macOS login or imported browser session tokens. |
+| `googleMode?` | `"ai-studio" \| "vertex" \| "cloud-code-assist"` | Google transport/auth mode. Default `ai-studio`. |
 | `directGeminiWireRenames?` | `boolean` | Google only. Applies only to direct AI Studio requests. Omitted or `true` keeps the `-tiered` wire rename for Gemini Flash ids (`gemini-3.7-flash` -> `gemini-3.7-flash-tiered`); `false` sends the requested bare ids to the wire unchanged. Vertex preserves the requested model ID, and Cloud Code Assist routing is unchanged. Set `false` when the configured upstream still serves the bare ids. |
 | `project?` | `string` | Vertex or Antigravity Cloud Code Assist project id. |
 | `location?` | `string` | Vertex location; environment fallback is `GOOGLE_CLOUD_LOCATION`. |
@@ -135,8 +135,21 @@ differing backup and rewrites known legacy namespaced selected ids to bare ids.
 | `desktopExecutor?` | `DesktopExecutorConfig` | Cursor only: external computer-use and record-screen commands. |
 | `unsafeAllowNativeLocalExec?` | `boolean` | Cursor legacy boolean, equivalent to `nativeLocalExec: "on"` only when the newer field is unset. |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Cursor local-exec policy. `off` is default; `codex-sandbox` currently fails closed like `off`. |
-| `commandCodeVersion?` | `string` | Command Code OAuth (`adapter: "command-code"`) only. Pins the `x-command-code-version` header on `/alpha/generate` requests. Absent uses the adapter default (`0.52.1`). Not read by the API-key `commandcode` preset (`openai-chat` / `/provider/v1`). |
-| `projectContext?` | `"off" \| "on"` | Command Code OAuth (`adapter: "command-code"`) only. When `"on"`, copies bounded project files from the proxy process working directory into the `/alpha/generate` `memory`, `taste`, and `skills` envelope. Absent or `"off"` keeps today's empty envelope even when those files exist on disk. Not read by the API-key `commandcode` preset. Set on `providers.command-code`, not at the top level. In the dashboard use **Providers → Command Code → Edit JSON**. Start the proxy from the trusted Codex project directory so `process.cwd()` is the repo you intend. Fail-soft: missing, unreadable, timed-out, or path-escape conditions omit that piece rather than failing the turn. Does not read `~/.commandcode/skills` or other home trees. `x-taste-learning` stays `"false"` regardless of this flag. |
+
+## Codex catalog and root `config.toml` settings
+
+These settings belong in the root of `$CODEX_HOME/config.toml`, alongside
+`approvals_reviewer`; they are not provider fields.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `auto_review_model` | `string` | Public catalog selector in `provider/model` form, for example `opencode-go/deepseek-v4-flash`. After each catalog merge, OpenCodex resolves it against the final catalog and stamps the trimmed value as `auto_review_model_override` on catalog entries. Boundary whitespace is removed; the selector's slash-delimited components are otherwise unchanged. If the value is absent or blank, existing routed overrides are cleared and normal upstream auto-review selection is preserved. If it is syntactically invalid or absent from the final catalog (including after provider/model removal), OpenCodex fails closed for the override only: it clears the dead override, preserves normal upstream behavior, and emits a diagnostic. Re-adding the provider/model on a later sync allows the configured selector to be stamped again. |
+
+The setting is evaluated after provider discovery, model filtering, native/account-row
+projection, and merge precedence, so only a selector present in the catalog produced by
+that sync can become an override. Native upstream values are preserved when the setting is
+cleared or unresolved. The persisted catalog field is read by Codex for the current turn's
+model, which is why a valid configured selector is copied to each applicable entry.
 
 ### FastWire B1 capability migration
 
@@ -216,10 +229,7 @@ configured under [`claudeCode.authMode`](/reference/configuration/server/#claude
 Dashboard connection tests and live model discovery use a bounded GET-only transport. Without an
 outbound proxy, opencodex resolves the hostname once and connects only to that validated address.
 HTTPS retains the original Host, SNI, and certificate verification; provider config cannot disable
-certificate checks. The native TLS profile performs a direct DNS safety preflight, but its native
-transport cannot pin the checked address, so a small DNS time-of-check/time-of-use residual remains;
-normal certificate and hostname verification are separate controls. Proxy-routed requests retain
-the proxy's peer-selection boundary.
+certificate checks.
 
 When `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` applies, these operations keep Bun's native fetch.
 URL and literal-address checks still run, but the proxy chooses the final route, DNS answer, and peer,
@@ -265,57 +275,6 @@ and pauses only accounts freshly confirmed at 100%; unknown or failed refreshes 
 
 Rotation does not protect against provider enforcement; multi-account use may violate provider terms.
 
-### Shared OAuth account-pool kernel
-
-Claude, Antigravity, and Cursor reuse a small shared kernel (`src/routing/account-pool/`)
-for process-local session affinity, bounded cooldowns, and pre-stream 429 failover.
-Codex keeps its own rich pool plugin (WHAM, spark scopes, probe leases, pin) and is
-not rewritten onto the kernel in this generation.
-
-Every kernel-backed plugin obeys the same four rules:
-
-1. A bound session stays on one OAuth account until affinity is cleared or the
-   session ends.
-2. New-session spreading (quota, round-robin, or fill-first) is **opt-in per
-   plugin**. Only Claude exposes it when enabled; Antigravity and Cursor do not
-   load-balance unbound sessions in v1.
-3. Mid-request rotation is limited to **rate-limit 429** or **credential
-   death** (401/403). Hops are capped at three, pre-commit / pre-stream only —
-   never after client-visible output. Global `setActiveAccount` must not steal
-   accounts bound to other live sessions.
-4. Operators should refuse or warn when pooled credentials share an
-   organization, workspace, Cloud project, or team quota bucket.
-
-**Billing is not 429.** Payment-required, 402, and billing-exhaustion responses use
-a separate billing cooldown. They do not enter the short 429 hop carousel or the
-three-hop failover cap. Codex already classifies these separately; kernel plugins
-use the same taxonomy.
-
-**Antigravity stick-wait (narrow).** When this session's sticky account is
-`rate_limited` and the remaining cooldown is at most five seconds, opencodex may
-**wait** instead of hopping to another account. It never waits on
-`quota_exhausted` or `geo_blocked`. This is not a prompt-cache feature — Code
-Assist OAuth does not support cached content per the Gemini CLI documentation.
-Stickiness serves thought-signature replay, project bind, and stable session
-routing.
-
-**Command Code unsupported.** Command Code terms require one account per person;
-extra accounts to obtain credits risk a lifetime ban. Team credits pool per
-organization only. opencodex does not implement a Command Code account pool, 429
-carousel, or dashboard control for multiple Command Code OAuth logins.
-
-Affinity keys ignore Desktop shared-cohort `prompt_cache_key` values. Promotion of
-the dashboard "active" account is not a kernel primitive — plugins promote only
-after a usable token is obtained.
-
-:::caution[Provider-policy responsibility]
-Kernel-backed pools are technical routing and resilience features. They do not
-endorse using additional accounts to circumvent rate limits, quotas, plan limits,
-or other provider restrictions, or sharing credentials between people. You are
-responsible for complying with each provider's current terms. See the Codex Auth
-caution in [Web Dashboard](/guides/web-dashboard/#codex-auth-and-account-pools).
-:::
-
 ### `anthropicAccountPool` (experimental)
 
 This opt-in pools multiple Anthropic OAuth accounts already stored in `auth.json`. It is off by
@@ -329,52 +288,71 @@ rotation may trigger provider restrictions.
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | New-session strategy; quota uses 5-hour bars only. |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | Successful new-session binds retained on one round-robin selection. Range 1–100. |
 
-When enabled, affinity and 429 failover use the shared account-pool kernel. A 429 records
-bounded cooldown from `Retry-After` or a default backoff and may rotate within the request
-(pre-stream only, cap three). Billing / payment failures are not treated as 429 and do not
-use the hop carousel. Affinity is process-local and size-bounded. Credential 401/403 marks
-the account as needing reauthentication. If all eligible accounts are cooling, clients receive
-429 with `Retry-After` when known, not an authentication error.
+When enabled, 429 records bounded cooldown from `Retry-After` or a default backoff and may rotate
+within the request. Affinity is process-local and size-bounded. Credential 401/403 marks the account
+as needing reauthentication. If all eligible accounts are cooling, clients receive 429 with
+`Retry-After` when known, not an authentication error.
 
 :::caution[Experimental]
 Leave this disabled unless you understand Anthropic account policy risk. Prefer manual
 `ocx account use anthropic <id>` switching when unsure.
 :::
 
-### Antigravity multi-account routing (failover-only)
+### `oauthAccountFailover`
 
-Multiple Antigravity OAuth accounts do not receive new-session load balancing in v1.
-When several accounts are logged in, opencodex binds each conversation to one account
-for its lifetime and may fail over to another eligible account on rate-limit 429 or
-credential death — without promoting a global active account that would disturb other
-live sessions. Stick-wait (up to five seconds) applies only when the bound account is
-`rate_limited` with a short remaining cooldown.
+Rotates to another logged-in account of the same provider when one is rate-limited, for OAuth
+providers that have no pool of their own — xAI, Cursor, Kimi, GitHub Copilot, Google Antigravity,
+and Nous.
 
-Do not expect prompt-cache dollar savings from Antigravity stickiness. Code Assist
-OAuth does not support cached content; affinity is for signature replay, project bind,
-and stable routing. Gemini API key and Vertex paths use per-project cache semantics
-separately.
-
-### `cursorAccountPool` (experimental, default off)
-
-Optional sticky session affinity and 429 failover for multiple Cursor OAuth accounts.
-Disabled unless `cursorAccountPool.enabled` is explicitly `true`.
+**Logging in a second account is what turns this on.** With no configuration, rotation activates
+for any of those providers holding 2 or more accounts that are not flagged for reauthentication —
+the same rule `apiKeyPool` already applies to a 2+ key pool. A provider with one stored account
+behaves exactly as before.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `cursorAccountPool.enabled?` | `boolean` | `false` | Enable sticky affinity and 429 cooldown failover across Cursor OAuth accounts. |
+| `oauthAccountFailover.enabled?` | `boolean` | presence-driven | Global override. `false` forces single-account behaviour everywhere; `true` forces rotation on. |
+| `providers.<name>.oauthAccountFailover.enabled?` | `boolean` | inherits | Per-provider override; beats the global setting and beats account presence. |
 
-When enabled with at least two accounts, a conversation keys affinity from the client
-thread id (and related session headers), not `prompt_cache_key`. Mid-request hops are
-pre-stream only, capped at three, and billing / 402 responses use a billing cooldown —
-not the 429 carousel. Checkpoints remain fail-closed: switching accounts without
-rebinding yields `identity_changed` rather than replaying another user's conversation.
-opencodex does not wire weighted round-robin `CursorCredentialRouter` for session
-routing.
+To keep strict single-account behaviour for one provider whose terms you would rather not test:
+
+```json
+{
+  "providers": {
+    "cursor": {
+      "oauthAccountFailover": { "enabled": false }
+    }
+  }
+}
+```
+
+That setting survives logging in, adding an account, and reauthenticating.
+
+Deliberately narrower than `anthropicAccountPool`: no session affinity, no quota-ranked
+selection, no probe leases. It answers one question — the account that just returned 429 is
+cooled, is there another one available.
+
+The Codex pool and the Anthropic pool are excluded and keep their own rotation; enabling this
+changes neither. A provider with a single stored account is a strict no-op, and no cooldown is
+recorded for it.
+
+On a 429 the failed account is cooled using `Retry-After` when present (capped at 15 minutes)
+or a default backoff, and the request is replayed on the next eligible account, up to three
+rotations per request. An account flagged for reauthentication is never selected. Cooldowns are
+process-local, so a restart forgets them.
+
+Rotation carries the alternate account's **full** credential snapshot, not just its bearer, so a
+provider that pairs routing metadata with its token — Antigravity's Cloud Code Assist project id,
+for example — cannot end up sending one account's token with another account's metadata.
+
+Current scope is the ordinary Responses request paths. Cursor reports rate limits as adapter
+events rather than an HTTP status, and the standalone Antigravity image endpoint has its own
+request path; neither rotates yet.
 
 :::caution[Experimental]
-Leave this disabled unless you understand Cursor account policy risk. Cursor's
-acceptable-use policy forbids circumventing rate limits and manipulating usage metering.
+Rotating across subscription accounts spends a second account's quota and may violate some
+providers' terms. If that is not a tradeoff you want, set `enabled: false` globally or for the
+provider in question.
 :::
 
 ### Managed record shapes
@@ -397,78 +375,6 @@ acceptable-use policy forbids circumventing rate limits and manipulating usage m
 | `codexWarmupEnabled?` | `boolean` | `false` | Opt into synthetic Codex pool-account validation. |
 | `codexWarmupMaxAgeSeconds?` | `number` | `691200` | Revalidate an account after 8 days. |
 | `codexWarmupModel?` | `string` | `gpt-5.4-mini` | Native model used for optional warmup. |
-
-## Azure OpenAI authentication
-
-Use the `azure-openai` adapter (or its `azure` alias) with a real resource URL. The adapter sends
-requests to the v1 Responses endpoint by appending `/v1/responses`; do not leave the registry's
-`{resource}` placeholder in a hand-written configuration.
-
-For Azure identity, `DefaultAzureCredential` is selected by the exact credential object below. Keep
-the model catalog static because identity mode does not perform generic `/models` discovery:
-
-```json
-{
-  "providers": {
-    "azure-identity": {
-      "adapter": "azure-openai",
-      "baseUrl": "https://my-resource.openai.azure.com/openai",
-      "azureCredential": {
-        "type": "default-azure-credential"
-      },
-      "models": ["gpt-4o"],
-      "liveModels": false,
-      "defaultModel": "gpt-4o"
-    }
-  }
-}
-```
-
-To select a user-assigned managed identity, add its client id to the same object:
-
-```json
-{
-  "providers": {
-    "azure-managed-identity": {
-      "adapter": "azure-openai",
-      "baseUrl": "https://my-resource.openai.azure.com/openai",
-      "azureCredential": {
-        "type": "default-azure-credential",
-        "managedIdentityClientId": "00000000-0000-0000-0000-000000000000"
-      },
-      "models": ["gpt-4o"],
-      "liveModels": false,
-      "defaultModel": "gpt-4o"
-    }
-  }
-}
-```
-
-The client id is write-only: it is used only for the managed-identity leg and is not returned in
-management DTOs. Identity requests use the exact scope
-`https://cognitiveservices.azure.com/.default` and send one `Authorization: Bearer` header. If the
-credential chain cannot produce a token, the request fails with the stable redacted error
-`Azure identity credential unavailable`; SDK diagnostics and tokens are never returned.
-
-`azureCredential` is mutually exclusive with both `apiKey` and `apiKeyPool` (and with non-key
-`authMode` values). If you prefer ordinary Azure API-key authentication, leave out
-`azureCredential` and use the existing key mode:
-
-```json
-{
-  "providers": {
-    "azure-key": {
-      "adapter": "azure-openai",
-      "baseUrl": "https://my-resource.openai.azure.com/openai",
-      "apiKey": "${AZURE_OPENAI_API_KEY}",
-      "defaultModel": "gpt-4o"
-    }
-  }
-}
-```
-
-Key mode remains API-key compatible and sends `api-key` instead of Bearer authentication. Do not
-combine the two modes in one provider entry; use separate provider entries when both are needed.
 
 ## Fixed provider endpoints
 
@@ -546,10 +452,8 @@ the curated `noVisionModels` list and use the vision describe sidecar instead.
 Cursor server-driven local tools are disabled by default. Codex continues using its own tools such as
 `apply_patch` and `exec_command` with its own approval and sandbox policy:
 
-- `"off"` (default) denies proxy-local Cursor-native `read`, `write`, `delete`, `ls`, `grep`,
-  `shell`, and `fetch` execution. When the turn advertises a bare Codex `shell_command` or
-  `exec_command` tool, native Shell/Read/Ls/Grep/Fetch map to that Codex shell bridge instead of
-  running on the proxy host; write/delete stay refused.
+- `"off"` (default) rejects Cursor-native `read`, `write`, `delete`, `ls`, `grep`, `shell`, and
+  `fetch` execution.
 - `"on"` opts into trusted-local execution and bypasses Codex approval/sandbox semantics.
 - `"codex-sandbox"` is retained for compatibility but fails closed like `"off"`; request prose is
   not trustworthy sandbox attestation.

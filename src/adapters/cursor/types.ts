@@ -16,6 +16,19 @@ export interface CursorRunRequest {
   /** Cursor Router optimization parameter; valid only while modelId is the `default` wire model. */
   routingLevel?: CursorRoutingLevel;
   /**
+   * Cursor Max Mode (ultra/big-context). Set from a synthetic `-1m` picker variant; the wire
+   * keeps the original model id and raises RequestedModel.maxMode + ModelDetails.maxMode
+   * (both fields — missing either can invalid_argument upstream). Devlog 260826 070.
+   */
+  maxMode?: boolean;
+  /**
+   * Bare API callers (no caller tools, no Codex thread identity) pay a ~10-15K input-token
+   * preamble because an absent AgentRunRequest.mcp_tools field makes Cursor inject its default
+   * native tool catalog. When true, an explicitly empty McpTools wrapper is serialized instead,
+   * suppressing that default. Codex-identified sessions keep the absent-field behavior.
+   */
+  suppressDefaultCursorToolCatalog?: boolean;
+  /**
    * Corrective active-turn text for the single envelope-echo retry (devlog 260826 gap-10).
    * When set on an external tool-result continuation, buildPreparedCursorRunRequest uses it as
    * the userMessageAction text instead of the standard continuation text; rawMessages stay
@@ -32,10 +45,9 @@ export interface CursorRunRequest {
    * hydration). History stays text-only. data: URLs only in this slice.
    */
   selectedImages?: readonly ResolvedCursorImage[];
- tools?: OcxTool[];
- toolChoice?: OcxRequestOptions["toolChoice"];
-  textFormat?: OcxRequestOptions["textFormat"];
- parallelToolCalls?: boolean;
+  tools?: OcxTool[];
+  toolChoice?: OcxRequestOptions["toolChoice"];
+  parallelToolCalls?: boolean;
   /**
    * Clear provider-private context-usage carry-forward before this run. Used when Codex starts a
    * newly observed compacted context epoch, so pre-compaction totals are not over-reported while

@@ -1,6 +1,6 @@
 ---
 title: Adapters
-description: 七个 provider adapter 的目标、请求构建方式与各自特性。
+description: provider adapter 的目标、请求构建方式与各自特性。
 ---
 
 **adapter** 负责在 opencodex 的内部请求/响应模型与某个 provider 的 wire 格式之间转换。每个
@@ -134,47 +134,41 @@ Cursor 的 HTTP/1.1 兼容传输：通过 `agent.v1.AgentService/RunSSE` 接收 
 `aiserver.v1.BidiService/BidiAppend` 发送 client message。
 **认证：** `provider.apiKey` 或转发 authorization header 中的 Cursor OAuth/access token。
 
-- 结构化输出在传输前就会被拒绝：Cursor 没有 protobuf 输出 schema 字段，因此 `text.format` / `response_format` JSON object 或 schema（以及内部 structured-output 标志）会返回 `400 invalid_request_error`。工具无法绕过此检查。
 - 使用 `runTurn`，而不是常规 fetch/parse 路径。请求、server event、工具参数、usage checkpoint
   和 client reply 由 `cursor/gen/agent_pb.ts` 中的 `@bufbuild/protobuf` schema 编码，并 frame 成
   Connect message。
 - 经 content-addressed blob 重放对话状态，把 server tool call 映射回 Codex，用 protobuf
   `GetUsableModels` RPC 发现实时 Cursor 模型，并且只在 run request 尚未 commit 到 wire 前重试。
+- 对不含工具且正常完成的 turn，会在进程本地保存返回的 ConversationStateStructure，并在经过验证的
+  线性 continuation 中复用 checkpoint。tool-result turn 会在已知覆盖消息边界时，复用最后一个已完成
+  turn 的 checkpoint，并只追加尚未覆盖的 suffix。无 ref 的 prefix lookup 仅在存在已记忆的 Cursor
+  conversation 或稳定 client thread（包括受限的 Desktop session/thread fallback），且唯一匹配的
+  checkpoint 由同一 provider conversation 所有时才允许；否则执行 full replay。compaction、
+  helper/shadow 隔离、account/model 不匹配、ref 缺失、decode 失败、forced-fresh recovery 以及
+  invalid_argument 重试也会回退到 full replay。进程重启会丢弃内存 store 并执行 full replay。
+  Cursor Connect 不提供权威的 cache_read_tokens，因此 OpenCodex usage 不是 cache hit 计数器。
+  受限的 Desktop fallback 只保存进程本地由 HMAC 派生的 owner；原始 session/thread header 与
+  OAuth/authorization 材料不会写入 checkpoint state。基于 OAuth 的 live transport 和按账号过滤的
+  live model discovery 仍是实验功能；登录与 transport 设置参见[提供商指南](/zh-cn/guides/providers/)
+  和 [Cursor 提供商配置](/zh-cn/reference/configuration/providers/#cursor-provider-adapter-cursor)。
+  checkpoint 复用本身是自动的，没有用户设置。
 - 模型实时发现和推理都会遵守 `upstreamHttpVersion`。`auto`、`http2` 与 `h2` 保持原有 HTTP/2
   transport；只有 `http1.1` 与 `h1` 会选择兼容模式。
 - 保留 `cursor/grok-4.5-fast` 作为可选模型，但向 Cursor 发送规范的 `grok-4.5` 模型，并将独立的
   `effort` 和 `fast=true` 值放入 `requested_model.parameters`。
 - Cursor 原生本地 filesystem/shell/network 执行默认被拒绝。显式 `mcpServers` 与
-  `desktopExecutor` 集成分别需要 opt-in；`unsafeAllowNativeLocalExec` 会启用更广泛的内置
-  executor，并绕过 Codex 审批和 sandbox 语义。默认 `off` 下，当目录中有桥接工具时，原生
-  Shell/Read/Ls/Grep/Fetch 会映射为 Codex `shell_command`/`exec_command` 调用；write/delete 仍被拒绝。
-
-## `command-code`
-
-**目标：** Command Code **OAuth** 订阅 agent API（`POST {baseUrl}/alpha/generate`）。
-**认证：** 通过 `ocx login command-code` 的 OAuth Bearer。
-
-- 与 API 密钥 `commandcode` 预设（`openai-chat` → `POST {baseUrl}/provider/v1/chat/completions`）不同。API 密钥路由从不读取 `projectContext`，也不会从磁盘填充 generate 信封。
-- 在 `providers.command-code` 上可选的 `projectContext: "on"` 会在请求时从 `process.cwd()` 复制有界文件到 `memory`、`taste` 和 `skills`。未设置或 `"off"` 时即使仓库中已有这些文件，也发送 `memory: ""`、`taste: null`、`skills: null` — 仅 opt-in，不会自动加载。
-- 请从受信任的 Codex 项目目录启动代理，使工作目录与 Codex 正在编辑的仓库一致。
-- **Memory：** 仅 cwd 下的 `AGENTS.md` UTF-8（不是 `CLAUDE.md`、`CODEX.md` 或主目录路径）。上限 32,768 字节；超限时前缀截断并附加 `<!-- truncated -->`。
-- **Taste：** `.commandcode/taste/taste.md` 的 UTF-8，缺失时为 `null`。上限 8,192 字节，使用相同截断标记。存在但为空的文件发送 `""`。`x-taste-learning` 保持 `"false"`；加载 taste 不是 Command Code 的 taste learning。
-- **Skills：** 按顺序从项目 skill 根生成 XML：`.commandcode/skills`、`.agents/skills`、`.pi/skills`。每个含 `SKILL.md` 的子目录成为一个 `<skill name="…">…</skill>` 条目（名称来自 YAML frontmatter 的 `name:` 或目录名）。跳过以 `.` 开头的名称和非目录；按解析名 first-wins；最多 16 个 skill；XML 总上限 32,768 字节。从不读取 `~/.commandcode/skills` 或其他主目录 skill 树。
-- 路径限制使用 cwd 下的 realpath 检查；符号链接逃逸会被省略。每个文件操作 2 秒超时。结果按 cwd 缓存 30 秒（最多 128 条）。任何失败都会 fail-soft 地省略该部分。
-- `commandCodeVersion` 固定 `x-command-code-version`（默认 `0.52.1`）。`permissionMode` 保持 `"standard"`，`mode` 保持 `"agent"`。
+  `desktopExecutor` 集成分别需要 opt-in；`nativeLocalExec: "on"` 会启用更广泛的内置
+  executor，并绕过 Codex 审批和 sandbox 语义；旧的 `unsafeAllowNativeLocalExec: true` 仅在
+  `nativeLocalExec` 未设置时等同。
 
 ## `azure-openai`（别名：`azure`）
 
 **目标：** **Azure OpenAI**。封装 `openai-responses`，因此同样是 `passthrough: true`。
-**认证：** 通过 `api-key` header 使用 API 密钥，或通过 `DefaultAzureCredential` 使用 Azure
-身份（Bearer，而不是 `api-key`）。两种模式互斥。
+**认证：** 用 `api-key` header 进行 `key` 认证，而非 Bearer。
 
 - 把请求构建交给 Responses passthrough，验证 `baseUrl` 不含未解析的 template placeholder，
   再用 `api-key` 替换 `Authorization`。配置的 URL 直接指向 Azure v1 Responses API，因此 adapter
   不会追加 `api-version`。
-- 身份模式使用精确 scope `https://cognitiveservices.azure.com/.default`，并静态使用已配置的模型
-  （`liveModels: false`），不会进行通用 `/models` 发现。完整的 `DefaultAzureCredential` 链和配置
-  请参阅英文页面。
 
 ## 图像工具（`image.ts`）
 

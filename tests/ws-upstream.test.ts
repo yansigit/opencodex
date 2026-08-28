@@ -52,7 +52,7 @@ function streamingInit(body: Record<string, unknown> = {}): RequestInit {
   return {
     method: "POST",
     headers: { "content-type": "application/json", authorization: "Bearer test" },
-    body: JSON.stringify({ model: "gpt-5.6-luna", stream: true, ...body }),
+    body: JSON.stringify({ model: "gpt-5.5", stream: true, ...body }),
   };
 }
 
@@ -113,7 +113,7 @@ describe("shouldUseCodexWsUpstream", () => {
     // Non-streaming turns keep HTTP: the WS path only speaks the event protocol.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
-      body: JSON.stringify({ model: "gpt-5.6-luna" }),
+      body: JSON.stringify({ model: "gpt-5.5" }),
     })).toBe(false);
     expect(shouldUseCodexWsUpstream(CODEX_URL, { method: "GET" })).toBe(false);
     expect(shouldUseCodexWsUpstream("https://api.openai.com/v1/responses", streamingInit())).toBe(false);
@@ -125,7 +125,7 @@ describe("shouldUseCodexWsUpstream", () => {
     // Nested stream:true must not flip the transport.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
-      body: JSON.stringify({ model: "gpt-5.6-luna", metadata: { stream: true } }),
+      body: JSON.stringify({ model: "gpt-5.5", metadata: { stream: true } }),
     })).toBe(false);
     // Whitespace-formatted JSON still routes.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
@@ -349,7 +349,7 @@ describe("handleResponses Codex WS relay selection", () => {
     return new Request("http://localhost/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer test" },
-      body: JSON.stringify({ model: "gpt-5.6-luna", input: "hello", stream: true }),
+      body: JSON.stringify({ model: "gpt-5.5", input: "hello", stream: true }),
     });
   }
 

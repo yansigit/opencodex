@@ -286,7 +286,7 @@ function quotaParts(quota: ProviderQuotaDto): string[] {
   return parts;
 }
 
-function providerQuotaLine(name: string, report: ProviderQuotaReportDto): string {
+export function providerQuotaLine(name: string, report: ProviderQuotaReportDto): string {
   return [name, ...quotaParts(report.quota)].join(" ");
 }
 
