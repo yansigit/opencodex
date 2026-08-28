@@ -48,9 +48,34 @@ export const CURSOR_EXEC_COMMAND_INPUT_SCHEMA = {
     tty: { type: "boolean", description: "True allocates a PTY for the command; false or omitted uses plain pipes." },
     yield_time_ms: { type: "number", description: "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms." },
     max_output_tokens: { type: "number", description: "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy." },
+    sandbox_permissions: {
+      type: "string",
+      enum: ["use_default", "require_escalated"],
+      description: "Per-command sandbox override. Defaults to use_default; use require_escalated for unsandboxed execution.",
+    },
+    justification: {
+      type: "string",
+      description: "User-facing approval question for require_escalated; omit otherwise.",
+    },
+    prefix_rule: {
+      type: "array",
+      items: { type: "string" },
+      description: "Reusable approval prefix for cmd, only with sandbox_permissions: require_escalated; for example [\"git\", \"pull\"].",
+    },
+    login: {
+      type: "boolean",
+      description: "True runs the shell with -l/-i semantics; false disables them. Defaults to true.",
+    },
   },
   required: ["cmd"],
   additionalProperties: false,
+} as const;
+
+/** Cursor requires freeform custom tools to advertise their body as one string input. */
+export const CURSOR_FREEFORM_INPUT_SCHEMA = {
+  type: "object",
+  properties: { input: { type: "string" } },
+  required: ["input"],
 } as const;
 
 /**
@@ -109,6 +134,10 @@ export const CODEX_SHELL_BRIDGE_ARG_NORMALIZE_SCHEMA = {
     yield_time_ms: { type: "number", description: "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms." },
     max_output_tokens: { type: "number", description: "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy." },
     max_output_chars: { type: "number", description: "Output character budget when the Responses tool uses chars instead of tokens." },
+    sandbox_permissions: { type: "string" },
+    justification: { type: "string" },
+    prefix_rule: { type: "array" },
+    login: { type: "boolean" },
   },
   required: ["command"],
 } as const;
@@ -364,6 +393,7 @@ export function responsesToolNameFromCursorWire(name: string, cursorToolNameMap?
 
 /** Schema advertised to Cursor for this tool (may use Cursor-preferred field names like `cmd`). */
 export function cursorToolInputSchema(tool: OcxTool): unknown {
+  if (tool.freeform) return CURSOR_FREEFORM_INPUT_SCHEMA;
   return isBareCodexExecCommandTool(tool) ? CURSOR_EXEC_COMMAND_INPUT_SCHEMA : (tool.parameters ?? {});
 }
 
@@ -373,6 +403,7 @@ export function cursorToolInputSchema(tool: OcxTool): unknown {
  * treating `cmd` as canonical prevents the `cmd` → `command` rewrite Codex requires (#399).
  */
 export function cursorToolArgNormalizeSchema(tool: OcxTool): unknown {
+  if (tool.freeform) return CURSOR_FREEFORM_INPUT_SCHEMA;
   if (isBareCodexShellBridgeTool(tool)) {
     return shellBridgeArgNormalizeSchema(tool);
   }
@@ -657,6 +688,12 @@ export function buildCursorToolGuidanceSystemNote(
       ? "In code mode the isolate returns nothing on its own: call `text(...)` (or `notify(...)`) on any value you need to see, or the call completes with empty output. There is no `require`, no `module`, and no filesystem or network globals; reach the host only through the nested helpers."
       : undefined,
     codeMode
+      ? 'When commands require network access, file writes outside workspace, or fail due to sandbox/permission restrictions, pass `sandbox_permissions: "require_escalated"` and a clear `justification: "..."` to `tools.exec_command`.'
+      : undefined,
+    codeMode
+      ? "Nested helpers may appear under longer `mcp_opencodex-responses_*` display names; use the exact helper names exposed by this turn."
+      : undefined,
+    codeMode
       ? "NEVER attempt Cursor-native Shell, Read, Grep, List, or any tool absent from the catalog — they are not executed in this environment and every probe wastes a turn. The exec code cell (with its nested helpers) is the ONLY execution surface; go to it directly on the FIRST attempt and do not narrate switching surfaces."
       : undefined,
     hasBareExec
@@ -670,6 +707,9 @@ export function buildCursorToolGuidanceSystemNote(
       : undefined,
     hasBareExec
       ? "Tool-selection commentary is forbidden: for any shell, read, grep, list, or file operation, your FIRST visible action is the bridge call itself — never a sentence about which tool you will use, which tool was redirected, or switching surfaces. Words like 차단/전환/blocked/switching must not appear in your output for tool-routing reasons."
+      : undefined,
+    hasBareExec
+      ? 'When a command requires network access, file writes outside workspace, or fails due to sandbox restrictions, include `sandbox_permissions: "require_escalated"` and `justification: "..."`.'
       : undefined,
     hostShellNote,
     "Cursor product features (Chronicle, screen recording, Notes, Plans, background agents) are available only if this turn's catalog lists a matching tool; do not offer or promise them otherwise.",
@@ -695,6 +735,7 @@ export function buildCursorToolGuidanceSystemNote(
       ? `Use ${discoveryTools} only for explicit discovery/resource tasks, not generic tool-count demos.`
       : undefined,
     "Do not count or report a tool call unless a tool result was actually returned.",
+    "When pursuing a multi-step task, check, or verification, do not stop or narrate intended future actions in plain text; immediately call the tool to execute the next step until the task is complete.",
     hasBareExec
       ? `For every file read, directory listing, grep, or shell operation use ${shellBridgeLabel} directly with host-shell-safe commands (POSIX: \`cat\`/\`ls\`/\`rg\`; Windows PowerShell: \`Get-Content\`/\`Get-ChildItem\`/\`Select-String\`). For file edits, use ${structuredEditNames.length > 0 ? `the structured edit tools (${quotedNames(structuredEditNames)}) or ` : ""}\`apply_patch\` when available.`
       : undefined,
