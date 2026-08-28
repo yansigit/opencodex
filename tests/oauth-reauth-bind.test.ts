@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { OAUTH_PROVIDERS, runLogin } from "../src/oauth";
-import { getAccountCredential, getAccountSet, saveCredential } from "../src/oauth/store";
+import { credentialGeneration, getAccountCredential, getAccountSet, markAccountNeedsReauthIfGeneration, saveCredential } from "../src/oauth/store";
 import type { OAuthController, OAuthCredentials } from "../src/oauth/types";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
@@ -107,6 +107,59 @@ describe("OAuth account-scoped reauth", () => {
     }
     expect(getAccountCredential("xai", slotId)?.access).toBe("a2");
     expect(getAccountSet("xai")?.accounts).toHaveLength(1);
+  });
+
+  test("runLogin reauthAccountId upgrades a legacy Antigravity slot in place", async () => {
+    await saveCredential("google-antigravity", {
+      access: "legacy-access",
+      refresh: "legacy-refresh",
+      expires: Date.now() + 60_000,
+    });
+    const slotId = getAccountSet("google-antigravity")!.activeAccountId;
+    const legacy = getAccountCredential("google-antigravity", slotId)!;
+    await markAccountNeedsReauthIfGeneration("google-antigravity", slotId, credentialGeneration(legacy));
+    const original = OAUTH_PROVIDERS["google-antigravity"].login;
+    OAUTH_PROVIDERS["google-antigravity"].login = async () => ({
+      access: "fresh-access",
+      refresh: "fresh-refresh",
+      expires: Date.now() + 60_000,
+      email: "user@example.test",
+    });
+    try {
+      await runLogin("google-antigravity", {} as OAuthController, { reauthAccountId: slotId });
+    } finally {
+      OAUTH_PROVIDERS["google-antigravity"].login = original;
+    }
+    expect(getAccountSet("google-antigravity")?.accounts).toHaveLength(1);
+    expect(getAccountCredential("google-antigravity", slotId)).toMatchObject({
+      access: "fresh-access",
+      email: "user@example.test",
+    });
+    expect(getAccountSet("google-antigravity")?.accounts[0]?.needsReauth).toBeUndefined();
+  });
+
+  test("runLogin reauthAccountId still rejects an identity-less non-Antigravity slot", async () => {
+    await saveCredential("xai", {
+      access: "legacy-access",
+      refresh: "legacy-refresh",
+      expires: Date.now() + 60_000,
+    });
+    const slotId = getAccountSet("xai")!.activeAccountId;
+    const original = OAUTH_PROVIDERS.xai.login;
+    OAUTH_PROVIDERS.xai.login = async () => ({
+      access: "fresh-access",
+      refresh: "fresh-refresh",
+      expires: Date.now() + 60_000,
+      email: "user@example.test",
+    });
+    try {
+      await expect(runLogin("xai", {} as OAuthController, { reauthAccountId: slotId })).rejects.toThrow(
+        "Could not verify signed-in account identity for reauth.",
+      );
+    } finally {
+      OAUTH_PROVIDERS.xai.login = original;
+    }
+    expect(getAccountCredential("xai", slotId)?.access).toBe("legacy-access");
   });
 
   test("forced Kiro add-account preserves a legacy identity-less account", async () => {
