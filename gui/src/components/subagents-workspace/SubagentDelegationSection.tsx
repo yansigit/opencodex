@@ -3,8 +3,8 @@
  *
  * This panel used to sit on the Dashboard, which is otherwise a read-only status page — the
  * one place you could change something was also the first thing a new user saw. It reads
- * better next to the roster it affects: the roster picks who may be called, this picks who
- * gets called first.
+ * better next to the roster it affects: the roster picks who may be called, while this panel
+ * holds guidance preferences and the native omitted-model synchronization setting.
  */
 import { useState } from "react";
 import { Select, Switch } from "../../ui";
