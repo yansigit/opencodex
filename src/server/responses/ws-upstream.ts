@@ -4,8 +4,8 @@
 // a measurably faster queue than the plain SSE POST path. Measured 2026-08-12
 // KST (same account, same payload, strictly sequential): gpt-5.6-luna TTFT p50
 // ~1.0s over WS vs ~3.9s over SSE. Codex CLI itself defaults to the WS
-// transport; opencodex previously always POSTed SSE, which is where its extra
-// 2-3s of TTFT came from.
+// transport; opencodex keeps HTTP/SSE as its reliable default and allows
+// operators to opt into WS when the lower latency is worth the risk.
 //
 // The wrapper only swaps the transport. It dials wss:// with the same headers,
 // sends the JSON body as a single `response.create` frame, and re-encodes the
@@ -62,9 +62,9 @@ export interface CodexWsUpstreamOptions {
 }
 
 export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boolean {
-  if (options?.wsUpstream === false) return true;
+  if (options?.wsUpstream !== undefined) return options.wsUpstream !== true;
   const env = process.env.OCX_CODEX_WS_UPSTREAM;
-  return env === "false" || env === "0";
+  return env !== "true" && env !== "1";
 }
 
 export function resolveCodexWsMaxFrameBytes(options?: CodexWsUpstreamOptions): number {
