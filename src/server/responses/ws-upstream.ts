@@ -14,6 +14,7 @@
 
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import { compareBunVersions } from "../../lib/bun-stream-caps";
+import { interceptRuntimeFailure } from "../../telemetry/hook";
 
 const CODEX_RESPONSES_HTTP_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_RESPONSES_WS_URL = "wss://chatgpt.com/backend-api/codex/responses";
@@ -397,7 +398,9 @@ export function codexWsUpstreamFetch(
         // here would reach clients with no response.completed/failed at all —
         // relaySseWithFailedTail() only synthesizes a failed terminal when the
         // body read THROWS. Error the stream like a reset TCP socket.
-        try { controller.error(new Error(closedBeforeTerminalMessage(event))); } catch { /* stream already done */ }
+        const error = new Error(closedBeforeTerminalMessage(event));
+        if ((event as { code?: unknown } | null)?.code === 1006) interceptRuntimeFailure(error, { category: "websocket_1006" });
+        try { controller.error(error); } catch { /* stream already done */ }
       }
     });
 
