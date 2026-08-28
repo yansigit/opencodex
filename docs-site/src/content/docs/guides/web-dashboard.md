@@ -48,7 +48,7 @@ the browser or password manager's decision.
 | **Providers** | Add, edit, set the default (enabled providers only), enable/disable, and remove providers; manage OAuth account pools and API-key pools where supported. Removing the current default switches to the first remaining enabled provider when one exists; otherwise deletion is refused and the current default is kept. Provider Settings can disable live model discovery for endpoints with missing, slow, or oversized `/models` catalogs. For Claude (Anthropic) OAuth pools, each logged-in account shows its own 5-hour and weekly rate-limit bars (usage is per credential); a failed probe keeps the last-known bars and marks them unavailable until the next successful refresh. |
 | **Add provider** | Search registry-backed presets for account login, API-key services, local servers, or a custom endpoint. |
 | **Codex Auth** | Add ChatGPT/Codex pool accounts, select the next-session account, refresh 5h / weekly / 30d quotas, enable or disable quota auto-switch, set its 1–100% threshold, and configure transient-failure failover. |
-| **Subagents** | Feature up to five bare native or namespaced routed models, edit up to eight named roles, toggle Codex agent-file sync, edit custom parent guidance plus global child instructions, and optionally route eligible V2 native parents to one routed model. |
+| **Subagents** | Feature up to five bare native or namespaced routed models, edit up to eight named roles, toggle Codex agent-file sync, edit custom parent guidance plus global child instructions, optionally route eligible V2 native parents to one routed model, and arm the routed delegation bridge. |
 | **Models** | Toggle native GPT and routed models, set provider allowlists and context caps, choose v1/base/v2, and configure the v2 thread limit. Configured providers stay visible as zero-model groups when discovery is off or returns no rows. |
 | **Logs** | Auto-refresh recent requests with tokens, requested effort and (when available) effective outbound effort, resolved model, provider, status, request id, duration, and error details. The detail view includes the exact reasoning wire field when the adapter emits one. Filter by opaque conversation/session id (when the client sends one) to total tokens and estimated list-price cost for the currently loaded Logs ring. |
 | **Usage / Debug** | Inspect token-usage coverage and trends, or enable opt-in provider transport and usage-extraction diagnostics. |
@@ -124,6 +124,20 @@ This setting is separate from **Keep ChatGPT on v1** (which preserves the native
 request to recover encrypted child content). Native children remain native; a native child that
 creates a routed grandchild can still hit the encrypted-task limitation. The control has no CLI
 equivalent and does not decrypt or alter Codex's protocol.
+
+### Routed V2 delegation bridge
+
+**Routed V2 delegation bridge** is an accessible experimental switch, default off. It saves only
+`{ "v2RoutedDelegationBridge": true|false }`, then reloads `/api/v2`; a failed write leaves the last
+server value visible. It may be armed outside explicit V2, where the dashboard says it activates only
+for eligible native V2 roots.
+
+It adds no model picker. The model decides which collaboration tools to call. The native Codex UI may
+still show the original model, while routed prompts, repository context, tool results, availability,
+context, behavior, billing, and privacy follow the selected provider. This is separate from native
+GPT-to-GPT collaboration, **Route native V2 parents**, and encrypted-task recovery. It is root-only:
+a native child that delegates to a routed grandchild can still receive an encrypted task. Turning it
+off applies immediately to subsequent requests.
 
 ## Codex Auth and account pools
 
@@ -237,7 +251,7 @@ The GUI is a thin client over the proxy's JSON management API. Useful endpoints 
 | `GET /api/update/check` · `POST /api/update/run` · `GET /api/update/status` | Check, run, and monitor self-update jobs. Worker PIDs are persisted so a crashed job recovers automatically; legacy no-PID jobs recover after ten minutes. |
 | `GET` / `PUT /api/sidecar-settings` | Read or set search/vision sidecar model settings. |
 | `GET` / `PUT /api/injection-model` | Read or set the shared sub-agent model/effort selection and the independent guidance/native-default switches. |
-| `GET` / `PUT /api/v2` | Read or set the surface mode, Codex feature flag, v2 thread limit, and `v2NativeParentOverride` object. |
+| `GET` / `PUT /api/v2` | Read or set the surface mode, Codex feature flag, v2 thread limit, `v2NativeParentOverride` object, and `v2RoutedDelegationBridge` boolean. |
 | `GET /api/providers` · `POST /api/providers` · `PATCH /api/providers?name=...` · `DELETE /api/providers?name=...` | List, add/replace, enable/disable, set the default, or remove providers. `PATCH` uses standalone `{ "setDefault": true }` on an enabled provider; `POST` may include `setDefault` when creating/replacing (also enabled-only). Deleting the current default reassigns to the first remaining enabled provider when one exists; otherwise the API returns `409` with `code: "last_provider"` and keeps the current default. |
 | `GET /api/models` · `PUT /api/disabled-models` | List native/routed model rows and update the shared disabled-model set. |
 | `GET /api/selected-models` · `PUT /api/model-visibility` | Read provider allowlists and atomically change the final visibility of one model or provider group. |

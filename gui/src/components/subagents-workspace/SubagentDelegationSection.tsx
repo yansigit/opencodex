@@ -11,7 +11,7 @@ import { Select, Switch } from "../../ui";
 import { useT } from "../../i18n/shared";
 import { formatNamespacedModelId } from "../../provider-icons";
 import type { DelegationPatch, DelegationModelOption } from "../../pages/use-subagent-delegation";
-import type { UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState } from "../../pages/use-subagent-delegation";
+import type { UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState, V2RoutedDelegationBridgeState } from "../../pages/use-subagent-delegation";
 
 export interface SubagentDelegationSectionProps {
   model: string;
@@ -38,6 +38,9 @@ export interface SubagentDelegationSectionProps {
   agentTaskRecovery?: AgentTaskRecoveryState;
   agentTaskRecoverySaving?: boolean;
   onAgentTaskRecoverySave?: (state: AgentTaskRecoveryState) => void;
+  routedDelegationBridge?: V2RoutedDelegationBridgeState;
+  routedDelegationBridgeSaving?: boolean;
+  onRoutedDelegationBridgeSave?: (enabled: boolean) => void;
 }
 
 export default function SubagentDelegationSection({
@@ -65,6 +68,9 @@ export default function SubagentDelegationSection({
   agentTaskRecovery = { enabled: false, model: null },
   agentTaskRecoverySaving = false,
   onAgentTaskRecoverySave = () => {},
+  routedDelegationBridge = { enabled: false },
+  routedDelegationBridgeSaving = false,
+  onRoutedDelegationBridgeSave = () => {},
 }: SubagentDelegationSectionProps) {
   const t = useT();
   // A present empty/whitespace hint is an upstream override that suppresses the
@@ -87,6 +93,22 @@ export default function SubagentDelegationSection({
           </button>
         </div>
       )}
+      <div className="swi-delegation-row">
+        <div className="setting-copy">
+          <div className="font-semibold">{t("sub.routedDelegationBridge")}</div>
+          <div className="muted setting-hint">{t("sub.routedDelegationBridgeHint")}</div>
+        </div>
+        <Switch
+          on={routedDelegationBridge.enabled}
+          onClick={() => onRoutedDelegationBridgeSave(!routedDelegationBridge.enabled)}
+          disabled={routedDelegationBridgeSaving}
+          label={t("sub.routedDelegationBridge")}
+        />
+        {!ultraMode.multiAgentV2Enabled && routedDelegationBridge.enabled && (
+          <div className="muted setting-hint">{t("sub.routedDelegationBridgeInactive")}</div>
+        )}
+      </div>
+
       <div className="swi-delegation-row">
         <div className="setting-copy">
           <div className="font-semibold">{t("sub.delegation.model")}</div>

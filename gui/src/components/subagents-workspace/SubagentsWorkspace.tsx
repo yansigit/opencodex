@@ -28,7 +28,7 @@ import { SectionTabs } from "../section-tabs";
 import { sectionAnchorId } from "../../section-anchors";
 import SubagentDelegationSection from "./SubagentDelegationSection";
 import SubagentRolesSection from "./SubagentRolesSection";
-import type { DelegationPatch, DelegationModelOption, UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState } from "../../pages/use-subagent-delegation";
+import type { DelegationPatch, DelegationModelOption, UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState, V2RoutedDelegationBridgeState } from "../../pages/use-subagent-delegation";
 
 export interface SubagentsWorkspaceProps {
   available: string[];
@@ -57,6 +57,9 @@ export interface SubagentsWorkspaceProps {
     agentTaskRecovery: AgentTaskRecoveryState;
     agentTaskRecoverySaving: boolean;
     onAgentTaskRecoverySave: (state: AgentTaskRecoveryState) => void;
+    routedDelegationBridge: V2RoutedDelegationBridgeState;
+    routedDelegationBridgeSaving: boolean;
+    onRoutedDelegationBridgeSave: (enabled: boolean) => void;
     prompt: string;
     childInstructions: string;
     childInstructionsSaving: boolean;
@@ -276,6 +279,9 @@ export default function SubagentsWorkspace({
             agentTaskRecovery={delegation.agentTaskRecovery}
             agentTaskRecoverySaving={delegation.agentTaskRecoverySaving}
             onAgentTaskRecoverySave={delegation.onAgentTaskRecoverySave}
+            routedDelegationBridge={delegation.routedDelegationBridge}
+            routedDelegationBridgeSaving={delegation.routedDelegationBridgeSaving}
+            onRoutedDelegationBridgeSave={delegation.onRoutedDelegationBridgeSave}
             keepNativeChatGptOnV1={roles.keepNativeChatGptOnV1}
             prompt={delegation.prompt}
             childInstructions={delegation.childInstructions}

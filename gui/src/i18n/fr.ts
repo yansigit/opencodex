@@ -2237,4 +2237,9 @@ export const fr: Record<TKey, string> = {
   "lab.layer.protocol_conformance": "Conformité du protocole",
   "lab.layer.live_route_compatibility": "Compatibilité des routes en direct",
   "lab.layer.task_effectiveness": "Efficacité des tâches",
+  "sub.routedDelegationBridge": "Routed V2 delegation bridge",
+  "sub.routedDelegationBridgeHint": "Experimental. Codex may still show the original model; routed prompts, repository context, tool results, availability, context, behavior, billing, and privacy follow the selected provider. The model chooses tools.",
+  "sub.routedDelegationBridgeInactive": "Armed; activates only for eligible native V2 roots.",
+  "sub.routedDelegationBridgeSaveFail": "Failed to save routed V2 delegation bridge",
+  "sub.routedDelegationBridgeSaved": "Routed V2 delegation bridge saved. Disabling applies immediately.",
 };
