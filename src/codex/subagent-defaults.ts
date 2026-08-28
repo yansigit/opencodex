@@ -1,6 +1,7 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { CODEX_CONFIG_PATH } from "./paths";
 import { hasInjectedCodexRouting } from "./injected-marker";
+import { resolveEffectiveProjectModelProvider } from "./project-config-warnings";
 
 /**
  * Pure, ownership-aware edits for Codex's native `[agents]` defaults.
@@ -446,8 +447,8 @@ export async function resolveNativeDefaultState(
   } catch {
     return "blocked";
   }
-  const provider = parsed.model_provider;
-  if (typeof provider === "string" && provider !== "openai" && provider !== "opencodex") return "blocked";
+  const provider = resolveEffectiveProjectModelProvider(content).provider;
+  if (provider && provider !== "openai" && provider !== "opencodex") return "blocked";
   const baseUrl = parsed.openai_base_url;
   if (typeof baseUrl === "string" && baseUrl.trim() && !hasInjectedCodexRouting(content)) return "blocked";
 
@@ -465,12 +466,7 @@ export async function resolveNativeDefaultState(
   try {
     catalogState = await (deps.collectCatalogState ?? (async () => {
       const { collectCodexAppServerCatalogStateForRequest } = await import("./app-server-processes");
-      return collectCodexAppServerCatalogStateForRequest({
-        // The native defaults live in config.toml, so compare process starts with this write.
-        catalogMtimeMs: () => {
-          try { return statSync(configPath).mtimeMs; } catch { return null; }
-        },
-      });
+      return collectCodexAppServerCatalogStateForRequest();
     }))();
   } catch {
     return "pending";
