@@ -7,7 +7,7 @@
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { hasOwnProvider } from "../config";
+import { hasOwnProvider, resolveSubagentCandidates } from "../config";
 import { isRateLimitOrQuotaFailureMessage } from "../lib/errors";
 import type { OcxParsedRequest, OcxConfig } from "../types";
 import { slugsEquivalent } from "../providers/slug-codec";
@@ -343,6 +343,71 @@ export function selectAvailableSubagentModel(
   return { model: primary, rewritten: false, skipped };
 }
 
+function isSubagentCandidateFailureMessage(message: string): boolean {
+  const normalized = String(message ?? "").trim();
+  if (!normalized) return false;
+  const lower = normalized.toLowerCase();
+  // Explicit client/transport errors must win over broad 5xx/network matches.
+  if (lower.includes("connection refused")) return false;
+  if (
+    lower.includes("invalid_request_error")
+    || lower.includes("invalid request")
+    || lower.includes("missing field")
+  ) return false;
+  const numericStatus = Number(normalized);
+  if (Number.isInteger(numericStatus) && numericStatus >= 500 && numericStatus < 600) return true;
+  if (isRateLimitOrQuotaFailureMessage(normalized)) return true;
+  if (lower.includes("stream closed before response.completed")) return true;
+  if (lower.includes("upstream json response stalled before completing")) return true;
+  if (lower.includes("etimedout") || lower.includes("timed out") || lower.includes("timeout")) return true;
+  if (lower.includes("fetch failed") || lower.includes("network error")) return true;
+  if (lower.includes("provider error 503") || lower.includes("service unavailable")) return true;
+  if (lower.includes("internal server error")) return true;
+  // Connection-refused is a legacy transport signal and is intentionally not a cooldown.
+  if (/provider error 5\d\d/.test(lower)) return true;
+  return false;
+}
+
+export function resolveSubagentSpawnRoleFromHeaders(headers: Headers): string | undefined {
+  const headerRole = headers.get("x-codex-agent-role")?.trim();
+  if (headerRole) return headerRole;
+  const turnMeta = headers.get("x-codex-turn-metadata");
+  if (!turnMeta) return undefined;
+  try {
+    const parsed = JSON.parse(turnMeta) as { agent_role?: unknown };
+    const role = parsed.agent_role;
+    return typeof role === "string" && role.trim() !== "" ? role.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function selectAvailableSubagentCandidate(
+  candidates: readonly string[],
+  config: OcxConfig,
+  accountId?: string | null,
+  now = Date.now(),
+  nativeFallbackOnly = false,
+  accountUsabilityOptions?: CodexAccountUsabilityOptions,
+): { model: string | null; skipped: string[] } {
+  const skipped: string[] = [];
+  for (const candidate of candidates) {
+    if (nativeFallbackOnly) {
+      const route = tryRouteFallbackModel(config, candidate);
+      if (!route || !isCanonicalOpenAiForwardProvider(route.provider)) {
+        skipped.push(candidate);
+        continue;
+      }
+    }
+    if (isSubagentModelUnavailable(candidate, config, accountId, now, accountUsabilityOptions)) {
+      skipped.push(candidate);
+      continue;
+    }
+    return { model: candidate, skipped };
+  }
+  return { model: null, skipped };
+}
+
 export function noteSubagentModelFailure(
   model: string,
   message: string,
@@ -352,7 +417,7 @@ export function noteSubagentModelFailure(
   ttlMs?: number,
 ): void {
   const interval = ttlMs ?? DEFAULT_SUBAGENT_MODEL_FALLBACK_POLL_MS;
-  if (!isRateLimitOrQuotaFailureMessage(message)) return;
+  if (!isSubagentCandidateFailureMessage(message)) return;
   const route = tryRouteFallbackModel(config, model);
   const poolScoped = !!route && isPoolCodexRoute(route);
   modelHealth.set(
@@ -555,6 +620,8 @@ export function recordSubagentQuotaFailureForThreadSpawn(
   noteSubagentModelFailure(model, String(message), config, accountId, now, pollIntervalMs(config));
 }
 
+export const recordSubagentFailureForThreadSpawn = recordSubagentQuotaFailureForThreadSpawn;
+
 export function applySubagentModelFallback(
   parsed: OcxParsedRequest,
   headers: Headers,
@@ -568,6 +635,31 @@ export function applySubagentModelFallback(
   resolvedFallbackChain?: readonly string[] | null,
 ): { from?: string; to?: string; skipped?: string[] } | null {
   if (!isThreadSpawnRequest(headers)) return null;
+
+  if (config.subagentCandidates !== undefined) {
+    const role = resolveSubagentSpawnRoleFromHeaders(headers);
+    const candidates = resolveSubagentCandidates(config, role ?? parsed.modelId);
+    if (candidates.length > 0) {
+      const requested = parsed.modelId;
+      const selection = selectAvailableSubagentCandidate(
+        candidates,
+        config,
+        accountId,
+        now,
+        nativeFallbackOnly,
+        accountUsabilityOptions,
+      );
+      if (selection.model && !slugsEquivalent(selection.model, requested)) {
+        rewriteParsedModel(parsed, selection.model);
+        return { from: requested, to: selection.model, skipped: selection.skipped };
+      }
+      if (selection.skipped.length > 0) {
+        return { from: requested, to: requested, skipped: selection.skipped };
+      }
+      return null;
+    }
+  }
+
   const fallbackChain = resolvedFallbackChain === undefined
     ? resolveSubagentFallbackChain(parsed, config)
     : resolvedFallbackChain;
