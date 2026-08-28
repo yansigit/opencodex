@@ -107,6 +107,8 @@ export interface CodexAppServerProcessIo {
   catalogMtimeMs?: () => number | null;
   /** Which on-disk write should be compared with app-server start times. */
   freshnessTarget?: "catalog" | "config";
+  /** Custom path for the default freshness stat, also part of request identity. */
+  freshnessPath?: string;
 }
 
 function execFileTextAsync(
@@ -683,9 +685,12 @@ export interface CodexAppServerCatalogStatus {
 }
 
 /** Resolve the catalog file Codex app-servers loaded at startup, for staleness checks. */
-function defaultCatalogMtimeMs(target: "catalog" | "config" = "catalog"): number | null {
+function defaultCatalogMtimeMs(
+  target: "catalog" | "config" = "catalog",
+  freshnessPath?: string,
+): number | null {
   try {
-    return statSync(target === "config" ? CODEX_CONFIG_PATH : readCodexCatalogPath()).mtimeMs;
+    return statSync(freshnessPath ?? (target === "config" ? CODEX_CONFIG_PATH : readCodexCatalogPath())).mtimeMs;
   } catch {
     return null;
   }
@@ -764,6 +769,7 @@ interface RequestCatalogStateIdentity {
   readStartMs?: CodexAppServerProcessIo["readStartMs"];
   readStartMsBatchAsync?: CodexAppServerProcessIo["readStartMsBatchAsync"];
   catalogMtimeMs?: CodexAppServerProcessIo["catalogMtimeMs"];
+  freshnessPath?: CodexAppServerProcessIo["freshnessPath"];
   now?: CodexAppServerProcessIo["now"];
 }
 
@@ -827,6 +833,7 @@ function sameRequestCatalogStateIdentity(
     && left.readStartMs === right.readStartMs
     && left.readStartMsBatchAsync === right.readStartMsBatchAsync
     && left.catalogMtimeMs === right.catalogMtimeMs
+    && left.freshnessPath === right.freshnessPath
     && left.now === right.now;
 }
 
@@ -838,7 +845,7 @@ function statusForFreshnessTarget(
   let catalogMtimeMs: number | null;
   try {
     const target = io.freshnessTarget ?? "catalog";
-    catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(target)))();
+    catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(target, io.freshnessPath)))();
   } catch {
     catalogMtimeMs = null;
   }
@@ -931,7 +938,7 @@ export function collectCodexAppServerCatalogState(
     catalogStatusCache.set(target, { evidence, status });
     return status;
   }
-  const catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(target)))();
+  const catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(target, io.freshnessPath)))();
   const status = catalogStatusFromProcesses(evidence.processes, catalogMtimeMs, evidence.starts);
   const prior = catalogStatusCache.get(target);
   if (prior?.evidence === evidence && prior.status.catalogMtimeMs === status.catalogMtimeMs) {
@@ -975,6 +982,7 @@ export async function collectCodexAppServerCatalogStateForRequest(
     readStartMs: io.readStartMs,
     readStartMsBatchAsync: io.readStartMsBatchAsync,
     catalogMtimeMs: io.catalogMtimeMs,
+    freshnessPath: io.freshnessPath,
     now: io.now,
   };
   const cached = requestCatalogStateCache
@@ -1020,7 +1028,7 @@ export async function collectCodexAppServerCatalogStateForRequest(
     }
     let catalogMtimeMs: number | null;
     try {
-      catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(io.freshnessTarget)))();
+      catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(io.freshnessTarget, io.freshnessPath)))();
     } catch {
       catalogMtimeMs = null;
     }

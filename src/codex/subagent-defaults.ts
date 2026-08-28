@@ -1,4 +1,4 @@
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { CODEX_CONFIG_PATH } from "./paths";
 import { hasInjectedCodexRouting } from "./injected-marker";
 import { resolveEffectiveProjectModelProvider } from "./project-config-warnings";
@@ -469,13 +469,7 @@ export async function resolveNativeDefaultState(
       const { collectCodexAppServerCatalogStateForRequest } = await import("./app-server-processes");
       return collectCodexAppServerCatalogStateForRequest({
         ...deps.processIo,
-        catalogMtimeMs: deps.processIo?.catalogMtimeMs ?? (() => {
-          try {
-            return statSync(configPath).mtimeMs;
-          } catch {
-            return null;
-          }
-        }),
+        freshnessPath: configPath,
         freshnessTarget: "config",
       });
     }))();

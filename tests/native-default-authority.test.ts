@@ -172,6 +172,44 @@ describe("native default authority", () => {
     }
   });
 
+  test("Windows request freshness shares process evidence across repeated custom-path resolves", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "ocx-native-authority-"));
+    const configPath = join(configDir, "config.toml");
+    try {
+      writeFileSync(configPath, managed(), "utf8");
+      utimesSync(configPath, 2, 2);
+      let enumerations = 0;
+      let releaseSnapshots: ((snapshots: Array<{ pid: number; commandLine: string }>) => void) | undefined;
+      const snapshots = new Promise<Array<{ pid: number; commandLine: string }>>(resolve => {
+        releaseSnapshots = resolve;
+      });
+      const current = config({
+        injectionModel: "gpt-5.6-sol",
+        injectionEffort: "high",
+        syncCodexSubagentDefaults: true,
+      });
+      const processIo = {
+        platform: "win32" as const,
+        listSnapshotsAsync: async () => {
+          enumerations += 1;
+          return snapshots;
+        },
+        readStartMsBatchAsync: async (pids: readonly number[]) => new Map(pids.map(pid => [pid, 3_000] as const)),
+        now: () => 5_000,
+      };
+
+      const first = resolveNativeDefaultState(current, { configPath, processIo });
+      const second = resolveNativeDefaultState(current, { configPath, processIo });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      releaseSnapshots?.([{ pid: 42, commandLine: "/usr/local/bin/codex app-server" }]);
+      await expect(first).resolves.toBe("active");
+      await expect(second).resolves.toBe("active");
+      expect(enumerations).toBe(1);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
   test("alternating catalog/config freshness reuses process evidence but returns target-correct states", () => {
     let enumerations = 0;
     let starts = 0;
