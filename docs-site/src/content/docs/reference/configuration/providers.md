@@ -344,6 +344,8 @@ process-local, so a restart forgets them.
 Rotation carries the alternate account's **full** credential snapshot, not just its bearer, so a
 provider that pairs routing metadata with its token — Antigravity's Cloud Code Assist project id,
 for example — cannot end up sending one account's token with another account's metadata.
+Antigravity rate limits embedded before output in a Cloud Code Assist SSE response are treated as
+429 for this purpose, and a successful rotation rebinds that conversation to the alternate account.
 
 Current scope is the ordinary Responses request paths. Cursor reports rate limits as adapter
 events rather than an HTTP status, and the standalone Antigravity image endpoint has its own
