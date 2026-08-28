@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MANAGED_SUBAGENT_DEFAULT_MARKER, resolveNativeDefaultState } from "../src/codex/subagent-defaults";
 import { multiAgentGuidanceText } from "../src/server/responses/collaboration";
 import { handleResponses } from "../src/server/responses/core";
-import { CODEX_CONFIG_PATH } from "../src/codex/paths";
 import { collectCodexAppServerCatalogState, resetCodexAppServerCatalogStateCache } from "../src/codex/app-server-processes";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
@@ -17,8 +18,13 @@ const config = (overrides: Partial<OcxConfig> = {}): OcxConfig => ({
 }) as OcxConfig;
 
 const originalFetch = globalThis.fetch;
+const originalCatalogStateOverride = process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE;
 afterEach(() => { globalThis.fetch = originalFetch; });
-afterEach(() => { resetCodexAppServerCatalogStateCache(); });
+afterEach(() => {
+  if (originalCatalogStateOverride === undefined) delete process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE;
+  else process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE = originalCatalogStateOverride;
+  resetCodexAppServerCatalogStateCache();
+});
 
 const managed = (model = "gpt-5.6-sol", effort = "high"): string =>
   `[agents]\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_model = "${model}"\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_reasoning_effort = "${effort}"\n`;
@@ -102,7 +108,6 @@ describe("native default authority", () => {
   });
 
   test("Responses core passes native sync state into production V2 guidance", async () => {
-    const previousCatalogState = process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE;
     process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE = "fresh";
     let upstreamBody: Record<string, unknown> | undefined;
     globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -137,33 +142,33 @@ describe("native default authority", () => {
     expect(response.status).toBe(200);
     expect(JSON.stringify(upstreamBody)).toContain("authority=pending");
     expect(JSON.stringify(upstreamBody)).not.toContain("authority=disabled");
-    if (previousCatalogState === undefined) delete process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE;
-    else process.env.OPENCODEX_APP_SERVER_CATALOG_STATE_OVERRIDE = previousCatalogState;
   });
 
   test("native authority uses config.toml freshness even when catalog freshness would pass", async () => {
-    const existed = existsSync(CODEX_CONFIG_PATH);
-    const before = existed ? readFileSync(CODEX_CONFIG_PATH) : undefined;
+    const configDir = mkdtempSync(join(tmpdir(), "ocx-native-authority-"));
+    const configPath = join(configDir, "config.toml");
     try {
-      writeFileSync(CODEX_CONFIG_PATH, managed(), "utf8");
+      writeFileSync(configPath, managed(), "utf8");
       // The app-server started before this config-only native-default write.
-      utimesSync(CODEX_CONFIG_PATH, 2, 2);
+      utimesSync(configPath, 2, 2);
       const state = await resolveNativeDefaultState(config({
         injectionModel: "gpt-5.6-sol",
         injectionEffort: "high",
         syncCodexSubagentDefaults: true,
       }), {
-        configPath: CODEX_CONFIG_PATH,
+        configPath,
         processIo: {
           listSnapshots: () => [{ pid: 42, commandLine: "/usr/local/bin/codex app-server" }],
           readStartMs: () => 1,
+          // The direct collector target regression below covers target selection;
+          // this seam keeps the resolver test isolated from the user's config.
+          catalogMtimeMs: () => statSync(configPath).mtimeMs,
           now: () => 3_000,
         },
       });
       expect(state).toBe("pending");
     } finally {
-      if (before === undefined) unlinkSync(CODEX_CONFIG_PATH);
-      else writeFileSync(CODEX_CONFIG_PATH, before);
+      rmSync(configDir, { recursive: true, force: true });
     }
   });
 
