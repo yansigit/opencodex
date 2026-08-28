@@ -4,6 +4,7 @@ import { MANAGED_SUBAGENT_DEFAULT_MARKER, resolveNativeDefaultState } from "../s
 import { multiAgentGuidanceText } from "../src/server/responses/collaboration";
 import { handleResponses } from "../src/server/responses/core";
 import { CODEX_CONFIG_PATH } from "../src/codex/paths";
+import { collectCodexAppServerCatalogState, resetCodexAppServerCatalogStateCache } from "../src/codex/app-server-processes";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
 import { ManagementRequest as Request } from "./helpers/management-auth";
@@ -17,6 +18,7 @@ const config = (overrides: Partial<OcxConfig> = {}): OcxConfig => ({
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
+afterEach(() => { resetCodexAppServerCatalogStateCache(); });
 
 const managed = (model = "gpt-5.6-sol", effort = "high"): string =>
   `[agents]\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_model = "${model}"\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_reasoning_effort = "${effort}"\n`;
@@ -163,5 +165,26 @@ describe("native default authority", () => {
       if (before === undefined) unlinkSync(CODEX_CONFIG_PATH);
       else writeFileSync(CODEX_CONFIG_PATH, before);
     }
+  });
+
+  test("alternating catalog/config freshness reuses process evidence but returns target-correct states", () => {
+    let enumerations = 0;
+    let starts = 0;
+    let targetMtime = 2_000;
+    const listSnapshots = () => {
+      enumerations += 1;
+      return [{ pid: 42, commandLine: "/usr/local/bin/codex app-server" }];
+    };
+    const readStartMs = () => {
+      starts += 1;
+      return 1_000;
+    };
+    const catalogMtimeMs = () => targetMtime;
+    const base = { listSnapshots, readStartMs, catalogMtimeMs, now: () => 3_000 };
+    expect(collectCodexAppServerCatalogState({ ...base, freshnessTarget: "catalog" }).state).toBe("stale");
+    targetMtime = 500;
+    expect(collectCodexAppServerCatalogState({ ...base, freshnessTarget: "config" }).state).toBe("fresh");
+    expect(enumerations).toBe(1);
+    expect(starts).toBe(1);
   });
 });
