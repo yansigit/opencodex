@@ -218,11 +218,17 @@ export interface MultiAgentGuidanceOptions {
   injectionPrompt?: string;
   subagentRoles?: OcxSubagentRole[];
   nativeDefaultState?: NativeDefaultState;
+  syncCodexSubagentDefaults?: boolean;
 }
 
 
 
 export interface MultiAgentGuidanceDeps {
+  resolveNativeDefaultState?: (config: {
+    injectionModel?: string;
+    injectionEffort?: string;
+    syncCodexSubagentDefaults?: boolean;
+  }) => NativeDefaultState | Promise<NativeDefaultState>;
   resolveEffectiveSubagentRoster?: (
     configuredModels: readonly string[],
     surface: SpawnAgentSurface,
@@ -311,6 +317,7 @@ export async function multiAgentGuidanceText(
     injectionPrompt,
     subagentRoles,
     nativeDefaultState: configuredNativeDefaultState,
+    syncCodexSubagentDefaults,
   } = options;
   const activeAccountNamespace = codexAccountNamespace?.length
     ? codexAccountNamespace
@@ -344,7 +351,9 @@ export async function multiAgentGuidanceText(
       return null;
     }
     const nativeDefaultState = configuredNativeDefaultState
-      ?? await resolveNativeDefaultState({ injectionModel, injectionEffort });
+      ?? await (deps.resolveNativeDefaultState ?? resolveNativeDefaultState)({
+        injectionModel, injectionEffort, syncCodexSubagentDefaults,
+      });
     // codex-rs supplies the Proactive text on v2; the proxy only adds model-designation
     // guidance, and only when there is something concrete to designate: a configured
     // injectionModel and/or a roster entry that resolves in the injected catalog.

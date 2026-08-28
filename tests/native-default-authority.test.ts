@@ -45,6 +45,10 @@ describe("native default authority", () => {
       readConfig: () => `model_provider = "other"\n${managed()}`,
       collectCatalogState: async () => ({ state: "not_running" }),
     })).toBe("blocked");
+    expect(await resolveNativeDefaultState(config({ injectionModel: "gpt-5.6-sol", syncCodexSubagentDefaults: true }), {
+      readConfig: () => `profile = "work"\n[profiles.work]\nmodel_provider = "other"\n${managed()}`,
+      collectCatalogState: async () => ({ state: "not_running" }),
+    })).toBe("blocked");
     expect(await resolveNativeDefaultState(config({ injectionModel: "gpt-5.6-sol", injectionEffort: "high", syncCodexSubagentDefaults: true }), {
       readConfig: () => managed(),
       collectCatalogState: async () => ({ state: "fresh" }),
@@ -76,12 +80,16 @@ describe("native default authority", () => {
     } as any;
     const text = await multiAgentGuidanceText(parsed, {
       injectionModel: "gpt-5.6-sol",
-      nativeDefaultState: "pending",
+      syncCodexSubagentDefaults: true,
     }, {
       collectCatalogState: () => ({ state: "fresh" }),
+      resolveNativeDefaultState: received => {
+        expect(received.syncCodexSubagentDefaults).toBe(true);
+        return "active";
+      },
       resolveEffectiveSubagentRoster: () => ({ candidates: [{ model: "gpt-5.6-sol", efforts: ["high"] }], advertised: [{ model: "gpt-5.6-sol", efforts: ["high"] }], excluded: [] }),
     });
     expect(text).toContain('Preferred sub-agent: model "gpt-5.6-sol"');
-    expect(text).toContain("nativeDefaultState: pending");
+    expect(text).toContain("nativeDefaultState: active");
   });
 });
