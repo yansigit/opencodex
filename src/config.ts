@@ -6,6 +6,7 @@ import * as z from "zod/v4";
 import { isValidProviderName, hasOwnProvider } from "./config/provider-name";
 import {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   nonBlankStringArrayConfigError,
@@ -59,6 +60,7 @@ import { recordOwnedConfigPath } from "./lib/config-ownership";
 import { assertNotRealHomeUnderTest } from "./lib/test-home-guard";
 import { providerDestinationConfigError } from "./lib/destination-policy";
 import { redactSecretString } from "./lib/redact";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "./lib/provider-tls-profile";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import { MODEL_ALIAS_PATTERN } from "./providers/default-aliases";
 import {
@@ -83,8 +85,10 @@ import {
   registryModelServiceTierCapabilityApplies,
 } from "./providers/registry";
 import { resolveOpenAiVirtualModel } from "./providers/openai-virtual-models";
+import { slugEquivalenceKey, slugsEquivalent } from "./providers/slug-codec";
 import { parseDesktopProfile } from "./claude/desktop-profile";
 import { isCodexReasoningEffort } from "./reasoning-effort";
+import { parseSubagentRoles, salvageSubagentRoles } from "./codex/agent-roles";
 import {
   COST4_RATE_KEYS,
   isValidCost4Rate,
@@ -449,18 +453,21 @@ const requestPacingRuleSchema = z.object({
   // Keep the RPM-derived timer within the same one-hour bound as minIntervalMs.
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
-}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined, {
-  message: "request pacing rules need requestsPerMinute or minIntervalMs",
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
+}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined || value.jitterMs !== undefined, {
+  message: "request pacing rules need requestsPerMinute, minIntervalMs, or jitterMs",
 });
 
 const requestPacingSchema = z.object({
   enabled: z.boolean(),
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
   models: z.record(z.string().trim().min(1), requestPacingRuleSchema).optional(),
 }).strict().refine(value => value.enabled === false
   || value.requestsPerMinute !== undefined
   || value.minIntervalMs !== undefined
+  || value.jitterMs !== undefined
   || (value.models !== undefined && Object.keys(value.models).length > 0), {
   message: "enabled request pacing needs a provider rule or model override",
 });
@@ -489,6 +496,12 @@ const fastWireSchema = z.object({
 const providerConfigSchema = z.object({
   adapter: z.string().min(1),
   baseUrl: z.string().min(1),
+  azureCredential: z.object({
+    type: z.literal("default-azure-credential"),
+    managedIdentityClientId: z.string().trim().min(1).optional(),
+  }).strict().transform(value => value.managedIdentityClientId === undefined
+    ? value
+    : { ...value, managedIdentityClientId: value.managedIdentityClientId.trim() }).optional(),
   alias: z.string().optional(),
   modelAliases: z.record(z.string(), z.string()).optional(),
   defaultAliases: z.boolean().optional(),
@@ -523,6 +536,8 @@ const providerConfigSchema = z.object({
   // accepted, persisted, and then silently resolved to the `code_mode_only` default — the
   // operator asked for shell mode, got code mode, and was told nothing (#2106).
   codexToolMode: z.enum(["code_mode_only", "shell"]).optional(),
+  projectContext: z.enum(["off", "on"]).optional(),
+  tlsProfile: z.literal("antigravity-browser").optional(),
   responsesItemIdRepair: z.object({
     message: z.array(z.string().min(1)).optional(),
     reasoning: z.array(z.string().min(1)).optional(),
@@ -535,6 +550,8 @@ const providerConfigSchema = z.object({
 export { isValidProviderName, hasOwnProvider } from "./config/provider-name";
 export {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
+  isAzureIdentityProvider,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   nonBlankStringArrayConfigError,
@@ -847,6 +864,11 @@ const agentTaskRecoverySchema = z.object({
   cacheEntries: z.number().int().min(1).max(512).optional(),
 }).strict();
 
+const v2NativeParentOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  model: z.string().trim().min(1).optional(),
+}).strict();
+
 const configSchema = z.object({
   port: z.number().int().min(0).max(65535).default(10100),
   managementUsageMaxReadBytes: z.number().int().positive().default(64 * 1024 * 1024),
@@ -894,6 +916,7 @@ const configSchema = z.object({
   providerContextCaps: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
+  v2NativeParentOverride: v2NativeParentOverrideSchema.optional().catch(undefined),
   // Invalid optional recovery config must not discard unrelated provider/account state.
   agentTaskRecovery: agentTaskRecoverySchema.optional().catch(undefined),
   // These selections pre-date schema validation and used to pass through as
@@ -903,12 +926,18 @@ const configSchema = z.object({
   injectionModel: z.string().optional().catch(undefined),
   injectionEffort: z.string().optional().catch(undefined),
   syncCodexSubagentDefaults: z.boolean().optional().catch(undefined),
+  syncCodexAgentRoles: z.boolean().optional().catch(undefined),
+  subagentRoles: z.unknown().optional(),
   // Per-primary-model fallback chains. Values must be non-empty string arrays;
   // malformed entries degrade to undefined rather than rejecting the whole config.
   subagentModelFallbackByModel: z.record(
     z.string(),
     z.array(z.string().trim().min(1)).min(1),
   ).optional().catch(undefined),
+  subagentCandidates: z.union([
+    z.array(z.string().trim().min(1)).min(1),
+    z.record(z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)),
+  ]).optional().catch(undefined),
   codexShimAutoRestore: z.boolean().optional(),
   pausedCodexAccountIds: z.array(z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/)).optional(),
   codexAccountNamespaces: codexAccountNamespacesSchema.optional(),
@@ -1062,6 +1091,14 @@ const configSchema = z.object({
         message: responsesPathError,
       });
     }
+    const tlsProfileError = providerTlsProfileConfigError(name, provider);
+    if (tlsProfileError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "tlsProfile"],
+        message: tlsProfileError,
+      });
+    }
     const headersError = providerHeadersConfigError((provider as { headers?: unknown }).headers);
     if (headersError) {
       ctx.addIssue({
@@ -1086,6 +1123,14 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "apiKeyTransport"],
         message: apiKeyTransportError,
+      });
+    }
+    const azureCredentialError = azureCredentialConfigError(provider);
+    if (azureCredentialError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "azureCredential"],
+        message: azureCredentialError,
       });
     }
     const modelAdaptersError = modelAdapterRecordConfigError(
@@ -1646,6 +1691,53 @@ function warnDegradedClaudeSubagentEffort(rawParsed: unknown): void {
   }
 }
 
+function normalizeSubagentRoles(config: OcxConfig, rawParsed: unknown): OcxConfig {
+  const raw = rawConfigRecord(rawParsed);
+  if (!raw || !Object.hasOwn(raw, "subagentRoles")) return config;
+  const salvaged = salvageSubagentRoles(raw.subagentRoles);
+  const normalized = { ...config };
+  if (salvaged.roles === undefined) delete normalized.subagentRoles;
+  else normalized.subagentRoles = salvaged.roles;
+  return normalized;
+}
+
+function subagentRolesLoadWarnings(rawParsed: unknown): string[] {
+  const raw = rawConfigRecord(rawParsed);
+  if (!raw || !Object.hasOwn(raw, "subagentRoles")) return [];
+  return salvageSubagentRoles(raw.subagentRoles).warnings;
+}
+
+function malformedSyncCodexAgentRolesWarning(rawParsed: unknown): string | null {
+  const raw = rawConfigRecord(rawParsed);
+  if (!raw || !Object.hasOwn(raw, "syncCodexAgentRoles")) return null;
+  if (typeof raw.syncCodexAgentRoles === "boolean") return null;
+  return "syncCodexAgentRoles ignored: expected a boolean; treating as false";
+}
+
+function normalizeSyncCodexAgentRoles(config: OcxConfig, rawParsed: unknown): OcxConfig {
+  return malformedSyncCodexAgentRolesWarning(rawParsed)
+    ? { ...config, syncCodexAgentRoles: false }
+    : config;
+}
+
+function warnDegradedSyncCodexAgentRoles(rawParsed: unknown): void {
+  const warning = malformedSyncCodexAgentRolesWarning(rawParsed);
+  if (warning) console.warn(`⚠️  config.json ${warning}. Other settings were preserved.`);
+}
+
+function warnDegradedSubagentRoles(rawParsed: unknown): void {
+  for (const warning of subagentRolesLoadWarnings(rawParsed)) {
+    console.warn(`⚠️  config.json ${warning}. Other settings were preserved.`);
+  }
+}
+
+function subagentRolesError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "subagentRoles")) return null;
+  const parsed = parseSubagentRoles(raw.subagentRoles);
+  return parsed.ok ? null : `schema_invalid: ${parsed.error}`;
+}
+
 function malformedUpstreamHostCircuitThresholdWarning(rawParsed: unknown): string | null {
   const raw = rawConfigRecord(rawParsed);
   if (!raw || !Object.hasOwn(raw, "upstreamHostCircuitThreshold")) return null;
@@ -1826,11 +1918,13 @@ export function loadConfig(): OcxConfig {
       warnDegradedApiKeys(parsed, config);
       warnDegradedCodexAccountPriorities(parsed, config);
       warnDegradedClaudeSubagentEffort(parsed);
+      warnDegradedSubagentRoles(parsed);
+      warnDegradedSyncCodexAgentRoles(parsed);
       warnDegradedNativeSubagentConfig(parsed, config);
       warnDegradedCodexAccountPicker(parsed);
       warnDegradedUpstreamHostCircuitThreshold(parsed);
       warnDegradedAgentTaskRecovery(parsed);
-      return withRefreshedCostOverlays(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed));
+      return withRefreshedCostOverlays(normalizeSyncCodexAgentRoles(normalizeSubagentRoles(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed), parsed), parsed));
     }
     // Schema validation failed — merge defaults into the raw object instead of
     // discarding it entirely, so pool accounts and providers survive a missing
@@ -1850,11 +1944,13 @@ export function loadConfig(): OcxConfig {
       warnDegradedApiKeys(parsed, config);
       warnDegradedCodexAccountPriorities(parsed, config);
       warnDegradedClaudeSubagentEffort(parsed);
+      warnDegradedSubagentRoles(parsed);
+      warnDegradedSyncCodexAgentRoles(parsed);
       warnDegradedNativeSubagentConfig(parsed, config);
       warnDegradedCodexAccountPicker(parsed);
       warnDegradedUpstreamHostCircuitThreshold(parsed);
       warnDegradedAgentTaskRecovery(parsed);
-      return withRefreshedCostOverlays(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed));
+      return withRefreshedCostOverlays(normalizeSyncCodexAgentRoles(normalizeSubagentRoles(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed), parsed), parsed));
     }
     // Still failing, but if every complaint is about one or more named entries
     // in an independent section, drop exactly those and keep the rest. Falling
@@ -1870,11 +1966,13 @@ export function loadConfig(): OcxConfig {
         warnDegradedApiKeys(parsed, config);
         warnDegradedCodexAccountPriorities(parsed, config);
         warnDegradedClaudeSubagentEffort(parsed);
+        warnDegradedSubagentRoles(parsed);
+        warnDegradedSyncCodexAgentRoles(parsed);
         warnDegradedNativeSubagentConfig(parsed, config);
         warnDegradedCodexAccountPicker(parsed);
         warnDegradedUpstreamHostCircuitThreshold(parsed);
         warnDegradedAgentTaskRecovery(parsed);
-        return withRefreshedCostOverlays(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed));
+        return withRefreshedCostOverlays(normalizeSyncCodexAgentRoles(normalizeSubagentRoles(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed), parsed), parsed));
       }
     }
     // Merge couldn't fix it — truly broken config
@@ -1960,13 +2058,16 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   // ordinary save persists the normalized absence.
   const syncDisabledReason = nativeSubagentSyncDisabledReason(config, rawParsed);
   const rawEffort = rawClaudeSubagentEffort(rawParsed);
-  const normalized = normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, rawParsed), rawParsed);
+  const normalized = normalizeSyncCodexAgentRoles(normalizeSubagentRoles(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, rawParsed), rawParsed), rawParsed), rawParsed);
   const warnings = configPlaceholderWarnings(normalized);
   warnings.push(...inheritedFastWireConflictProviderNames(normalized).map(inheritedFastWireConflictWarning));
   warnings.push(...degradedCodexAccountPriorityWarnings(rawParsed, normalized));
   if (rawEffort !== undefined && !isClaudeSubagentEffort(rawEffort)) {
     warnings.push(`claudeCode.subagentEffort ignored: expected one of ${CLAUDE_SUBAGENT_EFFORTS.join(", ")}`);
   }
+  warnings.push(...subagentRolesLoadWarnings(rawParsed));
+  const agentRoleSyncWarning = malformedSyncCodexAgentRolesWarning(rawParsed);
+  if (agentRoleSyncWarning) warnings.push(agentRoleSyncWarning);
   warnings.push(...malformedNativeSubagentFields(rawParsed).map(malformedNativeSubagentFieldWarning));
   const pickerWarning = malformedCodexAccountPickerWarning(rawParsed);
   if (pickerWarning) warnings.push(pickerWarning);
@@ -2063,6 +2164,16 @@ function agentTaskRecoveryError(value: unknown): string | null {
   const issue = result.error.issues[0];
   const field = issue?.path.join(".");
   return `schema_invalid: agentTaskRecovery${field ? `.${field}` : ""}: ${issue?.message ?? "invalid configuration"}`;
+}
+
+function v2NativeParentOverrideError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "v2NativeParentOverride") || raw.v2NativeParentOverride === undefined) return null;
+  const result = v2NativeParentOverrideSchema.safeParse(raw.v2NativeParentOverride);
+  if (result.success) return null;
+  const issue = result.error.issues[0];
+  const field = issue?.path.join(".");
+  return `schema_invalid: v2NativeParentOverride${field ? `.${field}` : ""}: ${issue?.message ?? "invalid configuration"}`;
 }
 
 /**
@@ -2174,9 +2285,11 @@ function loopbackListenerPortError(value: unknown): string | null {
 export function validateConfigCandidate(value: unknown): { ok: true; config: OcxConfig } | { ok: false; error: string } {
   const boundaryError = blankHostnameError(value)
     ?? claudeSubagentEffortError(value)
+    ?? subagentRolesError(value)
     ?? appOwnedMemoryBudgetError(value)
     ?? upstreamHostCircuitThresholdError(value)
     ?? agentTaskRecoveryError(value)
+    ?? v2NativeParentOverrideError(value)
     ?? googleAntigravityStaticCatalogVersionError(value)
     ?? codexAccountPrioritiesError(value)
     ?? codexAccountPickerEnabledError(value)
@@ -2187,6 +2300,15 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
   const result = configSchema.safeParse(value);
   if (result.success) {
     const config = normalizeApiKeyIds(result.data as OcxConfig);
+    for (const [name, provider] of Object.entries(config.providers)) {
+      const antigravityError = antigravityOAuthDestinationConfigError(name, provider);
+      if (antigravityError) return { ok: false, error: `providers.${name}.baseUrl: ${antigravityError}` };
+    }
+    if (value && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, "subagentRoles")) {
+      const parsedRoles = parseSubagentRoles((value as { subagentRoles?: unknown }).subagentRoles);
+      if (!parsedRoles.ok) return { ok: false, error: `schema_invalid: ${parsedRoles.error}` };
+      config.subagentRoles = parsedRoles.roles;
+    }
     return { ok: true, config };
   }
   return { ok: false, error: schemaDiagnosticsError(result.error) };

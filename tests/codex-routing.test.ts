@@ -1270,6 +1270,8 @@ describe("codex routing", () => {
         },
       }],
     })).toEqual({
+      fiveHourPercent: 11,
+      fiveHourResetAt: 1,
       shortPercent: 11,
       shortResetAt: 1,
       shortWindowSeconds: 5 * 60 * 60,

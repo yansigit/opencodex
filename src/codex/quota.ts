@@ -324,16 +324,10 @@ export function setAccountQuotaFromParsed(
   }
 
   if (snapshotHasShort(quota)) {
-    const shortPercent = quota.fiveHourPercent ?? quota.shortPercent;
-    const shortResetAt = quota.fiveHourResetAt ?? quota.shortResetAt;
-    if (shortPercent !== undefined) {
-      next.shortPercent = shortPercent;
-      next.fiveHourPercent = shortPercent;
-    }
-    if (shortResetAt !== undefined) {
-      next.shortResetAt = shortResetAt;
-      next.fiveHourResetAt = shortResetAt;
-    }
+    if (quota.shortPercent !== undefined) next.shortPercent = quota.shortPercent;
+    if (quota.shortResetAt !== undefined) next.shortResetAt = quota.shortResetAt;
+    if (quota.fiveHourPercent !== undefined) next.fiveHourPercent = quota.fiveHourPercent;
+    if (quota.fiveHourResetAt !== undefined) next.fiveHourResetAt = quota.fiveHourResetAt;
     if (quota.shortWindowSeconds !== undefined) next.shortWindowSeconds = quota.shortWindowSeconds;
   } else {
     // Header and reset-credit updates are partial snapshots. Preserve the last full WHAM
@@ -435,7 +429,10 @@ export function applyAccountQuotaFromUpstreamHeaders(
 ): void {
   const quota = parseUpstreamQuotaHeaders(headers);
   if (!quota) return;
-  setAccountQuotaFromParsed(accountId, quota, writerGeneration);
+  // Header consumers historically persist the Codex pool window under `short*`; keep that
+  // storage shape while the parser exposes the canonical five-hour alias to direct callers.
+  const { fiveHourPercent: _fiveHourPercent, fiveHourResetAt: _fiveHourResetAt, ...legacyQuota } = quota;
+  setAccountQuotaFromParsed(accountId, legacyQuota, writerGeneration);
 }
 
 export function updateAccountQuota(
