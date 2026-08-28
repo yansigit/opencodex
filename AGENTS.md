@@ -217,6 +217,11 @@ than nudged.
   user explicitly requests an upstream submission. Always specify the user's fork
   explicitly: `gh pr create --repo yansigit/opencodex --base dev --head <branch>`.
   Upstream PR creation is an external action requiring explicit user direction.
+- **Fork-owner authority:** `@yansigit` owns and administers this fork. Their
+  explicit request authorizes self-merge or direct push within the requested
+  scope. Do not seek approval from upstream maintainers unless `@yansigit`
+  explicitly asks for upstream review or submission. Required CI and the
+  security-review rules in `MAINTAINERS.md` still apply.
 
 ## Branch policy
 
@@ -258,9 +263,8 @@ local-CI box is an author attestation only — fork contributors cannot start
 repository CI; a maintainer has to — so the gate never disproves it; a new
 push still resets every box. A disproved claim unticks the matching box and
 keeps the PR a draft.
-Authors with repository push permission skip the ancestry heuristic only. As with approval requirements in
-[`MAINTAINERS.md`](./MAINTAINERS.md), this is enforced by convention until
-branch protection is configured.
+Authors with repository push permission skip the contributor-readiness
+checklist. Branch and quality failures still apply.
 
 [`MAINTAINERS.md`](./MAINTAINERS.md) is authoritative for review and merge
 policy (approvals, CI requirements, security review, promotion). This file
