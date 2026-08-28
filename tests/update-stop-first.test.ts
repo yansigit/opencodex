@@ -200,9 +200,9 @@ const runtimePath = join(home, "runtime-port.json");
 
 if (args[0] === "stop") {
   let pid = 0;
-  try { pid = Number(JSON.parse(readFileSync(runtimePath, "utf8")).pid); } catch {}
+  try { pid = Number(JSON.parse(readFileSync(runtimePath, "utf8")).pid); } catch { pid = 0; }
   if (Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid) {
-    try { process.kill(pid, "SIGTERM"); } catch {}
+    try { process.kill(pid, "SIGTERM"); } catch { pid = 0; }
   }
   rmSync(pidPath, { force: true });
   rmSync(runtimePath, { force: true });
