@@ -404,20 +404,20 @@ describe("Cursor discovery bounded retry", () => {
     const body = toBinary(GetUsableModelsResponseSchema, create(GetUsableModelsResponseSchema, {
       models: [create(ModelDetailsSchema, { modelId: "gpt-5.5-high" })],
     }));
-    let requests = 0;
-    const result = await withDiscoveryServer(stream => {
-      requests += 1;
-      if (requests === 1) {
-        // First attempt: accept the stream but never respond (client times out).
-        stream.on("error", () => {});
-        return;
-      }
-      stream.respond({ ":status": 200, "content-type": "application/proto" });
-      stream.end(body);
-    }, baseUrl => fetchCursorUsableModels({ apiKey: "test-token", baseUrl, timeoutMs: 120 }));
+   let requests = 0;
+   const result = await withDiscoveryServer(stream => {
+     requests += 1;
+     if (requests === 1) {
+       // First attempt: accept the stream but never respond (client times out).
+       stream.on("error", () => {});
+       return;
+     }
+     stream.respond({ ":status": 200, "content-type": "application/proto" });
+     stream.end(body);
+   }, baseUrl => fetchCursorUsableModels({ apiKey: "test-token", baseUrl, timeoutMs: 1_000 }));
 
-    expect(requests).toBe(2);
-    expect(result).toEqual({ ok: true, models: ["gpt-5.5-high"] });
+   expect(requests).toBe(2);
+   expect(result).toEqual({ ok: true, models: ["gpt-5.5-high"] });
   });
 
   test("retries when the HTTP/2 stream ends before response headers", async () => {
