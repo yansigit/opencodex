@@ -237,6 +237,14 @@ describe("the Responses WebSocket handshake", () => {
     expect(payload.headers).toBe(headers);
   });
 
+  test("the upgrade payload classifies the same Responses origin as HTTP", () => {
+    const payload = buildResponsesWsData(
+      new Headers({ "x-openai-subagent": "collab_spawn" }),
+      { kind: "configured", keyId: "second-key", source: "dedicated" },
+    );
+    expect(payload.agentKind).toBe("subagent");
+  });
+
   // The phase-2 guard that asserted no telemetry symbols existed yet has served
   // its purpose and is gone: phase 3 is what adds them, and a guard that must be
   // deleted by the next commit is a scheduling note, not a test. What survives is
