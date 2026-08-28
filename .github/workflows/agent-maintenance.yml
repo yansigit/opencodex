@@ -70,6 +70,7 @@ jobs:
               createJulesClient,
               defaultAgentMaintenanceState,
               exactHeadBugbotEvidence,
+              autonomousMergeEvidence,
               findGithubSource,
               hasExactHeadMaintainerWaiver,
               isExpectedJulesHeadAdvance,
@@ -132,12 +133,13 @@ jobs:
               "agent:needs-human": ["d93f0b", "Maintenance task needs a maintainer"],
               "agent:failed": ["b60205", "Maintenance task failed"],
               "agent:done": ["0e8a16", "Maintenance task completed"],
+              "agent:completed": ["0e8a16", "Autonomous maintenance task merged"],
               "review-bot-waived": ["6f42c1", "Two-maintainer exact-head review outage waiver"],
               "review-ready": ["0e8a16", "Automated maintenance checks passed; awaiting human merge"]
             };
             const LIFECYCLE = [
               "agent:queued", "agent:running", "agent:reviewing",
-              "agent:needs-human", "agent:failed", "agent:done"
+              "agent:needs-human", "agent:failed", "agent:done", "agent:completed"
             ];
             async function ensureLabels() {
               const existing = new Set((await github.paginate(
@@ -609,6 +611,18 @@ jobs:
               const checkRuns = await github.paginate(github.rest.checks.listForRef, {
                 owner, repo, ref: pr.head.sha, per_page: 100
               });
+              let headCommit;
+              try {
+                headCommit = (await github.rest.repos.getCommit({
+                  owner, repo, ref: pr.head.sha
+                })).data;
+              } catch (error) {
+                state.status = "needs-human";
+                state.reason = `Could not verify Jules head commit: ${error.message}`;
+                await saveRecord(issue.number, comment, state);
+                await setLifecycle(issue.number, "agent:needs-human");
+                continue;
+              }
               if (context.eventName === "schedule" && context.payload.schedule === "*/15 * * * *") {
                 try {
                   await github.rest.actions.createWorkflowDispatch({
@@ -651,6 +665,35 @@ jobs:
                 reviews: waiverReviews,
                 maintainers
               });
+              const autonomous = autonomousMergeEvidence({
+                pr,
+                checkRuns,
+                headCommit,
+                expectedJulesUserId: Number(process.env.JULES_BOT_USER_ID),
+                authorizedSessionId: state.sessionId,
+                sessionId: session.name,
+                expectedBugbotAppId: appId,
+                expectedChecksAppId: 15368,
+                labels
+              });
+              if (autonomous.ready) {
+                const merged = await github.graphql(
+                  `mutation($id: ID!) {
+                    mergePullRequest(input: { pullRequestId: $id, mergeMethod: MERGE }) {
+                      pullRequest { merged }
+                    }
+                  }`,
+                  { id: pr.node_id }
+                );
+                if (!merged.mergePullRequest.pullRequest.merged) {
+                  throw new Error("GitHub did not merge the verified autonomous fix");
+                }
+                state.status = "completed";
+                state.reason = `autonomous-merge:${pr.head.sha}`;
+                await saveRecord(issue.number, comment, state);
+                await setLifecycle(issue.number, "agent:completed");
+                continue;
+              }
               const baselineReady = readiness.baselineReady;
               if (readiness.ready) {
                 state.lastBugbotCheckRunId = readiness.bugbotEvidence?.checkRunId || null;
@@ -685,7 +728,7 @@ jobs:
                 const readinessBody = [
                   readinessMarker,
                   `Automated maintenance checks passed for exact head \`${pr.head.sha}\`; this PR is ready for human merge.`,
-                  "This workflow never merges PRs; a human maintainer must perform the final merge."
+                  "This workflow never merges PRs without autonomous evidence; a human maintainer must perform the final merge otherwise."
                 ].join("\n\n");
                 const readinessComments = await github.paginate(github.rest.issues.listComments, {
                   owner, repo, issue_number: pr.number, per_page: 100

@@ -176,6 +176,45 @@ function maintenanceReadyEvidence({
   };
 }
 
+function autonomousMergeEvidence({
+  pr,
+  checkRuns = [],
+  headCommit,
+  expectedJulesUserId,
+  authorizedSessionId,
+  sessionId,
+  expectedBugbotAppId,
+  expectedChecksAppId = 15368,
+  requiredNames = ["ci", "enforce-target", "hygiene"],
+  labels = (pr?.labels || []),
+}) {
+  const names = new Set(labels.map((label) => typeof label === "string" ? label : label?.name));
+  const headSha = pr?.head?.sha;
+  const julesId = Number(expectedJulesUserId);
+  const sessionKey = (value) => String(value ?? "").replace(/^sessions\//, "");
+  const authorized = authorizedSessionId && sessionKey(sessionId) === sessionKey(authorizedSessionId);
+  const prByJules = Number.isSafeInteger(julesId) && julesId > 0 && Number(pr?.user?.id) === julesId;
+  const authoredByJules = Number.isSafeInteger(julesId) && julesId > 0 &&
+    [headCommit?.author?.id, headCommit?.committer?.id].some((id) => Number(id) === julesId);
+  const baselineReady = requiredChecksSuccessful(checkRuns, headSha, requiredNames, expectedChecksAppId);
+  const bugbotEvidence = exactHeadBugbotEvidence({
+    checkRuns,
+    liveHeadSha: headSha,
+    expectedAppId: expectedBugbotAppId,
+  });
+  return {
+    autonomousLabel: names.has("autonomous-fix"),
+    baselineReady,
+    bugbotEvidence,
+    authorizedSession: Boolean(authorized),
+    prByJules: Boolean(prByJules),
+    authoredByJules: Boolean(prByJules && authoredByJules && headCommit?.sha === headSha),
+    ready: pr?.state === "open" && pr?.base?.ref === "dev" && names.has("autonomous-fix") &&
+      baselineReady && Boolean(bugbotEvidence) && Boolean(authorized) &&
+      Boolean(prByJules && authoredByJules && headCommit?.sha === headSha),
+  };
+}
+
 function trustedActiveMaintenanceCount(records) {
   return records.filter((record) =>
     record?.error ||
@@ -434,6 +473,7 @@ module.exports = {
   defaultAgentMaintenanceState,
   exactHeadBugbotEvidence,
   maintenanceReadyEvidence,
+  autonomousMergeEvidence,
   findGithubSource,
   hasExactHeadMaintainerWaiver,
   isExpectedJulesHeadAdvance,

@@ -262,6 +262,12 @@ export interface OcxConfigRebaseProvenance {
 
 export interface OcxConfig {
   port: number;
+  autonomousRemediation?: {
+    enabled?: boolean;
+    instanceId?: string;
+    threshold?: number;
+    rollingWindowMs?: number;
+  };
   /** Opt in to one identical-turn retry when a Responses completion has no text or tool call. */
   emptyCompletionRetry?: boolean;
   /**
