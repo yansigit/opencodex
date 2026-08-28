@@ -15,6 +15,7 @@ import {
   resolveTrustedWindowsTaskkillExe,
 } from "../lib/windows-elevation";
 import { readCodexCatalogPath } from "./catalog/parsing";
+import { CODEX_CONFIG_PATH } from "./paths";
 
 export const STALE_CODEX_APP_SERVER_HINT =
   "If Codex still shows an older model list, restart its long-lived app-server process after sync (ocx sync --restart-codex). "
@@ -104,6 +105,8 @@ export interface CodexAppServerProcessIo {
   /** Async batch start-time seam used by the request-path Windows collector. */
   readStartMsBatchAsync?: (pids: readonly number[]) => Promise<Map<number, number | null>>;
   catalogMtimeMs?: () => number | null;
+  /** Which on-disk write should be compared with app-server start times. */
+  freshnessTarget?: "catalog" | "config";
 }
 
 function execFileTextAsync(
@@ -680,9 +683,9 @@ export interface CodexAppServerCatalogStatus {
 }
 
 /** Resolve the catalog file Codex app-servers loaded at startup, for staleness checks. */
-function defaultCatalogMtimeMs(): number | null {
+function defaultCatalogMtimeMs(target: "catalog" | "config" = "catalog"): number | null {
   try {
-    return statSync(readCodexCatalogPath()).mtimeMs;
+    return statSync(target === "config" ? CODEX_CONFIG_PATH : readCodexCatalogPath()).mtimeMs;
   } catch {
     return null;
   }
@@ -722,7 +725,7 @@ function catalogStatusFromProcesses(
 
 // Short TTL: process listing + stat run once per window even under per-turn
 // guidance calls (#857).
-let catalogStateCache: { atMs: number; status: CodexAppServerCatalogStatus } | null = null;
+let catalogStateCache: { atMs: number; status: CodexAppServerCatalogStatus; target: "catalog" | "config" } | null = null;
 interface RequestCatalogStateIdentity {
   platform: NodeJS.Platform;
   listSnapshots?: CodexAppServerProcessIo["listSnapshots"];
@@ -730,6 +733,7 @@ interface RequestCatalogStateIdentity {
   readStartMs?: CodexAppServerProcessIo["readStartMs"];
   readStartMsBatchAsync?: CodexAppServerProcessIo["readStartMsBatchAsync"];
   catalogMtimeMs?: CodexAppServerProcessIo["catalogMtimeMs"];
+  freshnessTarget?: CodexAppServerProcessIo["freshnessTarget"];
   now?: CodexAppServerProcessIo["now"];
 }
 
@@ -793,6 +797,7 @@ function sameRequestCatalogStateIdentity(
     && left.readStartMs === right.readStartMs
     && left.readStartMsBatchAsync === right.readStartMsBatchAsync
     && left.catalogMtimeMs === right.catalogMtimeMs
+    && left.freshnessTarget === right.freshnessTarget
     && left.now === right.now;
 }
 
@@ -816,10 +821,12 @@ export function collectCodexAppServerCatalogState(
   io: CodexAppServerProcessIo = {},
 ): CodexAppServerCatalogStatus {
   const now = (io.now ?? Date.now)();
+  const target = io.freshnessTarget ?? "catalog";
   const fullyDefault = !io.listSnapshots && !io.readStartMs && !io.catalogMtimeMs
     && !io.platform && !io.getuid && !io.now;
   if (fullyDefault
     && catalogStateCache
+    && catalogStateCache.target === target
     && now - catalogStateCache.atMs < catalogStateTtlMs(catalogStateCache.status.state)) {
     return catalogStateCache.status;
   }
@@ -851,7 +858,7 @@ export function collectCodexAppServerCatalogState(
         ? { state: "unknown", processes: [], catalogMtimeMs: null }
         : { state: "not_running", processes: [], catalogMtimeMs: null };
     }
-    const catalogMtimeMs = (io.catalogMtimeMs ?? defaultCatalogMtimeMs)();
+    const catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(target)))();
     const starts = io.readStartMs
       ? new Map(processes.map(proc => [proc.pid, io.readStartMs!(proc.pid)] as const))
       : readProcessStartMsBatch(processes.map(proc => proc.pid), platform);
@@ -859,7 +866,7 @@ export function collectCodexAppServerCatalogState(
   };
   const status = compute();
   if (fullyDefault) {
-    catalogStateCache = { atMs: now, status };
+    catalogStateCache = { atMs: now, status, target };
   }
   return status;
 }
@@ -898,6 +905,7 @@ export async function collectCodexAppServerCatalogStateForRequest(
     readStartMs: io.readStartMs,
     readStartMsBatchAsync: io.readStartMsBatchAsync,
     catalogMtimeMs: io.catalogMtimeMs,
+    freshnessTarget: io.freshnessTarget,
     now: io.now,
   };
   const cached = requestCatalogStateCache
@@ -943,7 +951,7 @@ export async function collectCodexAppServerCatalogStateForRequest(
     }
     let catalogMtimeMs: number | null;
     try {
-      catalogMtimeMs = (io.catalogMtimeMs ?? defaultCatalogMtimeMs)();
+      catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(io.freshnessTarget)))();
     } catch {
       catalogMtimeMs = null;
     }

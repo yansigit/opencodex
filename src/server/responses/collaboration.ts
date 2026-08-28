@@ -431,7 +431,7 @@ export async function multiAgentGuidanceText(
       // fallback only for explicit routed/account-qualified ids.
       const promptModel = preferred?.model
         ?? (injectionModel?.includes("/") ? injectionModel : undefined);
-      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, customRolesText)}</multi_agent_mode>`;
+      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, customRolesText, nativeDefaultState)}</multi_agent_mode>`;
     }
     if (!preferred && roster === "" && fallbackGuidance === "" && customRolesText === "") return null;
     const preamble = "When the active spawn_agent tool supports optional \"model\" or \"reasoning_effort\" overrides, "
@@ -480,13 +480,14 @@ export async function multiAgentGuidanceText(
 
 export const V2_GUIDANCE_CHAR_BUDGET = 1200;
 
-export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, roles?: string): string {
+export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, roles?: string, nativeDefaultState?: NativeDefaultState): string {
   return prompt
     .replaceAll("{{model}}", model ?? "")
     .replaceAll("{{effort}}", effort ?? "")
     .replaceAll("{{roster}}", roster ?? "")
     .replaceAll("{{fallback}}", fallback ?? "")
-    .replaceAll("{{roles}}", roles ?? "");
+    .replaceAll("{{roles}}", roles ?? "")
+    .replaceAll("{{nativeDefaultState}}", nativeDefaultState ?? "");
 }
 
 
