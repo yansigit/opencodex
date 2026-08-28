@@ -139,9 +139,22 @@ describe("V2 routed delegation bridge", () => {
   test("caps retained SSE mirror bindings", () => {
     const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
     for (let index = 0; index < 129; index++) {
-      rewrite(JSON.stringify({ type: "response.output_item.added", output_index: index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: `fc_${index}` } }));
+      const snapshot = rewrite(JSON.stringify({ type: "response.output_item.added", output_index: index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: `fc_${index}` } }));
+      if (index === 128) expect(JSON.parse(snapshot)).toMatchObject({ item: { namespace: "ocx_agents", name: "spawn_agent" } });
     }
 
     expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_128", output_index: 128, delta: "{}" }))).encrypted_function_args).toBeUndefined();
+  });
+
+  test("rebinds an item id without leaving a stale output-index binding", () => {
+    const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
+    const snapshot = (output_index: number) => JSON.stringify({ type: "response.output_item.added", output_index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_repeat" } });
+    rewrite(snapshot(1));
+    rewrite(snapshot(2));
+    rewrite(JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_repeat", output_index: 2, arguments: "{}" }));
+
+    for (const output_index of [1, 2]) {
+      expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", output_index, delta: "late" }))).encrypted_function_args).toBeUndefined();
+    }
   });
 });
