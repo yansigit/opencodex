@@ -9,6 +9,7 @@ const {
   defaultAgentMaintenanceState,
   changedFileListComplete,
   exactHeadBugbotEvidence,
+  generatedSyncBaselineDisposition,
   maintenanceReadyEvidence,
   findGithubSource,
   hasExactHeadMaintainerWaiver,
@@ -115,6 +116,24 @@ describe("Cursor Bugbot evidence", () => {
 });
 
 describe("baseline CI evidence", () => {
+  it("keeps a generated sync gate pending until CI completes, but rejects a completed failure", () => {
+    const pending = [
+      { id: 1, name: "hygiene", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
+      { id: 2, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "queued", conclusion: null },
+    ];
+    assert.equal(generatedSyncBaselineDisposition({ syncGenerated: true, checkRuns: pending, headSha: SHA }), "pending");
+    assert.equal(generatedSyncBaselineDisposition({
+      syncGenerated: true,
+      checkRuns: pending.filter(check => check.name !== "ci"),
+      headSha: SHA,
+    }), "pending");
+    assert.equal(generatedSyncBaselineDisposition({
+      syncGenerated: true,
+      checkRuns: pending.map(check => check.name === "ci" ? { ...check, status: "completed", conclusion: "failure" } : check),
+      headSha: SHA,
+    }), "failed");
+  });
+
   it("requires latest successful exact-head evidence for every configured check", () => {
     const checks = [
       { id: 1, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
