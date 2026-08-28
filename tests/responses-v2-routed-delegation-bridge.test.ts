@@ -36,7 +36,7 @@ function config(): OcxConfig {
   } as OcxConfig;
 }
 
-function request(body: Record<string, unknown>): Request {
+function request(body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/v1/responses", {
     method: "POST",
     headers: {
@@ -44,6 +44,7 @@ function request(body: Record<string, unknown>): Request {
       authorization: `Bearer ${fakeChatGptJwt("acct-bridge")}`,
       "chatgpt-account-id": "acct-bridge",
       originator: "codex_cli_rs",
+      ...headers,
     },
     body: JSON.stringify(body),
   });
@@ -167,6 +168,32 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       const call = (await (await handleResponses(request(rootBody()), config(), { model: "", provider: "" })).json() as { output: Array<Record<string, unknown>> }).output[0]!;
       expect(call.encrypted_function_args).toBeUndefined();
       expect(call.namespace).toBe("collaboration");
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("does not inject on excluded request shapes", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return Response.json({ id: `resp_${requests.length}`, status: "completed", output: [] });
+    }) as typeof fetch;
+    try {
+      const routed = config();
+      routed.providers.gw = { adapter: "openai-responses", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
+      const cases: Array<[OcxConfig, Record<string, unknown>, Record<string, string>, Parameters<typeof handleResponses>[3]]> = [
+        [{ ...config(), multiAgentMode: "v1" }, rootBody(), {}, {}],
+        [{ ...config(), multiAgentMode: "default" }, rootBody(), {}, {}],
+        [config(), rootBody({ tools: [] }), {}, {}],
+        [config(), rootBody(), { "x-openai-subagent": "collab_spawn" }, {}],
+        [config(), rootBody(), { "x-openai-subagent": "review" }, {}],
+        [config(), rootBody({ tools: [{ type: "function", name: "spawn_agent" }, ...(rootBody().tools as unknown[]) ] }), {}, {}],
+        [config(), rootBody(), {}, { comboAttempt: true }],
+      ];
+      for (const [cfg, body, headers, options] of cases) await handleResponses(request(body, headers), cfg, { model: "", provider: "" }, options);
+      expect(requests).toHaveLength(cases.length);
+      for (const outbound of requests) expect(JSON.stringify(outbound.tools ?? outbound.input)).not.toContain('"ocx_agents"');
+      expect(routed.providers.gw).toBeDefined();
     } finally { globalThis.fetch = originalFetch; }
   });
 
