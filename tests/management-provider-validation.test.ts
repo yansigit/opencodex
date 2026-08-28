@@ -42,6 +42,7 @@ import { getAccountSet, saveCredential } from "../src/oauth/store";
 import { fastPolicyForModel } from "../src/providers/service-tier";
 import { resolveWireProtocolOverride } from "../src/server/adapter-resolve";
 import { providerTlsFetch, resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../src/lib/provider-tls-profile";
+import { shouldUseCodexWsUpstream } from "../src/server/responses/ws-upstream";
 
 // Full-suite Windows load: startServer + multi-step provider PATCH/GET flows exceed the
 // default 5s per-test budget (same flake class as 810fa115 / claude-management-api).
@@ -3782,6 +3783,62 @@ describe("provider upstreamHttpVersion management contract (#1668)", () => {
       expect(row).toBeDefined();
       expect(row.upstreamHttpVersion).toBeUndefined();
     });
+  });
+
+  test("POST with wsUpstream: null persists nothing and inherits the environment after reload", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig = makeConfig();
+    saveConfig(liveConfig);
+    const previousWsUpstream = process.env.OCX_CODEX_WS_UPSTREAM;
+    process.env.OCX_CODEX_WS_UPSTREAM = "true";
+    try {
+      await withRequest(liveConfig, async (request) => {
+        const created = await request("/api/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "ws-null-provider",
+            provider: {
+              adapter: "openai-chat",
+              baseUrl: "https://api.example.test/v1",
+              wsUpstream: null,
+            },
+          }),
+        });
+        expect(created?.status).toBe(200);
+
+        const liveProvider = liveConfig.providers["ws-null-provider"]!;
+        expect(Object.hasOwn(liveProvider, "wsUpstream")).toBe(false);
+        const onDisk = JSON.parse(readFileSync(join(TEST_DIR, "config.json"), "utf-8")) as any;
+        expect(Object.hasOwn(onDisk.providers["ws-null-provider"], "wsUpstream")).toBe(false);
+
+        const reloaded = loadConfig();
+        const reloadedProvider = reloaded.providers["ws-null-provider"]!;
+        expect(Object.hasOwn(reloadedProvider, "wsUpstream")).toBe(false);
+
+        const requestInit = {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-luna", stream: true }),
+        };
+        expect(shouldUseCodexWsUpstream(
+          "https://chatgpt.com/backend-api/codex/responses",
+          requestInit,
+          "1.4.0",
+          { wsUpstream: liveProvider.wsUpstream },
+        )).toBe(true);
+        expect(shouldUseCodexWsUpstream(
+          "https://chatgpt.com/backend-api/codex/responses",
+          requestInit,
+          "1.4.0",
+          { wsUpstream: reloadedProvider.wsUpstream },
+        )).toBe(true);
+      });
+    } finally {
+      if (previousWsUpstream === undefined) delete process.env.OCX_CODEX_WS_UPSTREAM;
+      else process.env.OCX_CODEX_WS_UPSTREAM = previousWsUpstream;
+    }
   });
 
   test("a config already holding upstreamHttpVersion: null still loads", async () => {

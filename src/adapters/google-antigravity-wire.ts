@@ -40,7 +40,7 @@ export function isLikelyRealThoughtSignature(sig: string | undefined): boolean {
   // signature exists. It is alphanumeric with underscores, so it would otherwise satisfy every
   // check below and be re-ingested as genuine — cached, replayed, and eventually treated as
   // evidence that a turn was signed. It is never a real signature.
-  if (sig === "skip_thought_signature_validator") return false;
+  if (sig === ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL) return false;
   // Reject synthetic Responses/tool-call ids and Anthropic tool-use ids (`_` or `-` separators).
   if (/^(fc|ctc|tsc|call|msg|rs|resp|reasoning|item|ws|toolu|tool|func|function)[-_]/i.test(sig)) return false;
   // Real Gemini thought signatures are opaque base64/base64url blobs: only [A-Za-z0-9+/_=-].
