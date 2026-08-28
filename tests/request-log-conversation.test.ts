@@ -16,6 +16,7 @@ import {
   requestLogEntryFromPersistedUsage,
   type RequestLogEntry,
 } from "../src/server/request-log";
+import { requestLogDto } from "../src/server/management/shared";
 import type { PersistedUsageEntry } from "../src/usage/log";
 
 function log(overrides: Partial<RequestLogEntry>): RequestLogEntry {
@@ -49,6 +50,23 @@ describe("normalizeLogConversationId", () => {
     const long = "x".repeat(200);
     expect(normalizeLogConversationId(long)).toBe(digest32(long));
     expect(normalizeLogConversationId(long)).toBe(normalizeLogConversationId(long));
+  });
+});
+
+describe("request log agentKind", () => {
+  test("hydrates valid agentKind and omits invalid historical values", () => {
+    const base: PersistedUsageEntry = {
+      requestId: "ocx-agent-kind",
+      timestamp: 1,
+      model: "gpt-test",
+      provider: "openai",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "reported",
+    };
+    expect(requestLogEntryFromPersistedUsage({ ...base, agentKind: "main" })).toMatchObject({ agentKind: "main" });
+    expect(requestLogEntryFromPersistedUsage({ ...base, agentKind: "invalid" } as unknown as PersistedUsageEntry)).not.toHaveProperty("agentKind");
+    expect(requestLogDto({ ...log({ agentKind: "internal" }) })).toMatchObject({ agentKind: "internal" });
   });
 });
 

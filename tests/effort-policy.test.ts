@@ -7,7 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyEffortCap, effortCapAppliesTo, effortCapFor, isThreadSpawnRequest, resolveCappedEffort, stripEmptyLadderEffort, supportedLadderFor } from "../src/server/effort-policy";
+import { applyEffortCap, classifyAgentKind, effortCapAppliesTo, effortCapFor, isThreadSpawnRequest, resolveCappedEffort, stripEmptyLadderEffort, supportedLadderFor } from "../src/server/effort-policy";
 import { collabSurface } from "../src/server/responses";
 import { handleManagementAPI } from "../src/server/management-api";
 import { inMemoryManagementPersistence } from "./helpers/management-auth";
@@ -79,6 +79,42 @@ describe("isThreadSpawnRequest", () => {
   test("malformed turn metadata never classifies as spawned child", () => {
     expect(isThreadSpawnRequest(new Headers({ "x-codex-turn-metadata": "{not json" }))).toBe(false);
     expect(isThreadSpawnRequest(new Headers({ "x-codex-turn-metadata": JSON.stringify({ subagent_kind: 42 }) }))).toBe(false);
+  });
+});
+
+describe("classifyAgentKind", () => {
+  test("gives exact spawn evidence precedence over other markers", () => {
+    expect(classifyAgentKind(new Headers({
+      "x-openai-subagent": "collab_spawn",
+      "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "review" }),
+    }))).toBe("subagent");
+    expect(classifyAgentKind(TURN_META_HEADERS)).toBe("subagent");
+  });
+
+  test("classifies known helper markers as internal", () => {
+    for (const kind of ["review", "compact", "memory_consolidation", "other"]) {
+      expect(classifyAgentKind(new Headers({ "x-openai-subagent": kind }))).toBe("internal");
+      expect(classifyAgentKind(new Headers({
+        "x-codex-turn-metadata": JSON.stringify({ subagent_kind: kind }),
+      }))).toBe("internal");
+    }
+  });
+
+  test("classifies marker-free Responses traffic as main and rejects malformed or contradictory evidence", () => {
+    expect(classifyAgentKind(new Headers(), "responses")).toBe("main");
+    expect(classifyAgentKind(new Headers({
+      "x-codex-turn-metadata": JSON.stringify({ request_kind: "turn" }),
+    }), "responses")).toBe("main");
+    expect(classifyAgentKind(new Headers())).toBeUndefined();
+    expect(classifyAgentKind(new Headers({ "x-openai-subagent": "future_helper" }), "responses")).toBe("internal");
+    expect(classifyAgentKind(new Headers({
+      "x-openai-subagent": "review",
+      "x-codex-turn-metadata": "{bad",
+    }), "responses")).toBeUndefined();
+    expect(classifyAgentKind(new Headers({
+      "x-openai-subagent": "review",
+      "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "compact" }),
+    }), "responses")).toBeUndefined();
   });
 });
 
