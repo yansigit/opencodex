@@ -1100,6 +1100,8 @@ export const en = {
   // add-provider modal
   "modal.addNamed": "Add: {label}",
   "modal.add": "Add provider",
+  "modal.catalogTabs": "Provider categories",
+  "modal.searchLabel": "Search providers",
   "modal.search": "Search providers…",
   "modal.logInWith": "Log in with {label}",
   "modal.waitingBrowser": "Waiting for browser…",

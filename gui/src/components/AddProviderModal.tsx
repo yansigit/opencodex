@@ -1,5 +1,5 @@
 import { usageSummary30dResourceKey } from "../usage-summary-resource";
-import { useEffect, useMemo, useReducer, useRef } from "react";
+import { useEffect, useId, useMemo, useReducer, useRef } from "react";
 import { IconX } from "../icons";
 import { useT } from "../i18n/shared";
 import { Notice } from "../ui";
@@ -62,7 +62,8 @@ export default function AddProviderModal({
   );
   const aliveRef = useRef(true);
   const previousFocusRef = useRef<HTMLElement | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
 
   const oauthPoll = useKeyedClientResource(
     `add-provider-oauth:${apiBase}`,
@@ -111,7 +112,8 @@ export default function AddProviderModal({
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     onOpen?.();
     const dialog = dialogRef.current;
-    if (dialog) {
+    if (dialog && !dialog.open) {
+      dialog.showModal();
       const focusable = dialog.querySelector<HTMLElement>(
         "input:not([disabled]), button:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
       );
@@ -119,19 +121,12 @@ export default function AddProviderModal({
     }
     return () => {
       aliveRef.current = false;
+      if (dialog?.open) dialog.close();
       previousFocusRef.current?.focus();
     };
     // oxlint-disable-next-line react/react-compiler -- existing exhaustive-deps exception is intentional
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only open hook
   }, []);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !oauthTosPending) onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose, oauthTosPending]);
 
   const presetDescription = (candidate: Preset): string | undefined => {
     const key = codexPresetDescriptionKey(candidate);
@@ -241,10 +236,18 @@ export default function AddProviderModal({
         selection drag that is released outside the card — would wipe every
         field the user already filled in. Close only via the × button,
         Escape, or a successful add. */}
-    <div role="dialog" aria-modal="true" aria-label={t("modal.add")} className="modal-overlay">
-      <div ref={dialogRef} className="modal-card">
+    <dialog
+      ref={dialogRef}
+      aria-labelledby={titleId}
+      className="modal-overlay"
+      onCancel={event => {
+        event.preventDefault();
+        if (!oauthTosPending) onClose();
+      }}
+    >
+      <div className="modal-card">
         <div className="modal-head">
-          <h3>{preset ? t("modal.addNamed", { label: preset.label }) : t("modal.add")}</h3>
+          <h3 id={titleId}>{preset ? t("modal.addNamed", { label: preset.label }) : t("modal.add")}</h3>
           <button type="button" className="btn btn-ghost btn-icon" aria-label={t("common.close")} onClick={onClose}><IconX /></button>
         </div>
 
@@ -325,7 +328,7 @@ export default function AddProviderModal({
           )
         )}
       </div>
-    </div>
+    </dialog>
     {oauthTosPending && (
       <OAuthTosWarningModal
         key={oauthTosPending}

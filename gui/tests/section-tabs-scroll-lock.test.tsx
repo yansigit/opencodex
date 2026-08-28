@@ -81,11 +81,11 @@ afterEach(() => {
   }
 });
 
-function tabButton(container: HTMLElement, label: string): HTMLButtonElement {
-  const found = Array.from(container.querySelectorAll("button[role='tab']"))
-    .find(button => (button.textContent ?? "").includes(label));
-  if (!found) throw new Error(`tab not found: ${label}`);
-  return found as HTMLButtonElement;
+function sectionLink(container: HTMLElement, label: string): HTMLAnchorElement {
+  const found = Array.from(container.querySelectorAll("a.page-tab"))
+    .find(link => (link.textContent ?? "").includes(label));
+  if (!found) throw new Error(`section link not found: ${label}`);
+  return found as HTMLAnchorElement;
 }
 
 test("clicking Coverage ignores intermediate scroll-spy updates until Coverage is visible", async () => {
@@ -113,26 +113,55 @@ test("clicking Coverage ignores intermediate scroll-spy updates until Coverage i
     );
   });
 
-  expect(tabButton(container, "Overview").className).toContain("page-tab--active");
+  expect(sectionLink(container, "Overview").className).toContain("page-tab--active");
 
   await act(async () => {
-    tabButton(container, "Coverage").click();
+    sectionLink(container, "Coverage").click();
   });
-  expect(tabButton(container, "Coverage").className).toContain("page-tab--active");
+  expect(sectionLink(container, "Coverage").className).toContain("page-tab--active");
 
   // Smooth scroll passes Models/Providers; without a lock the spy would steal the highlight.
   await act(async () => {
     emitIntersecting(sectionAnchorId("usage", "models"));
     emitIntersecting(sectionAnchorId("usage", "providers"));
   });
-  expect(tabButton(container, "Coverage").className).toContain("page-tab--active");
-  expect(tabButton(container, "Models").className).not.toContain("page-tab--active");
-  expect(tabButton(container, "Providers").className).not.toContain("page-tab--active");
+  expect(sectionLink(container, "Coverage").className).toContain("page-tab--active");
+  expect(sectionLink(container, "Models").className).not.toContain("page-tab--active");
+  expect(sectionLink(container, "Providers").className).not.toContain("page-tab--active");
 
   await act(async () => {
     emitIntersecting(sectionAnchorId("usage", "coverage"));
   });
-  expect(tabButton(container, "Coverage").className).toContain("page-tab--active");
+  expect(sectionLink(container, "Coverage").className).toContain("page-tab--active");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("renders labelled in-page navigation without tab semantics", async () => {
+  const { createRoot } = await import("react-dom/client");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const items = [
+    { id: "overview", label: "Overview" },
+    { id: "models", label: "Models" },
+  ];
+  let root!: Root;
+  await act(async () => {
+    root = createRoot(container);
+    root.render(<SectionTabs scope="usage" items={items} ariaLabel="Usage sections" />);
+  });
+
+  const nav = container.querySelector("nav[aria-label='Usage sections']");
+  expect(nav).toBeTruthy();
+  expect(nav?.querySelectorAll("[role='tab'], [role='tabpanel']")).toHaveLength(0);
+  const links = [...(nav?.querySelectorAll<HTMLAnchorElement>("a") ?? [])];
+  expect(links.map(link => link.getAttribute("href"))).toEqual([
+    `#${sectionAnchorId("usage", "overview")}`,
+    `#${sectionAnchorId("usage", "models")}`,
+  ]);
+  expect(links[0]?.getAttribute("aria-current")).toBe("location");
+  expect(links[1]?.hasAttribute("aria-current")).toBe(false);
 
   await act(async () => { root.unmount(); });
   container.remove();

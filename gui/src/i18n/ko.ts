@@ -933,6 +933,8 @@ export const ko: Record<TKey, string> = {
   // add-provider modal
   "modal.addNamed": "추가: {label}",
   "modal.add": "프로바이더 추가",
+  "modal.catalogTabs": "프로바이더 카테고리",
+  "modal.searchLabel": "프로바이더 검색",
   "modal.search": "프로바이더 검색…",
   "modal.logInWith": "{label} 로 로그인",
   "modal.waitingBrowser": "브라우저 대기 중…",

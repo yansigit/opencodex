@@ -1086,6 +1086,8 @@ export const tr: Record<TKey, string> = {
   // add-provider modal
   "modal.addNamed": "Ekle: {label}",
   "modal.add": "Sağlayıcı ekle",
+  "modal.catalogTabs": "Sağlayıcı kategorileri",
+  "modal.searchLabel": "Sağlayıcı ara",
   "modal.search": "Sağlayıcılarda ara…",
   "modal.logInWith": "{label} ile giriş yap",
   "modal.waitingBrowser": "Tarayıcı bekleniyor…",

@@ -926,6 +926,8 @@ export const zh: Record<TKey, string> = {
   // add-provider modal
   "modal.addNamed": "添加：{label}",
   "modal.add": "添加提供方",
+  "modal.catalogTabs": "提供方类别",
+  "modal.searchLabel": "搜索提供方",
   "modal.search": "搜索提供方…",
   "modal.logInWith": "使用 {label} 登录",
   "modal.waitingBrowser": "等待浏览器…",

@@ -1036,6 +1036,8 @@ export const ja: Record<TKey, string> = {
   // add-provider modal
   "modal.addNamed": "追加: {label}",
   "modal.add": "プロバイダーを追加",
+  "modal.catalogTabs": "プロバイダーのカテゴリ",
+  "modal.searchLabel": "プロバイダーを検索",
   "modal.search": "プロバイダーを検索…",
   "modal.logInWith": "{label} でログイン",
   "modal.waitingBrowser": "ブラウザを待機中…",

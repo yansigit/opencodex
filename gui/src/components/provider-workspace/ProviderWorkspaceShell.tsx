@@ -564,7 +564,7 @@ export default function ProviderWorkspaceShell({
           })}
         </div>
         </aside>
-        <main className="pws-main" aria-label={t("pws.workspaceMainAria")}>
+        <section className="pws-main" aria-label={t("pws.workspaceMainAria")}>
         {jsonEditor?.open ? (
           <ProviderJsonEditor
             editor={jsonEditor}
@@ -604,7 +604,7 @@ export default function ProviderWorkspaceShell({
             onEditConfig={onEditConfig}
           />
         )}
-        </main>
+        </section>
       </div>
     </div>
   );

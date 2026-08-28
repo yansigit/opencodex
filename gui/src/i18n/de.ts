@@ -909,6 +909,8 @@ export const de: Record<TKey, string> = {
   "usage.heatmap.more": "Mehr",
   "modal.addNamed": "Hinzufügen: {label}",
   "modal.add": "Anbieter hinzufügen",
+  "modal.catalogTabs": "Anbieterkategorien",
+  "modal.searchLabel": "Anbieter suchen",
   "modal.search": "Anbieter suchen…",
   "modal.logInWith": "Anmelden mit {label}",
   "modal.waitingBrowser": "Warten auf Browser…",

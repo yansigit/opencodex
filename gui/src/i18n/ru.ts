@@ -1079,6 +1079,8 @@ export const ru: Record<TKey, string> = {
   // add-provider modal
   "modal.addNamed": "Добавить: {label}",
   "modal.add": "Добавить провайдера",
+  "modal.catalogTabs": "Категории провайдеров",
+  "modal.searchLabel": "Поиск провайдеров",
   "modal.search": "Поиск провайдеров…",
   "modal.logInWith": "Войти через {label}",
   "modal.waitingBrowser": "Ожидание браузера…",

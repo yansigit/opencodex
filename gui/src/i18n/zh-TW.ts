@@ -881,6 +881,8 @@ export const zhTW: Record<TKey, string> = {
   "storage.policy.donePermanent": "策略已永久刪除 {count} 個檔案（{size}）。",
   "modal.addNamed": "新增：{label}",
   "modal.add": "新增供應商",
+  "modal.catalogTabs": "供應商類別",
+  "modal.searchLabel": "搜尋供應商",
   "modal.search": "搜尋供應商…",
   "modal.logInWith": "使用 {label} 登入",
   "modal.waitingBrowser": "等待瀏覽器…",

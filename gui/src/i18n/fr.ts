@@ -1068,6 +1068,8 @@ export const fr: Record<TKey, string> = {
   "storage.policy.donePermanent": "La politique a supprimé définitivement {count} fichier(s) ({size}).",
   "modal.addNamed": "Ajouter : {label}",
   "modal.add": "Ajouter un fournisseur",
+  "modal.catalogTabs": "Catégories de fournisseurs",
+  "modal.searchLabel": "Rechercher des fournisseurs",
   "modal.search": "Rechercher des fournisseurs…",
   "modal.logInWith": "Se connecter avec {label}",
   "modal.waitingBrowser": "En attente du navigateur…",
