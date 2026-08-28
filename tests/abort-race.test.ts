@@ -45,25 +45,30 @@ describe("Responses abort guards", () => {
   test("runTurn backlog overflow aborts the adapter signal", async () => {
     let adapterSignal: AbortSignal | undefined;
     let abortedAfterOverflow = false;
-    adapterFactory = provider => ({
-      name: "test-run-turn",
-      buildRequest: () => ({ url: provider.baseUrl, method: "POST", headers: {}, body: "" }),
-      async *parseStream(): AsyncGenerator<AdapterEvent> {
-        yield { type: "error", message: "runTurn adapter does not use parseStream" };
-      },
-      async runTurn(_parsed, incoming, emit) {
-        adapterSignal = incoming.abortSignal;
-        for (let i = 0; i <= 1_024; i++) emit({ type: "text_delta", text: String(i) });
-        abortedAfterOverflow = incoming.abortSignal?.aborted === true;
-      },
-    });
+   adapterFactory = provider => ({
+     name: "test-run-turn",
+     buildRequest: () => ({ url: provider.baseUrl, method: "POST", headers: {}, body: "" }),
+     async *parseStream(): AsyncGenerator<AdapterEvent> {
+       yield { type: "error", message: "runTurn adapter does not use parseStream" };
+     },
+     async runTurn(_parsed, incoming, emit) {
+       adapterSignal = incoming.abortSignal;
+       // Alternating-phase text deltas are non-coalescible (strict phase
+       // equality), so the flood still fills the backlog one event per push
+       // now that adjacent same-phase text deltas merge.
+       for (let i = 0; i <= 1_024; i++) {
+         emit({ type: "text_delta", text: String(i), phase: i % 2 === 0 ? "final_answer" : "commentary" });
+       }
+       abortedAfterOverflow = incoming.abortSignal?.aborted === true;
+     },
+   });
 
     const response = await post("test-run-turn", false);
     const body = await response.text();
 
     expect(adapterSignal?.aborted).toBe(true);
     expect(abortedAfterOverflow).toBe(true);
-    expect(body).toContain("consumer backlog exceeded — turn aborted");
+    expect(body).toContain("consumer stalled: adapter event backlog exceeded — turn aborted");
   });
 
   test("abort after fetch resolution cancels the body before a late reader attaches", async () => {

@@ -101,6 +101,11 @@ const head = await runCli(process.argv.slice(2));
 const args = head.args;
 const command = head.command;
 
+if (command === "telemetry") {
+  const { runTelemetryCommand } = await import("./telemetry-commands");
+  process.exit(runTelemetryCommand(args.slice(1), loadConfig()));
+}
+
 function parsePortOption(): number | undefined {
   if (args.length === 1) return undefined;
   if (args.length !== 3 || args[1] !== "--port") {

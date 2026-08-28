@@ -35,6 +35,7 @@ import {
 import * as windowsAcl from "../src/lib/windows-secret-acl";
 import { setTrustedWindowsSystemDirectoryResolverForTests } from "../src/lib/windows-elevation";
 import { AtomicWriteResidualTempError, atomicWriteFile, atomicWriteFileAsync, hardenConfigDir, hardenExistingSecret, renameAtomicFile, saveConfig } from "../src/config";
+import { providerManagementConfigError } from "../src/server/auth-cors";
 let testDir = "";
 
 /**
@@ -999,6 +1000,44 @@ describe("opencodex config defaults", () => {
     }
   });
 
+  test("validates and persists Codex WebSocket provider controls", () => {
+    const base = getDefaultConfig();
+    const provider = {
+      adapter: "openai-chat",
+      baseUrl: "https://example.test/v1",
+      wsUpstream: true,
+      maxWsFrameBytes: 1234,
+    };
+    const candidate = validateConfigCandidate({
+      ...base,
+      defaultProvider: "custom",
+      providers: { custom: provider },
+    });
+    expect(candidate).toMatchObject({
+      ok: true,
+      config: { providers: { custom: provider } },
+    });
+
+    for (const [field, value] of [
+      ["wsUpstream", "true"],
+      ["maxWsFrameBytes", -1],
+      ["maxWsFrameBytes", 1.5],
+    ] as const) {
+      expect(validateConfigCandidate({
+        ...base,
+        defaultProvider: "custom",
+        providers: { custom: { ...provider, [field]: value } },
+      }).ok).toBe(false);
+    }
+
+    writeConfig({
+      ...base,
+      defaultProvider: "custom",
+      providers: { custom: provider },
+    });
+    expect(loadConfig().providers.custom).toMatchObject(provider);
+  });
+
   test("rejects invalid or noncanonical codexAccountMode placements", () => {
     for (const [name, provider] of [
       ["custom", { adapter: "openai-chat", baseUrl: "https://example.test/v1", codexAccountMode: "pool" }],
@@ -1480,6 +1519,38 @@ describe("opencodex config defaults", () => {
       expect(readConfigDiagnostics().source).toBe("fallback");
       expect(readConfigDiagnostics().error).toContain("modelSupportsReasoningSummaries");
     }
+  });
+
+  test("modelSupportsVerbosity accepts only plain boolean records", () => {
+    writeConfig({
+      port: 12345,
+      providers: {
+        custom: {
+          adapter: "openai-responses",
+          baseUrl: "https://example.test/v1",
+          modelSupportsVerbosity: { strict: false, normal: true },
+        },
+      },
+      defaultProvider: "custom",
+    });
+    expect(readConfigDiagnostics().error).toBeNull();
+
+    for (const invalid of [[], { strict: "false" }, { "": false }]) {
+      writeConfig({
+        port: 12345,
+        providers: {
+          custom: {
+            adapter: "openai-responses",
+            baseUrl: "https://example.test/v1",
+            modelSupportsVerbosity: invalid,
+          },
+        },
+        defaultProvider: "custom",
+      });
+      expect(readConfigDiagnostics().source).toBe("fallback");
+      expect(readConfigDiagnostics().error).toContain("modelSupportsVerbosity");
+    }
+
   });
 
   test("modelReasoningSummaryDelivery validates known values and rejects summary opt-out conflicts (#538)", () => {

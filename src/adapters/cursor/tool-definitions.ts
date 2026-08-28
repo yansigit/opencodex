@@ -71,6 +71,13 @@ export const CURSOR_EXEC_COMMAND_INPUT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
+/** Cursor requires freeform custom tools to advertise their body as one string input. */
+export const CURSOR_FREEFORM_INPUT_SCHEMA = {
+  type: "object",
+  properties: { input: { type: "string" } },
+  required: ["input"],
+} as const;
+
 /**
  * Structured single-replacement schema advertised to Cursor models in addition to the freeform
  * `apply_patch` tool. Cursor-trained models reliably emit exact-match replacements (the native
@@ -110,13 +117,6 @@ export const CURSOR_MULTI_EDIT_INPUT_SCHEMA = {
   },
   required: ["file_path", "edits"],
   additionalProperties: false,
-} as const;
-
-/** Cursor requires freeform custom tools to advertise their body as one string input. */
-export const CURSOR_FREEFORM_INPUT_SCHEMA = {
-  type: "object",
-  properties: { input: { type: "string" } },
-  required: ["input"],
 } as const;
 
 /**
@@ -682,13 +682,16 @@ export function buildCursorToolGuidanceSystemNote(
     // Code mode: shell/edit/MCP live inside freeform `exec` as nested helpers. Without this the
     // model probes for a top-level shell tool that is not there.
     codeMode
-      ? `\`${CODEX_UNIFIED_EXEC_TOOL}\` is Codex code mode: its body is JavaScript evaluated in a V8 isolate, not a shell command and not Node. Shell, file edits, and MCP are nested helpers called INSIDE that body as \`await tools.<name>(...)\`, for example \`await tools.exec_command({cmd: \"ls\"})\`. When commands require network access, file writes outside workspace, or fail due to sandbox/permission restrictions, pass \`sandbox_permissions: "require_escalated"\` and a clear \`justification: "..."\` to \`tools.exec_command\`. Read the tool description and the isolate global \`ALL_TOOLS\` (not \`tools.ALL_TOOLS\`) for helpers this turn provides; absence from the top-level catalog or from \`exec\`'s description is not absence. Those nested helpers are not themselves top-level tools, so do not call \`exec_command\` or \`shell_command\` at the top level here${codeModeOtherTopLevelNames.length > 0 ? `; every other tool this turn lists, including ${quotedNames(codeModeOtherTopLevelNames)}, remains callable at the top level as usual` : ""}. Your tool list may display tools under a longer \`mcp_opencodex-responses_*\` name; call whichever your list shows. Nested \`tools.apply_patch(input)\` is host-executed: the string must begin exactly with \`*** Begin Patch\` and end with \`*** End Patch\` (no trailing \`***\` on those lines). OpenCodex does not rewrite JavaScript inside exec, so a decorated \`*** Begin Patch ***\` envelope is rejected by Codex before the file is touched.`
+      ? `\`${CODEX_UNIFIED_EXEC_TOOL}\` is Codex code mode: its body is JavaScript evaluated in a V8 isolate, not a shell command and not Node. Shell, file edits, and MCP are nested helpers called INSIDE that body as \`await tools.<name>(...)\`, for example \`await tools.exec_command({cmd: \"ls\"})\`. Read the tool description and the isolate global \`ALL_TOOLS\` (not \`tools.ALL_TOOLS\`) for helpers this turn provides; absence from the top-level catalog or from \`exec\`'s description is not absence. Those nested helpers are not themselves top-level tools, so do not call \`exec_command\` or \`shell_command\` at the top level here${codeModeOtherTopLevelNames.length > 0 ? `; every other tool this turn lists, including ${quotedNames(codeModeOtherTopLevelNames)}, remains callable at the top level as usual` : ""}. Nested \`tools.apply_patch(input)\` is host-executed: the string must begin exactly with \`*** Begin Patch\` and end with \`*** End Patch\` (no trailing \`***\` on those lines). OpenCodex does not rewrite JavaScript inside exec, so a decorated \`*** Begin Patch ***\` envelope is rejected by Codex before the file is touched.`
       : undefined,
     codeMode
       ? "In code mode the isolate returns nothing on its own: call `text(...)` (or `notify(...)`) on any value you need to see, or the call completes with empty output. There is no `require`, no `module`, and no filesystem or network globals; reach the host only through the nested helpers."
       : undefined,
     codeMode
-      ? "To read, search, or inspect files or run CLI commands, call `await tools.exec_command({ cmd: '...' })` inside `exec`. Do not write Node.js scripts or `require('fs')`."
+      ? 'When commands require network access, file writes outside workspace, or fail due to sandbox/permission restrictions, pass `sandbox_permissions: "require_escalated"` and a clear `justification: "..."` to `tools.exec_command`.'
+      : undefined,
+    codeMode
+      ? "Nested helpers may appear under longer `mcp_opencodex-responses_*` display names; use the exact helper names exposed by this turn."
       : undefined,
     codeMode
       ? "NEVER attempt Cursor-native Shell, Read, Grep, List, or any tool absent from the catalog — they are not executed in this environment and every probe wastes a turn. The exec code cell (with its nested helpers) is the ONLY execution surface; go to it directly on the FIRST attempt and do not narrate switching surfaces."
@@ -734,7 +737,7 @@ export function buildCursorToolGuidanceSystemNote(
     "Do not count or report a tool call unless a tool result was actually returned.",
     "When pursuing a multi-step task, check, or verification, do not stop or narrate intended future actions in plain text; immediately call the tool to execute the next step until the task is complete.",
     hasBareExec
-      ? `If a Cursor-native file read, directory listing, grep, or shell operation is rejected by the runtime, use ${shellBridgeLabel} with an equivalent host-shell-safe command (POSIX: \`cat\`/\`ls\`/\`rg\`; Windows PowerShell: \`Get-Content\`/\`Get-ChildItem\`/\`Select-String\`). For file edits, use ${structuredEditNames.length > 0 ? `the structured edit tools (${quotedNames(structuredEditNames)}) or ` : ""}\`apply_patch\` when available.`
+      ? `For every file read, directory listing, grep, or shell operation use ${shellBridgeLabel} directly with host-shell-safe commands (POSIX: \`cat\`/\`ls\`/\`rg\`; Windows PowerShell: \`Get-Content\`/\`Get-ChildItem\`/\`Select-String\`). For file edits, use ${structuredEditNames.length > 0 ? `the structured edit tools (${quotedNames(structuredEditNames)}) or ` : ""}\`apply_patch\` when available.`
       : undefined,
   ].filter((note): note is string => typeof note === "string");
   return notes.join(" ");

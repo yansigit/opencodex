@@ -66,6 +66,7 @@ export type {
   OcxApiKeyEntry,
   OcxClientIntegrationsConfig,
   OcxSubagentRole,
+  OcxConfigRebaseProvenance,
   OcxConfig,
   OcxAccountPoolRotationStrategy,
   OcxComboStrategy,

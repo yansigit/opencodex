@@ -26,7 +26,7 @@ describe("dev promotion workflow contract", () => {
   test("fast-forwards dev after a successful identical-tree main push", () => {
     expect(workflow.jobs?.backmerge?.permissions).toEqual({
       contents: "write",
-      actions: "read",
+      actions: "write",
     });
     expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'main'");
     expect(workflowSource).toContain("github.event.workflow_run.event == 'push'");

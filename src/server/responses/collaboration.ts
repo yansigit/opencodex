@@ -2,6 +2,7 @@ import type { Server } from "bun";
 import { bridgeToResponsesSSE, buildResponseJSON, formatErrorResponse, type ResponsesTerminalStatus } from "../../bridge";
 import {
   getConfigPath,
+  loadConfig,
   multiAgentGuidanceEnabled,
   resolveEnvValue,
 } from "../../config";
@@ -10,6 +11,7 @@ import { buildCompactV1Output, COMPACT_PROMPT, decodeCompactionSummary, extractC
 import { FORWARD_HEADERS, sanitizeReasoningInputContent } from "../../adapters/openai-responses";
 import { expandPreviousResponseInput, previousResponseProviderState, rememberResponseState } from "../../responses/state";
 import { routeModel } from "../../router";
+import type { RawEntry } from "../../codex/catalog/parsing";
 import {
   advanceComboAfterFailure,
   comboDefaultEffort,
@@ -245,15 +247,47 @@ export async function resolveEffectiveSubagentRoster(
   surface: SpawnAgentSurface,
 ): Promise<EffectiveSubagentRoster> {
   const { effectiveSubagentRoster } = await import("../../codex/catalog");
-  return effectiveSubagentRoster(configuredModels, surface);
+  return effectiveSubagentRoster(configuredModels, surface, await freshSubagentCatalogEntries());
+}
+
+/**
+ * The persisted Codex catalog, with native context metadata re-derived from the CURRENT config.
+ *
+ * The subagent roster reads the catalog FILE, which is only as fresh as the last sync. A row
+ * written before the operator widened the native window keeps its old `context_window`, so a
+ * child was planning and compacting against a narrower budget than its parent — measured at
+ * 272,000 x 95% = 258,400 while the request path resolved 922,000 (#2574).
+ *
+ * Re-applying the override is cheap and idempotent: it is the same function the writer uses,
+ * so a fresh catalog is unchanged and a stale one is repaired in memory rather than silently
+ * believed. It does not rewrite the file — the row on disk stays whatever the last sync wrote,
+ * and `ocx sync` remains what refreshes it.
+ */
+async function freshSubagentCatalogEntries(): Promise<RawEntry[]> {
+  const { readCatalog, readCodexCatalogPath, nativeContextLimits } = await import("../../codex/catalog");
+  const { applyNativeOpenAiContextOverride } = await import("../../codex/catalog/parsing");
+  const entries = readCatalog(readCodexCatalogPath())?.models ?? [];
+  if (entries.length === 0) return [];
+  let limits: ReturnType<typeof nativeContextLimits>;
+  try {
+    limits = nativeContextLimits(loadConfig());
+  } catch {
+    // An unreadable config must not cost the caller its roster; serve the file as written.
+    return entries;
+  }
+  return entries.map(entry => {
+    const clone = { ...entry };
+    applyNativeOpenAiContextOverride(clone, limits);
+    return clone;
+  });
 }
 
 /** Reuse one parsed catalog snapshot across every roster projection for this request. */
 async function createRequestScopedSubagentRosterResolver(): Promise<NonNullable<
   MultiAgentGuidanceDeps["resolveEffectiveSubagentRoster"]
 >> {
-  const { effectiveSubagentRoster, readCatalog, readCodexCatalogPath } = await import("../../codex/catalog");
-  const catalogEntries = readCatalog(readCodexCatalogPath())?.models ?? [];
+  const { effectiveSubagentRoster } = await import("../../codex/catalog");
+  const catalogEntries = await freshSubagentCatalogEntries();
   return (configuredModels, surface) =>
     effectiveSubagentRoster(configuredModels, surface, catalogEntries);
 }
@@ -390,7 +424,10 @@ export async function multiAgentGuidanceText(
       + "use only models listed for this collaboration surface. "
       + "When setting either override, set fork_turns to \"none\" "
       + "(or a positive turn count such as \"3\"; full-history forks reject overrides) "
-      + "and make the task message self-contained.";
+      + "and make the task message self-contained. "
+      + "When specifying model overrides, omit agent_type or use \"worker\" to prevent enforcing locked default models. "
+      + "Subagent exec runs in a pure V8 isolate without require('fs'); "
+      + "escape nested template literals in tools.apply_patch to prevent JavaScript syntax errors (e.g., write \\` and \\\${var}).";
     let preferredText = "";
     if (preferred) {
       preferredText = ` Preferred sub-agent: model "${preferred.model}"`
@@ -426,7 +463,7 @@ export async function multiAgentGuidanceText(
 
 
 
-export const V2_GUIDANCE_CHAR_BUDGET = 700;
+export const V2_GUIDANCE_CHAR_BUDGET = 1200;
 
 export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, roles?: string): string {
   return prompt

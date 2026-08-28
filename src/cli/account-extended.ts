@@ -250,9 +250,16 @@ function resetIso(value: number | undefined): string | null {
 function refreshLine(row: FamilyRows["rows"][number]): string {
   const parts = [row.id === MAIN_ID ? "main" : row.id, row.email, row.plan];
   const quota = row.quota;
-  if (!quota || (quota.weeklyPercent === undefined && quota.monthlyPercent === undefined)) {
+  const fiveHourPercent = quota?.fiveHourPercent ?? quota?.shortPercent;
+  const fiveHourResetAt = quota?.fiveHourResetAt ?? quota?.shortResetAt;
+  if (!quota || (quota.weeklyPercent === undefined && quota.monthlyPercent === undefined && fiveHourPercent === undefined)) {
     parts.push("quota: unknown");
   } else {
+    if (fiveHourPercent !== undefined) {
+      parts.push(`5h ${fiveHourPercent}%`);
+      const fiveHourReset = resetIso(fiveHourResetAt);
+      if (fiveHourReset) parts.push(`resets ${fiveHourReset}`);
+    }
     if (quota.weeklyPercent !== undefined) parts.push(`weekly ${quota.weeklyPercent}%`);
     const weeklyReset = resetIso(quota.weeklyResetAt);
     if (weeklyReset) parts.push(`resets ${weeklyReset}`);
@@ -272,14 +279,14 @@ function quotaParts(quota: ProviderQuotaDto): string[] {
     const reset = resetIso(resetAt);
     if (reset) parts.push(`resets ${reset}`);
   };
-  add("5h", quota.fiveHourPercent, quota.fiveHourResetAt);
+  add("5h", quota.fiveHourPercent ?? quota.shortPercent, quota.fiveHourResetAt ?? quota.shortResetAt);
   add("weekly", quota.weeklyPercent, quota.weeklyResetAt);
   add("monthly", quota.monthlyPercent, quota.monthlyResetAt);
   for (const window of quota.customWindows ?? []) add(window.label, window.percent, window.resetAt);
   return parts;
 }
 
-function providerQuotaLine(name: string, report: ProviderQuotaReportDto): string {
+export function providerQuotaLine(name: string, report: ProviderQuotaReportDto): string {
   return [name, ...quotaParts(report.quota)].join(" ");
 }
 

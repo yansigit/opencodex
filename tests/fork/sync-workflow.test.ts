@@ -22,6 +22,7 @@ describe("fork upstream sync workflow contract", () => {
   });
 
   test("grants vendor, issue, and draft PR write permissions", () => {
+    expect(workflow).toContain("actions: write");
     expect(workflow).toContain("contents: write");
     expect(workflow).toContain("issues: write");
     expect(workflow).toContain("pull-requests: write");
@@ -64,6 +65,8 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("status\" = \"hotspot-handoff\" ] || [ \"$status\" = \"history-diverged\"");
     expect(workflow).toContain('git push origin "refs/heads/$branch:refs/heads/$branch"');
     expect(workflow).toContain('git switch -C "$branch"');
+    expect(workflow).toContain("Sync handoff branch exists, updating to current state: $branch");
+    expect(workflow).toContain("--force-with-lease=refs/heads/$branch:$remote_sha");
   });
 
   test("prepares from dev while keeping scripts on the guarded trusted ref", () => {
@@ -133,6 +136,9 @@ describe("fork upstream sync workflow contract", () => {
     expect(cursorStep).toContain("FORK_SYNC_COORDINATORS=\"\"");
     expect(cursorStep).toContain("FORK_SYNC_CURSOR_WEBHOOK_URL");
     expect(cursorStep).toContain("FORK_SYNC_CURSOR_WEBHOOK_SECRET");
+    expect(cursorStep).toContain("::warning::Cursor webhook unavailable - hotspot handoff will be handled by Jules via GitHub issue.");
+    expect(cursorStep).toContain("Cursor webhook failed (HTTP \${coordinator_status:-unknown}); falling back to Jules-tracked GitHub issue (agent:jules).");
+    expect(cursorStep).toContain("Jules fallback issue ensured for hotspot handoff.");
   });
 
   test("does not create a Jules issue before Cursor fallback is known to fail", () => {

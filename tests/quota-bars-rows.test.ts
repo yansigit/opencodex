@@ -23,6 +23,8 @@ describe("buildQuotaRows (WP070)", () => {
   test("five-hour-only and weekly-only render single rows", () => {
     expect(buildQuotaRows(quota({ fiveHourPercent: 12 }), null, t).map(r => r.limitLabel))
       .toEqual(["quota.fiveHourLimit"]);
+    expect(buildQuotaRows(quota({ shortPercent: 15, shortResetAt: 1780000000 }), null, t).map(r => r.limitLabel))
+      .toEqual(["quota.fiveHourLimit"]);
     expect(buildQuotaRows(quota({ weeklyPercent: 30 }), null, t).map(r => r.limitLabel))
       .toEqual(["quota.weeklyLimit"]);
   });
@@ -105,6 +107,7 @@ describe("maxQuotaUtilisation", () => {
     expect(maxQuotaUtilisation(null)).toBe(-1);
     expect(maxQuotaUtilisation(quota({}))).toBe(-1);
     expect(maxQuotaUtilisation(quota({ weeklyPercent: 30, monthlyPercent: 80 }))).toBe(80);
+    expect(maxQuotaUtilisation(quota({ shortPercent: 40, weeklyPercent: 30 }))).toBe(40);
     expect(maxQuotaUtilisation(quota({
       fiveHourPercent: 10,
       customWindows: [{ label: "x", percent: 95 }],

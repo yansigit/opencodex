@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "OpenCodex AI Studio Relay",
-  "version": "1.0.0",
-  "description": "Background relay for Google AI Studio Web session with opencodex",
+  "name": "OpenCodex AI Studio Session Exporter",
+  "version": "2.0.0",
+  "description": "Export Google AI Studio session credentials to OpenCodex for direct inference",
   "permissions": [
     "tabs",
     "storage",
@@ -16,22 +16,8 @@
     "http://127.0.0.1/*",
     "http://127.0.0.1:*/*"
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": [
-        "https://aistudio.google.com/*"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "run_at": "document_idle"
-    }
-  ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "OpenCodex AI Studio Relay"
+    "default_title": "OpenCodex AI Studio Exporter"
   }
 }

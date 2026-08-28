@@ -13,6 +13,15 @@ import { CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
 export type CodexUsageAccountLogLabel = "main" | `p${string}`;
 
+export const OAUTH_ACCOUNT_LOG_LABEL_RE = /^[a-f0-9]{8,64}(?:-\d+)?$/;
+
+export function isPersistableAccountLogLabel(value: unknown): value is string {
+  return (
+    value === "main"
+    || (typeof value === "string" && (CODEX_ACCOUNT_LOG_LABEL_RE.test(value) || OAUTH_ACCOUNT_LOG_LABEL_RE.test(value)))
+  );
+}
+
 export function isCodexUsageAccountLogLabel(value: unknown): value is CodexUsageAccountLogLabel {
   return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
 }
@@ -30,6 +39,7 @@ export type AttemptRecoveryKind =
   | "anthropic-oauth-429"
   | "cursor-oauth-auth"
   | "cursor-oauth-429"
+  | "oauth-account-429"
   | "image-413"
   | "opaque-blob-rejection"
   | "empty-completion";
@@ -53,7 +63,7 @@ export interface PersistedUsageAttempt {
   recoveryKinds: AttemptRecoveryKind[];
   usageStatus: UsageStatus;
   /** Stable non-PII identity for the account that served this attempt. */
-  accountLogLabel?: CodexUsageAccountLogLabel;
+  accountLogLabel?: string;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -70,6 +80,7 @@ export interface PersistedUsageAttempt {
 }
 
 export interface PersistedUsageEntry {
+  requestedAlias?: string;
   requestId: string;
   timestamp: number;
   provider: string;
@@ -81,8 +92,8 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  /** Stable non-PII identity for account usage; absent for unauthenticated traffic. */
-  accountLogLabel?: CodexUsageAccountLogLabel;
+  /** Stable non-PII identity for the account that served this request. */
+  accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   resolvedModel?: string;
@@ -220,8 +231,7 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "key-429",
   "rate-limit-429",
   "anthropic-oauth-429",
-  "cursor-oauth-auth",
-  "cursor-oauth-429",
+  "oauth-account-429",
   "image-413",
   "opaque-blob-rejection",
   "empty-completion",
@@ -367,7 +377,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
-    ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
+    ...(isPersistableAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
       : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
@@ -454,7 +464,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+    ...(isPersistableAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()

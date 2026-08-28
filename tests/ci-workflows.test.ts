@@ -159,6 +159,20 @@ describe("GitHub Actions hardening", () => {
     expect(linuxShards).toEqual([1, 2, 3, 4]);
     expect(workflow).toContain(`--shard=\${{ matrix.shard }}/${linuxShards.length}`);
 
+    // Every job that runs tests/ must fetch tags, because one of those tests reads
+    // them. tests/release-version-line.test.ts compares package.json against the
+    // newest release tag, and actions/checkout brings no tags by default: git is
+    // present, `git tag --list` exits 0, and stdout is empty. The check then has an
+    // empty set, cannot fail, and a version regression rides through green. That is
+    // how the first cut of that test shipped, so pin the flag rather than trusting a
+    // comment. Asserted per job so a future edit cannot drop it from one leg while
+    // the other still carries it.
+    for (const jobName of ["test", "platform-macos", "platform-windows"]) {
+      const steps = (ci.jobs?.[jobName] as { steps?: Array<{ uses?: string; with?: Record<string, unknown> }> })?.steps ?? [];
+      const checkout = steps.find(step => typeof step.uses === "string" && step.uses.includes("actions/checkout"));
+      expect(`${jobName}:${String(checkout?.with?.["fetch-tags"])}`).toBe(`${jobName}:true`);
+    }
+
     // Windows uses the same shard matrix after the single-leg isolate budget was
     // replaced. Keep the two matrices equal so a future edit cannot reintroduce
     // a partial Windows suite while Linux stays fully tiled.
@@ -772,9 +786,10 @@ describe("GitHub Actions hardening", () => {
     expect(gate.test("docs-site/src/pages/index.astro")).toBe(false);
 
     // Channel guards stay branch-exact.
-    expect(workflow).toContain("Release must run from main or preview");
+    expect(workflow).toContain("Release must run from main, preview, or dev");
     expect(workflow).toContain("main releases must use a stable semver version");
     expect(workflow).toContain("preview releases must use a preview prerelease version");
+    expect(workflow).toContain("dev releases must use a dev prerelease version");
 
     // Release notes are built and coverage-validated before npm publish. The
     // builder owns Git-history/PR coverage; the workflow only wires the validated
@@ -5372,5 +5387,74 @@ describe("lint-gui-if-changed", () => {
     });
     expect(run.exitCode).toBe(0);
     expect(run.stdout.toString()).toContain("lint:gui: skip");
+  });
+});
+
+describe("gui exhaustive-deps suppression stays scoped and effective", () => {
+  // `bun run doctor:gui` exited 1 on dev for one deliberate exception at
+  // gui/src/pages/Models.tsx, and doctor:gui runs inside `prepush`, so every
+  // gui-touching push needed --no-verify. Two config edits fixed it, and each has a
+  // failure mode that is silent rather than loud, which is what these assertions cover.
+
+  test("the oxlint override carries its own react plugin, or it resolves to nothing", async () => {
+    const oxlintrc = JSON.parse(await readText("gui/.oxlintrc.json")) as {
+      overrides?: Array<{ files?: string[]; rules?: Record<string, unknown>; plugins?: string[] }>;
+    };
+    const overrides = oxlintrc.overrides ?? [];
+    const scoped = overrides.filter(entry => (entry.files ?? []).includes("src/pages/Models.tsx"));
+
+    expect(scoped).toHaveLength(1);
+    const override = scoped[0]!;
+
+    // Rule id must match the style the rest of this config uses ("react/..."). The
+    // eslint-style "react-hooks/..." id silently matches nothing here.
+    expect(override.rules?.["react/exhaustive-deps"]).toBe("off");
+    expect(override.rules).not.toHaveProperty("react-hooks/exhaustive-deps");
+
+    // Without a per-override plugins key the override is inert: the rule stays on and
+    // the warning comes back. This is the assertion that catches a well-meaning cleanup
+    // that deletes a key looking redundant next to the top-level plugin list.
+    expect(override.plugins).toContain("react");
+
+    // Narrow by construction: the override turns off exactly one rule. rules-of-hooks and
+    // react-compiler must keep firing in that file, and a probe confirmed they do.
+    expect(Object.keys(override.rules ?? {})).toEqual(["react/exhaustive-deps"]);
+  });
+
+  test("react-doctor scopes the ignore to one file instead of going blind everywhere", async () => {
+    const config = JSON.parse(await readText("gui/doctor.config.json")) as {
+      blocking?: string;
+      ignore?: { overrides?: Array<{ files?: string[]; rules?: string[] }> };
+      rules?: Record<string, unknown>;
+    };
+
+    // A global rules entry was tried first and rejected: it silenced the rule repo-wide,
+    // proven by injecting a missing-dep violation into Startup.tsx and watching doctor
+    // report "No issues". ignore.overrides keeps that violation failing.
+    expect(config.rules).not.toHaveProperty("react-doctor/exhaustive-deps");
+    expect(config.rules).not.toHaveProperty("react-hooks/exhaustive-deps");
+
+    const overrides = config.ignore?.overrides ?? [];
+    const scoped = overrides.filter(entry => (entry.files ?? []).includes("src/pages/Models.tsx"));
+    expect(scoped).toHaveLength(1);
+    expect(scoped[0]!.rules).toContain("react-hooks/exhaustive-deps");
+
+    // Every ignore override must name at least one file. An empty or missing files list
+    // would apply the ignore to the whole scan, which is the failure this pair guards.
+    for (const entry of overrides) {
+      expect((entry.files ?? []).length).toBeGreaterThan(0);
+      expect((entry.rules ?? []).length).toBeGreaterThan(0);
+    }
+
+    // blocking must stay at warning; flipping it to error would hide the next finding
+    // instead of this one. scripts/doctor-gui-if-changed.ts documents that contract.
+    expect(config.blocking).toBe("warning");
+  });
+
+  test("the Models effect tracks its stable loader dependencies", async () => {
+    const models = await readText("gui/src/pages/Models.tsx");
+    const effectEnd = models.indexOf("}, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2, reloadAliases]);");
+    expect(effectEnd).toBeGreaterThan(-1);
+    expect(models).not.toContain("react-doctor-disable-next-line");
   });
 });

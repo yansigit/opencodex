@@ -1382,6 +1382,8 @@ describe("codex-auth API", () => {
       expect(quota).toMatchObject({
         weeklyPercent: 1,
         weeklyResetAt: 2_000_586_800,
+        fiveHourPercent: 0,
+        fiveHourResetAt: 2_000_000_000,
         shortPercent: 0,
         shortResetAt: 2_000_000_000,
         shortWindowSeconds: 18_000,
@@ -3485,7 +3487,7 @@ describe("codex-auth API", () => {
       listOpenAiForwardSidecarCandidates(config),
       new Headers(),
       config,
-      { exactAccount: { accountId: "pool-delete", modelId: "gpt-5.6-sol" } },
+      { exactAccount: { accountId: "pool-delete", modelId: "gpt-5.5" } },
     );
     expect(exactSidecar?.authContext).toMatchObject({
       accountId: "pool-delete",

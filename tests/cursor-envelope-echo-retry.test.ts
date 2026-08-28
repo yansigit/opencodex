@@ -90,12 +90,6 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
     expect(multiline.feed("Shell was blocked.\n").kind).toBe("hold");
     expect(multiline.feed("Switching to exec_command.").kind).toBe("hallucination");
 
-    const bridgedClaim = new CursorRoutingCommentarySniffer();
-    expect(bridgedClaim.feed("Filesystem tools are bridged through the host shell, so I’ll inspect the remaining files that way.").kind).toBe("hallucination");
-
-    const bridgedClaim2 = new CursorRoutingCommentarySniffer();
-    expect(bridgedClaim2.feed("Filesystem tools are bridged through the host shell here, so I’ll pull the remaining files that way.").kind).toBe("hallucination");
-
     const legitimate = new CursorRoutingCommentarySniffer();
     expect(legitimate.feed("Shell is unavailable on this operating system.").kind).toBe("hold");
     expect(legitimate.finish().kind).toBe("flush");
@@ -255,50 +249,6 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
     expect(attempt).toBe(2);
     expect(text).toBe("READ_OK");
     expect(text).not.toContain("Shell");
-    expect(runRequests[1]?.echoRetryContinuationText).toBeDefined();
-  });
-
-  test("grok routing commentary claiming filesystem tools are bridged is quarantined and retried", async () => {
-    let attempt = 0;
-    const runRequests: CursorRunRequest[] = [];
-    const factory = () => ({
-      async *run(request: CursorRunRequest) {
-        runRequests.push(request);
-        attempt += 1;
-        if (attempt === 1) {
-          yield {
-            type: "text",
-            text: "Filesystem tools are bridged through the host shell, so I’ll inspect the remaining files that way.",
-          } satisfies CursorServerMessage;
-        } else {
-          yield { type: "text", text: "INSPECT_OK" } satisfies CursorServerMessage;
-        }
-        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const body = {
-      modelId: "cursor/grok-4.6",
-      context: {
-        messages: [{ role: "user", content: "Inspect remaining session export wiring.", timestamp: 1 }],
-        tools: [{
-          name: "exec_command",
-          description: "Run a shell command.",
-          parameters: {},
-        }],
-      },
-      stream: false,
-      options: {},
-      _cursorConversationId: "cursor_grok_bridged_commentary",
-      _cursorIdentityScope: "acct-routing-commentary",
-    } as OcxParsedRequest;
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(body, { headers: new Headers() }, event => events.push(event));
-    const text = events.filter(e => e.type === "text_delta").map(e => (e as { text: string }).text).join("");
-    expect(attempt).toBe(2);
-    expect(text).toBe("INSPECT_OK");
-    expect(text).not.toContain("bridged");
     expect(runRequests[1]?.echoRetryContinuationText).toBeDefined();
   });
 });

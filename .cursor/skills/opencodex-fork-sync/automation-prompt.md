@@ -29,11 +29,23 @@ Execute only the unresolved handoff stages:
    commands.
 7. Push the sync branch as needed and open or update a draft PR into `dev`.
    Fill Summary, Verification, and Checklist from the PR template. Include the
-   decision table and the tag SHA. Run
+   decision table and the tag SHA. Inside the PR body, maintain a sticky
+   section between `<!-- cursor-sync-progress:start -->` and
+   `<!-- cursor-sync-progress:end -->` with the 4-line checklist:
+   (1) Merge `vendor/main` TAG/SHA, (2) Resolve shared hotspot per
+   `OWNED.md`, (3) Rebase onto `origin/dev` (`MERGEABLE` or
+   `not a descendant` + `git merge origin/dev`), (4) CI
+   `ci`/`enforce-target`/`hygiene` with exact failing codes. Mirror the same
+   checklist in exactly one sticky comment marked
+   `<!-- cursor-sync-progress -->` - update it in place after every push,
+   never create a new one. Run
    `gh pr view <number> --json mergeable -q .mergeable` and do not stop or ping
    the human until it reports `MERGEABLE`.
-8. Stop. The human performs the merge commit, never squash or rebase. Do not
-   merge the PR, close issues, change repository settings, or force-push
+8. Until `MERGEABLE` and hygiene green, stay and supervise. After every push, poll `gh pr view <number> --json mergeable` and `gh pr checks` every 60s for 10m. If `not a descendant of origin/dev`, run `git fetch origin dev && git merge --no-edit origin/dev && git push` yourself. For `macos-launchd` timeout-only flakes, run `gh run rerun --failed` once. Update the sticky PR-body section and the single `<!-- cursor-sync-progress -->` comment in place (never a new comment) with the 4-line checklist and exact failing codes. Only `new_suppression` / `unsponsored_surface` need `suppression-approved` / `maintainer-sponsored` human waive - report the blocker but do not auto-waive.
+9. When all gates are `MERGEABLE` and hygiene green, flip Draft -> Ready
+   for review and post `Ready for human merge - do not squash/rebase.` Stop.
+   The human performs the merge commit, never squash or rebase. Do not merge
+   the PR, close issues, change repository settings, or force-push
    `main`/`origin/main`.
 
 If histories diverge again, use the disconnected `run/dev` rebuild only as an

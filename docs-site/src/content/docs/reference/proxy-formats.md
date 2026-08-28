@@ -114,6 +114,11 @@ not create, inspect, or delete the provider cache through this field.
 
 Unknown item types are accepted as loose typed items for forward compatibility. Translated adapters
 handle only the item types they recognize, and may reject a feature their provider cannot represent.
+On the canonical ChatGPT Codex forward route, text-only `system` input messages are folded into
+top-level `instructions`, and `truncation` is removed because that destination rejects both public
+Responses shapes. Other Responses destinations preserve them.
+The same canonical boundary removes nested client-only `prompt_cache_breakpoint` markers and drops
+`item_reference` entries only on `store: false` continuations; tool call/result pairing is unchanged.
 
 ### JSON and SSE output
 
@@ -132,12 +137,13 @@ bridge, the same condition emits a 502 `websocket_protocol_error` and cancels th
 A complete Responses terminal frame is authoritative: oversized or malformed trailing bytes after
 that terminal are dropped rather than replacing the completed turn with a transport failure.
 
-For canonical ChatGPT forward streaming, stable Bun 1.4.0 or newer may transparently use
-Codex's upstream WebSocket transport. Bundled Bun 1.3.14, prereleases, and unverifiable runtime
-identities use HTTP/SSE. The upstream WS adapter keeps the same downstream SSE contract, caps both
-the raw JSON frame and its SSE envelope at 4 MiB, and closes the upstream when its 8 MiB byte queue
-would overflow. That overflow emits a terminal downstream `response.failed` event followed by
-`[DONE]`.
+For canonical ChatGPT forward streaming, stable Bun 1.4.0 or newer may use Codex's upstream
+WebSocket transport when `wsUpstream: true` is set, or when `OCX_CODEX_WS_UPSTREAM=true`/`1` is
+set with no provider override. Omitted, invalid, and explicit false values stay on HTTP/SSE.
+Bundled Bun 1.3.14, prereleases, and unverifiable runtime identities also use HTTP/SSE. The
+upstream WS adapter keeps the same downstream SSE contract, caps both the raw JSON frame and its
+SSE envelope at 4 MiB, and closes the upstream when its 8 MiB byte queue would overflow. That
+overflow emits a terminal downstream `response.failed` event followed by `[DONE]`.
 
 Every terminal Responses usage object includes both detail objects, even when the provider did not
 report those details:

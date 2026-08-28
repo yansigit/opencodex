@@ -13,6 +13,7 @@ import {
   azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
+  maxWsFrameBytesConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
   positiveIntegerRecordConfigError,
@@ -20,6 +21,7 @@ import {
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
   isAzureIdentityProvider,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
@@ -32,6 +34,7 @@ import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compac
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
 import { antigravityOAuthDestinationConfigError, getProviderTlsProfileStatus, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -571,6 +574,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     delete canonicalCandidate.modelContextWindows;
     // User-owned soft compaction policy; it does not alter the canonical transport seed.
     delete canonicalCandidate.modelAutoCompactTokenLimits;
+    // Transport controls are user-owned overlays, not part of the immutable seed.
+    delete canonicalCandidate.wsUpstream;
+    delete canonicalCandidate.maxWsFrameBytes;
     const canonical = seed && sameCanonicalProviderSeed(canonicalCandidate, seed);
     if (!canonical) {
       return `provider ${name} must equal the canonical built-in provider seed`;
@@ -609,6 +615,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (upstreamHttpVersionError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${upstreamHttpVersionError}`;
   }
+  const wsUpstreamError = wsUpstreamConfigError(raw.wsUpstream);
+  if (wsUpstreamError) return `provider ${name} ${wsUpstreamError}`;
+  const maxWsFrameBytesError = maxWsFrameBytesConfigError(raw.maxWsFrameBytes);
+  if (maxWsFrameBytesError) return `provider ${name} ${maxWsFrameBytesError}`;
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
   if (modelCostsError) {
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
@@ -718,6 +728,9 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     }
     for (const key of [
       "defaultModel",
+      "alias",
+      "modelAliases",
+      "defaultAliases",
       "disabled",
       "allowPrivateNetwork",
       "authMode",
@@ -732,6 +745,8 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "contextWindow",
       "modelContextWindows",
       "modelAutoCompactTokenLimits",
+      "wsUpstream",
+      "maxWsFrameBytes",
       "defaultMaxOutputTokens",
       "modelMaxOutputTokens",
       "openRouterRouting",
@@ -766,12 +781,20 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     if (typeof registryNote === "string" && registryNote.trim()) dto.note = registryNote;
     const codexAccountMode = providerCodexAccountMode(name, provider);
     if (codexAccountMode) dto.codexAccountMode = codexAccountMode;
+    if (effectiveGoogleMode(name, provider) === "ai-studio-web" || name === "google-aistudio") {
+      const credentials = resolveAiStudioCredentials(provider);
+      dto.hasAiStudioSession = credentials.kind === "ready";
+      dto.aiStudioAuthState = process.platform !== "darwin"
+        ? "unsupported"
+        : credentials.kind === "ready" ? "checking" : "needs_reauth";
+    }
     providers[name] = dto;
   }
   return {
     port: config.port,
     hostname: config.hostname ?? "127.0.0.1",
     defaultProvider: config.defaultProvider,
+    defaultModelAliases: config.defaultModelAliases,
     codexAutoStart: codexAutoStartEnabled(config),
     websockets: config.websockets,
     // The GUI's browser-open toggle reads and writes this; absent means the

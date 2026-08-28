@@ -450,7 +450,9 @@ describe("v2 native parent override runtime", () => {
           { type: "function", name: "send_message", parameters: { type: "object" } },
         ],
         stream: false,
-      }, Object.fromEntries(childHeaders.entries())), cfg, { model: "", provider: "" });
+      }, Object.fromEntries(childHeaders.entries())), cfg, { model: "", provider: "" }, {
+        isDirectCallerEntitledToCodexModel: async () => true,
+      });
       expect(response.status).toBe(200);
       expect(urls).toHaveLength(1);
       expect(urls[0]).toContain("chatgpt.com/backend-api/codex");

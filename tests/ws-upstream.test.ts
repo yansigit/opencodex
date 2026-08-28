@@ -7,12 +7,15 @@ import {
   bunSupportsBoundedCodexWsRelay,
   CODEX_WS_CREATE_FRAME_LIMIT_BYTES,
   codexWsCreateFrameExceedsLimit,
+  type CodexWsUpstreamOptions,
   codexWsUpstreamFetch as rawCodexWsUpstreamFetch,
   currentBunRuntimeIdentity,
+  isCodexWsUpstreamDisabled,
   isCodexWsUpstreamResponse,
   MAX_CODEX_WS_CREATE_FRAME_BYTES,
   MAX_CODEX_WS_FRAME_BYTES,
   MAX_CODEX_WS_QUEUE_BYTES,
+  resolveCodexWsMaxFrameBytes,
   shouldUseCodexWsUpstream as rawShouldUseCodexWsUpstream,
 } from "../src/server/responses/ws-upstream";
 import type { OcxProviderConfig } from "../src/types";
@@ -32,23 +35,24 @@ const BOUNDED_WS_RUNTIME = "1.4.0";
 // constant that only held before the backfill landed.
 const EAGER_RELAY_FORCED_BY_PLATFORM = isWin32EagerRewrite(process.platform, true);
 
-function shouldUseCodexWsUpstream(url: string, init?: RequestInit): boolean {
-  return rawShouldUseCodexWsUpstream(url, init, BOUNDED_WS_RUNTIME);
+function shouldUseCodexWsUpstream(url: string, init?: RequestInit, options?: CodexWsUpstreamOptions): boolean {
+  return rawShouldUseCodexWsUpstream(url, init, BOUNDED_WS_RUNTIME, options);
 }
 
 function codexWsUpstreamFetch(
   url: string,
   init: RequestInit,
   fallback: typeof fetch,
+  options: CodexWsUpstreamOptions = { wsUpstream: true },
 ): Promise<Response> {
-  return rawCodexWsUpstreamFetch(url, init, fallback, BOUNDED_WS_RUNTIME);
+  return rawCodexWsUpstreamFetch(url, init, fallback, BOUNDED_WS_RUNTIME, options);
 }
 
 function streamingInit(body: Record<string, unknown> = {}): RequestInit {
   return {
     method: "POST",
     headers: { "content-type": "application/json", authorization: "Bearer test" },
-    body: JSON.stringify({ model: "gpt-5.6-luna", stream: true, ...body }),
+    body: JSON.stringify({ model: "gpt-5.5", stream: true, ...body }),
   };
 }
 
@@ -105,11 +109,11 @@ describe("shouldUseCodexWsUpstream", () => {
   });
 
   test("matches only streaming POSTs to the Codex backend", () => {
-    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(true);
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: true })).toBe(true);
     // Non-streaming turns keep HTTP: the WS path only speaks the event protocol.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
-      body: JSON.stringify({ model: "gpt-5.6-luna" }),
+      body: JSON.stringify({ model: "gpt-5.5" }),
     })).toBe(false);
     expect(shouldUseCodexWsUpstream(CODEX_URL, { method: "GET" })).toBe(false);
     expect(shouldUseCodexWsUpstream("https://api.openai.com/v1/responses", streamingInit())).toBe(false);
@@ -121,13 +125,13 @@ describe("shouldUseCodexWsUpstream", () => {
     // Nested stream:true must not flip the transport.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
-      body: JSON.stringify({ model: "gpt-5.6-luna", metadata: { stream: true } }),
+      body: JSON.stringify({ model: "gpt-5.5", metadata: { stream: true } }),
     })).toBe(false);
     // Whitespace-formatted JSON still routes.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
       body: "{\n  \"model\": \"gpt-5.6-luna\",\n  \"stream\" : true\n}",
-    })).toBe(true);
+    }, { wsUpstream: true })).toBe(true);
     // Non-boolean stream values stay on HTTP.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
@@ -135,6 +139,30 @@ describe("shouldUseCodexWsUpstream", () => {
     })).toBe(false);
     // Malformed JSON stays on HTTP.
     expect(shouldUseCodexWsUpstream(CODEX_URL, { method: "POST", body: "{\"stream\":true" })).toBe(false);
+  });
+
+  test("bypasses WS when wsUpstream option is false", () => {
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: false })).toBe(false);
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: true })).toBe(true);
+  });
+
+  test("requires an explicit provider or environment opt-in", () => {
+    delete process.env.OCX_CODEX_WS_UPSTREAM;
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(false);
+
+    for (const envVal of ["false", "0", "invalid"]) {
+      process.env.OCX_CODEX_WS_UPSTREAM = envVal;
+      expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(false);
+    }
+    for (const envVal of ["true", "1"]) {
+      process.env.OCX_CODEX_WS_UPSTREAM = envVal;
+      expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(true);
+    }
+
+    process.env.OCX_CODEX_WS_UPSTREAM = "true";
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: false })).toBe(false);
+    process.env.OCX_CODEX_WS_UPSTREAM = "false";
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: true })).toBe(true);
   });
 });
 
@@ -180,6 +208,8 @@ const RealWebSocket = globalThis.WebSocket;
 const RealFetch = globalThis.fetch;
 
 afterEach(() => {
+  delete process.env.OCX_CODEX_WS_UPSTREAM;
+  delete process.env.OCX_CODEX_WS_MAX_FRAME_BYTES;
   globalThis.WebSocket = RealWebSocket;
   globalThis.fetch = RealFetch;
   FakeWebSocket.instances = [];
@@ -192,6 +222,21 @@ function installFake(script: (ws: FakeWebSocket) => void) {
 }
 
 describe("providerFetch routing", () => {
+  test("defaults omitted wsUpstream to HTTP SSE", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: {} }) });
+    });
+    const sentinel = new Response("base");
+    const provider = {
+      fetch: (async () => sentinel) as typeof fetch,
+    } as OcxProviderConfig;
+    const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME);
+
+    expect(await wrapped(CODEX_URL, streamingInit())).toBe(sentinel);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
   test("a canary runtime identity cannot open the WS transport", async () => {
     const sentinel = new Response("base");
     let baseCalls = 0;
@@ -219,6 +264,7 @@ describe("providerFetch routing", () => {
     const baseCalls: string[] = [];
     const sentinel = new Response("base");
     const provider = {
+      wsUpstream: true,
       fetch: (async (input: unknown) => {
         baseCalls.push(String(input));
         return sentinel.clone();
@@ -241,6 +287,44 @@ describe("providerFetch routing", () => {
     expect(baseCalls).toHaveLength(3);
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
+
+  test("routes to base fetch over HTTP SSE when provider.wsUpstream is false", async () => {
+    const sentinel = new Response("base");
+    let baseCalls = 0;
+    const provider = {
+      wsUpstream: false,
+      fetch: (async () => {
+        baseCalls += 1;
+        return sentinel;
+      }) as typeof fetch,
+    } as OcxProviderConfig;
+    const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME);
+
+    const res = await wrapped(CODEX_URL, streamingInit());
+    expect(res).toBe(sentinel);
+    expect(baseCalls).toBe(1);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  test("routes to base fetch over HTTP SSE when OCX_CODEX_WS_UPSTREAM is false or 0", async () => {
+    for (const envVal of ["false", "0"]) {
+      process.env.OCX_CODEX_WS_UPSTREAM = envVal;
+      const sentinel = new Response("base");
+      let baseCalls = 0;
+      const provider = {
+        fetch: (async () => {
+          baseCalls += 1;
+          return sentinel;
+        }) as typeof fetch,
+      } as OcxProviderConfig;
+      const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME);
+
+      const res = await wrapped(CODEX_URL, streamingInit());
+      expect(res).toBe(sentinel);
+      expect(baseCalls).toBe(1);
+      expect(FakeWebSocket.instances).toHaveLength(0);
+    }
+  });
 });
 
 describe("handleResponses Codex WS relay selection", () => {
@@ -255,6 +339,7 @@ describe("handleResponses Codex WS relay selection", () => {
           baseUrl: "https://chatgpt.com/backend-api/codex",
           authMode: "forward",
           codexAccountMode: "direct",
+          wsUpstream: true,
         },
       },
     } as OcxConfig;
@@ -264,7 +349,7 @@ describe("handleResponses Codex WS relay selection", () => {
     return new Request("http://localhost/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer test" },
-      body: JSON.stringify({ model: "gpt-5.6-luna", input: "hello", stream: true }),
+      body: JSON.stringify({ model: "gpt-5.5", input: "hello", stream: true }),
     });
   }
 
@@ -746,6 +831,86 @@ describe("oversized Codex create frames", () => {
     const response = await codexWsUpstreamFetch(CODEX_URL, streamingInit({ padding: "x".repeat(1024) }), fallback);
     expect(isCodexWsUpstreamResponse(response)).toBe(true);
     expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  test("routes over SSE when frame exceeds provider.maxWsFrameBytes", async () => {
+    installFake(() => { throw new Error("WS must not be dialed for frame exceeding maxWsFrameBytes"); });
+    const sentinel = new Response("sse-fallback");
+    let fallbackCalls = 0;
+    const fallback = (async () => {
+      fallbackCalls += 1;
+      return sentinel;
+    }) as unknown as typeof fetch;
+
+    const customMax = 1000;
+    const response = await codexWsUpstreamFetch(
+      CODEX_URL,
+      streamingInit({ padding: "x".repeat(customMax) }),
+      fallback,
+      { maxWsFrameBytes: customMax },
+    );
+    expect(response).toBe(sentinel);
+    expect(fallbackCalls).toBe(1);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  test("routes over SSE when frame exceeds OCX_CODEX_WS_MAX_FRAME_BYTES environment ceiling", async () => {
+    process.env.OCX_CODEX_WS_MAX_FRAME_BYTES = "2000";
+    installFake(() => { throw new Error("WS must not be dialed for frame exceeding OCX_CODEX_WS_MAX_FRAME_BYTES"); });
+    const sentinel = new Response("sse-fallback");
+    let fallbackCalls = 0;
+    const fallback = (async () => {
+      fallbackCalls += 1;
+      return sentinel;
+    }) as unknown as typeof fetch;
+
+    const response = await codexWsUpstreamFetch(
+      CODEX_URL,
+      streamingInit({ padding: "x".repeat(2000) }),
+      fallback,
+    );
+    expect(response).toBe(sentinel);
+    expect(fallbackCalls).toBe(1);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  test("never lets provider or environment ceilings exceed the backend hard limit", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: {} }) });
+    });
+    const oversized = streamingInit({ padding: "x".repeat(CODEX_WS_CREATE_FRAME_LIMIT_BYTES) });
+    const sentinel = new Response("sse-fallback");
+    const fallback = (async () => sentinel) as unknown as typeof fetch;
+
+    expect(await codexWsUpstreamFetch(
+      CODEX_URL,
+      oversized,
+      fallback,
+      { maxWsFrameBytes: MAX_CODEX_WS_CREATE_FRAME_BYTES + 1 },
+    )).toBe(sentinel);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    process.env.OCX_CODEX_WS_MAX_FRAME_BYTES = String(MAX_CODEX_WS_CREATE_FRAME_BYTES + 1);
+    expect(await codexWsUpstreamFetch(CODEX_URL, oversized, fallback)).toBe(sentinel);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  test("providerFetch respects maxWsFrameBytes config and routes oversized frames to HTTP SSE", async () => {
+    const seen: RequestInit[] = [];
+    const provider = {
+      maxWsFrameBytes: 1500,
+      fetch: (async (_input: unknown, init: RequestInit) => {
+        seen.push(init);
+        return new Response("sse-direct");
+      }) as unknown as typeof fetch,
+    } as unknown as OcxProviderConfig;
+    const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME);
+
+    const res = await wrapped(CODEX_URL, streamingInit({ padding: "x".repeat(1500) }));
+    expect(await res.text()).toBe("sse-direct");
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    expect(seen).toHaveLength(1);
   });
 
   // The unit tests above measure the helper; these two measure the REAL serialized

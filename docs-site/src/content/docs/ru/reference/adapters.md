@@ -1,6 +1,6 @@
 ---
 title: Адаптеры
-description: Семь адаптеров провайдеров — назначение каждого, способ построения запросов и особенности.
+description: Адаптеры провайдеров — назначение каждого, способ построения запросов и особенности.
 ---
 
 **Адаптер** выполняет преобразование между внутренней моделью запросов/ответов opencodex и
@@ -144,55 +144,55 @@ incomplete. `TOOL_USE` без фактического вызова инстру
 
 ## `cursor`
 
-**Назначение:** `agent.v1.AgentService/Run` Cursor поверх потокового HTTP/2 Connect на
-`api2.cursor.sh`.
+**Назначение:** по умолчанию `agent.v1.AgentService/Run` Cursor поверх потокового HTTP/2 Connect
+на `api2.cursor.sh`. При `upstreamHttpVersion: "http1.1"` (или `"h1"`) используется совместимый
+транспорт HTTP/1.1: `agent.v1.AgentService/RunSSE` для вывода сервера и
+`aiserver.v1.BidiService/BidiAppend` для сообщений клиента. Эта настройка применяется и к
+inference, и к live model discovery.
 **Аутентификация:** Cursor OAuth/access token из `provider.apiKey` или из переданного заголовка
 authorization.
 
-- Структурированный вывод отклоняется до транспорта: у Cursor нет protobuf-поля схемы вывода, поэтому `text.format` / `response_format` JSON object или schema (и внутренний флаг structured-output) возвращают `400 invalid_request_error`. Инструменты эту проверку не обходят.
 - Использует `runTurn` вместо обычного пути fetch/parse. Запросы, серверные события, аргументы
   инструментов, контрольные точки использования и ответы клиента кодируются схемами
   `@bufbuild/protobuf` из `cursor/gen/agent_pb.ts` и оформляются как сообщения Connect.
 - Воспроизводит состояние диалога через content-addressed blob'ы, отображает серверные вызовы
   инструментов обратно в Codex, обнаруживает актуальные модели Cursor через protobuf RPC
   `GetUsableModels` и повторяет попытки только до того, как run-запрос зафиксирован на wire.
+- После успешно завершённого хода без инструментов хранит возвращённую ConversationStateStructure
+  локально в процессе и повторно использует checkpoint для проверенного линейного продолжения. Ходы
+  с результатом инструмента используют checkpoint последнего завершённого хода и только ещё не
+  охваченный suffix, когда известна граница охваченных сообщений. Поиск по префиксу без ref разрешён
+  только при наличии запомненного разговора Cursor или стабильного идентификатора client thread
+  (включая ограниченный fallback по Desktop session/thread) и единственного совпадающего checkpoint,
+  принадлежащего тому же разговору provider; иначе выполняется full replay. Compaction, изоляция
+  helper/shadow, несовпадение account/model, отсутствие ref, ошибки decode, forced-fresh recovery и
+  повтор после invalid_argument также используют full replay. Перезапуск процесса удаляет хранилище
+  из памяти и приводит к full replay. Cursor Connect не предоставляет достоверный
+  cache_read_tokens, поэтому usage OpenCodex не является счётчиком cache hit. Ограниченный Desktop
+  fallback хранит только владельца, выведенного через HMAC локально в процессе; исходные заголовки
+  session/thread и данные OAuth/authorization в checkpoint state не записываются. Live transport с
+  OAuth и фильтрация live model discovery по аккаунту остаются экспериментальными. Настройки входа
+  и transport описаны в [руководстве по провайдерам](/ru/guides/providers/) и
+  [конфигурации провайдера Cursor](/ru/reference/configuration/providers/#cursor-provider-adapter-cursor).
+  Повторное использование checkpoint выполняется автоматически и не имеет пользовательской настройки.
 - Сохраняет `cursor/grok-4.5-fast` доступной для выбора, но отправляет Cursor каноническую модель
   `grok-4.5`, помещая отдельные значения `effort` и `fast=true` в `requested_model.parameters`.
 - Нативное для Cursor локальное выполнение операций с файловой системой/shell/сетью по умолчанию
   запрещено. Явные интеграции `mcpServers` и `desktopExecutor` включаются отдельно;
-  `unsafeAllowNativeLocalExec` включает более широкий встроенный executor и обходит семантику
-  одобрений/песочницы Codex. При политике `off` по умолчанию нативные Shell/Read/Ls/Grep/Fetch
-  маппятся в Codex `shell_command`/`exec_command`, когда этот bridge-инструмент есть в каталоге;
-  write/delete по-прежнему запрещены.
-
-## `command-code`
-
-**Цели:** agent API подписки Command Code **OAuth** (`POST {baseUrl}/alpha/generate`).
-**Аутентификация:** OAuth Bearer через `ocx login command-code`.
-
-- Отличается от пресета API-ключа `commandcode` (`openai-chat` → `POST {baseUrl}/provider/v1/chat/completions`). Маршрут API-ключа никогда не читает `projectContext` и не заполняет generate-конверт с диска.
-- Необязательный `projectContext: "on"` на `providers.command-code` копирует ограниченные файлы из `process.cwd()` во время запроса в `memory`, `taste` и `skills`. Если отсутствует или `"off"`, отправляет `memory: ""`, `taste: null`, `skills: null`, даже когда файлы есть в репозитории — только opt-in, без автозагрузки.
-- Запускайте прокси из доверенной директории проекта Codex, чтобы рабочая директория совпадала с редактируемым репозиторием.
-- **Memory:** только UTF-8 `AGENTS.md` в cwd (не `CLAUDE.md`, `CODEX.md` и не домашние пути). Лимит 32 768 байт; при превышении префикс обрезается с `<!-- truncated -->`.
-- **Taste:** UTF-8 `.commandcode/taste/taste.md` или `null`, если файла нет. Лимит 8 192 байт с тем же маркером. Пустой, но существующий файл отправляет `""`. `x-taste-learning` остаётся `"false"`; загрузка taste — это не taste learning Command Code.
-- **Skills:** XML из корней skill проекта по порядку: `.commandcode/skills`, `.agents/skills`, `.pi/skills`. Каждый подкаталог с `SKILL.md` становится `<skill name="…">…</skill>` (имя из YAML frontmatter `name:` или имени каталога). Пропускает имена с `.` и не-каталоги; first-wins по разрешённому имени; максимум 16 skills; общий XML-лимит 32 768 байт. Никогда не читает `~/.commandcode/skills` и другие домашние skill-деревья.
-- Ограничение путей через realpath под cwd; symlink-выходы опускаются. Таймаут 2 секунды на операцию с файлом. Кэш по cwd на 30 секунд (максимум 128 записей). Любая ошибка fail-soft опускает только эту часть.
-- `commandCodeVersion` фиксирует `x-command-code-version` (по умолчанию `0.52.1`). `permissionMode` остаётся `"standard"`, `mode` — `"agent"`.
+  `nativeLocalExec: "on"` включает более широкий встроенный executor и обходит семантику
+  одобрений/песочницы Codex; устаревший `unsafeAllowNativeLocalExec: true` эквивалентен только
+  если `nativeLocalExec` не задан.
 
 ## `azure-openai` (алиас: `azure`)
 
 **Назначение:** **Azure OpenAI**. Обёртка над `openai-responses` (поэтому тоже
 `passthrough: true`).
-**Аутентификация:** API-ключ через заголовок `api-key` или идентичность Azure через
-`DefaultAzureCredential` (Bearer, не `api-key`). Режимы взаимоисключающие.
+**Аутентификация:** `key` через заголовок `api-key` (не Bearer).
 
 - Делегирует построение запроса passthrough-адаптеру Responses, проверяет, что `baseUrl` не
   содержит неразрешённых плейсхолдеров шаблона, и заменяет `Authorization` на `api-key`.
   Настроенный URL указывает напрямую на Azure v1 Responses API, поэтому адаптер не добавляет
   `api-version`.
-- В режиме идентичности используется точный scope `https://cognitiveservices.azure.com/.default`
-  и статический список настроенных моделей (`liveModels: false`); общий `/models` не запрашивается.
-  Полная цепочка и настройка `DefaultAzureCredential` описаны на английской странице.
 
 ## Утилиты для изображений (`image.ts`)
 

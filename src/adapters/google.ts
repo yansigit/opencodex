@@ -37,7 +37,7 @@ import {
 } from "../web-search/gemini-executor";
 import type { WebSearchSource } from "../web-search/parse";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
-import { lookupReplayThoughtSignature } from "../responses/thought-signature-replay";
+import { forgetThoughtSignatureForReplay, lookupReplayThoughtSignature } from "../responses/thought-signature-replay";
 import {
   isTranslatorBudgetExceededError,
   releaseTranslatedEvent,
@@ -49,9 +49,8 @@ import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../reasoning-effort";
 import { normalizeAntigravityProviderError } from "../oauth/antigravity-routing";
 import { buildAiStudioHeaders, parseGoogleCookieJar } from "../oauth/google-aistudio-auth";
-import { cookieHeaderFromSession, loadAiStudioSession } from "../oauth/aistudio-session-sync";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 import { parseMakerSuiteChunk } from "./google-aistudio-parser";
-import { globalAiStudioRelayHub } from "../server/aistudio-ws-hub";
 
 const INLINE_ERROR_URL_USERINFO = /https?:\/\/[^\s"'<>]*@/gi;
 
@@ -74,6 +73,43 @@ const GOOGLE_BREVITY_INSTRUCTION = [
   "- Prefer taking the next tool action over explaining; keep calling tools until the task is complete.",
   "- This applies only to intermediate progress text. Your final answer after the work is done is exempt: write it in full and at whatever length the task requires.",
 ].join("\n");
+
+/**
+ * Documented output ceiling for a Google-surface model, or `undefined` when the id is not
+ * recognized.
+ *
+ * Unknown ids return `undefined` deliberately. An earlier revision returned a 16,384 floor for
+ * anything unmatched, which silently truncated aliases, gateway ids, and any model added after
+ * this table was written — the operator asked for N tokens and got 16,384 with no signal. A cap
+ * we cannot justify is worse than no cap: `structure/02_config-and-codex-home.md` is explicit
+ * that an explicit request value wins, so an unrecognized model passes through untouched and the
+ * upstream remains the authority on its own limit.
+ *
+ * Matching is prefix/family based rather than substring based for the same reason: `includes("pro")`
+ * matched any id containing "pro" (`my-prototype-model`), and `includes("oss")` matched any id
+ * containing "oss" (`crossover-v2`).
+ */
+export function maxOutputTokensForGoogleModel(modelId: string): number | undefined {
+  const lower = modelId.toLowerCase().trim();
+  if (lower.startsWith("gemini")) {
+    // Pro tops out one token below the flash/other Gemini ceiling; both are documented values.
+    return /(^|[-.])pro([-.]|$)/.test(lower) ? 65535 : 65536;
+  }
+  if (lower.startsWith("claude")) return 64000;
+  if (lower.startsWith("gpt-oss")) return 32768;
+  return undefined;
+}
+
+export function clampGoogleMaxOutputTokens(
+  modelId: string,
+  requestedTokens?: number,
+): number | undefined {
+  if (requestedTokens === undefined || requestedTokens <= 0) return undefined;
+  const modelMax = maxOutputTokensForGoogleModel(modelId);
+  // Unknown model: honour the request as-is rather than inventing a ceiling for it.
+  if (modelMax === undefined) return requestedTokens;
+  return Math.min(requestedTokens, modelMax);
+}
 
 /**
  * Some Google direct deployments expose current Gemini Flash generations with a `-tiered`
@@ -181,7 +217,7 @@ function geminiTextPart(text: unknown): { text: string } | undefined {
  */
 function geminiToolResultText(content: string | OcxContentPart[]): string {
   if (typeof content === "string") return content || GEMINI_EMPTY_TOOL_OUTPUT_PLACEHOLDER;
-  const hasContent = content.some(p => p.type === "image" || (typeof p.text === "string" && p.text.length > 0));
+  const hasContent = content.some(p => p.type !== "text" || p.text.length > 0);
   return hasContent ? contentPartsToText(content) : GEMINI_EMPTY_TOOL_OUTPUT_PLACEHOLDER;
 }
 
@@ -225,7 +261,7 @@ function messagesToGeminiFormat(
   parsed: OcxParsedRequest,
   identityModelId: string,
   repairToolPairs: boolean,
-): { systemInstruction?: unknown; contents: unknown[] } {
+): { systemInstruction?: unknown; contents: unknown[]; replayedCallIds: string[] } {
   // Neutralize Codex's GPT-5 identity line (Gemini/Antigravity share this path) so a routed model
   // never misreports as GPT-5/OpenAI, and never leaks the proxy identity upstream.
   const toolCatalogNudge = buildNonOpenAIToolCatalogNudgeForTools(parsed.context.tools, parsed.options.toolChoice);
@@ -237,6 +273,7 @@ function messagesToGeminiFormat(
   const systemInstruction = { parts: [{ text: systemText }] };
 
   const contents: unknown[] = [];
+  const replayedCallIds: string[] = [];
   let userMergeBarrier = false;
   const appendContent = (next: { role: string; parts: unknown[] }): void => {
     appendGeminiContent(contents, next, !userMergeBarrier);
@@ -269,6 +306,13 @@ function messagesToGeminiFormat(
               // Gemini takes base64 via inline_data; a remote URL needs a mime type we don't have, so
               // fall back to a short marker rather than inlining the URL as a huge text blob.
               parts.push(data ? { inline_data: { mime_type: data.mediaType, data: data.base64 } } : { text: `[image: ${p.imageUrl}]` });
+              continue;
+            }
+            if (p.type === "video") {
+              const data = parseDataUrl(p.videoUrl);
+              // Gemini accepts inline video bytes in the same Part union as images. Arbitrary
+              // remote URLs are not valid fileData references, so retain only a short marker.
+              parts.push(data ? { inline_data: { mime_type: data.mediaType, data: data.base64 } } : { text: `[video: ${p.videoUrl}]` });
               continue;
             }
             // Drop empty/malformed text instead of emitting `{ text: "" }` or a bare `{}` part.
@@ -318,7 +362,10 @@ function messagesToGeminiFormat(
             const signature = tc.providerMetadata?.google?.thoughtSignature
               ?? tc.thoughtSignature
               ?? lookupReplayThoughtSignature(tc.id, parsed._reasoningReplayScope);
-            if (isLikelyRealThoughtSignature(signature)) part.thoughtSignature = signature;
+            if (isLikelyRealThoughtSignature(signature)) {
+              part.thoughtSignature = signature;
+              replayedCallIds.push(tc.id);
+            }
             parts.push(part);
           }
         }
@@ -375,7 +422,7 @@ function messagesToGeminiFormat(
     }
   }
 
-  return { systemInstruction, contents };
+  return { systemInstruction, contents, replayedCallIds };
 }
 
 function toolsToGeminiFormat(
@@ -744,6 +791,47 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
   const truncationErrorMessage = provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
     ? vertexTruncationErrorMessage
     : googleTruncationErrorMessage;
+  let lastInjectedCallIds: string[] = [];
+  let lastReasoningReplayScope: OcxParsedRequest["_reasoningReplayScope"];
+
+  // Conservative batch invalidation: upstream Gemini/Antigravity errors (e.g.
+  // "Function call is missing a thought_signature in functionCall parts") do not specify which
+  // specific call_id was rejected. When a request containing replayed signatures is rejected,
+  // we evict all callIds injected in that turn (lastInjectedCallIds) from the durable store
+  // and clear the session replay cache, preventing poisoned-signature loops while allowing
+  // subsequent turns to re-accumulate valid signatures. Unrelated calls from other turns remain intact.
+  //
+  // Memory-cache clearing stays broad (any invalid-argument/signature error can poison the
+  // session replay cache), but durable-store eviction is intentionally narrower: it only runs
+  // when the error text explicitly mentions a signature, so a generic tool-schema
+  // INVALID_ARGUMENT does not destroy valid durable signatures.
+  function handleSignatureRejection(errorMessage?: string) {
+    const replayModel = provider.googleMode === "cloud-code-assist" ? antigravityModel : vertexReplayModel;
+    const replaySession = provider.googleMode === "cloud-code-assist" ? antigravitySession : vertexReplaySession;
+    const text = errorMessage ?? "";
+    const isInvalidArgument = /invalid_argument|invalid argument/i.test(text);
+    const isSignatureError = /signature|thought_signature|thoughtSignature/i.test(text);
+    // The in-memory Antigravity replay cache only exists for CCA/Vertex, so clearing it stays
+    // scoped to those modes (replayModel/replaySession are undefined elsewhere anyway).
+    if (
+      (provider.googleMode === "cloud-code-assist" || provider.googleMode === "vertex")
+      && replayModel && replaySession && (isInvalidArgument || isSignatureError)
+    ) {
+      clearAntigravityReplay(replayModel, replaySession);
+    }
+    // The DURABLE store is not mode-scoped: signatures are remembered through
+    // rememberAndSerializeExtraContent and read back by lookupReplayThoughtSignature on every
+    // Google mode, including AI Studio. Gating eviction on CCA/Vertex therefore left AI Studio
+    // with rejected signatures cached forever, replaying them into every subsequent turn — the
+    // store poisons itself and the request keeps failing. Eviction follows the same scope the
+    // write does.
+    if (isSignatureError) {
+      for (const callId of lastInjectedCallIds) {
+        forgetThoughtSignatureForReplay(callId, lastReasoningReplayScope);
+      }
+    }
+  }
+
   return {
     name: "google",
     validateRequest(parsed: OcxParsedRequest) {
@@ -763,46 +851,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
     // Direct AI-Studio uses the canonical server transport (fetchWithTransientRetry), which
     // retries transient 5xx responses through providerFetch while preserving multi-key pool
     // 429 rotation and raw error formatting.
-    ...(provider.googleMode === "ai-studio-web"
-      ? {
-          fetchResponse: async (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> => {
-            if (globalAiStudioRelayHub.hasActiveSessions()) {
-              const streamRes = await globalAiStudioRelayHub.dispatchStream(
-                {
-                  url: request.url,
-                  method: request.method,
-                  headers: request.headers,
-                  body: request.body,
-                },
-                ctx?.abortSignal,
-              );
-              const encoder = new TextEncoder();
-              const bodyStream = new ReadableStream({
-                async start(controller) {
-                  try {
-                    for await (const chunk of streamRes.chunks) {
-                      controller.enqueue(encoder.encode(chunk));
-                    }
-                    controller.close();
-                  } catch (err) {
-                    controller.error(err);
-                  }
-                },
-              });
-              return new Response(bodyStream, {
-                status: 200,
-                headers: { "Content-Type": "text/event-stream" },
-              });
-            }
-            return fetch(request.url, {
-              method: request.method,
-              headers: request.headers,
-              body: request.body,
-              signal: ctx?.abortSignal,
-            });
-          },
-        }
-      : provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
+    ...(provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
       ? {
           fetchResponse: (request: AdapterRequest, ctx?: AdapterFetchContext): Promise<Response> =>
             (provider.googleMode === "cloud-code-assist" ? fetchAntigravityWithRetry : fetchVertexWithRetry)(request, ctx),
@@ -824,11 +873,13 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           : resolveDirectGeminiWireModelId(parsed.modelId, provider.directGeminiWireRenames !== false);
       // AI Studio's `-tiered` spelling is wire-only; CCA aliases may migrate to another generation.
       const identityModelId = provider.googleMode === "cloud-code-assist" ? routedModelId : parsed.modelId;
-      const { systemInstruction, contents } = messagesToGeminiFormat(
+      const { systemInstruction, contents, replayedCallIds } = messagesToGeminiFormat(
         parsed,
         identityModelId,
         provider.googleMode === "cloud-code-assist",
       );
+      lastInjectedCallIds = [...replayedCallIds];
+      lastReasoningReplayScope = parsed._reasoningReplayScope;
       const tools = toolsToGeminiFormat(parsed, routedModelId);
 
       const body: Record<string, unknown> = { contents };
@@ -843,7 +894,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       if (googleOptions?.cachedContent) body.cachedContent = googleOptions.cachedContent;
 
       const generationConfig: Record<string, unknown> = {};
-      if (parsed.options.maxOutputTokens) generationConfig.maxOutputTokens = parsed.options.maxOutputTokens;
+      const clampedMaxOutputTokens = clampGoogleMaxOutputTokens(identityModelId, parsed.options.maxOutputTokens);
+      if (clampedMaxOutputTokens !== undefined) generationConfig.maxOutputTokens = clampedMaxOutputTokens;
       if (parsed.options.temperature !== undefined) generationConfig.temperature = parsed.options.temperature;
       if (parsed.options.topP !== undefined) generationConfig.topP = parsed.options.topP;
       if (parsed.options.stopSequences) generationConfig.stopSequences = parsed.options.stopSequences;
@@ -1019,8 +1071,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       if (provider.googleMode === "ai-studio-web") {
         const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
         const url = `${base}/v1internal:${method}${streamParam}`;
-        const cookieInput = provider.apiKey || provider.headers?.["Cookie"] || cookieHeaderFromSession(loadAiStudioSession()) || "";
-        const jar = parseGoogleCookieJar(cookieInput);
+        const credentials = resolveAiStudioCredentials(provider);
+        if (credentials.kind !== "ready") throw new Error(credentials.reason);
+        const jar = parseGoogleCookieJar(credentials.cookieHeader);
         const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");
         Object.assign(headers, aiStudioHeaders);
         const compiled = compileGoogleWireBody({ ...body, model: routedModelId });
@@ -1051,6 +1104,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const emitInTurnGroundingSources = emitInTurnGroundingSourcesQueue.shift() ?? false;
       const filterCcaSearchSuggestionHtml =
         provider.googleMode === "cloud-code-assist" && emitInTurnGroundingSources;
+      if (provider.googleMode === "ai-studio-web" && (response.status === 401 || response.status === 403 || (response.status >= 300 && response.status < 400))) {
+        try { await response.body?.cancel(); } catch { /* ignore */ }
+        yield { type: "error", message: "Google AI Studio session expired — re-authentication required" };
+        return;
+      }
       if (!response.body) {
         yield { type: "error", message: "No response body" };
         return;
@@ -1063,6 +1121,17 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       const budgetEncoder = new TextEncoder();
+      const contentType = response.headers.get("content-type") ?? "";
+      const isHtmlContentType = contentType.toLowerCase().includes("text/html");
+      const isHtmlRedirect = (text: string) => {
+        const lower = text.trim().toLowerCase();
+        return lower.startsWith("<!doctype") || lower.includes("accounts.google.com/v3/signin");
+      };
+      const reauthError = "Google AI Studio session expired — re-authentication required";
+      if (isHtmlContentType) {
+        yield { type: "error", message: reauthError };
+        return;
+      }
       let buffer = "";
       let bufferBytes = 0;
       // Raw unterminated-line bytes, independent of TextDecoder's pending UTF-8
@@ -1124,15 +1193,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           if (provider.googleMode === "cloud-code-assist" && error) observeProviderError?.(error);
           const err = { ...(error ?? {}), message: error?.message ?? safeMessage ?? "upstream error" };
           // Clear-on-invalid: a signature rejection means our replayed thoughtSignatures are stale.
-          // Drop the cache entry so the next turn starts clean instead of re-injecting a bad sig.
-          const replayModel = provider.googleMode === "cloud-code-assist" ? antigravityModel : vertexReplayModel;
-          const replaySession = provider.googleMode === "cloud-code-assist" ? antigravitySession : vertexReplaySession;
-          if ((provider.googleMode === "cloud-code-assist" || provider.googleMode === "vertex")
-            && replayModel && replaySession
-            && !/missing.*thought_signature/i.test(err?.message ?? "")
-            && /signature|invalid_argument|invalid argument/i.test(err?.message ?? "")) {
-            clearAntigravityReplay(replayModel, replaySession);
-          }
+          // Drop the cache entry and durable store entry for rejected calls so the next turn
+          // starts clean instead of re-injecting a bad sig.
+          handleSignatureRejection(err?.message);
           yield {
             type: "error",
             ...(error?.status !== undefined ? { status: error.status } : {}),
@@ -1321,6 +1384,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           }
           incompleteLineBytes = lineScan.residual;
           const nextBuffer = buffer + decoder.decode(value, { stream: true });
+          if (isHtmlRedirect(nextBuffer)) {
+            yield { type: "error", message: reauthError };
+            try { await reader.cancel(); } catch { /* ignore */ }
+            return;
+          }
           const nextBufferBytes = budgetEncoder.encode(nextBuffer).byteLength;
           const appendReservation = budget.reserveTransient(nextBufferBytes, { kind: "live_transient" });
           buffer = nextBuffer;
@@ -1383,6 +1451,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
                 yield { type: "done" };
                 return;
               }
+            }
+            if (isHtmlContentType || isHtmlRedirect(residual)) {
+              yield { type: "error", message: reauthError };
+              return;
             }
             yield { type: "error", message: `upstream non-SSE response: ${residual.slice(0, 300)}` };
             return;
@@ -1509,7 +1581,18 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       let raw: Record<string, unknown>;
       let rawBytes = 0;
       try {
-        raw = JSON.parse(rawText) as Record<string, unknown>;
+        const parsedRaw: unknown = JSON.parse(rawText);
+        // `JSON.parse("null")` returns null instead of throwing, so the catch below cannot see it
+        // and the `raw.error` read crashed the turn — #1219 at the buffered body root, which #1240
+        // never reached because that audit swept SSE frame parsers only. There is no next frame to
+        // recover into here, so unlike a stream frame this fails closed, matching the
+        // unparseable-body branch just below and the buffered candidate guards added in #2232.
+        if (!isGoogleRecord(parsedRaw)) {
+          budget.releaseRetained(rawTextBytes, { kind: "retained_collectors" });
+          const valueType = googleStructuralValueType(parsedRaw);
+          return [{ type: "error", message: `google response was not a JSON object (${valueType})` }];
+        }
+        raw = parsedRaw;
         rawBytes = new TextEncoder().encode(JSON.stringify(raw)).byteLength;
         const rawReservation = budget.reserveTransient(rawBytes, { kind: "retained_collectors" });
         rawReservation.commitRetained();
@@ -1533,16 +1616,24 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           message: safeMessage,
         });
         if (error) observeProviderError?.(error);
+        const message = error?.message ?? safeMessage ?? "upstream error";
+        handleSignatureRejection(message);
         return finish([{
           type: "error",
           ...(error?.status !== undefined ? { status: error.status } : {}),
           ...(error?.code ? { code: error.code } : {}),
-          message: error?.message ?? safeMessage ?? "upstream error",
+          message,
         }]);
       }
-      const json = (provider.googleMode === "cloud-code-assist" && raw.response && typeof raw.response === "object" && !Array.isArray(raw.response))
-        ? (raw.response as Record<string, unknown>)
-        : raw;
+      // Antigravity (CCA) nests the standard Gemini payload under `response`; unwrap it.
+      let json = raw;
+      if (provider.googleMode === "cloud-code-assist") {
+        const wrapped = raw.response;
+        if (!wrapped || typeof wrapped !== "object" || Array.isArray(wrapped)) {
+          return finish([{ type: "error", message: "google-antigravity response missing response wrapper" }]);
+        }
+        json = wrapped as Record<string, unknown>;
+      }
       const events: AdapterEvent[] = [];
 
       const rawCandidates: unknown = json.candidates;

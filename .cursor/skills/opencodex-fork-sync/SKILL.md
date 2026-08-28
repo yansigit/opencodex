@@ -69,6 +69,21 @@ fast-forward of `upstream/main`; `vendor/dev` remains an exact fast-forward of
 branch. The issue notifier is selected by `FORK_SYNC_NOTIFIERS=github-issue`;
 the Cursor coordinator is selected by `FORK_SYNC_COORDINATORS=cursor-webhook`.
 
+Keep the PR readable while the automation works. Maintain exactly one sticky
+progress comment with marker `<!-- cursor-sync-progress -->` and one matching
+PR-body section between `<!-- cursor-sync-progress:start -->` and
+`<!-- cursor-sync-progress:end -->`. Update both in place after every push,
+never post a new comment. Inside each, render a 4-line checklist in this order:
+
+1. Merge `vendor/main` TAG/SHA - done or pending
+2. Resolve shared hotspot per `OWNED.md` - done or pending (name the files)
+3. Rebase onto `origin/dev` - `MERGEABLE` or `not a descendant of origin/dev` with recovery `git merge origin/dev` and re-push
+4. CI `ci` / `enforce-target` / `hygiene` - each with `pass` / `fail` and the
+   exact code (`new_suppression`, `unsponsored_surface`, shard name) when failing
+
+When all gates are `MERGEABLE` and hygiene is green, flip Draft -> Ready for
+review and post `Ready for human merge - do not squash/rebase.` Stop.
+
 Cursor is the first coordinator, not the only supported integration. The
 registry accepts comma-separated IDs and can run multiple coordinators, for
 example `FORK_SYNC_COORDINATORS=cursor-webhook,http`.

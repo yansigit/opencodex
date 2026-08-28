@@ -72,6 +72,8 @@ export interface OcxParsedRequest {
   _promptCacheKeyIsSharedCohort?: boolean;
   /** Provider-private Command Code session affinity id, stable across in-process request mutation. */
   _commandCodeSessionId?: string;
+  /** Cursor-only thread owner; may be an opaque process-local Desktop session/thread identity. */
+  _cursorClientThreadId?: string;
   /** Conversation/provider/account/model-bound namespace for reasoning replay state. */
   _reasoningReplayScope?: OcxReasoningReplayScopeRef;
   /**
@@ -90,7 +92,7 @@ export interface OcxParsedRequest {
    */
   _cursorIsolateConversation?: boolean;
   /** Account-scoped, non-secret Kiro request metadata selected with the OAuth access token. */
-  _kiroAuthContext?: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion">;
+  _kiroAuthContext?: Pick<KiroOAuthMetadata, "profileArn" | "apiRegion" | "ssoRegion" | "authType">;
   /** Provider-private continuation metadata resolved from the Responses previous_response_id chain. */
   _providerContinuation?: OcxProviderContinuationState;
   /** Persisted continuation considered only after the final physical route is known. */
@@ -198,8 +200,14 @@ export interface OcxImageContent {
   detail?: string;
 }
 
-/** A user/developer message content part: text or an image (vision). */
-export type OcxContentPart = OcxTextContent | OcxImageContent;
+export interface OcxVideoContent {
+  type: "video";
+  /** A base64 `data:` URL from an OpenAI-compatible `video_url` part. */
+  videoUrl: string;
+}
+
+/** A user/developer message content part: text or native media. */
+export type OcxContentPart = OcxTextContent | OcxImageContent | OcxVideoContent;
 
 export interface OcxThinkingContent {
   type: "thinking";
@@ -260,13 +268,9 @@ export interface OcxRequestOptions {
   /**
    * Responses `text.format` (json_schema / json_object), preserved for adapters whose
    * upstream wire has an equivalent. The openai-chat adapter re-nests it as chat
-   * `response_format`, the exact inverse of responseFormatToText in src/chat/inbound.ts; the
-   * Google adapter lowers supported requests to Gemini JSON mode (`responseMimeType` /
-   * `responseSchema`) but skips requests with tools, Claude models, or image-capable models.
-   * The `openai-chat` adapter can omit it for models in `noStructuredOutputModels`; Kiro
-   * rejects structured output via `_structuredOutput`; and Cursor has no structured-output
-   * wire field and rejects the request before transport.
-   * Native passthrough does not consume this option and forwards `_rawBody.text` verbatim.
+   * `response_format`, the exact inverse of responseFormatToText in src/chat/inbound.ts.
+   * The native passthrough ignores it (it forwards `_rawBody.text` verbatim) and Kiro
+   * keeps rejecting structured output via `_structuredOutput`.
    */
   textFormat?: {
     type: "json_schema" | "json_object";
@@ -292,10 +296,12 @@ export type GoogleSafetyThreshold =
   | "BLOCK_ONLY_HIGH"
   | "BLOCK_NONE"
   | "OFF";
+
 export interface GoogleSafetySetting {
   category: GoogleSafetyCategory;
   threshold: GoogleSafetyThreshold;
 }
+
 export interface GoogleProviderOptions {
   thinkingBudget?: number;
   includeThoughts?: boolean;

@@ -56,27 +56,41 @@ function quotaFromUnknown(quota: unknown, fallbackUpdatedAt?: number): AccountQu
         }];
       })
     : [];
-  const credits = q.creditsUsd && typeof q.creditsUsd === "object" && !Array.isArray(q.creditsUsd)
+  const creditsRaw = q.creditsUsd && typeof q.creditsUsd === "object" && !Array.isArray(q.creditsUsd)
     ? q.creditsUsd as Record<string, unknown>
     : null;
-  const creditsPercent = finite(credits?.percent);
-  const creditsExpiresAt = finite(credits?.expiresAt);
-  if (creditsPercent !== undefined && !windows.some(window => /credits?/i.test(window.label))) {
-    windows.push({
-      label: "Total subscription credits",
-      percent: creditsPercent,
-      ...(creditsExpiresAt !== undefined ? { resetAt: creditsExpiresAt } : {}),
-    });
-  }
+  const creditsUsed = finite(creditsRaw?.used);
+  const creditsLimit = finite(creditsRaw?.limit);
+  const creditsRemaining = finite(creditsRaw?.remaining);
+  const creditsPercent = finite(creditsRaw?.percent);
+  const creditsExpiresAt = finite(creditsRaw?.expiresAt);
+  const creditsUsd = creditsUsed !== undefined
+    && creditsLimit !== undefined
+    && creditsRemaining !== undefined
+    && creditsPercent !== undefined
+    ? {
+        used: creditsUsed,
+        limit: creditsLimit,
+        remaining: creditsRemaining,
+        percent: creditsPercent,
+        ...(creditsExpiresAt !== undefined ? { expiresAt: creditsExpiresAt } : {}),
+        ...(typeof creditsRaw?.unlimited === "boolean" ? { unlimited: creditsRaw.unlimited } : {}),
+      }
+    : undefined;
+  const fiveHourPercent = finite(q.fiveHourPercent) ?? finite(q.shortPercent);
+  const fiveHourResetAt = finite(q.fiveHourResetAt) ?? finite(q.shortResetAt);
   const out: AccountQuota = {
-    ...(finite(q.fiveHourPercent) !== undefined ? { fiveHourPercent: q.fiveHourPercent as number } : {}),
-    ...(finite(q.fiveHourResetAt) !== undefined ? { fiveHourResetAt: q.fiveHourResetAt as number } : {}),
+    ...(fiveHourPercent !== undefined ? { fiveHourPercent } : {}),
+    ...(fiveHourResetAt !== undefined ? { fiveHourResetAt } : {}),
+    ...(finite(q.shortPercent) !== undefined ? { shortPercent: q.shortPercent as number } : {}),
+    ...(finite(q.shortResetAt) !== undefined ? { shortResetAt: q.shortResetAt as number } : {}),
+    ...(finite(q.shortWindowSeconds) !== undefined ? { shortWindowSeconds: q.shortWindowSeconds as number } : {}),
     ...(finite(q.weeklyPercent) !== undefined ? { weeklyPercent: q.weeklyPercent as number } : {}),
     ...(finite(q.weeklyResetAt) !== undefined ? { weeklyResetAt: q.weeklyResetAt as number } : {}),
     ...(finite(q.monthlyPercent) !== undefined ? { monthlyPercent: q.monthlyPercent as number } : {}),
     ...(finite(q.monthlyResetAt) !== undefined ? { monthlyResetAt: q.monthlyResetAt as number } : {}),
     ...(windows.length > 0 ? { customWindows: windows } : {}),
-    ...(credits && creditsPercent !== undefined ? { creditsUsd: credits as unknown as AccountQuota["creditsUsd"] } : {}),
+    ...(creditsUsd ? { creditsUsd } : {}),
     updatedAt: finite(q.updatedAt) ?? fallbackUpdatedAt ?? Date.now(),
   };
   return out.fiveHourPercent !== undefined
@@ -114,9 +128,9 @@ export function capacityAggregationFromReport(report?: ProviderQuotaReportView):
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   if (row.kind !== "capacity-weighted-v1" || row.scope !== "routable-known") return null;
-  const includedAccounts = finite(row.includedAccounts) ?? 0;
   const excludedAccounts = finite(row.excludedAccounts);
   const unknownPlanAccounts = finite(row.unknownPlanAccounts);
+  const includedAccounts = finite(row.includedAccounts) ?? 0;
   if (excludedAccounts === undefined || unknownPlanAccounts === undefined || typeof row.incomplete !== "boolean") return null;
   const currentRaw = row.currentAccount && typeof row.currentAccount === "object" && !Array.isArray(row.currentAccount)
     ? row.currentAccount as Record<string, unknown>

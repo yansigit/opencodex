@@ -3,7 +3,9 @@ import {
   effectiveCodexAuthAccountId,
   fetchMainAccountInfoSnapshot,
   listCodexAuthAccountsSnapshot,
+  withSparkVisibility,
 } from "../codex/auth-api";
+import type { StoredAccountQuota } from "../codex/quota";
 import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache";
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { codexPlanKey } from "../codex/plan";
@@ -16,7 +18,6 @@ import { XAI_GROK_CLIENT_VERSION, XAI_GROK_COMPATIBILITY } from "./xai-transport
 import { getProviderRegistryEntry, providerCodexAccountMode, registryEntryForProviderDestination } from "./registry";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "./openai-tiers";
-import { globalAiStudioRelayHub } from "../server/aistudio-ws-hub";
 import {
   captureConfigGeneration,
   sweepExpiredOnWrite,
@@ -174,6 +175,27 @@ function quotaSignatureValue(quota: CodexCapacityQuota | null): unknown {
   };
 }
 
+function providerQuotaFromCodexQuota(
+  quota: StoredAccountQuota | Omit<StoredAccountQuota, "updatedAt"> | null | undefined,
+): CodexCapacityQuota | null {
+  if (!quota) return null;
+  // Every Codex-sourced provider report funnels through here — the pooled path via
+  // listCodexAuthAccountsSnapshot and the `direct` path via fetchMainAccountInfoSnapshot, which
+  // never touches the Codex Auth DTO. Applying the Spark preference at this one point is what
+  // stops the row surviving on /api/provider-quotas after the operator switched it off.
+  quota = withSparkVisibility(quota ?? null) ?? quota;
+  return {
+    ...(quota.shortPercent !== undefined ? { fiveHourPercent: quota.shortPercent } : {}),
+    ...(quota.shortResetAt !== undefined ? { fiveHourResetAt: quota.shortResetAt } : {}),
+    ...(quota.weeklyPercent !== undefined ? { weeklyPercent: quota.weeklyPercent } : {}),
+    ...(quota.weeklyResetAt !== undefined ? { weeklyResetAt: quota.weeklyResetAt } : {}),
+    ...(quota.monthlyPercent !== undefined ? { monthlyPercent: quota.monthlyPercent } : {}),
+    ...(quota.monthlyResetAt !== undefined ? { monthlyResetAt: quota.monthlyResetAt } : {}),
+    ...(quota.customWindows !== undefined ? { customWindows: quota.customWindows } : {}),
+    updatedAt: "updatedAt" in quota ? quota.updatedAt : Date.now(),
+  };
+}
+
 /** Hash only presentation-relevant state; account ids and email addresses never enter the key. */
 function cacheKeyWithAggregationState(
   config: OcxConfig,
@@ -191,7 +213,7 @@ function cacheKeyWithAggregationState(
         plan: codexPlanKey(account.plan) ?? null,
         paused: account.paused,
         needsReauth: account.needsReauth === true,
-        quota: quotaSignatureValue(account.quota as CodexCapacityQuota | null),
+        quota: quotaSignatureValue(providerQuotaFromCodexQuota(account.quota)),
       }));
       const canonicalRows = rows.map(row => JSON.stringify(row)).sort();
       const digest = createHash("sha256").update(JSON.stringify(canonicalRows)).digest("hex").slice(0, 24);
@@ -1111,9 +1133,8 @@ async function fetchChatGptForwardQuota(
 ): Promise<ProviderQuotaReport | null> {
   if (providerCodexAccountMode(provider, providerConfig) === "direct") {
     const snapshot = await fetchMainAccountInfoSnapshot(forceRefresh);
-    const quota = snapshot.info.quota
-      ? { ...snapshot.info.quota, updatedAt: Date.now() } as ProviderQuota
-      : null;
+    const quota = providerQuotaFromCodexQuota(snapshot.info.quota);
+    if (quota) quota.updatedAt = Date.now();
     return quota
       ? tagNativeMainReport(report(provider, "chatgpt:wham", quota), snapshot.mainIdentityGeneration)
       : null;
@@ -1121,10 +1142,14 @@ async function fetchChatGptForwardQuota(
   const snapshot = await (prefetchedSnapshot ?? listCodexAuthAccountsSnapshot(config, forceRefresh));
   const accounts = snapshot.accounts;
   const activeId = effectiveCodexAuthAccountId(config);
-  const capacityAccounts = accounts.map(account => ({ ...account, active: account.id === activeId }));
+  const capacityAccounts = accounts.map(account => ({
+    ...account,
+    active: account.id === activeId,
+    quota: providerQuotaFromCodexQuota(account.quota),
+  }));
   const active = capacityAccounts.find(account => account.active)
-    ?? accounts.find(account => account.id === MAIN_CODEX_ACCOUNT_ID)
-    ?? accounts[0];
+    ?? capacityAccounts.find(account => account.id === MAIN_CODEX_ACCOUNT_ID)
+    ?? capacityAccounts[0];
   const now = Date.now();
   const capacity = aggregateCodexPoolCapacity(capacityAccounts, now);
   if (capacity.aggregation && capacity.quota) {
@@ -1140,7 +1165,12 @@ async function fetchChatGptForwardQuota(
   }
   const activeUsable = !!active && !active.paused && active.needsReauth !== true;
   const quota = activeUsable && active?.quota
-    ? { ...active.quota, updatedAt: active.quota.updatedAt ?? Date.now() } as CodexCapacityQuota
+    ? {
+        ...active.quota,
+        fiveHourPercent: active.quota.fiveHourPercent ?? active.quota.shortPercent,
+        fiveHourResetAt: active.quota.fiveHourResetAt ?? active.quota.shortResetAt,
+        updatedAt: active.quota.updatedAt ?? Date.now(),
+      } as CodexCapacityQuota
     : null;
   const quotaFresh = !!quota
     && Number.isFinite(quota.updatedAt)
@@ -1286,6 +1316,24 @@ function parseClaudeBucket(value: unknown): { percent?: number; resetAt?: number
   return { percent, resetAt };
 }
 
+function parseClaudeLimit(value: unknown): { label: string; percent: number; resetAt?: number } | null {
+  const rec = asRecord(value);
+  if (!rec) return null;
+  const percent = normalizePercent(rec.percent);
+  if (percent === undefined) return null;
+  const scope = asRecord(rec.scope);
+  const model = asRecord(scope?.model);
+  const rawLabel = String(model?.display_name ?? "").trim();
+  if (!rawLabel) return null;
+  const lowerLabel = rawLabel.toLowerCase();
+  const label = lowerLabel.includes("fable") ? "Fable"
+    : lowerLabel.includes("opus") ? "Opus"
+      : lowerLabel.includes("sonnet") ? "Sonnet"
+        : rawLabel;
+  const resetAt = normalizeResetAt(rec.resets_at);
+  return { label, percent, ...(resetAt !== undefined ? { resetAt } : {}) };
+}
+
 /** Claude's OAuth usage endpoint, probed with ONE account's own bearer token. */
 const anthropicUsageInflight = new Map<string, Promise<ProviderQuota | null>>();
 
@@ -1309,11 +1357,25 @@ async function fetchAnthropicUsageQuota(accessToken: string): Promise<ProviderQu
     if (!body) return null;
     const fiveHour = parseClaudeBucket(body.five_hour);
     const sevenDay = parseClaudeBucket(body.seven_day);
+    const fable = parseClaudeBucket(body.seven_day_fable);
     const opus = parseClaudeBucket(body.seven_day_opus);
     const sonnet = parseClaudeBucket(body.seven_day_sonnet);
     const customWindows: ProviderQuotaWindow[] = [];
+    if (fable?.percent !== undefined) customWindows.push({ label: "Fable", percent: fable.percent, ...(fable.resetAt !== undefined ? { resetAt: fable.resetAt } : {}) });
     if (opus?.percent !== undefined) customWindows.push({ label: "Opus", percent: opus.percent, ...(opus.resetAt !== undefined ? { resetAt: opus.resetAt } : {}) });
     if (sonnet?.percent !== undefined) customWindows.push({ label: "Sonnet", percent: sonnet.percent, ...(sonnet.resetAt !== undefined ? { resetAt: sonnet.resetAt } : {}) });
+    const knownLabels = new Set(customWindows.map(window => window.label.toLowerCase()));
+    const limits = Array.isArray(body.limits) ? body.limits : [];
+    for (const rawLimit of limits) {
+      const limitRecord = asRecord(rawLimit);
+      // `session` and `weekly_all` mirror the canonical five-hour and weekly
+      // buckets above; only model-scoped weekly limits add a third window.
+      if (String(limitRecord?.kind ?? "").trim().toLowerCase() !== "weekly_scoped") continue;
+      const limit = parseClaudeLimit(rawLimit);
+      if (!limit || knownLabels.has(limit.label.toLowerCase())) continue;
+      knownLabels.add(limit.label.toLowerCase());
+      customWindows.push(limit);
+    }
     const quota: ProviderQuota = {
       // Claude's 5-hour window is a first-class rate limit, same as the Codex login 5h/weekly
       // rows: report it in the canonical fields so the dashboard renders it with the standard
@@ -2252,15 +2314,12 @@ async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig
   });
 }
 
-async function fetchAiStudioQuota(name: string, provider: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
-  const active = globalAiStudioRelayHub.hasActiveSessions();
-  const sessionCount = globalAiStudioRelayHub.getActiveSessionCount();
+async function fetchAiStudioQuota(name: string, _provider: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
   const now = Date.now();
-
   return {
     provider: name,
     label: "Google AI Studio (Web)",
-    source: active ? `Browser Relay (${sessionCount} active tab${sessionCount > 1 ? "s" : ""})` : "Browser Relay (Disconnected)",
+    source: "Direct Session",
     updatedAt: now,
     quota: {
       updatedAt: now,

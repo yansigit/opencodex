@@ -195,6 +195,45 @@ function maintenanceReadyEvidence({
   };
 }
 
+function autonomousMergeEvidence({
+  pr,
+  checkRuns = [],
+  headCommit,
+  expectedJulesUserId,
+  authorizedSessionId,
+  sessionId,
+  expectedBugbotAppId,
+  expectedChecksAppId = 15368,
+  requiredNames = ["ci", "enforce-target", "hygiene"],
+  labels = (pr?.labels || []),
+}) {
+  const names = new Set(labels.map((label) => typeof label === "string" ? label : label?.name));
+  const headSha = pr?.head?.sha;
+  const julesId = Number(expectedJulesUserId);
+  const sessionKey = (value) => String(value ?? "").replace(/^sessions\//, "");
+  const authorized = authorizedSessionId && sessionKey(sessionId) === sessionKey(authorizedSessionId);
+  const prByJules = Number.isSafeInteger(julesId) && julesId > 0 && Number(pr?.user?.id) === julesId;
+  const authoredByJules = Number.isSafeInteger(julesId) && julesId > 0 &&
+    [headCommit?.author?.id, headCommit?.committer?.id].some((id) => Number(id) === julesId);
+  const baselineReady = requiredChecksSuccessful(checkRuns, headSha, requiredNames, expectedChecksAppId);
+  const bugbotEvidence = exactHeadBugbotEvidence({
+    checkRuns,
+    liveHeadSha: headSha,
+    expectedAppId: expectedBugbotAppId,
+  });
+  return {
+    autonomousLabel: names.has("autonomous-fix"),
+    baselineReady,
+    bugbotEvidence,
+    authorizedSession: Boolean(authorized),
+    prByJules: Boolean(prByJules),
+    authoredByJules: Boolean(prByJules && authoredByJules && headCommit?.sha === headSha),
+    ready: pr?.state === "open" && pr?.base?.ref === "dev" && names.has("autonomous-fix") &&
+      baselineReady && Boolean(bugbotEvidence) && Boolean(authorized) &&
+      Boolean(prByJules && authoredByJules && headCommit?.sha === headSha),
+  };
+}
+
 function trustedActiveMaintenanceCount(records) {
   return records.filter((record) =>
     record?.error ||
@@ -386,6 +425,19 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
     return assertSession(await request(`/sessions/${encodeURIComponent(id)}`));
   }
 
+  async function sendMessage(id, prompt) {
+    if (!/^[^/]+$/.test(id)) throw new Error("invalid Jules session resource id");
+    if (!prompt || typeof prompt !== "string") throw new Error("sendMessage requires a prompt string");
+    return request(`/sessions/${encodeURIComponent(id)}:sendMessage`, { method: "POST", body: { prompt }, retryReads: false });
+  }
+
+  async function listSessionActivities(id) {
+    if (!/^[^/]+$/.test(id)) throw new Error("invalid Jules session resource id");
+    const result = await request(`/sessions/${encodeURIComponent(id)}/activities`);
+    if (!result || !Array.isArray(result.activities)) return [];
+    return result.activities;
+  }
+
   async function createSessionIdempotently(payload) {
     try {
       return await createSession(payload);
@@ -420,6 +472,8 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
     createSession,
     createSessionIdempotently,
     getSession,
+    listSessionActivities,
+    sendMessage,
     listSessions,
     listSources,
   };
@@ -439,6 +493,7 @@ module.exports = {
   exactHeadBugbotEvidence,
   generatedSyncBaselineDisposition,
   maintenanceReadyEvidence,
+  autonomousMergeEvidence,
   findGithubSource,
   hasExactHeadMaintainerWaiver,
   isExpectedJulesHeadAdvance,

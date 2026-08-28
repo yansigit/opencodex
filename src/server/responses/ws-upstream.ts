@@ -4,8 +4,8 @@
 // a measurably faster queue than the plain SSE POST path. Measured 2026-08-12
 // KST (same account, same payload, strictly sequential): gpt-5.6-luna TTFT p50
 // ~1.0s over WS vs ~3.9s over SSE. Codex CLI itself defaults to the WS
-// transport; opencodex previously always POSTed SSE, which is where its extra
-// 2-3s of TTFT came from.
+// transport; opencodex keeps HTTP/SSE as its reliable default and allows
+// operators to opt into WS when the lower latency is worth the risk.
 //
 // The wrapper only swaps the transport. It dials wss:// with the same headers,
 // sends the JSON body as a single `response.create` frame, and re-encodes the
@@ -14,6 +14,7 @@
 
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import { compareBunVersions } from "../../lib/bun-stream-caps";
+import { interceptRuntimeFailure } from "../../telemetry/hook";
 
 const CODEX_RESPONSES_HTTP_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_RESPONSES_WS_URL = "wss://chatgpt.com/backend-api/codex/responses";
@@ -54,6 +55,29 @@ export type BunRuntimeIdentity = {
 };
 
 export type BunRuntimeGateInput = string | BunRuntimeIdentity;
+
+export interface CodexWsUpstreamOptions {
+  wsUpstream?: boolean;
+  maxWsFrameBytes?: number;
+}
+
+export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boolean {
+  if (options?.wsUpstream !== undefined) return options.wsUpstream !== true;
+  const env = process.env.OCX_CODEX_WS_UPSTREAM;
+  return env !== "true" && env !== "1";
+}
+
+export function resolveCodexWsMaxFrameBytes(options?: CodexWsUpstreamOptions): number {
+  if (typeof options?.maxWsFrameBytes === "number" && Number.isFinite(options.maxWsFrameBytes) && options.maxWsFrameBytes > 0) {
+    return Math.min(options.maxWsFrameBytes, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
+  }
+  const envVal = process.env.OCX_CODEX_WS_MAX_FRAME_BYTES;
+  if (envVal) {
+    const parsed = Number.parseInt(envVal, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return Math.min(parsed, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
+  }
+  return CODEX_WS_CREATE_FRAME_LIMIT_BYTES;
+}
 
 const codexWsUpstreamResponses = new WeakSet<Response>();
 
@@ -102,7 +126,9 @@ export function shouldUseCodexWsUpstream(
   url: string,
   init?: RequestInit,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
+  options?: CodexWsUpstreamOptions,
 ): boolean {
+  if (isCodexWsUpstreamDisabled(options)) return false;
   if (!bunSupportsBoundedCodexWsRelay(runtime)) return false;
   if (url !== CODEX_RESPONSES_HTTP_URL) return false;
   if ((init?.method ?? "GET").toUpperCase() !== "POST") return false;
@@ -172,8 +198,9 @@ export function codexWsUpstreamFetch(
   init: RequestInit,
   sseFallback: typeof globalThis.fetch,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
+  options?: CodexWsUpstreamOptions,
 ): Promise<Response> {
-  if (!bunSupportsBoundedCodexWsRelay(runtime)) {
+  if (isCodexWsUpstreamDisabled(options) || !bunSupportsBoundedCodexWsRelay(runtime)) {
     return sseFallback(url, init);
   }
   const signal = init.signal ?? undefined;
@@ -196,7 +223,8 @@ export function codexWsUpstreamFetch(
   // streaming Response, so the oversized close can only be surfaced as a stream
   // error — and a resend at that point could double-generate. Measuring the
   // frame we are about to send keeps the whole failure mode unreachable.
-  if (codexWsCreateFrameExceedsLimit(frameText)) {
+  const maxFrameBytes = resolveCodexWsMaxFrameBytes(options);
+  if (codexWsCreateFrameExceedsLimit(frameText, maxFrameBytes)) {
     return sseFallback(url, init);
   }
 
@@ -370,7 +398,9 @@ export function codexWsUpstreamFetch(
         // here would reach clients with no response.completed/failed at all —
         // relaySseWithFailedTail() only synthesizes a failed terminal when the
         // body read THROWS. Error the stream like a reset TCP socket.
-        try { controller.error(new Error(closedBeforeTerminalMessage(event))); } catch { /* stream already done */ }
+        const error = new Error(closedBeforeTerminalMessage(event));
+        if ((event as { code?: unknown } | null)?.code === 1006) interceptRuntimeFailure(error, { category: "websocket_1006" });
+        try { controller.error(error); } catch { /* stream already done */ }
       }
     });
 

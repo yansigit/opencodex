@@ -209,7 +209,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const fallbackAccounts: Record<string, string> = {};
     for (const p of listOAuthProviders()) {
       const set = getAccountSet(p);
-      if (set?.activeAccountId) fallbackAccounts[p] = set.activeAccountId;
+      if (set && set.accounts.length === 1 && set.activeAccountId) fallbackAccounts[p] = set.activeAccountId;
     }
     const project = <T extends UsageSummary>(summary: T, entries?: PersistedUsageEntry[]) =>
       projectUsageSummary(summary, filter, entries, fallbackAccounts);
