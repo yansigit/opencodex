@@ -3,6 +3,12 @@ name: Sync PR Babysitter
 on:
   push:
     branches: [dev]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [dev]
+  check_run:
+    types: [completed]
+  status:
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
@@ -14,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     if: github.repository == 'yansigit/opencodex'
     permissions:
+      actions: write
       contents: write
       pull-requests: write
       issues: write
@@ -68,3 +75,78 @@ jobs:
             git checkout dev
           done
           echo "Babysitter complete."
+
+      - name: Reconcile sync PR checks and progress
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          SYNC_PROGRESS_MARKER: "<!-- cursor-sync-progress -->"
+        with:
+          script: |
+            const path = require("node:path");
+            const { buildProgressComment } = require(path.join(
+              process.cwd(), ".github", "scripts", "sync-pr-babysitter.cjs"
+            ));
+            const { owner, repo } = context.repo;
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: "open", base: "dev", per_page: 100
+            });
+            for (const candidate of prs.filter(pr =>
+              pr.head?.ref?.startsWith("sync/upstream-")
+            )) {
+              const pr = (await github.rest.pulls.get({
+                owner, repo, pull_number: candidate.number
+              })).data;
+              const checkRuns = await github.paginate(github.rest.checks.listForRef, {
+                owner, repo, ref: pr.head.sha, per_page: 100
+              });
+              const body = buildProgressComment({
+                headSha: pr.head.sha,
+                baseRef: pr.base.ref,
+                mergeable: pr.mergeable,
+                mergeableState: pr.mergeable_state,
+                checkRuns,
+              });
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: pr.number, per_page: 100
+              });
+              const existing = comments
+                .filter(comment =>
+                  comment.user?.login === "github-actions[bot]" &&
+                  comment.body?.includes(process.env.SYNC_PROGRESS_MARKER)
+                )
+                .sort((a, b) => Number(b.id) - Number(a.id))[0];
+              if (existing) {
+                if (existing.body !== body) {
+                  await github.rest.issues.updateComment({
+                    owner, repo, comment_id: existing.id, body
+                  });
+                }
+              } else {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: pr.number, body
+                });
+              }
+
+              // The target gate can race the aggregate CI/hygiene checks on a
+              // new head. Re-run it only after those trusted producers finish;
+              // its resolver rejects every other check-run producer.
+              const completedCheck = context.payload.check_run;
+              if (
+                context.eventName === "check_run" &&
+                ["ci", "hygiene"].includes(completedCheck?.name) &&
+                completedCheck?.head_sha === pr.head.sha
+              ) {
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner,
+                    repo,
+                    workflow_id: "enforce-pr-target.yml",
+                    ref: context.payload.repository?.default_branch || "dev",
+                    inputs: { pull_number: String(pr.number) }
+                  });
+                  core.info(`Re-ran enforce-target for exact head ${pr.head.sha}.`);
+                } catch (error) {
+                  core.warning(`Could not re-run enforce-target for #${pr.number}: ${error.message}`);
+                }
+              }
+            }
