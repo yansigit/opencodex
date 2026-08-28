@@ -3258,6 +3258,104 @@ describe("GitHub Actions hardening", () => {
       expect(callsTo(result, "repos.listPullRequestsAssociatedWithCommit")).toEqual([]);
     });
 
+    test("the workflow_run resolver fails closed for untrusted, stale, or non-unique completions", async () => {
+      const headSha = "7d42d17f213a632fc2def56053f0cd574b13d459";
+      const baseWorkflowRun = {
+        name: "Cross-platform CI",
+        event: "pull_request",
+        status: "completed",
+        conclusion: "success" as const,
+        head_sha: headSha,
+        repository: { full_name: "lidge-jun/opencodex" },
+        head_repository: { full_name: "contributor/opencodex" },
+      };
+      const cases = [
+        {
+          name: "wrong workflow name",
+          workflowRun: { ...baseWorkflowRun, name: "Untrusted CI" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "wrong original event",
+          workflowRun: { ...baseWorkflowRun, event: "push" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "non-completed status",
+          workflowRun: { ...baseWorkflowRun, status: "in_progress" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "wrong repository",
+          workflowRun: {
+            ...baseWorkflowRun,
+            repository: { full_name: "attacker/opencodex" },
+          },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "missing head SHA",
+          workflowRun: (() => {
+            const { head_sha: _headSha, ...missing } = baseWorkflowRun;
+            return missing;
+          })(),
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "blank head SHA",
+          workflowRun: { ...baseWorkflowRun, head_sha: "" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "stale head",
+          workflowRun: { ...baseWorkflowRun, head_sha: "stale-head" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "closed candidate",
+          workflowRun: baseWorkflowRun,
+          openPulls: [{ number: 4242, state: "closed", head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "merged candidate",
+          workflowRun: baseWorkflowRun,
+          openPulls: [{ number: 4242, state: "open", merged: true, head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "ambiguous same-head candidates",
+          workflowRun: baseWorkflowRun,
+          openPulls: [
+            { number: 4242, state: "open", head: { sha: headSha } },
+            { number: 7777, state: "open", head: { sha: headSha } },
+          ],
+          listed: 1,
+        },
+      ] as const;
+
+      for (const scenario of cases) {
+        const result = await runResolver({
+          pr: { base: { ref: "dev" }, number: 4242, head: { sha: headSha } },
+          eventName: "workflow_run",
+          workflowRun: scenario.workflowRun,
+          openPulls: scenario.openPulls,
+        });
+        expect(result.outputs, scenario.name).toEqual([]);
+        expect(callsTo(result, "pulls.list"), scenario.name).toHaveLength(scenario.listed);
+        expect(callsTo(result, "pulls.get"), scenario.name).toEqual([]);
+        expect(callsTo(result, "issues.createComment"), scenario.name).toEqual([]);
+        expect(callsTo(result, "issues.updateComment"), scenario.name).toEqual([]);
+      }
+    });
+
     test("a non-maintainer issue_comment does not re-run the gate", async () => {
       // The `issue_comment` trigger must only re-run for maintainer comments
       // (OWNER / COLLABORATOR / MEMBER). A random comment from a contributor

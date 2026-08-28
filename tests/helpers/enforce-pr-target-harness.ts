@@ -1042,7 +1042,9 @@ export async function runEnforcePrTarget(
                   event: options.workflowRun?.event ?? "pull_request",
                   status: options.workflowRun?.status ?? "completed",
                   conclusion: options.workflowRun?.conclusion ?? "success",
-                  head_sha: options.workflowRun?.head_sha ?? pr.head.sha,
+                  ...(options.workflowRun && Object.prototype.hasOwnProperty.call(options.workflowRun, "head_sha")
+                    ? { head_sha: options.workflowRun.head_sha }
+                    : options.workflowRun ? {} : { head_sha: pr.head.sha }),
                   repository: {
                     full_name: options.workflowRun?.repository?.full_name ?? "lidge-jun/opencodex",
                   },
