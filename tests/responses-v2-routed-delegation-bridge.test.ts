@@ -2,9 +2,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleResponses } from "../src/server/responses";
+import { handleResponses, handleResponsesCompact } from "../src/server/responses";
 import type { OcxConfig } from "../src/types";
-import { fakeChatGptJwt } from "./helpers/agent-task-recovery";
+import { FERNET_TASK, fakeChatGptJwt } from "./helpers/agent-task-recovery";
 
 const savedCodexHome = process.env.CODEX_HOME;
 const codexHome = mkdtempSync(join(tmpdir(), "ocx-v2-routed-delegation-bridge-"));
@@ -194,6 +194,111 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       expect(requests).toHaveLength(cases.length);
       for (const outbound of requests) expect(JSON.stringify(outbound.tools ?? outbound.input)).not.toContain('"ocx_agents"');
       expect(routed.providers.gw).toBeDefined();
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("keeps the mirror out after routed override, compaction, shadow interception, and native child recovery", async () => {
+    const outbound: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      outbound.push({ url: String(url), body });
+      return Response.json({ id: `resp_excluded_${outbound.length}`, status: "completed", output: [] });
+    }) as typeof fetch;
+    try {
+      const overridden = config();
+      overridden.providers.gw = { adapter: "openai-responses", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
+      overridden.v2NativeParentOverride = { enabled: true, model: "gw/routed" };
+      await handleResponses(request(rootBody()), overridden, { model: "", provider: "" });
+
+      const routedParent = config();
+      routedParent.providers.gw = { adapter: "openai-responses", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
+      await handleResponses(request(rootBody({ model: "gw/routed" })), routedParent, { model: "", provider: "" });
+
+      await handleResponses(request(rootBody({ input: [...(rootBody().input as unknown[]), { type: "compaction_trigger" }] })), config(), { model: "", provider: "" });
+
+      const shadowed = config();
+      shadowed.providers.gw = { adapter: "openai-chat", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
+      shadowed.shadowCallIntercept = { enabled: true, model: "gw/routed" };
+      await handleResponses(request(rootBody()), shadowed, { model: "", provider: "" });
+
+      const recoveredChild = config();
+      recoveredChild.agentTaskRecovery = { enabled: true };
+      await handleResponses(request(rootBody({ input: [{
+        type: "agent_message", author: "/root", recipient: "/root/child", content: [
+          { type: "encrypted_content", encrypted_content: FERNET_TASK },
+        ],
+      }] }), { "x-openai-subagent": "collab_spawn" }), recoveredChild, { model: "", provider: "" });
+
+      const compact = config();
+      compact.v2NativeParentOverride = { enabled: true, model: "gw/routed" };
+      compact.providers.gw = { adapter: "openai-responses", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
+      await handleResponsesCompact(request({
+        model: "gpt-5.6-luna", stream: false,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "compact" }] }, { type: "compaction_trigger" }],
+      }), compact, { model: "", provider: "" });
+
+      expect(outbound).toHaveLength(6);
+      for (const requestBody of outbound) expect(JSON.stringify(requestBody.body)).not.toContain('"ocx_agents"');
+      expect(outbound[0]?.url).toContain("gateway.example");
+      expect(outbound[1]?.url).toContain("gateway.example");
+      expect(outbound[4]?.url).toContain("chatgpt.com/backend-api/codex");
+      expect(outbound[5]?.url).toContain("gateway.example");
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("runs the root, routed child, and parent continuation lifecycle without leaking mirrors", async () => {
+    const outbound: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let turn = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      outbound.push({ url: String(url), body });
+      turn += 1;
+      if (turn === 1) return Response.json({ id: "resp_root", status: "completed", output: [{
+        type: "function_call", id: "fc_root", call_id: "call_root", namespace: "ocx_agents", name: "spawn_agent", arguments: "{}",
+      }] });
+      if (turn === 2) return Response.json({ choices: [{ message: { role: "assistant", content: "safe-fixed-result" }, finish_reason: "stop" }] });
+      return Response.json({ id: "resp_parent", status: "completed", output: [
+        { type: "function_call", id: "fc_follow", call_id: "call_follow", namespace: "ocx_agents", name: "followup_task", arguments: "{}" },
+        { type: "function_call", id: "fc_wait", call_id: "call_wait", namespace: "collaboration", name: "wait_agent", arguments: "{}" },
+        { type: "function_call", id: "fc_list", call_id: "call_list", namespace: "collaboration", name: "list_agents", arguments: "{}" },
+      ] });
+    }) as typeof fetch;
+    try {
+      const root = await handleResponses(request(rootBody()), config(), { model: "", provider: "" });
+      expect((await root.json() as { output: Array<Record<string, unknown>> }).output[0]).toMatchObject({ namespace: "collaboration", encrypted_function_args: [] });
+
+      const childConfig = config();
+      childConfig.providers.gw = { adapter: "openai-chat", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
+      const child = await handleResponses(request({
+        model: "gw/routed", stream: false,
+        input: [{ type: "agent_message", author: "/root", recipient: "/root/child", content: [
+          { type: "encrypted_content", encrypted_content: "Implement the readable child task." },
+        ] }, { type: "function_call_output", call_id: "safe-fixed-call", output: "safe-fixed-result" }],
+        tools: rootBody().tools,
+      }, { "x-openai-subagent": "collab_spawn" }), childConfig, { model: "", provider: "" });
+      expect(child.status).toBe(200);
+
+      const parent = await handleResponses(request(rootBody({ tools: [{ type: "namespace", name: "collaboration", tools: [
+        { type: "function", name: "spawn_agent", parameters: { type: "object" } },
+        { type: "function", name: "followup_task", parameters: { type: "object" } },
+        { type: "function", name: "wait_agent", parameters: { type: "object" } },
+        { type: "function", name: "list_agents", parameters: { type: "object" } },
+      ] }] })), config(), { model: "", provider: "" });
+      const calls = (await parent.json() as { output: Array<Record<string, unknown>> }).output;
+
+      expect(JSON.stringify(outbound[0]?.body.tools)).toContain('"ocx_agents"');
+      expect(outbound[1]?.url).toContain("gateway.example");
+      expect(outbound[1]?.url).not.toContain("chatgpt.com");
+      expect(JSON.stringify(outbound[1]?.body)).toContain("Implement the readable child task.");
+      expect(JSON.stringify(outbound[1]?.body)).toContain("safe-fixed-result");
+      expect(JSON.stringify(outbound[1]?.body)).not.toContain('"ocx_agents"');
+      expect(calls[0]).toMatchObject({ namespace: "collaboration", name: "followup_task", encrypted_function_args: [] });
+      expect(calls[1]).toMatchObject({ namespace: "collaboration", name: "wait_agent" });
+      expect(calls[1]?.encrypted_function_args).toBeUndefined();
+      expect(calls[2]).toMatchObject({ namespace: "collaboration", name: "list_agents" });
+      expect(calls[2]?.encrypted_function_args).toBeUndefined();
     } finally { globalThis.fetch = originalFetch; }
   });
 

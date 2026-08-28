@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, jest, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { providerFetch } from "../src/server/responses/fetch-helpers";
 import { handleResponses } from "../src/server/responses";
 import { isEagerRelaySseResponse } from "../src/server/relay";
@@ -371,6 +374,51 @@ describe("handleResponses Codex WS relay selection", () => {
     const text = await response.text();
     expect(text).toContain("response.completed");
     expect(text).toContain("data: [DONE]");
+  });
+
+  test("a canonical upstream WebSocket carries the bridge catalog and normalized collaboration frame", async () => {
+    const previousHome = process.env.CODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-v2-bridge-ws-"));
+    writeFileSync(join(home, "config.toml"), "[features.multi_agent_v2]\nenabled = true\n");
+    process.env.CODEX_HOME = home;
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.output_item.added", item: {
+        type: "function_call", id: "fc_bridge_ws", call_id: "call_bridge_ws", namespace: "ocx_agents", name: "spawn_agent", arguments: "",
+      } }) });
+      ws.emit("message", { data: JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_bridge_ws", arguments: "{}" }) });
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: {
+        id: "resp_bridge_ws", status: "completed", output: [{
+          type: "function_call", id: "fc_bridge_ws", call_id: "call_bridge_ws", namespace: "ocx_agents", name: "spawn_agent", arguments: "{}",
+        }],
+      } }) });
+    });
+    try {
+      const cfg = forwardConfig();
+      cfg.multiAgentMode = "v2";
+      cfg.v2RoutedDelegationBridge = true;
+      const response = await handleResponses(new Request("http://localhost/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer test" },
+        body: JSON.stringify({ model: "gpt-5.6-luna", stream: true, input: "delegate", tools: [{
+          type: "namespace", name: "collaboration", tools: [
+            { type: "function", name: "spawn_agent", parameters: { type: "object" } },
+            { type: "function", name: "send_message", parameters: { type: "object" } },
+          ],
+        }] }),
+      }), cfg, { model: "", provider: "" }, { codexWsRuntimeIdentity: BOUNDED_WS_RUNTIME });
+
+      const frame = JSON.parse(FakeWebSocket.instances[0]!.sent[0]!) as Record<string, unknown>;
+      const text = await response.text();
+      expect(JSON.stringify(frame.tools)).toContain('"ocx_agents"');
+      expect(text).toContain('"namespace":"collaboration"');
+      expect(text).toContain('"encrypted_function_args":[]');
+      expect(text).not.toContain('"namespace":"ocx_agents"');
+    } finally {
+      if (previousHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("an HTTP fallback remains on the configured legacy tee path", async () => {
