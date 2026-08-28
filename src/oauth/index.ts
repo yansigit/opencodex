@@ -1240,15 +1240,18 @@ export async function runLogin(
       const existing = getAccountCredential(provider, opts.reauthAccountId);
       if (!existing) throw new Error(`Unknown account for reauth: ${opts.reauthAccountId}`);
       if (!existing.accountId && !existing.email) {
-        throw new OAuthReauthIdentityUnverifiedError();
-      }
-      const identityMatches = existing.accountId && cred.accountId
-        ? existing.accountId === cred.accountId
-        : existing.email && cred.email
-          ? existing.email.toLowerCase() === cred.email.toLowerCase()
-          : false;
-      if (!identityMatches) {
-        throw new OAuthReauthIdentityMismatchError();
+        if (provider !== GOOGLE_ANTIGRAVITY_PROVIDER || (!cred.accountId && !cred.email)) {
+          throw new OAuthReauthIdentityUnverifiedError();
+        }
+      } else {
+        const identityMatches = existing.accountId && cred.accountId
+          ? existing.accountId === cred.accountId
+          : existing.email && cred.email
+            ? existing.email.toLowerCase() === cred.email.toLowerCase()
+            : false;
+        if (!identityMatches) {
+          throw new OAuthReauthIdentityMismatchError();
+        }
       }
       await (deps.saveAccountCredential ?? saveAccountCredential)(provider, opts.reauthAccountId, cred, {
         assertBeforePersist: deps.assertCurrentOwner,
