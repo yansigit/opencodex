@@ -6,7 +6,7 @@ import SubagentsWorkspace, { FEATURED_MAX } from "../components/subagents-worksp
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
-import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState } from "./use-subagent-delegation";
+import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState, type V2RoutedDelegationBridgeState } from "./use-subagent-delegation";
 
 type CachedSubagents = { available: string[]; chosen: string[] };
 
@@ -28,6 +28,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false });
   const [nativeParentOverride, setNativeParentOverride] = useState<V2NativeParentOverrideState>({ enabled: false, model: null, active: false });
   const [agentTaskRecovery, setAgentTaskRecovery] = useState<AgentTaskRecoveryState>({ enabled: false, model: null });
+  const [routedDelegationBridge, setRoutedDelegationBridge] = useState<V2RoutedDelegationBridgeState>({ enabled: false });
   const [multiAgentMode, setMultiAgentMode] = useState<"v1" | "default" | "v2">("default");
   const [keepNativeChatGptOnV1, setKeepNativeChatGptOnV1] = useState(false);
   const [childInstructions, setChildInstructions] = useState("");
@@ -37,6 +38,8 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const nativeParentOverrideSavingRef = useRef(false);
   const [agentTaskRecoverySaving, setAgentTaskRecoverySaving] = useState(false);
   const agentTaskRecoverySavingRef = useRef(false);
+  const routedDelegationBridgeSavingRef = useRef(false);
+  const [routedDelegationBridgeSaving, setRoutedDelegationBridgeSaving] = useState(false);
   const [ultraLoadFailed, setUltraLoadFailed] = useState(false);
   const ultraLoadGeneration = useRef(0);
   const currentUltraApiBase = useRef(apiBase);
@@ -60,6 +63,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       subagentDeveloperInstructions?: string | null;
       v2NativeParentOverride?: Partial<V2NativeParentOverrideState>;
       agentTaskRecovery?: Partial<AgentTaskRecoveryState>;
+      v2RoutedDelegationBridge?: unknown;
     }>(res, t("sub.ultraModeLoadFail"));
     if (!data) return false;
     if (signal?.aborted || generation !== ultraLoadGeneration.current || currentUltraApiBase.current !== apiBase) return false;
@@ -86,6 +90,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       enabled: recovery?.enabled === true,
       model: typeof recovery?.model === "string" ? recovery.model : null,
     });
+    setRoutedDelegationBridge({ enabled: data.v2RoutedDelegationBridge === true });
     return true;
   }, [apiBase, t]);
 
@@ -176,6 +181,32 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
     } finally {
       agentTaskRecoverySavingRef.current = false;
       setAgentTaskRecoverySaving(false);
+    }
+  };
+
+  const saveRoutedDelegationBridge = async (enabled: boolean) => {
+    if (routedDelegationBridgeSavingRef.current) return;
+    routedDelegationBridgeSavingRef.current = true;
+    const requestApiBase = apiBase;
+    setRoutedDelegationBridgeSaving(true);
+    setStatus("");
+    try {
+      const res = await fetch(`${apiBase}/api/v2`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ v2RoutedDelegationBridge: enabled }),
+      });
+      await readJsonOrThrow(res, t("sub.routedDelegationBridgeSaveFail"));
+      if (currentUltraApiBase.current !== requestApiBase || !await loadUltraMode()) return;
+      setOk(true);
+      setStatus(t("sub.routedDelegationBridgeSaved"));
+    } catch (error) {
+      if (currentUltraApiBase.current !== requestApiBase) return;
+      setOk(false);
+      setStatus(error instanceof Error && error.message ? error.message : t("sub.networkError"));
+    } finally {
+      routedDelegationBridgeSavingRef.current = false;
+      setRoutedDelegationBridgeSaving(false);
     }
   };
 
@@ -356,6 +387,9 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
           agentTaskRecovery,
           agentTaskRecoverySaving,
           onAgentTaskRecoverySave: next => { void saveAgentTaskRecovery(next); },
+          routedDelegationBridge,
+          routedDelegationBridgeSaving,
+          onRoutedDelegationBridgeSave: enabled => { void saveRoutedDelegationBridge(enabled); },
           prompt: delegation.prompt,
           childInstructions,
           childInstructionsSaving,

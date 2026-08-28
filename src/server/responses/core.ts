@@ -244,6 +244,7 @@ import { readBoundedResponseBody } from "../../lib/bounded-body";
 import type { AdmissionLease } from "../../lib/admission";
 import { supportedLadderFor } from "../effort-policy";
 import { isThreadSpawnRequest } from "../effort-policy";
+import { isMultiAgentV2Enabled } from "../../codex/features";
 import {
   applySubagentModelFallback,
   maybePrimeSubagentQuota,
@@ -321,6 +322,12 @@ import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/cat
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
 import { decideV2NativeParentOverride } from "./v2-native-parent-override";
+import {
+  createV2RoutedDelegationSseRewrite,
+  injectV2RoutedDelegationBridge,
+  rewriteV2RoutedDelegationCallsInJson,
+  type V2RoutedDelegationBridgeContext,
+} from "./v2-routed-delegation-bridge";
 import { mapCodexAuthContextErrorToResponse } from "./codex-auth-error";
 import { hasUnreadableEncryptedAgentTask, looksLikeBackendCiphertext, sanitizeEncryptedContentInPlace } from "./encrypted-payload";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel } from "./fetch-helpers";
@@ -2529,11 +2536,13 @@ async function handleResponsesInner(
 
   // Shadow call intercept: rewrite Codex 0.145.0+ helper calls (gpt-5.6-luna).
   // Ancient clients using gpt-5.4-mini remain configurable via sourceModels.
+  let shadowIntercepted = false;
   const _sci = config.shadowCallIntercept;
   if (_sci?.enabled && _sci.model && shouldInterceptShadowCall(
     parsed.modelId,
     _sci.sourceModels,
   )) {
+    shadowIntercepted = true;
     const _sciOriginal = parsed.modelId;
     parsed.modelId = _sci.model;
     if (parsed._rawBody && typeof parsed._rawBody === "object") {
@@ -2593,6 +2602,28 @@ async function handleResponsesInner(
     parsed.modelId = route.modelId;
     if (parsed._rawBody && typeof parsed._rawBody === "object") {
       (parsed._rawBody as { model?: string }).model = route.modelId;
+    }
+  }
+
+  let v2RoutedDelegationBridge: V2RoutedDelegationBridgeContext | undefined;
+  if (
+    inboundWire === "responses"
+    && config.v2RoutedDelegationBridge === true
+    && config.multiAgentMode === "v2"
+    && isMultiAgentV2Enabled()
+    && isCanonicalOpenAiForwardProvider(route.provider)
+    && collabSurface(parsed) === "v2"
+    && !isThreadSpawnRequest(req.headers)
+    && !req.headers.has("x-openai-subagent")
+    && !options.comboAttempt
+    && parsed._compactionRequest !== true
+    && !shadowIntercepted
+  ) {
+    try {
+      v2RoutedDelegationBridge = injectV2RoutedDelegationBridge(parsed);
+      if (v2RoutedDelegationBridge) toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
+    } catch (error) {
+      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -3422,7 +3453,12 @@ async function handleResponsesInner(
       && (!parsed.previousResponseId || parsed._previousResponseInputExpanded === true);
     const rememberPassthroughResponse = passthroughRecordEligible
       ? (response: { id?: unknown; output?: unknown; status?: unknown }) =>
-        rememberResponseState(parsed._rawBody, response, undefined, responseStateOptions(true))
+        rememberResponseState(
+          v2RoutedDelegationBridge?.requestStateBody ?? parsed._rawBody,
+          response,
+          undefined,
+          responseStateOptions(true),
+        )
       : undefined;
     if (parsed.previousResponseId && !parsed._previousResponseInputExpanded) {
       console.warn(
@@ -4208,6 +4244,17 @@ async function handleResponsesInner(
           options.responsesTerminalRepairScheduler,
         )
         : upstreamResponse.body;
+      // The bridge owns request-scoped item-id admission. Apply it before the
+      // stream is split so the client, inspector, and continuation cache see
+      // the same authorized event history.
+      const bridgeSseRewrite = createV2RoutedDelegationSseRewrite(v2RoutedDelegationBridge);
+      const normalizedPassthroughSseBody = bridgeSseRewrite
+        ? relaySseWithBlockRewrite(
+          passthroughSseBody,
+          payloadRewriteAsBlockRewrite(bridgeSseRewrite),
+          translatorBudget,
+        )
+        : passthroughSseBody;
       const repairConfig = route.provider.responsesItemIdRepair;
       const snapshotRepairEnabled = hasResponsesSnapshotRepair(route.provider.responsesSnapshotRepair);
       const githubCopilotRepairEnabled = route.providerName === "github-copilot";
@@ -4269,7 +4316,7 @@ async function handleResponsesInner(
       const clientBlockRewrite = blockRewrites.length > 0
         ? composeSseBlockRewrites(...blockRewrites)
         : undefined;
-      const needsClientRewrite = clientBlockRewrite !== undefined;
+      const needsClientRewrite = bridgeSseRewrite !== undefined || clientBlockRewrite !== undefined;
       // #864: win32 rewrite traffic must never enter the tee()+JS-pull chain
       // (Bun#32111 JS-sink segfault — text frames pass, the terminal block is
       // lost). The eager single reader applies the same rewrites inline.
@@ -4318,7 +4365,7 @@ async function handleResponsesInner(
           onFirstOutput: options.onFirstOutput,
           pinCompletedResponseIdToFirstSeen: githubCopilotRepairEnabled,
         });
-        const eagerBody = relaySseEagerBounded(passthroughSseBody, turnAc, {
+        const eagerBody = relaySseEagerBounded(normalizedPassthroughSseBody, turnAc, {
           inspectChunk: chunk => inspector.feed(chunk),
           finishInspection: () => inspector.finish(),
           disposeInspection: () => inspector.dispose(),
@@ -4355,7 +4402,7 @@ async function handleResponsesInner(
           })),
         );
       }
-      const [nativeBody, inspectBody] = passthroughSseBody.tee();
+      const [nativeBody, inspectBody] = normalizedPassthroughSseBody.tee();
       const turnAc = new AbortController();
       const clientGone = new AbortController();
       linkAbortSignal(upstream, turnAc.signal);
@@ -4446,8 +4493,12 @@ async function handleResponsesInner(
           restoreImageGenCallsInJson(text, imageGenCallAliases),
           routedNamespaceToolAliases,
         );
-        const restored = restoreRoutedCustomCallsInJson(
+        const bridgeNormalized = rewriteV2RoutedDelegationCallsInJson(
           restoredNamespace,
+          v2RoutedDelegationBridge,
+        );
+        const restored = restoreRoutedCustomCallsInJson(
+          bridgeNormalized,
           routedCustomToolNames,
           routedCustomToolRepairNames,
           declaredWireToolNames,
@@ -4495,7 +4546,7 @@ async function handleResponsesInner(
       if (rememberPassthroughResponseChecked) {
         try {
           rememberPassthroughResponseChecked(
-            JSON.parse(text) as { id?: unknown; output?: unknown; status?: unknown },
+            JSON.parse(clientJson) as { id?: unknown; output?: unknown; status?: unknown },
           );
         } catch { /* non-JSON despite content-type; recording is best-effort */ }
       }
