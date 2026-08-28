@@ -9,6 +9,7 @@ import { usageDisplayTotalTokens } from "./totals";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
+import type { AgentKind } from "../server/effort-policy";
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
 export type CodexUsageAccountLogLabel = "main" | `p${string}`;
@@ -80,6 +81,8 @@ export interface PersistedUsageAttempt {
 }
 
 export interface PersistedUsageEntry {
+  /** Responses request origin; absent for unrelated traffic and old rows. */
+  agentKind?: AgentKind;
   requestedAlias?: string;
   requestId: string;
   timestamp: number;
@@ -163,6 +166,11 @@ const KNOWN_ADMISSION_KINDS = new Set<NonNullable<PersistedUsageEntry["admission
 const KNOWN_INBOUND_PROTOCOLS = new Set<NonNullable<PersistedUsageEntry["inboundProtocol"]>>([
   "responses", "chat", "messages",
 ]);
+const KNOWN_AGENT_KINDS = new Set<AgentKind>(["main", "subagent", "internal"]);
+
+export function isKnownAgentKind(value: unknown): value is AgentKind {
+  return typeof value === "string" && KNOWN_AGENT_KINDS.has(value as AgentKind);
+}
 
 /** Same closed-set discipline as `isKnownUsageSurface`: an old or corrupted row
  *  carrying an unexpected value drops the field instead of poisoning the enum. */
@@ -454,6 +462,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     timestamp: entry.timestamp,
     provider: entry.provider,
     model: entry.model,
+    ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(typeof entry.apiKeyId === "string" && entry.apiKeyId.trim()
       // Deliberately NOT capped. `capMetadataString` protects free-form metadata

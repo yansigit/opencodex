@@ -38,6 +38,22 @@ afterEach(() => {
 });
 
 describe("usage log", () => {
+  test("round-trips agentKind and drops invalid historical values", () => {
+    const base = {
+      requestId: "ocx-agent-kind",
+      timestamp: 1,
+      provider: "openai",
+      model: "gpt-test",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "reported" as const,
+    };
+    expect(normalizeUsageEntryForTest({ ...base, agentKind: "subagent" })).toMatchObject({ agentKind: "subagent" });
+    expect(normalizeUsageEntryForTest({ ...base, agentKind: "corrupt" } as unknown as PersistedUsageEntry)).not.toHaveProperty("agentKind");
+    appendUsageEntry({ ...base, agentKind: "internal" });
+    expect(readUsageEntries()[0]).toMatchObject({ agentKind: "internal" });
+  });
+
   test("preserves explicitly empty attempts through normalization", () => {
     const normalized = normalizeUsageEntryForTest({
       requestId: "ocx-empty-attempts",
