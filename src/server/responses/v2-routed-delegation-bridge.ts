@@ -161,11 +161,13 @@ export function createV2RoutedDelegationSseRewrite(
   active: V2RoutedDelegationBridgeContext | undefined,
 ): SsePayloadRewrite | undefined {
   if (!active || active.names.size === 0) return undefined;
-  const authorizedIds = new Set<string>();
+  const admittedIds = new Set<string>();
+  const openArgumentIds = new Set<string>();
   const bind = (itemId: unknown): boolean => {
     if (typeof itemId !== "string" || itemId.trim().length === 0) return false;
-    if (!authorizedIds.has(itemId) && authorizedIds.size >= MAX_SSE_BINDINGS) return false;
-    authorizedIds.add(itemId);
+    if (!admittedIds.has(itemId) && admittedIds.size >= MAX_SSE_BINDINGS) return false;
+    admittedIds.add(itemId);
+    openArgumentIds.add(itemId);
     return true;
   };
   return payload => {
@@ -176,15 +178,22 @@ export function createV2RoutedDelegationSseRewrite(
     const item = isRecord(event.item) ? event.item : undefined;
     const armed = !!item && item.type === "function_call" && item.namespace === MIRROR_NAMESPACE
       && typeof item.name === "string" && active.names.has(item.name);
-    const bound = armed && bind(item?.id);
+    const added = type === "response.output_item.added";
+    const itemDone = type === "response.output_item.done";
+    const bound = added && armed && bind(item?.id);
+    const admittedSnapshot = itemDone && armed && typeof item?.id === "string" && admittedIds.has(item.id);
     const argumentEvent = type === "response.function_call_arguments.delta" || type === "response.function_call_arguments.done";
-    const matchedArgument = argumentEvent && typeof event.item_id === "string" && authorizedIds.has(event.item_id);
+    const matchedArgument = argumentEvent && typeof event.item_id === "string" && openArgumentIds.has(event.item_id);
     const failedTerminal = type === "response.failed" || type === "response.incomplete";
-    const rewritten = armed && !bound
+    const rewritten = armed && (added || itemDone) && !bound && !admittedSnapshot
       ? { value: event, changed: false }
-      : failedTerminal ? { value: event, changed: false } : rewriteValue(event, active, authorizedIds);
-    if (type === "response.function_call_arguments.done" && matchedArgument) authorizedIds.delete(event.item_id as string);
-    if (type === "response.completed" || failedTerminal) authorizedIds.clear();
+      : failedTerminal ? { value: event, changed: false } : rewriteValue(event, active, admittedIds);
+    if (type === "response.function_call_arguments.done" && matchedArgument) openArgumentIds.delete(event.item_id as string);
+    if (itemDone && admittedSnapshot) openArgumentIds.delete(item!.id as string);
+    if (type === "response.completed" || failedTerminal) {
+      admittedIds.clear();
+      openArgumentIds.clear();
+    }
     if (matchedArgument) {
       const next = rewritten.changed && isRecord(rewritten.value) ? rewritten.value : { ...event };
       next.encrypted_function_args = [];

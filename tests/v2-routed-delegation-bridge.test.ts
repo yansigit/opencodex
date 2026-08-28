@@ -179,4 +179,27 @@ describe("V2 routed delegation bridge", () => {
     expect(rewrite(unknown)).toBe(unknown);
     expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_known", delta: "{}" }))).encrypted_function_args).toEqual([]);
   });
+
+  test("does not reauthorize arguments after a call closes", () => {
+    const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
+    const added = JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_closed" } });
+    rewrite(added);
+    rewrite(JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_closed", arguments: "{}" }));
+    rewrite(JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_closed" } }));
+
+    const late = JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_closed", delta: "late" });
+    expect(rewrite(late)).toBe(late);
+  });
+
+  test("keeps capped ids rejected after a slot frees", () => {
+    const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
+    const added = (id: string) => JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id } });
+    for (let index = 0; index < 128; index++) rewrite(added(`fc_${index}`));
+    const capped = added("fc_capped");
+    expect(rewrite(capped)).toBe(capped);
+    rewrite(JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_0", arguments: "{}" }));
+    const done = JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_capped" } });
+    expect(rewrite(done)).toBe(done);
+    expect(rewrite(JSON.stringify({ type: "response.completed", response: { output: [{ type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_capped" }] } }))).toContain('"namespace":"ocx_agents"');
+  });
 });
