@@ -682,6 +682,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     const disabled = new Set(config.disabledModels ?? []);
     const { listCatalogNativeSlugs } = await import("../../codex/catalog");
     const { CODEX_REASONING_LEVELS } = await import("../../reasoning-effort");
+    const { resolveNativeDefaultState } = await import("../../codex/subagent-defaults");
     const nativeModels = listCatalogNativeSlugs()
       .filter(slug => !disabled.has(slug))
       .map(slug => ({ provider: "openai", model: slug, namespaced: slug }));
@@ -696,6 +697,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       model: config.injectionModel ?? null,
       effort: config.injectionEffort ?? null,
       prompt: config.injectionPrompt ?? null,
+      nativeDefaultState: await resolveNativeDefaultState(config),
       efforts: CODEX_REASONING_LEVELS.map(l => l.effort),
       available: [...nativeModels, ...routedModels],
     });

@@ -1,3 +1,7 @@
+import { readFileSync, statSync } from "node:fs";
+import { CODEX_CONFIG_PATH } from "./paths";
+import { hasInjectedCodexRouting } from "./injected-marker";
+
 /**
  * Pure, ownership-aware edits for Codex's native `[agents]` defaults.
  *
@@ -17,6 +21,16 @@ export type ManagedSubagentDefaultKey =
 export interface ManagedSubagentDefaults {
   model: string;
   reasoningEffort?: string;
+}
+
+export type NativeDefaultState = "active" | "disabled" | "pending" | "blocked";
+
+export interface NativeDefaultStateDeps {
+  configPath?: string;
+  readConfig?: () => string;
+  collectCatalogState?: () => {
+    state: "fresh" | "stale" | "not_running" | "unknown";
+  } | Promise<{ state: "fresh" | "stale" | "not_running" | "unknown" }>;
 }
 
 export interface ManagedSubagentDefaultsConflict {
@@ -363,6 +377,105 @@ function analyzeToml(lines: readonly SourceLine[]): { shape: TomlShape } | { err
       definitions,
     },
   };
+}
+
+interface ManagedSubagentDefaultsInspection {
+  values: Partial<ManagedSubagentDefaults>;
+  owned: Record<ManagedSubagentDefaultKey, boolean>;
+}
+
+/** Read the effective native defaults without changing the TOML document. */
+function inspectManagedSubagentDefaults(content: string):
+  | { ok: true; inspection: ManagedSubagentDefaultsInspection }
+  | { ok: false; error: string } {
+  const analysis = analyzeToml(splitSourceLines(content));
+  if ("error" in analysis) return { ok: false, error: analysis.error };
+  let parsed: unknown;
+  try {
+    parsed = Bun.TOML.parse(content);
+  } catch {
+    return { ok: false, error: "Codex config is not valid TOML" };
+  }
+  const root = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+    ? parsed as Record<string, unknown>
+    : null;
+  const agents = root?.agents && typeof root.agents === "object" && !Array.isArray(root.agents)
+    ? root.agents as Record<string, unknown>
+    : {};
+  const values: Partial<ManagedSubagentDefaults> = {};
+  const owned = {} as Record<ManagedSubagentDefaultKey, boolean>;
+  for (const key of TARGET_KEYS) {
+    const definition = analysis.shape.definitions.get(key);
+    owned[key] = definition?.owned === true;
+    if (!definition) continue;
+    const value = agents[key];
+    if (typeof value !== "string") return { ok: false, error: `agents.${key} is not a string` };
+    if (key === "default_subagent_model") values.model = value;
+    else values.reasoningEffort = value;
+  }
+  return { ok: true, inspection: { values, owned } };
+}
+
+/**
+ * Resolve whether the configured preference is actually authoritative for omitted-model Codex
+ * subagents. This is intentionally read-only; sync/start remains the writer of native defaults.
+ */
+export async function resolveNativeDefaultState(
+  config: { syncCodexSubagentDefaults?: boolean; injectionModel?: string; injectionEffort?: string },
+  deps: NativeDefaultStateDeps = {},
+): Promise<NativeDefaultState> {
+  const model = config.injectionModel?.trim();
+  const enabled = config.syncCodexSubagentDefaults === true && Boolean(model);
+  if (!enabled) return "disabled";
+
+  const configPath = deps.configPath ?? CODEX_CONFIG_PATH;
+  let content: string;
+  try {
+    content = (deps.readConfig ?? (() => readFileSync(configPath, "utf8")))();
+  } catch (error) {
+    // A config that has not been created yet is waiting for the next sync; other read failures
+    // cannot be safely diagnosed as a missing desired value.
+    return (error as NodeJS.ErrnoException | undefined)?.code === "ENOENT" ? "pending" : "blocked";
+  }
+  const inspected = inspectManagedSubagentDefaults(content);
+  if (!inspected.ok) return "blocked";
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = Bun.TOML.parse(content) as Record<string, unknown>;
+  } catch {
+    return "blocked";
+  }
+  const provider = parsed.model_provider;
+  if (typeof provider === "string" && provider !== "openai" && provider !== "opencodex") return "blocked";
+  const baseUrl = parsed.openai_base_url;
+  if (typeof baseUrl === "string" && baseUrl.trim() && !hasInjectedCodexRouting(content)) return "blocked";
+
+  const { values, owned } = inspected.inspection;
+  for (const key of TARGET_KEYS) {
+    if (owned[key] === false && Object.hasOwn(values, key === "default_subagent_model" ? "model" : "reasoningEffort")) {
+      return "blocked";
+    }
+  }
+  if (values.model !== model) return "pending";
+  const effort = config.injectionEffort?.trim() || undefined;
+  if (values.reasoningEffort !== effort) return "pending";
+
+  let catalogState: { state: "fresh" | "stale" | "not_running" | "unknown" };
+  try {
+    catalogState = await (deps.collectCatalogState ?? (async () => {
+      const { collectCodexAppServerCatalogStateForRequest } = await import("./app-server-processes");
+      return collectCodexAppServerCatalogStateForRequest({
+        // The native defaults live in config.toml, so compare process starts with this write.
+        catalogMtimeMs: () => {
+          try { return statSync(configPath).mtimeMs; } catch { return null; }
+        },
+      });
+    }))();
+  } catch {
+    return "pending";
+  }
+  return catalogState.state === "fresh" || catalogState.state === "not_running" ? "active" : "pending";
 }
 
 function quotedTomlString(value: string): string {

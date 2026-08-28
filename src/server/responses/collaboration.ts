@@ -77,6 +77,7 @@ import { registerTurn, trackStreamLifetime, unregisterTurn } from "../lifecycle"
 import { redactSecretString } from "../../lib/redact";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { supportedLadderFor } from "../effort-policy";
+import { resolveNativeDefaultState, type NativeDefaultState } from "../../codex/subagent-defaults";
 import {
   beginRequestAttempt,
   catalogModelSupportsServiceTier,
@@ -216,6 +217,7 @@ export interface MultiAgentGuidanceOptions {
   subagentModelFallback?: string[];
   injectionPrompt?: string;
   subagentRoles?: OcxSubagentRole[];
+  nativeDefaultState?: NativeDefaultState;
 }
 
 
@@ -308,6 +310,7 @@ export async function multiAgentGuidanceText(
     subagentModelFallback,
     injectionPrompt,
     subagentRoles,
+    nativeDefaultState: configuredNativeDefaultState,
   } = options;
   const activeAccountNamespace = codexAccountNamespace?.length
     ? codexAccountNamespace
@@ -340,6 +343,8 @@ export async function multiAgentGuidanceText(
     if (catalogState.state === "stale" || catalogState.state === "unknown") {
       return null;
     }
+    const nativeDefaultState = configuredNativeDefaultState
+      ?? await resolveNativeDefaultState({ injectionModel, injectionEffort });
     // codex-rs supplies the Proactive text on v2; the proxy only adds model-designation
     // guidance, and only when there is something concrete to designate: a configured
     // injectionModel and/or a roster entry that resolves in the injected catalog.
@@ -432,6 +437,7 @@ export async function multiAgentGuidanceText(
     if (preferred) {
       preferredText = ` Preferred sub-agent: model "${preferred.model}"`
         + (injectionEffort ? `, reasoning_effort "${injectionEffort}"` : "")
+        + `; nativeDefaultState: ${nativeDefaultState}.`
         + " — use it unless the user names another.";
     }
     const specialist = (catalog: string): string =>
