@@ -59,11 +59,19 @@ gestionnaire de mots de passe.
 
 ### Liens directs vers une section
 
-Il n'existe qu'une seule mise en page, donc aucun commutateur de disposition n'est à configurer. Les sections
-du tableau de bord possèdent plutôt leur propre adresse : `#dashboard` ouvre **Vue d'ensemble**, tandis que
+Il n'existe qu'une seule mise en page adaptative, donc aucun commutateur de disposition n'est à configurer.
+Sur ordinateur, la barre latérale assure la navigation principale ; sur petit écran, **Open menu** affiche
+les mêmes liens de pages. Les sections du tableau de bord possèdent plutôt leur propre adresse : `#dashboard` ouvre **Vue d'ensemble**, tandis que
 `#dashboard/providers` et `#dashboard/models` ouvrent les deux autres sections. Le rechargement, les favoris
 et le bouton **Précédent** conservent la section affichée. **Journaux** fonctionne de la même manière avec
 `#logs` et `#logs/debug`. Un ancien favori `#providers/workspace` ouvre désormais `#providers`.
+
+La Vue d'ensemble comprend aussi le panneau **30-day activity**, avec les tendances des requêtes et des
+jetons sur 30 jours. Sélectionnez un jour sur l'un des sparklines pour lire ses totaux, ou choisissez
+**View usage** pour ouvrir la page Utilisation complète. Si une actualisation est interrompue après le
+chargement de la Vue d'ensemble, les dernières données valides restent visibles et un avis de reconnexion
+propose **Retry**. En cas d'échec de la connexion initiale, le tableau de bord affiche les indications
+`ocx start` et la même action de nouvelle tentative.
 
 Les coûts affichés dans **Journaux** et **Utilisation** sont des équivalents au tarif catalogue de l'API,
 calculés à partir des jetons signalés. Ils ne constituent ni des reçus de facturation ni la preuve d'une
