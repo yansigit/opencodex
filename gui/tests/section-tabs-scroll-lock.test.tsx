@@ -81,11 +81,11 @@ afterEach(() => {
   }
 });
 
-function sectionLink(container: HTMLElement, label: string): HTMLAnchorElement {
-  const found = Array.from(container.querySelectorAll("a.page-tab"))
-    .find(link => (link.textContent ?? "").includes(label));
-  if (!found) throw new Error(`section link not found: ${label}`);
-  return found as HTMLAnchorElement;
+function sectionControl(container: HTMLElement, label: string): HTMLButtonElement {
+  const found = Array.from(container.querySelectorAll("button.page-tab"))
+    .find(button => (button.textContent ?? "").includes(label));
+  if (!found) throw new Error(`section control not found: ${label}`);
+  return found as HTMLButtonElement;
 }
 
 test("clicking Coverage ignores intermediate scroll-spy updates until Coverage is visible", async () => {
@@ -113,26 +113,26 @@ test("clicking Coverage ignores intermediate scroll-spy updates until Coverage i
     );
   });
 
-  expect(sectionLink(container, "Overview").className).toContain("page-tab--active");
+  expect(sectionControl(container, "Overview").className).toContain("page-tab--active");
 
   await act(async () => {
-    sectionLink(container, "Coverage").click();
+    sectionControl(container, "Coverage").click();
   });
-  expect(sectionLink(container, "Coverage").className).toContain("page-tab--active");
+  expect(sectionControl(container, "Coverage").className).toContain("page-tab--active");
 
   // Smooth scroll passes Models/Providers; without a lock the spy would steal the highlight.
   await act(async () => {
     emitIntersecting(sectionAnchorId("usage", "models"));
     emitIntersecting(sectionAnchorId("usage", "providers"));
   });
-  expect(sectionLink(container, "Coverage").className).toContain("page-tab--active");
-  expect(sectionLink(container, "Models").className).not.toContain("page-tab--active");
-  expect(sectionLink(container, "Providers").className).not.toContain("page-tab--active");
+  expect(sectionControl(container, "Coverage").className).toContain("page-tab--active");
+  expect(sectionControl(container, "Models").className).not.toContain("page-tab--active");
+  expect(sectionControl(container, "Providers").className).not.toContain("page-tab--active");
 
   await act(async () => {
     emitIntersecting(sectionAnchorId("usage", "coverage"));
   });
-  expect(sectionLink(container, "Coverage").className).toContain("page-tab--active");
+  expect(sectionControl(container, "Coverage").className).toContain("page-tab--active");
 
   await act(async () => { root.unmount(); });
   container.remove();
@@ -155,13 +155,12 @@ test("renders labelled in-page navigation without tab semantics", async () => {
   const nav = container.querySelector("nav[aria-label='Usage sections']");
   expect(nav).toBeTruthy();
   expect(nav?.querySelectorAll("[role='tab'], [role='tabpanel']")).toHaveLength(0);
-  const links = [...(nav?.querySelectorAll<HTMLAnchorElement>("a") ?? [])];
-  expect(links.map(link => link.getAttribute("href"))).toEqual([
-    `#${sectionAnchorId("usage", "overview")}`,
-    `#${sectionAnchorId("usage", "models")}`,
-  ]);
-  expect(links[0]?.getAttribute("aria-current")).toBe("location");
-  expect(links[1]?.hasAttribute("aria-current")).toBe(false);
+  const controls = [...(nav?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
+  expect(controls.map(control => control.type)).toEqual(["button", "button"]);
+  expect(controls.map(control => control.textContent?.trim())).toEqual(["Overview", "Models"]);
+  expect(controls[0]?.getAttribute("aria-current")).toBe("location");
+  expect(controls[1]?.hasAttribute("aria-current")).toBe(false);
+  expect(nav?.querySelector("a")).toBeNull();
 
   await act(async () => { root.unmount(); });
   container.remove();

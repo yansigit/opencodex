@@ -40,6 +40,11 @@ function clearStaleViewKeys(): void {
   }
 }
 
+function navigateToPage(id: Page, subPath?: string): void {
+  const target = subPath ? `${id}/${subPath}` : id;
+  navigateHash(target);
+}
+
 /**
  * Production App route ownership. Hash page changes push history; normalization of an
  * unknown sub-hash replaces the current entry so Back is never trapped on a URL the
@@ -65,16 +70,6 @@ export function useAppRouteState() {
           animate: deliberate,
         });
   }, []);
-
-  /**
-   * Deliberate navigation. `subPath` deep-links a page sub-view (for example the
-   * sidebar's `dashboard/update` action link); `hashBelongsToPage` must accept it,
-   * otherwise the normalization effect below strips it right back off.
-   */
-  const navigateToPage = (id: Page, subPath?: string) => {
-    const target = subPath ? `${id}/${subPath}` : id;
-    navigateHash(target);
-  };
 
   useEffect(() => {
     const onRouteHash = () => {

@@ -115,19 +115,16 @@ export function SectionTabs({
       aria-label={ariaLabel}
     >
       {items.map(item => (
-        <a
+        <button
           key={item.id}
-          href={`#${sectionAnchorId(scope, item.id)}`}
+          type="button"
           aria-current={active === item.id ? "location" : undefined}
           className={`page-tab${active === item.id ? " page-tab--active" : ""}`}
-          onClick={event => {
-            event.preventDefault();
-            go(item.id);
-          }}
+          onClick={() => go(item.id)}
         >
           {item.label}
           {item.meta ? <span className="section-tab-meta">{item.meta}</span> : null}
-        </a>
+        </button>
       ))}
     </nav>
   );
