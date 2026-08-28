@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { MANAGED_SUBAGENT_DEFAULT_MARKER, resolveNativeDefaultState } from "../src/codex/subagent-defaults";
@@ -144,29 +144,29 @@ describe("native default authority", () => {
     expect(JSON.stringify(upstreamBody)).not.toContain("authority=disabled");
   });
 
-  test("native authority uses config.toml freshness even when catalog freshness would pass", async () => {
+  test("native authority uses a custom config path for freshness", async () => {
     const configDir = mkdtempSync(join(tmpdir(), "ocx-native-authority-"));
     const configPath = join(configDir, "config.toml");
     try {
       writeFileSync(configPath, managed(), "utf8");
-      // The app-server started before this config-only native-default write.
-      utimesSync(configPath, 2, 2);
-      const state = await resolveNativeDefaultState(config({
+      const current = config({
         injectionModel: "gpt-5.6-sol",
         injectionEffort: "high",
         syncCodexSubagentDefaults: true,
-      }), {
-        configPath,
-        processIo: {
-          listSnapshots: () => [{ pid: 42, commandLine: "/usr/local/bin/codex app-server" }],
-          readStartMs: () => 1,
-          // The direct collector target regression below covers target selection;
-          // this seam keeps the resolver test isolated from the user's config.
-          catalogMtimeMs: () => statSync(configPath).mtimeMs,
-          now: () => 3_000,
-        },
       });
-      expect(state).toBe("pending");
+      const processIo = {
+        listSnapshots: () => [{ pid: 42, commandLine: "/usr/local/bin/codex app-server" }],
+        readStartMs: () => 3_000,
+        now: () => 5_000,
+      };
+
+      // The app-server started after this config-only native-default write.
+      utimesSync(configPath, 2, 2);
+      expect(await resolveNativeDefaultState(current, { configPath, processIo })).toBe("active");
+
+      // The app-server started before this newer config write.
+      utimesSync(configPath, 4, 4);
+      expect(await resolveNativeDefaultState(current, { configPath, processIo })).toBe("pending");
     } finally {
       rmSync(configDir, { recursive: true, force: true });
     }
