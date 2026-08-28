@@ -325,9 +325,8 @@ jobs:
             );
             const {
               exactHeadBugbotEvidence,
-              hasExactHeadMaintainerWaiver,
-              requiredChecksDisposition,
-              requiredChecksSuccessful
+              generatedSyncBaselineDisposition,
+              hasExactHeadMaintainerWaiver
             } = require(
               path.join(
                 process.cwd(),
@@ -786,12 +785,12 @@ jobs:
                   // its previous result here would deadlock a draft after the
                   // first run fails only because CI/hygiene were incomplete;
                   // this run becomes the successful enforce-target result.
-                  const syncBaselineStatus = requiredChecksDisposition(
+                  const syncBaselineStatus = generatedSyncBaselineDisposition({
+                    syncGenerated,
                     checkRuns,
-                    pr.head.sha,
-                    ["ci", "hygiene"],
-                    15368
-                  );
+                    headSha: pr.head.sha,
+                    expectedAppId: 15368,
+                  });
                   syncBaselineReady = syncBaselineStatus === "success";
                   syncBaselineFailed = syncBaselineStatus === "failed";
                 }

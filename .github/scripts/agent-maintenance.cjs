@@ -144,6 +144,16 @@ function requiredChecksSuccessful(checkRuns, headSha, requiredNames, expectedApp
   return requiredChecksDisposition(checkRuns, headSha, requiredNames, expectedAppId) === "success";
 }
 
+function generatedSyncBaselineDisposition({
+  syncGenerated,
+  checkRuns = [],
+  headSha,
+  expectedAppId = 15368,
+}) {
+  if (!syncGenerated) return "not-applicable";
+  return requiredChecksDisposition(checkRuns, headSha, ["ci", "hygiene"], expectedAppId);
+}
+
 function maintenanceReadyEvidence({
   checkRuns = [],
   headSha,
@@ -481,6 +491,7 @@ module.exports = {
   createJulesClient,
   defaultAgentMaintenanceState,
   exactHeadBugbotEvidence,
+  generatedSyncBaselineDisposition,
   maintenanceReadyEvidence,
   autonomousMergeEvidence,
   findGithubSource,
