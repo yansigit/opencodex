@@ -113,7 +113,7 @@ function installFakeShellRuntime(options: {
       signals.push(signal);
       return options.onKill?.(rawChild as unknown as FakeChild, signal) ?? true;
     },
-    isProcessGroupAlive: () => false,
+    isProcessGroupAlive: () => "gone",
   });
   return { clock, children, signals, spawnCalls: () => spawnCalls };
 }
@@ -133,7 +133,7 @@ test("background shells are detached and terminate their POSIX process group", a
       if (signal === "SIGKILL") queueMicrotask(() => fake.children[0]!.emit("close", null, signal));
       return true;
     },
-    isProcessGroupAlive: () => true,
+    isProcessGroupAlive: () => "alive",
   } as never);
   spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
   const cleanup = terminateBackgroundShellsForSession("session-a");
@@ -170,7 +170,7 @@ test("POSIX group escalation continues after the shell wrapper closes", async ()
       if (signal === "SIGTERM") queueMicrotask(() => fake.children[0]!.emit("close", 0, signal));
       return true;
     },
-    isProcessGroupAlive: () => true,
+    isProcessGroupAlive: () => "alive",
   } as never);
   spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
   const cleanup = terminateBackgroundShellsForSession("session-a");
@@ -242,13 +242,38 @@ test("dead POSIX process group skips SIGKILL after graceful TERM", async () => {
       if (signal === "SIGTERM") queueMicrotask(() => fake.children[0]!.emit("close", 0, signal));
       return true;
     },
-    isProcessGroupAlive: () => false,
+    isProcessGroupAlive: () => "gone",
   } as never);
   spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
   const cleanup = terminateBackgroundShellsForSession("session-a");
   await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
   await cleanup;
   expect(groupSignals).toEqual(["SIGTERM"]);
+  expect(backgroundShellLifecycleMetrics().killFailures).toBe(0);
+});
+
+test("unknown POSIX process-group liveness conservatively escalates", async () => {
+  const fake = installFakeShellRuntime();
+  const groupSignals: Array<NodeJS.Signals | undefined> = [];
+  setBackgroundShellRuntimeForTests({
+    platform: "linux",
+    spawn: (() => {
+      const child = new FakeChild();
+      fake.children.push(child);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    }) as typeof import("node:child_process").spawn,
+    killProcessGroup: (_pid: number, signal?: NodeJS.Signals) => {
+      groupSignals.push(signal);
+      if (signal === "SIGKILL") queueMicrotask(() => fake.children[0]!.emit("close", null, signal));
+      return true;
+    },
+    isProcessGroupAlive: () => { throw Object.assign(new Error("probe denied"), { code: "EPERM" }); },
+  } as never);
+  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
+  const cleanup = terminateBackgroundShellsForSession("session-a");
+  await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
+  await cleanup;
+  expect(groupSignals).toEqual(["SIGTERM", "SIGKILL"]);
   expect(backgroundShellLifecycleMetrics().killFailures).toBe(0);
 });
 });

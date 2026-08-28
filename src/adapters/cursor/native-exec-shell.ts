@@ -35,6 +35,7 @@ export const CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS = 2_000;
 
 type BackgroundShellTerminationReason = "session_close" | "idle" | "absolute" | "shutdown";
 type BackgroundShellTimer = ReturnType<typeof setTimeout>;
+type ProcessGroupLiveness = "alive" | "gone" | "unknown";
 
 export interface BackgroundShellTerminationReport {
   attempted: number;
@@ -51,7 +52,7 @@ export interface BackgroundShellRuntime {
   clearTimer(timer: BackgroundShellTimer): void;
   kill(child: ChildProcessWithoutNullStreams, signal?: NodeJS.Signals): boolean;
   killProcessGroup(pid: number, signal?: NodeJS.Signals): boolean;
-  isProcessGroupAlive(pid: number): boolean;
+  isProcessGroupAlive(pid: number): ProcessGroupLiveness;
   killTree(child: ChildProcessWithoutNullStreams): boolean;
 }
 
@@ -84,9 +85,9 @@ const defaultBackgroundShellRuntime: BackgroundShellRuntime = {
   isProcessGroupAlive: pid => {
     try {
       process.kill(-pid, 0);
-      return true;
-    } catch {
-      return false;
+      return "alive";
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH" ? "gone" : "unknown";
     }
   },
   killTree: child => {
@@ -401,13 +402,13 @@ function tryKillBackgroundShellTree(entry: BackgroundShellEntry): boolean {
   }
 }
 
-function isBackgroundShellProcessGroupAlive(entry: BackgroundShellEntry): boolean {
+function isBackgroundShellProcessGroupAlive(entry: BackgroundShellEntry): ProcessGroupLiveness {
   const pid = entry.child.pid;
-  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return "unknown";
   try {
     return backgroundShellRuntime.isProcessGroupAlive(pid);
   } catch {
-    return false;
+    return "unknown";
   }
 }
 
@@ -452,7 +453,7 @@ async function terminateBackgroundShell(
     if (!closed && backgroundShells.get(entry.shellId) !== entry) closed = true;
     if (processGroupTerminationStarted) {
       await waitForBackgroundShellGrace();
-      if (isBackgroundShellProcessGroupAlive(entry) && !tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) {
+      if (isBackgroundShellProcessGroupAlive(entry) !== "gone" && !tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) {
         attemptKillFailures += 1;
       }
       closed = backgroundShells.get(entry.shellId) !== entry;
