@@ -164,8 +164,11 @@ test("Models uses native dialogs, restores triggers, and keeps row tooltips info
 
   const edit = row.querySelector<HTMLButtonElement>('button[aria-label="Edit Custom A"]')!;
   const remove = row.querySelector<HTMLButtonElement>('button[aria-label="Delete Custom A"]')!;
+  const rowActions = row.querySelector<HTMLElement>(".models-model-row-actions");
   expect(edit).toBeTruthy();
   expect(remove).toBeTruthy();
+  expect(rowActions).toBeTruthy();
+  expect([...rowActions!.querySelectorAll("button")]).toEqual([edit, remove]);
   await click(edit);
   let dialog = host.querySelector<HTMLDialogElement>('dialog[aria-labelledby="models-custom-dialog-title"]')!;
   expect(dialog?.open).toBe(true);

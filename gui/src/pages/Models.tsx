@@ -1439,7 +1439,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                      {sourceKey && <span className="models-chip muted mono text-caption">{t(sourceKey)}</span>}
                      {m.metadataStale && <span className="models-chip muted mono text-caption">{t("models.contextMetadataStale")}</span>}
                      {m.custom && m.customId && (
-                       <>
+                       <span className="models-model-row-actions">
                          <button
                            type="button"
                            className="btn btn-ghost btn-sm text-caption"
@@ -1474,7 +1474,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                              setHoveredModel(null);
                            }}
                          ><IconTrash width={13} height={13} aria-hidden="true" /></button>
-                       </>
+                       </span>
                      )}
                    </div>
                    {hoveredModel?.namespaced === m.namespaced && (() => {
