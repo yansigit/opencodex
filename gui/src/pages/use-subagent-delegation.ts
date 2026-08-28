@@ -43,6 +43,8 @@ export type AgentTaskRecoveryState = {
   model: string | null;
 };
 
+export type NativeDefaultState = "active" | "disabled" | "pending" | "blocked";
+
 type DelegationResponse = {
   multiAgentGuidanceEnabled?: boolean;
   syncCodexSubagentDefaults?: boolean;
@@ -51,6 +53,7 @@ type DelegationResponse = {
   prompt?: string | null;
   efforts?: string[];
   available?: DelegationModelOption[];
+  nativeDefaultState?: NativeDefaultState;
 };
 
 export function useSubagentDelegation(apiBase: string) {
@@ -63,11 +66,15 @@ export function useSubagentDelegation(apiBase: string) {
   const [guidanceEnabled, setGuidanceEnabled] = useState(true);
   const [syncCodexDefaults, setSyncCodexDefaults] = useState(false);
   const [prompt, setPrompt] = useState("");
+  const [nativeDefaultState, setNativeDefaultState] = useState<NativeDefaultState>("disabled");
 
   const apply = useCallback((data: DelegationResponse) => {
     const normalized = normalizeInjectionSelection(data);
     setGuidanceEnabled(normalized.multiAgentGuidanceEnabled);
     setSyncCodexDefaults(normalized.syncCodexSubagentDefaults);
+    setNativeDefaultState(data.nativeDefaultState === "active" || data.nativeDefaultState === "pending" || data.nativeDefaultState === "blocked"
+      ? data.nativeDefaultState
+      : "disabled");
     setModel(normalized.injectionModel);
     setEffort(normalized.injectionEffort);
     if ("prompt" in data) setPrompt(typeof data.prompt === "string" ? data.prompt : "");
@@ -75,14 +82,20 @@ export function useSubagentDelegation(apiBase: string) {
     if (Array.isArray(data.available)) setAvailable(data.available);
   }, []);
 
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/injection-model`);
+      apply(await requireJson<DelegationResponse>(res));
+    } catch { /* keep defaults; the panel still renders and can be retried by saving */ }
+  }, [apiBase, apply]);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const res = await fetch(`${apiBase}/api/injection-model`);
         const data = await requireJson<DelegationResponse>(res);
-        if (cancelled) return;
-        apply(data);
+        if (!cancelled) apply(data);
       } catch { /* keep defaults; the panel still renders and can be retried by saving */ }
       finally { if (!cancelled) setLoaded(true); }
     })();
@@ -116,6 +129,6 @@ export function useSubagentDelegation(apiBase: string) {
 
   return {
     loaded, saving, model, effort, efforts, available, prompt,
-    guidanceEnabled, syncCodexDefaults, save,
+    guidanceEnabled, syncCodexDefaults, nativeDefaultState, refresh, save,
   };
 }

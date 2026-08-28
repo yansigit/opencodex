@@ -18,6 +18,7 @@ let root: Root | null = null;
 let requests: { url: string; init?: RequestInit }[] = [];
 let available: string[] = [];
 let chosen: string[] = [];
+let injectionModel = "";
 
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map((k) => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
@@ -34,10 +35,19 @@ beforeEach(() => {
   requests = [];
   available = ["a-1", "a-2", "a-3", "a-4", "a-5", "a-6"];
   chosen = [];
+  injectionModel = "";
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (url: string, init?: RequestInit) => {
       requests.push({ url: String(url), init });
+      if (String(url).includes("/api/injection-model")) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ model: injectionModel, effort: "high", available: available.map(model => ({ provider: "openai", model, namespaced: model })) }),
+          json: async () => ({ model: injectionModel, effort: "high", available: available.map(model => ({ provider: "openai", model, namespaced: model })) }),
+        } as unknown as Response;
+      }
       const body = JSON.stringify({ available, chosen });
       return {
         ok: true,
@@ -76,15 +86,15 @@ async function mount() {
   await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
 }
 
-/** Rail add/remove toggles are labelled from sub.workspace.addToFeatured / removeFromFeatured. */
+/** Picker add/remove toggles use the advertised override labels. */
 function addToggle(id: string): HTMLButtonElement {
   const row = Array.from(container.querySelectorAll("button"))
-    .find((b) => (b.getAttribute("aria-label") ?? "").includes(`Add ${id} to featured`));
+    .find((b) => (b.getAttribute("aria-label") ?? "").includes(`Add ${id} to advertised overrides`));
   if (!row) throw new Error(`add toggle not found: ${id}`);
   return row as unknown as HTMLButtonElement;
 }
 
-/** Featured-list remove only (rail also has "Remove … from featured"). */
+/** Advertised-list remove only. */
 function removeButtons(): HTMLButtonElement[] {
   return Array.from(container.querySelectorAll(".swi-featured-actions button")).filter((b) =>
     /^Remove /.test(b.getAttribute("aria-label") ?? "")) as unknown as HTMLButtonElement[];
@@ -99,7 +109,7 @@ test("renders one featured list and one picker, never the same list twice", asyn
   expect(container.querySelector(".subagents-workspace-rail")).toBeNull();
   const featuredHeadings = Array.from(container.querySelectorAll(".swi-featured-title"))
     .map(node => node.textContent?.trim());
-  expect(featuredHeadings.filter(text => text === "Featured").length).toBe(1);
+  expect(featuredHeadings.filter(text => text === "Advertised overrides").length).toBe(1);
 });
 
 test("caps featured selections at five", async () => {
@@ -147,4 +157,18 @@ test("saves the featured order with PUT and the models payload", async () => {
   expect(put).toBeDefined();
   expect(put!.url).toContain("/api/subagent-models");
   expect(put!.init?.body).toBe(JSON.stringify({ models: ["a-1", "a-2"] }));
+});
+
+test("marks the preferred model and lets Prefer update it without changing roster order", async () => {
+  injectionModel = "a-2";
+  await mount();
+  await act(async () => { addToggle("a-1").click(); });
+  expect(container.textContent).toContain("Preferred");
+  const prefer = [...container.querySelectorAll("button")]
+    .find(button => button.textContent?.trim() === "Prefer");
+  expect(prefer).toBeTruthy();
+  await act(async () => { prefer!.click(); });
+  const patch = requests.find(row => row.init?.method === "PUT" && String(row.url).includes("/api/injection-model"));
+  expect(JSON.parse(String(patch!.init!.body))).toEqual({ model: "a-1", effort: "high" });
+  expect(removeButtons().map(button => button.getAttribute("aria-label"))).toEqual(["Remove a-1"]);
 });

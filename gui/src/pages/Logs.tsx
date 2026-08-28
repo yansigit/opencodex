@@ -18,6 +18,8 @@ import {
   extractLogFilterOptions,
   filterLogs,
   hasActiveFilters,
+  normalizedAgentKind,
+  type PersistedAgentKind,
   type LogFilterState,
 } from "./logs-filter";
 
@@ -140,6 +142,7 @@ export interface LogEntry {
   timestamp: number;
   model: string;
   provider: string;
+  agentKind?: PersistedAgentKind | string;
   surface?: LogSurface;
   conversationId?: string;
   /**
@@ -179,6 +182,20 @@ export interface LogEntry {
     selected?: { provider?: string; model?: string; reason?: string };
     candidates?: Array<{ provider?: string; model?: string; eligible?: boolean; exclusions?: Array<{ code?: string }> }>;
   };
+}
+
+function agentKindLabelKey(kind: LogEntry["agentKind"]): "logs.agent.main" | "logs.agent.subagent" | "logs.agent.internal" | "logs.agent.unknown" {
+  const keys = {
+    main: "logs.agent.main",
+    subagent: "logs.agent.subagent",
+    internal: "logs.agent.internal",
+    unknown: "logs.agent.unknown",
+  } as const;
+  return keys[normalizedAgentKind(kind)];
+}
+
+function AgentKindBadge({ kind, t }: { kind: LogEntry["agentKind"]; t: TFn }) {
+  return <span className="badge badge-muted" title={t("logs.agent.badgeTitle")}>{t(agentKindLabelKey(kind))}</span>;
 }
 
 function validCachedLogs(cached: LogEntry[] | null): LogEntry[] | null {
@@ -711,8 +728,9 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                     {formatEstimatedUsd(log.displayMetrics?.cost, t, localeTag)}
                   </td>
                  <td className="mono log-col-model" title={modelTitle(log, t)}>
-                  <span className="logs-model-cell">
+                   <span className="logs-model-cell">
                    <span>{modelLabel(log.resolvedModel ?? log.model)}</span>
+                      <AgentKindBadge kind={log.agentKind} t={t} />
                       {log.shadowCallRewrittenFrom && (
                         <span
                           className="badge badge-muted"
@@ -875,6 +893,7 @@ function LogDetailDialog({
             )}
             <span className="muted">{t("logs.col.model")}</span><span className="mono">{modelLabel(detail.resolvedModel ?? detail.model)}</span>
             <span className="muted">{t("logs.col.provider")}</span><span>{formatProviderDisplayName(detail.provider, t)}</span>
+            <span className="muted">{t("logs.filter.agent.label")}</span><AgentKindBadge kind={detail.agentKind} t={t} />
             {(detail.requestedEffort || detail.effectiveEffort) && (
               <><span className="muted">{t("logs.col.effort")}</span><span className="mono">{effortLabel(detail)}{reasoningWire ? ` (${reasoningWire})` : ""}</span></>
             )}
