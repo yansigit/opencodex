@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, statSync } from "node:f
 import { dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, type AtomicWriteAsyncTestSeam } from "../config";
 import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
+import { ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL } from "./google-antigravity-wire";
 
 /**
  * Google-family thoughtSignature reasoning-replay cache.
@@ -481,14 +482,12 @@ export function antigravityReplaySessionKeysForTests(): string[] {
   return [...replayCache.keys()];
 }
 
-const THOUGHT_SIGNATURE_BYPASS = "skip_thought_signature_validator";
-
 function extractSignature(part: Record<string, unknown>): string | undefined {
   const direct = part.thoughtSignature ?? part.thought_signature;
-  if (typeof direct === "string" && direct.length >= MIN_SIGNATURE_LEN && direct !== THOUGHT_SIGNATURE_BYPASS) return direct;
+  if (typeof direct === "string" && direct.length >= MIN_SIGNATURE_LEN && direct !== ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL) return direct;
   const extra = part.extra_content as { google?: { thought_signature?: unknown } } | undefined;
   const nested = extra?.google?.thought_signature;
-  if (typeof nested === "string" && nested.length >= MIN_SIGNATURE_LEN && nested !== THOUGHT_SIGNATURE_BYPASS) return nested;
+  if (typeof nested === "string" && nested.length >= MIN_SIGNATURE_LEN && nested !== ANTIGRAVITY_SIGNATURE_BYPASS_SENTINEL) return nested;
   return undefined;
 }
 

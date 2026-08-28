@@ -874,6 +874,28 @@ describe("oversized Codex create frames", () => {
     expect(FakeWebSocket.instances).toHaveLength(0);
   });
 
+  test("never lets provider or environment ceilings exceed the backend hard limit", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: {} }) });
+    });
+    const oversized = streamingInit({ padding: "x".repeat(CODEX_WS_CREATE_FRAME_LIMIT_BYTES) });
+    const sentinel = new Response("sse-fallback");
+    const fallback = (async () => sentinel) as unknown as typeof fetch;
+
+    expect(await codexWsUpstreamFetch(
+      CODEX_URL,
+      oversized,
+      fallback,
+      { maxWsFrameBytes: MAX_CODEX_WS_CREATE_FRAME_BYTES + 1 },
+    )).toBe(sentinel);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    process.env.OCX_CODEX_WS_MAX_FRAME_BYTES = String(MAX_CODEX_WS_CREATE_FRAME_BYTES + 1);
+    expect(await codexWsUpstreamFetch(CODEX_URL, oversized, fallback)).toBe(sentinel);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
   test("providerFetch respects maxWsFrameBytes config and routes oversized frames to HTTP SSE", async () => {
     const seen: RequestInit[] = [];
     const provider = {

@@ -69,12 +69,12 @@ export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boo
 
 export function resolveCodexWsMaxFrameBytes(options?: CodexWsUpstreamOptions): number {
   if (typeof options?.maxWsFrameBytes === "number" && Number.isFinite(options.maxWsFrameBytes) && options.maxWsFrameBytes > 0) {
-    return options.maxWsFrameBytes;
+    return Math.min(options.maxWsFrameBytes, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
   }
   const envVal = process.env.OCX_CODEX_WS_MAX_FRAME_BYTES;
   if (envVal) {
     const parsed = Number.parseInt(envVal, 10);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    if (Number.isFinite(parsed) && parsed > 0) return Math.min(parsed, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
   }
   return CODEX_WS_CREATE_FRAME_LIMIT_BYTES;
 }

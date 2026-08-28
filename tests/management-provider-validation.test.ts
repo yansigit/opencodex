@@ -3863,6 +3863,101 @@ describe("provider upstreamHttpVersion management contract (#1668)", () => {
     });
   });
 
+  test("provider PATCH persists, exposes, validates, and clears Codex WebSocket controls", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig = makeConfig();
+    saveConfig(liveConfig);
+    await withRequest(liveConfig, async (request) => {
+      const invalidType = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: "true" }),
+      });
+      expect(invalidType?.status).toBe(400);
+
+      const invalidLimit = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ maxWsFrameBytes: -1 }),
+      });
+      expect(invalidLimit?.status).toBe(400);
+
+      const set = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: true, maxWsFrameBytes: 1234 }),
+      });
+      expect(set?.status).toBe(200);
+      expect(liveConfig.providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+      expect(loadConfig().providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+      const list = await request("/api/providers");
+      expect(await list?.json()).toContainEqual(expect.objectContaining({
+        name: "nvidia",
+        wsUpstream: true,
+        maxWsFrameBytes: 1234,
+      }));
+      const dto = safeConfigDTO(liveConfig) as { providers: Record<string, Record<string, unknown>> };
+      expect(dto.providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+
+      const clear = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: null, maxWsFrameBytes: null }),
+      });
+      expect(clear?.status).toBe(200);
+      expect(liveConfig.providers.nvidia.wsUpstream).toBeUndefined();
+      expect(liveConfig.providers.nvidia.maxWsFrameBytes).toBeUndefined();
+      expect(loadConfig().providers.nvidia.wsUpstream).toBeUndefined();
+      expect(loadConfig().providers.nvidia.maxWsFrameBytes).toBeUndefined();
+    });
+  });
+
+  test("canonical OpenAI management writes preserve valid Codex WebSocket controls", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig: OcxConfig = {
+      ...makeConfig(),
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: { openai: { ...canonicalDirect } },
+    };
+    saveConfig(liveConfig);
+    await withRequest(liveConfig, async (request) => {
+      const set = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: true, maxWsFrameBytes: 1234 }),
+      });
+      expect(set?.status).toBe(200);
+      expect(liveConfig.providers.openai).toMatchObject({
+        ...canonicalDirect,
+        wsUpstream: true,
+        maxWsFrameBytes: 1234,
+      });
+      expect(loadConfig().providers.openai).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+
+      const clear = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: null, maxWsFrameBytes: null }),
+      });
+      expect(clear?.status).toBe(200);
+      expect(liveConfig.providers.openai.wsUpstream).toBeUndefined();
+      expect(liveConfig.providers.openai.maxWsFrameBytes).toBeUndefined();
+
+      const forged = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: "true" }),
+      });
+      expect(forged?.status).toBe(400);
+      expect(await forged?.json()).toMatchObject({ error: expect.stringContaining("wsUpstream") });
+    });
+  });
+
   test("safeConfigDTO exposes upstreamHttpVersion without leaking it into the live row", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
