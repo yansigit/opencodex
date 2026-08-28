@@ -51,7 +51,8 @@ describe("enforce-pr-target workflow", () => {
   it("treats generated sync PRs as checklist-free but still requires exact-head baseline evidence", () => {
     assert.match(workflow, /syncGenerated/);
     assert.match(workflow, /sync.*upstream-/);
-    assert.match(workflow, /requiredChecksSuccessful/);
+    assert.match(workflow, /generatedSyncBaselineDisposition/);
+    assert.doesNotMatch(workflow, /requiredChecksSuccessful/);
     assert.match(workflow, /syncBaselineReady/);
     assert.match(workflow, /syncGenerated && syncBaselineReady/);
   });
