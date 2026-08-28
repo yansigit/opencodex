@@ -359,6 +359,13 @@ function waitForBackgroundShellClose(entry: BackgroundShellEntry): Promise<boole
   });
 }
 
+function waitForBackgroundShellGrace(): Promise<void> {
+  return new Promise(resolveWait => {
+    const timer = backgroundShellRuntime.setTimer(resolveWait, CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
+    void timer;
+  });
+}
+
 function tryKillBackgroundShell(entry: BackgroundShellEntry, signal?: NodeJS.Signals): boolean {
   try {
     return backgroundShellRuntime.kill(entry.child, signal);
@@ -368,9 +375,10 @@ function tryKillBackgroundShell(entry: BackgroundShellEntry, signal?: NodeJS.Sig
 }
 
 function tryKillBackgroundShellProcessGroup(entry: BackgroundShellEntry, signal?: NodeJS.Signals): boolean {
-  if (typeof entry.child.pid !== "number") return false;
+  const pid = entry.child.pid;
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
-    return backgroundShellRuntime.killProcessGroup(entry.child.pid, signal);
+    return backgroundShellRuntime.killProcessGroup(pid, signal);
   } catch {
     return false;
   }
@@ -402,15 +410,29 @@ async function terminateBackgroundShell(
 
     let attemptKillFailures = 0;
     let treeTerminationStarted = false;
+    let processGroupTerminationStarted = false;
+    let treeTerminationFailed = false;
     if (backgroundShellRuntime.platform === "win32") {
       treeTerminationStarted = tryKillBackgroundShellTree(entry);
-      if (!treeTerminationStarted && !tryKillBackgroundShell(entry)) attemptKillFailures += 1;
-    } else if (!tryKillBackgroundShellProcessGroup(entry, "SIGTERM")) {
+      if (!treeTerminationStarted) {
+        treeTerminationFailed = true;
+        attemptKillFailures += 1;
+        if (!tryKillBackgroundShell(entry)) attemptKillFailures += 1;
+      }
+    } else if (tryKillBackgroundShellProcessGroup(entry, "SIGTERM")) {
+      processGroupTerminationStarted = true;
+    } else {
+      attemptKillFailures += 1;
       if (!tryKillBackgroundShell(entry)) attemptKillFailures += 1;
     }
-    let closed = await waitForBackgroundShellClose(entry);
+    let closed = processGroupTerminationStarted ? false : await waitForBackgroundShellClose(entry);
     if (!closed && backgroundShells.get(entry.shellId) !== entry) closed = true;
-    if (!closed && !treeTerminationStarted) {
+    if (processGroupTerminationStarted) {
+      await waitForBackgroundShellGrace();
+      if (!tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) attemptKillFailures += 1;
+      closed = backgroundShells.get(entry.shellId) !== entry;
+    }
+    if ((!closed || treeTerminationFailed) && !treeTerminationStarted && !processGroupTerminationStarted) {
       if (backgroundShellRuntime.platform === "win32") {
         if (!tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
       } else if (!tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) {

@@ -117,6 +117,7 @@ function installFakeShellRuntime(options: {
   return { clock, children, signals, spawnCalls: () => spawnCalls };
 }
 
+describe("process-tree lifecycle regressions", () => {
 test("background shells are detached and terminate their POSIX process group", async () => {
   const fake = installFakeShellRuntime();
   const spawnOptions: unknown[] = [];
@@ -151,6 +152,51 @@ test("Windows termination uses one whole-tree operation instead of the shell wra
   await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ attempted: 1, closed: 1 });
   expect(treeKills).toBe(1);
   expect(fake.signals).toEqual([]);
+});
+
+test("POSIX group escalation continues after the shell wrapper closes", async () => {
+  const fake = installFakeShellRuntime();
+  setBackgroundShellRuntimeForTests({
+    platform: "linux",
+    spawn: (() => {
+      const child = new FakeChild();
+      fake.children.push(child);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    }) as typeof import("node:child_process").spawn,
+    killProcessGroup: (_pid: number, signal?: NodeJS.Signals) => {
+      fake.signals.push(signal);
+      if (signal === "SIGTERM") queueMicrotask(() => fake.children[0]!.emit("close", 0, signal));
+      return true;
+    },
+  } as never);
+  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
+  const cleanup = terminateBackgroundShellsForSession("session-a");
+  await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
+  await cleanup;
+  expect(fake.signals).toEqual(["SIGTERM", "SIGKILL"]);
+});
+
+test("failed POSIX group termination counts even when direct-child fallback closes", async () => {
+  const fake = installFakeShellRuntime({
+    onKill(child, signal) { queueMicrotask(() => child.emit("close", 0, signal)); return true; },
+  });
+  setBackgroundShellRuntimeForTests({
+    platform: "linux",
+    spawn: (() => {
+      const child = new FakeChild();
+      fake.children.push(child);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    }) as typeof import("node:child_process").spawn,
+    killProcessGroup: () => false,
+    kill: child => {
+      fake.signals.push(undefined);
+      queueMicrotask(() => (child as unknown as FakeChild).emit("close", 0, null));
+      return true;
+    },
+  } as never);
+  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
+  await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ killFailures: 1, closed: 1 });
+});
 });
 
 function spawnSuccess(bytes: Uint8Array): number {
@@ -343,7 +389,7 @@ describe("Cursor background shell lifecycle", () => {
     spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
     const cleanup = terminateBackgroundShellsForSession("session-a");
     await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS * 2);
-    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 2 });
+    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 3 });
     expect(backgroundShellAdmissionMetrics().active).toBe(1);
     fake.children[0]!.emit("close", 0, null);
   });
@@ -353,7 +399,7 @@ describe("Cursor background shell lifecycle", () => {
     spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
     const cleanup = terminateBackgroundShellsForSession("session-a");
     await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS * 2);
-    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 0 });
+    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 1 });
     expect(backgroundShellLifecycleMetrics().unresolvedKills).toBe(1);
     expect(backgroundShellAdmissionMetrics().active).toBe(1);
     fake.children[0]!.emit("close", 0, null);
