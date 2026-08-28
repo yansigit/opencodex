@@ -71,6 +71,72 @@ changed domain. Open or update a draft PR on the fork from
 `MERGEABLE`. The human creates the **merge commit** / **Merge pull request**.
 Never squash or rebase these sync PRs.
 
+### Long-running sync operator discipline
+
+Before changing a branch, write down the completion contract and keep one
+state ledger in the sync issue or PR's existing sticky progress comment so it
+is shared across devices and sessions. Update it only when state changes; do
+not reconstruct it from chat history or branch names. Never put secrets,
+webhook payloads, tokens, account identifiers, or other private data there.
+
+| Field | Required value |
+|---|---|
+| Upstream release | Tag and immutable commit SHA |
+| Vendor pin | Current `vendor/main` SHA |
+| Integration | Current `origin/dev` SHA |
+| Sync work | PR number, branch, and exact head SHA |
+| Verification | Exact-head workflow run IDs and conclusions |
+| Blocker | One observed failure with its owning job or agent |
+| Next action | One action, one owner, and the evidence it should produce |
+
+For each new PR head, discard evidence from the previous SHA. Diagnose a
+failure in this order:
+
+1. Read the failing job log for the exact head SHA.
+2. Reproduce the smallest relevant check locally.
+3. Search local git history and related GitHub issues, pull requests, and code
+   before inventing a fix.
+4. Compare the resulting tree, not only ancestry, with any known-good fix.
+   `git merge-base --is-ancestor` proves that a commit is an ancestor; it does
+   not prove that a later conflict resolution preserved the commit's change.
+5. Add or strengthen a regression test that fails on the broken behavior.
+6. Run focused verification, then the full required suite for shared runtime,
+   routing, configuration, server, or workflow changes.
+7. Push once, record the new SHA, and wait for all exact-head gates before
+   merging. Verify the post-merge branch separately.
+
+Do not collapse these states:
+
+- A successful sync workflow may have stopped at hotspot handoff or used a
+  fallback coordinator; it does not prove that upstream reached `dev`.
+- A completed Cursor or Jules session does not prove that its PR is mergeable
+  or that required checks passed.
+- A fix commit in ancestry does not prove that the fix remains in the final
+  tree.
+- A failure also seen on the base branch is not automatically a flake. Require
+  a reproduced transient signature or an already-documented retry policy.
+
+Never merge while a required exact-head check is red or pending. An emergency
+override requires an explicit maintainer decision after the unresolved risk is
+stated; do not infer permission from a general request to merge.
+
+Check the workflow trust boundary before expecting a workflow edit to take
+effect. Scheduled and `pull_request_target` automation loads trusted code from
+the default branch, so a fix present only on `dev` may require a reviewed
+promotion before it can repair the event path that exposed it.
+
+Use one controller for GitHub mutations and the state ledger. Delegate only
+independent investigations or isolated worktree changes, and serialize the
+shared hotspots listed in [`OWNED.md`](./OWNED.md). Prefer a bounded workflow
+watch or notification over repeated polling; report state changes rather than
+unchanged checks.
+
+A sync is complete only when the pinned upstream SHA is an ancestor of
+`origin/dev`, the sync PR is merged, required exact-head and post-merge checks
+are green, and no task-owned PR remains open. If release or promotion was also
+requested, completion additionally requires the reviewed `dev` promotion on
+`main` and verification of the requested tag, release, and package artifacts.
+
 If a disconnected rebuild is ever required for `history-diverged`, keep it as
 the emergency/catch-up recipe only. After the rebuild is reviewed, check out
 `run/dev` first and
