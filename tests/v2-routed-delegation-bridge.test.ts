@@ -76,6 +76,27 @@ describe("V2 routed delegation bridge", () => {
     expect(() => injectV2RoutedDelegationBridge(request)).toThrow("v2 routed delegation bridge namespace collision");
   });
 
+  test("accepts a key-reordered injected mirror as idempotent", () => {
+    const body = { tools: [{ type: "namespace", name: "collaboration", tools: [spawn] }] };
+    const request = parsed(body);
+    injectV2RoutedDelegationBridge(request);
+    const mirror = body.tools[1] as { tools: Array<Record<string, unknown>> };
+    mirror.tools[0] = Object.fromEntries(Object.entries(mirror.tools[0]!).reverse());
+
+    expect(() => injectV2RoutedDelegationBridge(request)).not.toThrow();
+  });
+
+  test("leaves a collaboration group with no mirrorable function inactive", () => {
+    const body = { tools: [{ type: "namespace", name: "collaboration", tools: [{ type: "function", name: "wait_agent", parameters: {} }] }] };
+    const request = parsed(body);
+    const before = structuredClone(body);
+    const tools = structuredClone(request.context.tools);
+
+    expect(injectV2RoutedDelegationBridge(request)).toBeUndefined();
+    expect(body).toEqual(before);
+    expect(request.context.tools).toEqual(tools);
+  });
+
   test("normalizes only armed mirror calls in JSON", () => {
     const active = { names: new Set(["spawn_agent"]) };
     const input = JSON.stringify({ output: [
@@ -93,14 +114,34 @@ describe("V2 routed delegation bridge", () => {
     ] });
   });
 
+  test("preserves owned __proto__ data while normalizing untrusted JSON", () => {
+    const input = '{"__proto__":{"polluted":true},"type":"function_call","namespace":"ocx_agents","name":"spawn_agent"}';
+    const output = JSON.parse(rewriteV2RoutedDelegationCallsInJson(input, { names: new Set(["spawn_agent"]) }));
+
+    expect(Object.hasOwn(output, "__proto__")).toBe(true);
+    expect(output.__proto__).toEqual({ polluted: true });
+    expect(Object.getPrototypeOf(output)).toBe(Object.prototype);
+  });
+
   test("normalizes SSE item snapshots and only matching interleaved argument events", () => {
     const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
     const added = JSON.stringify({ type: "response.output_item.added", output_index: 3, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_1", call_id: "call_1", arguments: "", status: "in_progress" } });
     const unrelated = JSON.stringify({ type: "response.output_item.added", output_index: 4, item: { type: "function_call", namespace: "ocx_agents", name: "list_agents", id: "fc_2", call_id: "call_2", arguments: "" } });
 
     expect(JSON.parse(rewrite(added))).toMatchObject({ item: { namespace: "collaboration", name: "spawn_agent", encrypted_function_args: [] } });
+    expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "native_fc", output_index: 3, delta: "{" })))).not.toHaveProperty("encrypted_function_args");
     expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_2", output_index: 4, delta: "{" })))).not.toHaveProperty("encrypted_function_args");
     expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_1", output_index: 3, arguments: "{}" })))).toMatchObject({ encrypted_function_args: [] });
+    expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_1", output_index: 3, delta: "late" })))).not.toHaveProperty("encrypted_function_args");
     expect(JSON.parse(rewrite(unrelated))).toMatchObject({ item: { namespace: "ocx_agents", name: "list_agents" } });
+  });
+
+  test("caps retained SSE mirror bindings", () => {
+    const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
+    for (let index = 0; index < 129; index++) {
+      rewrite(JSON.stringify({ type: "response.output_item.added", output_index: index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: `fc_${index}` } }));
+    }
+
+    expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_128", output_index: 128, delta: "{}" }))).encrypted_function_args).toBeUndefined();
   });
 });
