@@ -19,6 +19,7 @@ import {
   CodexWriteConflictError,
   DEFAULT_INJECT_LOCK_TIMEOUT_MS,
   recomputeInjectWitness,
+  recordCodexNativeTransactionProvenance,
   restoreCodexPreImages,
 } from "./inject-coordination";
 import { readIntegrationRecord } from "./integration-record";
@@ -966,6 +967,7 @@ export async function injectCodexConfig(
     const coordinated = await withCodexWriteLock(
       {
         timeoutMs: options.lockTimeoutMs ?? DEFAULT_INJECT_LOCK_TIMEOUT_MS,
+        ...(eligibility.kind === "adopt" ? { adoption: { direction: "apply" as const } } : {}),
         admitted: { authoritySnapshotId: witness.comparisonId },
         readAdmissionUnderLock: () => ({
           authoritySnapshotId: recomputeInjectWitness({
@@ -1032,6 +1034,7 @@ export async function injectCodexConfig(
         }
         return {
           kind: "applied" as const,
+          preImages,
           /*
            * The receipt the terminal update matches on. The transition commits
            * when the callback returns, so this pair is what the post-job
@@ -1049,6 +1052,10 @@ export async function injectCodexConfig(
     if (coordinated.status !== "acquired") {
       return codexInjectLockOutcome(coordinated);
     }
+    recordCodexNativeTransactionProvenance(
+      coordinated.value.preImages,
+      coordinated.value.receipt.currentTxId,
+    );
     transitionReceipt = coordinated.value.receipt;
   }
   // Legacy mode still forward-tags history so re-tagged threads stay listable. Design B needs
@@ -1560,13 +1567,14 @@ export async function restoreNativeCodexAsync(
   let config: CodexRestoreConfigResult;
   let transitionReceipt: { nativeGeneration: number; currentTxId: string } | undefined;
 
-  if (eligibility.kind === "coordinated") {
+  if (eligibility.kind === "coordinated" || eligibility.kind === "adopt") {
     // The restore has no candidate bytes to witness; freshness comes from the
     // filesystem reads and the desired-state re-read performed under the lock.
     const witness = { authoritySnapshotId: "codex-native-restore" };
     const coordinated = await withCodexWriteLock(
       {
         timeoutMs: DEFAULT_INJECT_LOCK_TIMEOUT_MS,
+        ...(eligibility.kind === "adopt" ? { adoption: { direction: "remove" as const } } : {}),
         admitted: witness,
         readAdmissionUnderLock: () => witness,
       },
@@ -1602,6 +1610,7 @@ export async function restoreNativeCodexAsync(
         }
         return {
           config: restored,
+          preImages,
           receipt: {
             nativeGeneration: ctx.expectation.nativeAfter,
             currentTxId: ctx.expectation.txId,
@@ -1620,6 +1629,10 @@ export async function restoreNativeCodexAsync(
           : `Codex configuration was not restored: ${coordinated.message}`,
       };
     } else {
+      recordCodexNativeTransactionProvenance(
+        coordinated.value.preImages,
+        coordinated.value.receipt.currentTxId,
+      );
       config = coordinated.value.config;
       transitionReceipt = coordinated.value.receipt;
     }

@@ -89,17 +89,17 @@ export type RoutingCommentaryDecision =
   | { kind: "flush" }
   | { kind: "hallucination" };
 
-const ROUTING_NATIVE_TOOL_NAME = /\b(shell|read|grep|list|bash|filesystem)\b/giu;
+const ROUTING_NATIVE_TOOL_NAME = /\b(shell|read|grep|list|bash)\b/giu;
 const ROUTING_TOOL_HINT =
-  /(?:\b(?:shell|read|grep|list|bash|filesystem)\b|exec_command|shell_command|브리지|네이티브\s*(?:셸|쉘))/iu;
-const ROUTING_FAILURE_OR_BRIDGE_CLAIM =
-  /(?:blocked|unavailable|interrupted|bridged|bridge|차단|중단|막혀)/iu;
+  /(?:\b(?:shell|read|grep|list|bash)\b|exec_command|shell_command|브리지|네이티브\s*(?:셸|쉘))/iu;
+const ROUTING_FAILURE_CLAIM =
+  /(?:blocked|unavailable|interrupted|차단|중단|막혀)/iu;
 const ROUTING_REDIRECT_CLAIM =
-  /(?:exec_command|shell_command|\bexec\b|브리지|bridged|bridge|redirected|fallback|switch(?:ed|ing)?|host shell|전환|우회|통과(?:되|하)|다른\s*(?:도구|경로)|경로로)/iu;
+  /(?:exec_command|shell_command|\bexec\b|브리지|redirected|fallback|switch(?:ed|ing)?|전환|우회|통과(?:되|하)|다른\s*(?:도구|경로)|경로로)/iu;
 
 /**
  * Quarantines the first line of code-mode / bridge output long enough to reject
- * an impossible routing claim. It requires a failure or bridge claim plus either an
+ * an impossible routing claim. It requires a failure claim plus either an
  * explicit redirect to another execution surface or two distinct unadvertised
  * native-tool names; a legitimate sentence such as "Shell is unavailable on
  * this OS" therefore passes.
@@ -122,10 +122,10 @@ export class CursorRoutingCommentarySniffer {
       return { kind: "hallucination" };
     }
     const lineBreakCount = (this.buffered.match(/\n/gu) ?? []).length;
-    const hasRoutingHint = ROUTING_TOOL_HINT.test(this.buffered) || ROUTING_FAILURE_OR_BRIDGE_CLAIM.test(this.buffered);
+    const hasRoutingHint = ROUTING_TOOL_HINT.test(this.buffered) || ROUTING_FAILURE_CLAIM.test(this.buffered);
     const pendingFailureClaim =
       ROUTING_TOOL_HINT.test(this.buffered)
-      && ROUTING_FAILURE_OR_BRIDGE_CLAIM.test(this.buffered)
+      && ROUTING_FAILURE_CLAIM.test(this.buffered)
       && lineBreakCount < 2;
     if (
       this.byteCount < MAX_ROUTING_COMMENTARY_BYTES
@@ -146,7 +146,7 @@ export class CursorRoutingCommentarySniffer {
   }
 
   private matchesHallucination(): boolean {
-    if (!ROUTING_FAILURE_OR_BRIDGE_CLAIM.test(this.buffered)) return false;
+    if (!ROUTING_FAILURE_CLAIM.test(this.buffered)) return false;
     const nativeTools = new Set(
       [...this.buffered.matchAll(ROUTING_NATIVE_TOOL_NAME)].map(match => match[1]?.toLowerCase()),
     );

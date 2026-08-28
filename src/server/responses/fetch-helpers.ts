@@ -9,7 +9,6 @@ import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
 import { waitForProviderRequestSlot } from "../../providers/request-pacing";
 import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
-import { providerTlsFetch } from "../../lib/provider-tls-profile";
 
 export { withUpstreamHttpVersion };
 
@@ -68,12 +67,9 @@ export function providerFetch(
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
   };
-  const transport = options.providerName
-    ? providerTlsFetch(options.providerName, provider, base)
-    : base;
   const httpFetch = Object.assign(
     (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
-      transport(input, withUpstreamHttpVersion(input, init, provider)),
+      base(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 }),
     { preconnect },
   ) as typeof globalThis.fetch;
   // ChatGPT Codex backend: streaming turns ride the responses_websockets
@@ -143,6 +139,7 @@ export async function fetchWithHeaderTimeout(
       // indistinguishable from a pre-connection failure (#914).
       ...(manualRedirect ? { redirect: "manual" as const } : {}),
       signal: AbortSignal.any([abortSignal, timeout.signal]),
+      timeout: 0,
     });
   } finally {
     clearTimeout(timer);

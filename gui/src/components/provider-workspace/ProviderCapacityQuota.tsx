@@ -4,7 +4,7 @@
  * rows, current-account breakdown). Shared by the aggregate dashboard and the
  * single-provider Overview so both surfaces present the same capacity semantics.
  */
-import { useT, useI18n } from "../../i18n/shared";
+import { useT, useI18n, type Locale } from "../../i18n/shared";
 import {
   accountQuotaFromReport,
   capacityAggregationFromReport,
@@ -14,22 +14,34 @@ import {
 import { type QuotaWindowKey } from "../QuotaBars";
 import QuotaBars from "../QuotaBars";
 
+function bcp47(locale: Locale): string {
+  switch (locale) {
+    case "en": return "en-GB";
+    case "de": return "de-DE";
+    case "fr": return "fr-FR";
+    case "ko": return "ko-KR";
+    case "zh": return "zh-CN";
+    case "zh-TW": return "zh-TW";
+    case "ru": return "ru-RU";
+    case "ja": return "ja-JP";
+    case "tr": return "tr-TR";
+    default: {
+      const _exhaustive: never = locale;
+      return _exhaustive;
+    }
+  }
+}
+
 export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuotaReportView; pending: boolean }) {
   const t = useT();
   const { locale } = useI18n();
   const aggregation = capacityAggregationFromReport(report);
   const primaryQuota = accountQuotaFromReport(report);
+  const credits = primaryQuota?.creditsUsd;
   const showsAggregate = aggregation?.presentation === "aggregate";
-  const totalPoolAccounts = (aggregation?.includedAccounts ?? 0) + (aggregation?.excludedAccounts ?? 0);
-  const isMultiAccountPool = Boolean(showsAggregate && totalPoolAccounts > 1);
-  const displayQuota = (!isMultiAccountPool && aggregation?.currentAccount?.quota)
-    ? aggregation.currentAccount.quota
-    : primaryQuota;
-  const displayPlan = !isMultiAccountPool ? aggregation?.currentAccount?.plan : undefined;
-  const showsCurrentAccountBreakdown = Boolean(showsAggregate && isMultiAccountPool && aggregation?.currentAccount?.quota);
   const incompleteWindowKeys = new Set<QuotaWindowKey>();
   const incompleteCustomWindowLabels = new Set<string>();
-  if (showsAggregate && isMultiAccountPool && aggregation) {
+  if (showsAggregate && aggregation) {
     if (aggregation.fiveHour?.incomplete) incompleteWindowKeys.add("fiveHour");
     if (aggregation.weekly?.incomplete) incompleteWindowKeys.add("weekly");
     if (aggregation.monthly?.incomplete) incompleteWindowKeys.add("monthly");
@@ -37,7 +49,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
       if (window.incomplete) incompleteCustomWindowLabels.add(window.label);
     }
   }
-  const recoveryRows: Array<{ key: number; label: string; window: CapacityWindowView }> = showsAggregate && isMultiAccountPool && aggregation ? [
+  const recoveryRows: Array<{ key: number; label: string; window: CapacityWindowView }> = showsAggregate && aggregation ? [
     ...(aggregation.fiveHour ? [{ key: 0, label: t("codexAuth.fiveHour"), window: aggregation.fiveHour }] : []),
     ...(aggregation.weekly ? [{ key: 1, label: t("codexAuth.weekly"), window: aggregation.weekly }] : []),
     ...(aggregation.monthly ? [{ key: 2, label: t("codexAuth.monthly"), window: aggregation.monthly }] : []),
@@ -48,44 +60,51 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(value > 10_000_000_000 ? value : value * 1000));
-  const activeRecoveryRows = recoveryRows.filter(
-    r => r.window.nextRecoveryAt !== undefined && r.window.nextRecoveryPercent !== undefined,
-  );
-  const hasIncompleteWarning = Boolean(aggregation?.incomplete && aggregation.excludedAccounts > 0);
-  const hasPartialWarning = Boolean(aggregation && aggregation.partialWindowAccounts > 0);
-  const hasDetails = Boolean(
-    aggregation && (
-      activeRecoveryRows.length > 0
-      || showsCurrentAccountBreakdown
-      || hasIncompleteWarning
-      || hasPartialWarning
-    ),
-  );
+  const localeTag = bcp47(locale);
+  const formatCredits = (value: number) => new Intl.NumberFormat(localeTag, {
+    style: "currency",
+    currency: "USD",
+  }).format(value);
+  const formatPeriodEnd = (value: number) => new Intl.DateTimeFormat(localeTag, {
+    dateStyle: "medium",
+  }).format(new Date(value > 10_000_000_000 ? value : value * 1000));
 
   return (
     <>
-      {showsAggregate && isMultiAccountPool && <div className="pws-capacity-label">{t("pws.capacity.estimate")}</div>}
-      {(displayQuota || pending) && (
+      {showsAggregate && <div className="pws-capacity-label">{t("pws.capacity.estimate")}</div>}
+      {(primaryQuota || pending) && (
         <QuotaBars
-          quota={displayQuota}
-          plan={displayPlan}
+          quota={primaryQuota}
           threshold={80}
           t={t}
           layout="stacked"
           pending={pending}
-          incompleteWindowKeys={showsAggregate && isMultiAccountPool ? incompleteWindowKeys : undefined}
-          incompleteCustomWindowLabels={showsAggregate && isMultiAccountPool ? incompleteCustomWindowLabels : undefined}
+          incompleteWindowKeys={showsAggregate ? incompleteWindowKeys : undefined}
+          incompleteCustomWindowLabels={showsAggregate ? incompleteCustomWindowLabels : undefined}
         />
       )}
-      {hasDetails && (
+      {(credits || aggregation) && (
         <div className="pws-capacity-details">
-          {activeRecoveryRows.map(({ key, label, window }) => (
-            <div className="pws-capacity-recovery" key={key}>
-              <span>{t("pws.capacity.nextRecovery")} · {label} · {formatRecoveryAt(window.nextRecoveryAt!)}</span>
-              <strong>{t("pws.capacity.recoveryShare", { percent: formatPercent(window.nextRecoveryPercent!) })}</strong>
+          {credits && (
+            <div className="pws-capacity-recovery">
+              <span>{t("quota.creditsBalance")}</span>
+              <strong>{formatCredits(credits.remaining)}</strong>
             </div>
+          )}
+          {credits?.expiresAt !== undefined && (
+            <div className="pws-capacity-recovery">
+              <span>{t("quota.creditsPeriodEnds", { date: formatPeriodEnd(credits.expiresAt) })}</span>
+            </div>
+          )}
+          {recoveryRows.flatMap(({ key, label, window }) => (
+            window.nextRecoveryAt !== undefined && window.nextRecoveryPercent !== undefined
+              ? [<div className="pws-capacity-recovery" key={key}>
+                  <span>{t("pws.capacity.nextRecovery")} · {label} · {formatRecoveryAt(window.nextRecoveryAt)}</span>
+                  <strong>{t("pws.capacity.recoveryShare", { percent: formatPercent(window.nextRecoveryPercent) })}</strong>
+                </div>]
+              : []
           ))}
-          {showsCurrentAccountBreakdown && aggregation?.currentAccount?.quota && (
+          {showsAggregate && aggregation && aggregation.currentAccount?.quota && (
             <div className="pws-capacity-current">
               <span className="pws-capacity-label">
                 {t("pws.capacity.currentAccount")}
@@ -94,7 +113,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
               <QuotaBars quota={aggregation.currentAccount.quota} threshold={80} t={t} layout="stacked" />
             </div>
           )}
-          {hasIncompleteWarning && aggregation && (
+          {aggregation && aggregation.incomplete && aggregation.excludedAccounts > 0 && (
             <div className="pws-capacity-incomplete">
               {t("pws.capacity.incomplete", {
                 excluded: aggregation.excludedAccounts,
@@ -102,7 +121,7 @@ export function ProviderCapacityQuota({ report, pending }: { report: ProviderQuo
               })}
             </div>
           )}
-          {hasPartialWarning && aggregation && (
+          {aggregation && aggregation.partialWindowAccounts > 0 && (
             <div className="pws-capacity-incomplete">
               {t("pws.capacity.partial", { count: aggregation.partialWindowAccounts })}
             </div>
