@@ -352,16 +352,17 @@ export function subjectSuggestions(
   subjects: readonly SubjectListItemDto[],
   verdicts: readonly VerdictDto[],
 ): SubjectListItemDto[] {
+  const subjectById = new Map(subjects.map(subject => [subject.subjectId, subject]));
   const suggestions = new Map<string, SubjectListItemDto>();
-  for (const subject of subjects) {
-    if (suggestions.size >= MAX_SUBJECT_SUGGESTIONS) break;
-    if (!suggestions.has(subject.subjectId)) suggestions.set(subject.subjectId, subject);
-  }
   for (const verdict of verdicts) {
     if (suggestions.size >= MAX_SUBJECT_SUGGESTIONS) break;
     if (!suggestions.has(verdict.subjectId)) {
-      suggestions.set(verdict.subjectId, { subjectId: verdict.subjectId, subjectKind: "" });
+      suggestions.set(verdict.subjectId, subjectById.get(verdict.subjectId) ?? { subjectId: verdict.subjectId, subjectKind: "" });
     }
+  }
+  for (const subject of subjects) {
+    if (suggestions.size >= MAX_SUBJECT_SUGGESTIONS) break;
+    if (!suggestions.has(subject.subjectId)) suggestions.set(subject.subjectId, subject);
   }
   return [...suggestions.values()].slice(0, MAX_SUBJECT_SUGGESTIONS);
 }

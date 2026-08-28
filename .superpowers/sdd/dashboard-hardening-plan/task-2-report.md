@@ -59,3 +59,45 @@ The focused tests cover one initial subject GET with `limit=50` and no cursor, n
 ## Concerns
 
 None. The build’s large-chunk advisory and full-suite React `act(...)` warnings predate this change.
+
+## Fix round 1
+
+### Finding addressed
+
+Suggestion composition now prioritizes deduplicated subject IDs visible in verdicts, using the first subject page’s known kind when available, and fills remaining slots from the first subject page. This keeps verdict-only subjects visible even when the first subject page already contains 50 rows.
+
+### Exact TDD evidence
+
+RED, after adding the full-page regression and before changing the helper:
+
+```text
+bun test tests/compatibility-lab.test.tsx -t "subject suggestions retain verdict-only"
+0 pass
+1 fail
+Expected: true
+Received: false
+```
+
+GREEN after reordering the helper:
+
+```text
+bun test tests/compatibility-lab.test.tsx tests/compatibility-pagination-cap.test.ts
+31 pass
+0 fail
+59 expect() calls
+```
+
+### Fix-round validation
+
+- `cd gui && bun test tests/compatibility-lab.test.tsx tests/compatibility-pagination-cap.test.ts` — passed: 31 tests, 0 failures, 59 assertions.
+- `cd gui && bun run lint` — passed (`oxlint .`).
+- `cd gui && bun run build` — passed (`tsc -b && vite build`); Vite emitted the existing large-chunk advisory.
+- `git diff --check` — passed.
+
+### Fix-round self-review
+
+- Verdict IDs are inserted first and deduplicated by exact ID.
+- A verdict overlapping the first subject page retains that page’s `subjectKind`.
+- The output remains capped at 50, and no new API or dependency was introduced.
+
+Fix-round concerns: none.

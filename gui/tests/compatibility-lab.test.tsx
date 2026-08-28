@@ -411,7 +411,16 @@ test("subject suggestions are deduplicated and capped at 50", () => {
   const suggestions = subjectSuggestions(subjects, verdicts);
   expect(suggestions).toHaveLength(50);
   expect(new Set(suggestions.map(subject => subject.subjectId)).size).toBe(50);
-  expect(suggestions.at(-1)?.subjectId).toBe("verdict-subject-1");
+  expect(suggestions.some(subject => subject.subjectId === "verdict-subject-1")).toBe(true);
+});
+
+test("subject suggestions retain verdict-only subjects when the first page is full", () => {
+  const subjects = Array.from({ length: 50 }, (_, index) => ({ subjectId: `subject-${index}`, subjectKind: "route" }));
+  const verdict = { ...parseVerdictPage(VERDICTS_PAGE_1).verdicts[0]!, subjectId: "verdict-only" };
+  const suggestions = subjectSuggestions(subjects, [verdict]);
+  expect(suggestions).toHaveLength(50);
+  expect(suggestions.some(subject => subject.subjectId === "verdict-only")).toBe(true);
+  expect(suggestions.some(subject => subject.subjectId === "subject-49")).toBe(false);
 });
 
 test("subject filter uses a labelled native datalist input", async () => {
