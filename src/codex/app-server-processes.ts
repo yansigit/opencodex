@@ -768,8 +768,6 @@ interface RequestCatalogStateIdentity {
   listSnapshotsAsync?: CodexAppServerProcessIo["listSnapshotsAsync"];
   readStartMs?: CodexAppServerProcessIo["readStartMs"];
   readStartMsBatchAsync?: CodexAppServerProcessIo["readStartMsBatchAsync"];
-  catalogMtimeMs?: CodexAppServerProcessIo["catalogMtimeMs"];
-  freshnessPath?: CodexAppServerProcessIo["freshnessPath"];
   now?: CodexAppServerProcessIo["now"];
 }
 
@@ -832,8 +830,6 @@ function sameRequestCatalogStateIdentity(
     && left.listSnapshotsAsync === right.listSnapshotsAsync
     && left.readStartMs === right.readStartMs
     && left.readStartMsBatchAsync === right.readStartMsBatchAsync
-    && left.catalogMtimeMs === right.catalogMtimeMs
-    && left.freshnessPath === right.freshnessPath
     && left.now === right.now;
 }
 
@@ -981,8 +977,6 @@ export async function collectCodexAppServerCatalogStateForRequest(
     listSnapshotsAsync: io.listSnapshotsAsync,
     readStartMs: io.readStartMs,
     readStartMsBatchAsync: io.readStartMsBatchAsync,
-    catalogMtimeMs: io.catalogMtimeMs,
-    freshnessPath: io.freshnessPath,
     now: io.now,
   };
   const cached = requestCatalogStateCache

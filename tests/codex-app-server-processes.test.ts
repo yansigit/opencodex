@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTrustedWindowsElevationExecutablesForTests } from "../src/lib/windows-elevation";
 import { createWindowsPowerShellFixture, type WindowsPowerShellFixture } from "./helpers/windows-power-shell-fixture";
@@ -208,6 +209,51 @@ afterAll(() => stallingFakePowerShell?.cleanup());
     expect((await collectCodexAppServerCatalogStateForRequest(io)).state).toBe("fresh");
     expect(calls).toBe(2);
     resetCodexAppServerCatalogStateCache();
+  });
+
+  test("Windows request collection shares process evidence across freshness targets", async () => {
+    resetCodexAppServerCatalogStateCache();
+    const dir = mkdtempSync(join(tmpdir(), "ocx-catalog-targets-"));
+    const catalogPath = join(dir, "catalog.json");
+    const configPath = join(dir, "config.toml");
+    let calls = 0;
+    let starts = 0;
+    let releaseSnapshots: ((snapshots: Array<{ pid: number; commandLine: string }>) => void) | undefined;
+    try {
+      writeFileSync(catalogPath, "{}");
+      writeFileSync(configPath, "[agents]\n");
+      utimesSync(catalogPath, 1, 1);
+      utimesSync(configPath, 2, 2);
+      const snapshots = new Promise<Array<{ pid: number; commandLine: string }>>(resolve => {
+        releaseSnapshots = resolve;
+      });
+      const base = {
+        platform: "win32" as const,
+        listSnapshotsAsync: async () => {
+          calls += 1;
+          return snapshots;
+        },
+        readStartMsBatchAsync: async (pids: readonly number[]) => {
+          starts += 1;
+          return new Map(pids.map(pid => [pid, 3_000] as const));
+        },
+        now: () => 5_000,
+      };
+      const catalog = collectCodexAppServerCatalogStateForRequest({
+        ...base, freshnessTarget: "catalog", freshnessPath: catalogPath,
+      });
+      const config = collectCodexAppServerCatalogStateForRequest({
+        ...base, freshnessTarget: "config", freshnessPath: configPath,
+      });
+      releaseSnapshots?.([{ pid: 42, commandLine: APP_SERVER_CMD }]);
+      await expect(catalog).resolves.toMatchObject({ state: "fresh", catalogMtimeMs: 1_000 });
+      await expect(config).resolves.toMatchObject({ state: "fresh", catalogMtimeMs: 2_000 });
+      expect(calls).toBe(1);
+      expect(starts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      resetCodexAppServerCatalogStateCache();
+    }
   });
 
   test("cache invalidation cannot be undone by an older in-flight Windows refresh (#1852)", async () => {
