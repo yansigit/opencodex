@@ -3443,7 +3443,12 @@ async function handleResponsesInner(
       && (!parsed.previousResponseId || parsed._previousResponseInputExpanded === true);
     const rememberPassthroughResponse = passthroughRecordEligible
       ? (response: { id?: unknown; output?: unknown; status?: unknown }) =>
-        rememberResponseState(parsed._rawBody, response, undefined, responseStateOptions(true))
+        rememberResponseState(
+          v2RoutedDelegationBridge?.requestStateBody ?? parsed._rawBody,
+          response,
+          undefined,
+          responseStateOptions(true),
+        )
       : undefined;
     if (parsed.previousResponseId && !parsed._previousResponseInputExpanded) {
       console.warn(

@@ -143,39 +143,49 @@ describe("V2 routed delegation bridge", () => {
     expect(JSON.parse(rewrite(unrelated))).toMatchObject({ item: { namespace: "ocx_agents", name: "list_agents" } });
   });
 
-  test("leaves ID-less mirror snapshots and index-only arguments untouched", () => {
+  test("fails ID-less mirror snapshots closed and leaves index-only arguments untouched", () => {
     const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
     const snapshot = JSON.stringify({ type: "response.output_item.added", output_index: 3, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent" } });
 
-    expect(rewrite(snapshot)).toBe(snapshot);
+    expect(() => rewrite(snapshot)).toThrow("v2 routed delegation bridge received an unbound SSE call");
     const argument = JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 3, delta: "{}" });
     expect(rewrite(argument)).toBe(argument);
   });
 
-  test("caps retained SSE mirror bindings", () => {
+  test("fails closed before a capped SSE mirror can escape", () => {
     const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
-    for (let index = 0; index < 129; index++) {
-      const snapshot = rewrite(JSON.stringify({ type: "response.output_item.added", output_index: index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: `fc_${index}` } }));
-      if (index === 128) expect(JSON.parse(snapshot)).toMatchObject({ item: { namespace: "ocx_agents", name: "spawn_agent" } });
+    for (let index = 0; index < 128; index++) {
+      rewrite(JSON.stringify({ type: "response.output_item.added", output_index: index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: `fc_${index}` } }));
     }
 
-    expect(JSON.parse(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_128", output_index: 128, delta: "{}" }))).encrypted_function_args).toBeUndefined();
+    expect(() => rewrite(JSON.stringify({ type: "response.output_item.added", output_index: 128, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_128" } })))
+      .toThrow("v2 routed delegation bridge exceeded 128 SSE call bindings");
   });
 
   test("keeps only authorized nonblank ids through completed aggregates", () => {
     const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
     const snapshot = (id: string, output_index: number) => JSON.stringify({ type: "response.output_item.added", output_index, item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id } });
-    for (let index = 0; index < 128; index++) rewrite(snapshot(`fc_${index}`, index));
-    expect(rewrite(snapshot("fc_capped", 128))).toContain('"namespace":"ocx_agents"');
-    expect(rewrite(snapshot(" ", 129))).toContain('"namespace":"ocx_agents"');
+    rewrite(snapshot("fc_0", 0));
+    expect(() => rewrite(snapshot(" ", 1))).toThrow("v2 routed delegation bridge received an unbound SSE call");
     const completed = JSON.parse(rewrite(JSON.stringify({ type: "response.completed", response: { output: [
       { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_0" },
-      { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_capped" },
-      { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: " " },
     ] } })));
 
-    expect(completed.response.output.map((item: { namespace: string }) => item.namespace)).toEqual(["collaboration", "ocx_agents", "ocx_agents"]);
+    expect(completed.response.output.map((item: { namespace: string }) => item.namespace)).toEqual(["collaboration"]);
     expect(rewrite(JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_0", delta: "late" }))).toContain('"item_id":"fc_0"');
+  });
+
+  test("normalizes admitted calls in failed and incomplete terminal snapshots", () => {
+    for (const type of ["response.failed", "response.incomplete"]) {
+      const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
+      rewrite(JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_terminal" } }));
+
+      const terminal = JSON.parse(rewrite(JSON.stringify({ type, response: { status: type.slice(9), output: [
+        { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_terminal" },
+      ] } })));
+
+      expect(terminal.response.output[0]).toMatchObject({ namespace: "collaboration", encrypted_function_args: [] });
+    }
   });
 
   test("an unknown item-id terminal does not affect an authorized call", () => {
@@ -205,20 +215,9 @@ describe("V2 routed delegation bridge", () => {
     rewrite(JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_duplicate", arguments: "{}" }));
     rewrite(JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_duplicate" } }));
 
-    expect(rewrite(added)).toBe(added);
+    expect(JSON.parse(rewrite(added))).toMatchObject({ item: { namespace: "collaboration", encrypted_function_args: [] } });
     const late = JSON.stringify({ type: "response.function_call_arguments.delta", item_id: "fc_duplicate", delta: "late" });
     expect(rewrite(late)).toBe(late);
   });
 
-  test("keeps capped ids rejected after a slot frees", () => {
-    const rewrite = createV2RoutedDelegationSseRewrite({ names: new Set(["spawn_agent"]) })!;
-    const added = (id: string) => JSON.stringify({ type: "response.output_item.added", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id } });
-    for (let index = 0; index < 128; index++) rewrite(added(`fc_${index}`));
-    const capped = added("fc_capped");
-    expect(rewrite(capped)).toBe(capped);
-    rewrite(JSON.stringify({ type: "response.function_call_arguments.done", item_id: "fc_0", arguments: "{}" }));
-    const done = JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_capped" } });
-    expect(rewrite(done)).toBe(done);
-    expect(rewrite(JSON.stringify({ type: "response.completed", response: { output: [{ type: "function_call", namespace: "ocx_agents", name: "spawn_agent", id: "fc_capped" }] } }))).toContain('"namespace":"ocx_agents"');
-  });
 });

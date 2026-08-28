@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { expandPreviousResponseInput } from "../src/responses/state";
 import { handleResponses, handleResponsesCompact } from "../src/server/responses";
 import type { OcxConfig } from "../src/types";
 import { FERNET_TASK, fakeChatGptJwt } from "./helpers/agent-task-recovery";
@@ -135,6 +136,58 @@ describe("Responses V2 routed delegation bridge runtime", () => {
         type: "namespace", name: "ocx_agents", description: "Use this routed-child mirror for collaboration operations.", tools: [{ type: "function", name: "spawn_agent", description: "Use this routed-child mirror for collaboration operations. spawn_agent.", parameters: { type: "object" } }, { type: "function", name: "send_message", description: "Use this routed-child mirror for collaboration operations. send_message.", parameters: { type: "object" } }],
       }]);
       expect((await response.json() as { output: Array<Record<string, unknown>> }).output[0]).toMatchObject({ namespace: "collaboration", encrypted_function_args: [] });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("keeps replayed additional_tools out of a fresh current-turn mirror catalog", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const native = { type: "namespace", name: "collaboration", tools: [
+      { type: "function", name: "spawn_agent", parameters: { type: "object" } },
+      { type: "function", name: "send_message", parameters: { type: "object" } },
+    ] };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return Response.json({ id: requests.length === 1 ? "resp_additional_replay" : "resp_additional_after", status: "completed", output: [] });
+    }) as typeof fetch;
+    try {
+      await handleResponses(request(rootBody({ tools: [], input: [{ type: "additional_tools", tools: [native] }] })), config(), { model: "", provider: "" });
+      const second = await handleResponses(request(rootBody({
+        tools: [],
+        previous_response_id: "resp_additional_replay",
+        input: [{ type: "additional_tools", tools: [native] }],
+      })), config(), { model: "", provider: "" });
+
+      expect(second.status).toBe(200);
+      const catalogs = (requests[1]?.input as Array<Record<string, unknown>>)
+        .filter(item => item.type === "additional_tools")
+        .map(item => item.tools);
+      expect(catalogs).toEqual([[native], [native, expect.objectContaining({ name: "ocx_agents" })]]);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("replayed additional_tools alone cannot arm a later bridge turn", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const native = { type: "namespace", name: "collaboration", tools: [
+      { type: "function", name: "spawn_agent", parameters: { type: "object" } },
+      { type: "function", name: "send_message", parameters: { type: "object" } },
+    ] };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return Response.json({ id: requests.length === 1 ? "resp_stale_catalog" : "resp_stale_after", status: "completed", output: [] });
+    }) as typeof fetch;
+    try {
+      await handleResponses(request(rootBody({ tools: [], input: [{ type: "additional_tools", tools: [native] }] })), config(), { model: "", provider: "" });
+      const second = await handleResponses(request(rootBody({
+        tools: [],
+        previous_response_id: "resp_stale_catalog",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "continue" }] }],
+      })), config(), { model: "", provider: "" });
+
+      expect(second.status).toBe(200);
+      expect(JSON.stringify(requests[0]?.input)).toContain('"ocx_agents"');
+      expect(JSON.stringify(requests[1]?.input)).not.toContain('"ocx_agents"');
     } finally { globalThis.fetch = originalFetch; }
   });
 
@@ -345,7 +398,7 @@ describe("Responses V2 routed delegation bridge runtime", () => {
     }
   });
 
-  test("keeps a capped SSE mirror out of both the client and replay normalization", async () => {
+  test("fails a capped SSE mirror closed before client or replay state can see the private alias", async () => {
     const requests: Array<Record<string, unknown>> = [];
     let turn = 0;
     const originalFetch = globalThis.fetch;
@@ -366,11 +419,11 @@ describe("Responses V2 routed delegation bridge runtime", () => {
     }) as typeof fetch;
     try {
       const first = await handleResponses(request(rootBody({ stream: true })), config(), { model: "", provider: "" });
-      expect(await first.text()).toContain('"namespace":"ocx_agents"');
-      await handleResponses(request(rootBody({ previous_response_id: "resp_idless" })), config(), { model: "", provider: "" });
-
-      expect(JSON.stringify(requests[1]?.input)).toContain('"namespace":"ocx_agents"');
-      expect(JSON.stringify(requests[1]?.input)).not.toContain('"encrypted_function_args":[]');
+      const text = await first.text();
+      expect(text).not.toContain('"namespace":"ocx_agents"');
+      expect(text).toContain('"code":"translation_buffer_limit"');
+      const replay = expandPreviousResponseInput({ previous_response_id: "resp_idless", input: [] }) as { input: unknown[] };
+      expect(replay.input).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
     }

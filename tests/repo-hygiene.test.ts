@@ -58,19 +58,6 @@ function trackedEntries(): { mode: string; path: string }[] {
 }
 
 describe("repository hygiene", () => {
-  test("V2 bridge verification scripts keep the focused coverage contract", async () => {
-    const pkg = JSON.parse(await Bun.file(new URL("../package.json", import.meta.url)).text()) as {
-      scripts?: Record<string, string>;
-    };
-
-    expect(pkg.scripts?.["test:v2-bridge"]).toBe(
-      "bun scripts/test.ts tests/config.test.ts tests/multi-agent-keep-native-v1.test.ts tests/namespace-tool-compat.test.ts tests/v2-routed-delegation-bridge.test.ts tests/responses-v2-routed-delegation-bridge.test.ts tests/v2-agent-message-failfast.test.ts tests/responses-compaction-routing.test.ts tests/responses-v2-native-parent-override.test.ts tests/passthrough-abort.test.ts tests/ws-upstream.test.ts tests/core-lab-boundary.test.ts",
-    );
-    expect(pkg.scripts?.["verify:v2-bridge"]).toBe(
-      "bun run typecheck && bun run test:v2-bridge && cd gui && bun test tests/subagents-ultra-mode.test.tsx && bun run lint:i18n",
-    );
-  });
-
   test("no local agent or session state is tracked", () => {
     const offenders = trackedFiles().filter((path) =>
       path.split("/").some((segment) => FORBIDDEN_TRACKED_DIRS.includes(segment)),

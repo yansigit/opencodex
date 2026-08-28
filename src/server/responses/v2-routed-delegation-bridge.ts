@@ -12,22 +12,38 @@ type RecordValue = Record<string, unknown>;
 
 export interface V2RoutedDelegationBridgeContext {
   readonly names: ReadonlySet<string>;
+  /** Request snapshot taken before mirror injection, for continuation-cache persistence. */
+  readonly requestStateBody: unknown;
 }
 
 function isRecord(value: unknown): value is RecordValue {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
-function rawToolLists(body: unknown): unknown[][] {
+function rawToolLists(body: unknown, replayPrefixLength: number): unknown[][] {
   if (!isRecord(body)) return [];
   const lists: unknown[][] = [];
   if (Array.isArray(body.tools)) lists.push(body.tools);
   if (Array.isArray(body.input)) {
-    for (const item of body.input) {
+    for (const item of body.input.slice(Math.max(0, Math.min(replayPrefixLength, body.input.length)))) {
       if (isRecord(item) && item.type === "additional_tools" && Array.isArray(item.tools)) lists.push(item.tools);
     }
   }
   return lists;
+}
+
+function requestStateBody(body: unknown): unknown {
+  if (!isRecord(body) || !Array.isArray(body.input)) return body;
+  // Only additional_tools containers are mutated below. Clone that narrow path so the
+  // continuation cache retains the caller's catalog without copying unrelated context.
+  return {
+    ...body,
+    input: body.input.map(item => (
+      isRecord(item) && item.type === "additional_tools" && Array.isArray(item.tools)
+        ? { ...item, tools: [...item.tools] }
+        : item
+    )),
+  };
 }
 
 function mirrorTool(tool: RecordValue): RecordValue {
@@ -52,7 +68,8 @@ function mirrorGroup(group: RecordValue): RecordValue {
 export function injectV2RoutedDelegationBridge(
   parsed: OcxParsedRequest,
 ): V2RoutedDelegationBridgeContext | undefined {
-  const lists = rawToolLists(parsed._rawBody);
+  const stateBody = requestStateBody(parsed._rawBody);
+  const lists = rawToolLists(parsed._rawBody, parsed._replayPrefixLen ?? 0);
   const nativeGroups: Array<{ list: unknown[]; index: number; group: RecordValue }> = [];
   const existing: Array<{ list: unknown[]; index: number; group: RecordValue }> = [];
   for (const list of lists) {
@@ -105,7 +122,7 @@ export function injectV2RoutedDelegationBridge(
       parsed.context.tools = [...(parsed.context.tools ?? []), ...mirrorTools.filter(tool => !present.has(tool.name))];
     }
   }
-  return names.size > 0 ? { names } : undefined;
+  return names.size > 0 ? { names, requestStateBody: stateBody } : undefined;
 }
 
 function rewriteValue(
@@ -130,13 +147,22 @@ function rewriteValue(
     return [key, rewritten.value];
   });
   const next: RecordValue = Object.fromEntries(entries);
-  if (
+  const armed =
     value.type === "function_call"
     && value.namespace === MIRROR_NAMESPACE
     && typeof value.name === "string"
-    && active.names.has(value.name)
-    && (authorizedIds === undefined || (typeof value.id === "string" && authorizedIds.has(value.id)))
-  ) {
+    && active.names.has(value.name);
+  if (armed && authorizedIds !== undefined) {
+    if (typeof value.id !== "string" || !authorizedIds.has(value.id)) {
+      const capped = authorizedIds.size >= MAX_SSE_BINDINGS;
+      throw Object.assign(new Error(capped
+        ? `v2 routed delegation bridge exceeded ${MAX_SSE_BINDINGS} SSE call bindings`
+        : "v2 routed delegation bridge received an unbound SSE call"), {
+        ...(capped ? { code: "translation_buffer_limit" } : {}),
+      });
+    }
+  }
+  if (armed) {
     next.namespace = NATIVE_NAMESPACE;
     next.encrypted_function_args = [];
     changed = true;
@@ -163,13 +189,17 @@ export function createV2RoutedDelegationSseRewrite(
   if (!active || active.names.size === 0) return undefined;
   const admittedIds = new Set<string>();
   const openArgumentIds = new Set<string>();
-  const bind = (itemId: unknown): boolean => {
-    if (typeof itemId !== "string" || itemId.trim().length === 0) return false;
-    if (admittedIds.has(itemId)) return openArgumentIds.has(itemId);
-    if (admittedIds.size >= MAX_SSE_BINDINGS) return false;
+  const bind = (itemId: unknown): void => {
+    if (typeof itemId !== "string" || itemId.trim().length === 0) return;
+    if (admittedIds.has(itemId)) return;
+    if (admittedIds.size >= MAX_SSE_BINDINGS) {
+      throw Object.assign(
+        new Error(`v2 routed delegation bridge exceeded ${MAX_SSE_BINDINGS} SSE call bindings`),
+        { code: "translation_buffer_limit" },
+      );
+    }
     admittedIds.add(itemId);
     openArgumentIds.add(itemId);
-    return true;
   };
   return payload => {
     let event: unknown;
@@ -181,14 +211,12 @@ export function createV2RoutedDelegationSseRewrite(
       && typeof item.name === "string" && active.names.has(item.name);
     const added = type === "response.output_item.added";
     const itemDone = type === "response.output_item.done";
-    const bound = added && armed && bind(item?.id);
+    if (added && armed) bind(item?.id);
     const admittedSnapshot = itemDone && armed && typeof item?.id === "string" && admittedIds.has(item.id);
     const argumentEvent = type === "response.function_call_arguments.delta" || type === "response.function_call_arguments.done";
     const matchedArgument = argumentEvent && typeof event.item_id === "string" && openArgumentIds.has(event.item_id);
     const failedTerminal = type === "response.failed" || type === "response.incomplete";
-    const rewritten = armed && (added || itemDone) && !bound && !admittedSnapshot
-      ? { value: event, changed: false }
-      : failedTerminal ? { value: event, changed: false } : rewriteValue(event, active, admittedIds);
+    const rewritten = rewriteValue(event, active, admittedIds);
     if (type === "response.function_call_arguments.done" && matchedArgument) openArgumentIds.delete(event.item_id as string);
     if (itemDone && admittedSnapshot) openArgumentIds.delete(item!.id as string);
     if (type === "response.completed" || failedTerminal) {
