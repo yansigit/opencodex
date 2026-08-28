@@ -1,15 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useKeyedClientResource } from "./client-resource";
 import Dashboard from "./pages/Dashboard";
-import Providers from "./pages/Providers";
-import Models from "./pages/Models";
-import Subagents from "./pages/Subagents";
-import Logs from "./pages/Logs";
-import Usage from "./pages/Usage";
-import Storage from "./pages/Storage";
-import CodexSet from "./pages/CodexSet";
-import Integrations from "./pages/Integrations";
-import Startup from "./pages/Startup";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { SidebarGithubRow } from "./components/sidebar-github-row";
 import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconHardDrive, IconKey, IconMenu, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower, IconX, IconRefresh} from "./icons";
@@ -23,6 +14,16 @@ import { requestProxyStop } from "./stop-proxy";
 import { useCodexRestart } from "./use-codex-restart";
 
 installApiAuthFetch();
+
+const Startup = lazy(() => import("./pages/Startup"));
+const Providers = lazy(() => import("./pages/Providers"));
+const Models = lazy(() => import("./pages/Models"));
+const Subagents = lazy(() => import("./pages/Subagents"));
+const Logs = lazy(() => import("./pages/Logs"));
+const Usage = lazy(() => import("./pages/Usage"));
+const Storage = lazy(() => import("./pages/Storage"));
+const CodexSet = lazy(() => import("./pages/CodexSet"));
+const Integrations = lazy(() => import("./pages/Integrations"));
 
 type Theme = "light" | "dark" | "system";
 
@@ -83,7 +84,7 @@ function readStoredTheme(): Theme {
 }
 
 export default function App() {
-  const { page, navigateToPage } = useAppRouteState();
+  const { page, transitionId, animate, navigateToPage } = useAppRouteState();
   /*
    * App needs the Models tab for one reason only: the full-bleed combos modifier lives
    * on `.main-inner`, which is App's element. Models owns every other tab concern.
@@ -106,7 +107,23 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const announcementRef = useRef<HTMLDivElement>(null);
   const navWasOpen = useRef(false);
+  const restoreMenuFocus = useRef(false);
+  const previousPage = useRef(page);
+
+  useEffect(() => {
+    document.title = t("app.pageTitle", { page: t(PAGE_TKEY[page]) });
+  }, [page, t]);
+
+  useEffect(() => {
+    if (previousPage.current === page) return;
+    previousPage.current = page;
+    window.scrollTo(0, 0);
+    mainRef.current?.focus({ preventScroll: true });
+    if (announcementRef.current) announcementRef.current.textContent = t(PAGE_TKEY[page]);
+  }, [page, t]);
 
   useEffect(() => {
     // External navigation (hash edit, back/forward) also dismisses the mobile drawer.
@@ -144,7 +161,11 @@ export default function App() {
 
   useEffect(() => {
     if (!navOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setNavOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      restoreMenuFocus.current = true;
+      setNavOpen(false);
+    };
     window.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";         // no background scroll behind the drawer
@@ -155,11 +176,16 @@ export default function App() {
   useEffect(() => {
     if (navOpen) {
       navWasOpen.current = true;
+      restoreMenuFocus.current = false;
       // after the 180ms slide-in: while visibility is transitioning, focus() no-ops
       const timer = setTimeout(() => sidebarRef.current?.focus(), 200);
       return () => clearTimeout(timer);
     }
-    if (navWasOpen.current) { navWasOpen.current = false; menuBtnRef.current?.focus(); }
+    if (navWasOpen.current) {
+      navWasOpen.current = false;
+      if (restoreMenuFocus.current) menuBtnRef.current?.focus();
+      restoreMenuFocus.current = false;
+    }
   }, [navOpen]);
 
   // Growing the window past the breakpoint dismisses the drawer state.
@@ -311,15 +337,16 @@ export default function App() {
         </div>
       </aside>
 
-      <main className="main" inert={navOpen}>
+      <main ref={mainRef} className="main" inert={navOpen} tabIndex={-1}>
+        <div ref={announcementRef} className="sr-only route-announcement" aria-live="polite" aria-atomic="true" />
         {/*
           Combos is full-bleed, unlike every other surface, and it is reachable only as
           a Models tab. `.main-inner` is App's element, so App is the only place that
           can know which tab is showing.
         */}
-        <div className={`main-inner${
+        <div key={transitionId} className={`main-inner${
           page === "models" && modelsTab === "combos" ? " main-inner--combos" : ""
-        }`}>
+        }${animate ? " route-enter" : ""}`}>
           <ErrorBoundary
             key={page}
             pageName={t(PAGE_TKEY[page])}
@@ -327,17 +354,20 @@ export default function App() {
             message={t("errorBoundary.message")}
             detailsLabel={t("errorBoundary.details")}
             reloadLabel={t("errorBoundary.reload")}
+            onReload={() => window.location.reload()}
           >
-            {page === "dashboard" && <Dashboard apiBase={API_BASE} />}
-            {page === "startup" && <Startup apiBase={API_BASE} />}
-            {page === "providers" && <Providers apiBase={API_BASE} />}
-            {page === "models" && <Models key={API_BASE} apiBase={API_BASE} restartEpoch={codexRestartEpoch} />}
-            {page === "subagents" && <Subagents key={API_BASE} apiBase={API_BASE} />}
-            {page === "logs" && <Logs apiBase={API_BASE} />}
-            {page === "usage" && <Usage apiBase={API_BASE} />}
-            {page === "storage" && <Storage apiBase={API_BASE} />}
-            {page === "codex-set" && <CodexSet apiBase={API_BASE} />}
-            {page === "integrations" && <Integrations apiBase={API_BASE} />}
+            <Suspense fallback={<div className="route-loading" aria-busy="true"><span className="spin" aria-hidden="true" />{t("common.loading")}</div>}>
+              {page === "dashboard" && <Dashboard apiBase={API_BASE} />}
+              {page === "startup" && <Startup apiBase={API_BASE} />}
+              {page === "providers" && <Providers apiBase={API_BASE} />}
+              {page === "models" && <Models key={API_BASE} apiBase={API_BASE} restartEpoch={codexRestartEpoch} />}
+              {page === "subagents" && <Subagents key={API_BASE} apiBase={API_BASE} />}
+              {page === "logs" && <Logs apiBase={API_BASE} />}
+              {page === "usage" && <Usage apiBase={API_BASE} />}
+              {page === "storage" && <Storage apiBase={API_BASE} />}
+              {page === "codex-set" && <CodexSet apiBase={API_BASE} />}
+              {page === "integrations" && <Integrations apiBase={API_BASE} />}
+            </Suspense>
           </ErrorBoundary>
         </div>
       </main>

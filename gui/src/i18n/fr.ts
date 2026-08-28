@@ -39,6 +39,7 @@ export const fr: Record<TKey, string> = {
   "auth.adminTokenRejected": "Ce jeton d’administration a été refusé. Vérifiez-le et réessayez.",
   "auth.adminTokenUnavailable": "Le jeton d’administration n’a pas pu être vérifié. Réessayez.",
   "app.logoAria": "Logo opencodex",
+  "app.pageTitle": "{page} — opencodex",
   "app.claudeOn": "Claude ACTIVÉ",
   "app.claudeOff": "Claude DÉSACTIVÉ",
   "theme.label": "Thème",

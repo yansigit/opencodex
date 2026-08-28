@@ -404,6 +404,12 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 .main { min-width: 0; }
 .main-inner { max-width: 980px; margin: 0 auto; padding: 32px 36px 64px; container-type: inline-size; }
+.route-loading { display: flex; align-items: center; gap: 8px; min-height: 80px; color: var(--muted); }
+.route-enter { animation: route-enter 160ms ease-out both; }
+@keyframes route-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .main-inner.main-inner--combos {
   max-width: none;
   margin: 0;

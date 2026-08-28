@@ -109,6 +109,7 @@ export const ja: Record<TKey, string> = {
   "auth.adminTokenRejected": "管理者トークンが拒否されました。確認してもう一度お試しください。",
   "auth.adminTokenUnavailable": "管理者トークンを確認できませんでした。もう一度お試しください。",
   "app.logoAria": "opencodex ロゴ",
+  "app.pageTitle": "{page} — opencodex",
   "app.claudeOn": "Claude オン",
   "app.claudeOff": "Claude オフ",
   "theme.label": "テーマ",

@@ -109,6 +109,7 @@ export const ru: Record<TKey, string> = {
   "auth.adminTokenRejected": "Токен администратора отклонён. Проверьте его и повторите попытку.",
   "auth.adminTokenUnavailable": "Не удалось проверить токен администратора. Повторите попытку.",
   "app.logoAria": "Логотип opencodex",
+  "app.pageTitle": "{page} — opencodex",
   "app.claudeOn": "Claude ВКЛ",
   "app.claudeOff": "Claude ВЫКЛ",
   "theme.label": "Тема",

@@ -1653,6 +1653,7 @@ export const zh: Record<TKey, string> = {
   "common.close": "关闭",
   "common.ok": "确定",
   "app.logoAria": "opencodex 徽标",
+  "app.pageTitle": "{page} — opencodex",
   "app.claudeOn": "Claude 开",
   "app.claudeOff": "Claude 关",
   "usage.dayMon": "一",

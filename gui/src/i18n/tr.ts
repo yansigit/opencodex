@@ -41,6 +41,7 @@ export const tr: Record<TKey, string> = {
   "auth.adminTokenRejected": "Bu yönetici jetonu reddedildi. Kontrol edip tekrar deneyin.",
   "auth.adminTokenUnavailable": "Yönetici jetonu doğrulanamadı. Tekrar deneyin.",
   "app.logoAria": "opencodex logosu",
+  "app.pageTitle": "{page} — opencodex",
   "app.claudeOn": "Claude AÇIK",
   "app.claudeOff": "Claude KAPALI",
   "theme.label": "Tema",

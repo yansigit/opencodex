@@ -4,7 +4,12 @@ import {
   resolveAppHashChange,
   type Page,
 } from "./app-routing";
-import { navigateHash, normalizeHashPath, replaceHash } from "./hash-routing";
+import {
+  DELIBERATE_NAVIGATION_EVENT,
+  navigateHash,
+  normalizeHashPath,
+  replaceHash,
+} from "./hash-routing";
 
 /** localStorage keys written by the removed Classic/Workspace preference. */
 const STALE_VIEW_KEYS = [
@@ -41,14 +46,24 @@ function clearStaleViewKeys(): void {
  * router immediately rewrites.
  */
 export function useAppRouteState() {
-  const [page, setPageState] = useState<Page>(readPageFromHash);
+  const [route, setRoute] = useState(() => ({
+    page: readPageFromHash(),
+    transitionId: 0,
+    animate: false,
+  }));
 
   useEffect(() => { clearStaleViewKeys(); }, []);
 
-  const applyHashAction = useCallback((rawHash: string) => {
+  const applyHashAction = useCallback((rawHash: string, deliberate = false) => {
     const action = resolveAppHashChange(rawHash);
     if (action.replaceTo) replaceHash(action.replaceTo);
-    setPageState(action.page);
+    setRoute(current => action.page === current.page
+      ? current
+      : {
+          page: action.page,
+          transitionId: current.transitionId + Number(deliberate),
+          animate: deliberate,
+        });
   }, []);
 
   /**
@@ -59,19 +74,23 @@ export function useAppRouteState() {
   const navigateToPage = (id: Page, subPath?: string) => {
     const target = subPath ? `${id}/${subPath}` : id;
     navigateHash(target);
-    setPageState(id);
   };
 
   useEffect(() => {
     const onRouteHash = () => {
       applyHashAction(normalizeHashPath(window.location.hash));
     };
+    const onDeliberateNavigation = (event: Event) => {
+      applyHashAction((event as CustomEvent<string>).detail, true);
+    };
     // hashchange covers location.hash assignment; popstate covers Back/Forward.
     window.addEventListener("hashchange", onRouteHash);
     window.addEventListener("popstate", onRouteHash);
+    window.addEventListener(DELIBERATE_NAVIGATION_EVENT, onDeliberateNavigation);
     return () => {
       window.removeEventListener("hashchange", onRouteHash);
       window.removeEventListener("popstate", onRouteHash);
+      window.removeEventListener(DELIBERATE_NAVIGATION_EVENT, onDeliberateNavigation);
     };
   }, [applyHashAction]);
 
@@ -96,12 +115,11 @@ export function useAppRouteState() {
      * renders against a hash it no longer matches.
      */
     // eslint-disable-next-line react-hooks/set-state-in-effect, react/react-compiler -- reconciles a hash changed before the listener existed; the equality check bounds it to one render
-    if (action.page !== page) setPageState(action.page);
-  }, [page]);
+    if (action.page !== route.page) setRoute(current => ({ ...current, page: action.page, animate: false }));
+  }, [route.page]);
 
   return {
-    page,
-    setPageState,
+    ...route,
     navigateToPage,
   };
 }

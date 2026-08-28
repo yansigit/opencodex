@@ -42,6 +42,7 @@ export const en = {
   "auth.adminTokenRejected": "That admin token was rejected. Check it and try again.",
   "auth.adminTokenUnavailable": "The admin token could not be verified. Try again.",
   "app.logoAria": "opencodex logo",
+  "app.pageTitle": "{page} — opencodex",
   "app.claudeOn": "Claude ON",
   "app.claudeOff": "Claude OFF",
   "theme.label": "Theme",

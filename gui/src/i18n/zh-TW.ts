@@ -22,6 +22,7 @@ export const zhTW: Record<TKey, string> = {
   "common.loading": "載入中…",
   "common.retry": "重試",
   "app.logoAria": "opencodex 徽標",
+  "app.pageTitle": "{page} — opencodex",
   "app.claudeOn": "Claude 開",
   "app.claudeOff": "Claude 關",
   "theme.label": "主題",
