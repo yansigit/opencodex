@@ -5,11 +5,18 @@ import { logMatchesSurface } from "./logs-surface-filter";
 export type { LogSurface, LogSurfaceFilter };
 export type LogTimeWindow = "all" | "15m" | "1h" | "24h";
 export type LogStatusFilter = "all" | "success" | "errors";
+export type LogAgentKind = "all" | "main" | "subagent" | "internal" | "unknown";
+export type PersistedAgentKind = Exclude<LogAgentKind, "all" | "unknown">;
+
+export function normalizedAgentKind(value: unknown): Exclude<LogAgentKind, "all"> {
+  return value === "main" || value === "subagent" || value === "internal" ? value : "unknown";
+}
 
 export interface LogFilterState {
   surface: LogSurfaceFilter;
   model: string;
   provider: string;
+  agentKind: LogAgentKind;
   statusFilter: LogStatusFilter;
   timeWindow: LogTimeWindow;
   minTokPerSec?: number;
@@ -23,6 +30,7 @@ export const DEFAULT_LOG_FILTER_STATE: LogFilterState = {
   surface: "all",
   model: "",
   provider: "",
+  agentKind: "all",
   statusFilter: "all",
   timeWindow: "all",
   interceptedHelpersOnly: false,
@@ -34,6 +42,7 @@ export function hasActiveFilters(state: LogFilterState): boolean {
     state.surface !== "all" ||
     state.model !== "" ||
     state.provider !== "" ||
+    state.agentKind !== "all" ||
     state.statusFilter !== "all" ||
     state.timeWindow !== "all" ||
     state.minTokPerSec !== undefined ||
@@ -54,6 +63,7 @@ export interface MinimalLogEntry {
   model?: string;
   resolvedModel?: string;
   provider?: string;
+  agentKind?: string;
   surface?: LogSurface;
   status?: number;
   conversationId?: string;
@@ -86,6 +96,11 @@ export function filterLogs<T extends MinimalLogEntry>(
   return logs.filter(log => {
     // Surface filter
     if (!logMatchesSurface(log, filters.surface)) return false;
+
+    if (filters.agentKind !== "all") {
+      const kind = normalizedAgentKind(log.agentKind);
+      if (kind !== filters.agentKind) return false;
+    }
 
     // Intercepted helpers
     if (filters.interceptedHelpersOnly && !log.shadowCallRewrittenFrom && log.shadowCallSource !== "agent-helper") {

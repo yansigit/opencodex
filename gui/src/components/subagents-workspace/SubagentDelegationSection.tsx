@@ -10,7 +10,7 @@ import { useState } from "react";
 import { Select, Switch } from "../../ui";
 import { useT } from "../../i18n/shared";
 import { formatNamespacedModelId } from "../../provider-icons";
-import type { DelegationPatch, DelegationModelOption } from "../../pages/use-subagent-delegation";
+import type { DelegationPatch, DelegationModelOption, NativeDefaultState } from "../../pages/use-subagent-delegation";
 import type { UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState, V2RoutedDelegationBridgeState } from "../../pages/use-subagent-delegation";
 
 export interface SubagentDelegationSectionProps {
@@ -20,6 +20,7 @@ export interface SubagentDelegationSectionProps {
   available: DelegationModelOption[];
   guidanceEnabled: boolean;
   syncCodexDefaults: boolean;
+  nativeDefaultState?: NativeDefaultState;
   saving: boolean;
   onSave: (patch: DelegationPatch) => void;
   prompt: string;
@@ -50,6 +51,7 @@ export default function SubagentDelegationSection({
   available,
   guidanceEnabled,
   syncCodexDefaults,
+  nativeDefaultState = "disabled",
   saving,
   onSave,
   prompt,
@@ -146,6 +148,7 @@ export default function SubagentDelegationSection({
         <div className="setting-copy">
           <div className="font-semibold">{t("dash.syncCodexSubagentDefaults")}</div>
           <div className="muted setting-hint">{t("dash.syncCodexSubagentDefaultsHint")}</div>
+          <div className="muted setting-hint">{t(`sub.nativeDefaultState.${nativeDefaultState}`)}</div>
         </div>
         <button
           type="button"

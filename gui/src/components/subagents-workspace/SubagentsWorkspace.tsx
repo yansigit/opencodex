@@ -28,7 +28,8 @@ import { SectionTabs } from "../section-tabs";
 import { sectionAnchorId } from "../../section-anchors";
 import SubagentDelegationSection from "./SubagentDelegationSection";
 import SubagentRolesSection from "./SubagentRolesSection";
-import type { DelegationPatch, DelegationModelOption, UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState, V2RoutedDelegationBridgeState } from "../../pages/use-subagent-delegation";
+import type { DelegationPatch, DelegationModelOption, UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState, NativeDefaultState } from "../../pages/use-subagent-delegation";
+import type { V2RoutedDelegationBridgeState } from "../../pages/use-subagent-delegation";
 
 export interface SubagentsWorkspaceProps {
   available: string[];
@@ -44,6 +45,7 @@ export interface SubagentsWorkspaceProps {
     available: DelegationModelOption[];
     guidanceEnabled: boolean;
     syncCodexDefaults: boolean;
+    nativeDefaultState: NativeDefaultState;
     saving: boolean;
     onSave: (patch: DelegationPatch) => void;
     ultraMode: UltraModeState;
@@ -146,7 +148,13 @@ export default function SubagentsWorkspace({
                 <div key={m} className="swi-featured-row">
                   <span className="swi-featured-pos">{i + 1}</span>
                   <span className="swi-featured-name">{modelLabel(m)}</span>
+                  {delegation.model === m && <span className="badge badge-accent">{t("sub.preferred")}</span>}
                   <span className="swi-featured-actions">
+                    {delegation.model !== m && (
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => delegation.onSave({ model: m, effort: delegation.effort || null })} disabled={busy || delegation.saving}>
+                        {t("sub.prefer")}
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn-ghost btn-icon btn-sm"
@@ -259,6 +267,9 @@ export default function SubagentsWorkspace({
           <div className="swi-featured-head">
             <h2 className="swi-featured-title">{t("sub.settings")}</h2>
           </div>
+          {delegation.model && !chosenSet.has(delegation.model) && (
+            <p className="swi-featured-hint"><IconInfo width={15} height={15} aria-hidden="true" />{t("sub.preferredOutsideAdvertised")}</p>
+          )}
           <SubagentDelegationSection
             model={delegation.model}
             effort={delegation.effort}
@@ -266,6 +277,7 @@ export default function SubagentsWorkspace({
             available={delegation.available}
             guidanceEnabled={delegation.guidanceEnabled}
             syncCodexDefaults={delegation.syncCodexDefaults}
+            nativeDefaultState={delegation.nativeDefaultState}
             saving={delegation.saving}
             onSave={delegation.onSave}
             ultraMode={delegation.ultraMode}

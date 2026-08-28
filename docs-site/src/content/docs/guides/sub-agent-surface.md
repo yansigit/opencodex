@@ -135,6 +135,9 @@ active Codex routing, sync or restart can write the selected values as marker-ow
 opencodex updates or removes only fields bearing its markers. If either target field is user-owned,
 the pair is left unchanged rather than partially written; ambiguous TOML is rejected without a
 write. External provider managers and user-owned root routing also remain authoritative.
+The dashboard's `nativeDefaultState` diagnostic is fail-closed: only `active` means the synchronized
+native default is live. `pending`, `blocked`, `disabled`, or a missing field never claims that an
+omitted-model subagent will inherit the preferred model.
 
 ## Fallback chains
 
