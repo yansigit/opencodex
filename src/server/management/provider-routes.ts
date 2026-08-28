@@ -99,6 +99,7 @@ import type { ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import { resolveAiStudioCredentials } from "../../oauth/aistudio-credentials";
 import { buildAiStudioHeaders, parseGoogleCookieJar } from "../../oauth/google-aistudio-auth";
+import { maxWsFrameBytesConfigError, wsUpstreamConfigError } from "../../config/provider-validation";
 
 type ProviderPatchApplication =
   | { error: string }
@@ -293,6 +294,28 @@ function applyProviderPatchFields(
   if (Object.hasOwn(rawBody, "liveModels")) {
     if (typeof rawBody.liveModels !== "boolean") return { error: "liveModels must be a boolean" };
     next.liveModels = rawBody.liveModels;
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "wsUpstream")) {
+    const value = rawBody.wsUpstream;
+    if (value === null) {
+      delete next.wsUpstream;
+    } else {
+      const error = wsUpstreamConfigError(value);
+      if (error) return { error };
+      next.wsUpstream = value as boolean;
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "maxWsFrameBytes")) {
+    const value = rawBody.maxWsFrameBytes;
+    if (value === null) {
+      delete next.maxWsFrameBytes;
+    } else {
+      const error = maxWsFrameBytesConfigError(value);
+      if (error) return { error };
+      next.maxWsFrameBytes = value as number;
+    }
     touched = true;
   }
   if (Object.hasOwn(rawBody, "xaiResponsesOptIn")) {
@@ -571,6 +594,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       contextWindow: p.contextWindow,
       modelContextWindows: p.modelContextWindows,
       modelAutoCompactTokenLimits: p.modelAutoCompactTokenLimits,
+      wsUpstream: p.wsUpstream,
+      maxWsFrameBytes: p.maxWsFrameBytes,
       modelSupportsServiceTier: p.modelSupportsServiceTier,
       noStructuredOutputModels: p.noStructuredOutputModels,
       upstreamHttpVersion: p.upstreamHttpVersion,
@@ -673,6 +698,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // reached disk and the next loadConfig() refused it. Canonicalize to absent, which is what
     // "clear" means everywhere else.
     if (prov && prov.upstreamHttpVersion === null) delete prov.upstreamHttpVersion;
+    if (prov && prov.wsUpstream === null) delete prov.wsUpstream;
     if (!name || !prov?.adapter || !prov?.baseUrl) {
       return jsonResponse({ error: "name, provider.adapter and provider.baseUrl are required" }, 400);
     }

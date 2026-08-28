@@ -43,7 +43,7 @@ function codexWsUpstreamFetch(
   url: string,
   init: RequestInit,
   fallback: typeof fetch,
-  options?: CodexWsUpstreamOptions,
+  options: CodexWsUpstreamOptions = { wsUpstream: true },
 ): Promise<Response> {
   return rawCodexWsUpstreamFetch(url, init, fallback, BOUNDED_WS_RUNTIME, options);
 }
@@ -109,7 +109,7 @@ describe("shouldUseCodexWsUpstream", () => {
   });
 
   test("matches only streaming POSTs to the Codex backend", () => {
-    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(true);
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: true })).toBe(true);
     // Non-streaming turns keep HTTP: the WS path only speaks the event protocol.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
@@ -131,7 +131,7 @@ describe("shouldUseCodexWsUpstream", () => {
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
       body: "{\n  \"model\": \"gpt-5.6-luna\",\n  \"stream\" : true\n}",
-    })).toBe(true);
+    }, { wsUpstream: true })).toBe(true);
     // Non-boolean stream values stay on HTTP.
     expect(shouldUseCodexWsUpstream(CODEX_URL, {
       method: "POST",
@@ -146,13 +146,23 @@ describe("shouldUseCodexWsUpstream", () => {
     expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: true })).toBe(true);
   });
 
-  test("bypasses WS when OCX_CODEX_WS_UPSTREAM is false or 0", () => {
-    process.env.OCX_CODEX_WS_UPSTREAM = "false";
+  test("requires an explicit provider or environment opt-in", () => {
+    delete process.env.OCX_CODEX_WS_UPSTREAM;
     expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(false);
-    process.env.OCX_CODEX_WS_UPSTREAM = "0";
-    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(false);
+
+    for (const envVal of ["false", "0", "invalid"]) {
+      process.env.OCX_CODEX_WS_UPSTREAM = envVal;
+      expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(false);
+    }
+    for (const envVal of ["true", "1"]) {
+      process.env.OCX_CODEX_WS_UPSTREAM = envVal;
+      expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(true);
+    }
+
     process.env.OCX_CODEX_WS_UPSTREAM = "true";
-    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit())).toBe(true);
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: false })).toBe(false);
+    process.env.OCX_CODEX_WS_UPSTREAM = "false";
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: true })).toBe(true);
   });
 });
 
@@ -212,6 +222,21 @@ function installFake(script: (ws: FakeWebSocket) => void) {
 }
 
 describe("providerFetch routing", () => {
+  test("defaults omitted wsUpstream to HTTP SSE", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: {} }) });
+    });
+    const sentinel = new Response("base");
+    const provider = {
+      fetch: (async () => sentinel) as typeof fetch,
+    } as OcxProviderConfig;
+    const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME);
+
+    expect(await wrapped(CODEX_URL, streamingInit())).toBe(sentinel);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
   test("a canary runtime identity cannot open the WS transport", async () => {
     const sentinel = new Response("base");
     let baseCalls = 0;
@@ -239,6 +264,7 @@ describe("providerFetch routing", () => {
     const baseCalls: string[] = [];
     const sentinel = new Response("base");
     const provider = {
+      wsUpstream: true,
       fetch: (async (input: unknown) => {
         baseCalls.push(String(input));
         return sentinel.clone();
@@ -313,6 +339,7 @@ describe("handleResponses Codex WS relay selection", () => {
           baseUrl: "https://chatgpt.com/backend-api/codex",
           authMode: "forward",
           codexAccountMode: "direct",
+          wsUpstream: true,
         },
       },
     } as OcxConfig;
@@ -844,6 +871,28 @@ describe("oversized Codex create frames", () => {
     );
     expect(response).toBe(sentinel);
     expect(fallbackCalls).toBe(1);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  test("never lets provider or environment ceilings exceed the backend hard limit", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: {} }) });
+    });
+    const oversized = streamingInit({ padding: "x".repeat(CODEX_WS_CREATE_FRAME_LIMIT_BYTES) });
+    const sentinel = new Response("sse-fallback");
+    const fallback = (async () => sentinel) as unknown as typeof fetch;
+
+    expect(await codexWsUpstreamFetch(
+      CODEX_URL,
+      oversized,
+      fallback,
+      { maxWsFrameBytes: MAX_CODEX_WS_CREATE_FRAME_BYTES + 1 },
+    )).toBe(sentinel);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    process.env.OCX_CODEX_WS_MAX_FRAME_BYTES = String(MAX_CODEX_WS_CREATE_FRAME_BYTES + 1);
+    expect(await codexWsUpstreamFetch(CODEX_URL, oversized, fallback)).toBe(sentinel);
     expect(FakeWebSocket.instances).toHaveLength(0);
   });
 

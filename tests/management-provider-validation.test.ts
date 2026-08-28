@@ -42,6 +42,7 @@ import { getAccountSet, saveCredential } from "../src/oauth/store";
 import { fastPolicyForModel } from "../src/providers/service-tier";
 import { resolveWireProtocolOverride } from "../src/server/adapter-resolve";
 import { providerTlsFetch, resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../src/lib/provider-tls-profile";
+import { shouldUseCodexWsUpstream } from "../src/server/responses/ws-upstream";
 
 // Full-suite Windows load: startServer + multi-step provider PATCH/GET flows exceed the
 // default 5s per-test budget (same flake class as 810fa115 / claude-management-api).
@@ -3784,6 +3785,62 @@ describe("provider upstreamHttpVersion management contract (#1668)", () => {
     });
   });
 
+  test("POST with wsUpstream: null persists nothing and inherits the environment after reload", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig = makeConfig();
+    saveConfig(liveConfig);
+    const previousWsUpstream = process.env.OCX_CODEX_WS_UPSTREAM;
+    process.env.OCX_CODEX_WS_UPSTREAM = "true";
+    try {
+      await withRequest(liveConfig, async (request) => {
+        const created = await request("/api/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "ws-null-provider",
+            provider: {
+              adapter: "openai-chat",
+              baseUrl: "https://api.example.test/v1",
+              wsUpstream: null,
+            },
+          }),
+        });
+        expect(created?.status).toBe(200);
+
+        const liveProvider = liveConfig.providers["ws-null-provider"]!;
+        expect(Object.hasOwn(liveProvider, "wsUpstream")).toBe(false);
+        const onDisk = JSON.parse(readFileSync(join(TEST_DIR, "config.json"), "utf-8")) as any;
+        expect(Object.hasOwn(onDisk.providers["ws-null-provider"], "wsUpstream")).toBe(false);
+
+        const reloaded = loadConfig();
+        const reloadedProvider = reloaded.providers["ws-null-provider"]!;
+        expect(Object.hasOwn(reloadedProvider, "wsUpstream")).toBe(false);
+
+        const requestInit = {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-luna", stream: true }),
+        };
+        expect(shouldUseCodexWsUpstream(
+          "https://chatgpt.com/backend-api/codex/responses",
+          requestInit,
+          "1.4.0",
+          { wsUpstream: liveProvider.wsUpstream },
+        )).toBe(true);
+        expect(shouldUseCodexWsUpstream(
+          "https://chatgpt.com/backend-api/codex/responses",
+          requestInit,
+          "1.4.0",
+          { wsUpstream: reloadedProvider.wsUpstream },
+        )).toBe(true);
+      });
+    } finally {
+      if (previousWsUpstream === undefined) delete process.env.OCX_CODEX_WS_UPSTREAM;
+      else process.env.OCX_CODEX_WS_UPSTREAM = previousWsUpstream;
+    }
+  });
+
   test("a config already holding upstreamHttpVersion: null still loads", async () => {
     // Compatibility for anything the old POST path already wrote to disk.
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
@@ -3860,6 +3917,101 @@ describe("provider upstreamHttpVersion management contract (#1668)", () => {
       expect(clear?.status).toBe(200);
       expect(liveConfig.providers.nvidia?.upstreamHttpVersion).toBeUndefined();
       expect(loadConfig().providers.nvidia?.upstreamHttpVersion).toBeUndefined();
+    });
+  });
+
+  test("provider PATCH persists, exposes, validates, and clears Codex WebSocket controls", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig = makeConfig();
+    saveConfig(liveConfig);
+    await withRequest(liveConfig, async (request) => {
+      const invalidType = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: "true" }),
+      });
+      expect(invalidType?.status).toBe(400);
+
+      const invalidLimit = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ maxWsFrameBytes: -1 }),
+      });
+      expect(invalidLimit?.status).toBe(400);
+
+      const set = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: true, maxWsFrameBytes: 1234 }),
+      });
+      expect(set?.status).toBe(200);
+      expect(liveConfig.providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+      expect(loadConfig().providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+      const list = await request("/api/providers");
+      expect(await list?.json()).toContainEqual(expect.objectContaining({
+        name: "nvidia",
+        wsUpstream: true,
+        maxWsFrameBytes: 1234,
+      }));
+      const dto = safeConfigDTO(liveConfig) as { providers: Record<string, Record<string, unknown>> };
+      expect(dto.providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+
+      const clear = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: null, maxWsFrameBytes: null }),
+      });
+      expect(clear?.status).toBe(200);
+      expect(liveConfig.providers.nvidia.wsUpstream).toBeUndefined();
+      expect(liveConfig.providers.nvidia.maxWsFrameBytes).toBeUndefined();
+      expect(loadConfig().providers.nvidia.wsUpstream).toBeUndefined();
+      expect(loadConfig().providers.nvidia.maxWsFrameBytes).toBeUndefined();
+    });
+  });
+
+  test("canonical OpenAI management writes preserve valid Codex WebSocket controls", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig: OcxConfig = {
+      ...makeConfig(),
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: { openai: { ...canonicalDirect } },
+    };
+    saveConfig(liveConfig);
+    await withRequest(liveConfig, async (request) => {
+      const set = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: true, maxWsFrameBytes: 1234 }),
+      });
+      expect(set?.status).toBe(200);
+      expect(liveConfig.providers.openai).toMatchObject({
+        ...canonicalDirect,
+        wsUpstream: true,
+        maxWsFrameBytes: 1234,
+      });
+      expect(loadConfig().providers.openai).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+
+      const clear = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: null, maxWsFrameBytes: null }),
+      });
+      expect(clear?.status).toBe(200);
+      expect(liveConfig.providers.openai.wsUpstream).toBeUndefined();
+      expect(liveConfig.providers.openai.maxWsFrameBytes).toBeUndefined();
+
+      const forged = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: "true" }),
+      });
+      expect(forged?.status).toBe(400);
+      expect(await forged?.json()).toMatchObject({ error: expect.stringContaining("wsUpstream") });
     });
   });
 

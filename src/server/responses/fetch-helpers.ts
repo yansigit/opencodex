@@ -77,9 +77,11 @@ export function providerFetch(
       transport(input, withUpstreamHttpVersion(input, init, provider)),
     { preconnect },
   ) as typeof globalThis.fetch;
-  // ChatGPT Codex backend: streaming turns ride the responses_websockets
-  // transport (measured ~3s faster TTFT than the SSE POST queue); everything
-  // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
+  // ChatGPT Codex backend: eligible streaming turns stay on HTTP/SSE by
+  // default. `wsUpstream: true`, or (when that option is omitted)
+  // OCX_CODEX_WS_UPSTREAM=true/1, opts into the responses_websockets transport;
+  // everything else keeps the provider's HTTP fetch. See ws-upstream.ts for
+  // the details.
   const wsOptions: CodexWsUpstreamOptions = {
     wsUpstream: provider.wsUpstream,
     maxWsFrameBytes: provider.maxWsFrameBytes,

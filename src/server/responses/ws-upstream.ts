@@ -4,8 +4,8 @@
 // a measurably faster queue than the plain SSE POST path. Measured 2026-08-12
 // KST (same account, same payload, strictly sequential): gpt-5.6-luna TTFT p50
 // ~1.0s over WS vs ~3.9s over SSE. Codex CLI itself defaults to the WS
-// transport; opencodex previously always POSTed SSE, which is where its extra
-// 2-3s of TTFT came from.
+// transport; opencodex keeps HTTP/SSE as its reliable default and allows
+// operators to opt into WS when the lower latency is worth the risk.
 //
 // The wrapper only swaps the transport. It dials wss:// with the same headers,
 // sends the JSON body as a single `response.create` frame, and re-encodes the
@@ -62,19 +62,19 @@ export interface CodexWsUpstreamOptions {
 }
 
 export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boolean {
-  if (options?.wsUpstream === false) return true;
+  if (options?.wsUpstream !== undefined) return options.wsUpstream !== true;
   const env = process.env.OCX_CODEX_WS_UPSTREAM;
-  return env === "false" || env === "0";
+  return env !== "true" && env !== "1";
 }
 
 export function resolveCodexWsMaxFrameBytes(options?: CodexWsUpstreamOptions): number {
   if (typeof options?.maxWsFrameBytes === "number" && Number.isFinite(options.maxWsFrameBytes) && options.maxWsFrameBytes > 0) {
-    return options.maxWsFrameBytes;
+    return Math.min(options.maxWsFrameBytes, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
   }
   const envVal = process.env.OCX_CODEX_WS_MAX_FRAME_BYTES;
   if (envVal) {
     const parsed = Number.parseInt(envVal, 10);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    if (Number.isFinite(parsed) && parsed > 0) return Math.min(parsed, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
   }
   return CODEX_WS_CREATE_FRAME_LIMIT_BYTES;
 }

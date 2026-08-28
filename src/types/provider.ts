@@ -229,8 +229,10 @@ export interface OcxProviderConfig {
   allowPrivateNetwork?: boolean;
   /**
    * ChatGPT Codex backend WebSocket upstream transport.
-   * Defaults to true (uses faster responses_websockets transport for streaming turns).
-   * Set `false` to bypass WebSocket and route directly over standard HTTP/SSE.
+   * Defaults to false (routes streaming turns over standard HTTP/SSE).
+   * Set `true` to opt into the faster responses_websockets transport.
+   * `OCX_CODEX_WS_UPSTREAM=true` or `1` also enables it when this is omitted;
+   * `false` and `0` disable it. Invalid or absent values default to HTTP/SSE.
    */
   wsUpstream?: boolean;
   /**

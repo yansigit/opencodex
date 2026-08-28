@@ -999,6 +999,44 @@ describe("opencodex config defaults", () => {
     }
   });
 
+  test("validates and persists Codex WebSocket provider controls", () => {
+    const base = getDefaultConfig();
+    const provider = {
+      adapter: "openai-chat",
+      baseUrl: "https://example.test/v1",
+      wsUpstream: true,
+      maxWsFrameBytes: 1234,
+    };
+    const candidate = validateConfigCandidate({
+      ...base,
+      defaultProvider: "custom",
+      providers: { custom: provider },
+    });
+    expect(candidate).toMatchObject({
+      ok: true,
+      config: { providers: { custom: provider } },
+    });
+
+    for (const [field, value] of [
+      ["wsUpstream", "true"],
+      ["maxWsFrameBytes", -1],
+      ["maxWsFrameBytes", 1.5],
+    ] as const) {
+      expect(validateConfigCandidate({
+        ...base,
+        defaultProvider: "custom",
+        providers: { custom: { ...provider, [field]: value } },
+      }).ok).toBe(false);
+    }
+
+    writeConfig({
+      ...base,
+      defaultProvider: "custom",
+      providers: { custom: provider },
+    });
+    expect(loadConfig().providers.custom).toMatchObject(provider);
+  });
+
   test("rejects invalid or noncanonical codexAccountMode placements", () => {
     for (const [name, provider] of [
       ["custom", { adapter: "openai-chat", baseUrl: "https://example.test/v1", codexAccountMode: "pool" }],
