@@ -463,7 +463,8 @@ async function terminateBackgroundShell(
       if (backgroundShellRuntime.platform === "win32") {
         if (!tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
       } else if (!tryKillBackgroundShellProcessGroup(entry, "SIGKILL")) {
-        if (!tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
+        attemptKillFailures += 1;
+        if (!closed && !tryKillBackgroundShell(entry, "SIGKILL")) attemptKillFailures += 1;
       }
       closed = await waitForBackgroundShellClose(entry);
       if (!closed && backgroundShells.get(entry.shellId) !== entry) closed = true;

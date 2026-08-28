@@ -198,7 +198,7 @@ test("failed POSIX group termination counts even when direct-child fallback clos
     },
   } as never);
   spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
-  await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ killFailures: 1, closed: 1 });
+  await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ killFailures: 2, closed: 1 });
 });
 
 test("failed POSIX TERM still escalates after direct-child fallback closes", async () => {
@@ -224,7 +224,7 @@ test("failed POSIX TERM still escalates after direct-child fallback closes", asy
   spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
   await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ closed: 1 });
   expect(groupSignals).toEqual(["SIGTERM", "SIGKILL"]);
-  expect(fake.signals).toEqual([undefined, undefined]);
+  expect(fake.signals).toEqual([undefined]);
 });
 
 test("dead POSIX process group skips SIGKILL after graceful TERM", async () => {
@@ -428,7 +428,7 @@ describe("Cursor background shell lifecycle", () => {
     await fake.clock.advance(CURSOR_BACKGROUND_SHELL_IDLE_MS - 1);
     expect(fake.signals).toEqual([]);
     await fake.clock.advance(1);
-    expect(fake.signals).toEqual([undefined, "SIGKILL"]);
+    expect(fake.signals).toEqual([undefined]);
     expect(backgroundShellLifecycleMetrics().idleTerminations).toBe(1);
   });
 
@@ -445,7 +445,7 @@ describe("Cursor background shell lifecycle", () => {
         }), "session-a");
       }
     }
-    expect(fake.signals).toEqual([undefined, "SIGKILL"]);
+    expect(fake.signals).toEqual([undefined]);
     expect(backgroundShellLifecycleMetrics().absoluteTerminations).toBe(1);
   });
 
@@ -468,7 +468,7 @@ describe("Cursor background shell lifecycle", () => {
     spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
     const cleanup = terminateBackgroundShellsForSession("session-a");
     await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS * 2);
-    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 3 });
+    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 4 });
     expect(backgroundShellAdmissionMetrics().active).toBe(1);
     fake.children[0]!.emit("close", 0, null);
   });
@@ -478,7 +478,7 @@ describe("Cursor background shell lifecycle", () => {
     spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
     const cleanup = terminateBackgroundShellsForSession("session-a");
     await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS * 2);
-    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 1 });
+    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 2 });
     expect(backgroundShellLifecycleMetrics().unresolvedKills).toBe(1);
     expect(backgroundShellAdmissionMetrics().active).toBe(1);
     fake.children[0]!.emit("close", 0, null);
@@ -501,7 +501,7 @@ describe("Cursor background shell lifecycle", () => {
     spawnSuccess(backgroundShellSpawnExec(spawnArgs("b"), "session-b"));
     await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ attempted: 1, closed: 1 });
     expect(backgroundShellAdmissionMetrics().active).toBe(1);
-    expect(fake.signals).toEqual([undefined, "SIGKILL"]);
+    expect(fake.signals).toEqual([undefined]);
     fake.children[1]!.emit("close", 0, null);
   });
 
