@@ -32,6 +32,13 @@ export class TelemetryLedger {
     return { fingerprint: row.fingerprint as string, firstSeen: row.first_seen as number, lastSeen: row.last_seen as number, count: row.count as number, status: row.status as RemediationStatus, ...(row.details ? { details: JSON.parse(row.details as string) } : {}) };
   }
 
+  listRecords(): LedgerRecord[] {
+    return this.db.query("SELECT fingerprint, first_seen, last_seen, count, status, details FROM failure_events ORDER BY last_seen DESC").all().map(row => {
+      const value = row as Record<string, unknown>;
+      return { fingerprint: value.fingerprint as string, firstSeen: value.first_seen as number, lastSeen: value.last_seen as number, count: value.count as number, status: value.status as RemediationStatus, ...(value.details ? { details: JSON.parse(value.details as string) } : {}) };
+    });
+  }
+
   updateStatus(fingerprint: FailureFingerprint, status: RemediationStatus, details?: Record<string, unknown>): void {
     this.db.query("UPDATE failure_events SET status = ?, details = ? WHERE fingerprint = ?").run(status, details ? JSON.stringify(details) : null, fingerprint);
   }
