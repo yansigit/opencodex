@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, getDefaultConfig, saveConfig } from "../src/config";
+import { handleConfigCommand } from "../src/cli/config-command";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
 
 let home = "";
@@ -80,6 +81,30 @@ test("whole saves refuse to replace an invalid existing config", () => {
 
   expect(() => saveConfig({ port: 10210, defaultProvider: "openai", providers: {} })).toThrow();
   expect(readFileSync(getConfigPath(), "utf8")).toBe(invalid);
+});
+
+test("whole saves refuse to replace a schema-invalid JSON config", () => {
+  mkdirSync(home, { recursive: true });
+  const invalid = JSON.stringify({ port: "not-a-port", providers: {} });
+  writeFileSync(getConfigPath(), invalid);
+
+  expect(() => saveConfig({ port: 10210, defaultProvider: "openai", providers: {} })).toThrow();
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(invalid);
+});
+
+test("config import with --yes replaces the provider registry", async () => {
+  writeDiskConfig(sixProviderConfig());
+  const imported = {
+    port: 10212,
+    defaultProvider: "imported",
+    providers: { imported: provider("imported") },
+  };
+  const source = join(home, "import.json");
+  writeFileSync(source, JSON.stringify(imported));
+
+  expect(await handleConfigCommand(["import", source, "--yes", "--json"])).toBe(0);
+  expect(diskConfig().providers).toEqual(imported.providers);
+  expect(diskConfig().defaultProvider).toBe("imported");
 });
 
 test("whole saves create the default OpenAI config when no config exists", () => {

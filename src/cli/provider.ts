@@ -8,7 +8,7 @@
  *   show <name>   Show provider config details (secrets masked)
  *   set-default <name>  Change the default provider
  */
-import { hasOwnProvider, isValidProviderName, loadConfig, sanitizeModelCostsForDisplay, saveConfig } from "../config";
+import { hasOwnProvider, isValidProviderName, loadConfig, mutatePersistedConfig, sanitizeModelCostsForDisplay } from "../config";
 import { apiKeyTransportConfigError } from "../config/provider-validation";
 import { hasHelpFlag } from "./help";
 import { getProviderRegistryEntry, PROVIDER_REGISTRY } from "../providers/registry";
@@ -69,7 +69,19 @@ function validateAndSave(config: ReturnType<typeof loadConfig>): void {
     console.error(`Error: defaultProvider "${config.defaultProvider}" does not exist in providers. Aborting.`);
     process.exit(1);
   }
-  saveConfig(config);
+  const outcome = mutatePersistedConfig(fresh => {
+    const before = JSON.stringify(fresh);
+    fresh.providers = structuredClone(config.providers);
+    fresh.defaultProvider = config.defaultProvider;
+    if (config.customModels === undefined) delete fresh.customModels;
+    else fresh.customModels = structuredClone(config.customModels);
+    return { changed: JSON.stringify(fresh) !== before, value: undefined };
+  });
+  if (outcome.status === "unavailable") {
+    throw new Error(outcome.reason === "conflict"
+      ? "config changed while applying this provider update; retry"
+      : `config is ${outcome.reason}`);
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@ import { managementFetch as fetch } from "./helpers/management-auth";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveConfig } from "../src/config";
+import { replacePersistedConfig, saveConfig } from "../src/config";
 import {
   addProviderApiKey,
   isKeyAuthProvider,
@@ -141,7 +141,7 @@ describe("provider API key pool", () => {
       models: ["gpt-4o"],
       liveModels: false,
     };
-    saveConfig(config);
+    replacePersistedConfig(config);
     const server = startServer(0);
     try {
       // Startup normalizes the loaded config; capture the persisted baseline only

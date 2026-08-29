@@ -2731,7 +2731,7 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
  * cost-overlay registry from the persisted config so runtime estimates follow
  * every save path.
  */
-function persistConfigUnlocked(config: OcxConfig): boolean {
+function persistConfigUnlocked(config: OcxConfig, replaceProviderRegistry = false): boolean {
   const configPath = getConfigPath();
   // Check the resolved file target before reading it: a symlink can point from an
   // isolated test home into the protected real home, where another write guard
@@ -2746,8 +2746,9 @@ function persistConfigUnlocked(config: OcxConfig): boolean {
     throw new Error("refusing to overwrite an invalid persisted config; fix the persisted config first");
   }
   // Automatic whole-config writes own non-provider settings only. A valid disk
-  // registry is authoritative; provider changes use the locked mutation path.
-  const base = snapshot.diagnostics.source === "file"
+  // registry is authoritative; explicit locked mutations pass replacement
+  // authority for intentional provider/default changes.
+  const base = snapshot.diagnostics.source === "file" && !replaceProviderRegistry
     ? {
       ...config,
       providers: snapshot.diagnostics.config.providers,
@@ -2793,6 +2794,22 @@ export function saveConfig(config: OcxConfig): void {
     adoptCustomModelCatalogMigration(config, withProvenance);
     if (withProvenance.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
     else config.configRebaseProvenance = structuredClone(withProvenance.configRebaseProvenance);
+    clearPendingConfigTopLevelDeletions(config);
+  });
+}
+
+/** Replace a validated config under the shared lock for confirmed import/init/reset flows. */
+export function replacePersistedConfig(config: OcxConfig): void {
+  assertNotRealHomeUnderTest(getConfigDir());
+  withConfigMutationLockSync(() => {
+    const projected = projectCustomModelCatalogMigration(
+      readRawConfigJson(),
+      projectConfigRebaseProvenance(config),
+    );
+    if (persistConfigUnlocked(projected, true)) bumpGenerationForCooperatingConfigWrite();
+    adoptCustomModelCatalogMigration(config, projected);
+    if (projected.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+    else config.configRebaseProvenance = structuredClone(projected.configRebaseProvenance);
     clearPendingConfigTopLevelDeletions(config);
   });
 }
@@ -2878,7 +2895,7 @@ export function mutatePersistedConfig<T>(
         commitBase.diagnostics.config,
         confirmedConfig,
       );
-      if (persistConfigUnlocked(projected)) bumpGenerationForCooperatingConfigWrite();
+      if (persistConfigUnlocked(projected, true)) bumpGenerationForCooperatingConfigWrite();
       return { status: "committed", value: confirmed.value };
     }
     return { status: "unavailable", reason: "conflict" };
@@ -3200,7 +3217,7 @@ function readPersistedServerBinding(
  *   conflict keeps the live value;
  * - a provider or custom-model row deleted on disk stays deleted even if stale
  *   live state edited that same row;
- * - file missing/unreadable → save what we have, no throw.
+ * - missing file → save what we have; invalid existing file → fail closed.
  *
  * Custom-model rows are merged by their stable `id`, preserving independent
  * edits and deletions across stale whole-config saves.

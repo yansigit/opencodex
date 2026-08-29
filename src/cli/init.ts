@@ -1,7 +1,7 @@
 import * as readline from "node:readline";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { injectCodexConfig } from "../codex/inject";
-import { classifyOpenAiTierBackup, getConfigPath, getDefaultConfig, isValidProviderName, preserveOpenAiTierRollbackSnapshot, saveConfig } from "../config";
+import { classifyOpenAiTierBackup, getConfigPath, getDefaultConfig, isValidProviderName, preserveOpenAiTierRollbackSnapshot, replacePersistedConfig } from "../config";
 import { enrichProviderFromCatalog } from "../oauth/key-providers";
 import { deriveInitProviders } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -168,7 +168,7 @@ export async function runInit(): Promise<void> {
       modelDiscovery: { newModelPolicy: "off" },
     };
 
-    saveConfig(config);
+    replacePersistedConfig(config);
     // Init writes a fresh config, so a stale pre-migration backup from a previous
     // installation would make the next `ocx start` crash on a stale-backup
     // collision (issue #257). But only a STALE backup (unparseable, or already a
