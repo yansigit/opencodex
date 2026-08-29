@@ -261,7 +261,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const loadSubagents = useCallback(async (signal?: AbortSignal): Promise<CachedSubagents> => {
     // The resource layer's deadline abort must reach the wire — a signal dropped
     // here is a store that can only settle by race timeout.
-    catalogLoadGeneration.current++;
+    const generation = ++catalogLoadGeneration.current;
     const res = await fetch(`${apiBase}/api/subagent-models`, { signal });
     const response = await readJsonOrThrow<{ available?: string[]; chosen?: string[]; catalogState?: { state?: CatalogState } }>(res, t("sub.loadFail"));
     if (!response) throw new Error(t("sub.loadFail"));
@@ -272,6 +272,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       chosen: (response.chosen ?? []).filter(model => availableSet.has(model)),
       catalogState: response.catalogState,
     };
+    if (generation !== catalogLoadGeneration.current) return next;
     setChosen(next.chosen);
     setCatalogState(readCatalogState(next));
     writeSessionListCache(cacheKey, next);

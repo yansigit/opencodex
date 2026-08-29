@@ -26,6 +26,8 @@ let subagentCatalogReads = 0;
 let subagentCatalogFails = false;
 let deferSubagentSave = false;
 let releaseSubagentSave: (() => void) | null = null;
+let deferCatalogGets = false;
+let releaseCatalogGets: Array<() => void> = [];
 
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map((k) => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
@@ -50,6 +52,8 @@ beforeEach(() => {
   subagentCatalogFails = false;
   deferSubagentSave = false;
   releaseSubagentSave = null;
+  deferCatalogGets = false;
+  releaseCatalogGets = [];
   testWindow.sessionStorage.clear();
   clearClientResourceStoresForTests();
   Object.defineProperty(globalThis, "confirm", { configurable: true, value: () => true });
@@ -83,6 +87,9 @@ beforeEach(() => {
         } as unknown as Response;
       }
       const isSubagentCatalog = String(url).includes("/api/subagent-models");
+      if (isSubagentCatalog && init?.method === undefined && deferCatalogGets) {
+        await new Promise<void>((resolve) => { releaseCatalogGets.push(resolve); });
+      }
       if (isSubagentCatalog && init?.method === "PUT" && deferSubagentSave) {
         await new Promise<void>((resolve) => { releaseSubagentSave = resolve; });
       }
@@ -279,6 +286,39 @@ test("a refresh completing during save cannot be overwritten by the stale save c
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
 
   releaseSubagentSave!();
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+  expect(JSON.parse(testWindow.sessionStorage.getItem("ocx.subagents.v1:")!)).toMatchObject({
+    available: ["new-model"],
+    catalogState: { state: "fresh" },
+  });
+});
+
+test("an older catalog GET resolving last cannot overwrite the newer cache", async () => {
+  catalogState = "stale";
+  available = ["old-model"];
+  rosterAfterRefresh = ["new-model"];
+  await mount();
+
+  deferCatalogGets = true;
+  const restart = container.querySelector<HTMLButtonElement>(".codex-stale-banner button");
+  expect(restart).toBeTruthy();
+  await act(async () => {
+    restart!.click();
+    restart!.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+  expect(releaseCatalogGets).toHaveLength(2);
+
+  available = ["new-model"];
+  catalogState = "fresh";
+  releaseCatalogGets[1]!();
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+  available = ["old-model"];
+  catalogState = "stale";
+  rosterAfterRefresh = null;
+  releaseCatalogGets[0]!();
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
 
   expect(JSON.parse(testWindow.sessionStorage.getItem("ocx.subagents.v1:")!)).toMatchObject({
