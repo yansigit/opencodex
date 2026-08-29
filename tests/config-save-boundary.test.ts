@@ -314,7 +314,9 @@ test("management routes cannot reach global config writers through any runtime h
     "providers/key-failover.ts: mutatePersistedConfig",
     "providers/replit/setup.ts: mutatePersistedConfig",
     "server/management-api.ts: saveConfigPreservingClaudeCode",
-    "storage/policy.ts: saveConfigPreservingClaudeCode",
+    // Management reaches lifecycle for shutdown state. Lifecycle independently owns
+    // storage worker teardown, whose completion uses this locked field-scoped mutation.
+    "storage/policy.ts: mutatePersistedConfig",
   ]);
   const api = new API({ cwd: join(SRC, "..") });
   try {
@@ -323,9 +325,22 @@ test("management routes cannot reach global config writers through any runtime h
       const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
       if (!project) throw new Error("TypeScript did not load the repository project");
       const managementDir = join(SRC, "server", "management");
-      const pending = readdirSync(managementDir)
+      const managementRoutes = readdirSync(managementDir)
         .filter(name => name.endsWith(".ts") && name !== "context.ts")
         .map(name => join(managementDir, name));
+      const directStorageImports: string[] = [];
+      for (const path of managementRoutes) {
+        const source = await project.program.getSourceFile(path);
+        if (!source) throw new Error(`TypeScript omitted ${path}`);
+        for (const imported of localRuntimeImports(source)) {
+          if (imported === join(SRC, "storage", "policy.ts")
+            || imported === join(SRC, "storage", "policy-job.ts")) {
+            directStorageImports.push(`${path.slice(SRC.length + 1)} -> ${imported.slice(SRC.length + 1)}`);
+          }
+        }
+      }
+      expect(directStorageImports).toEqual([]);
+      const pending = [...managementRoutes];
       const visited = new Set<string>();
       const offenders: string[] = [];
       while (pending.length > 0) {

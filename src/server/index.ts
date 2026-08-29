@@ -39,6 +39,11 @@ import {
 } from "../lib/state-store-registrations";
 import { startUserCostOverlayReconciler } from "../usage/user-cost-overlay-reconciler";
 import {
+  getStorageCleanupPolicyJobState,
+  getStorageCleanupPolicyTestStreamResponse,
+  requestStorageCleanupPolicyRun,
+} from "../storage/policy-job";
+import {
   configureAppOwnedMemoryBudget,
   enforceAppOwnedMemoryBudget,
   resolveAppOwnedMemoryBudgetBytes,
@@ -537,6 +542,11 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   const managementApi: ManagementApiDeps = {
     saveConfigPreservingClaudeCode,
     mutatePersistedConfig,
+    storageCleanupPolicyJob: {
+      getState: getStorageCleanupPolicyJobState,
+      getTestStream: getStorageCleanupPolicyTestStreamResponse,
+      requestRun: requestStorageCleanupPolicyRun,
+    },
     ...deps.managementApi,
   };
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();

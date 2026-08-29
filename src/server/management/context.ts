@@ -41,6 +41,12 @@ export interface ManagementApiDeps {
   saveConfigPreservingClaudeCode?: (config: OcxConfig) => void;
   /** Config-mutation seam for routes that commit through `mutatePersistedConfig`. */
   mutatePersistedConfig?: typeof import("../../config").mutatePersistedConfig;
+  /** Storage-policy job seam keeps management routes off persistence-bearing worker modules. */
+  storageCleanupPolicyJob?: {
+    getState: typeof import("../../storage/policy-job").getStorageCleanupPolicyJobState;
+    getTestStream: typeof import("../../storage/policy-job").getStorageCleanupPolicyTestStreamResponse;
+    requestRun: typeof import("../../storage/policy-job").requestStorageCleanupPolicyRun;
+  };
   /** Test-only fetch injection for Replit gateway install probes. */
   probeFetch?: typeof globalThis.fetch;
   /**
