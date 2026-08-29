@@ -1776,7 +1776,7 @@ describe("codex-auth API", () => {
     await fetchStarted;
     const editedOnDisk = loadConfig();
     editedOnDisk.providers.custom!.note = "manual-disk-note";
-    saveConfig(editedOnDisk);
+    writeFileSync(getConfigPath(), `${JSON.stringify(editedOnDisk, null, 2)}\n`);
     releaseFetch();
     const resp = await pending;
     expect(resp!.status).toBe(200);
@@ -1805,7 +1805,7 @@ describe("codex-auth API", () => {
       injected = true;
       const concurrent = loadConfig();
       concurrent.providers.custom!.note = "concurrent-disk-note";
-      saveConfig(concurrent);
+      writeFileSync(getConfigPath(), `${JSON.stringify(concurrent, null, 2)}\n`);
     });
     globalThis.fetch = (async () => Response.json({
       plan_type: "prolite",

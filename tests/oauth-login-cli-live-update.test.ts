@@ -3,7 +3,7 @@ import { managementFetch as fetch } from "./helpers/management-auth";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig, writePid, writeRuntimePort } from "../src/config";
+import { loadConfig, mutatePersistedConfig, saveConfig, writePid, writeRuntimePort } from "../src/config";
 import { upsertOAuthProvider } from "../src/oauth";
 import {
   commitKeyLoginProvider,
@@ -193,13 +193,16 @@ describe("CLI OAuth live-update credential preservation", () => {
       writePid(process.pid);
       const boot = loadConfig();
       boot.port = port;
-      boot.providers["google-aistudio"] = {
-        adapter: "google",
-        googleMode: "ai-studio-web",
-        baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
-        authMode: "local",
-      };
       saveConfig(boot);
+      mutatePersistedConfig(fresh => {
+        fresh.providers["google-aistudio"] = {
+          adapter: "google",
+          googleMode: "ai-studio-web",
+          baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+          authMode: "local",
+        };
+        return { changed: true, value: undefined };
+      });
 
       const result = await notifyRunningProxy("google-aistudio");
       expect(result?.kind).toBe("reloaded");

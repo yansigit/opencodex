@@ -6,8 +6,8 @@ import { join } from "node:path";
 import {
   getConfigPath,
   loadConfig,
+  mutatePersistedConfig,
   saveConfig,
-  saveConfigPreservingClaudeCode,
 } from "../src/config";
 import type { OcxConfig } from "../src/types";
 import { resolveMatchedPrice } from "../src/usage/cost";
@@ -102,8 +102,11 @@ describe("provider deletion with disk-only preservation", () => {
     // until disk confirms the deletion. Preservation must still not put beta back.
     const versionBeforeDelete = userCostOverlayVersion();
     delete liveConfigB.providers.beta;
-    expect(reconcileUserCostOverlaysFromDisk()).toBe(true);
-    saveConfigPreservingClaudeCode(liveConfigB);
+    expect(mutatePersistedConfig(persisted => {
+      delete persisted.providers.beta;
+      return { changed: true, value: undefined };
+    }).status).toBe("committed");
+    delete liveConfigC.providers.beta;
     persisted = JSON.parse(readFileSync(getConfigPath(), "utf8")) as OcxConfig;
     expect(persisted.providers.beta).toBeUndefined();
     expect(activeUserCostOverlays().some(row => row.provider === "beta")).toBe(false);

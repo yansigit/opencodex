@@ -1,4 +1,4 @@
-import { saveConfig } from "../config";
+import { mutatePersistedConfig } from "../config";
 import { backupConfigBeforeAlibabaRegionMigration } from "./alibaba-region-backup";
 import { projectAlibabaRegionMigration } from "./alibaba-region-migration";
 import type { OcxConfig } from "../types";
@@ -6,7 +6,7 @@ import type { OcxConfig } from "../types";
 export interface AlibabaRegionStartupDeps {
   project: typeof projectAlibabaRegionMigration;
   backup: () => void;
-  save: (config: OcxConfig) => void;
+  save?: (config: OcxConfig) => void;
 }
 
 /**
@@ -22,15 +22,35 @@ export function runAlibabaRegionStartupMigration(
   deps: AlibabaRegionStartupDeps = {
     project: projectAlibabaRegionMigration,
     backup: () => { backupConfigBeforeAlibabaRegionMigration(); },
-    save: saveConfig,
   },
 ): OcxConfig {
-  const projection = deps.project(config);
-  // Warnings are emitted even on a no-op: the collision case IS the warning.
-  for (const warning of projection.warnings) console.warn(`[alibaba-region-migration] ${warning}`);
-  if (!projection.changed) return projection.config;
-  // Strictly before the save: the snapshot must describe the config as it was.
-  deps.backup();
-  deps.save(projection.config);
-  return projection.config;
+  if (deps.save) {
+    const projection = deps.project(config);
+    if (!projection.changed) {
+      for (const warning of projection.warnings) console.warn(`[alibaba-region-migration] ${warning}`);
+      return projection.config;
+    }
+    deps.backup();
+    deps.save(projection.config);
+    for (const warning of projection.warnings) console.warn(`[alibaba-region-migration] ${warning}`);
+    return projection.config;
+  }
+
+  let previousSnapshot: string | undefined;
+  const outcome = mutatePersistedConfig(fresh => {
+    const snapshot = JSON.stringify(fresh);
+    const next = deps.project(fresh);
+    // The callback is repeated after freshness validation. Back up only the
+    // confirmed preimage that is about to be committed.
+    if (next.changed && snapshot === previousSnapshot) deps.backup();
+    previousSnapshot = snapshot;
+    if (next.changed) {
+      for (const key of Object.keys(fresh)) delete (fresh as unknown as Record<string, unknown>)[key];
+      Object.assign(fresh, next.config);
+    }
+    return { changed: next.changed, value: next };
+  });
+  if (outcome.status === "unavailable") return config;
+  for (const warning of outcome.value.warnings) console.warn(`[alibaba-region-migration] ${warning}`);
+  return outcome.value.config;
 }

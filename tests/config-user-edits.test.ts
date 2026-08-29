@@ -541,7 +541,11 @@ test("a 429 key rotation does not clobber the hand edit", async () => {
       { id: "b", key: "key-b" },
     ],
   } as never;
-  saveConfig(live);
+  const added = mutatePersistedConfig(fresh => {
+    fresh.providers.pool = structuredClone(live.providers.pool);
+    return { changed: true, value: structuredClone(fresh.providers.pool) };
+  });
+  expect(added.status).toBe("committed");
   armClaudeCodeBaseline(live);
   writeDiskConfig({ claudeCode: { authMode: "proxy" } });
 
@@ -647,14 +651,14 @@ test("a key-order-only difference is not treated as an external edit", () => {
   expect((diskConfig().claudeCode as Record<string, unknown>).authMode).toBe("proxy");
 });
 
-test("an unreadable config file never fails the save", () => {
+test("an unreadable config file fails closed instead of replacing it", () => {
   const live = loadConfig();
   armClaudeCodeBaseline(live);
   writeFileSync(getConfigPath(), "{ not json");
 
   live.claudeCode = { authMode: "proxy" };
-  expect(() => saveConfigPreservingClaudeCode(live)).not.toThrow();
-  expect((diskConfig().claudeCode as Record<string, unknown>).authMode).toBe("proxy");
+  expect(() => saveConfigPreservingClaudeCode(live)).toThrow("refusing to overwrite an invalid persisted config");
+  expect(readFileSync(getConfigPath(), "utf8")).toBe("{ not json");
 });
 
 // An UNARMED config (a short-lived CLI load) behaves exactly like the old saveConfig.

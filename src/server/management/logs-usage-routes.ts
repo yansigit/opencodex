@@ -20,7 +20,7 @@ import {
   submitManualLoginCode,
   upsertOAuthProvider,
 } from "../../oauth";
-import { getAccountSet, removeCredential } from "../../oauth/store";
+import { removeCredential } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets } from "../../providers/derive";
@@ -31,21 +31,13 @@ import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
-import { resolveCodexHomeDir } from "../../codex/home";
-import { scanStorage } from "../../storage/scanner";
 import { executeArchivedCleanup, listTrashEntries, pickWireCleanupTestHooks, previewArchivedCleanup, type CleanupMode, type RestoreErrorCode } from "../../storage/cleanup";
 import { runArchivedCleanupJob } from "../../storage/cleanup-job";
 import { getRestoreTrashTestStreamResponse, runRestoreTrashEntryJob } from "../../storage/restore-job";
 import {
   normalizeStorageCleanupPolicy,
   parseStorageCleanupPolicyInput,
-  writeStorageCleanupPolicyToConfig,
-} from "../../storage/policy";
-import {
-  getStorageCleanupPolicyJobState,
-  getStorageCleanupPolicyTestStreamResponse,
-  requestStorageCleanupPolicyRun,
-} from "../../storage/policy-job";
+} from "../../storage/policy-input";
 import {
   currentUsageLogRevision,
   readUsageSnapshotForManagement,
@@ -77,7 +69,7 @@ import { applySystemEnvToggle } from "../system-env";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { MissingManagementPersistenceError, mutateManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import {
   discardUsageSummaryCacheEntry,
@@ -131,6 +123,7 @@ function snapshotWindow(entries: PersistedUsageEntry[]): { start: number | null;
 
 export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, syncClaudeAgentDefsBestEffort } = ctx;
+  const storagePolicyJobState = () => deps.storageCleanupPolicyJob?.getState() ?? { status: "idle" as const };
 
   if (url.pathname === "/api/logs" && req.method === "GET") {
     const all = getRequestLogEntries();
@@ -203,16 +196,10 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const filter = {
       provider: url.searchParams.get("provider"),
       model: url.searchParams.get("model"),
-      account: url.searchParams.get("account"),
     };
-    const fallbackAccounts: Record<string, string> = {};
-    for (const p of listOAuthProviders()) {
-      const set = getAccountSet(p);
-      if (set && set.accounts.length === 1 && set.activeAccountId) fallbackAccounts[p] = set.activeAccountId;
-    }
     const project = <T extends UsageSummary>(summary: T, entries?: PersistedUsageEntry[]) =>
-      projectUsageSummary(summary, filter, entries, fallbackAccounts);
-    const filterRequested = Boolean(filter.provider ?? filter.model ?? filter.account);
+      projectUsageSummary(summary, filter, entries);
+    const filterRequested = Boolean(filter.provider ?? filter.model);
     const now = Date.now();
     try {
       const cacheKey = `${range}:${surface}`;
@@ -247,7 +234,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       const revisionReadAt = Date.now();
       const window = snapshotWindow(snapshot.entries);
       const summary = {
-        ...summarizeUsage(snapshot.entries, range, now, surface, fallbackAccounts),
+        ...summarizeUsage(snapshot.entries, range, now, surface),
         historyTruncated: snapshot.truncatedPrefixBytes > 0 || snapshot.entriesTruncated,
         truncatedPrefixBytes: snapshot.truncatedPrefixBytes,
         entriesTruncated: snapshot.entriesTruncated,
@@ -275,7 +262,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       for (const nextRange of ranges) {
         for (const nextSurface of surfaces) {
           const nextSummary = nextRange === range && nextSurface === surface ? summary : {
-            ...summarizeUsage(snapshot.entries, nextRange, now, nextSurface, fallbackAccounts),
+            ...summarizeUsage(snapshot.entries, nextRange, now, nextSurface),
             historyTruncated: summary.historyTruncated,
             truncatedPrefixBytes: summary.truncatedPrefixBytes,
             entriesTruncated: summary.entriesTruncated,
@@ -344,20 +331,6 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         snapshotWindowStart: null,
         snapshotWindowEnd: null,
         error: "read_failed",
-      });
-    }
-  }
-
-  if (url.pathname === "/api/storage" && req.method === "GET") {
-    try {
-      return jsonResponse(scanStorage());
-    } catch {
-      return jsonResponse({
-        codexHome: resolveCodexHomeDir(),
-        generatedAt: Date.now(),
-        total: { bytes: 0, fileCount: 0 },
-        buckets: [],
-        error: "scan_failed",
       });
     }
   }
@@ -555,7 +528,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
   }
 
   if (url.pathname === "/api/storage/cleanup-policy/test-stream" && req.method === "GET") {
-    const stream = getStorageCleanupPolicyTestStreamResponse();
+    const stream = deps.storageCleanupPolicyJob?.getTestStream();
     if (stream) return stream;
     // Production: hook is off. Return an explicit JSON 404 — do not fall through to the GUI.
     return jsonResponse({ error: "not_found" }, 404);
@@ -565,7 +538,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const policy = normalizeStorageCleanupPolicy(config.storageCleanupPolicy);
     return jsonResponse({
       ...policy,
-      job: getStorageCleanupPolicyJobState(),
+      job: storagePolicyJobState(),
     });
   }
 
@@ -575,17 +548,25 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const previous = normalizeStorageCleanupPolicy(config.storageCleanupPolicy);
     const parsed = parseStorageCleanupPolicyInput(raw, previous);
     if (!parsed.ok) return jsonResponse({ error: parsed.error }, 400);
-    // Never enable implicitly: if client omitted enabled, keep previous (default false).
     const body = raw as Record<string, unknown>;
-    if (body.enabled === undefined) parsed.policy.enabled = previous.enabled;
-    const saved = writeStorageCleanupPolicyToConfig(parsed.policy);
-    config.storageCleanupPolicy = saved;
-    return jsonResponse({ ok: true, policy: saved, job: getStorageCleanupPolicyJobState() });
+    const persisted = mutateManagementConfig(deps, disk => {
+      const latest = normalizeStorageCleanupPolicy(disk.storageCleanupPolicy);
+      const rebased = parseStorageCleanupPolicyInput(raw, latest);
+      if (!rebased.ok) throw new Error(rebased.error);
+      // Never enable implicitly: if client omitted enabled, keep the latest persisted value.
+      if (body.enabled === undefined) rebased.policy.enabled = latest.enabled;
+      disk.storageCleanupPolicy = rebased.policy;
+      return { changed: true, value: structuredClone(rebased.policy) };
+    });
+    if (persisted.status === "unavailable") return jsonResponse({ error: "management persistence unavailable" }, 500);
+    config.storageCleanupPolicy = persisted.value;
+    return jsonResponse({ ok: true, policy: persisted.value, job: storagePolicyJobState() });
   }
 
   if (url.pathname === "/api/storage/cleanup-policy/run" && req.method === "POST") {
     try {
-      const accepted = requestStorageCleanupPolicyRun({ reason: "manual", force: true });
+      if (!deps.storageCleanupPolicyJob) throw new MissingManagementPersistenceError();
+      const accepted = deps.storageCleanupPolicyJob.requestRun({ reason: "manual", force: true });
       if (!accepted.accepted) {
         return jsonResponse({
           ok: false,

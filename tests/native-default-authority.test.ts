@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 const managed = (model = "gpt-5.6-sol", effort = "high"): string =>
-  `[agents]\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_model = "${model}"\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_reasoning_effort = "${effort}"\n`;
+  `# Auto-injected by opencodex\nopenai_base_url = "http://127.0.0.1:10100/v1"\n[agents]\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_model = "${model}"\n${MANAGED_SUBAGENT_DEFAULT_MARKER}\ndefault_subagent_reasoning_effort = "${effort}"\n`;
 
 describe("native default authority", () => {
   test("reports all four states from marker ownership and app-server freshness", async () => {
@@ -50,6 +50,10 @@ describe("native default authority", () => {
     expect(await resolveNativeDefaultState(config({ injectionModel: "gpt-5.6-sol", syncCodexSubagentDefaults: true }), {
       readConfig: () => `[agents]\ndefault_subagent_model = "user/model"\n`,
       collectCatalogState: async () => ({ state: "not_running" }),
+    })).toBe("blocked");
+    expect(await resolveNativeDefaultState(config({ injectionModel: "gpt-5.6-sol", injectionEffort: "high", syncCodexSubagentDefaults: true }), {
+      readConfig: () => managed().replace('# Auto-injected by opencodex\nopenai_base_url = "http://127.0.0.1:10100/v1"\n', ""),
+      collectCatalogState: async () => ({ state: "fresh" }),
     })).toBe("blocked");
     expect(await resolveNativeDefaultState(config({ injectionModel: "gpt-5.6-sol", syncCodexSubagentDefaults: true }), {
       readConfig: () => { const error = new Error("denied") as NodeJS.ErrnoException; error.code = "EACCES"; throw error; },
@@ -106,6 +110,7 @@ describe("native default authority", () => {
     });
     expect(text).toContain('Preferred sub-agent: model "gpt-5.6-sol"');
     expect(text).toContain("nativeDefaultState: active");
+    expect(text).toContain("one spawn only");
   });
 
   test("Responses core passes native sync state into production V2 guidance", async () => {

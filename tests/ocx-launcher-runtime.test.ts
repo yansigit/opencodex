@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -299,6 +299,179 @@ function isolatedLauncherEnv(root: string, override: string): NodeJS.ProcessEnv 
     OPENCODEX_BUN_PATH: override,
   };
 }
+
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise(resolveExit => {
+    const timer = setTimeout(() => resolveExit(false), timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolveExit(true);
+    });
+  });
+}
+
+type FirstStartupCleanupDeps = {
+  probe: typeof healthAt;
+  kill: (pid: number) => void;
+  remove: (path: string) => void;
+};
+
+async function cleanupFirstStartup(
+  root: string,
+  configDir: string,
+  launcher: ChildProcess | null,
+  health: Health | null,
+  deps: FirstStartupCleanupDeps = { probe: healthAt, kill: killProxy, remove: removeTree },
+): Promise<void> {
+  const errors: string[] = [];
+  if (health) {
+    let owned = false;
+    try {
+      const runtime = JSON.parse(readFileSync(join(configDir, "runtime-port.json"), "utf8")) as { pid?: number; port?: number };
+      const pid = Number(readFileSync(join(configDir, "ocx.pid"), "utf8").trim());
+      owned = pid === health.pid && runtime.pid === health.pid && runtime.port === health.port;
+    } catch { /* clean shutdown removes runtime ownership state */ }
+    if (owned) try {
+      const live = await deps.probe(health.port);
+      if (live?.pid === health.pid) deps.kill(health.pid);
+    } catch (error) {
+      errors.push(`proxy cleanup: ${String(error)}`);
+    }
+  }
+  if (launcher?.pid && launcher.exitCode === null && launcher.signalCode === null) {
+    try { deps.kill(launcher.pid); } catch (error) { errors.push(`launcher cleanup: ${String(error)}`); }
+  }
+  try { deps.remove(root); } catch (error) { errors.push(`root cleanup: ${String(error)}`); }
+  if (errors.length > 0) throw new Error(errors.join("; "));
+}
+
+test("first-start cleanup attempts every owned resource when one cleanup step fails", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-launcher-cleanup-"));
+  const configDir = join(root, "opencodex");
+  mkdirSync(configDir);
+  writeFileSync(join(configDir, "runtime-port.json"), JSON.stringify({ pid: 11, port: 10100 }));
+  writeFileSync(join(configDir, "ocx.pid"), "11");
+  const calls: string[] = [];
+  const launcher = { pid: 22, exitCode: null, signalCode: null } as ChildProcess;
+  const error = await cleanupFirstStartup(root, configDir, launcher, {
+    status: "ok", service: "opencodex", pid: 11, port: 10100,
+  }, {
+    probe: async () => ({ status: "ok", service: "opencodex", pid: 11, port: 10100 }),
+    kill: pid => { calls.push(`kill:${pid}`); throw new Error(`${pid} kill failed`); },
+    remove: path => { calls.push(`remove:${path}`); throw new Error("remove failed"); },
+  }).then(() => null, cause => cause as Error);
+  expect(calls).toEqual(["kill:11", "kill:22", `remove:${root}`]);
+  expect(error?.message).toContain("11 kill failed");
+  expect(error?.message).toContain("22 kill failed");
+  expect(error?.message).toContain("remove failed");
+  removeTree(root);
+});
+
+test("first-start cleanup never hard-kills a health PID without matching isolated runtime state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-launcher-ownership-"));
+  const configDir = join(root, "opencodex");
+  mkdirSync(configDir);
+  writeFileSync(join(configDir, "runtime-port.json"), JSON.stringify({ pid: 99, port: 10100 }));
+  writeFileSync(join(configDir, "ocx.pid"), "99");
+  const killed: number[] = [];
+  await cleanupFirstStartup(root, configDir, null, {
+    status: "ok", service: "opencodex", pid: 11, port: 10100,
+  }, {
+    probe: async () => ({ status: "ok", service: "opencodex", pid: 11, port: 10100 }),
+    kill: pid => { killed.push(pid); },
+    remove: removeTree,
+  });
+  expect(killed).toEqual([]);
+});
+
+describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
+  test("preserves an existing six-provider registry when startup defaults are saved", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-launcher-first-start-"));
+    const env = { ...isolatedLauncherEnv(root, process.execPath), CI: "1" };
+    const configPath = join(env.OPENCODEX_HOME!, "config.json");
+    const packDir = join(root, "pack");
+    const installDir = join(root, "install");
+    const providers = {
+      openai: {
+        adapter: "openai-responses",
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        authMode: "forward",
+        codexAccountMode: "direct",
+      },
+      anthropic: { adapter: "openai-chat", baseUrl: "https://anthropic.example.test/v1" },
+      google: { adapter: "openai-chat", baseUrl: "https://google.example.test/v1" },
+      grok: { adapter: "openai-chat", baseUrl: "https://grok.example.test/v1" },
+      deepseek: { adapter: "openai-chat", baseUrl: "https://deepseek.example.test/v1" },
+      ollama: { adapter: "openai-chat", baseUrl: "https://ollama.example.test/v1" },
+    };
+    let launcher: ChildProcess | null = null;
+    let health: Health | null = null;
+    try {
+      mkdirSync(packDir);
+      mkdirSync(installDir);
+      const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+      const packed = spawnSync(npm, ["pack", "--json", "--pack-destination", packDir], {
+        cwd: join(import.meta.dir, ".."),
+        encoding: "utf8",
+        timeout: 120_000,
+        windowsHide: true,
+      });
+      expect(packed.status).toBe(0);
+      const packResult = JSON.parse(packed.stdout) as { filename: string }[] | Record<string, { filename: string }>;
+      const { filename } = Array.isArray(packResult) ? packResult[0]! : Object.values(packResult)[0]!;
+      const installed = spawnSync(npm, [
+        "install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false",
+        join(packDir, filename),
+      ], {
+        cwd: installDir,
+        encoding: "utf8",
+        timeout: 120_000,
+        windowsHide: true,
+      });
+      expect(installed.status).toBe(0);
+      const installedOcx = join(installDir, "node_modules", "@yansigit", "opencodex", "bin", "ocx.mjs");
+      const port = await freePort();
+      writeFileSync(configPath, JSON.stringify({
+        port,
+        openaiProviderTierVersion: 1,
+        providers,
+        defaultProvider: "openai",
+      }, null, 2));
+      launcher = spawn("node", [installedOcx, "start", "--port", String(port)], {
+        env,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      health = await waitForHealth(port, 25_000, launcher);
+      if (!health) throw new Error("proxy did not become healthy through bin/ocx.mjs");
+
+      const during = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+      expect(during.subagentModels).toBeArray();
+      expect(Object.keys(during.providers as object)).toEqual(Object.keys(providers));
+      expect(during.providers).toEqual(providers);
+      expect(during.defaultProvider).toBe("openai");
+      expect(during.openaiProviderTierVersion).toBe(2);
+
+      const stopped = spawnSync("node", [installedOcx, "stop"], {
+        env,
+        encoding: "utf8",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      expect(stopped.status).toBe(0);
+      expect(await waitForExit(launcher, 15_000)).toBe(true);
+
+      const after = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+      expect(Object.keys(after.providers as object)).toEqual(Object.keys(providers));
+      expect(after.providers).toEqual(providers);
+      expect(after.defaultProvider).toBe("openai");
+      expect(after.openaiProviderTierVersion).toBe(2);
+    } finally {
+      await cleanupFirstStartup(root, env.OPENCODEX_HOME!, launcher, health);
+    }
+  }, 240_000);
+});
 
 describe.skipIf(!nodeAvailable)("ocx npm launcher relative Bun override", () => {
   test("resolves a valid bare relative override before spawning", () => {

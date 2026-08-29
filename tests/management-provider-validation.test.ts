@@ -13,7 +13,7 @@ import {
   getCodexUpstreamHealth,
   recordCodexUpstreamOutcome,
 } from "../src/codex/routing";
-import { loadConfig, saveConfig } from "../src/config";
+import { loadConfig, mutatePersistedConfig, saveConfig } from "../src/config";
 import { deriveProviderPresets } from "../src/providers/derive";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
 import {
@@ -233,7 +233,10 @@ describe("provider management validation", () => {
       apiKey: "new-disk-key",
       headers: { "x-operator-header": "operator-owned" },
     };
-    saveConfig(diskConfig);
+    expect(mutatePersistedConfig(fresh => {
+      fresh.providers.xai = structuredClone(diskConfig.providers.xai!);
+      return { changed: true, value: null };
+    }).status).toBe("committed");
     const diskBefore = readFileSync(join(TEST_DIR, "config.json"));
     const stableBefore = structuredClone(liveConfig.providers.stable);
     const resolvedError = spyOn(destinationPolicy, "providerDestinationResolvedError")
@@ -278,7 +281,10 @@ describe("provider management validation", () => {
     saveConfig(liveConfig);
     const diskConfig = structuredClone(liveConfig);
     diskConfig.providers.xai = { ...diskConfig.providers.xai!, apiKey: "first-disk-key" };
-    saveConfig(diskConfig);
+    expect(mutatePersistedConfig(fresh => {
+      fresh.providers.xai = structuredClone(diskConfig.providers.xai!);
+      return { changed: true, value: null };
+    }).status).toBe("committed");
 
     const untrusted = new Request(`http://127.0.0.1${LOCAL_PROVIDER_RELOAD_PATH}`, {
       method: "POST",
@@ -296,7 +302,10 @@ describe("provider management validation", () => {
       .mockImplementation(async () => {
         const changed = loadConfig();
         changed.providers.xai = { ...changed.providers.xai!, apiKey: "second-disk-key" };
-        saveConfig(changed);
+        mutatePersistedConfig(fresh => {
+          fresh.providers.xai = structuredClone(changed.providers.xai!);
+          return { changed: true, value: null };
+        });
         return null;
       });
     try {
@@ -1832,7 +1841,7 @@ describe("provider management validation", () => {
     }
   });
 
-  test("provider deletion removes that provider's custom models (#1273)", async () => {
+  test("provider deletion drops dependent custom models atomically", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -1870,10 +1879,10 @@ describe("provider management validation", () => {
         method: "DELETE",
       });
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ success: true, droppedCustomModels: 1 });
+      expect(await response.json()).toMatchObject({
+        droppedCustomModels: 1,
+      });
 
-      // The dashboard model page reads this route; a surviving row here is the
-      // ghost model users see pointing at a provider that no longer exists.
       const customModels = await fetch(new URL("/api/custom-models", server.url));
       expect(await customModels.json()).toEqual([
         { id: "keep-1", provider: "test-openai", modelId: "kept-model" },

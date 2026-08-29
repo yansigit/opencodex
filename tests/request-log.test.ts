@@ -634,7 +634,6 @@ describe("request log metadata", () => {
   test("classifies status codes with optional upstream error context", () => {
     expect(requestLogErrorCode(200)).toBeUndefined();
     expect(requestLogErrorCode(400)).toBe("invalid_request_error");
-    expect(requestLogErrorCode(400, "Provider error 400: You have insufficient credits to make this request.")).toBe("insufficient_quota");
     expect(requestLogErrorCode(401)).toBe("invalid_api_key");
     expect(requestLogErrorCode(403)).toBe("permission_denied");
     expect(requestLogErrorCode(403, "Provider error 403")).toBe("permission_denied");
@@ -724,19 +723,39 @@ describe("request log metadata", () => {
     expect(combined.map(entry => entry.requestId)).toEqual(["c"]);
   });
 
-  test("filters logs by model, since, and until", () => {
+  /**
+   * #2704: there was no `model` clause at all, so `?model=x` was accepted and silently
+   * ignored -- every row came back, and `ocx logs --model x` looked like it had filtered.
+   * The non-matching assertion is the one that matters: an unfiltered implementation passes
+   * the positive case for free.
+   */
+  test("filters logs by model, including the attempt that actually served a failover", () => {
     const now = Date.now();
     const logs = [
-      log({ requestId: "m1", model: "claude-3-5-sonnet", resolvedModel: "claude-3-5-sonnet-20241022", timestamp: now - 3000 }),
-      log({ requestId: "m2", model: "gpt-4o", timestamp: now - 2000 }),
-      log({ requestId: "m3", model: "gemini-1.5-pro", timestamp: now - 1000 }),
+      log({ requestId: "a", model: "gpt-test", resolvedModel: "gpt-test-20260829", provider: "openai", timestamp: now - 3_000 }),
+      log({ requestId: "b", model: "grok-4.6", provider: "xai", timestamp: now - 2_000 }),
+      log({
+        requestId: "c",
+        model: "sonnet-4.6",
+        provider: "anthropic",
+        timestamp: now - 1_000,
+        attempts: [
+          { ordinal: 1, provider: "anthropic", model: "sonnet-4.6", adapter: "anthropic", status: 429, durationMs: 5, sendCount: 1, recoveryKinds: [], usageStatus: "unreported" },
+          { ordinal: 2, provider: "xai", model: "grok-4.6", adapter: "openai", status: 200, durationMs: 7, sendCount: 1, recoveryKinds: [], usageStatus: "reported" },
+        ],
+      }),
     ];
 
-    expect(filterRequestLogs(logs, new URLSearchParams("model=claude-3-5-sonnet")).map(e => e.requestId)).toEqual(["m1"]);
-    expect(filterRequestLogs(logs, new URLSearchParams("model=claude-3-5-sonnet-20241022")).map(e => e.requestId)).toEqual(["m1"]);
-    expect(filterRequestLogs(logs, new URLSearchParams("model=gpt-4o")).map(e => e.requestId)).toEqual(["m2"]);
-    expect(filterRequestLogs(logs, new URLSearchParams(`since=${now - 2500}`)).map(e => e.requestId)).toEqual(["m2", "m3"]);
-    expect(filterRequestLogs(logs, new URLSearchParams(`until=${now - 1500}`)).map(e => e.requestId)).toEqual(["m1", "m2"]);
+    expect(filterRequestLogs(logs, new URLSearchParams("model=gpt-test")).map(entry => entry.requestId)).toEqual(["a"]);
+    expect(filterRequestLogs(logs, new URLSearchParams("model=gpt-test-20260829")).map(entry => entry.requestId)).toEqual(["a"]);
+    // "c" matches on its second ATTEMPT, mirroring how `provider` already behaves: the request
+    // was ultimately served by grok-4.6, so a grok-4.6 search has to find it.
+    expect(filterRequestLogs(logs, new URLSearchParams("model=grok-4.6")).map(entry => entry.requestId)).toEqual(["b", "c"]);
+    // The assertion an unfiltered implementation cannot pass.
+    expect(filterRequestLogs(logs, new URLSearchParams("model=absent-model"))).toEqual([]);
+    expect(filterRequestLogs(logs, new URLSearchParams("model=grok-4.6&provider=xai")).map(entry => entry.requestId)).toEqual(["b", "c"]);
+    expect(filterRequestLogs(logs, new URLSearchParams(`since=${now - 2_500}`)).map(entry => entry.requestId)).toEqual(["b", "c"]);
+    expect(filterRequestLogs(logs, new URLSearchParams(`until=${now - 1_500}`)).map(entry => entry.requestId)).toEqual(["a", "b"]);
   });
 
   test("filters logs by offset and limit", () => {

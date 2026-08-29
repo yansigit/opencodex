@@ -447,7 +447,7 @@ export async function multiAgentGuidanceText(
       preferredText = ` Preferred sub-agent: model "${preferred.model}"`
         + (injectionEffort ? `, reasoning_effort "${injectionEffort}"` : "")
         + `; nativeDefaultState: ${nativeDefaultState}.`
-        + " — use it unless the user names another.";
+        + " — use it unless the user names another. Confirm a different listed model for one spawn only; do not persist the exception.";
     }
     const specialist = (catalog: string): string =>
       catalog ? ` When spawning, use a named specialist: ${catalog}.` : "";

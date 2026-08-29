@@ -18,6 +18,7 @@ import {
   AtomicWriteResidualTempError,
   AtomicWriteSecretResidualError,
   backupConfigBeforeOpenAiTierMigration,
+  getConfigPath,
   getDefaultConfig,
   OpenAiTierBackupCleanupError,
   OpenAiTierBackupCollisionError,
@@ -25,6 +26,7 @@ import {
   OpenAiTierBackupSecretResidualError,
   OpenAiTierRollbackPreserveError,
   preserveOpenAiTierRollbackSnapshot,
+  setPersistedConfigMutationBeforeCommitForTests,
   type OpenAiTierBackupIO,
   type OpenAiTierRollbackPreserveIO,
 } from "../src/config";
@@ -192,6 +194,42 @@ describe("OpenAI provider option startup coordinator", () => {
       "save",
       "warn:[openai-provider-migration] providerContextCaps.openai: conflict resolved",
     ]);
+  });
+
+  test("backs up and warns from the rebased projection that is committed", () => {
+    const configPath = getConfigPath();
+    const backupPath = `${configPath}.pre-openai-tiers-v2.bak`;
+    const stale = { ...config, port: 10100 };
+    const concurrent = { ...config, port: 20200 };
+    const concurrentBytes = `${JSON.stringify(concurrent, null, 2)}\n`;
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    writeFileSync(configPath, `${JSON.stringify(stale, null, 2)}\n`);
+    setPersistedConfigMutationBeforeCommitForTests(() => {
+      writeFileSync(configPath, concurrentBytes);
+    });
+    console.warn = message => { warnings.push(String(message)); };
+    try {
+      const result = runOpenAiTierStartupMigration(stale, {
+        project: fresh => ({
+          config: { ...fresh, openaiProviderTierVersion: 2 },
+          changed: fresh.openaiProviderTierVersion !== 2,
+          resolvedMode: "pool",
+          warnings: [`port ${fresh.port}`],
+        }),
+        backup: () => { backupConfigBeforeOpenAiTierMigration(configPath); },
+      });
+
+      expect(result.port).toBe(20200);
+      expect(readFileSync(backupPath, "utf8")).toBe(concurrentBytes);
+      expect(warnings).toEqual(["[openai-provider-migration] port 20200"]);
+    } finally {
+      console.warn = originalWarn;
+      setPersistedConfigMutationBeforeCommitForTests(null);
+      for (const path of [configPath, backupPath]) {
+        if (existsSync(path)) unlinkSync(path);
+      }
+    }
   });
 
   test("projection collision performs zero backup/save", () => {

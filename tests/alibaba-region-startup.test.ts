@@ -1,10 +1,18 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { getConfigPath, setPersistedConfigMutationBeforeCommitForTests } from "../src/config";
 import { AlibabaBackupIntegrityError } from "../src/providers/alibaba-region-backup";
 import { projectAlibabaRegionMigration } from "../src/providers/alibaba-region-migration";
 import { runAlibabaRegionStartupMigration } from "../src/providers/alibaba-region-startup";
 import type { OcxConfig } from "../src/types";
 
 const INTL_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
+
+afterEach(() => {
+  setPersistedConfigMutationBeforeCommitForTests(null);
+});
 
 function migratableConfig(): OcxConfig {
   return {
@@ -95,4 +103,42 @@ test("a backup failure prevents the migration from saving", () => {
     save: config => { saved.push(config); },
   })).toThrow(AlibabaBackupIntegrityError);
   expect(saved).toEqual([]);
+});
+
+test("backs up and warns from the rebased Alibaba projection committed to disk", () => {
+  const home = mkdtempSync(join(tmpdir(), "ocx-alibaba-startup-"));
+  const previousHome = process.env.OPENCODEX_HOME;
+  process.env.OPENCODEX_HOME = home;
+  const configPath = getConfigPath();
+  const stale = { ...migratableConfig(), port: 10100 };
+  const concurrent = { ...migratableConfig(), port: 20200 };
+  const concurrentBytes = `${JSON.stringify(concurrent, null, 2)}\n`;
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  writeFileSync(configPath, `${JSON.stringify(stale, null, 2)}\n`);
+  setPersistedConfigMutationBeforeCommitForTests(() => writeFileSync(configPath, concurrentBytes));
+  console.warn = message => { warnings.push(String(message)); };
+  try {
+    const result = runAlibabaRegionStartupMigration(stale, {
+      project: projectAlibabaRegionMigration,
+      backup: () => {
+        expect(warnings).toEqual([]);
+        expect(readFileSync(configPath, "utf8")).toBe(concurrentBytes);
+      },
+    });
+
+    const persisted = JSON.parse(readFileSync(configPath, "utf8")) as OcxConfig;
+    expect(result.port).toBe(20200);
+    expect(persisted.port).toBe(20200);
+    expect(persisted.providers["alibaba-token-plan"]).toBeUndefined();
+    expect(persisted.providers["alibaba-token-plan-intl"]).toBeDefined();
+    expect(warnings).toHaveLength(1);
+  } finally {
+    console.warn = originalWarn;
+    setPersistedConfigMutationBeforeCommitForTests(null);
+    if (existsSync(configPath)) unlinkSync(configPath);
+    rmSync(home, { recursive: true, force: true });
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+  }
 });

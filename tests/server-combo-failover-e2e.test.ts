@@ -1263,6 +1263,7 @@ describe("server combo failover 030 activation matrix", () => {
     const config = comboConfig({
       a: provider("test-response", "https://test.invalid/v1", pool[0]!.key, { apiKeyPool: pool }),
     });
+    saveConfig(config);
     const response = await postLogged(config);
     expect(response.status).toBe(200);
     await response.text();

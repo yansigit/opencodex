@@ -28,7 +28,13 @@ import { canonicalAntigravityHttpsHost, isAntigravityHttpsHost } from "./google-
 import { compileGoogleWireBody } from "./google-wire-compiler";
 import { sanitizeGeminiToolParameters } from "./google-tool-schema";
 import { identifyRoutedModel } from "./identity";
-import { antigravityUsesReplayCache, applyAntigravityReplay, clearAntigravityReplay, observeAntigravityReplay } from "./google-antigravity-replay";
+import {
+  antigravityUsesReplayCache,
+  applyAntigravityReplay,
+  applyAntigravityThoughtSignatureFallback,
+  clearAntigravityReplay,
+  observeAntigravityReplay,
+} from "./google-antigravity-replay";
 import { resolveAntigravityEffortWireModel } from "../providers/antigravity-models";
 import {
   extractCcaGroundingSources,
@@ -999,6 +1005,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           } else {
             sanitizeAntigravityClaudeSignatures(contents);
           }
+          // After replay, not instead of it: a real signature always wins, and the sentinel only
+          // fills a first functionCall that replay could not sign. Outside the cache branch too,
+          // because the turn still needs a signature when no session was ever recorded.
+          applyAntigravityThoughtSignatureFallback(wireModelId, contents);
           // Claude-on-Antigravity rejects assistant-tail (model-tail in Gemini terms) histories
           // as prefill: "This model does not support assistant message prefill. The conversation
           // must end with a user message." Context compaction, previous_response_id expansion,
@@ -1046,6 +1056,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           applyAntigravityReplay(
             vertexReplayModel,
             vertexReplaySession,
+            (compiled.body as { contents: unknown[] }).contents,
+          );
+          applyAntigravityThoughtSignatureFallback(
+            vertexReplayModel,
             (compiled.body as { contents: unknown[] }).contents,
           );
         }
@@ -1681,9 +1695,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         if (invalidFunctionCall) return finish([invalidGoogleFunctionCallEvent(invalidFunctionCall)]);
         // Non-streaming Google-family response: observe thought signatures for the next turn,
         // using the same transport-scoped namespace as the streaming path.
-        const replayModel = vertexReplayModel;
-        const replaySession = vertexReplaySession;
-        if (provider.googleMode === "vertex" && replayModel && replaySession) {
+        const replayModel = provider.googleMode === "cloud-code-assist" ? antigravityModel : vertexReplayModel;
+        const replaySession = provider.googleMode === "cloud-code-assist" ? antigravitySession : vertexReplaySession;
+        if ((provider.googleMode === "cloud-code-assist" || provider.googleMode === "vertex")
+          && replayModel && replaySession) {
           observeAntigravityReplay(replayModel, replaySession, parts as unknown[]);
         }
         let pendingThoughtSig: string | undefined;
