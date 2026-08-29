@@ -130,6 +130,10 @@ export async function handleConfigCommand(argv: string[]): Promise<number> {
       const raw = action === "set" ? args.shift() : undefined;
       if (!path || (action === "set" && raw === undefined)) throw new CliUsageError("config path and value are required", USAGE);
       rejectArgs(args, USAGE);
+      const segments = pathSegments(path);
+      if (segments.length === 1 && segments[0] === "providers") {
+        throw new CliUsageError("replacing the provider registry requires config import --yes", USAGE);
+      }
       // #1835/#1838: the read used to happen OUTSIDE the mutation lock, so a concurrent
       // edit landing between it and the save was reverted by this whole-snapshot write.
       // `mutatePersistedConfig` reruns this callback against the latest validated disk
@@ -150,7 +154,7 @@ export async function handleConfigCommand(argv: string[]): Promise<number> {
         // account's tier with nothing on any surface explaining why. `import` is
         // deliberately not covered — that file supplies its own pin, so there is no
         // stale one to release.
-        if (pathSegments(path)[0] === "codexAccountPriorities") clearCodexAccountPin(config);
+        if (segments[0] === "codexAccountPriorities") clearCodexAccountPin(config);
         // REPLACE rather than merge: `Object.assign` alone cannot remove a key that
         // `unset` deleted, which would make unset silently succeed while changing nothing.
         for (const key of Object.keys(fresh)) {

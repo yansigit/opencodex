@@ -174,6 +174,10 @@ type ModelMutationValue =
   | { config: OcxConfig; alias?: string | null; aliases?: Record<string, string>; selected?: string[] }
   | { error: string; conflicts?: Array<{ alias: string; heldBy: string }>; status?: number };
 
+function providerDiscoveryFingerprint(provider: OcxProviderConfig): string {
+  return JSON.stringify(provider);
+}
+
 function adoptCommittedConfig(target: OcxConfig, source: OcxConfig): void {
   for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
   Object.assign(target, structuredClone(source));
@@ -835,6 +839,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     if (!hasModelPreset(provider)) {
       return jsonResponse({ error: `no model preset is shipped for provider '${provider}'` }, 400);
     }
+    const admittedProviderFingerprint = providerDiscoveryFingerprint(target);
     const models = await fetchAllModels(config);
     const catalogIds = models.filter(m => m.provider === provider).map(m => m.id);
     const presetIds = materializeModelPreset(provider, catalogIds);
@@ -847,6 +852,9 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
         const target = fresh.providers[provider];
         if (!target) return { changed: false, value: { error: "unknown provider" } };
+        if (providerDiscoveryFingerprint(target) !== admittedProviderFingerprint) {
+          return { changed: false, value: { error: "provider changed during model discovery; retry", status: 409 } };
+        }
         target.modelPreset = {
           mode: "all",
           appliedVersion: preset.version,
@@ -856,7 +864,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
         return { changed: true, value: { config: structuredClone(fresh), selected: [...(target.selectedModels ?? [])] } };
       });
       if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 404);
+      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 404);
       adoptCommittedConfig(config, outcome.value.config);
       return jsonResponse({
         ok: true,
@@ -870,6 +878,9 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
       const target = fresh.providers[provider];
       if (!target) return { changed: false, value: { error: "unknown provider" } };
+      if (providerDiscoveryFingerprint(target) !== admittedProviderFingerprint) {
+        return { changed: false, value: { error: "provider changed during model discovery; retry", status: 409 } };
+      }
       target.selectedModels = presetIds;
       target.modelPreset = {
         mode: "preset",
@@ -879,7 +890,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       return { changed: true, value: { config: structuredClone(fresh) } };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 404);
+    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 404);
     adoptCommittedConfig(config, outcome.value.config);
     return jsonResponse({
       ok: true,

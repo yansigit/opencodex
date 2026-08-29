@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { AtomicWriteResidualTempError, getConfigPath, getDefaultConfig, initializePersistedConfigIfMissing, mutatePersistedConfig, PersistedConfigInitializationCleanupError, PersistedConfigInitializationRollbackError, saveConfig, setPersistedConfigInitializationBeforePublishForTests, setPersistedConfigMutationBeforeCommitForTests, type PersistedConfigInitializationIO } from "../src/config";
+import { AtomicWriteResidualTempError, ConfigMutationValidationError, getConfigPath, getDefaultConfig, initializePersistedConfigIfMissing, mutatePersistedConfig, PersistedConfigInitializationCleanupError, PersistedConfigInitializationRollbackError, saveConfig, setPersistedConfigInitializationBeforePublishForTests, setPersistedConfigMutationBeforeCommitForTests, type PersistedConfigInitializationIO } from "../src/config";
 import { handleConfigCommand } from "../src/cli/config-command";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
 
@@ -115,6 +115,21 @@ test("a provider delta preserves concurrent unrelated provider and custom-model 
     modelId: "theta-model",
     addedAt: "2026-08-29T00:00:00.000Z",
   }]);
+});
+
+test("the mutation boundary refuses a schema-invalid callback result", () => {
+  const persisted = sixProviderConfig();
+  persisted.routingProfiles = {
+    daily: { candidates: [{ provider: "alpha", model: "alpha-model" }] },
+  };
+  writeDiskConfig(persisted);
+  const bytes = readFileSync(getConfigPath(), "utf8");
+
+  expect(() => mutatePersistedConfig(config => {
+    delete config.providers.alpha;
+    return { changed: true, value: undefined };
+  })).toThrow(ConfigMutationValidationError);
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(bytes);
 });
 
 test("whole saves preserve a valid persisted provider registry and default provider", () => {

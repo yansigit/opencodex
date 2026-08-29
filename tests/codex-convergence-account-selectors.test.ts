@@ -493,6 +493,52 @@ test("invalid discovery persistence leaves live discovery state untouched", asyn
   }
 });
 
+test("discovery evidence is discarded when its provider is replaced before persistence", async () => {
+  writeCatalog([nativeEntry()]);
+  const provider = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ data: [{ id: "stale-endpoint-model" }] }),
+  });
+  try {
+    const live = config(false);
+    live.providers = { vendor: discoveryProvider(`http://127.0.0.1:${provider.port}/v1`) };
+    live.defaultProvider = "vendor";
+    live.modelDiscovery = {
+      knownModels: {
+        vendor: { ids: ["old-model"], removed: [], updatedAt: "2026-08-01T00:00:00.000Z" },
+      },
+    };
+    saveConfig(structuredClone(live));
+    const before = structuredClone(live);
+    setPersistedConfigMutationBeforeCommitForTests(() => {
+      const replacement = readPersistedConfig();
+      replacement.providers.vendor!.baseUrl = "https://replacement.example.test/v1";
+      replacement.modelDiscovery!.knownModels!.vendor = {
+        ids: ["replacement-model"],
+        removed: [],
+        updatedAt: "2026-08-29T00:00:00.000Z",
+      };
+      writeFileSync(getConfigPath(), `${JSON.stringify(replacement, null, 2)}\n`);
+    });
+
+    const result = await convergeCodexCatalog(
+      captureCatalogAdmissionSnapshot(live),
+      { action: "converge", scope: "catalog", reason: "management-mutation", mode: "explicit", deadlineMs: 1_000 },
+    );
+    const disk = readPersistedConfig();
+
+    expect(result.catalogRefresh.status).toBe("committed");
+    expect(disk.providers.vendor?.baseUrl).toBe("https://replacement.example.test/v1");
+    expect(disk.modelDiscovery?.knownModels?.vendor.ids).toEqual(["replacement-model"]);
+    expect(disk.modelDiscovery?.recentArrivals?.vendor).toBeUndefined();
+    expect(disk.disabledModels).not.toContain("vendor/stale-endpoint-model");
+    expect(live.modelDiscovery).toEqual(before.modelDiscovery);
+    expect(live.disabledModels).toEqual(before.disabledModels);
+  } finally {
+    provider.stop(true);
+  }
+});
+
 test("convergence renders account-qualified rows and preserves only non-generated foreign rows", async () => {
   grantGpt56NativeModels("main-chatgpt-account", "side-chatgpt-account");
   writeCatalog([

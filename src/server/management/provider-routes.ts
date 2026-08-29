@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
@@ -111,8 +111,82 @@ type ProviderPatchApplication =
     };
 
 type ProviderMutationValue =
-  | { config: OcxConfig; fallbackDefault?: string; droppedCustomModels?: number }
-  | { error: string; code?: string; status?: number; combos?: string[] };
+  | { config: OcxConfig; fallbackDefault?: string }
+  | {
+      error: string;
+      code?: string;
+      status?: number;
+      combos?: string[];
+      routingProfiles?: string[];
+      customModels?: string[];
+    };
+
+function reconcileSubmittedApiKey(provider: OcxProviderConfig): void {
+  if (!provider.apiKey || !provider.apiKeyPool) return;
+  const key = provider.apiKey.trim();
+  if (!key || /[\r\n]/.test(key)) return;
+  const id = createHash("sha256").update(key).digest("hex").slice(0, 8);
+  if (!provider.apiKeyPool.some(entry => entry.id === id)) {
+    provider.apiKeyPool.push({ id, key, addedAt: Date.now() });
+  }
+  provider.apiKey = key;
+}
+
+function providerDependencies(config: OcxConfig, name: string): {
+  combos: string[];
+  routingProfiles: string[];
+  customModels: string[];
+} {
+  return {
+    combos: Object.entries(config.combos ?? {})
+      .filter(([, combo]) => combo.targets.some(target => target.provider === name))
+      .map(([id]) => id)
+      .sort((a, b) => a.localeCompare(b)),
+    routingProfiles: Object.entries(config.routingProfiles ?? {})
+      .filter(([, profile]) => profile.candidates.some(candidate => candidate.provider === name))
+      .map(([id]) => id)
+      .sort((a, b) => a.localeCompare(b)),
+    customModels: (config.customModels ?? [])
+      .filter(model => model.provider === name)
+      .map(model => model.id)
+      .sort((a, b) => a.localeCompare(b)),
+  };
+}
+
+function providerDependencyError(config: OcxConfig, name: string): Extract<ProviderMutationValue, { error: string }> | null {
+  const dependencies = providerDependencies(config, name);
+  if (dependencies.routingProfiles.length > 0) return {
+    error: `cannot delete provider "${name}" while routing profiles depend on it`,
+    code: "provider_has_dependent_routing_profiles",
+    routingProfiles: dependencies.routingProfiles,
+  };
+  if (dependencies.combos.length > 0) return {
+    error: `cannot delete provider "${name}" while combos depend on it`,
+    code: "provider_has_dependent_combos",
+    combos: dependencies.combos,
+  };
+  if (dependencies.customModels.length > 0) return {
+    error: `cannot delete provider "${name}" while custom models depend on it`,
+    code: "provider_has_dependent_custom_models",
+    customModels: dependencies.customModels,
+  };
+  return null;
+}
+
+function providerNamespaceCollisionError(config: OcxConfig, name: string): string | undefined {
+  const accountCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, name);
+  if (accountCollision) return accountCollision;
+  if ((name === "combo" && Object.keys(config.combos ?? {}).length > 0) || Object.hasOwn(config.combos ?? {}, name)) {
+    return "provider name must not collide with a configured combo namespace";
+  }
+  const profileCollision = Object.values(config.routingProfiles ?? {}).some(profile => {
+    const alias = profile.alias?.trim();
+    return alias === name || alias?.startsWith(`${name}/`);
+  });
+  return profileCollision
+    ? "provider name must not collide with a configured routing profile namespace"
+    : undefined;
+}
 
 function adoptCommittedConfig(target: OcxConfig, source: OcxConfig): void {
   for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
@@ -730,7 +804,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (!isValidProviderName(name)) {
       return jsonResponse({ error: "provider name must use letters, numbers, dot, underscore, or hyphen and cannot be a reserved object key" }, 400);
     }
-    const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, name);
+    const namespaceCollision = providerNamespaceCollisionError(config, name);
     if (namespaceCollision) {
       return jsonResponse({ error: namespaceCollision }, 409);
     }
@@ -753,7 +827,10 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
     const buildProvider = (existing: OcxProviderConfig | undefined): OcxProviderConfig => {
       const next = structuredClone(prov);
-      enrichProviderFromCatalog(name, next);
+      // Native OpenAI capabilities are registry-owned runtime defaults. Enriching this exact
+      // canonical row adds supportsServiceTier to the document, which no longer equals the
+      // immutable forward seed and is correctly rejected by the write validator.
+      if (name !== "openai") enrichProviderFromCatalog(name, next);
       const existingPool = existing?.apiKeyPool;
       if (existingPool && !next.apiKeyPool && !next.azureCredential) next.apiKeyPool = existingPool;
       const existingCosts = existing?.modelCosts;
@@ -775,9 +852,10 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return stripRegistryOnlyStaticHeaders(name, next);
     };
     const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
-      const namespaceCollision = codexAccountNamespaceProviderCollisionError(fresh.codexAccountNamespaces, name);
+      const namespaceCollision = providerNamespaceCollisionError(fresh, name);
       if (namespaceCollision) return { changed: false, value: { error: namespaceCollision, status: 409 } };
       const next = buildProvider(fresh.providers[name]);
+      reconcileSubmittedApiKey(next);
       const providerError = providerManagementConfigError(name, next)
         ?? providerServiceTierConfigError(name, next);
       if (providerError) return { changed: false, value: { error: providerError, status: 400 } };
@@ -789,10 +867,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status, req, config);
     adoptCommittedConfig(config, outcome.value.config);
     reconcileLiveStateStores();
-    if (prov.apiKey && prov.apiKeyPool) {
-      const { addProviderApiKey } = await import("../../providers/api-keys");
-      addProviderApiKey(config, name, prov.apiKey);
-    }
     const { clearModelCache } = await import("../../codex/model-cache");
     clearModelCache(name);
     const catalogRefresh = await convergeCodexCatalog();
@@ -1136,18 +1210,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         code: "last_provider",
       }, 409);
     }
-    const dependentCombos = Object.entries(config.combos ?? {})
-      .filter(([, combo]) => combo.targets.some(target => target.provider === name))
-      .map(([id]) => id)
-      .sort((a, b) => a.localeCompare(b));
-    if (dependentCombos.length > 0) {
-      return jsonResponse({
-        error: `cannot delete provider "${name}" while combos depend on it`,
-        code: "provider_has_dependent_combos",
-        combos: dependentCombos,
-      }, 409);
-    }
-    const { dropProviderCustomModels } = await import("../../providers/provider-id-rewrite");
+    const dependencyError = providerDependencyError(config, name);
+    if (dependencyError) return jsonResponse(dependencyError, 409);
     const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
       if (!hasOwnProvider(fresh.providers, name)) return { changed: false, value: { error: "unknown provider" } };
       const fallbackDefault = name === fresh.defaultProvider
@@ -1158,22 +1222,16 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (name === fresh.defaultProvider && !fallbackDefault) {
         return { changed: false, value: { error: "cannot delete the default provider when no enabled replacement remains", code: "last_provider" } };
       }
-      const dependentCombos = Object.entries(fresh.combos ?? {})
-        .filter(([, combo]) => combo.targets.some(target => target.provider === name))
-        .map(([id]) => id)
-        .sort((a, b) => a.localeCompare(b));
-      if (dependentCombos.length > 0) {
-        return { changed: false, value: { error: `cannot delete provider "${name}" while combos depend on it`, code: "provider_has_dependent_combos", combos: dependentCombos } };
-      }
+      const dependencyError = providerDependencyError(fresh, name);
+      if (dependencyError) return { changed: false, value: dependencyError };
       if (fallbackDefault) fresh.defaultProvider = fallbackDefault;
       delete fresh.providers[name];
-      const droppedCustomModels = dropProviderCustomModels(fresh, name);
       setProviderContextCap(fresh, name, false);
-      return { changed: true, value: { config: structuredClone(fresh), fallbackDefault, droppedCustomModels } };
+      return { changed: true, value: { config: structuredClone(fresh), fallbackDefault } };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
     if ("error" in outcome.value) {
-      const status = outcome.value.code === "provider_has_dependent_combos" || outcome.value.code === "last_provider" ? 409 : 404;
+      const status = outcome.value.code?.startsWith("provider_has_dependent_") || outcome.value.code === "last_provider" ? 409 : 404;
       return jsonResponse(outcome.value, status);
     }
     adoptCommittedConfig(config, outcome.value.config);
@@ -1185,7 +1243,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     return jsonResponse({
       success: true,
       ...(outcome.value.fallbackDefault ? { defaultProvider: outcome.value.fallbackDefault } : {}),
-      ...((outcome.value.droppedCustomModels ?? 0) > 0 ? { droppedCustomModels: outcome.value.droppedCustomModels } : {}),
       catalogRefresh,
     });
   }

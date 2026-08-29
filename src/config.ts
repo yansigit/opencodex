@@ -2988,6 +2988,13 @@ export type PersistedConfigMutationOutcome<T> =
   | { status: "committed" | "unchanged"; value: T }
   | { status: "unavailable"; reason: "missing" | "invalid" | "conflict" };
 
+export class ConfigMutationValidationError extends Error {
+  constructor(readonly validationError: string) {
+    super(`Config mutation rejected: ${validationError}`);
+    this.name = "ConfigMutationValidationError";
+  }
+}
+
 const CONFIG_MUTATION_MAX_REBASE_ATTEMPTS = 3;
 let persistedConfigMutationBeforeCommitForTests: (() => void) | null = null;
 
@@ -3060,6 +3067,8 @@ export function mutatePersistedConfig<T>(
         commitBase.diagnostics.config,
         confirmedConfig,
       );
+      const validation = validateConfigCandidate(projected);
+      if (!validation.ok) throw new ConfigMutationValidationError(validation.error);
       if (persistConfigUnlocked(projected, "mutation")) bumpGenerationForCooperatingConfigWrite();
       return { status: "committed", value: confirmed.value };
     }

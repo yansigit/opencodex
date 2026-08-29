@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig, writePid, writeRuntimePort } from "../src/config";
+import { getConfigPath, loadConfig, saveConfig, setPersistedConfigInitializationBeforePublishForTests, writePid, writeRuntimePort } from "../src/config";
 import { commitKeyLoginProvider, providerConfigFromKeyLoginProvider } from "../src/oauth/login-cli";
 import { KEY_LOGIN_PROVIDERS } from "../src/oauth/key-providers";
 import { startServer } from "../src/server";
@@ -50,6 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPersistedConfigInitializationBeforePublishForTests(null);
   // The overlay registry is module-level; reset it so rows added through the
   // live provider update path cannot leak into later tests in a shared run.
   refreshUserCostOverlays({ providers: {} } as unknown as OcxConfig);
@@ -61,6 +62,44 @@ afterEach(() => {
 });
 
 describe("CLI key-login live-update overlay preservation", () => {
+  test("fresh key and AI Studio logins initialize a missing config without losing OpenAI", async () => {
+    for (const [name, provider] of [
+      ["umans", providerConfigFromKeyLoginProvider(KEY_LOGIN_PROVIDERS.umans, "sk-fresh")],
+      ["google-aistudio", {
+        adapter: "google",
+        authMode: "local",
+        googleMode: "ai-studio-web",
+        baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+      }],
+    ] as const) {
+      if (existsSync(getConfigPath())) unlinkSync(getConfigPath());
+      const config = loadConfig();
+      await commitKeyLoginProvider(config, name, provider as OcxConfig["providers"][string]);
+      const disk = loadConfig();
+      expect(disk.defaultProvider).toBe("openai");
+      expect(disk.providers.openai).toBeDefined();
+      expect(disk.providers[name]).toBeDefined();
+    }
+  });
+
+  test("fresh key login retries a lost initialization race and rejects the winner's namespace collision", async () => {
+    unlinkSync(getConfigPath());
+    const config = loadConfig();
+    const winner = structuredClone(config);
+    winner.codexAccountNamespaces = { umans: "pool-a" };
+    const winnerBytes = `${JSON.stringify(winner, null, 2)}\n`;
+    setPersistedConfigInitializationBeforePublishForTests(() => {
+      writeFileSync(getConfigPath(), winnerBytes, { flag: "wx", mode: 0o600 });
+    });
+
+    await expect(commitKeyLoginProvider(
+      config,
+      "umans",
+      providerConfigFromKeyLoginProvider(KEY_LOGIN_PROVIDERS.umans, "sk-fresh"),
+    )).rejects.toThrow("must not collide with a configured Codex account namespace");
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(winnerBytes);
+  });
+
   test("key-login commit updates one provider without replacing sibling providers on disk", async () => {
     const richConfig = umansKeyConfig();
     richConfig.providers.extra = {

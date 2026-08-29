@@ -290,6 +290,10 @@ function handleRemove(args: string[]): void {
       .filter(([, combo]) => combo.targets.some(target => target.provider === name))
       .map(([id]) => id).sort();
     if (dependentCombos.length > 0) throw new Error(`Cannot remove "${name}" — combo(s) depend on it: ${dependentCombos.join(", ")}`);
+    const dependentProfiles = Object.entries(config.routingProfiles ?? {})
+      .filter(([, profile]) => profile.candidates.some(candidate => candidate.provider === name))
+      .map(([id]) => id).sort();
+    if (dependentProfiles.length > 0) throw new Error(`Cannot remove "${name}" — routing profile(s) depend on it: ${dependentProfiles.join(", ")}`);
     delete config.providers[name];
     const droppedCustomModels = dropProviderCustomModels(config, name);
     validateProviderConfig(config);

@@ -7,7 +7,7 @@ import {
 } from "../providers/new-model-policy";
 import { COMBO_NAMESPACE } from "../combos";
 import { getAuthStorePath } from "../oauth/store";
-import type { OcxConfig } from "../types";
+import type { OcxConfig, OcxProviderConfig } from "../types";
 import { captureCatalogAdmissionSnapshot } from "./catalog-admission";
 import { legacyCustomModelCatalogSlugs } from "./custom-model-catalog-migration";
 import {
@@ -146,6 +146,7 @@ interface CandidateState {
 interface DiscoveryEvidence {
   readonly models: readonly { provider: string; id: string; custom?: boolean }[];
   readonly authoritativeProviders: readonly string[];
+  readonly providerIdentities: Readonly<Record<string, string>>;
   readonly now: string;
 }
 
@@ -160,6 +161,16 @@ interface DiscoveryProjection {
 const candidateStates = new WeakMap<object, CandidateState>();
 function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function discoveryProviderIdentity(provider: OcxProviderConfig | undefined): string {
+  if (!provider) return "missing";
+  const row: Record<string, unknown> = { ...provider };
+  delete row.note;
+  delete row.newModelPolicy;
+  return JSON.stringify(row, (_key, value) => value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right)))
+    : value);
 }
 
 function targetPath(identity: string): string {
@@ -537,6 +548,10 @@ export async function gatherCodexCatalogCandidate(
       discovery: {
         models: routedModels,
         authoritativeProviders,
+        providerIdentities: Object.fromEntries(authoritativeProviders.map(provider => [
+          provider,
+          discoveryProviderIdentity(snapshot.config.providers[provider]),
+        ])),
         now: discoveryNow,
       },
     });
@@ -557,6 +572,11 @@ export async function gatherCodexCatalogCandidate(
 
 function reconcilePersistedDiscovery(state: CandidateState) {
   return mutatePersistedConfig(config => {
+    if (state.discovery.authoritativeProviders.some(provider => (
+      discoveryProviderIdentity(config.providers[provider]) !== state.discovery.providerIdentities[provider]
+    ))) {
+      return { changed: false, value: null };
+    }
     const disabledBefore = new Set(config.disabledModels ?? []);
     const changed = reconcileSuccessfulModelDiscoveries({
       config,
@@ -740,7 +760,7 @@ export async function convergeCodexCatalog(
   const committed = await commitCodexCatalogCandidate(gathered.candidate, request.deadlineMs);
   if (committed.kind === "committed") {
     const persisted = reconcilePersistedDiscovery(state);
-    if (persisted.status === "committed" || persisted.status === "unchanged") {
+    if ((persisted.status === "committed" || persisted.status === "unchanged") && persisted.value) {
       adoptDiscoveryProjection(snapshot.config as OcxConfig, persisted.value);
     }
   }

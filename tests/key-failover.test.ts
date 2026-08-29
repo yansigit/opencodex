@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { getConfigPath, initializePersistedConfigIfMissing, setPersistedConfigMutationBeforeCommitForTests } from "../src/config";
 import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
 import {
   clearKeyCooldowns,
@@ -17,7 +18,7 @@ import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../src/type
 let home: string;
 
 function makeConfig(provider: Partial<OcxProviderConfig>): OcxConfig {
-  return {
+  const config = {
     port: 10199,
     defaultProvider: "p",
     providers: {
@@ -28,6 +29,8 @@ function makeConfig(provider: Partial<OcxProviderConfig>): OcxConfig {
       } as OcxProviderConfig,
     },
   } as OcxConfig;
+  initializePersistedConfigIfMissing(config);
+  return config;
 }
 
 function pool3(): OcxProviderConfig["apiKeyPool"] {
@@ -45,6 +48,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPersistedConfigMutationBeforeCommitForTests(null);
   delete process.env.OPENCODEX_HOME;
   rmSync(home, { recursive: true, force: true });
   clearKeyCooldowns();
@@ -142,6 +146,28 @@ describe("rotateKeyOn429", () => {
     // A REAL beta failure afterwards still rotates to gamma.
     expect(rotateKeyOn429(config, "p", null, now, "key-beta-444555666777")?.apiKey).toBe("key-gamma-888999000111");
   });
+
+  test("a lost active-key race adopts the committed provider row without rotating again", () => {
+    const config = makeConfig({
+      apiKey: "key-alpha-000111222333",
+      apiKeyPool: pool3(),
+      note: "stale row",
+    });
+    const winner = structuredClone(config);
+    winner.providers.p.apiKey = "key-gamma-888999000111";
+    winner.providers.p.note = "concurrent winner";
+    winner.providers.p.baseUrl = "https://winner.example.com/v1";
+    setPersistedConfigMutationBeforeCommitForTests(() => {
+      writeFileSync(getConfigPath(), `${JSON.stringify(winner, null, 2)}\n`);
+    });
+
+    const rotated = rotateKeyOn429(config, "p", null, 1_000_000);
+    const disk = (JSON.parse(readFileSync(getConfigPath(), "utf8")) as OcxConfig).providers.p;
+    expect(rotated).toEqual(disk);
+    expect(config.providers.p).toEqual(disk);
+    expect(rotated?.apiKey).toBe("key-gamma-888999000111");
+    expect(rotated?.note).toBe("concurrent winner");
+  });
 });
 
 describe("rotateProviderTransportOn429", () => {
@@ -158,6 +184,7 @@ describe("rotateProviderTransportOn429", () => {
       baseUrl: "https://api.kimi.com/coding/v1",
     };
     delete config.providers.p;
+    writeFileSync(getConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
     expect(config.providers["kimi-code"].promptCacheKey).toBeUndefined();
 
     const parsed: OcxParsedRequest = {
@@ -220,6 +247,8 @@ describe("rotateProviderTransportOn429", () => {
     });
     config.providers.xai = config.providers.p;
     delete config.providers.p;
+    config.defaultProvider = "xai";
+    writeFileSync(getConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
 
     const rotated = rotateProviderTransportOn429(config, "xai", { ...config.providers.xai }, {
       now: 1_000_000,

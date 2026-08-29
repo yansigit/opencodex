@@ -1,6 +1,6 @@
 import * as readline from "node:readline";
 import { openUrl } from "../lib/open-url";
-import { loadConfig, mutatePersistedConfig } from "../config";
+import { initializePersistedConfigIfMissing, loadConfig, mutatePersistedConfig } from "../config";
 import { findLiveProxy } from "../server/proxy-liveness";
 import {
   requestBoundLocalProviderReload,
@@ -219,11 +219,26 @@ export async function commitKeyLoginProvider(
   onLiveReload?: (result: LocalProviderReloadResult | null) => void,
 ): Promise<OcxProviderConfig> {
   let mergedProvider = mergeKeyLoginProviderRow(provider, config.providers[name]);
-  const outcome = mutatePersistedConfig(fresh => {
+  const mutate = () => mutatePersistedConfig(fresh => {
+    const collision = codexAccountNamespaceProviderCollisionError(fresh.codexAccountNamespaces, name);
+    if (collision) throw new Error(collision);
     mergedProvider = mergeKeyLoginProviderRow(provider, fresh.providers[name]);
     fresh.providers[name] = mergedProvider;
     return { changed: true, value: { config: structuredClone(fresh), provider: structuredClone(mergedProvider) } };
   });
+  let outcome = mutate();
+  if (outcome.status === "unavailable" && outcome.reason === "missing") {
+    const initial = structuredClone(config);
+    const collision = codexAccountNamespaceProviderCollisionError(initial.codexAccountNamespaces, name);
+    if (collision) throw new Error(collision);
+    mergedProvider = mergeKeyLoginProviderRow(provider, initial.providers[name]);
+    initial.providers[name] = mergedProvider;
+    const initialized = initializePersistedConfigIfMissing(initial);
+    if (initialized === "invalid") throw new Error("config is invalid");
+    outcome = initialized === "created"
+      ? { status: "committed", value: { config: initial, provider: structuredClone(mergedProvider) } }
+      : mutate();
+  }
   if (outcome.status === "unavailable") throw new Error(outcome.reason === "conflict"
     ? "config changed while saving provider; retry"
     : `config is ${outcome.reason}`);

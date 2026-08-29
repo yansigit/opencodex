@@ -391,6 +391,8 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-launcher-first-start-"));
     const env = { ...isolatedLauncherEnv(root, process.execPath), CI: "1" };
     const configPath = join(env.OPENCODEX_HOME!, "config.json");
+    const packDir = join(root, "pack");
+    const installDir = join(root, "install");
     const providers = {
       openai: { adapter: "openai-chat", baseUrl: "https://openai.example.test/v1" },
       anthropic: { adapter: "openai-chat", baseUrl: "https://anthropic.example.test/v1" },
@@ -402,6 +404,29 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
     let launcher: ChildProcess | null = null;
     let health: Health | null = null;
     try {
+      mkdirSync(packDir);
+      mkdirSync(installDir);
+      const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+      const packed = spawnSync(npm, ["pack", "--json", "--pack-destination", packDir], {
+        cwd: join(import.meta.dir, ".."),
+        encoding: "utf8",
+        timeout: 120_000,
+        windowsHide: true,
+      });
+      expect(packed.status).toBe(0);
+      const packResult = JSON.parse(packed.stdout) as { filename: string }[] | Record<string, { filename: string }>;
+      const { filename } = Array.isArray(packResult) ? packResult[0]! : Object.values(packResult)[0]!;
+      const installed = spawnSync(npm, [
+        "install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false",
+        join(packDir, filename),
+      ], {
+        cwd: installDir,
+        encoding: "utf8",
+        timeout: 120_000,
+        windowsHide: true,
+      });
+      expect(installed.status).toBe(0);
+      const installedOcx = join(installDir, "node_modules", "@yansigit", "opencodex", "bin", "ocx.mjs");
       const port = await freePort();
       writeFileSync(configPath, JSON.stringify({
         port,
@@ -409,7 +434,7 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
         providers,
         defaultProvider: "openai",
       }, null, 2));
-      launcher = spawn("node", [BIN_OCX, "start", "--port", String(port)], {
+      launcher = spawn("node", [installedOcx, "start", "--port", String(port)], {
         env,
         stdio: "ignore",
         windowsHide: true,
@@ -423,7 +448,7 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
       expect(during.providers).toEqual(providers);
       expect(during.defaultProvider).toBe("openai");
 
-      const stopped = spawnSync("node", [BIN_OCX, "stop"], {
+      const stopped = spawnSync("node", [installedOcx, "stop"], {
         env,
         encoding: "utf8",
         timeout: 30_000,
@@ -439,7 +464,7 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
     } finally {
       await cleanupFirstStartup(root, env.OPENCODEX_HOME!, launcher, health);
     }
-  }, 120_000);
+  }, 240_000);
 });
 
 describe.skipIf(!nodeAvailable)("ocx npm launcher relative Bun override", () => {

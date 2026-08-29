@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
@@ -67,7 +67,7 @@ import { isAzureIdentityProvider } from "../../config/provider-validation";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import { saveManagementConfig, type ManagementContext } from "./context";
+import { mutateManagementConfig, saveManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, readManagementJsonBodyOr, rethrowManagementBodyTooLarge } from "./body";
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
 import { ACCOUNT_IMPORT_DEADLINE_MS, ACCOUNT_IMPORT_MAX_REQUEST_BYTES } from "../../oauth/account-import";
@@ -93,6 +93,44 @@ async function readJsonBody(req: Request): Promise<Record<string, unknown> | nul
     rethrowManagementBodyTooLarge(error);
     return null;
   }
+}
+
+function providerKeyPool(provider: OcxProviderConfig): NonNullable<OcxProviderConfig["apiKeyPool"]> {
+  const pool = provider.apiKeyPool ??= [];
+  if (pool.length === 0 && provider.apiKey) {
+    pool.push({ id: createHash("sha256").update(provider.apiKey).digest("hex").slice(0, 8), key: provider.apiKey });
+  }
+  return pool;
+}
+
+function providerUsesKeyAuth(provider: OcxProviderConfig): boolean {
+  return !isAzureIdentityProvider(provider) && provider.authMode !== "oauth" && provider.authMode !== "forward";
+}
+
+function mutateProviderKey<T>(
+  deps: ManagementContext["deps"],
+  config: OcxConfig,
+  name: string,
+  mutate: (provider: OcxProviderConfig) => T | null,
+): { ok: true; value: T } | { ok: false; error: string; status: number } {
+  const outcome = mutateManagementConfig(deps, fresh => {
+    const provider = fresh.providers[name];
+    if (!provider || !providerUsesKeyAuth(provider)) {
+      return { changed: false, value: null };
+    }
+    const before = JSON.stringify(provider);
+    const value = mutate(provider);
+    return {
+      changed: value !== null && JSON.stringify(provider) !== before,
+      value: value === null ? null : { provider: structuredClone(provider), value },
+    };
+  });
+  if (outcome.status === "unavailable") {
+    return { ok: false, error: outcome.reason === "conflict" ? "config changed; retry" : `config is ${outcome.reason}`, status: outcome.reason === "conflict" ? 409 : 500 };
+  }
+  if (outcome.value === null) return { ok: false, error: "key not found", status: 404 };
+  config.providers[name] = outcome.value.provider;
+  return { ok: true, value: outcome.value.value };
 }
 
 /**
@@ -560,27 +598,45 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; key?: string; label?: string };
     const name = (body.name ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
+    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (typeof body.key !== "string" || !body.key.trim()) return jsonResponse({ error: "key is required" }, 400);
-    const { addProviderApiKey } = await import("../../providers/api-keys");
-    const result = addProviderApiKey(config, name, body.key, body.label);
-    if ("error" in result) return jsonResponse({ error: result.error }, 400);
+    const key = body.key.trim();
+    if (/[\r\n]/.test(key)) return jsonResponse({ error: "key must not include line breaks" }, 400);
+    const id = createHash("sha256").update(key).digest("hex").slice(0, 8);
+    const result = mutateProviderKey(deps, config, name, provider => {
+      const pool = providerKeyPool(provider);
+      const existing = pool.find(entry => entry.id === id);
+      const label = body.label?.trim();
+      if (existing) {
+        if (label) existing.label = label;
+      } else {
+        pool.push({ id, key, ...(label ? { label } : {}), addedAt: Date.now() });
+      }
+      provider.apiKey = key;
+      return id;
+    });
+    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
     const { clearModelCache } = await import("../../codex/model-cache");
     clearModelCache(name);
     const { clearProviderQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
     const { clearKeyCooldowns } = await import("../../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
-    return jsonResponse({ ok: true, id: result.id }, 201);
+    return jsonResponse({ ok: true, id: result.value }, 201);
   }
   if (url.pathname === "/api/providers/keys/active" && req.method === "PUT") {
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; id?: string };
     const name = (body.name ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
+    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!body.id) return jsonResponse({ error: "missing id" }, 400);
-    const { setActiveProviderApiKey } = await import("../../providers/api-keys");
-    if (!setActiveProviderApiKey(config, name, body.id)) return jsonResponse({ error: "key not found" }, 404);
+    const result = mutateProviderKey(deps, config, name, provider => {
+      const entry = providerKeyPool(provider).find(candidate => candidate.id === body.id);
+      if (!entry) return null;
+      provider.apiKey = entry.key;
+      return true;
+    });
+    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
     const { clearModelCache } = await import("../../codex/model-cache");
     clearModelCache(name);
     const { clearProviderQuotaCache } = await import("../../providers/quota");
@@ -595,23 +651,41 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const id = typeof body.id === "string" ? body.id.trim() : "";
     const alias = typeof body.alias === "string" ? body.alias.trim() : "";
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
+    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!id) return jsonResponse({ error: "missing id" }, 400);
     if (typeof body.alias !== "string" || alias.length > 80 || /[\x00-\x1f\x7f]/.test(alias)) {
       return jsonResponse({ error: "alias must be at most 80 printable characters" }, 400);
     }
-    const { setProviderApiKeyLabel } = await import("../../providers/api-keys");
-    if (!setProviderApiKeyLabel(config, name, id, alias || undefined)) return jsonResponse({ error: "key not found" }, 404);
+    const result = mutateProviderKey(deps, config, name, provider => {
+      const entry = providerKeyPool(provider).find(candidate => candidate.id === id);
+      if (!entry) return null;
+      if (alias) entry.label = alias;
+      else delete entry.label;
+      return true;
+    });
+    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
     return jsonResponse({ ok: true, name, id, alias: alias || null });
   }
   if (url.pathname === "/api/providers/keys" && req.method === "DELETE") {
     const name = (url.searchParams.get("name") ?? "").trim();
     const id = url.searchParams.get("id") ?? "";
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
+    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     if (!id) return jsonResponse({ error: "missing id" }, 400);
-    const { removeProviderApiKey } = await import("../../providers/api-keys");
-    if (!removeProviderApiKey(config, name, id)) return jsonResponse({ error: "key not found" }, 404);
+    const result = mutateProviderKey(deps, config, name, provider => {
+      const pool = providerKeyPool(provider);
+      const entry = pool.find(candidate => candidate.id === id);
+      if (!entry) return null;
+      provider.apiKeyPool = pool.filter(candidate => candidate.id !== id);
+      if (provider.apiKey === entry.key) {
+        const next = provider.apiKeyPool[0];
+        if (next) provider.apiKey = next.key;
+        else delete provider.apiKey;
+      }
+      if (provider.apiKeyPool.length === 0) delete provider.apiKeyPool;
+      return true;
+    });
+    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
     const { clearModelCache } = await import("../../codex/model-cache");
     clearModelCache(name);
     const { clearProviderQuotaCache } = await import("../../providers/quota");

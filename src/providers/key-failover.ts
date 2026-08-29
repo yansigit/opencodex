@@ -159,61 +159,66 @@ export function rotateKeyOn429(
   if (isAzureIdentityProvider(provider)) return null;
   if (provider.authMode === "oauth" || provider.authMode === "forward") return null;
 
-  const pool = provider.apiKeyPool;
-  if (!pool || pool.length < 2) return null;
-
-  // Cool the key that ACTUALLY failed. Under concurrent 429s another request may already have
-  // rotated provider.apiKey — cooling the live key would punish an innocent replacement and can
-  // exhaust a 2-key pool from a single bad key. CAS semantics: callers pass the key they used.
   const failedKey = attemptedKey ?? provider.apiKey;
-  const currentEntry = pool.find(e => e.key === failedKey);
-  if (currentEntry) {
-    const cooldownMs = parseRetryAfterMs(retryAfterHeader, now) ?? DEFAULT_COOLDOWN_MS;
-    keyCooldowns.set(cooldownKey(providerName, currentEntry.id), {
-      cooldownUntil: now + cooldownMs,
-    });
-    sweepExpiredOnWrite(now);
-  }
-
-  // Lost the race: someone already rotated away from the failed key. If the live key is healthy,
-  // retry with it as-is instead of rotating a second time.
-  if (attemptedKey !== undefined && provider.apiKey !== attemptedKey) {
-    const liveEntry = pool.find(e => e.key === provider.apiKey);
-    if (liveEntry && !isKeyInCooldown(providerName, liveEntry.id, now)) {
-      return { ...provider };
+  type Rotation =
+    | { provider: OcxProviderConfig; failedId?: string; candidateId?: string }
+    | { exhaustedCount: number };
+  const outcome = mutatePersistedConfig<Rotation | null>(fresh => {
+    const freshProvider = fresh.providers[providerName];
+    if (!freshProvider || isAzureIdentityProvider(freshProvider)
+      || freshProvider.authMode === "oauth" || freshProvider.authMode === "forward") {
+      return { changed: false, value: null };
     }
-  }
+    const pool = freshProvider.apiKeyPool;
+    if (!pool || pool.length < 2) return { changed: false, value: null };
 
-  // Pick the next key that is NOT in cooldown
-  const currentIndex = currentEntry ? pool.indexOf(currentEntry) : -1;
-  for (let i = 1; i < pool.length; i++) {
-    const candidate = pool[(currentIndex + i) % pool.length]!;
-    if (!isKeyInCooldown(providerName, candidate.id, now)) {
-      const outcome = mutatePersistedConfig(fresh => {
-        const freshProvider = fresh.providers[providerName];
-        if (!freshProvider) return { changed: false, value: null };
-        const freshCandidate = freshProvider.apiKeyPool?.find(entry => entry.id === candidate.id);
-        if (!freshCandidate || isKeyInCooldown(providerName, freshCandidate.id, now)) {
-          return { changed: false, value: null };
-        }
-        freshProvider.apiKey = freshCandidate.key;
-        return { changed: true, value: structuredClone(freshProvider) };
-      });
-      if (outcome.status === "unavailable" || outcome.value === null) return null;
-      // Swap active key after the disk commit.
-      Object.assign(provider, outcome.value);
-      config.providers[providerName] = provider;
-      console.warn(
-        // Log ids only — labels are user-supplied free text and could carry secret material.
-        `[key-failover] ${providerName}: 429 on key ${currentEntry?.id ?? "?"}; rotating to key ${candidate.id}`,
-      );
-      return { ...provider };
+    // Cool the key that actually failed. The callback is rerun after rebasing,
+    // so both the id and the active-key comparison come from the commit preimage.
+    const failedEntry = pool.find(entry => entry.key === failedKey);
+    if (failedEntry) {
+      const cooldownMs = parseRetryAfterMs(retryAfterHeader, now) ?? DEFAULT_COOLDOWN_MS;
+      keyCooldowns.set(cooldownKey(providerName, failedEntry.id), { cooldownUntil: now + cooldownMs });
+      sweepExpiredOnWrite(now);
     }
+
+    if (freshProvider.apiKey !== failedKey) {
+      const activeEntry = pool.find(entry => entry.key === freshProvider.apiKey);
+      if (activeEntry && !isKeyInCooldown(providerName, activeEntry.id, now)) {
+        return {
+          changed: false,
+          value: { provider: structuredClone(freshProvider), failedId: failedEntry?.id, candidateId: undefined },
+        };
+      }
+    }
+
+    const currentIndex = failedEntry ? pool.indexOf(failedEntry) : -1;
+    const candidateCount = failedEntry ? pool.length - 1 : pool.length;
+    for (let offset = 1; offset <= candidateCount; offset += 1) {
+      const candidate = pool[(currentIndex + offset) % pool.length]!;
+      if (isKeyInCooldown(providerName, candidate.id, now)) continue;
+      freshProvider.apiKey = candidate.key;
+      return {
+        changed: true,
+        value: { provider: structuredClone(freshProvider), failedId: failedEntry?.id, candidateId: candidate.id },
+      };
+    }
+    return { changed: false, value: { exhaustedCount: pool.length } };
+  });
+  if (outcome.status === "unavailable" || outcome.value === null) return null;
+  if ("exhaustedCount" in outcome.value) {
+    console.warn(`[key-failover] ${providerName}: all ${outcome.value.exhaustedCount} keys in cooldown; returning 429 to client`);
+    return null;
   }
 
-  // All keys in cooldown
-  console.warn(`[key-failover] ${providerName}: all ${pool.length} keys in cooldown; returning 429 to client`);
-  return null;
+  const committed = structuredClone(outcome.value.provider);
+  config.providers[providerName] = committed;
+  if (outcome.value.candidateId) {
+    console.warn(
+      // Log ids only — labels are user-supplied free text and could carry secret material.
+      `[key-failover] ${providerName}: 429 on key ${outcome.value.failedId ?? "?"}; rotating to key ${outcome.value.candidateId}`,
+    );
+  }
+  return structuredClone(committed);
 }
 
 export function sweepExpiredApiKeyCooldowns(now = Date.now()): number {

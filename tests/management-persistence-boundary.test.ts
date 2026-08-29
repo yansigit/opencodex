@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { getConfigPath, mutatePersistedConfig } from "../src/config";
 import { handleManagementAPI, type ManagementApiDeps } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
@@ -16,7 +16,12 @@ const richOnDisk = {
   providers: {
     "command-code": { adapter: "openai-chat", baseUrl: "https://command.example/v1", apiKey: "command" },
     openai: { adapter: "openai-chat", baseUrl: "https://openai.example/v1", apiKey: "openai" },
-    "google-antigravity": { adapter: "openai-chat", baseUrl: "https://antigravity.example/v1", apiKey: "antigravity" },
+    "google-antigravity": {
+      adapter: "google",
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth",
+      googleMode: "cloud-code-assist",
+    },
     "google-aistudio": { adapter: "openai-chat", baseUrl: "https://aistudio.example/v1", apiKey: "aistudio" },
     "opencode-go": { adapter: "openai-chat", baseUrl: "https://opencode.example/v1", apiKey: "opencode" },
     cursor: { adapter: "openai-chat", baseUrl: "https://cursor.example/v1", apiKey: "cursor" },
@@ -112,6 +117,120 @@ test("provider POST adds one row without replacing the persisted registry", asyn
   expect(persisted().providers["new-provider"]).toMatchObject({ apiKey: "new-key" });
 });
 
+test("provider POST reconciles a replacement API key into the inherited pool in one transaction", async () => {
+  const config = structuredClone(richOnDisk) as OcxConfig;
+  config.providers["command-code"]!.apiKeyPool = [{ id: "old", key: "command" }];
+  let committed!: OcxConfig;
+  let calls = 0;
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "command-code",
+      provider: {
+        adapter: "openai-chat",
+        baseUrl: "http://8.8.8.8/v1",
+        apiKey: "replacement-key",
+        liveModels: false,
+      },
+    }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      calls++;
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      committed = candidate;
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(200);
+  expect(calls).toBe(1);
+  expect(committed.providers["command-code"]?.apiKey).toBe("replacement-key");
+  expect(committed.providers["command-code"]?.apiKeyPool?.map(entry => entry.key)).toEqual([
+    "command",
+    "replacement-key",
+  ]);
+});
+
+test("provider POST rechecks account namespace collisions inside its transaction", async () => {
+  const config = structuredClone(historicalFixture);
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "late-namespace",
+      provider: { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", liveModels: false },
+    }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      candidate.codexAccountNamespaces = { "late-namespace": "account-id" };
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(409);
+  expect(config.providers["late-namespace"]).toBeUndefined();
+});
+
+test.each([
+  [
+    "combo",
+    { combos: { occupied: { targets: [{ provider: "openai", model: "gpt" }] } } },
+    "occupied",
+    "configured combo namespace",
+  ],
+  [
+    "routing profile",
+    { routingProfiles: { route: { alias: "occupied/model", candidates: [{ provider: "openai", model: "gpt" }] } } },
+    "occupied",
+    "configured routing profile namespace",
+  ],
+] as const)("provider POST rejects a %s namespace collision", async (_label, namespace, name, message) => {
+  const config = Object.assign(structuredClone(historicalFixture), structuredClone(namespace)) as OcxConfig;
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name,
+      provider: { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", liveModels: false },
+    }),
+  }), url, config);
+  expect(response?.status).toBe(409);
+  expect(await response?.text()).toContain(message);
+  expect(config.providers[name]).toBeUndefined();
+});
+
+test("provider API-key POST uses only the injected mutation boundary", async () => {
+  const config = structuredClone(richOnDisk) as OcxConfig;
+  config.providers["command-code"]!.apiKeyPool = [{ id: "old", key: "command" }];
+  const beforeDisk = readFileSync(getConfigPath(), "utf8");
+  let calls = 0;
+  const url = new URL("http://localhost/api/providers/keys");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "command-code", key: "second-key" }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      calls++;
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+  });
+  expect(response?.status).toBe(201);
+  expect(calls).toBe(1);
+  expect(config.providers["command-code"]?.apiKey).toBe("second-key");
+  expect(config.providers["command-code"]?.apiKeyPool?.map(entry => entry.key)).toEqual(["command", "second-key"]);
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(beforeDisk);
+});
+
 test("provider set-default updates only the persisted defaultProvider", async () => {
   const liveConfig = {
     ...structuredClone(historicalFixture),
@@ -160,6 +279,45 @@ test("provider DELETE removes one row and preserves the rest of the persisted re
   expect(saved.providers["google-aistudio"]).toEqual(richOnDisk.providers["google-aistudio"]);
 });
 
+test.each([
+  [
+    "routing profile",
+    { routingProfiles: { balanced: { candidates: [{ provider: "command-code", model: "model-a" }] } } },
+    "provider_has_dependent_routing_profiles",
+    "routingProfiles",
+    ["balanced"],
+  ],
+  [
+    "combo",
+    { combos: { fallback: { targets: [{ provider: "command-code", model: "model-a" }] } } },
+    "provider_has_dependent_combos",
+    "combos",
+    ["fallback"],
+  ],
+  [
+    "custom model",
+    { customModels: [{ id: "custom-row", provider: "command-code", modelId: "model-a" }] },
+    "provider_has_dependent_custom_models",
+    "customModels",
+    ["custom-row"],
+  ],
+] as const)("provider DELETE reports its dependent %s without mutating", async (_label, dependency, code, field, ids) => {
+  const config = Object.assign(structuredClone(richOnDisk) as OcxConfig, structuredClone(dependency));
+  const before = structuredClone(config);
+  const url = new URL("http://localhost/api/providers?name=command-code");
+  const response = await handleManagementAPI(new Request(url, { method: "DELETE" }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(409);
+  expect(await response?.json()).toMatchObject({ code, [field]: ids });
+  expect(config).toEqual(before);
+});
+
 test("selected-models PUT scopes its provider row mutation to the persisted config", async () => {
   const liveConfig = {
     ...structuredClone(historicalFixture),
@@ -178,6 +336,38 @@ test("selected-models PUT scopes its provider row mutation to the persisted conf
     selectedModels: ["fresh-model"],
   });
   expect(persisted().providers.cursor).toEqual(richOnDisk.providers.cursor);
+});
+
+test("model preset refuses to commit discovery results after the provider row changes", async () => {
+  const config: OcxConfig = {
+    port: 10100,
+    defaultProvider: "openrouter",
+    providers: {
+      openrouter: {
+        adapter: "openai-chat",
+        baseUrl: "https://openrouter.ai/api/v1",
+        apiKey: "openrouter-key",
+        liveModels: false,
+        models: ["openai/gpt-5.6"],
+      },
+    },
+  };
+  const url = new URL("http://localhost/api/model-presets");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider: "openrouter", mode: "preset" }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      candidate.providers.openrouter!.baseUrl = "https://concurrent.example/v1";
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(409);
+  expect(config.providers.openrouter?.baseUrl).not.toBe("https://concurrent.example/v1");
 });
 
 test("provider alias PUT scopes its provider row mutation to the persisted config", async () => {
@@ -524,12 +714,87 @@ test("Claude Desktop PUT lets a persistence failure reach dispatcher rollback", 
   expect(readFileSync(getConfigPath(), "utf8")).toBe(beforeDisk);
 });
 
-test("management route modules do not import global config writers", async () => {
-  const dir = join(import.meta.dir, "..", "src/server/management");
-  const files = readdirSync(dir).filter(file => file.endsWith(".ts") && file !== "context.ts");
-  for (const file of files) {
-    const source = readFileSync(join(dir, file), "utf8");
-    expect(source).not.toMatch(/(?:saveConfigPreservingClaudeCode|mutatePersistedConfig)[\s\S]{0,120}from "\.\.\/\.\.\/config"/);
-    expect(source).not.toMatch(/await import\("\.\.\/\.\.\/config"\)[\s\S]{0,120}(?:saveConfigPreservingClaudeCode|mutatePersistedConfig)/);
+const GLOBAL_MANAGEMENT_WRITERS = [
+  "saveConfig",
+  "saveConfigPreservingClaudeCode",
+  "mutatePersistedConfig",
+  "addProviderApiKey",
+  "setActiveProviderApiKey",
+  "setProviderApiKeyLabel",
+  "removeProviderApiKey",
+] as const;
+
+function withoutComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function importedGlobalWriters(source: string): string[] {
+  const clean = withoutComments(source);
+  const violations = new Set<string>();
+  const authority = String.raw`(?:\.\.?\/)+(?:config|providers\/api-keys)`;
+  for (const match of clean.matchAll(new RegExp(String.raw`import\s*\{([^}]*)\}\s*from\s*["']${authority}["']`, "g"))) {
+    for (const part of match[1]!.split(",")) {
+      const imported = part.trim().split(/\s+as\s+/)[0];
+      if (GLOBAL_MANAGEMENT_WRITERS.includes(imported as typeof GLOBAL_MANAGEMENT_WRITERS[number])) violations.add(imported!);
+    }
   }
+  for (const match of clean.matchAll(new RegExp(String.raw`(?:import\s*\*\s*as\s+(\w+)\s*from|(?:const|let)\s+(\w+)\s*=\s*await\s+import\()\s*["']${authority}["']`, "g"))) {
+    const namespace = match[1] ?? match[2];
+    if (!namespace) continue;
+    for (const writer of GLOBAL_MANAGEMENT_WRITERS) {
+      const access = new RegExp(String.raw`\b${namespace}\s*(?:\.\s*${writer}\b|\[\s*["'\x60]${writer}["'\x60]\s*\])`);
+      if (access.test(clean)) violations.add(writer);
+    }
+  }
+  for (const match of clean.matchAll(new RegExp(String.raw`(?:const|let)\s*\{([^}]*)\}\s*=\s*await\s+import\(\s*["']${authority}["']\s*\)`, "g"))) {
+    for (const part of match[1]!.split(",")) {
+      const imported = part.trim().split(/\s*:\s*/)[0];
+      if (GLOBAL_MANAGEMENT_WRITERS.includes(imported as typeof GLOBAL_MANAGEMENT_WRITERS[number])) violations.add(imported!);
+    }
+  }
+  for (const writer of GLOBAL_MANAGEMENT_WRITERS) {
+    const directDynamic = new RegExp(String.raw`import\(\s*["']${authority}["']\s*\)[\s\S]{0,80}(?:\.\s*${writer}\b|\[\s*["'\x60]${writer}["'\x60]\s*\])`);
+    if (directDynamic.test(clean)) violations.add(writer);
+  }
+  return [...violations];
+}
+
+function localTypeScriptImports(file: string, source: string, managementDir: string): string[] {
+  const imports: string[] = [];
+  for (const match of withoutComments(source).matchAll(/(?:from\s*|import\(\s*)["'](\.[^"']+)["']/g)) {
+    const base = resolve(dirname(file), match[1]!);
+    for (const candidate of [`${base}.ts`, join(base, "index.ts")]) {
+      if (candidate.startsWith(`${managementDir}/`) && existsSync(candidate)) imports.push(candidate);
+    }
+  }
+  return imports;
+}
+
+test("management route modules cannot reach global config writers directly or through local helpers", () => {
+  const managementDir = join(import.meta.dir, "..", "src/server/management");
+  const pending = readdirSync(managementDir)
+    .filter(file => file.endsWith(".ts") && file !== "context.ts")
+    .map(file => join(managementDir, file));
+  const visited = new Set<string>();
+  const violations: string[] = [];
+  while (pending.length > 0) {
+    const file = pending.pop()!;
+    if (visited.has(file) || file === join(managementDir, "context.ts")) continue;
+    visited.add(file);
+    const source = readFileSync(file, "utf8");
+    for (const writer of importedGlobalWriters(source)) violations.push(`${file}: ${writer}`);
+    pending.push(...localTypeScriptImports(file, source, managementDir));
+  }
+  expect(violations).toEqual([]);
+});
+
+test("management writer policy recognizes aliased, namespace, computed, and dynamic access", () => {
+  expect(importedGlobalWriters(`import { mutatePersistedConfig as persist } from "../../config"; persist(fn);`))
+    .toContain("mutatePersistedConfig");
+  expect(importedGlobalWriters(`import * as cfg from "../../config"; cfg["saveConfig"](value);`))
+    .toContain("saveConfig");
+  expect(importedGlobalWriters(`const apiKeys = await import("../../providers/api-keys"); apiKeys.addProviderApiKey(c, n, k);`))
+    .toContain("addProviderApiKey");
+  expect(importedGlobalWriters(`const { removeProviderApiKey: remove } = await import("../../providers/api-keys"); remove(c, n, id);`))
+    .toContain("removeProviderApiKey");
 });

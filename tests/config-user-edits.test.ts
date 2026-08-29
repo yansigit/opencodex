@@ -524,7 +524,11 @@ test("a 429 key rotation does not clobber the hand edit", async () => {
       { id: "b", key: "key-b" },
     ],
   } as never;
-  saveConfig(live);
+  const added = mutatePersistedConfig(fresh => {
+    fresh.providers.pool = structuredClone(live.providers.pool);
+    return { changed: true, value: structuredClone(fresh.providers.pool) };
+  });
+  expect(added.status).toBe("committed");
   armClaudeCodeBaseline(live);
   writeDiskConfig({ claudeCode: { authMode: "proxy" } });
 
