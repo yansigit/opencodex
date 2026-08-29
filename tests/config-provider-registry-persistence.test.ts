@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, getDefaultConfig, saveConfig } from "../src/config";
+import { getConfigPath, getDefaultConfig, mutatePersistedConfig, saveConfig, setPersistedConfigMutationBeforeCommitForTests } from "../src/config";
 import { handleConfigCommand } from "../src/cli/config-command";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
 
@@ -50,9 +50,38 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPersistedConfigMutationBeforeCommitForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   rmSync(home, { recursive: true, force: true });
+});
+
+test("a provider delta preserves concurrent unrelated provider and custom-model edits", () => {
+  writeDiskConfig(sixProviderConfig());
+  setPersistedConfigMutationBeforeCommitForTests(() => {
+    const concurrent = diskConfig();
+    concurrent.providers.theta = provider("theta");
+    concurrent.customModels = [{
+      id: "concurrent-theta-model",
+      provider: "theta",
+      modelId: "theta-model",
+      addedAt: "2026-08-29T00:00:00.000Z",
+    }];
+    writeDiskConfig(concurrent);
+  });
+
+  expect(mutatePersistedConfig(config => {
+    config.providers.alpha!.disabled = true;
+    return { changed: true, value: undefined };
+  })).toEqual({ status: "committed", value: undefined });
+  expect(diskConfig().providers.alpha?.disabled).toBe(true);
+  expect(diskConfig().providers.theta).toEqual(provider("theta"));
+  expect(diskConfig().customModels).toEqual([{
+    id: "concurrent-theta-model",
+    provider: "theta",
+    modelId: "theta-model",
+    addedAt: "2026-08-29T00:00:00.000Z",
+  }]);
 });
 
 test("whole saves preserve a valid persisted provider registry and default provider", () => {
@@ -105,6 +134,21 @@ test("config import with --yes replaces the provider registry", async () => {
   expect(await handleConfigCommand(["import", source, "--yes", "--json"])).toBe(0);
   expect(diskConfig().providers).toEqual(imported.providers);
   expect(diskConfig().defaultProvider).toBe("imported");
+});
+
+test("config import with --yes replaces an invalid existing config", async () => {
+  mkdirSync(home, { recursive: true });
+  writeFileSync(getConfigPath(), "{ invalid existing config");
+  const imported = {
+    port: 10213,
+    defaultProvider: "imported",
+    providers: { imported: provider("imported") },
+  };
+  const source = join(home, "invalid-recovery-import.json");
+  writeFileSync(source, JSON.stringify(imported));
+
+  expect(await handleConfigCommand(["import", source, "--yes", "--json"])).toBe(0);
+  expect(diskConfig()).toMatchObject(imported);
 });
 
 test("whole saves create the default OpenAI config when no config exists", () => {

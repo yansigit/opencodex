@@ -69,6 +69,15 @@ describe("provider API key pool", () => {
     expect(provider.apiKeyPool).toBeUndefined();
   });
 
+  test("a failed key-pool persistence leaves the live provider unchanged", () => {
+    const config = baseConfig();
+    const before = structuredClone(config.providers["opencode-go"]);
+    rmSync(join(testDir, "config.json"));
+
+    expect(addProviderApiKey(config, "opencode-go", "key-second-444555666777")).toEqual({ error: "config is unavailable" });
+    expect(config.providers["opencode-go"]).toEqual(before);
+  });
+
   test("GET seeds legacy bare apiKey into a one-entry pool with masked value", async () => {
     const server = startServer(0);
     try {

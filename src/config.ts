@@ -2731,24 +2731,26 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
  * cost-overlay registry from the persisted config so runtime estimates follow
  * every save path.
  */
-function persistConfigUnlocked(config: OcxConfig, replaceProviderRegistry = false): boolean {
+type PersistConfigAuthority = "ordinary" | "mutation" | "replacement";
+
+function persistConfigUnlocked(config: OcxConfig, authority: PersistConfigAuthority = "ordinary"): boolean {
   const configPath = getConfigPath();
   // Check the resolved file target before reading it: a symlink can point from an
   // isolated test home into the protected real home, where another write guard
   // must not mask this refusal based on the target's current contents.
   assertNotRealHomeUnderTest(dirname(resolveWriteTarget(configPath)));
   const raw = readRawConfigJson();
-  if (raw && configNeedsProviderRepair(raw)) {
+  if (authority !== "replacement" && raw && configNeedsProviderRepair(raw)) {
     throw new Error("refusing to overwrite a config repaired with defaults; fix the persisted config first");
   }
   const snapshot = readConfigFileSnapshot();
-  if (snapshot.diagnostics.source === "fallback") {
+  if (authority !== "replacement" && snapshot.diagnostics.source === "fallback") {
     throw new Error("refusing to overwrite an invalid persisted config; fix the persisted config first");
   }
   // Automatic whole-config writes own non-provider settings only. A valid disk
   // registry is authoritative; explicit locked mutations pass replacement
   // authority for intentional provider/default changes.
-  const base = snapshot.diagnostics.source === "file" && !replaceProviderRegistry
+  const base = snapshot.diagnostics.source === "file" && authority === "ordinary"
     ? {
       ...config,
       providers: snapshot.diagnostics.config.providers,
@@ -2798,7 +2800,7 @@ export function saveConfig(config: OcxConfig): void {
   });
 }
 
-/** Replace a validated config under the shared lock for confirmed import/init/reset flows. */
+/** Replace a validated config under the shared lock for confirmed import/init flows. */
 export function replacePersistedConfig(config: OcxConfig): void {
   assertNotRealHomeUnderTest(getConfigDir());
   withConfigMutationLockSync(() => {
@@ -2806,7 +2808,7 @@ export function replacePersistedConfig(config: OcxConfig): void {
       readRawConfigJson(),
       projectConfigRebaseProvenance(config),
     );
-    if (persistConfigUnlocked(projected, true)) bumpGenerationForCooperatingConfigWrite();
+    if (persistConfigUnlocked(projected, "replacement")) bumpGenerationForCooperatingConfigWrite();
     adoptCustomModelCatalogMigration(config, projected);
     if (projected.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
     else config.configRebaseProvenance = structuredClone(projected.configRebaseProvenance);
@@ -2895,7 +2897,7 @@ export function mutatePersistedConfig<T>(
         commitBase.diagnostics.config,
         confirmedConfig,
       );
-      if (persistConfigUnlocked(projected, true)) bumpGenerationForCooperatingConfigWrite();
+      if (persistConfigUnlocked(projected, "mutation")) bumpGenerationForCooperatingConfigWrite();
       return { status: "committed", value: confirmed.value };
     }
     return { status: "unavailable", reason: "conflict" };
