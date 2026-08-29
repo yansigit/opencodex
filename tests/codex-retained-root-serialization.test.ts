@@ -574,7 +574,7 @@ test("two processes at the post-approval management seam serialize instead of in
       continue;
     }
     // The route persisted its mutation, so it must answer 2xx no matter what the
-    // catalog attempt decided. A throw here would be the old `catch {}` failure
+    // catalog attempt decided. A throw here would reproduce the old swallowed-error failure
     // inverted: a persisted change reported as a 500.
     if (parsed.status >= 300) throw new Error(JSON.stringify(parsed));
     expect(parsed.status).toBeGreaterThanOrEqual(200);
