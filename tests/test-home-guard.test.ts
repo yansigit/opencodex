@@ -56,6 +56,26 @@ function runProbe(source: string, env: Record<string, string | undefined>): { co
   };
 }
 
+function runShardProbe(testSource: string, env: Record<string, string | undefined>): { code: number; stdout: string; stderr: string } {
+  const dir = mkdtempSync(join(tmpdir(), "ocx-shard-guard-probe-"));
+  const file = join(dir, "probe.test.ts");
+  writeFileSync(file, testSource, "utf8");
+  const childEnv: Record<string, string> = {};
+  for (const [key, value] of Object.entries({ ...process.env, ...env })) {
+    if (value !== undefined) childEnv[key] = value;
+  }
+  const result = Bun.spawnSync(
+    [process.execPath, "run", join(REPO_ROOT, "scripts/test.ts"), "--shard=1/1", file],
+    { cwd: REPO_ROOT, env: childEnv, stdout: "pipe", stderr: "pipe" },
+  );
+  rmSync(dir, { recursive: true, force: true });
+  return {
+    code: result.exitCode ?? 1,
+    stdout: new TextDecoder().decode(result.stdout),
+    stderr: new TextDecoder().decode(result.stderr),
+  };
+}
+
 /** A fake "real home" the guard will protect, so no deny case aims at the true one. */
 function sentinelHome(): { realHome: string; opencodexHome: string } {
   const realHome = mkdtempSync(join(tmpdir(), "ocx-sentinel-home-"));
@@ -65,6 +85,33 @@ function sentinelHome(): { realHome: string; opencodexHome: string } {
 }
 
 describe("real-home write guard", () => {
+
+  test("the shard wrapper arms the real writer guard without inherited preload state", () => {
+    const { realHome, opencodexHome } = sentinelHome();
+    const configPath = join(opencodexHome, "config.json");
+    const sentinel = '{"providers":{"openai":{"name":"sentinel"}},"defaultProvider":"openai"}';
+    writeFileSync(configPath, sentinel, "utf8");
+    const probe = runShardProbe(`
+      import { test } from "bun:test";
+      test("refuses the protected config", async () => {
+        process.env.OPENCODEX_HOME = process.env.OCX_REAL_HOME + "/.opencodex";
+        const { saveConfig } = await import("${REPO_ROOT_URL}src/config");
+        try {
+          saveConfig({ providers: {}, defaultProvider: "openai", port: 10100 } as never);
+          throw new Error("writer unexpectedly succeeded");
+        } catch (error) {
+          if (!String(error).includes("refusing to write the real OpenCodex home")) throw error;
+        }
+      });
+    `, {
+      OCX_TEST_HOME_GUARD: undefined,
+      OCX_TEST_PRELOAD_PID: undefined,
+      OCX_REAL_HOME: realHome,
+    });
+
+    expect(probe.code).toBe(0);
+    expect(readFileSync(configPath, "utf8")).toBe(sentinel);
+  });
 
 /**
  * Windows without Developer Mode or admin cannot create symlinks (EPERM). The
