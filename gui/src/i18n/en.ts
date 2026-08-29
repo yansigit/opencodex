@@ -334,7 +334,7 @@ export const en = {
   "dash.injectionHint": "Pick the model Codex should hand sub-agent work to. The two switches below decide where that pick is used.",
   "dash.injectionManage": "Open settings",
   "dash.syncCodexSubagentDefaults": "Use for omitted-model subagents",
-  "dash.syncCodexSubagentDefaultsHint": "After sync/restart, apply this preference when Codex creates a subagent without an explicit model. It never restarts automatically and leaves user-owned [agents] settings alone.",
+  "dash.syncCodexSubagentDefaultsHint": "On, after sync/restart, apply this preference when Codex creates a subagent without an explicit model. Off, it does nothing; it never restarts automatically and leaves user-owned [agents] settings untouched.",
   "dash.multiAgentGuidance": "Tell Codex how to split work",
   "dash.multiAgentGuidanceHint": "Sends a short note telling Codex how to hand work to sub-agents. On v2 it names the models it may use and which to prefer; on v1 it only applies at max or ultra reasoning effort. Off, no note is added.",
   "dash.injectionNone": "None",
