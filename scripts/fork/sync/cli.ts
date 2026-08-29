@@ -2,6 +2,7 @@ import { detectLatestVTag } from "./detect";
 import { annotateMainLane } from "./lane";
 import { pinVendorRefs } from "./pin";
 import { prepareSync } from "./prepare";
+import { publishSyncBranch } from "./publish";
 import { createDraftPullRequestClient } from "./pull-request";
 import { enabledCoordinators, enabledNotifiers, registerCoordinator, registerNotifier } from "./registry";
 import { createCliCoordinator } from "./coordinators/cli";
@@ -14,12 +15,13 @@ import type {
   DraftPullRequestClient,
   FetchImplementation,
   GitHubIssuesClient,
+  PrepareResult,
   ProcessRunner,
   SyncEvent,
 } from "./types";
 
 const DEFAULT_UPSTREAM_REPO = "https://github.com/lidge-jun/opencodex.git";
-const usage = "usage: bun scripts/fork/sync/cli.ts detect|pin|prepare|draft-pr|emit";
+const usage = "usage: bun scripts/fork/sync/cli.ts detect|pin|prepare|publish|draft-pr|emit";
 
 export interface CliOptions {
   env?: Record<string, string | undefined>;
@@ -183,6 +185,7 @@ export async function runCli(
     command !== "detect"
     && command !== "pin"
     && command !== "prepare"
+    && command !== "publish"
     && command !== "draft-pr"
     && command !== "emit"
   ) {
@@ -221,6 +224,16 @@ export async function runCli(
     const event = JSON.parse(input) as SyncEvent;
     const result = await prepareSync(event, { runner });
     write(JSON.stringify(result));
+    return;
+  }
+  if (command === "publish") {
+    const input = options.stdin ?? await readStdin();
+    const envelope = JSON.parse(input) as {
+      event: SyncEvent;
+      result: PrepareResult;
+      devSha: string;
+    };
+    write(JSON.stringify(await publishSyncBranch({ ...envelope, runner })));
     return;
   }
   if (command === "draft-pr") {

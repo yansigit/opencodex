@@ -24,6 +24,23 @@ export interface PrepareResult {
   pullRequestNumber?: number;
 }
 
+export type PublishAction =
+  | "created"
+  | "fast-forwarded"
+  | "unchanged"
+  | "preserved-advanced"
+  | "preserved-diverged";
+
+export interface PublishResult {
+  action: PublishAction;
+  branch: string;
+  remoteSha?: string;
+  containsDev: boolean;
+  containsVendorMain: boolean;
+  handoffRequired: boolean;
+  escalationRequired: boolean;
+}
+
 export interface SyncEvent {
   kind: SyncEventKind;
   upstreamRepo: string;

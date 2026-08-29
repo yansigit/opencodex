@@ -20,10 +20,11 @@ describe("fork sync detection", () => {
       upstreamRepo: "https://github.com/lidge-jun/opencodex.git",
       now: () => new Date("2026-08-22T18:00:00.000Z"),
       runner: queuedRunner([
-        result(`${TAG_SHA} refs/tags/v2.28.0\n${TAG_SHA} refs/tags/v2.29.0\n${MAIN_SHA} refs/tags/not-a-release\n`),
+        result(`${MAIN_SHA} refs/tags/v2.28.0\n${TAG_SHA} refs/tags/v2.29.0\n${MAIN_SHA} refs/tags/not-a-release\n`),
         result(MAIN_SHA),
         result(DEV_SHA),
         result(""),
+        result('{"version":"2.28.0"}'),
         result("", 1),
         result(""),
       ]),
@@ -38,6 +39,22 @@ describe("fork sync detection", () => {
       vendorDevSha: DEV_SHA,
       detectedAt: "2026-08-22T18:00:00.000Z",
     });
+  });
+
+  test("uses the commit behind an annotated stable tag", async () => {
+    const tagObject = "5555555555555555555555555555555555555555";
+    const event = await detectLatestVTag({
+      upstreamRepo: "upstream",
+      runner: queuedRunner([
+        result(`${tagObject} refs/tags/v2.29.0\n${TAG_SHA} refs/tags/v2.29.0^{}\n`),
+        result(TAG_SHA),
+        result(DEV_SHA),
+        result(""),
+      ]),
+    });
+
+    expect(event.kind).toBe("already-current");
+    expect(event.latestTagSha).toBe(TAG_SHA);
   });
 
   test("returns already-current when vendor main is at the latest tag", async () => {
@@ -55,7 +72,24 @@ describe("fork sync detection", () => {
     expect(event.latestTagSha).toBe(TAG_SHA);
   });
 
-  test("skips a newer preview tag that is not on upstream main", async () => {
+  test("treats missing vendor refs as an uninitialized pin candidate", async () => {
+    const event = await detectLatestVTag({
+      upstreamRepo: "upstream",
+      runner: queuedRunner([
+        result(`${TAG_SHA} refs/tags/v2.29.0\n`),
+        result("", 1),
+        result("", 1),
+        result(""),
+      ]),
+    });
+
+    expect(event.kind).toBe("pin-updated");
+    expect(event.latestTagSha).toBe(TAG_SHA);
+    expect(event.vendorMainSha).toBe("");
+    expect(event.vendorDevSha).toBe("");
+  });
+
+  test("ignores a newer preview tag", async () => {
     const previewSha = "4444444444444444444444444444444444444444";
     const event = await detectLatestVTag({
       upstreamRepo: "upstream",
@@ -64,7 +98,6 @@ describe("fork sync detection", () => {
         result(`${TAG_SHA} refs/tags/v2.31.0\n${previewSha} refs/tags/v2.32.0-preview.20260822\n`),
         result(TAG_SHA),
         result(DEV_SHA),
-        result("", 1, "preview not on main"),
         result(""),
       ]),
     });
@@ -74,30 +107,66 @@ describe("fork sync detection", () => {
     expect(event.latestTagSha).toBe(TAG_SHA);
   });
 
-  test("returns already-current when vendor main already contains the latest tag", async () => {
+  test("never selects a preview tag even when it is on upstream main", async () => {
+    const previewSha = "4444444444444444444444444444444444444444";
     const event = await detectLatestVTag({
       upstreamRepo: "upstream",
       runner: queuedRunner([
-        result(`${TAG_SHA} refs/tags/v2.29.0\n`),
-        result(MAIN_SHA),
+        result(`${TAG_SHA} refs/tags/v2.31.0\n${previewSha} refs/tags/v2.32.0-preview.20260822\n`),
+        result(TAG_SHA),
         result(DEV_SHA),
-        result(""),
         result(""),
       ]),
     });
 
     expect(event.kind).toBe("already-current");
+    expect(event.latestTag).toBe("v2.31.0");
+    expect(event.latestTagSha).toBe(TAG_SHA);
+  });
+
+  test("rejects vendor main when it is ahead of the latest stable tag", async () => {
+    const event = await detectLatestVTag({
+      upstreamRepo: "upstream",
+      runner: queuedRunner([
+        result(`${MAIN_SHA} refs/tags/v2.28.0\n${TAG_SHA} refs/tags/v2.29.0\n`),
+        result(MAIN_SHA),
+        result(DEV_SHA),
+        result(""),
+        result('{"version":"2.28.0"}'),
+        result(""),
+      ]),
+    });
+
+    expect(event.kind).toBe("pin-diverged");
+    expect(event.error).toContain("ahead");
     expect(event.vendorMainSha).toBe(MAIN_SHA);
+  });
+
+  test("rejects a stable tag retagged away from the pinned commit", async () => {
+    const event = await detectLatestVTag({
+      upstreamRepo: "upstream",
+      runner: queuedRunner([
+        result(`${MAIN_SHA} refs/tags/v2.28.0\n${TAG_SHA} refs/tags/v2.29.0\n`),
+        result(MAIN_SHA),
+        result(DEV_SHA),
+        result(""),
+        result('{"version":"2.29.0"}'),
+      ]),
+    });
+
+    expect(event.kind).toBe("pin-diverged");
+    expect(event.error).toContain("current stable tag");
   });
 
   test("returns pin-diverged when vendor main cannot fast-forward to the tag", async () => {
     const event = await detectLatestVTag({
       upstreamRepo: "upstream",
       runner: queuedRunner([
-        result(`${TAG_SHA} refs/tags/v2.29.0\n`),
+        result(`${MAIN_SHA} refs/tags/v2.28.0\n${TAG_SHA} refs/tags/v2.29.0\n`),
         result(MAIN_SHA),
         result(DEV_SHA),
         result(""),
+        result('{"version":"2.28.0"}'),
         result("", 1, "tag not in vendor"),
         result("", 1, "not an ancestor"),
       ]),

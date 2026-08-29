@@ -20,10 +20,11 @@ function result(stdout: string, exitCode = 0, stderr = ""): CommandResult {
 
 function detectRunner(): CommandRunner {
   const results = [
-    result(`${TAG_SHA} refs/tags/v2.29.0\n`),
+    result(`${MAIN_SHA} refs/tags/v2.28.0\n${TAG_SHA} refs/tags/v2.29.0\n`),
     result(MAIN_SHA),
     result(DEV_SHA),
     result(""),
+    result('{"version":"2.28.0"}'),
     result("", 1),
     result(""),
     result("", 1),
@@ -99,9 +100,9 @@ describe("fork sync CLI", () => {
     expect(event.mergeBaseCount).toBe(1);
     expect(event.recommendedLane).toBe("noop");
     expect(calls).toEqual([
-      ["ls-remote", "--tags", "--refs", "upstream", "v*"],
-      ["rev-parse", "refs/heads/vendor/main"],
-      ["rev-parse", "refs/heads/vendor/dev"],
+      ["ls-remote", "--tags", "upstream", "v*"],
+      ["rev-parse", "--verify", "--quiet", "refs/heads/vendor/main^{commit}"],
+      ["rev-parse", "--verify", "--quiet", "refs/heads/vendor/dev^{commit}"],
       ["merge-base", "--is-ancestor", TAG_SHA, "refs/remotes/upstream/main"],
       ["merge-base", "--is-ancestor", TAG_SHA, "HEAD"],
       ["merge-base", "--all", "HEAD", TAG_SHA],
@@ -158,13 +159,15 @@ describe("fork sync CLI", () => {
     const calls: string[][] = [];
     const output: string[] = [];
     const results = [
-      result(`${TAG_SHA} refs/tags/v2.29.0\n`),
+      result(`${MAIN_SHA} refs/tags/v2.28.0\n${TAG_SHA} refs/tags/v2.29.0\n`),
       result(MAIN_SHA),
       result(DEV_SHA),
       result(""),
+      result('{"version":"2.28.0"}'),
       result("", 1),
       result(""),
       result(DEFAULT_MAIN_SHA),
+      result(""),
       result(""),
       result(TAG_SHA),
       result(""),
@@ -191,13 +194,15 @@ describe("fork sync CLI", () => {
       "refs/remotes/upstream/dev:refs/heads/vendor/dev",
     ]);
     expect(calls).toEqual([
-      ["ls-remote", "--tags", "--refs", "upstream", "v*"],
-      ["rev-parse", "refs/heads/vendor/main"],
-      ["rev-parse", "refs/heads/vendor/dev"],
+      ["ls-remote", "--tags", "upstream", "v*"],
+      ["rev-parse", "--verify", "--quiet", "refs/heads/vendor/main^{commit}"],
+      ["rev-parse", "--verify", "--quiet", "refs/heads/vendor/dev^{commit}"],
       ["merge-base", "--is-ancestor", TAG_SHA, "refs/remotes/upstream/main"],
+      ["show", `${MAIN_SHA}:package.json`],
       ["merge-base", "--is-ancestor", TAG_SHA, MAIN_SHA],
       ["merge-base", "--is-ancestor", MAIN_SHA, TAG_SHA],
       ["rev-parse", "HEAD"],
+      ["merge-base", "--is-ancestor", DEV_SHA, "refs/remotes/upstream/dev"],
       ["fetch", ".", `${TAG_SHA}:refs/heads/vendor/main`],
       ["rev-parse", "refs/heads/vendor/main"],
       ["fetch", ".", "refs/remotes/upstream/dev:refs/heads/vendor/dev"],
@@ -213,10 +218,11 @@ describe("fork sync CLI", () => {
   test("keeps a pin-diverged event unchanged after lane annotation", async () => {
     const output: string[] = [];
     const results = [
-      result(`${TAG_SHA} refs/tags/v2.29.0\n`),
+      result(`${MAIN_SHA} refs/tags/v2.28.0\n${TAG_SHA} refs/tags/v2.29.0\n`),
       result(MAIN_SHA),
       result(DEV_SHA),
       result(""),
+      result('{"version":"2.28.0"}'),
       result("", 1),
       result("", 1),
       result(DEFAULT_MAIN_SHA),
@@ -236,7 +242,7 @@ describe("fork sync CLI", () => {
     expect(event.recommendedLane).toBeUndefined();
   });
 
-  test("keeps a detect failure with no vendor main unchanged", async () => {
+  test("keeps a tag eligibility failure with missing vendor refs unchanged", async () => {
     const calls: string[][] = [];
     const output: string[] = [];
     await runCli(["pin"], {
@@ -255,8 +261,10 @@ describe("fork sync CLI", () => {
     expect(event.vendorContainedInMain).toBeUndefined();
     expect(event.mergeBaseCount).toBeUndefined();
     expect(calls).toEqual([
-      ["ls-remote", "--tags", "--refs", "upstream", "v*"],
-      ["rev-parse", "refs/heads/vendor/main"],
+      ["ls-remote", "--tags", "upstream", "v*"],
+      ["rev-parse", "--verify", "--quiet", "refs/heads/vendor/main^{commit}"],
+      ["rev-parse", "--verify", "--quiet", "refs/heads/vendor/dev^{commit}"],
+      ["merge-base", "--is-ancestor", TAG_SHA, "refs/remotes/upstream/main"],
     ]);
   });
 

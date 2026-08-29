@@ -28,6 +28,32 @@ async function runGit(
   return result;
 }
 
+async function optionalLocalRef(
+  runner: CommandRunner,
+  ref: string,
+): Promise<string> {
+  const result = await runner(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  if (result.exitCode === 1) return "";
+  if (result.exitCode !== 0) {
+    throw new GitCommandError(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], result);
+  }
+  const sha = result.stdout.trim();
+  if (!sha) throw new Error(`${ref} resolved to an empty SHA`);
+  return sha;
+}
+
+async function stableTagAtCommit(
+  runner: CommandRunner,
+  commit: string,
+): Promise<string> {
+  const packageJson = (await runGit(runner, ["show", `${commit}:package.json`])).stdout;
+  const version = (JSON.parse(packageJson) as { version?: unknown }).version;
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) {
+    throw new Error("vendor/main package version is not a stable release");
+  }
+  return `v${version}`;
+}
+
 function safeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message
@@ -40,12 +66,15 @@ function safeError(error: unknown): string {
 }
 
 function parseTags(output: string): Array<{ tag: string; sha: string }> {
-  return output
-    .split(/\r?\n/)
-    .map(line => line.trim().split(/\s+/))
-    .filter(parts => parts.length >= 2 && parts[0] && parts[1]?.startsWith("refs/tags/"))
-    .map(([sha, ref]) => ({ sha, tag: ref.slice("refs/tags/".length) }))
-    .filter(({ tag }) => tag.startsWith("v"));
+  const tags = new Map<string, string>();
+  for (const line of output.split(/\r?\n/)) {
+    const [sha, ref] = line.trim().split(/\s+/);
+    if (!sha || !ref?.startsWith("refs/tags/")) continue;
+    const peeled = ref.endsWith("^{}");
+    const tag = ref.slice("refs/tags/".length, peeled ? -3 : undefined);
+    if (/^v\d+\.\d+\.\d+$/.test(tag) && (peeled || !tags.has(tag))) tags.set(tag, sha);
+  }
+  return [...tags].map(([tag, sha]) => ({ tag, sha }));
 }
 
 function compareTags(left: string, right: string): number {
@@ -101,20 +130,13 @@ export async function detectLatestVTag(
       (await runGit(options.runner, [
         "ls-remote",
         "--tags",
-        "--refs",
         options.upstreamRepo,
         "v*",
       ])).stdout,
     ).sort((left, right) => compareTags(left.tag, right.tag));
     if (tags.length === 0) throw new Error("no v* release tag found");
-    vendorMainSha = (await runGit(options.runner, [
-      "rev-parse",
-      "refs/heads/vendor/main",
-    ])).stdout.trim();
-    vendorDevSha = (await runGit(options.runner, [
-      "rev-parse",
-      "refs/heads/vendor/dev",
-    ])).stdout.trim();
+    vendorMainSha = await optionalLocalRef(options.runner, "refs/heads/vendor/main");
+    vendorDevSha = await optionalLocalRef(options.runner, "refs/heads/vendor/dev");
 
     let latest: { tag: string; sha: string } | undefined;
     for (let index = tags.length - 1; index >= 0; index -= 1) {
@@ -152,6 +174,32 @@ export async function detectLatestVTag(
     latestTag = latest.tag;
     latestTagSha = latest.sha;
 
+    if (vendorMainSha && vendorMainSha !== latestTagSha) {
+      const pinnedTag = await stableTagAtCommit(options.runner, vendorMainSha);
+      if (!tags.some(tag => tag.tag === pinnedTag && tag.sha === vendorMainSha)) {
+        return event(
+          "pin-diverged",
+          options,
+          latestTag,
+          latestTagSha,
+          vendorMainSha,
+          vendorDevSha,
+          "vendor/main is not pinned to its current stable tag",
+        );
+      }
+    }
+
+    if (!vendorMainSha || !vendorDevSha) {
+      return event(
+        "pin-updated",
+        options,
+        latestTag,
+        latestTagSha,
+        vendorMainSha,
+        vendorDevSha,
+      );
+    }
+
     if (vendorMainSha === latestTagSha) {
       return event(
         "already-current",
@@ -171,12 +219,13 @@ export async function detectLatestVTag(
     ]);
     if (tagContainedInVendor.exitCode === 0) {
       return event(
-        "already-current",
+        "pin-diverged",
         options,
         latestTag,
         latestTagSha,
         vendorMainSha,
         vendorDevSha,
+        "vendor/main is ahead of the latest eligible stable tag",
       );
     }
     if (tagContainedInVendor.exitCode !== 1) {

@@ -1,5 +1,7 @@
 "use strict";
 
+const { spawnSync } = require("node:child_process");
+
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const PACKAGE_NAME = "@yansigit/opencodex";
@@ -19,11 +21,22 @@ function requiredSha(value, name) {
   return value;
 }
 
+function skipsAutoRelease(rawCommitMessage) {
+  const parsed = spawnSync("git", ["interpret-trailers", "--parse"], {
+    input: rawCommitMessage,
+    encoding: "utf8",
+  });
+  if (parsed.error || parsed.status !== 0) {
+    throw new Error(parsed.error?.message || parsed.stderr.trim() || "git trailer parsing failed");
+  }
+  return parsed.stdout.split(/\r?\n/).includes("Auto-Release: skip");
+}
+
 /**
  * Decide whether a successful main-branch CI completion may dispatch release.yml.
  *
- * The function is deliberately pure so the workflow's publish eligibility can be
- * tested without GitHub or npm credentials.
+ * The function is centralized so publish eligibility can be tested without
+ * GitHub or npm credentials; Git remains the authority for trailer parsing.
  */
 function decideForkAutoRelease({
   eventName,
@@ -34,6 +47,7 @@ function decideForkAutoRelease({
   liveMainSha,
   packageName,
   packageVersion,
+  rawCommitMessage,
   versionOnNpm,
 }) {
   requiredString(eventName, "eventName");
@@ -44,6 +58,10 @@ function decideForkAutoRelease({
   requiredSha(liveMainSha, "liveMainSha");
   requiredString(packageName, "packageName");
   requiredString(packageVersion, "packageVersion");
+  requiredString(rawCommitMessage, "rawCommitMessage");
+  if (!rawCommitMessage.trim()) {
+    throw new TypeError("rawCommitMessage must be a non-empty string");
+  }
 
   if (!SEMVER.test(packageVersion)) {
     throw new TypeError("packageVersion must be valid semver");
@@ -82,6 +100,12 @@ function decideForkAutoRelease({
       reason: `package version must be stable semver; got ${packageVersion}.`,
     };
   }
+  if (skipsAutoRelease(rawCommitMessage)) {
+    return {
+      action: "skip",
+      reason: "commit trailer requested skipping automatic release.",
+    };
+  }
   if (versionOnNpm) {
     return {
       action: "skip",
@@ -102,6 +126,7 @@ function decideFromEnv(env = process.env) {
     liveMainSha: env.LIVE_MAIN_SHA,
     packageName: env.PACKAGE_NAME,
     packageVersion: env.PACKAGE_VERSION,
+    rawCommitMessage: env.RAW_COMMIT_MESSAGE,
   };
   if (Object.prototype.hasOwnProperty.call(env, "VERSION_ON_NPM")) {
     input.versionOnNpm = env.VERSION_ON_NPM;
