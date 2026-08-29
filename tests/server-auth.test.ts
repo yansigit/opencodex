@@ -3493,11 +3493,25 @@ describe("server local API auth", () => {
 
       expect(response.status).toBe(200);
       await response.text();
-      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
+      // The passthrough response has a client-facing tee branch and an async
+      // inspection branch. Wait for the latter to record its outcome before
+      // asserting the health/log contract.
+      const deadline = Date.now() + 1_000;
+      let health = getCodexUpstreamHealth("pool-a");
+      let logs: ReturnType<typeof logsFromApiBody> = [];
+      while (Date.now() < deadline) {
+        health = getCodexUpstreamHealth("pool-a");
+        logs = logsFromApiBody(await fetch(new URL("/api/logs?tail=1", server.url), { headers: managementHeaders() }).then(r => r.json()));
+        if (health?.consecutiveFailures === 3 && logs.at(-1)?.terminalStatus === "failed") break;
+        await Bun.sleep(10);
+      }
+      if (health?.consecutiveFailures !== 3 || logs.at(-1)?.terminalStatus !== "failed") {
+        throw new Error(`timed out waiting for passthrough terminal inspection (health=${JSON.stringify(health)}, lastLog=${JSON.stringify(logs.at(-1))})`);
+      }
+      expect(health).toMatchObject({
         consecutiveFailures: 3,
         lastFailureStatus: 502,
       });
-      const logs = logsFromApiBody(await fetch(new URL("/api/logs?tail=1", server.url), { headers: managementHeaders() }).then(r => r.json()));
       expect(logs.at(-1)).toMatchObject({
         status: 502,
         errorCode: "upstream_server_error",

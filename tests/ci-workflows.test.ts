@@ -85,6 +85,25 @@ function expectSecureLinuxKeyringBootstrap(workflow: string): void {
 }
 
 describe("GitHub Actions hardening", () => {
+  test("repository-owned root tests always use the isolated wrapper", async () => {
+    const paths = [
+      ".github/workflows/ci.yml",
+      ".github/workflows/nightly-macos.yml",
+      "scripts/ci/run-bun-test-batches.sh",
+      "scripts/release.ts",
+      "scripts/openai-provider-option-final-gates.ts",
+    ];
+    const rawRootTest = /(?:^|[;&| \t])(?:bun|\$BUN_BIN) test(?:\s|$)/;
+    for (const path of paths) {
+      const text = await readText(path);
+      for (const line of text.split(/\r?\n/)) {
+        if (/^\s*(?:#|\/\/|\*|\/\*)/.test(line)) continue;
+        if (line.includes("cd gui") || line.includes("replit-gateway")) continue;
+        expect(`${path}:${line}`).not.toMatch(rawRootTest);
+      }
+    }
+  });
+
   test("cross-platform CI keeps bounded jobs and immutable action references", async () => {
     const workflow = await readText(".github/workflows/ci.yml");
     const ci = Bun.YAML.parse(workflow) as {
@@ -148,7 +167,7 @@ describe("GitHub Actions hardening", () => {
     expect(await readText(".github/actions/setup-project-bun/action.yml"))
       .toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
     expect(workflow).toContain("actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e");
-    expect(workflow).toContain("bun test --isolate tests");
+    expect(workflow).toContain("bun scripts/test.ts --isolate");
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
 
     // Sharding is only safe while the shards tile the suite exactly. If the
@@ -229,7 +248,7 @@ describe("GitHub Actions hardening", () => {
     // drop the crash-signature guard so an assertion failure gets retried into
     // green, or let the retry loop swallow a repeated crash. Pin both.
     const macosTestRun = macosSteps.find(step => step.run?.includes("run-bun-with-crash-retry.sh"))?.run ?? "";
-    expect(macosTestRun).toContain("bun test --isolate --timeout 60000");
+    expect(macosTestRun).toContain("bun scripts/test.ts --isolate --timeout 60000");
     const crashRetry = await readText("scripts/ci/run-bun-with-crash-retry.sh");
     expect(crashRetry).toContain("for attempt in 1 2");
     expect(crashRetry).toContain("assertion failures are not retried");
@@ -261,7 +280,7 @@ describe("GitHub Actions hardening", () => {
     // while Linux and macOS both pass 60000, and it is the slowest hardware on the board.
     // Three composed-acceptance failures were that default firing on tests still working
     // at 41s. Pin the flag so the leg cannot silently drift back to the default.
-    const windowsTestCommand = `bun test --isolate --timeout 60000 tests --shard=\${{ matrix.shard }}/${windowsShards.length}`;
+    const windowsTestCommand = `bun scripts/test.ts --isolate --timeout 60000 tests --shard=\${{ matrix.shard }}/${windowsShards.length}`;
     expect(hasShellCommandHead(`echo ${windowsTestCommand}`, windowsTestCommand)).toBe(false);
     // Binding the assertion to an executable line is only half the guarantee: a
     // step carrying the exact command still runs nothing under `if: false`, and

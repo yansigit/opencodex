@@ -12,7 +12,7 @@ bun install
 bun run dev:proxy    # 开发模式代理 API
 bun run dev:gui      # 仪表盘 dev 服务器（另一个终端）
 bun run typecheck    # bun x tsc --noEmit
-bun run test         # bun test ./tests/
+bun run test         # tests/ suite
 ```
 
 `bun run dev` 继续作为 `bun run dev:proxy` 的别名。仪表盘 dev 服务器使用 `bun run dev:gui`；
@@ -26,7 +26,7 @@ bun run test         # bun test ./tests/
 ```bash
 bun run typecheck                 # 严格 TypeScript 检查
 bun run test                      # 完整 tests/ suite
-bun test tests/router.test.ts     # 聚焦单个测试文件
+bun scripts/test.ts tests/router.test.ts     # 聚焦单个测试文件
 bun run build:gui                 # Vite GUI 构建 + package 准备
 bun run privacy:scan              # CI 使用的 credential/privacy 扫描
 bun run prepare:package           # 刷新 package launcher/asset
@@ -147,5 +147,5 @@ package API，还要从 `src/index.ts` export。
 ## 在声称完成前先验证
 
 先运行能证明改动的最小命令：类型检查用 `bun run typecheck`，行为检查用聚焦的
-`bun test tests/<name>.test.ts` 或 runtime probe，然后再执行适合影响范围的更宽 gate。
+`bun scripts/test.ts tests/<name>.test.ts` 或 runtime probe，然后再执行适合影响范围的更宽 gate。
 opencodex 倾向于小而可验证的 commit，而不是大批量改动。

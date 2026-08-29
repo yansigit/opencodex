@@ -51,4 +51,4 @@ jobs:
         run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
 
       - name: Full macOS suite
-        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests
+        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests

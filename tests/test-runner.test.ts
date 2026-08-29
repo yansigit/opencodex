@@ -96,6 +96,15 @@ describe("test runner isolation", () => {
     expect(existsSync(isolated.root)).toBe(false);
   });
 
+  test("sharded lanes arm the home guard before Bun starts", async () => {
+    const exitCode = await runTestLaneForTests(
+      { label: "shard guard", args: ["--shard=1/1"], timeoutMs: 1_000 },
+      "shard-guard-fixture",
+      { command: [process.execPath, "-e", "process.exit(process.env.OCX_TEST_HOME_GUARD === '1' ? 0 : 2)"] },
+    );
+    expect(exitCode).toBe(0);
+  });
+
   test.if(process.platform === "win32")("gives the Windows sandbox a real profile shape", () => {
     const isolated = createIsolatedTestEnvironment({ PATH: "C:\\test\\bin" });
     try {
@@ -186,6 +195,18 @@ describe("bun test argv", () => {
     }
     expect(plan.find(lane => lane.label === "release-helper.test.ts")?.timeoutMs).toBe(5 * 60 * 1000);
     expect(plan.find(lane => lane.label === "codex-shim.test.ts")?.timeoutMs).toBe(3 * 60 * 1000);
+  });
+
+  test("isolates the journal suite in its own one-worker lane", () => {
+    expect(SERIAL_FULL_SUITE_FILES).toContain("codex-journal.test.ts");
+    expect(resolveBunTestPlan([]).find(lane => lane.label === "codex-journal.test.ts")?.args)
+      .toEqual(["--isolate", "--parallel=1", "./tests/codex-journal.test.ts"]);
+  });
+
+  test("isolates request decompression memory spikes in their own one-worker lane", () => {
+    expect(SERIAL_FULL_SUITE_FILES).toContain("request-decompress.test.ts");
+    expect(resolveBunTestPlan([]).find(lane => lane.label === "request-decompress.test.ts")?.args)
+      .toEqual(["--isolate", "--parallel=1", "./tests/request-decompress.test.ts"]);
   });
 
   test("serial lanes override caller parallelism without changing the main lane", () => {

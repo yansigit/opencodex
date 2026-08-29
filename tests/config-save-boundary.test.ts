@@ -215,7 +215,7 @@ test("startServer arms the baseline before it can serve a request", () => {
 test("full config replacement is limited to explicit import and init", async () => {
   const allowed = new Map([
     ["replacePersistedConfig", new Set(["cli/config-command.ts", "cli/init.ts", "config.ts"])],
-    ["initializePersistedConfigIfMissing", new Set(["config.ts", "oauth/index.ts", "oauth/login-cli.ts"])],
+    ["initializePersistedConfigIfMissing", new Set(["cli/init.ts", "config.ts", "oauth/index.ts", "oauth/login-cli.ts"])],
   ]);
   const fixtureDir = mkdtempSync(join(tmpdir(), "ocx-config-policy-"));
   const fixture = join(fixtureDir, "fixture.ts");

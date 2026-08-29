@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Database } from "bun:sqlite";
 import { EXPORT_CLIENT_IDS } from "../src/clients/config-export";
+import { diagnoseService, serviceLogPath } from "../src/service";
 import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
@@ -172,7 +173,13 @@ describe("CLI subcommand help", () => {
       expect(result.stdout).toContain("Default provider: openai");
       expect(result.stdout).toContain("Codex autostart: disabled");
       expect(result.stdout).toContain("Service:");
-      expect(result.stdout).toContain(join(opencodexHome, "service.log"));
+      const service = diagnoseService();
+      if (service.supported) {
+        expect(result.stdout).toContain(join(opencodexHome, "service.log"));
+      } else {
+        expect(result.stdout).toContain(`Service: ${service.summary}`);
+        expect(result.stdout).not.toContain(serviceLogPath());
+      }
       expect(result.stdout).toContain("Codex autostart shim");
       // #2411: status must name the routing kind it already computes. The
       // proxy is down in this fixture, so the unused-proxy warning must stay

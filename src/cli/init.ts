@@ -1,7 +1,7 @@
 import * as readline from "node:readline";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { injectCodexConfig } from "../codex/inject";
-import { classifyOpenAiTierBackup, getConfigPath, getDefaultConfig, isValidProviderName, preserveOpenAiTierRollbackSnapshot, replacePersistedConfig } from "../config";
+import { classifyOpenAiTierBackup, getConfigPath, getDefaultConfig, initializePersistedConfigIfMissing, isValidProviderName, preserveOpenAiTierRollbackSnapshot, replacePersistedConfig } from "../config";
 import { enrichProviderFromCatalog } from "../oauth/key-providers";
 import { deriveInitProviders } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -85,10 +85,48 @@ export function cleanupOpenAiTierBackupAfterInit(configPath = getConfigPath()): 
   } catch { /* cleanup is best-effort; never block init on backup housekeeping */ }
 }
 
-export async function runInit(): Promise<void> {
+export function parseInitArgs(args: string[]): { yes: boolean; error?: string } {
+  const unknown = args.find(arg => arg !== "--yes");
+  return unknown === undefined
+    ? { yes: args.includes("--yes") }
+    : { yes: false, error: `Unknown option: ${unknown}. Usage: ocx init [--yes]` };
+}
+
+export type InitOverwriteDecision = "create" | "replace" | "refuse" | "cancel";
+
+export function decideInitOverwrite(existing: boolean, yes: boolean, isTTY: boolean, answer?: string): InitOverwriteDecision {
+  if (!existing) return "create";
+  if (yes) return "replace";
+  if (!isTTY) return "refuse";
+  return /^(y|yes)$/i.test(answer?.trim() ?? "") ? "replace" : "cancel";
+}
+
+export async function runInit(args: string[] = []): Promise<void> {
+  const parsedArgs = parseInitArgs(args);
+  if (parsedArgs.error) {
+    console.error(parsedArgs.error);
+    process.exitCode = 2;
+    return;
+  }
   const prompt = createPrompt();
   try {
     console.log("\n🔧 opencodex (ocx) setup\n");
+
+    const existingConfig = existsSync(getConfigPath());
+    let overwriteDecision = decideInitOverwrite(existingConfig, parsedArgs.yes, Boolean(process.stdin.isTTY));
+    if (overwriteDecision === "refuse") {
+        console.error("❌ An opencodex config already exists. Re-run `ocx init --yes` to replace it.");
+        process.exitCode = 2;
+        return;
+    }
+    if (overwriteDecision === "cancel") {
+      const answer = await prompt.ask("Overwrite existing config? [y/N]: ");
+      overwriteDecision = decideInitOverwrite(true, false, true, answer);
+      if (overwriteDecision === "cancel") {
+        console.log("Keeping existing config.");
+        return;
+      }
+    }
 
     const providers = buildInitProviders();
     printMenu(providers);
@@ -168,7 +206,18 @@ export async function runInit(): Promise<void> {
       modelDiscovery: { newModelPolicy: "off" },
     };
 
-    replacePersistedConfig(config);
+    if (overwriteDecision === "replace") {
+      replacePersistedConfig(config);
+    } else {
+      const outcome = initializePersistedConfigIfMissing(config);
+      if (outcome !== "created") {
+        console.error(outcome === "exists"
+          ? "❌ Config was created by another process while setup was running; keeping that config."
+          : "❌ Config became invalid while setup was running; no changes were made.");
+        process.exitCode = 1;
+        return;
+      }
+    }
     // Init writes a fresh config, so a stale pre-migration backup from a previous
     // installation would make the next `ocx start` crash on a stale-backup
     // collision (issue #257). But only a STALE backup (unparseable, or already a

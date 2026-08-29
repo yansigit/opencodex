@@ -15,7 +15,7 @@ bun install
 bun run dev:proxy    # proxy API in dev mode
 bun run dev:gui      # dashboard dev server (another terminal)
 bun run typecheck    # bun x tsc --noEmit
-bun run test         # bun test ./tests/
+bun run test         # tests/ suite
 ```
 
 `bun run dev` remains an alias for `bun run dev:proxy`. The dashboard dev server is `bun run dev:gui`;
@@ -29,7 +29,8 @@ scripts so local commands match CI:
 ```bash
 bun run typecheck                 # strict TypeScript check
 bun run test                      # complete tests/ suite
-bun test tests/router.test.ts     # focused test file
+bun run test:container            # macOS with Apple Container: isolated container suite
+bun scripts/test.ts tests/router.test.ts # focused test file
 bun run build:gui                 # Vite GUI build + package preparation
 bun run privacy:scan              # credential/privacy scan used by CI
 bun run prepare:package           # refresh package launchers/assets
@@ -39,6 +40,10 @@ Most tests are flat `tests/*.test.ts` Bun tests. `tests/helpers/` contains share
 `tests/e2e-style/` contains broader native-parity scenarios. Keep a focused regression near the
 existing tests for the subsystem you change; run the full suite for shared routing, adapters, config,
 or server behavior.
+
+For a non-trivial pre-PR check on a Mac with Apple Container available, also run `bun run test:container`.
+Start the service with `container system start` first if needed. Ordinary `bun run prepush` remains
+host-native and does not include this suite; it is not a GitHub-hosted CI job.
 
 The docs site you're reading lives in `docs-site/` (Astro + Starlight):
 
@@ -215,5 +220,5 @@ startup path must not import the manifest catalog or activate Compatibility Lab.
 ## Verify before you claim done
 
 Run the narrowest command that proves your change — `bun run typecheck` for types, a focused
-`bun test tests/<name>.test.ts` or runtime probe for behavior, then the broader gates appropriate to
+`bun scripts/test.ts tests/<name>.test.ts` or runtime probe for behavior, then the broader gates appropriate to
 the affected surface. opencodex favors small, verifiable commits over large batches.
