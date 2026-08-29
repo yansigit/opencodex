@@ -59,12 +59,20 @@ jobs:
           fi
 
       - name: Check base ancestry
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -eu
-          git fetch origin "${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
-          if ! git merge-base --is-ancestor "origin/${{ github.base_ref }}" HEAD; then
-            echo "The pull request head is not a descendant of origin/${{ github.base_ref }}"
-            echo "Recovery: merge \`origin/${{ github.base_ref }}\` into the sync branch before retrying."
+          git fetch origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
+          if ! git merge-base --is-ancestor "origin/$BASE_REF" HEAD; then
+            echo "The pull request head is not a descendant of origin/$BASE_REF"
+            if [ "$BASE_REF" = main ] && [ "$HEAD_REF" = dev ]; then
+              echo "Protected dev reconciliation must finish before this promotion can merge."
+              echo "Do not use GitHub's Update branch button; it cannot write directly to protected dev."
+            else
+              echo "Recovery: merge the base into the pull request branch before retrying."
+            fi
             echo "Never ask the human to resolve GitHub's 3-way of a disconnected rebuild."
             exit 1
           fi
