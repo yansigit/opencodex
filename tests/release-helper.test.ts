@@ -424,6 +424,15 @@ describe("release helper", () => {
       .toContain("expected-sha=deadbeefcafe1234");
   });
 
+  test("an obsolete latest version aborts before bumping or committing", async () => {
+    const { calls, result } = await runRelease("9.9.8", { npmLatest: "9.9.9" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("does not move the 'latest' channel forward");
+    expect(findCallIndex(calls, "npm", call => call.args[0] === "version")).toBe(-1);
+    expect(findCallIndex(calls, "git", call => call.args[0] === "commit")).toBe(-1);
+  });
+
   test("failed privacy scan aborts before version bump, commit, and push", async () => {
     const { calls, result } = await runRelease("9.9.9", { privacyExitCode: 1 });
 
@@ -432,6 +441,20 @@ describe("release helper", () => {
     expect(findCallIndex(calls, "npm", call => call.args[0] === "version")).toBe(-1);
     expect(findCallIndex(calls, "git", call => call.args[0] === "commit")).toBe(-1);
     expect(findCallIndex(calls, "git", call => call.args[0] === "push")).toBe(-1);
+  });
+
+  test("a credential-bearing origin aborts before push without exposing its credential", async () => {
+    const credential = ["not", "for", "logs"].join("-");
+    const { calls, result } = await runRelease("9.9.9", {
+      releaseSshKey: "/tmp/k",
+      originUrl: `https://x-access-token:${credential}@${"github.com"}/lidge-jun/opencodex.git`,
+      pendingBump: true,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("origin carries credentials");
+    expect(result.stderr + result.stdout).not.toContain(credential);
+    expect(calls.find(call => call.name === "git" && call.args[0] === "push")).toBeUndefined();
   });
 
   test("Git passes the emitted deploy-key path to SSH as one literal argument", async () => {
@@ -512,6 +535,17 @@ describe("release helper", () => {
   test("remote head equality is explicit", () => {
     expect(remoteHeadMatches("abc", "abc")).toBe(true);
     expect(remoteHeadMatches("abc", "def")).toBe(false);
+  });
+
+  test("a moved remote head aborts before workflow dispatch", async () => {
+    const { calls, result } = await runRelease("9.9.9", {
+      headSha: "abc123def456",
+      remoteHeadSha: "9999999999999999999999999999999999999999",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("moved while waiting for CI");
+    expect(findCallIndex(calls, "gh", call => call.args[0] === "workflow" && call.args[1] === "run")).toBe(-1);
   });
 
   /**
