@@ -40,6 +40,7 @@ const canSymlink = (() => {
  * capability check stays: an unprivileged POSIX-like environment still skips honestly.
  */
 const WINDOWS = process.platform === "win32";
+const HAS_NPM = Bun.which("npm") !== null;
 
 function tempRoot(name: string): string {
   const root = join(tmpdir(), `ocx-cache-preflight-${name}-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -228,7 +229,7 @@ describe("npm cache access pre-flight", () => {
   // Spawns the real npm to read its configured cache path while claiming a non-Windows
   // platform. On Windows that is both slow and meaningless: production takes the
   // windows_skip branch, covered by the case below.
-  test.skipIf(process.platform === "win32")("runs the real worker protocol against npm's configured cache path", () => {
+  test.skipIf(WINDOWS || !HAS_NPM)("runs the real worker protocol against npm's configured cache path", () => {
     const cache = tempRoot("worker-round-trip");
     mkdirSync(join(cache, "_cacache"));
 
