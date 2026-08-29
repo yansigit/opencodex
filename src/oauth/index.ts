@@ -1,7 +1,7 @@
 import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
 import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
-import { loadConfig, mutatePersistedConfig, resolveEnvValue } from "../config";
+import { initializePersistedConfigIfMissing, loadConfig, mutatePersistedConfig, resolveEnvValue } from "../config";
 import { maskEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
 import { getAccountCredential, getAccountSet, removeAccount, saveAccountCredential, saveCredential, setActiveAccount, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, markOAuthRefreshIntentStaleOwner, clearOAuthRefreshIntent, normalizeAuthStoreBuffer, OAuthMutationBusyError } from "./store";
@@ -1247,6 +1247,7 @@ interface RunLoginDeps {
   saveAccountCredential?: typeof saveAccountCredential;
   loadConfig?: typeof loadConfig;
   mutatePersistedConfig?: typeof mutatePersistedConfig;
+  initializePersistedConfigIfMissing?: typeof initializePersistedConfigIfMissing;
   settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
   removeAccount?: typeof removeAccount;
   setActiveAccount?: typeof setActiveAccount;
@@ -1282,6 +1283,7 @@ export async function runLogin(
   if (!def) throw new UnsupportedOAuthProviderError(provider);
   const loadLatestConfig = deps.loadConfig ?? loadConfig;
   const mutateLatestConfig = deps.mutatePersistedConfig ?? mutatePersistedConfig;
+  const initializeLatestConfig = deps.initializePersistedConfigIfMissing ?? initializePersistedConfigIfMissing;
   if (provider !== "chatgpt") {
     const preflightConfig = loadLatestConfig();
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
@@ -1336,7 +1338,7 @@ export async function runLogin(
     if (provider !== "chatgpt") {
       // Re-run against post-credential state so same-provider API-key additions, removals,
       // and active-key switches survive. A late namespace claim wins over provider creation.
-      const outcome = mutateLatestConfig<{ error: string } | { config: OcxConfig }>(fresh => {
+      const publish = () => mutateLatestConfig<{ error: string } | { config: OcxConfig }>(fresh => {
         const lateCollision = codexAccountNamespaceProviderCollisionError(
           fresh.codexAccountNamespaces,
           provider,
@@ -1345,7 +1347,21 @@ export async function runLogin(
         upsertOAuthProvider(fresh, provider);
         return { changed: true, value: { config: structuredClone(fresh) } };
       });
-      if (outcome.status === "unavailable" || "error" in outcome.value) {
+      let outcome = publish();
+      let published = false;
+      if (outcome.status === "unavailable" && outcome.reason === "missing") {
+        const initial = loadLatestConfig();
+        const lateCollision = codexAccountNamespaceProviderCollisionError(
+          initial.codexAccountNamespaces,
+          provider,
+        );
+        if (lateCollision) throw new OAuthProviderPublicationError();
+        upsertOAuthProvider(initial, provider);
+        const initialized = initializeLatestConfig(initial);
+        published = initialized === "created";
+        if (initialized === "exists") outcome = publish();
+      }
+      if (!published && (outcome.status === "unavailable" || "error" in outcome.value)) {
         throw new OAuthProviderPublicationError();
       }
     }

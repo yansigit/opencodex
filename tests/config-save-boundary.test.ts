@@ -8,10 +8,13 @@ import {
   isBinaryExpression,
   isCallExpression,
   isElementAccessExpression,
+  isExportDeclaration,
   isIdentifier,
   isImportDeclaration,
   isNamedImports,
+  isNamedExports,
   isNamespaceImport,
+  isNamespaceExport,
   isNoSubstitutionTemplateLiteral,
   isObjectBindingPattern,
   isParenthesizedExpression,
@@ -36,7 +39,7 @@ import {
 
 const SRC = join(import.meta.dir, "..", "src");
 
-function fullReplacementReferences(source: SourceFile): number[] {
+function configReplacementReferences(source: SourceFile, symbol: string): number[] {
   const namespaces = new Set<string>();
   const hits: number[] = [];
   const isConfigModule = (node: Node): boolean => isStringLiteral(node)
@@ -66,15 +69,21 @@ function fullReplacementReferences(source: SourceFile): number[] {
       const bindings = node.importClause?.namedBindings;
       if (bindings && isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
       if (bindings && isNamedImports(bindings) && bindings.elements.some(
-        item => (item.propertyName ?? item.name).text === "replacePersistedConfig",
+        item => (item.propertyName ?? item.name).text === symbol,
       )) hits.push(node.getStart(source));
+    }
+    if (isExportDeclaration(node) && node.moduleSpecifier && isConfigModule(node.moduleSpecifier)) {
+      const bindings = node.exportClause;
+      if (!bindings || isNamespaceExport(bindings) || (isNamedExports(bindings) && bindings.elements.some(
+        item => (item.propertyName ?? item.name).text === symbol,
+      ))) hits.push(node.getStart(source));
     }
     if (isVariableDeclaration(node) && node.initializer && isConfigNamespace(node.initializer)) {
       if (isIdentifier(node.name)) namespaces.add(node.name.text);
       if (isObjectBindingPattern(node.name) && node.name.elements.some(element => {
         const imported = element.propertyName ?? element.name;
         return (isIdentifier(imported) || isStringLiteral(imported))
-          && imported.text === "replacePersistedConfig";
+          && imported.text === symbol;
       })) hits.push(node.getStart(source));
     }
     if (isBinaryExpression(node) && node.operatorToken.kind === SyntaxKind.EqualsToken
@@ -85,10 +94,10 @@ function fullReplacementReferences(source: SourceFile): number[] {
   };
   const collectAccesses = (node: Node): void => {
     if (isPropertyAccessExpression(node)
-      && node.name.text === "replacePersistedConfig"
+      && node.name.text === symbol
       && isConfigNamespace(node.expression)) hits.push(node.getStart(source));
     if (isElementAccessExpression(node)
-      && staticString(node.argumentExpression) === "replacePersistedConfig"
+      && staticString(node.argumentExpression) === symbol
       && isConfigNamespace(node.expression)) hits.push(node.getStart(source));
     node.forEachChild(collectAccesses);
   };
@@ -158,10 +167,9 @@ test("startServer arms the baseline before it can serve a request", () => {
 });
 
 test("full config replacement is limited to explicit import and init", async () => {
-  const allowed = new Set([
-    "cli/config-command.ts",
-    "cli/init.ts",
-    "config.ts",
+  const allowed = new Map([
+    ["replacePersistedConfig", new Set(["cli/config-command.ts", "cli/init.ts", "config.ts"])],
+    ["initializePersistedConfigIfMissing", new Set(["config.ts", "oauth/index.ts"])],
   ]);
   const fixtureDir = mkdtempSync(join(tmpdir(), "ocx-config-policy-"));
   const fixture = join(fixtureDir, "fixture.ts");
@@ -177,6 +185,13 @@ test("full config replacement is limited to explicit import and init", async () 
     `const { replacePersistedConfig: destructured } = await import(${JSON.stringify(configModule)}); destructured(value);`,
     "config[`replacePersistedConfig`](value);",
     `config[("replace" + "PersistedConfig")](value);`,
+    `(await import(${JSON.stringify(configModule)})).initializePersistedConfigIfMissing(value);`,
+    `export { replacePersistedConfig } from ${JSON.stringify(configModule)};`,
+    `export { replacePersistedConfig as replaceExport } from ${JSON.stringify(configModule)};`,
+    `export { initializePersistedConfigIfMissing } from ${JSON.stringify(configModule)};`,
+    `export { initializePersistedConfigIfMissing as initializeExport } from ${JSON.stringify(configModule)};`,
+    `export * from ${JSON.stringify(configModule)};`,
+    `export * as config from ${JSON.stringify(configModule)};`,
   ].join("\n"));
   const api = new API({ cwd: join(SRC, "..") });
   try {
@@ -187,7 +202,8 @@ test("full config replacement is limited to explicit import and init", async () 
     try {
       const fixtureProject = await snapshot.getDefaultProjectForFile(fixture);
       const fixtureSource = await fixtureProject?.program.getSourceFile(fixture);
-      expect(fixtureSource && fullReplacementReferences(fixtureSource)).toHaveLength(10);
+      expect(fixtureSource && configReplacementReferences(fixtureSource, "replacePersistedConfig")).toHaveLength(14);
+      expect(fixtureSource && configReplacementReferences(fixtureSource, "initializePersistedConfigIfMissing")).toHaveLength(5);
 
       const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
       if (!project) throw new Error("TypeScript did not load the repository project");
@@ -204,7 +220,10 @@ test("full config replacement is limited to explicit import and init", async () 
       const offenders = sources.flatMap(source => {
         if (!source) throw new Error("TypeScript omitted a production source file");
         const relative = source.fileName.slice(SRC.length + 1);
-        return !allowed.has(relative) && fullReplacementReferences(source).length > 0 ? [relative] : [];
+        return [...allowed].flatMap(([symbol, files]) =>
+          !files.has(relative) && configReplacementReferences(source, symbol).length > 0
+            ? [`${relative}: ${symbol}`]
+            : []);
       });
       expect(offenders).toEqual([]);
     } finally {

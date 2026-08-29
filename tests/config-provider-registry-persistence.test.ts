@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, getDefaultConfig, mutatePersistedConfig, saveConfig, setPersistedConfigMutationBeforeCommitForTests } from "../src/config";
+import { AtomicWriteResidualTempError, getConfigPath, getDefaultConfig, initializePersistedConfigIfMissing, mutatePersistedConfig, PersistedConfigInitializationCleanupError, PersistedConfigInitializationRollbackError, saveConfig, setPersistedConfigInitializationBeforePublishForTests, setPersistedConfigMutationBeforeCommitForTests, type PersistedConfigInitializationIO } from "../src/config";
 import { handleConfigCommand } from "../src/cli/config-command";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
 
@@ -43,6 +43,38 @@ function writeDiskConfig(config: OcxConfig): void {
   writeFileSync(getConfigPath(), JSON.stringify(config, null, 2) + "\n");
 }
 
+function failingInitializationIO(failures: { harden?: number; tempUnlink?: number; targetUnlink?: number } = {}) {
+  const calls: string[] = [];
+  const fail = (key: keyof typeof failures): boolean => {
+    const remaining = failures[key] ?? 0;
+    if (remaining === 0) return false;
+    failures[key] = remaining - 1;
+    return true;
+  };
+  const io: PersistedConfigInitializationIO = {
+    createExclusive(path) { calls.push(`create:${path}`); writeFileSync(path, "", { flag: "wx", mode: 0o600 }); },
+    write(path, bytes) { calls.push(`write:${path}`); writeFileSync(path, bytes); },
+    harden(path) {
+      calls.push(`harden:${path}`);
+      if (fail("harden")) throw new Error("harden failed");
+      chmodSync(path, 0o600);
+    },
+    publishNoReplace(temp, target) { calls.push(`publish:${target}`); linkSync(temp, target); },
+    truncate(path) { calls.push(`truncate:${path}`); truncateSync(path, 0); },
+    unlink(path) {
+      calls.push(`unlink:${path}`);
+      const target = path === getConfigPath();
+      if (fail(target ? "targetUnlink" : "tempUnlink")) throw new Error(`${target ? "target" : "temp"} unlink failed`);
+      unlinkSync(path);
+    },
+  };
+  return { calls, io };
+}
+
+function initializationTemps(): string[] {
+  return readdirSync(home).filter(name => name.includes("config.json.ocx.") && name.endsWith(".tmp"));
+}
+
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
   home = mkdtempSync(join(tmpdir(), "ocx-provider-registry-persistence-"));
@@ -50,6 +82,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPersistedConfigInitializationBeforePublishForTests(null);
   setPersistedConfigMutationBeforeCommitForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
@@ -119,6 +152,82 @@ test("whole saves refuse to replace a schema-invalid JSON config", () => {
 
   expect(() => saveConfig({ port: 10210, defaultProvider: "openai", providers: {} })).toThrow();
   expect(readFileSync(getConfigPath(), "utf8")).toBe(invalid);
+});
+
+test("initialization creates only a missing config", () => {
+  const initial = sixProviderConfig();
+  expect(initializePersistedConfigIfMissing(initial)).toBe("created");
+  expect(diskConfig()).toEqual(initial);
+
+  const bytes = readFileSync(getConfigPath(), "utf8");
+  expect(initializePersistedConfigIfMissing(getDefaultConfig())).toBe("exists");
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(bytes);
+});
+
+test("initialization preserves invalid existing bytes", () => {
+  mkdirSync(home, { recursive: true });
+  const invalid = "{ definitely not json";
+  writeFileSync(getConfigPath(), invalid);
+
+  expect(initializePersistedConfigIfMissing(getDefaultConfig())).toBe("invalid");
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(invalid);
+});
+
+test("initialization never replaces a config created immediately before publication", () => {
+  const competing = sixProviderConfig();
+  competing.port = 10999;
+  const competingBytes = JSON.stringify(competing, null, 2) + "\n";
+  setPersistedConfigInitializationBeforePublishForTests(() => {
+    writeFileSync(getConfigPath(), competingBytes, { flag: "wx", mode: 0o600 });
+  });
+
+  expect(initializePersistedConfigIfMissing(getDefaultConfig())).toBe("exists");
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(competingBytes);
+});
+
+test("initialization reports a scrubbed residual when pre-publication cleanup cannot unlink", () => {
+  const state = failingInitializationIO({ harden: 1, tempUnlink: 2 });
+  expect(() => initializePersistedConfigIfMissing(getDefaultConfig(), state.io)).toThrow(AtomicWriteResidualTempError);
+  expect(existsSync(getConfigPath())).toBe(false);
+  const [temp] = initializationTemps();
+  expect(temp).toBeDefined();
+  expect(readFileSync(join(home, temp!), "utf8")).toBe("");
+});
+
+test("initialization preserves an EEXIST winner when loser cleanup cannot unlink", () => {
+  const competingBytes = JSON.stringify(sixProviderConfig(), null, 2) + "\n";
+  const state = failingInitializationIO({ tempUnlink: 2 });
+  setPersistedConfigInitializationBeforePublishForTests(() => {
+    writeFileSync(getConfigPath(), competingBytes, { flag: "wx", mode: 0o600 });
+  });
+
+  expect(() => initializePersistedConfigIfMissing(getDefaultConfig(), state.io)).toThrow(AtomicWriteResidualTempError);
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(competingBytes);
+  const [temp] = initializationTemps();
+  expect(readFileSync(join(home, temp!), "utf8")).toBe("");
+});
+
+test("initialization rolls back publication before scrubbing after unlink failure", () => {
+  const state = failingInitializationIO({ tempUnlink: 2 });
+  expect(() => initializePersistedConfigIfMissing(getDefaultConfig(), state.io))
+    .toThrow(PersistedConfigInitializationCleanupError);
+  expect(existsSync(getConfigPath())).toBe(false);
+  expect(initializationTemps()).toEqual([]);
+  const rollback = state.calls.indexOf(`unlink:${getConfigPath()}`);
+  const scrub = state.calls.findIndex(call => call.startsWith("truncate:"));
+  expect(rollback).toBeGreaterThan(-1);
+  expect(scrub).toBeGreaterThan(rollback);
+});
+
+test("initialization rollback failure preserves both complete hardened links", () => {
+  const state = failingInitializationIO({ tempUnlink: 2, targetUnlink: 1 });
+  expect(() => initializePersistedConfigIfMissing(getDefaultConfig(), state.io))
+    .toThrow(PersistedConfigInitializationRollbackError);
+  const expected = JSON.stringify(getDefaultConfig(), null, 2) + "\n";
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(expected);
+  const [temp] = initializationTemps();
+  expect(readFileSync(join(home, temp!), "utf8")).toBe(expected);
+  expect(state.calls.some(call => call.startsWith("truncate:"))).toBe(false);
 });
 
 test("config import with --yes replaces the provider registry", async () => {
