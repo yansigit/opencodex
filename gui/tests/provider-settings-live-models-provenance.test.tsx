@@ -78,6 +78,14 @@ async function save(container: HTMLElement): Promise<void> {
   });
 }
 
+function liveModelsToggle(container: HTMLElement): HTMLInputElement {
+  const label = [...container.querySelectorAll("label")]
+    .find(candidate => candidate.textContent?.includes("Discover models from provider"));
+  const toggle = label?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  expect(toggle).toBeTruthy();
+  return toggle!;
+}
+
 test("an unrelated settings save does not materialize an omitted liveModels value", async () => {
   const { root, container, patches } = await mountSettings(provider());
   const note = container.querySelector<HTMLTextAreaElement>(".pwi-settings-textarea")!;
@@ -95,11 +103,23 @@ test("an unrelated settings save does not materialize an omitted liveModels valu
   await act(async () => { root.unmount(); });
 });
 
+test("replay transient failures toggle is persisted independently", async () => {
+  const { root, container, patches } = await mountSettings(provider());
+  const toggle = [...container.querySelectorAll("label")]
+    .find(candidate => candidate.textContent?.includes("Replay transient failures"))
+    ?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  expect(toggle).toBeTruthy();
+  await act(async () => { toggle!.click(); await Promise.resolve(); });
+  await save(container);
+  expect(patches[0]?.replayTransientFailures).toBe(true);
+  root.unmount();
+});
+
 test("changing an omitted effective true to false sends an explicit liveModels choice", async () => {
   const { root, container, patches } = await mountSettings(provider());
-  const toggles = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+  const toggle = liveModelsToggle(container);
 
-  await act(async () => { toggles[1]!.click(); });
+  await act(async () => { toggle.click(); });
   await save(container);
 
   expect(patches[0]?.liveModels).toBe(false);
@@ -108,9 +128,9 @@ test("changing an omitted effective true to false sends an explicit liveModels c
 
 test("changing an explicit false to true sends an explicit liveModels choice", async () => {
   const { root, container, patches } = await mountSettings(provider(false));
-  const toggles = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+  const toggle = liveModelsToggle(container);
 
-  await act(async () => { toggles[1]!.click(); });
+  await act(async () => { toggle.click(); });
   await save(container);
 
   expect(patches[0]?.liveModels).toBe(true);
@@ -125,10 +145,10 @@ test("canonical ClinePass shows the static catalog as disabled even with stale l
     authMode: "key",
     liveModels: true,
   } as WorkspaceItem);
-  const toggles = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+  const toggle = liveModelsToggle(container);
 
-  expect(toggles[1]?.disabled).toBe(true);
-  expect(toggles[1]?.checked).toBe(false);
+  expect(toggle.disabled).toBe(true);
+  expect(toggle.checked).toBe(false);
   await act(async () => { root.unmount(); });
 });
 
@@ -140,10 +160,10 @@ test("same-named custom MiMo provider keeps live discovery editable", async () =
     authMode: "key",
     liveModels: true,
   } as WorkspaceItem);
-  const toggles = container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+  const toggle = liveModelsToggle(container);
 
-  expect(toggles[1]?.disabled).toBe(false);
-  expect(toggles[1]?.checked).toBe(true);
+  expect(toggle.disabled).toBe(false);
+  expect(toggle.checked).toBe(true);
   await act(async () => { root.unmount(); });
 });
 

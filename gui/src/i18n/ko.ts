@@ -2029,6 +2029,8 @@ export const ko: Record<TKey, string> = {
   "pws.allowPrivateNetwork": "로컬/사설 네트워크 허용",
   "pws.liveModels": "프로바이더에서 모델 검색",
   "pws.liveModelsDesc": "프로바이더의 실시간 모델 카탈로그를 가져옵니다. 끄면 설정된 정적 모델만 사용합니다.",
+  "pws.replayTransientFailures": "일시적 실패 재시도",
+  "pws.replayTransientFailuresDesc": "스트리밍 전에 발생한 일시적 실패를 한 번 이상 재시도합니다. 요청이 여러 번 전달될 수 있습니다.",
   "pws.xaiResponsesOptIn": "Grok 4.5와 4.6에 Responses API 사용",
   "pws.xaiResponsesOptInDesc": "두 모델을 openai-responses로 라우팅합니다. 다른 Grok 모델과 티어 동작은 바뀌지 않습니다.",
   "pws.xaiResponsesOptInMixed": "일부만 활성화됨.",

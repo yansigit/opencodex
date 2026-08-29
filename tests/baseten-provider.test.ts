@@ -160,7 +160,7 @@ describe("Baseten Model APIs provider", () => {
     globalThis.fetch = (async (input, init) => {
       expect(String(input)).toBe("https://inference.baseten.co/v1/models");
       expect(new Headers(init?.headers).get("authorization")).toBe("Bearer bt-validation-key");
-      expect(init?.redirect).toBe("error");
+      expect(init?.redirect).toBe("manual");
       return new Response(FIXTURE, {
         status: 200,
         headers: { "content-type": "application/json" },
@@ -171,6 +171,7 @@ describe("Baseten Model APIs provider", () => {
       "baseten",
       KEY_LOGIN_PROVIDERS.baseten!,
       "bt-validation-key",
+      { fetch: globalThis.fetch },
     )).toBe(true);
   });
 

@@ -54,6 +54,8 @@ export interface WsData {
   /** Turn/account ownership retained for the complete sideband socket lifetime. */
   liveTurnAdmissionLease?: AdmissionLease;
   admissionLease?: AdmissionReservation<ServerWebSocket<WsData>>;
+  wsDrain?: () => void;
+  wsDrainWaiter?: { resolve: () => void };
 }
 
 /**
@@ -155,6 +157,18 @@ export function sendTextFrame(ws: ServerWebSocket<WsData>, payload: string): voi
   // Bun returns -1 when queued with backpressure. That is accepted; a later 0 is the hard failure.
 }
 
+async function sendTextFrameWithDrain(ws: ServerWebSocket<WsData>, payload: string): Promise<void> {
+  if (ws.readyState !== OPEN) throw new WsSendDroppedError();
+  const result = ws.send(payload);
+  if (result === 0) throw new WsSendDroppedError();
+  if (result === -1) {
+    await new Promise<void>(resolve => {
+      ws.data.wsDrainWaiter = { resolve };
+    });
+    if (ws.readyState !== OPEN) throw new WsSendDroppedError();
+  }
+}
+
 export function sendJsonFrame(ws: ServerWebSocket<WsData>, payload: Record<string, unknown>): void {
   sendTextFrame(ws, JSON.stringify(payload));
 }
@@ -222,6 +236,7 @@ export async function pumpResponsesSseToWebSocket(
   sseStream: ReadableStream<Uint8Array>,
   options: {
     isCurrent?: () => boolean;
+    abortSignal?: AbortSignal;
     onTerminal?: ResponsesTerminalReporter;
     onSsePayload?: ResponsesPayloadObserver;
   } = {},
@@ -237,15 +252,22 @@ export async function pumpResponsesSseToWebSocket(
   };
   const cancel = () => {
     clientCancelled = true;
+    ws.data.wsDrain?.();
     void reader.cancel().catch(() => {});
   };
+  const drain = () => {
+    ws.data.wsDrainWaiter?.resolve();
+    ws.data.wsDrainWaiter = undefined;
+  };
+  ws.data.wsDrain = drain;
   ws.data.cancel = cancel;
+  options.abortSignal?.addEventListener("abort", cancel, { once: true });
 
   const decoder = new TextDecoder();
   const framer = new BoundedSseFrameBuffer();
   let terminalSeen = false;
 
-  const handlePayload = (payload: string): boolean => {
+  const handlePayload = async (payload: string): Promise<boolean> => {
     if (!isCurrent()) return true;
     if (payload === "[DONE]") return false;
     try {
@@ -262,7 +284,7 @@ export async function pumpResponsesSseToWebSocket(
       return true;
     }
     if (terminalSeen) return true;
-    sendTextFrame(ws, payload);
+    await sendTextFrameWithDrain(ws, payload);
     const terminalStatus = terminalStatusFromType(type);
     if (terminalStatus) {
       reportTerminal(terminalStatus);
@@ -279,13 +301,13 @@ export async function pumpResponsesSseToWebSocket(
       if (done) break;
       for (const frame of framer.feed(value)) {
         const payload = parseSseBlock(decoder.decode(frame.block));
-        if (payload && handlePayload(payload)) break;
+        if (payload && await handlePayload(payload)) break;
       }
     }
     const tail = framer.finish();
     if (!terminalSeen && tail.byteLength > 0) {
       const payload = parseSseBlock(decoder.decode(tail));
-      if (payload) handlePayload(payload);
+      if (payload) await handlePayload(payload);
     }
     if (!terminalSeen && isCurrent() && !clientCancelled) {
       reportTerminal("incomplete");
@@ -314,6 +336,10 @@ export async function pumpResponsesSseToWebSocket(
     // release the reader, even when terminal/send paths already cancelled it.
     void reader.cancel().catch(() => {});
     if (ws.data.cancel === cancel) ws.data.cancel = undefined;
+    if (ws.data.wsDrain === drain) ws.data.wsDrain = undefined;
+    options.abortSignal?.removeEventListener("abort", cancel);
+    ws.data.wsDrainWaiter?.resolve();
+    ws.data.wsDrainWaiter = undefined;
   }
 }
 
@@ -363,6 +389,7 @@ export async function sendResponseToWebSocket(
   options: {
     onTerminal?: ResponsesTerminalReporter;
     onSsePayload?: ResponsesPayloadObserver;
+    abortSignal?: AbortSignal;
   } = {},
 ): Promise<void> {
   if (!isCurrent()) {
@@ -391,6 +418,7 @@ export async function sendResponseToWebSocket(
   if (contentType.includes("text/event-stream")) {
     await pumpResponsesSseToWebSocket(ws, response.body, {
       isCurrent,
+      abortSignal: options.abortSignal,
       onTerminal: options.onTerminal,
       onSsePayload: options.onSsePayload,
     });
@@ -413,6 +441,7 @@ export async function sendResponseToWebSocket(
   if (looksLikeSse(prefix)) {
     await pumpResponsesSseToWebSocket(ws, stream, {
       isCurrent,
+      abortSignal: options.abortSignal,
       onTerminal: options.onTerminal,
       onSsePayload: options.onSsePayload,
     });

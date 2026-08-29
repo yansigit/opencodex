@@ -128,4 +128,6 @@ export interface AdapterFetchContext {
   stream?: boolean;
   /** Custom fetch executor to use for physical upstream network requests (defaults to globalThis.fetch). */
   executor?: typeof globalThis.fetch;
+  /** Shared transient replay allowance for one logical generation. */
+  replayBudget?: { remaining: number };
 }

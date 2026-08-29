@@ -11,7 +11,9 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  validateConfigCandidate,
 } from "../../config";
+import { canonicalServerOrigin, serverTlsConfigError } from "../../lib/server-tls";
 import {
   clearLoginState,
   getLoginStatus,
@@ -91,7 +93,7 @@ import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import type { PersistedUsageAttempt } from "../../usage/log";
-import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
+import { assertServerAuthConfig, configuredApiAuthToken, isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { withProviderServiceTierDTO } from "./provider-capability-config";
 import { applySystemEnvToggle } from "../system-env";
 import { getCachedStartupHealth, invalidateStartupHealthCache } from "../startup-health-cache";
@@ -129,6 +131,40 @@ async function sidecarVisionResponseSettings(config: OcxConfig): Promise<{
     models.unshift({ value: model, label: model, backend });
   }
   return { model, reasoning, models };
+}
+
+function aiStudioExtensionOrigin(config: Pick<OcxConfig, "corsAllowOrigins">): string | null {
+  return config.corsAllowOrigins?.find(origin => origin.startsWith("chrome-extension://")) ?? null;
+}
+
+function serverSettings(
+  config: OcxConfig,
+  activeOrigin?: string,
+  activeConfig?: Pick<OcxConfig, "hostname" | "port" | "tls">,
+) {
+  const active = activeOrigin ?? canonicalServerOrigin(config, config.port);
+  const configuredOrigin = canonicalServerOrigin(config, config.port);
+  const configuredListener = {
+    hostname: config.hostname ?? "127.0.0.1",
+    port: config.port,
+    tls: config.tls ?? null,
+  };
+  const activeListener = activeConfig && {
+    hostname: activeConfig.hostname ?? "127.0.0.1",
+    port: activeConfig.port,
+    tls: activeConfig.tls ?? null,
+  };
+  return {
+    configured: {
+      ...configuredListener,
+      aiStudioOrigin: aiStudioExtensionOrigin(config),
+    },
+    activeOrigin: active,
+    credentialConfigured: !!configuredApiAuthToken(config)
+      || (config.apiKeys ?? []).some(entry => !!entry.key.trim()),
+    restartRequired: active !== configuredOrigin
+      || !!activeListener && JSON.stringify(activeListener) !== JSON.stringify(configuredListener),
+  };
 }
 
 /** One client's outcome from a fan-out sync. Absent from the list means "left alone". */
@@ -304,6 +340,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // Absent means the historical auto-open, so the GUI can render the toggle
       // without having to know that `undefined` and `true` mean the same thing.
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
+      server: serverSettings(config, deps.activeServerOrigin, deps.activeServerConfig),
       startupHealth: await readStartupHealth(config),
       codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
@@ -390,14 +427,16 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexAccountPickerEnabled?: unknown;
       oauthOpenBrowser?: unknown;
       showCodexSparkQuota?: unknown;
+      server?: unknown;
     };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
       && body.appOwnedMemoryBudgetMb === undefined
       && body.codexAccountPickerEnabled === undefined
       && body.oauthOpenBrowser === undefined
-      && body.showCodexSparkQuota === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, oauthOpenBrowser, or showCodexSparkQuota" }, 400);
+      && body.showCodexSparkQuota === undefined
+      && body.server === undefined) {
+      return jsonResponse({ error: "provide a supported settings field" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -414,6 +453,30 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
       return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
+    }
+    let nextServer: {
+      hostname: string;
+      port: number;
+      tls: OcxConfig["tls"];
+      aiStudioOrigin: string | null;
+    } | undefined;
+    if (body.server !== undefined) {
+      if (!isPlainRecord(body.server)) return jsonResponse({ error: "server must be an object" }, 400);
+      const raw = body.server;
+      if (typeof raw.hostname !== "string" || !raw.hostname.trim()) return jsonResponse({ error: "server.hostname must be a non-empty string" }, 400);
+      if (typeof raw.port !== "number" || !Number.isInteger(raw.port) || raw.port < 0 || raw.port > 65535) return jsonResponse({ error: "server.port must be an integer from 0 to 65535" }, 400);
+      const tlsError = raw.tls === null ? null : serverTlsConfigError(raw.tls);
+      if (tlsError) return jsonResponse({ error: tlsError }, 400);
+      if (raw.aiStudioOrigin !== null && (
+        typeof raw.aiStudioOrigin !== "string"
+        || !/^chrome-extension:\/\/[a-z]{32}$/.test(raw.aiStudioOrigin)
+      )) return jsonResponse({ error: "server.aiStudioOrigin must be an exact chrome-extension origin or null" }, 400);
+      nextServer = {
+        hostname: raw.hostname.trim(),
+        port: raw.port,
+        tls: raw.tls === null ? undefined : raw.tls as OcxConfig["tls"],
+        aiStudioOrigin: raw.aiStudioOrigin,
+      };
     }
     if (body.appOwnedMemoryBudgetMb !== undefined && (
       typeof body.appOwnedMemoryBudgetMb !== "number"
@@ -438,36 +501,67 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasOauthOpenBrowser: Object.hasOwn(config, "oauthOpenBrowser"),
       showCodexSparkQuota: config.showCodexSparkQuota,
       hasShowCodexSparkQuota: Object.hasOwn(config, "showCodexSparkQuota"),
+      hostname: config.hostname,
+      hasHostname: Object.hasOwn(config, "hostname"),
+      port: config.port,
+      tls: config.tls,
+      hasTls: Object.hasOwn(config, "tls"),
+      corsAllowOrigins: config.corsAllowOrigins,
+      hasCorsAllowOrigins: Object.hasOwn(config, "corsAllowOrigins"),
     };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
-    let pickerIsEnabled = pickerWasEnabled;
-    try {
+    const applySettings = (target: OcxConfig): boolean => {
       if (typeof body.codexAutoStart === "boolean") {
-        config.codexAutoStart = body.codexAutoStart;
+        target.codexAutoStart = body.codexAutoStart;
       }
       if (body.streamMode !== undefined) {
         if (body.streamMode === "auto") {
-          deleteConfigTopLevelKey(config, "streamMode");
+          deleteConfigTopLevelKey(target, "streamMode");
         } else {
-          config.streamMode = body.streamMode as "legacy-tee" | "eager-relay";
+          target.streamMode = body.streamMode as "legacy-tee" | "eager-relay";
         }
       }
       if (typeof body.appOwnedMemoryBudgetMb === "number") {
-        config.appOwnedMemoryBudgetMb = body.appOwnedMemoryBudgetMb;
+        target.appOwnedMemoryBudgetMb = body.appOwnedMemoryBudgetMb;
       }
       if (body.codexAccountPickerEnabled === true) {
-        config.codexAccountPickerEnabled = true;
-        initializeDefaultCodexAccountNamespaces(config);
+        target.codexAccountPickerEnabled = true;
+        initializeDefaultCodexAccountNamespaces(target);
       } else if (body.codexAccountPickerEnabled === false) {
-        config.codexAccountPickerEnabled = false;
+        target.codexAccountPickerEnabled = false;
       }
       if (typeof body.oauthOpenBrowser === "boolean") {
-        config.oauthOpenBrowser = body.oauthOpenBrowser;
+        target.oauthOpenBrowser = body.oauthOpenBrowser;
       }
       if (typeof body.showCodexSparkQuota === "boolean") {
-        config.showCodexSparkQuota = body.showCodexSparkQuota;
+        target.showCodexSparkQuota = body.showCodexSparkQuota;
       }
-      pickerIsEnabled = codexAccountPickerEnabled(config);
+      if (nextServer) {
+        target.hostname = nextServer.hostname;
+        target.port = nextServer.port;
+        if (nextServer.tls) target.tls = nextServer.tls;
+        else deleteConfigTopLevelKey(target, "tls");
+        const origins = (target.corsAllowOrigins ?? []).filter(origin => !origin.startsWith("chrome-extension://"));
+        if (nextServer.aiStudioOrigin) origins.push(nextServer.aiStudioOrigin);
+        if (origins.length) target.corsAllowOrigins = origins;
+        else deleteConfigTopLevelKey(target, "corsAllowOrigins");
+      }
+      return codexAccountPickerEnabled(target);
+    };
+    if (nextServer) {
+      const candidate = structuredClone(config);
+      applySettings(candidate);
+      const validation = validateConfigCandidate(candidate);
+      if (!validation.ok) return jsonResponse({ error: validation.error }, 400);
+      try {
+        assertServerAuthConfig(candidate);
+      } catch (error) {
+        return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
+      }
+    }
+    let pickerIsEnabled = pickerWasEnabled;
+    try {
+      pickerIsEnabled = applySettings(config);
       saveManagementConfig(deps, config);
     } catch (error) {
       if (previousSettings.hasCodexAutoStart) config.codexAutoStart = previousSettings.codexAutoStart;
@@ -489,6 +583,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasShowCodexSparkQuota) {
         config.showCodexSparkQuota = previousSettings.showCodexSparkQuota;
       } else deleteConfigTopLevelKey(config, "showCodexSparkQuota");
+      if (previousSettings.hasHostname) config.hostname = previousSettings.hostname;
+      else deleteConfigTopLevelKey(config, "hostname");
+      config.port = previousSettings.port;
+      if (previousSettings.hasTls) config.tls = previousSettings.tls;
+      else deleteConfigTopLevelKey(config, "tls");
+      if (previousSettings.hasCorsAllowOrigins) config.corsAllowOrigins = previousSettings.corsAllowOrigins;
+      else deleteConfigTopLevelKey(config, "corsAllowOrigins");
       throw error;
     }
     if (typeof body.appOwnedMemoryBudgetMb === "number") {
@@ -512,6 +613,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       catalogRefreshPending,
       showCodexSparkQuota: config.showCodexSparkQuota === true,
       startupHealth: await readStartupHealth(config),
+      server: serverSettings(config, deps.activeServerOrigin, deps.activeServerConfig),
     });
   }
 

@@ -130,3 +130,4 @@ Fonctions partagées par les adaptateurs qui prennent en charge la vision :
 
 - `parseDataUrl(url)` — sépare une URL `data:<type>;base64,<data>` en `{ mediaType, base64 }` pour les blocs d’image Anthropic/Google.
 - `contentPartsToText(content)` — aplatit les parties de contenu en texte pour les messages d’outil purement textuels (une image sans description devient un court marqueur `[image]`, jamais un blob base64 qui consommerait énormément de jetons).
+L’origin de l’extension AI Studio doit être un origin `chrome-extension://` exact ; la synchronisation nécessite une data-plane API key.

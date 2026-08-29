@@ -249,7 +249,7 @@ describe("oauth refresh hardening", () => {
       throw new Error("network down");
     }) as typeof fetch;
 
-    await expect(getValidAccessToken("kiro")).rejects.toThrow("network down");
+    await expect(getValidAccessToken("kiro")).rejects.toThrow("OAuth request failed");
     expect(calls).toBe(1);
     expect(getCredential("kiro")?.refresh).toBe("rt-old");
     expect(getCredential("kiro")?.access).toBe("aoa-old");

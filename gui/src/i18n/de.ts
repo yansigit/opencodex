@@ -2002,6 +2002,8 @@ export const de: Record<TKey, string> = {
   "pws.allowPrivateNetwork": "Lokales/privates Netzwerk erlauben",
   "pws.liveModels": "Modelle beim Anbieter erkennen",
   "pws.liveModelsDesc": "Lädt den Live-Modellkatalog des Anbieters. Ausschalten, um nur konfigurierte statische Modelle zu verwenden.",
+  "pws.replayTransientFailures": "Vorübergehende Fehler wiederholen",
+  "pws.replayTransientFailuresDesc": "Vor dem Stream erkannte vorübergehende Fehler mindestens einmal wiederholen; Anfragen können mehrfach zugestellt werden.",
   "pws.xaiResponsesOptIn": "Responses API für Grok 4.5 und 4.6 verwenden",
   "pws.xaiResponsesOptInDesc": "Leitet beide Modelle über openai-responses. Andere Grok-Modelle und das Tier-Verhalten bleiben unverändert.",
   "pws.xaiResponsesOptInMixed": "Teilweise aktiviert.",

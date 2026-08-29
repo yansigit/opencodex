@@ -5,6 +5,7 @@
  * This is an unofficial bridge — GitHub may tighten or revoke access. See registry note.
  */
 import type { OAuthController, OAuthCredentials } from "./types";
+import { oauthFetch } from "./transport";
 
 /** VS Code's public GitHub OAuth app — required for copilot_internal/v2/token to succeed. */
 export const GITHUB_COPILOT_OAUTH_CLIENT_ID = "Iv1.b507a08c87ecfe98";
@@ -149,7 +150,7 @@ async function requestDeviceAuthorization(signal?: AbortSignal): Promise<{
   expiresInMs: number;
   intervalMs: number;
 }> {
-  const response = await fetch(DEVICE_CODE_URL, {
+  const response = await oauthFetch(DEVICE_CODE_URL, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -194,7 +195,7 @@ async function pollGithubDeviceToken(
     // cadence violation GitHub may answer with slow_down.
     await sleep(waitMs, signal);
     if (Date.now() >= deadline) break;
-    const response = await fetch(ACCESS_TOKEN_URL, {
+    const response = await oauthFetch(ACCESS_TOKEN_URL, {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -211,6 +212,7 @@ async function pollGithubDeviceToken(
         ? AbortSignal.any([signal, AbortSignal.timeout(Math.max(MIN_POLL_MS, deadline - Date.now()))])
         : AbortSignal.timeout(Math.max(MIN_POLL_MS, deadline - Date.now())),
     });
+    if (signal?.aborted) throw new Error("Login cancelled");
     const payload = (await response.json().catch(() => ({}))) as GithubTokenResponse;
     if (response.ok && payload.access_token) {
       // Classic OAuth apps issue a non-expiring `gho_` access token with NO refresh token;
@@ -245,7 +247,7 @@ async function pollGithubDeviceToken(
 }
 
 async function refreshGithubAccessToken(refreshToken: string, signal?: AbortSignal): Promise<{ access: string; refresh: string }> {
-  const response = await fetch(ACCESS_TOKEN_URL, {
+  const response = await oauthFetch(ACCESS_TOKEN_URL, {
     method: "POST",
     headers: {
       Accept: "application/json",
@@ -283,7 +285,7 @@ async function exchangeCopilotToken(githubAccessToken: string, signal?: AbortSig
   expires: number;
   apiBaseUrl: string;
 }> {
-  const response = await fetch(COPILOT_TOKEN_URL, {
+  const response = await oauthFetch(COPILOT_TOKEN_URL, {
     method: "GET",
     headers: {
       ...GITHUB_COPILOT_EDITOR_HEADERS,
@@ -316,7 +318,7 @@ async function fetchGithubIdentityOnce(githubAccessToken: string, signal?: Abort
   email?: string;
   accountId?: string;
 }> {
-  const response = await fetch(GITHUB_USER_URL, {
+  const response = await oauthFetch(GITHUB_USER_URL, {
     headers: {
       Accept: "application/vnd.github+json",
       Authorization: `Bearer ${githubAccessToken}`,

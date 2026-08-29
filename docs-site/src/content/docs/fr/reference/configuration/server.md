@@ -251,3 +251,6 @@ Les images `https:` distantes et les descriptions échouées ou vides ne sont pa
 
 Les services auxiliaires Anthropic OAuth réutilisent l'empreinte OAuth Claude Code existante d'opencodex. Effectuez un test d'endurance avec le
 compte et la charge de travail prévus.
+### TLS et WebSocket
+
+`tls` accepte `certFile`, `keyFile` et `publicOrigin`. Les WebSockets ont un délai d’inactivité de 255 secondes et ferment la connexion à la limite de contre-pression (1 MiB).

@@ -209,3 +209,6 @@ context; в ключи OpenAI дополнительно входит reasoning 
 
 Sidecar'ы Anthropic OAuth повторно используют уже существующий OAuth fingerprint Claude Code от
 opencodex. Перед использованием прогоните soak-test на нужном аккаунте и ожидаемой нагрузке.
+### TLS и WebSocket
+
+`tls` принимает `certFile`, `keyFile` и `publicOrigin`. Тайм-аут простоя WebSocket — 255 секунд; при лимите обратного давления (1 МиБ) соединение закрывается.

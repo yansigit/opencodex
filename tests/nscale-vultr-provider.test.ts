@@ -158,14 +158,14 @@ describe("Nscale and Vultr provider presets", () => {
       globalThis.fetch = (async (input, init) => {
         expect(String(input)).toBe(`${baseUrl}/models`);
         expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${API_KEY}`);
-        expect(init?.redirect).toBe("error");
+        expect(init?.redirect).toBe("manual");
         return new Response(fixtures[providerId], {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }) as typeof fetch;
 
-      expect(await validateApiKey(providerId, KEY_LOGIN_PROVIDERS[providerId]!, API_KEY)).toBe(true);
+      expect(await validateApiKey(providerId, KEY_LOGIN_PROVIDERS[providerId]!, API_KEY, { fetch: globalThis.fetch })).toBe(true);
     }
   });
 

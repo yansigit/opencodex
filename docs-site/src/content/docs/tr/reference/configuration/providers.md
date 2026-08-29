@@ -492,3 +492,4 @@ bildirir; senkronize edilen katalog `xhigh`'ı ayrı tutarken `max` bildirir.
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures` (varsayılan kapalı), akış öncesi geçici hataları yeniden dener; istek birden fazla iletilebilir.

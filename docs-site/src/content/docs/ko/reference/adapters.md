@@ -193,3 +193,4 @@ discovery에 모두 적용됩니다.
 - `contentPartsToText(content)` — 텍스트 전용 툴 메시지를 위해 content part를 텍스트로
   평탄화합니다. 설명이 없는 이미지는 토큰을 폭증시키는 base64 blob 대신 짧은 `[image]` marker가
   됩니다.
+AI Studio 확장 origin은 정확한 `chrome-extension://` origin이어야 하며 동기화 요청에는 data-plane API key가 필요합니다.

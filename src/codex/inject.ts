@@ -217,14 +217,16 @@ export function buildProviderTableBlock(
   supportsWebsockets = false,
   includeApiAuthHeader = false,
   hostname?: string,
+  publicOrigin?: string,
 ): string {
   const host = providerBaseHost(hostname);
+  const baseUrl = publicOrigin ?? `http://${host}:${port}`;
   const lines = [
     "",
     OCX_SECTION_MARKER,
     "[model_providers.opencodex]",
     'name = "OpenCodex Proxy"',
-    `base_url = "http://${host}:${port}/v1"`,
+    `base_url = "${baseUrl}/v1"`,
     'wire_api = "responses"',
     "requires_openai_auth = true",
   ];
@@ -244,8 +246,9 @@ export function buildProviderTableBlock(
 export function buildOpenaiBaseUrlLine(
   port: number,
   hostname?: string,
+  publicOrigin?: string,
 ): string {
-  return `openai_base_url = "http://${providerBaseHost(hostname)}:${port}/v1"`;
+  return `openai_base_url = "${publicOrigin ?? `http://${providerBaseHost(hostname)}:${port}`}/v1"`;
 }
 
 /**
@@ -258,11 +261,12 @@ export function setRootOpenaiBaseUrl(
   content: string,
   port: number,
   hostname?: string,
+  publicOrigin?: string,
 ): { content: string; keptUserBaseUrl: boolean } {
   const lines = content.split("\n");
   const firstTable = lines.findIndex((l) => /^\s*\[/.test(l));
   const rootEnd = firstTable === -1 ? lines.length : firstTable;
-  const key = buildOpenaiBaseUrlLine(port, hostname);
+  const key = buildOpenaiBaseUrlLine(port, hostname, publicOrigin);
 
   for (let i = 0; i < rootEnd; i++) {
     if (!isRootOpenaiBaseUrlLine(lines[i])) continue;
@@ -620,7 +624,7 @@ function stripOpencodexCatalogPath(content: string): string {
     .join("\n");
 }
 
-export function buildProfileFile(port: number, catalogPath?: string | null, supportsWebsockets = false, includeApiAuthHeader = false, hostname?: string, fastMode?: boolean): string {
+export function buildProfileFile(port: number, catalogPath?: string | null, supportsWebsockets = false, includeApiAuthHeader = false, hostname?: string, fastMode?: boolean, publicOrigin?: string): string {
   const host = providerBaseHost(hostname);
   // Design B (loopback): the reference/fallback file documents the root override form.
   // Non-loopback keeps the legacy provider-table shape (built-in provider cannot carry
@@ -630,7 +634,7 @@ export function buildProfileFile(port: number, catalogPath?: string | null, supp
       "# OpenCodex proxy fallback config (Design B)",
       `# Root override that points Codex's built-in openai provider at the proxy on ${host}:${port}.`,
       "# Merge these root keys into ~/.codex/config.toml manually if auto-injection was removed.",
-      buildOpenaiBaseUrlLine(port, hostname),
+      buildOpenaiBaseUrlLine(port, hostname, publicOrigin),
     ];
     if (catalogPath) lines.push(`model_catalog_json = ${tomlString(catalogPath)}`);
     if (fastMode !== undefined) lines.push("", "[features]", `fast_mode = ${fastMode ? "true" : "false"}`, "");
@@ -643,7 +647,7 @@ export function buildProfileFile(port: number, catalogPath?: string | null, supp
   ];
   if (catalogPath) lines.push(`model_catalog_json = ${tomlString(catalogPath)}`);
   if (fastMode !== undefined) lines.push("", "[features]", `fast_mode = ${fastMode ? "true" : "false"}`);
-  lines.push(buildProviderTableBlock(port, supportsWebsockets, includeApiAuthHeader, hostname).trimEnd(), "");
+  lines.push(buildProviderTableBlock(port, supportsWebsockets, includeApiAuthHeader, hostname, publicOrigin).trimEnd(), "");
   return lines.join("\n");
 }
 
@@ -725,7 +729,7 @@ export async function injectCodexConfig(
       message:
         `⚠️ Codex routing NOT injected: config.toml selects the external model_provider ${tomlString(activeProvider)}.\n` +
         `  OpenCodex preserves external provider configuration so existing ${tomlString(activeProvider)} session history stays visible.\n` +
-        `  Configure that provider for Responses passthrough at http://${providerBaseHost(config?.hostname)}:${port}/v1` +
+        `  Configure that provider for Responses passthrough at ${config?.tls?.publicOrigin ?? `http://${providerBaseHost(config?.hostname)}:${port}`}/v1` +
         `${shouldInjectApiAuthHeader(config) ? ` with x-opencodex-api-key from OPENCODEX_API_AUTH_TOKEN` : ""}.\n` +
         `  For direct injection, switch to the built-in openai provider, remove any user-owned root openai_base_url, and rerun 'ocx start'.`,
     });
@@ -810,12 +814,13 @@ export async function injectCodexConfig(
         websocketsEnabled(config ?? {}),
         true,
         config?.hostname,
+        config?.tls?.publicOrigin,
       );
   } else {
     // Design B (loopback): a single root override; codex keeps its native `openai` provider id
     // so thread history is never remapped. Any legacy form was already stripped above.
     content = stripInjectedOpenaiBaseUrl(content); // normalize before idempotent re-insert
-    const result = setRootOpenaiBaseUrl(content, port, config?.hostname);
+    const result = setRootOpenaiBaseUrl(content, port, config?.hostname, config?.tls?.publicOrigin);
     content = result.content;
     keptUserBaseUrl = result.keptUserBaseUrl;
   }
@@ -851,7 +856,7 @@ export async function injectCodexConfig(
     managedDefaultsMessage = `  ⚠️ ${nativeSubagentDefaultsWarning}\n`;
   }
 
-  const profileContent = buildProfileFile(port, catalogPath, websocketsEnabled(config ?? {}), legacyMode, config?.hostname, config?.fastMode);
+  const profileContent = buildProfileFile(port, catalogPath, websocketsEnabled(config ?? {}), legacyMode, config?.hostname, config?.fastMode, config?.tls?.publicOrigin);
   content = applyEol(content, eol);
 
   /*

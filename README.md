@@ -267,10 +267,12 @@ npm uninstall -g @yansigit/opencodex
 
 ## Remote access
 
-By default opencodex binds to `127.0.0.1` and needs no extra authentication. Binding beyond
-loopback (`"hostname": "0.0.0.0"`) **requires** a bearer token — the proxy refuses to start
-without `OPENCODEX_API_AUTH_TOKEN`, and every client request must carry it as
-`x-opencodex-api-key`. Details: [configuration reference](https://opencodex.me/reference/configuration/).
+By default opencodex binds to `127.0.0.1` over HTTP. Binding beyond loopback requires both a
+data-plane credential and native TLS; the proxy refuses remote plaintext. Configure certificate
+and key file paths plus the client-visible HTTPS `publicOrigin`, then restart the listener. Clients
+must trust the operator-managed certificate and send the credential as `x-opencodex-api-key`.
+SSH port forwarding remains the simpler loopback-only alternative. Details:
+[configuration reference](https://opencodex.me/reference/configuration/).
 
 ## Documentation
 

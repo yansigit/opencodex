@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { OcxProviderConfig } from "../types";
 import { resolveGithubCopilotTransport } from "./github-copilot-transport";
+import { testProviderFetch } from "../lib/test-provider-fetch";
+import { RUNTIME_PROVIDER_FETCH, type RuntimeProviderFetch } from "../lib/provider-runtime-fetch";
 
 export const XAI_GROK_CLI_BASE_URL = "https://cli-chat-proxy.grok.com/v1";
 
@@ -46,6 +48,7 @@ export const XAI_CONV_ID_HEADER = XAI_GROK_COMPATIBILITY.headers.conversationId;
 export type OcxProviderTransport = OcxProviderConfig & {
   /** Request executor used only at runtime; never persisted. */
   fetch?: typeof globalThis.fetch;
+  [RUNTIME_PROVIDER_FETCH]?: RuntimeProviderFetch;
 };
 
 const XAI_GROK_CLI_HEADERS: Readonly<Record<string, string>> = {
@@ -156,14 +159,25 @@ export function resolveProviderTransport(
   // transient retries reuse one id so the upstream can dedupe them. A rotated key resolves a
   // fresh transport, which gets its own id.
   const requestId = configuredRequestId ?? randomUUID();
-  const baseFetch = provider.fetch ?? globalThis.fetch;
+  const baseFetch = testProviderFetch(provider) ?? globalThis.fetch;
   const attemptFetch = ((input, init) =>
     baseFetch(input, withGeneratedRequestId(init, requestId, stableHeaders))) as typeof globalThis.fetch;
 
-  return {
+  const resolved = {
     ...provider,
     ...(provider.authMode === "oauth" ? { baseUrl: XAI_GROK_CLI_BASE_URL } : {}),
     headers,
     fetch: attemptFetch,
   };
+  // Enumerable symbols survive runtime provider spreads (credential/key rotation), while
+  // JSON serialization still cannot persist or accept them from configuration.
+  Object.defineProperty(resolved, RUNTIME_PROVIDER_FETCH, {
+    value: {
+      providerName: "xai",
+      origins: ["https://api.x.ai", "https://cli-chat-proxy.grok.com"],
+      fetch: attemptFetch,
+    },
+    enumerable: true,
+  });
+  return resolved;
 }

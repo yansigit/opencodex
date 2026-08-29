@@ -55,7 +55,7 @@ import { runAlibabaRegionStartupMigration } from "../providers/alibaba-region-st
 import { runModelRenameStartupMigration } from "../providers/model-rename-startup";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
-import type { StorageCleanupPolicy } from "../types";
+import type { OcxConfig, StorageCleanupPolicy } from "../types";
 import { MAX_DECOMPRESSED_BODY_BYTES } from "./request-decompress";
 import {
   CodexAccountCooldownError,
@@ -153,6 +153,7 @@ import {
   jsonResponse,
   admissionFields,
   resolveApiAuth,
+  resolveDataPlaneAdmissionSecret,
   resolveResponsesApiAuth,
   requestPolicyView,
   type RequestPolicyView,
@@ -161,6 +162,10 @@ import {
   withCors,
   withManagementCors,
 } from "./auth-cors";
+import {
+  managementBodyTooLargeResponse,
+  readManagementJsonBody,
+} from "./management/body";
 export {
   assertServerAuthConfig,
   corsHeaders,
@@ -205,6 +210,8 @@ import {
 import { SYSTEM_RESTART_CAPABILITY_VERSION } from "../lib/system-restart-contract";
 import { LOCAL_PROVIDER_RELOAD_CAPABILITY_VERSION } from "../lib/local-provider-reload-contract";
 import { createReadinessGate, type ReadinessGate } from "./readiness";
+import { isTestHomeGuardArmed } from "../lib/test-home-guard";
+import { canonicalServerOrigin } from "../lib/server-tls";
 import {
   createRuntimePackageTreeIntegrityGuard,
   type PackageTreeIntegrityGuard,
@@ -212,18 +219,22 @@ import {
 import { detectInstall } from "../update/index";
 import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
 
-function isAiStudioSessionOrigin(origin: string | null): boolean {
-  return !!origin && (origin.startsWith("chrome-extension://") || origin === "https://aistudio.google.com");
+function isAiStudioSessionOrigin(origin: string | null, config: Pick<OcxConfig, "corsAllowOrigins">): boolean {
+  return !!origin && (
+    origin === "https://aistudio.google.com"
+    || (origin.startsWith("chrome-extension://") && config.corsAllowOrigins?.includes(origin) === true)
+  );
 }
 
-function withAiStudioSessionCors(resp: Response, req: Request): Response {
+function withAiStudioSessionCors(resp: Response, req: Request, config: RequestPolicyView): Response {
   const origin = req.headers.get("Origin");
-  if (isAiStudioSessionOrigin(origin) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
+  if (isAiStudioSessionOrigin(origin, config) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
   return resp;
 }
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
-const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
+const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 255;
+const WEBSOCKET_BACKPRESSURE_LIMIT = 1024 * 1024;
 const LIVE_SIDEBAND_PENDING_MAX = 32;
 const LIVE_SIDEBAND_PENDING_BYTES_MAX = 1024 * 1024;
 const LIVE_SIDEBAND_CLOSE_FALLBACK_MS = 1_000;
@@ -402,11 +413,16 @@ function attachLiveSidebandUpstream(
         return;
       }
       logLiveSidebandFrame("u2c", event.data);
-      if (typeof event.data === "string") ws.send(event.data);
-      else if (event.data instanceof ArrayBuffer) ws.send(event.data);
-      else if (ArrayBuffer.isView(event.data)) {
-        ws.send(event.data.buffer.slice(event.data.byteOffset, event.data.byteOffset + event.data.byteLength));
-      } else ws.send(event.data as Buffer);
+      const result = typeof event.data === "string"
+        ? ws.send(event.data)
+        : event.data instanceof ArrayBuffer
+          ? ws.send(event.data)
+          : ArrayBuffer.isView(event.data)
+            ? ws.send(event.data.buffer.slice(event.data.byteOffset, event.data.byteOffset + event.data.byteLength))
+            : ws.send(event.data as Buffer);
+      // The upstream cannot be paused; shed the socket as soon as Bun reports
+      // backpressure or a dropped send rather than building an application queue.
+      if (result <= 0) closeLiveSideband(ws, 1009, "backpressure limit");
     } catch {
       closeLiveSideband(ws, 1011, "client send failed");
     }
@@ -544,7 +560,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
-  assertServerAuthConfig(config);
+  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: isTestHomeGuardArmed() });
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   let userCostOverlayReconciler: { stop(): void } | null = null;
   // Arm synchronously before listen. A pending journal therefore makes __main__ unusable
@@ -855,6 +871,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     // release the owner-scoped lease on any listener failure.
     userCostOverlayReconciler = startUserCostOverlayReconciler({ liveConfig: config });
     const serveOptions = {
+      ...(config.tls ? { tls: { cert: Bun.file(config.tls.certFile), key: Bun.file(config.tls.keyFile) } } : {}),
       idleTimeout: 255,
       maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
       async fetch(req: Request, requestServer: Server<WsData>): Promise<Response> {
@@ -921,13 +938,13 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         }
         if (url.pathname === "/api/aistudio/session") {
           const origin = req.headers.get("Origin");
-          if (isAiStudioSessionOrigin(origin)) {
+          if (isAiStudioSessionOrigin(origin, policy)) {
             return new Response(null, {
               status: 204,
               headers: {
                 "Access-Control-Allow-Origin": origin as string,
                 "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, Authorization, X-OpenCodex-API-Key",
+                "Access-Control-Allow-Headers": "Content-Type, X-OpenCodex-API-Key",
                 Vary: "Origin, Access-Control-Request-Headers",
               },
             });
@@ -995,16 +1012,19 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
-        const admission = resolveApiAuth(req, policy);
+        const dedicated = req.headers.get("x-opencodex-api-key")?.trim() ?? "";
+        const admission = dedicated
+          ? resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated")
+          : null;
         if (!admission) {
-          return withAiStudioSessionCors(withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy), req);
+          return withAiStudioSessionCors(withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy), req, policy);
         }
         const origin = req.headers.get("Origin");
-        if (!isAllowedRequestOrigin(req, policy) && !isAiStudioSessionOrigin(origin)) {
-          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req);
+        if (!isAiStudioSessionOrigin(origin, policy)) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req, policy);
         }
         try {
-          const bodyJson = await req.json() as any;
+          const bodyJson = await readManagementJsonBody(req) as any;
           const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
           if (typeof bodyJson.token === "string" && bodyJson.token) {
             saveAiStudioSessionFromToken(bodyJson.token);
@@ -1015,11 +1035,16 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
               cookies: bodyJson.cookies,
             });
           } else {
-            return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req);
+            return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req, policy);
           }
-          return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req);
+          return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req, policy);
         } catch (error) {
-          return withAiStudioSessionCors(withCors(jsonResponse({ error: String(error) }, 400), req, policy), req);
+          const tooLarge = managementBodyTooLargeResponse(error, req, config);
+          return withAiStudioSessionCors(
+            withCors(tooLarge ?? jsonResponse({ error: "invalid session payload" }, 400), req, policy),
+            req,
+            policy,
+          );
         }
       }
 
@@ -1739,6 +1764,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     websocket: {
       maxPayloadLength: MAX_WS_FRAME_BYTES,
       idleTimeout: WEBSOCKET_IDLE_TIMEOUT_SECONDS,
+      backpressureLimit: WEBSOCKET_BACKPRESSURE_LIMIT,
+      closeOnBackpressureLimit: true,
       // Responses WebSocket data plane (phase 120.2). Re-frames the same SSE pipeline onto the
       // socket: parse response.create → run handleResponses unchanged → pump its SSE body as WS
       // Text frames. response.processed is a no-op ack. close() aborts the upstream (RC2 parity).
@@ -1758,6 +1785,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         }
         ws.data.admissionLease.bind(ws);
         registerCodexWebSocket(ws);
+      },
+      drain(ws: ServerWebSocket<WsData>) {
+        ws.data.wsDrain?.();
       },
       message(ws: ServerWebSocket<WsData>, raw: string | Buffer) {
         if (ws.data.kind === "live-sideband") {
@@ -1897,6 +1927,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
               },
             });
             await sendResponseToWebSocket(ws, response, isCurrent, {
+              abortSignal: turnAbort.signal,
               onSsePayload: payload => inspectResponseLogSsePayload(logCtx, payload),
               onTerminal: status => {
                 terminalRecorder?.(status, logCtx.terminalHttpStatus);
@@ -1947,6 +1978,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         ws.data.admissionLease?.release();
         ws.data.admissionLease = undefined;
         ws.data.cancel?.(); // RC2: abort the upstream when the client disconnects
+        ws.data.wsDrainWaiter?.resolve();
+        ws.data.wsDrainWaiter = undefined;
       },
     },
     } as const;
@@ -1961,6 +1994,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       try {
         loopbackServer = Bun.serve<WsData>({
           ...serveOptions,
+          tls: undefined,
           port: loopbackListenerPort,
           hostname: "127.0.0.1",
         });
@@ -2012,9 +2046,15 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   setServerRef(server);
   const actualPort = server.port ?? listenPort;
   boundPort = actualPort;
+  managementApi.activeServerOrigin = canonicalServerOrigin(config, actualPort);
+  managementApi.activeServerConfig = {
+    hostname: config.hostname,
+    port: actualPort,
+    tls: config.tls ? { ...config.tls } : undefined,
+  };
   setCorsOrigin(actualPort);
 
-  console.log(`🚀 opencodex proxy running on http://localhost:${actualPort}`);
+  console.log(`🚀 opencodex proxy running on ${managementApi.activeServerOrigin}`);
   console.log(`   POST /v1/responses → provider translation`);
   console.log(`   POST /v1/chat/completions → OpenAI-compatible clients`);
   console.log(`   GET  /healthz      → health check`);

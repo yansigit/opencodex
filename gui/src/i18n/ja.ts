@@ -1266,6 +1266,8 @@ export const ja: Record<TKey, string> = {
   "pws.allowPrivateNetwork": "ローカル/プライベートネットワークを許可",
   "pws.liveModels": "プロバイダーからモデルを検出",
   "pws.liveModelsDesc": "プロバイダーのライブモデルカタログを取得します。オフにすると設定済みの静的モデルのみを使用します。",
+  "pws.replayTransientFailures": "一時的な失敗を再試行",
+  "pws.replayTransientFailuresDesc": "ストリーム開始前の一時的な失敗を少なくとも一度再試行します。リクエストが複数回配信される可能性があります。",
   "pws.xaiResponsesOptIn": "Grok 4.5 と 4.6 で Responses API を使用",
   "pws.xaiResponsesOptInDesc": "両モデルを openai-responses 経由でルーティングします。他の Grok モデルと tier 動作は変わりません。",
   "pws.xaiResponsesOptInMixed": "一部のみ有効です。",

@@ -11,7 +11,8 @@ runs helper features around provider requests.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Proxy listen port. |
-| `hostname?` | `string` | `"127.0.0.1"` | Bind address. Non-loopback binds require `OPENCODEX_API_AUTH_TOKEN`. |
+| `hostname?` | `string` | `"127.0.0.1"` | Bind address. Non-loopback binds require TLS and a data-plane credential. |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | Serve HTTPS with the supplied readable certificate and private-key files. `publicOrigin` must be the exact HTTPS origin (for example `https://proxy.example.com`) used for generated callback and client URLs; paths, credentials, queries, and fragments are rejected. |
 | `proxy?` | `string` | — | Outbound HTTP(S) proxy URL or `${ENV_VAR}`. Applied to `HTTP_PROXY` / `HTTPS_PROXY` only when those variables are unset; loopback remains in `NO_PROXY`. |
 | `noProxy?` | `string \| string[]` | — | Hosts that bypass `proxy`, merged with inherited `NO_PROXY` and loopback entries. A string may use comma-separated `NO_PROXY` syntax or `${ENV_VAR}`. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Opt in to one identical Responses retry when a turn has no text or tool call, including a stream that ends before a terminal event. The retry may be billable. `OCX_EMPTY_COMPLETION_RETRY=0` disables it without changing config; combo and routed-compaction turns remain excluded. |
@@ -19,7 +20,7 @@ runs helper features around provider requests.
 | `oauthOpenBrowser?` | `boolean` | `true` | Whether a login may open a browser on the machine running the proxy. Absent and `true` both open, so an existing install is unchanged; only an explicit `false` declines. Decline when you need the authorization link in a different browser profile, or when the dashboard is not on the proxy's machine — the login still starts and the URL is still returned and displayed. `POST /api/oauth/login` and `POST /api/codex-auth/login` accept a per-request `openBrowser` boolean that overrides this, and the dashboard exposes the same choice beside the login button. Device-code flows never open a browser either way. |
 | `connectTimeoutMs?` | `number` | `200000` | Per-attempt DNS/TCP/TLS/final-header deadline; it ends before body generation. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
-| `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE. Canonical ChatGPT upstream WS is separately opt-in: a set provider `wsUpstream` takes precedence (`true` enables, `false` disables); when omitted, `OCX_CODEX_WS_UPSTREAM=true` or `1` enables it, while `false`/`0`, absent, or invalid values keep HTTP/SSE. |
+| `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE. Idle sockets close after 255 seconds; writes that exceed the bounded backpressure budget close with code 1009. Canonical ChatGPT upstream WS is separately opt-in: a set provider `wsUpstream` takes precedence (`true` enables, `false` disables); when omitted, `OCX_CODEX_WS_UPSTREAM=true` or `1` enables it, while `false`/`0`, absent, or invalid values keep HTTP/SSE. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. Authority-based browser extension origins such as `chrome-extension://<extension-id>` are supported; `*` is not a wildcard. Firefox and Safari regenerate the extension UUID (per install / per browser launch), so update the entry when the origin changes. |
 | `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` credentials accepted by management and data-plane auth on non-loopback binds. Dashboard-managed. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in archived-session cleanup policy. Never enabled implicitly. |
@@ -51,15 +52,30 @@ history; review the full-scope warning in the lifecycle reference before running
 ## Remote access
 
 The default `127.0.0.1` bind is loopback-only. A non-loopback address such as `0.0.0.0` requires
-token authentication on both `/api/*` and the data plane. Export the token before starting:
+native TLS and token authentication on both `/api/*` and the data plane. Configure the listener
+and export the token before starting:
 
-```bash
+```jsonc
+{
+  "hostname": "0.0.0.0",
+  "tls": {
+    "certFile": "/etc/opencodex/server.crt",
+    "keyFile": "/etc/opencodex/server.key",
+    "publicOrigin": "https://proxy.example.com"
+  }
+}
+```
+
+```sh
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-The proxy refuses a remote bind without this variable. For a background service, export it before
-`ocx service install` so launchd, systemd, or Task Scheduler receives it. Clients should send:
+The proxy refuses a remote bind when either requirement is missing. Certificate and listener changes
+take effect after restart; certificate trust and renewal remain the operator's responsibility. For a
+background service, export the token before `ocx service install` so launchd, systemd, or Task
+Scheduler receives it. SSH port forwarding to the loopback listener is the plaintext-free alternative.
+Clients should send:
 
 ```text
 x-opencodex-api-key: your-secret-token

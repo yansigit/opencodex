@@ -824,7 +824,7 @@ describe("Nous refresh failure-atomicity + terminal errors", () => {
 
   test("a network failure leaves the intent uncertain (fail-closed, never blindly replayable)", async () => {
     globalThis.fetch = (async () => { throw new Error("network down"); }) as typeof fetch;
-    await expect(refreshNousToken("old-refresh")).rejects.toThrow("network down");
+    await expect(refreshNousToken("old-refresh")).rejects.toThrow("OAuth request failed");
     // We cannot prove the server never received/rotated the token on a
     // connection failure, so it must be treated as uncertain: replay refused.
     expect(nousRefreshIntentBlocksReplay("old-refresh")).toBe(true);

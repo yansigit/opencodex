@@ -47,6 +47,7 @@ export interface WorkspaceProvider {
   disabled?: boolean;
   note?: string;
   allowPrivateNetwork?: boolean;
+  replayTransientFailures?: boolean;
   requestPacing?: {
     enabled?: boolean;
     requestsPerMinute?: number;

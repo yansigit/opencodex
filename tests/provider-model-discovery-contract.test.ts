@@ -150,19 +150,46 @@ describe("registry-owned provider model discovery", () => {
   });
 
   test("uses the registry discovery URL for API-key validation without following redirects", async () => {
-    await withTogetherDiscovery({
-      path: "catalog",
-      query: { capability: "chat", limit: "1" },
-    }, async () => {
-      globalThis.fetch = (async (input, init) => {
-        expect(String(input)).toBe("https://api.together.xyz/v1/catalog?capability=chat&limit=1");
-        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
-        expect(init?.redirect).toBe("error");
-        return Response.json({ data: [] });
-      }) as typeof fetch;
+    const timeout = spyOn(AbortSignal, "timeout");
+    try {
+      await withTogetherDiscovery({
+        path: "catalog",
+        query: { capability: "chat", limit: "1" },
+      }, async () => {
+        globalThis.fetch = (async (input, init) => {
+          expect(String(input)).toBe("https://api.together.xyz/v1/catalog?capability=chat&limit=1");
+          expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
+          expect(init?.redirect).toBe("manual");
+          return Response.json({ data: [] });
+        }) as typeof fetch;
 
-      expect(await validateApiKey("together", KEY_LOGIN_PROVIDERS.together!, "secret")).toBe(true);
+        expect(await validateApiKey("together", KEY_LOGIN_PROVIDERS.together!, "secret", { fetch: globalThis.fetch })).toBe(true);
+        expect(timeout).toHaveBeenCalledWith(8_000);
+      });
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  test("validates LiteLLM keys over its explicitly allowed loopback HTTP transport", async () => {
+    let authorization: string | null = null;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        authorization = request.headers.get("authorization");
+        return Response.json({ data: [] });
+      },
     });
+    try {
+      expect(await validateApiKey("litellm", {
+        ...KEY_LOGIN_PROVIDERS.litellm!,
+        baseUrl: `http://127.0.0.1:${server.port}/v1`,
+      }, "local-key")).toBe(true);
+      expect(authorization).toBe("Bearer local-key");
+    } finally {
+      await server.stop(true);
+    }
   });
 
   test("pins fixed OAuth discovery before resolving relative and default endpoints", async () => {
@@ -673,4 +700,3 @@ describe("same-named custom provider preservation", () => {
     });
   });
 });
-

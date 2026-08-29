@@ -1114,6 +1114,8 @@ export const zhTW: Record<TKey, string> = {
   "pws.allowPrivateNetwork": "允許本地/私有網路",
   "pws.liveModels": "從供應商發現模型",
   "pws.liveModelsDesc": "取得供應商的即時模型目錄。關閉後僅使用已配置的靜態模型。",
+  "pws.replayTransientFailures": "重試暫時性失敗",
+  "pws.replayTransientFailuresDesc": "在串流開始前至少重試一次暫時性失敗；請求可能會傳送多次。",
   "pws.xaiResponsesOptIn": "讓 Grok 4.5 與 4.6 使用 Responses API",
   "pws.xaiResponsesOptInDesc": "透過 openai-responses 路由這兩個模型。其他 Grok 模型與層級行為不變。",
   "pws.xaiResponsesOptInMixed": "已部分啟用。",

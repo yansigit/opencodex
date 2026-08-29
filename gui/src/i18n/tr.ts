@@ -1326,6 +1326,8 @@ export const tr: Record<TKey, string> = {
   "pws.allowPrivateNetwork": "Yerel/özel ağa izin ver",
   "pws.liveModels": "Sağlayıcıdan canlı model keşfet",
   "pws.liveModelsDesc": "Sağlayıcının canlı model kataloğunu çekin.",
+  "pws.replayTransientFailures": "Geçici hataları yeniden oynat",
+  "pws.replayTransientFailuresDesc": "Akış başlamadan oluşan geçici hataları en az bir kez yeniden dene; istek birden fazla iletilebilir.",
   "pws.xaiResponsesOptIn": "Grok 4.5 ve 4.6 için Responses API kullan",
   "pws.xaiResponsesOptInDesc": "İki modeli de openai-responses üzerinden yönlendirir. Diğer Grok modelleri ve katman davranışı değişmez.",
   "pws.xaiResponsesOptInMixed": "Kısmen etkin.",

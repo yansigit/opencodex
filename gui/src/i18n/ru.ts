@@ -1319,6 +1319,8 @@ export const ru: Record<TKey, string> = {
   "pws.allowPrivateNetwork": "Разрешить локальную/частную сеть",
   "pws.liveModels": "Обнаруживать модели провайдера",
   "pws.liveModelsDesc": "Загружать актуальный каталог моделей провайдера. Выключите, чтобы использовать только настроенные статические модели.",
+  "pws.replayTransientFailures": "Повторять временные сбои",
+  "pws.replayTransientFailuresDesc": "Повторять временные ошибки до начала потока хотя бы один раз; запрос может быть доставлен повторно.",
   "pws.xaiResponsesOptIn": "Использовать Responses API для Grok 4.5 и 4.6",
   "pws.xaiResponsesOptInDesc": "Направляет обе модели через openai-responses. Другие модели Grok и поведение tier не меняются.",
   "pws.xaiResponsesOptInMixed": "Включено частично.",

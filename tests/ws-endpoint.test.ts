@@ -14,11 +14,13 @@ import type { ServerWebSocket } from "bun";
 
 function mockWs(sendResult = 1): { ws: ServerWebSocket<WsData>; sent: string[] } {
   const sent: string[] = [];
+  const data = {} as WsData;
   const ws = {
     readyState: 1,
-    data: {} as WsData,
+    data,
     send: (m: string) => { sent.push(m); return sendResult; },
   } as unknown as ServerWebSocket<WsData>;
+  data.wsDrain = () => { data.wsDrainWaiter?.resolve(); data.wsDrainWaiter = undefined; };
   return { ws, sent };
 }
 
@@ -38,7 +40,9 @@ function sseStream(frames: string[], onCancel?: () => void): ReadableStream<Uint
 describe("WS endpoint re-framer (120/132)", () => {
   test("server config declares explicit websocket idle timeout policy", () => {
     const source = readFileSync(new URL("../src/server/index.ts", import.meta.url), "utf8");
-    expect(source).toContain("const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;");
+    expect(source).toContain("const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 255;");
+    expect(source).toContain("backpressureLimit: WEBSOCKET_BACKPRESSURE_LIMIT,");
+    expect(source).toContain("closeOnBackpressureLimit: true,");
     expect(source).toContain("websocket: {");
     expect(source).toContain("idleTimeout: WEBSOCKET_IDLE_TIMEOUT_SECONDS,");
     expect(source).toContain("finalizeLog(httpStatusForRequestLogTerminal(status, logCtx), {");
@@ -155,10 +159,40 @@ describe("WS endpoint re-framer (120/132)", () => {
 
   test("backpressured websocket sends are accepted", async () => {
     const { ws, sent } = mockWs(-1);
-    await pumpResponsesSseToWebSocket(ws, sseStream([
+    const pump = pumpResponsesSseToWebSocket(ws, sseStream([
       'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r1"}}\n\n',
     ]));
+    await Promise.resolve();
+    ws.data.wsDrain?.();
+    await pump;
     expect(JSON.parse(sent[0]).type).toBe("response.completed");
+  });
+
+  test("pauses SSE reads until Bun drain after a backpressured send", async () => {
+    const sent: string[] = [];
+    let sends = 0;
+    let pulls = 0;
+    const ws = {
+      readyState: 1,
+      data: {} as WsData,
+      send: (m: string) => { sent.push(m); sends += 1; return sends === 1 ? -1 : 1; },
+    } as unknown as ServerWebSocket<WsData>;
+    const enc = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        if (pulls === 1) controller.enqueue(enc.encode('data: {"type":"response.created"}\n\n'));
+        else if (pulls === 2) controller.enqueue(enc.encode('data: {"type":"response.completed"}\n\n'));
+        else controller.close();
+      },
+    });
+    const pump = pumpResponsesSseToWebSocket(ws, stream);
+    for (let i = 0; i < 10 && !ws.data.wsDrainWaiter; i++) await Promise.resolve();
+    expect(sent).toHaveLength(1);
+    expect(pulls).toBeGreaterThanOrEqual(1);
+    ws.data.wsDrainWaiter?.resolve();
+    await pump;
+    expect(sent).toHaveLength(2);
   });
 
   test("wires a cancel hook that aborts the stream on client disconnect", async () => {

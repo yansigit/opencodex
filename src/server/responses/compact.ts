@@ -58,7 +58,6 @@ import {
   type CodexUpstreamOutcome,
 } from "../../codex/routing";
 import {
-  fetchWithResetRetry,
   fetchWithTransientRetry,
   applyUpstreamRecoveryInit,
   type UpstreamSendRecovery,
@@ -533,7 +532,11 @@ export async function handleResponsesCompact(
       });
       return recovery === "single"
         ? doFetch()
-        : fetchWithTransientRetry(doFetch, { abortSignal: req.signal, label: safeHostLabel(compactUrl) });
+        : fetchWithTransientRetry(doFetch, {
+          abortSignal: req.signal,
+          label: safeHostLabel(compactUrl),
+          replayTransientFailures: sendProvider.replayTransientFailures,
+        });
     };
 
     // The account each outcome belongs to. Reassigned only when the alternate send below

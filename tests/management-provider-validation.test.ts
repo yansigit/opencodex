@@ -551,6 +551,18 @@ describe("provider management validation", () => {
     expect(secretNameError).toContain("[REDACTED]");
   });
 
+  test("provider management validates transient replay as a boolean", () => {
+    const base = { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" };
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      replayTransientFailures: true,
+    })).toBeNull();
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      replayTransientFailures: "true",
+    })).toContain("replayTransientFailures must be a boolean");
+  });
+
   test("provider management redacts provider names from auto-compaction validation errors", () => {
     const secretName = "sk-super-secret-9876";
     const error = providerManagementConfigError(secretName, {

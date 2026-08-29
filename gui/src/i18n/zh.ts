@@ -2022,6 +2022,8 @@ export const zh: Record<TKey, string> = {
   "pws.allowPrivateNetwork": "允许本地/私有网络",
   "pws.liveModels": "从提供方发现模型",
   "pws.liveModelsDesc": "获取提供方的实时模型目录。关闭后仅使用已配置的静态模型。",
+  "pws.replayTransientFailures": "重试暂时性失败",
+  "pws.replayTransientFailuresDesc": "在流开始前至少重试一次暂时性失败；请求可能会被传递多次。",
   "pws.xaiResponsesOptIn": "为 Grok 4.5 和 4.6 使用 Responses API",
   "pws.xaiResponsesOptInDesc": "通过 openai-responses 路由这两个模型。其他 Grok 模型和层级行为不变。",
   "pws.xaiResponsesOptInMixed": "已部分启用。",

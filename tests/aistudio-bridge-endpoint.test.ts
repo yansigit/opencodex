@@ -1,8 +1,44 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { saveConfig } from "../src/config";
 import { startServer } from "../src/server";
 import { serializeSessionBundle } from "../src/oauth/aistudio-session-sync";
 
 describe("aistudio legacy routes and session ingest endpoint", () => {
+  const previousHome = process.env.OPENCODEX_HOME;
+  const previousToken = process.env.OPENCODEX_API_AUTH_TOKEN;
+  let testDir = "";
+
+  function configuredServer() {
+    testDir = mkdtempSync(join(tmpdir(), "ocx-aistudio-endpoint-"));
+    process.env.OPENCODEX_HOME = testDir;
+    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
+    saveConfig({
+      port: 0,
+      defaultProvider: "openai",
+      providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" } },
+      corsAllowOrigins: ["chrome-extension://test-extension-id"],
+    });
+    return startServer(0);
+  }
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (previousToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
+    else process.env.OPENCODEX_API_AUTH_TOKEN = previousToken;
+    if (testDir && existsSync(testDir)) rmSync(testDir, { recursive: true, force: true });
+    testDir = "";
+  });
+
+  test("extension requires the proxy key before harvesting and displays its exact origin", () => {
+    const source = readFileSync(join(import.meta.dir, "..", "integrations", "aistudio-extension", "popup.js"), "utf8");
+    expect(source.indexOf("Proxy API key is required")).toBeLessThan(source.indexOf("await harvestSession()", source.indexOf("btnAutoSync")));
+    expect(source).toContain("chrome.runtime.id");
+    expect(source).toContain('"x-opencodex-api-key": proxyApiKey');
+  });
   test("GET /aistudio/bridge returns HTTP 410 HTML migration notice", async () => {
     const server = startServer(0);
     try {
@@ -50,8 +86,8 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
     }
   });
 
-  test("OPTIONS /api/aistudio/session preflight allows chrome-extension origin", async () => {
-    const server = startServer(0);
+  test("OPTIONS /api/aistudio/session preflight allows only a configured extension origin", async () => {
+    const server = configuredServer();
     try {
       const res = await fetch(new URL("/api/aistudio/session", server.url), {
         method: "OPTIONS",
@@ -66,6 +102,16 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
       const allowHeaders = res.headers.get("Access-Control-Allow-Headers") || "";
       expect(allowHeaders).toContain("Content-Type");
       expect(allowHeaders).toContain("X-OpenCodex-API-Key");
+      expect(allowHeaders).not.toContain("Authorization");
+
+      const rejected = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "OPTIONS",
+        headers: {
+          Origin: "chrome-extension://attacker-extension-id",
+          "Access-Control-Request-Method": "POST",
+        },
+      });
+      expect(rejected.status).toBe(403);
     } finally {
       server.stop(true);
     }
@@ -89,8 +135,8 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
     }
   });
 
-  test("POST /api/aistudio/session reflects chrome-extension origin in CORS header and saves session", async () => {
-    const server = startServer(0);
+  test("POST /api/aistudio/session requires the dedicated key even on loopback", async () => {
+    const server = configuredServer();
     try {
       const token = serializeSessionBundle({
         selectedProject: "projects/my-test-proj",
@@ -102,6 +148,7 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
         headers: {
           "Content-Type": "application/json",
           Origin: "chrome-extension://test-extension-id",
+          "x-opencodex-api-key": "local-secret",
         },
         body: JSON.stringify({ token }),
       });
@@ -109,6 +156,20 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
       expect(res.headers.get("Access-Control-Allow-Origin")).toBe("chrome-extension://test-extension-id");
       const postJson = await res.json() as any;
       expect(postJson.ok).toBe(true);
+
+      const missing = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "chrome-extension://test-extension-id" },
+        body: JSON.stringify({ token }),
+      });
+      expect(missing.status).toBe(401);
+
+      const bearer = await fetch(new URL("/api/aistudio/session", server.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "chrome-extension://test-extension-id", Authorization: "Bearer local-secret" },
+        body: JSON.stringify({ token }),
+      });
+      expect(bearer.status).toBe(401);
     } finally {
       server.stop(true);
     }

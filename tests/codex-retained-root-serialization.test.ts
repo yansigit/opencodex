@@ -378,6 +378,7 @@ test("a persisted runtime selection moved by another process during the await bl
 
   const sync = Bun.spawn([process.execPath, ...withOwnedServiceHomePreload(["--eval", `
     import { existsSync, writeFileSync } from "node:fs";
+    globalThis[Symbol.for("opencodex.test.provider-fetch")] = true;
     const config = ${JSON.stringify(config)};
     config.providers.together.fetch = async () => {
       writeFileSync(${JSON.stringify(requested)}, "requested");

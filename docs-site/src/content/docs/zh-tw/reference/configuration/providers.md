@@ -335,3 +335,4 @@ OpenRouter 可透過多個推論供應商提供一個模型。`openRouterRouting
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures`（預設關閉）會在串流開始前重試暫時性失敗；請求可能傳送多次。

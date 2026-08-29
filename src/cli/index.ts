@@ -37,6 +37,7 @@ import {
 } from "./tray-proxy";
 import { requestBoundSystemRestart } from "./system-restart-client";
 import { installCrashGuards } from "../lib/crash-guard";
+import { canonicalServerOrigin } from "../lib/server-tls";
 import { dispatchCommand } from "./dispatch";
 import { findAvailablePort, isAddrInUse, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../server/ports";
 import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
@@ -293,7 +294,14 @@ async function handleStart(options: { block?: boolean } = {}) {
   writePid(process.pid);
 
   const config = loadConfig();
-  writeRuntimePort({ pid: process.pid, port, hostname: config.hostname, attestationSecret: localAttestationSecret });
+  const boundPort = server.port ?? port;
+  writeRuntimePort({
+    pid: process.pid,
+    port: boundPort,
+    hostname: config.hostname,
+    origin: canonicalServerOrigin(config, boundPort),
+    attestationSecret: localAttestationSecret,
+  });
   // No pre-emptive snapshot here. `injectCodexConfig` journals the exact bytes it
   // is about to transform; snapshotting earlier only captured a baseline that could
   // already be stale by the time injection ran (#477).

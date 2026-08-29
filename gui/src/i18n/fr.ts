@@ -1308,6 +1308,8 @@ export const fr: Record<TKey, string> = {
   "pws.allowPrivateNetwork": "Autoriser le réseau local/privé",
   "pws.liveModels": "Détecter les modèles auprès du fournisseur",
   "pws.liveModelsDesc": "Récupérez le catalogue de modèles en direct du fournisseur. Désactivez cette option pour utiliser uniquement les modèles configurés/statiques.",
+  "pws.replayTransientFailures": "Rejouer les erreurs transitoires",
+  "pws.replayTransientFailuresDesc": "Réessayer au moins une fois les erreurs transitoires avant le flux ; une requête peut être livrée plusieurs fois.",
   "pws.xaiResponsesOptIn": "Utiliser l’API Responses pour Grok 4.5 et 4.6",
   "pws.xaiResponsesOptInDesc": "Achemine les deux modèles via openai-responses. Les autres modèles Grok et le comportement des tiers restent inchangés.",
   "pws.xaiResponsesOptInMixed": "Activation partielle.",

@@ -21,6 +21,7 @@ interface WreqModule {
     browser: "chrome_142";
     os: "windows" | "macos" | "linux";
     proxy?: string;
+    resolve?: Record<string, string[]>;
   }): Promise<WreqTransport>;
   fetch(input: string | URL | Request, init?: Record<string, unknown>): Promise<unknown>;
 }
@@ -46,6 +47,8 @@ const defaultRuntime: ProviderTlsRuntimeForTest = {
 let runtime = defaultRuntime;
 const statusByProvider = new Map<string, { status: ProviderTlsProfileStatus; fingerprint: string }>();
 const transports = new Map<string, Promise<InitializedTransport | undefined>>();
+const requestTransports = new Set<WreqTransport>();
+let modulePromise: Promise<WreqModule | undefined> | undefined;
 let shutdownDetach: (() => void) | undefined;
 let fallbackWarned = false;
 
@@ -92,7 +95,7 @@ function safeProviderTlsError(error: unknown): Error {
 function warnFallbackOnce(): void {
   if (fallbackWarned) return;
   fallbackWarned = true;
-  console.warn("[opencodex] Antigravity TLS profile requested → fallback to Bun fetch; native transport initialization failed");
+  console.warn("[opencodex] Antigravity TLS profile request blocked: native transport initialization failed");
 }
 
 function emulationOs(): "windows" | "macos" | "linux" {
@@ -184,10 +187,13 @@ function registerShutdownHook(): void {
   shutdownDetach = registerOptionalShutdownHook("provider-tls-profile", () => {
     const pending = [...transports.values()];
     transports.clear();
+    const scoped = [...requestTransports];
+    requestTransports.clear();
     shutdownDetach = undefined;
     for (const transport of pending) {
       void transport.then(value => value?.transport.close()).catch(() => undefined);
     }
+    for (const transport of scoped) void transport.close().catch(() => undefined);
   });
 }
 
@@ -202,7 +208,8 @@ async function getTransport(proxy: string | undefined): Promise<InitializedTrans
   const pending = (async () => {
     let transport: WreqTransport | undefined;
     try {
-      const module = await runtime.importWreq();
+      const module = await getWreqModule();
+      if (!module) return undefined;
       transport = await module.createTransport({
         browser: "chrome_142",
         os: emulationOs(),
@@ -217,6 +224,69 @@ async function getTransport(proxy: string | undefined): Promise<InitializedTrans
   })();
   transports.set(key, pending);
   return pending;
+}
+
+function getWreqModule(): Promise<WreqModule | undefined> {
+  modulePromise ??= runtime.importWreq().catch(() => undefined);
+  return modulePromise;
+}
+
+async function getPinnedRequestTransport(
+  hostname: string,
+  addresses: string[],
+): Promise<InitializedTransport | undefined> {
+  let transport: WreqTransport | undefined;
+  try {
+    const module = await getWreqModule();
+    if (!module) return undefined;
+    transport = await module.createTransport({
+      browser: "chrome_142",
+      os: emulationOs(),
+      resolve: { [hostname]: addresses },
+    });
+    requestTransports.add(transport);
+    registerShutdownHook();
+    return { module, transport };
+  } catch {
+    if (transport) await transport.close().catch(() => undefined);
+    return undefined;
+  }
+}
+
+function closeTransportWithResponse(response: Response, transport: WreqTransport): Response {
+  const close = () => {
+    if (!requestTransports.delete(transport)) return;
+    void transport.close().catch(() => undefined);
+  };
+  if (!response.body) {
+    close();
+    return response;
+  }
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          close();
+          controller.close();
+        } else {
+          controller.enqueue(chunk.value);
+        }
+      } catch (error) {
+        close();
+        controller.error(error);
+      }
+    },
+    async cancel(reason) {
+      try { await reader.cancel(reason); } finally { close(); }
+    },
+  });
+  return new Response(body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
 }
 
 export function providerTlsFetch(
@@ -237,27 +307,34 @@ export function providerTlsFetch(
   if (!profileIsSupported(providerName, provider)) {
     setStatus(providerName, provider, "fallback");
     warnFallbackOnce();
-    return bunFetch;
+    return (async () => {
+      throw safeProviderTlsError(new Error("configured native transport profile is not valid for this provider"));
+    }) as unknown as typeof globalThis.fetch;
   }
   return (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" || input instanceof URL ? input : input.url;
-    if (!isCanonicalAntigravityUrl(url)) return bunFetch(input, init);
+    if (!isCanonicalAntigravityUrl(url)) {
+      throw safeProviderTlsError(new Error("configured native transport profile refused a noncanonical destination"));
+    }
     const proxy = proxyForUrl(url);
     // A direct profiled request must pass the same public-destination gate as the
     // ordinary provider executor before wreq can send its bearer-bearing request.
     // Proxied requests deliberately leave peer selection to the configured proxy,
     // matching providerOutbound's proxy boundary (and its inability to pin a peer).
-    if (!proxy) {
-      await (runtime.resolveDestination ?? resolvePublicAddresses)(String(url), {
+    const parsed = new URL(String(url));
+    const resolved = !proxy
+      ? await (runtime.resolveDestination ?? resolvePublicAddresses)(String(url), {
         context: "Antigravity profile URL",
         allowPrivateNetwork: false,
-      });
-    }
-    const initialized = await getTransport(proxy);
+      })
+      : undefined;
+    const initialized = resolved
+      ? await getPinnedRequestTransport(parsed.hostname, resolved.addresses.map(address => address.address))
+      : await getTransport(proxy);
     if (!initialized) {
       setStatus(providerName, provider, "fallback");
       warnFallbackOnce();
-      return bunFetch(input, { ...init, redirect: "manual" });
+      throw safeProviderTlsError(new Error("native transport initialization failed"));
     }
     setStatus(providerName, provider, "active");
     const wreqInit = {
@@ -268,8 +345,12 @@ export function providerTlsFetch(
       redirect: "manual" as const,
     };
     try {
-      return await initialized.module.fetch(input, wreqInit) as Response;
+      const response = await initialized.module.fetch(input, wreqInit) as Response;
+      return resolved ? closeTransportWithResponse(response, initialized.transport) : response;
     } catch (error) {
+      if (resolved && requestTransports.delete(initialized.transport)) {
+        void initialized.transport.close().catch(() => undefined);
+      }
       // Native errors are post-dispatch failures. Redact at this boundary and
       // never replay through Bun, since generation may already have started.
       throw safeProviderTlsError(error);
@@ -280,6 +361,7 @@ export function providerTlsFetch(
 export function setProviderTlsRuntimeForTest(next: ProviderTlsRuntimeForTest | undefined): void {
   if (next === undefined) {
     runtime = defaultRuntime;
+    modulePromise = undefined;
     return;
   }
   // Test callers normally replace only the native module. Keep those tests
@@ -294,11 +376,15 @@ export function setProviderTlsRuntimeForTest(next: ProviderTlsRuntimeForTest | u
     }),
     ...next,
   };
+  modulePromise = undefined;
 }
 
 export function resetProviderTlsProfileForTests(): void {
   for (const pending of transports.values()) void pending.then(value => value?.transport.close()).catch(() => undefined);
   transports.clear();
+  for (const transport of requestTransports) void transport.close().catch(() => undefined);
+  requestTransports.clear();
+  modulePromise = undefined;
   shutdownDetach?.();
   shutdownDetach = undefined;
   statusByProvider.clear();

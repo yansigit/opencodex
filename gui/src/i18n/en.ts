@@ -1362,6 +1362,8 @@ export const en = {
   "pws.allowPrivateNetwork": "Allow local/private network",
   "pws.liveModels": "Discover models from provider",
   "pws.liveModelsDesc": "Fetch the provider's live model catalog. Turn this off to use only configured/static models.",
+  "pws.replayTransientFailures": "Replay transient failures",
+  "pws.replayTransientFailuresDesc": "Retry pre-stream transient failures at least once; requests may be delivered more than once.",
   "pws.xaiResponsesOptIn": "Use Responses API for Grok 4.5 and 4.6",
   "pws.xaiResponsesOptInDesc": "Routes both models through openai-responses. Other Grok models and tier behavior are unchanged.",
   "pws.xaiResponsesOptInMixed": "Partially enabled.",

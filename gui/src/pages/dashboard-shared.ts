@@ -53,6 +53,17 @@ export interface SettingsData {
   hostname: string;
   /** IANA zone of the machine running the proxy, used to render log timestamps (#725). */
   timeZone?: string;
+  server?: {
+    configured: {
+      hostname: string;
+      port: number;
+      tls: { certFile: string; keyFile: string; publicOrigin: string } | null;
+      aiStudioOrigin: string | null;
+    };
+    activeOrigin: string;
+    credentialConfigured: boolean;
+    restartRequired: boolean;
+  };
   startupHealth?: {
     status: "native" | "protected" | "at-risk";
     routingKind: "native" | "opencodex-local" | "custom-local" | "custom-remote" | "unknown";

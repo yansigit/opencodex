@@ -281,3 +281,6 @@ sınırı tüketmez. Uzak `https:` görselleri ve başarısız veya boş açıkl
 
 Anthropic OAuth sidecar'ları opencodex'in mevcut Claude Code OAuth parmak izini
 yeniden kullanır. Hedeflenen hesap ve iş yükünü kapsamlı bir şekilde test edin.
+### TLS ve WebSocket
+
+`tls`, `certFile`, `keyFile` ve `publicOrigin` alanlarını kabul eder. WebSocket boşta kalma süresi 255 saniyedir; geri basınç sınırında (1 MiB) bağlantı kapatılır.

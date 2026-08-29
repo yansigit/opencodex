@@ -2,6 +2,7 @@
 import { OAuthCallbackFlow } from "./callback-server";
 import { generatePKCE } from "./pkce";
 import type { LocalTokenImportMode, OAuthController, OAuthCredentials } from "./types";
+import { oauthFetch } from "./transport";
 
 const CLIENT_ID = atob("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
@@ -46,7 +47,7 @@ export class AnthropicTokenError extends Error {
 }
 
 async function postJson(url: string, body: Record<string, string | number>): Promise<string> {
-  const response = await fetch(url, {
+  const response = await oauthFetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(body),
@@ -62,7 +63,7 @@ async function postJson(url: string, body: Record<string, string | number>): Pro
       // Best-effort only: malformed error bodies remain structured by HTTP status.
     }
     throw new AnthropicTokenError(
-      `Anthropic OAuth HTTP ${response.status}: ${responseBody}`,
+      `Anthropic OAuth HTTP ${response.status}`,
       response.status,
       oauthError,
     );
@@ -74,7 +75,7 @@ function parseTokenResponse(responseBody: string): AnthropicTokenResponse {
   try {
     return JSON.parse(responseBody) as AnthropicTokenResponse;
   } catch {
-    throw new Error(`Anthropic OAuth returned invalid JSON: ${responseBody.slice(0, 200)}`);
+    throw new Error("Anthropic OAuth returned invalid JSON");
   }
 }
 
