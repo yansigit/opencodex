@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveTrustedWindowsTaskkillExe } from "../src/lib/windows-elevation";
 import { acquireTestRunLock, TEST_RUN_ID_ENV } from "./test-run-lock";
 
 export interface IsolatedTestEnvironment {
@@ -145,16 +146,31 @@ const BUN_TEST_OPTIONS_REQUIRING_VALUES = new Set([
   "--config",
 ]);
 
+const BUN_TEST_SELECTION_FLAGS = [
+  "--changed",
+  "--grep",
+  "--only",
+  "--path-ignore-patterns",
+  "--shard",
+  "--test-name-pattern",
+  "-t",
+] as const;
+
 /** True for a filter-less `bun run test`. `--timeout` / `--dots` / `--parallel=N` still count. */
-function isFullSuiteRun(requested: string[]): boolean {
+export function isFullSuiteRun(requested: string[]): boolean {
   const delimiterIndex = requested.indexOf("--");
   const wrapperArgs = delimiterIndex === -1 ? requested : requested.slice(0, delimiterIndex);
   const passedThrough = delimiterIndex === -1 ? [] : requested.slice(delimiterIndex + 1);
   if (passedThrough.length > 0) return false;
+  if (BUN_TEST_SELECTION_FLAGS.some(flag => hasCliFlag(wrapperArgs, flag))) return false;
 
   for (let index = 0; index < wrapperArgs.length; index++) {
     const arg = wrapperArgs[index];
-    if (arg === "-" || !arg.startsWith("-")) return false;
+    if (arg === "-") return false;
+    if (!arg.startsWith("-")) {
+      if (arg !== "./tests/") return false;
+      continue;
+    }
     if (!arg.includes("=") && BUN_TEST_OPTIONS_REQUIRING_VALUES.has(arg)) index++;
   }
   return true;
@@ -200,6 +216,82 @@ export interface BunTestLane {
   label: string;
   args: string[];
   timeoutMs: number;
+}
+
+export function terminationCommandForTests(
+  pid: number,
+  platform = process.platform,
+  resolveTaskkill: () => string = resolveTrustedWindowsTaskkillExe,
+): string[] | null {
+  return platform === "win32"
+    ? [resolveTaskkill(), "/PID", String(pid), "/T", "/F"]
+    : null;
+}
+
+export function testLaneTimedOut(exitCode: number | null): boolean {
+  return exitCode === null;
+}
+
+export function laneExitCodeForTests(exitCode: number | null, interrupted: NodeJS.Signals | null): number {
+  if (testLaneTimedOut(exitCode)) return 124;
+  if (interrupted === "SIGINT") return 130;
+  if (interrupted === "SIGTERM") return 143;
+  return exitCode!;
+}
+
+export interface TestTerminationOptions {
+  pid: number;
+  platform: string;
+  signal?: NodeJS.Signals;
+  exited: Promise<number>;
+  signalGroup?: (signal: NodeJS.Signals) => void;
+  isAlive?: () => boolean;
+  resolveTaskkill?: () => string;
+  taskkill?: (command: string[]) => number;
+  graceMs?: number;
+  killGraceMs?: number;
+}
+
+export interface TestTerminationGraceOptions {
+  graceMs?: number;
+  killGraceMs?: number;
+}
+
+export async function terminateTestProcessForTests(options: TestTerminationOptions): Promise<void> {
+  if (!Number.isSafeInteger(options.pid) || options.pid <= 0) {
+    throw new Error(`[test] child pid must be a positive safe integer; received ${options.pid}`);
+  }
+  const graceMs = options.graceMs ?? 5_000;
+  const killGraceMs = options.killGraceMs ?? 2_000;
+  if (options.platform === "win32") {
+    const command = terminationCommandForTests(options.pid, "win32", options.resolveTaskkill)!;
+    const result = options.taskkill?.(command) ?? 0;
+    if (result !== 0) {
+      throw new Error(`[test] failed to terminate process tree with ${command[0]} (exit ${result})`);
+    }
+    if (await waitWithTimeout(options.exited, killGraceMs) === null) {
+      throw new Error(`[test] process tree ${options.pid} did not terminate after taskkill`);
+    }
+    return;
+  }
+  const signal = options.signalGroup ?? (() => {});
+  const alive = options.isAlive ?? (() => false);
+  signal(options.signal ?? "SIGTERM");
+  if (await waitForProcessDeath(alive, graceMs)) return;
+  signal("SIGKILL");
+  if (!await waitForProcessDeath(alive, killGraceMs)) {
+    throw new Error(`[test] process group ${options.pid} did not terminate after SIGKILL`);
+  }
+}
+
+async function waitForProcessDeath(isAlive: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (isAlive()) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return false;
+    await Bun.sleep(Math.min(10, remaining));
+  }
+  return true;
 }
 
 function withoutParallelOverride(requested: string[]): string[] {
@@ -248,66 +340,145 @@ function waitWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T |
   });
 }
 
-async function runTestLane(lane: BunTestLane, runId: string): Promise<number> {
-  const isolated = createIsolatedTestEnvironment({ ...process.env, [TEST_RUN_ID_ENV]: runId });
+export interface TestLaneRuntimeOptions extends TestTerminationGraceOptions {
+  command?: string[];
+  createEnvironment?: typeof createIsolatedTestEnvironment;
+  terminateProcess?: (child: Bun.Subprocess, signal: NodeJS.Signals) => Promise<void>;
+}
+
+export async function runTestLaneForTests(
+  lane: BunTestLane,
+  runId: string,
+  options: TestLaneRuntimeOptions = {},
+): Promise<number> {
+  const isolated = (options.createEnvironment ?? createIsolatedTestEnvironment)({
+    ...process.env,
+    [TEST_RUN_ID_ENV]: runId,
+  });
   const startedAt = Date.now();
   let interrupted: NodeJS.Signals | null = null;
-  const child = Bun.spawn([process.execPath, "test", ...lane.args], {
-    env: isolated.env,
-    stdin: "inherit",
-    stdout: "inherit",
-    stderr: "inherit",
-  });
-  const forward = (signal: NodeJS.Signals) => {
-    interrupted = signal;
-    try { child.kill(signal); } catch { /* child already exited */ }
-  };
-  const onInterrupt = () => forward("SIGINT");
-  const onTerminate = () => forward("SIGTERM");
-  process.once("SIGINT", onInterrupt);
-  process.once("SIGTERM", onTerminate);
-
-  const exited = child.exited;
+  let termination: Promise<void> | null = null;
+  let onInterrupt: (() => void) | null = null;
+  let onTerminate: (() => void) | null = null;
   try {
-    const exitCode = await waitWithTimeout(exited, lane.timeoutMs);
-    if (exitCode === null) {
+    const child = Bun.spawn(options.command ?? [process.execPath, "test", ...lane.args], {
+      env: isolated.env,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+      detached: process.platform !== "win32",
+    });
+    const terminate = options.terminateProcess ?? ((target, signal) => terminateSpawnedTestProcessForTests(
+      target,
+      signal,
+      options,
+    ));
+    let resolveInterrupt!: (signal: NodeJS.Signals) => void;
+    const interruptRequested = new Promise<NodeJS.Signals>(resolve => { resolveInterrupt = resolve; });
+    const forward = (signal: NodeJS.Signals) => {
+      if (interrupted) return;
+      interrupted = signal;
+      termination ??= Promise.resolve().then(() => terminate(child, signal));
+      resolveInterrupt(signal);
+    };
+    onInterrupt = () => forward("SIGINT");
+    onTerminate = () => forward("SIGTERM");
+    process.on("SIGINT", onInterrupt);
+    process.on("SIGTERM", onTerminate);
+
+    const outcome = await Promise.race([
+      waitWithTimeout(child.exited, lane.timeoutMs).then(exitCode => ({ kind: "exit" as const, exitCode })),
+      interruptRequested.then(async signal => {
+        await termination;
+        return { kind: "interrupt" as const, signal };
+      }),
+    ]);
+    if (outcome.kind === "interrupt") return laneExitCodeForTests(0, outcome.signal);
+
+    const exitCode = outcome.exitCode;
+    if (testLaneTimedOut(exitCode)) {
       console.error(`[test] ${lane.label} exceeded ${Math.round(lane.timeoutMs / 1000)}s; terminating pid ${child.pid}.`);
-      try { child.kill("SIGTERM"); } catch { /* child already exited */ }
-      const graceful = await waitWithTimeout(exited, 5_000);
-      if (graceful === null) {
-        try { child.kill("SIGKILL"); } catch { /* child already exited */ }
-        await waitWithTimeout(exited, 2_000);
-      }
+      termination ??= Promise.resolve().then(() => terminate(child, "SIGTERM"));
+      await termination;
       return 124;
     }
-    if (interrupted === "SIGINT") return 130;
-    if (interrupted === "SIGTERM") return 143;
+    if (interrupted === "SIGINT") return laneExitCodeForTests(exitCode, interrupted);
+    if (interrupted === "SIGTERM") return laneExitCodeForTests(exitCode, interrupted);
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.warn(`[test] ${lane.label} finished in ${seconds}s (exit ${exitCode}).`);
     return exitCode;
   } finally {
-    process.off("SIGINT", onInterrupt);
-    process.off("SIGTERM", onTerminate);
-    isolated.cleanup();
+    try {
+      try {
+        if (termination) await termination;
+      } finally {
+        isolated.cleanup();
+      }
+    } finally {
+      if (onInterrupt) process.off("SIGINT", onInterrupt);
+      if (onTerminate) process.off("SIGTERM", onTerminate);
+    }
   }
 }
 
-if (import.meta.main) {
-  const requestedTests = process.argv.slice(2);
-  const runId = randomUUID();
-  const lock = await acquireTestRunLock({
-    runId,
+export async function terminateSpawnedTestProcessForTests(
+  child: { pid: number; exited: Promise<number>; kill(signal: NodeJS.Signals): void },
+  signal: NodeJS.Signals,
+  grace: TestTerminationGraceOptions = {},
+): Promise<void> {
+  if (process.platform === "win32") {
+    return terminateTestProcessForTests({ pid: child.pid, platform: "win32", signal, exited: child.exited,
+      taskkill: command => Bun.spawnSync(command, { stdout: "ignore", stderr: "pipe" }).exitCode,
+      ...grace });
+  }
+
+  const signalGroup = (name: NodeJS.Signals) => {
+    try { process.kill(-child.pid, name); } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  };
+  return terminateTestProcessForTests({ pid: child.pid, platform: process.platform, signal, exited: child.exited,
+    signalGroup, isAlive: () => processGroupAlive(child.pid), ...grace });
+}
+
+function processGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+export interface TestMainRuntimeOptions {
+  lockPath?: string;
+  pollMs?: number;
+  maxWaitMs?: number;
+  runLane?: (lane: BunTestLane, runId: string) => Promise<number>;
+}
+
+export async function runTestMainForTests(
+  requestedTests: string[],
+  options: TestMainRuntimeOptions = {},
+): Promise<number> {
+  const fullSuite = isFullSuiteRun(requestedTests);
+  const runId = fullSuite ? randomUUID() : undefined;
+  const lock = fullSuite ? await acquireTestRunLock({
+    runId: runId!,
+    lockPath: options.lockPath,
+    pollMs: options.pollMs,
+    maxWaitMs: options.maxWaitMs,
     onWait: owner => console.warn(
       `[test] another Bun test run${owner ? ` (pid ${owner.pid})` : ""} holds the machine lock; waiting. `
       + "Set OCX_TEST_NO_QUEUE=1 only for intentional overlap.",
     ),
     onAcquiredAfterWait: elapsedMs => console.warn(`[test] acquired the machine lock after ${Math.round(elapsedMs / 1000)}s.`),
-  });
+  }) : { release() {} };
   const startedAt = Date.now();
   try {
     let exitCode = 0;
     for (const lane of resolveBunTestPlan(requestedTests)) {
-      const laneExitCode = await runTestLane(lane, runId);
+      const laneExitCode = await (options.runLane ?? runTestLaneForTests)(lane, runId ?? "focused");
       if (laneExitCode !== 0 && exitCode === 0) exitCode = laneExitCode;
       if ([124, 130, 143].includes(laneExitCode)) break;
     }
@@ -318,8 +489,12 @@ if (import.meta.main) {
         + "Check for another test runner, a busy CPU, or a test that started polling something real.",
       );
     }
-    process.exitCode = exitCode;
+    return exitCode;
   } finally {
     lock.release();
   }
+}
+
+if (import.meta.main) {
+  process.exitCode = await runTestMainForTests(process.argv.slice(2));
 }
