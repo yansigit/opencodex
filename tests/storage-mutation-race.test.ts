@@ -288,10 +288,10 @@ describe("storage mutation coordinator", () => {
       expect(done.job.lastOutcome?.ok).toBe(false);
       expect(done.job.lastOutcome?.error).toBe("storage_mutation_busy");
       acquired.release();
-
       const restoreResult = await restorePromise;
       expect(restoreResult.ok).toBe(true);
     } finally {
+      acquired.release();
       await stopRaceServer(server);
     }
   }, { timeout: 30_000 });
@@ -317,10 +317,10 @@ describe("storage mutation coordinator", () => {
       expect(done.job.lastOutcome?.ok).toBe(false);
       expect(done.job.lastOutcome?.error).toBe("storage_mutation_busy");
       acquired.release();
-
       const cleanupRes = await cleanupPromise;
       expect(cleanupRes.status).toBe(200);
     } finally {
+      acquired.release();
       await stopRaceServer(server);
     }
   }, { timeout: 30_000 });
@@ -353,11 +353,11 @@ describe("storage mutation coordinator", () => {
       expect(restoreRes.status).toBe(409);
       expect((await restoreRes.json()).error).toBe("storage_mutation_busy");
       acquired.release();
-
       // Drain the blocked policy job before stop/teardown — leaving it mid-block leaves
       // Windows holding OPENCODEX_HOME (SQLite/job handles) and afterEach rmSync fails EBUSY.
       await waitForPolicyJob(server.url, startedAt);
     } finally {
+      acquired.release();
       await stopRaceServer(server);
     }
   }, { timeout: 30_000 });
@@ -477,6 +477,7 @@ describe("storage mutation coordinator", () => {
       expect(existsSync(join(home, "archived_sessions", "rollout-new.jsonl"))).toBe(true);
       expect(threadCount(home)).toBe(1);
     } finally {
+      acquired.release();
       await stopRaceServer(server);
     }
   }, { timeout: 30_000 });
@@ -512,10 +513,10 @@ describe("storage mutation coordinator", () => {
       expect(second.status).toBe(409);
       expect((await second.json()).error).toBe("storage_mutation_busy");
       acquired.release();
-
       const firstRes = await first;
       expect(firstRes.status).toBe(200);
     } finally {
+      acquired.release();
       await stopRaceServer(server);
     }
   }, { timeout: 30_000 });
