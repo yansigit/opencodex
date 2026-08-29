@@ -20,7 +20,7 @@ import {
   isKnownAdmissionKind,
   isKnownInboundProtocol,
   isKnownUsageSurface,
-  isPersistableAccountLogLabel,
+  isCodexUsageAccountLogLabel,
   isValidReasoningWireValue,
   readRecentUsageEntries,
   usageForFinalLog,
@@ -63,6 +63,13 @@ export interface RequestLogContext {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  /**
+   * Set when an adapter answered the turn locally and no upstream request was made
+   * (`ProviderAdapter.localTerminal`). A fixed identifier naming the code path, never
+   * conversation-derived: it exists so a request log showing zero sends is explainable
+   * rather than looking like a lost request.
+   */
+  localTerminalReason?: string;
   /** Stable non-PII Codex Pool account identity for durable usage attribution. */
   accountLogLabel?: string;
   requestedModel?: string;
@@ -133,6 +140,12 @@ export interface RequestLogEntry {
   /** TTFT: ms from request start to the first non-empty model output delta; unset for non-streaming/tool-only. */
   firstOutputMs?: number;
   surface?: "claude" | "claude-desktop" | "grok";
+  /**
+   * Set when the proxy answered this turn locally and sent nothing upstream. Without it a zero-send
+   * row is indistinguishable from a request that vanished. A fixed adapter-supplied identifier,
+   * never conversation-derived.
+   */
+  localTerminalReason?: string;
   /** The matched configured key's id. Set ONLY for admissionKind "configured" —
    *  never a sentinel, so a hand-edited entry whose id happens to be "loopback"
    *  cannot absorb unrelated traffic. */
@@ -259,7 +272,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
-    ...(isPersistableAccountLogLabel(entry.accountLogLabel)
+    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
@@ -378,7 +391,7 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-      ...(isPersistableAccountLogLabel(entry.accountLogLabel)
+      ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
@@ -555,7 +568,6 @@ export function requestLogErrorCode(
   // Keep the high-confidence message fallback for runtimes/providers that stripped the
   // structured code before emitting response.failed.
   if (classifiedCode === CYBER_POLICY_ERROR_CODE) return CYBER_POLICY_ERROR_CODE;
-  if (classifiedCode === "insufficient_quota") return classifiedCode;
   if (status === 400 || status === 409) return "invalid_request_error";
   if (status === 401) return "invalid_api_key";
   if (status === 403) {
@@ -943,6 +955,7 @@ export function addFinalRequestLog(
     logCtx.usage,
     logCtx.usageLogInputTokens,
     contextWindowForModel(logCtx.providerAdapter ?? logCtx.provider, logCtx.model),
+    logCtx.localTerminalReason !== undefined,
   );
   const attempts = logCtx.attempts?.map(attempt => ({
     ...attempt,
@@ -970,7 +983,10 @@ export function addFinalRequestLog(
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
-    ...(isPersistableAccountLogLabel(logCtx.accountLogLabel)
+    ...(logCtx.localTerminalReason
+      ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
+      : {}),
+    ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel)
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
@@ -1030,29 +1046,18 @@ export function filterRequestLogs(logs: RequestLogEntry[], params: URLSearchPara
     filtered = filtered.filter(entry => entry.provider === provider
       || entry.attempts?.some(attempt => attempt.provider === provider));
   }
-  const model = params.get("model")?.trim().toLowerCase();
-  if (model) {
-    filtered = filtered.filter(entry => entry.model.toLowerCase() === model
-      || entry.resolvedModel?.toLowerCase() === model
-      || entry.attempts?.some(attempt => attempt.model.toLowerCase() === model));
-  }
-  const sinceRaw = params.get("since")?.trim();
-  if (sinceRaw) {
-    const since = Number(sinceRaw);
-    if (Number.isFinite(since)) {
-      filtered = filtered.filter(entry => entry.timestamp >= since);
-    }
-  }
-  const untilRaw = params.get("until")?.trim();
-  if (untilRaw) {
-    const until = Number(untilRaw);
-    if (Number.isFinite(until)) {
-      filtered = filtered.filter(entry => entry.timestamp <= until);
-    }
-  }
   const conversationId = params.get("conversationId")?.trim() || params.get("conversation")?.trim();
   if (conversationId) {
     filtered = filtered.filter(entry => matchesLogConversationId(entry.conversationId, conversationId));
+  }
+  // #2704: there was no `model` clause at all, so `?model=x` was ACCEPTED and silently
+  // ignored -- worse than an error, because it yields wrong conclusions from output that
+  // looks correct. Attempts are matched for the same reason `provider` matches them: a
+  // request that failed over should be findable by the model that actually served it.
+  const model = params.get("model")?.trim();
+  if (model) {
+    filtered = filtered.filter(entry => entry.model === model
+      || entry.attempts?.some(attempt => attempt.model === model));
   }
   const status = params.get("status")?.trim().toLowerCase();
   if (status) {
@@ -1123,6 +1128,7 @@ function finalizedUsage(
   usage: OcxUsage | undefined,
   inputTokenEstimate: number | undefined,
   contextWindow: number | undefined,
+  locallyAnswered = false,
 ): FinalizedUsageResult {
   // The ESTIMATE itself is capped at the model's context window (codex-router PR #140). The
   // combined value below keeps its max(inputTokens, estimate) behavior — a provider-reported
@@ -1132,7 +1138,7 @@ function finalizedUsage(
     && inputTokenEstimate >= 0
     ? capEstimateAtContextWindow(inputTokenEstimate, contextWindow)
     : undefined;
-  const finalUsage = usageForFinalLog(adapter, usage);
+  const finalUsage = usageForFinalLog(adapter, usage, locallyAnswered);
   const usageFallback = !finalUsage && estimate !== undefined
     ? { inputTokens: estimate, outputTokens: 0, estimated: true }
     : undefined;
@@ -1196,7 +1202,7 @@ export function sealRequestAttemptIdentity(
   if (!attempt) return;
   attempt.provider = provider;
   attempt.adapter = adapter;
-  if (isPersistableAccountLogLabel(accountLogLabel)) attempt.accountLogLabel = accountLogLabel;
+  if (isCodexUsageAccountLogLabel(accountLogLabel)) attempt.accountLogLabel = accountLogLabel;
 }
 
 export function noteAttemptSend(
@@ -1226,13 +1232,13 @@ export function finishRequestAttempt(
   status: number,
   durationMs: number,
   usage?: OcxUsage,
-  upstreamError?: string,
 ): PersistedUsageAttempt {
   const finalized = finalizedUsage(
     attempt.adapter,
     usage ?? attempt.usage,
     attempt.inputTokenEstimate,
     contextWindowForModel(attempt.adapter, attempt.model),
+    attempt.locallyAnswered === true,
   );
   attempt.status = status;
   attempt.durationMs = Math.max(0, durationMs);
@@ -1241,7 +1247,7 @@ export function finishRequestAttempt(
   else delete attempt.usage;
   if (finalized.totalTokens !== undefined) attempt.totalTokens = finalized.totalTokens;
   else delete attempt.totalTokens;
-  const errorCode = requestLogErrorCode(status, upstreamError);
+  const errorCode = requestLogErrorCode(status);
   if (errorCode) attempt.errorCode = errorCode;
   else delete attempt.errorCode;
   return attempt;

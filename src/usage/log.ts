@@ -8,21 +8,33 @@ import { sanitizeLogMetadataString } from "../lib/redact";
 import { usageDisplayTotalTokens } from "./totals";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
-import { CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
+import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
-export type CodexUsageAccountLogLabel = "main" | `p${string}`;
+/**
+ * A persisted account label: a Codex pool account (`main`/`p<hex6>`) or a non-Codex OAuth
+ * provider account (`o<hex6>`, #2699).
+ *
+ * The old name `CodexUsageAccountLogLabel` is kept as an alias because it is exported and used
+ * across modules; the two predicates below are what callers should choose between.
+ */
+export type UsageAccountLogLabel = "main" | `p${string}` | `o${string}`;
+export type CodexUsageAccountLogLabel = UsageAccountLogLabel;
 
-export const OAUTH_ACCOUNT_LOG_LABEL_RE = /^[a-f0-9]{8,64}(?:-\d+)?$/;
-
-export function isPersistableAccountLogLabel(value: unknown): value is string {
-  return (
-    value === "main"
-    || (typeof value === "string" && (CODEX_ACCOUNT_LOG_LABEL_RE.test(value) || OAUTH_ACCOUNT_LOG_LABEL_RE.test(value)))
-  );
+/**
+ * Accepts EITHER label family. This is the predicate the persistence writers use, so widening
+ * it here is what stops six separate call sites from silently dropping an `o`-label -- including
+ * two in the live request path (`request-log.ts:972` and `:1187`).
+ *
+ * The name is unchanged deliberately: renaming it would touch every call site for no behavior,
+ * and the widened contract is what every one of those sites wanted.
+ */
+export function isCodexUsageAccountLogLabel(value: unknown): value is UsageAccountLogLabel {
+  return value === "main" || (typeof value === "string" && ACCOUNT_LOG_LABEL_RE.test(value));
 }
 
-export function isCodexUsageAccountLogLabel(value: unknown): value is CodexUsageAccountLogLabel {
+/** Strictly a Codex pool label. Use when the Codex-only distinction actually matters. */
+export function isCodexPoolAccountLogLabel(value: unknown): value is "main" | `p${string}` {
   return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
 }
 
@@ -62,8 +74,15 @@ export interface PersistedUsageAttempt {
   sendCount: number;
   recoveryKinds: AttemptRecoveryKind[];
   usageStatus: UsageStatus;
-  /** Stable non-PII identity for the account that served this attempt. */
-  accountLogLabel?: string;
+  /**
+   * True when the proxy answered this turn locally and issued no upstream request. It travels on
+   * the attempt itself rather than as a `finishRequestAttempt` argument because that function is
+   * called from six places, and a new parameter would silently default to the wrong answer at any
+   * one of them that was missed. Absent on ordinary attempts so old rows keep their exact shape.
+   */
+  locallyAnswered?: boolean;
+  /** Stable non-PII identity for the Codex pool account that served this attempt. */
+  accountLogLabel?: CodexUsageAccountLogLabel;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -92,8 +111,8 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  /** Stable non-PII identity for the account that served this request. */
-  accountLogLabel?: string;
+  /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
+  accountLogLabel?: CodexUsageAccountLogLabel;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   resolvedModel?: string;
@@ -192,8 +211,20 @@ function isEstimatedUsageProvider(providerOrAdapter: string): boolean {
     || providerOrAdapter === "cursor" || providerOrAdapter.startsWith("cursor-");
 }
 
-export function usageForFinalLog(provider: string, usage: OcxUsage | undefined): OcxUsage | undefined {
+export function usageForFinalLog(
+  provider: string,
+  usage: OcxUsage | undefined,
+  /**
+   * True when the proxy answered this turn locally and issued no upstream request. Such a turn's
+   * zero counts are EXACT, so the provider-wide estimated marking must not apply: Kiro and Cursor
+   * are marked estimated because their adapters can only guess a real inference's usage, and a
+   * turn with no inference has nothing to guess. Without this, a no-send turn is indistinguishable
+   * from a real one whose usage frame never arrived.
+   */
+  locallyAnswered = false,
+): OcxUsage | undefined {
   if (!usage) return undefined;
+  if (locallyAnswered) return usage;
   if (usage.estimated || isEstimatedUsageProvider(provider)) return { ...usage, estimated: true };
   return usage;
 }
@@ -231,6 +262,8 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "key-429",
   "rate-limit-429",
   "anthropic-oauth-429",
+  "cursor-oauth-auth",
+  "cursor-oauth-429",
   "oauth-account-429",
   "image-413",
   "opaque-blob-rejection",
@@ -377,7 +410,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
-    ...(isPersistableAccountLogLabel(attempt.accountLogLabel)
+    ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
       : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
@@ -464,7 +497,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-    ...(isPersistableAccountLogLabel(entry.accountLogLabel)
+    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()

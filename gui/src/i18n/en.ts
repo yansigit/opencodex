@@ -1094,6 +1094,7 @@ export const en = {
   "storage.policy.skippedEmpty": "No archived candidates matched the target.",
   "storage.policy.doneQuarantine": "Policy quarantined {count} file(s) ({size}).",
   "storage.policy.donePermanent": "Policy permanently deleted {count} file(s) ({size}).",
+  "storage.policy.metadataSaveWarning": "The policy run finished, but its scheduling metadata could not be saved.",
 
   // add-provider modal
   "modal.addNamed": "Add: {label}",

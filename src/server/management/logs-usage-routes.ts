@@ -21,7 +21,7 @@ import {
   submitManualLoginCode,
   upsertOAuthProvider,
 } from "../../oauth";
-import { getAccountSet, removeCredential } from "../../oauth/store";
+import { removeCredential } from "../../oauth/store";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets } from "../../providers/derive";
@@ -32,8 +32,6 @@ import { isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
-import { resolveCodexHomeDir } from "../../codex/home";
-import { scanStorage } from "../../storage/scanner";
 import { executeArchivedCleanup, listTrashEntries, pickWireCleanupTestHooks, previewArchivedCleanup, type CleanupMode, type RestoreErrorCode } from "../../storage/cleanup";
 import { runArchivedCleanupJob } from "../../storage/cleanup-job";
 import { getRestoreTrashTestStreamResponse, runRestoreTrashEntryJob } from "../../storage/restore-job";
@@ -204,16 +202,10 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const filter = {
       provider: url.searchParams.get("provider"),
       model: url.searchParams.get("model"),
-      account: url.searchParams.get("account"),
     };
-    const fallbackAccounts: Record<string, string> = {};
-    for (const p of listOAuthProviders()) {
-      const set = getAccountSet(p);
-      if (set && set.accounts.length === 1 && set.activeAccountId) fallbackAccounts[p] = set.activeAccountId;
-    }
     const project = <T extends UsageSummary>(summary: T, entries?: PersistedUsageEntry[]) =>
-      projectUsageSummary(summary, filter, entries, fallbackAccounts);
-    const filterRequested = Boolean(filter.provider ?? filter.model ?? filter.account);
+      projectUsageSummary(summary, filter, entries);
+    const filterRequested = Boolean(filter.provider ?? filter.model);
     const now = Date.now();
     try {
       const cacheKey = `${range}:${surface}`;
@@ -248,7 +240,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       const revisionReadAt = Date.now();
       const window = snapshotWindow(snapshot.entries);
       const summary = {
-        ...summarizeUsage(snapshot.entries, range, now, surface, fallbackAccounts),
+        ...summarizeUsage(snapshot.entries, range, now, surface),
         historyTruncated: snapshot.truncatedPrefixBytes > 0 || snapshot.entriesTruncated,
         truncatedPrefixBytes: snapshot.truncatedPrefixBytes,
         entriesTruncated: snapshot.entriesTruncated,
@@ -276,7 +268,7 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
       for (const nextRange of ranges) {
         for (const nextSurface of surfaces) {
           const nextSummary = nextRange === range && nextSurface === surface ? summary : {
-            ...summarizeUsage(snapshot.entries, nextRange, now, nextSurface, fallbackAccounts),
+            ...summarizeUsage(snapshot.entries, nextRange, now, nextSurface),
             historyTruncated: summary.historyTruncated,
             truncatedPrefixBytes: summary.truncatedPrefixBytes,
             entriesTruncated: summary.entriesTruncated,
@@ -345,20 +337,6 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
         snapshotWindowStart: null,
         snapshotWindowEnd: null,
         error: "read_failed",
-      });
-    }
-  }
-
-  if (url.pathname === "/api/storage" && req.method === "GET") {
-    try {
-      return jsonResponse(scanStorage());
-    } catch {
-      return jsonResponse({
-        codexHome: resolveCodexHomeDir(),
-        generatedAt: Date.now(),
-        total: { bytes: 0, fileCount: 0 },
-        buckets: [],
-        error: "scan_failed",
       });
     }
   }
