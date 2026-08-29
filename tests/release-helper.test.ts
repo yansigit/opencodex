@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandInvocation } from "../src/lib/win-exec";
+import { compareReleaseVersions, isSshRemote, releasePolicy, remoteHeadMatches, sshPushCommand, sshTargetFromOrigin } from "../scripts/release";
 
 setDefaultTimeout(30_000);
 
@@ -350,8 +351,30 @@ process.exit(0);
 }
 
 describe("release helper", () => {
+  test("pure release policy selects the branch channel and validates the version", () => {
+    expect(releasePolicy("9.9.9", "main")).toEqual({ tag: "latest" });
+    expect(releasePolicy("9.9.9-preview.1", "preview")).toEqual({ tag: "preview" });
+    expect(releasePolicy("9.9.9-dev.1", "dev")).toEqual({ tag: "dev" });
+    expect(releasePolicy("9.9.9", "preview").error).toContain("Preview releases");
+    expect(releasePolicy("9.9.9", "main", "preview").error).toContain("tag mismatch");
+    expect(releasePolicy("9.9.9-preview.1", "main").error).toContain("stable semver");
+    expect(releasePolicy("9.9.9", "dev").error).toContain("Dev releases");
+    expect(releasePolicy("9.9.9", "other").error).toContain("must be on");
+  });
+
+  test("pure SSH push command selects key and target without invoking git", () => {
+    expect(sshPushCommand("main", undefined, undefined, "https://github.com/owner/repo.git"))
+      .toEqual({ command: ["git", "push", "origin", "main"] });
+    expect(sshPushCommand("main", "/tmp/key", "git@example.test:owner/repo.git", undefined))
+      .toEqual({ command: ["git", "push", "git@example.test:owner/repo.git", "HEAD:main"], env: { GIT_SSH_COMMAND: 'ssh -i "/tmp/key" -o IdentitiesOnly=yes' } });
+  });
   test("preflight runs the shared audit, typecheck, test suite, and privacy scan before version bump", async () => {
-    const { calls, result } = await runRelease("9.9.9");
+    const { calls, result } = await runRelease("9.9.9", {
+      headSha: "deadbeefcafe1234",
+      releaseSshKey: "/tmp/ocx-release-key",
+      releaseSshRepo: sshTarget,
+      pendingBump: true,
+    });
 
     // Report what the script actually said. A bare status assertion turned a
     // Windows-only spawn failure into "Expected: 0 Received: 1" with no cause,
@@ -394,28 +417,20 @@ describe("release helper", () => {
     expect(privacyIndex).toBeGreaterThan(isolatedUsageIndex);
     expect(versionIndex).toBeGreaterThan(privacyIndex);
     expect(dispatchIndex).toBeGreaterThan(versionIndex);
+    const push = calls.find(call => call.name === "git" && call.args[0] === "push");
+    expect(push?.args).toEqual(["push", sshTarget, "HEAD:main"]);
+    expect(push?.gitSshCommand).toBe('ssh -i "/tmp/ocx-release-key" -o IdentitiesOnly=yes');
+    expect(calls.find(call => call.name === "gh" && call.args[0] === "workflow" && call.args[1] === "run")?.args)
+      .toContain("expected-sha=deadbeefcafe1234");
   });
 
-  test("an obsolete version that would move latest backwards aborts before the bump", async () => {
+  test("an obsolete latest version aborts before bumping or committing", async () => {
     const { calls, result } = await runRelease("9.9.8", { npmLatest: "9.9.9" });
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr ?? "").toContain("does not move the 'latest' channel forward");
+    expect(result.stderr).toContain("does not move the 'latest' channel forward");
     expect(findCallIndex(calls, "npm", call => call.args[0] === "version")).toBe(-1);
     expect(findCallIndex(calls, "git", call => call.args[0] === "commit")).toBe(-1);
-  });
-
-  test("a version newer than the channel tip passes the forward guard", async () => {
-    const { calls, result } = await runRelease("9.9.10", { npmLatest: "9.9.9" });
-
-    expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
-    expect(findCallIndex(calls, "npm", call => call.args.join(" ") === "version 9.9.10 --no-git-tag-version")).toBeGreaterThanOrEqual(0);
-  });
-
-  test("preview releases compare against the preview channel, not latest", async () => {
-    const { result } = await runRelease("9.9.9-preview.2", { branch: "preview", npmLatest: "10.0.0", npmPreview: "9.9.9-preview.1" });
-
-    expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
   });
 
   test("failed privacy scan aborts before version bump, commit, and push", async () => {
@@ -428,82 +443,26 @@ describe("release helper", () => {
     expect(findCallIndex(calls, "git", call => call.args[0] === "push")).toBe(-1);
   });
 
-  test("preview branch still defaults to preview tag and dry-run dispatch", async () => {
-    const { calls, result } = await runRelease("9.9.9-preview.1", { branch: "preview" });
-
-    expect(result.status).toBe(0);
-    expect(findCallIndex(calls, "gh", call =>
-      call.args[0] === "workflow"
-      && call.args[1] === "run"
-      && call.args.includes("release.yml")
-      && call.args.includes("tag=preview")
-      && call.args.includes("dry-run=true"),
-    )).toBeGreaterThanOrEqual(0);
-  });
-
-  test("dispatch pins the audited release SHA via expected-sha", async () => {
-    const { calls, result } = await runRelease("9.9.9", { headSha: "deadbeefcafe1234" });
-
-    expect(result.status).toBe(0);
-    expect(findCallIndex(calls, "gh", call =>
-      call.args[0] === "workflow"
-      && call.args[1] === "run"
-      && call.args.includes("release.yml")
-      && call.args.includes("expected-sha=deadbeefcafe1234"),
-    )).toBeGreaterThanOrEqual(0);
-  });
-
-  /**
-   * `main` and `preview` carry rulesets whose admin bypass is `pull_request` — enough to merge a
-   * PR, not enough to push. That is where v2.29.0 died. The carve-out is a dedicated write deploy
-   * key registered as a `DeployKey` bypass actor, selected for this one push and nothing else.
-   *
-   * Pin both halves: the key path must reach git as `GIT_SSH_COMMAND` with `IdentitiesOnly` (an
-   * ssh-agent holding the maintainer's key would otherwise authenticate as the maintainer and be
-   * rejected by the ruleset again), and the default path must stay byte-identical so a contributor
-   * or CI clone without the variable is unaffected.
-   */
-  test("the protected push uses the release deploy key only when one is configured", async () => {
+  test("a credential-bearing origin aborts before push without exposing its credential", async () => {
+    const credential = ["not", "for", "logs"].join("-");
     const { calls, result } = await runRelease("9.9.9", {
-      releaseSshKey: "/tmp/ocx-release-key",
-      releaseSshRepo: sshTarget,
+      releaseSshKey: "/tmp/k",
+      originUrl: `https://x-access-token:${credential}@${"github.com"}/lidge-jun/opencodex.git`,
       pendingBump: true,
     });
 
-    expect(result.status).toBe(0);
-    const push = calls.find(call => call.name === "git" && call.args[0] === "push");
-    expect(push).toBeDefined();
-    expect(push?.args).toEqual(["push", sshTarget, "HEAD:main"]);
-    expect(push?.gitSshCommand).toBe('ssh -i "/tmp/ocx-release-key" -o IdentitiesOnly=yes');
-  });
-
-  /**
-   * Git parses `GIT_SSH_COMMAND` with shell-style word splitting rather than exec'ing it, so a
-   * bare interpolation splits any key path containing a space — the Windows default
-   * (`C:\Users\Jun Kim\.ssh\...`) is exactly that shape, and ssh would read the tail as its next
-   * flag. Assert the whole command string, not a substring: `toContain` passes on the broken form.
-   */
-  test("a key path with spaces and backslashes stays a single ssh argument", async () => {
-    const { calls } = await runRelease("9.9.9", {
-      releaseSshKey: "C:\\Users\\Jun Kim\\.ssh\\ocx release key",
-      pendingBump: true,
-    });
-
-    const push = calls.find(call => call.name === "git" && call.args[0] === "push");
-    expect(push?.gitSshCommand).toBe('ssh -i "C:\\\\Users\\\\Jun Kim\\\\.ssh\\\\ocx release key" -o IdentitiesOnly=yes');
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toContain("origin carries credentials");
+    expect(result.stderr + result.stdout).not.toContain(credential);
+    expect(calls.find(call => call.name === "git" && call.args[0] === "push")).toBeUndefined();
   });
 
   test("Git passes the emitted deploy-key path to SSH as one literal argument", async () => {
     const keyPath = 'C:\\Users\\Jun Kim\\.ssh\\ocx "quoted" $HOME $(not-run) `not-run`; key';
-    const { calls: releaseCalls } = await runRelease("9.9.9", {
-      releaseSshKey: keyPath,
-      releaseSshRepo: sshTarget,
-      pendingBump: true,
-    });
-    const push = releaseCalls.find(call => call.name === "git" && call.args[0] === "push");
-    expect(push?.gitSshCommand).toBeDefined();
+    const push = sshPushCommand("main", keyPath, sshTarget, undefined);
+    expect(push.env?.GIT_SSH_COMMAND).toBeDefined();
 
-    const { calls } = await executeGitSshCommand(push?.gitSshCommand ?? "");
+    const { calls } = await executeGitSshCommand(push.env?.GIT_SSH_COMMAND ?? "");
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
       const identityIndex = call.args.indexOf("-i");
@@ -516,119 +475,69 @@ describe("release helper", () => {
    * The SSH target is derived from `origin` rather than hardcoded, so a fork's release pushes to
    * the fork instead of silently targeting upstream.
    */
-  test("the ssh push target follows the configured origin remote", async () => {
-    const { calls } = await runRelease("9.9.9", {
-      releaseSshKey: "/tmp/k",
-      originUrl: "https://github.com/someone-else/opencodex.git",
-      pendingBump: true,
-    });
-
-    const push = calls.find(call => call.name === "git" && call.args[0] === "push");
-    expect(push?.args[1]).toBe(`${"git"}@${"github.com"}:someone-else/opencodex.git`);
-  });
-
   /**
    * A credential-bearing origin must not be transplanted into the SSH target: `runLoud` prints the
    * failing command, so a folded `user:token@` would put the token on the terminal and in the
    * release log. Refuse instead of building a target.
    */
-  test("an origin carrying credentials is refused rather than transplanted", async () => {
-    const { calls, result } = await runRelease("9.9.9", {
-      releaseSshKey: "/tmp/k",
-      originUrl: `https://x-access-token:SECRET@${"github.com"}/lidge-jun/opencodex.git`,
-      pendingBump: true,
-    });
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr + result.stdout).toContain("origin carries credentials");
-    expect(result.stderr + result.stdout).not.toContain("SECRET");
-    expect(calls.find(call => call.name === "git" && call.args[0] === "push")).toBeUndefined();
-  });
-
-  test("a malformed OCX_RELEASE_SSH_REPO override is refused instead of pushed to", async () => {
-    const { calls, result } = await runRelease("9.9.9", {
-      releaseSshKey: "/tmp/k",
-      releaseSshRepo: "not-a-remote",
-      pendingBump: true,
-    });
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr + result.stdout).toContain("OCX_RELEASE_SSH_REPO");
-    expect(calls.find(call => call.name === "git" && call.args[0] === "push")).toBeUndefined();
-  });
-
   test.each([
-    { releaseSshRepo: "ssh://git:SECRET@example.test/owner/repository.git" },
-    { releaseSshRepo: "ssh://SECRET@example.test/owner/repository.git" },
-    { releaseSshRepo: "ssh://git%3ASECRET@example.test/owner/repository.git" },
-    { releaseSshRepo: "git@SECRET@example.test:owner/repository.git" },
-    { releaseSshRepo: "ssh://git:@example.test/owner/repository.git" },
-    { releaseSshRepo: "git@example.test:owner/repository.git?token=SECRET" },
-    { originUrl: "ssh://git:SECRET@example.test/owner/repository.git" },
-    { originUrl: "git:SECRET@example.test:owner/repository.git" },
-  ] satisfies ReleaseScenario[])(
-    "credential-bearing SSH target is rejected without logging the credential",
-    async scenario => {
-      const { calls, result } = await runRelease("9.9.9", {
-        releaseSshKey: "/tmp/k",
-        pendingBump: true,
-        ...scenario,
-      });
-      const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-      expect(result.status).not.toBe(0);
-      expect(output).not.toContain("SECRET");
-      expect(calls.find(call => call.name === "git" && call.args[0] === "push")).toBeUndefined();
-    },
-  );
+    "ssh://git:SECRET@example.test/owner/repository.git",
+    "ssh://SECRET@example.test/owner/repository.git",
+    "ssh://git%3ASECRET@example.test/owner/repository.git",
+    "ssh://git:@example.test/owner/repository.git",
+    "git@example.test:owner/repository.git?token=SECRET",
+    "git:SECRET@example.test:owner/repository.git",
+    "git@SECRET@example.test:owner/repository.git",
+  ])("credential-bearing SSH target is rejected by the pure classifier", value => {
+    expect(isSshRemote(value)).toBe(false);
+  });
 
   test.each([
     "ssh://git@example.test/owner/repository.git",
     "ssh://example.test/owner/repository.git",
     "git@example.test:owner/repository.git",
-  ])("credential-free ssh URL or scp-like release target remains accepted", async releaseSshRepo => {
-    const { calls, result } = await runRelease("9.9.9", {
-      releaseSshKey: "/tmp/k",
-      releaseSshRepo,
-      pendingBump: true,
-    });
-    expect(result.status).toBe(0);
-    expect(calls.find(call => call.name === "git" && call.args[0] === "push")?.args[1])
-      .toBe(releaseSshRepo);
+  ])("credential-free SSH target remains accepted by the pure classifier", value => {
+    expect(isSshRemote(value)).toBe(true);
   });
 
-  test("an ssh origin is reused verbatim rather than rewritten", async () => {
-    const { calls } = await runRelease("9.9.9", {
-      releaseSshKey: "/tmp/k",
-      originUrl: `${"git"}@${"github.com"}:lidge-jun/opencodex.git`,
-      pendingBump: true,
-    });
-
-    const push = calls.find(call => call.name === "git" && call.args[0] === "push");
-    expect(push?.args[1]).toBe(`${"git"}@${"github.com"}:lidge-jun/opencodex.git`);
+  test.each([
+    "ssh://git:SECRET@example.test/owner/repository.git",
+    "ssh://git%3ASECRET@example.test/owner/repository.git",
+    "git@example.test:owner/repository.git?token=SECRET",
+    "git:SECRET@example.test:owner/repository.git",
+  ])("credential-bearing origin form yields no SSH target", origin => {
+    expect(sshTargetFromOrigin(origin)).toBeUndefined();
   });
 
-  test("an origin that yields no ssh target aborts instead of guessing one", async () => {
-    const { calls, result } = await runRelease("9.9.9", {
-      releaseSshKey: "/tmp/k",
-      originUrl: "/srv/git/opencodex.git",
-      pendingBump: true,
-    });
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr + result.stdout).toContain("no SSH push target");
-    expect(calls.find(call => call.name === "git" && call.args[0] === "push")).toBeUndefined();
+  test.each([
+    "ssh://git@example.test/owner/repository.git",
+    "ssh://example.test/owner/repository.git",
+    "git@example.test:owner/repository.git",
+  ])("credential-free origin form is reused verbatim", origin => {
+    expect(sshTargetFromOrigin(origin)).toBe(origin);
   });
 
-  test("without a configured key the push is unchanged and carries no ssh override", async () => {
-    const { calls, result } = await runRelease("9.9.9", { pendingBump: true });
-
-    expect(result.status).toBe(0);
-    const push = calls.find(call => call.name === "git" && call.args[0] === "push");
-    expect(push?.args).toEqual(["push", "origin", "main"]);
-    expect(push?.gitSshCommand).toBeUndefined();
+  test("credential-free origin is converted to the deploy-key target", () => {
+    expect(sshTargetFromOrigin("https://example.test/owner/repository.git"))
+      .toBe("git@example.test:owner/repository.git");
   });
 
-  test("aborts before dispatch when the remote branch moved during the CI wait", async () => {
+  test("SSH command builder covers origin, malformed, and missing targets", () => {
+    expect(sshPushCommand("main", "/tmp/k", undefined, "https://github.com/someone-else/opencodex.git").command[2])
+      .toBe(`${"git"}@${"github.com"}:someone-else/opencodex.git`);
+    expect(sshPushCommand("main", "/tmp/k", "not-a-remote", undefined).error).toContain("OCX_RELEASE_SSH_REPO");
+    expect(sshPushCommand("main", "/tmp/k", undefined, "/srv/git/opencodex.git").error).toContain("no SSH push target");
+    expect(sshPushCommand("main", "/tmp/k", undefined, "https://x-access-token:SECRET@example.test/owner/repo.git").error)
+      .toContain("origin carries credentials");
+    expect(sshPushCommand("main", undefined, undefined, undefined)).toEqual({ command: ["git", "push", "origin", "main"] });
+  });
+
+  test("remote head equality is explicit", () => {
+    expect(remoteHeadMatches("abc", "abc")).toBe(true);
+    expect(remoteHeadMatches("abc", "def")).toBe(false);
+  });
+
+  test("a moved remote head aborts before workflow dispatch", async () => {
     const { calls, result } = await runRelease("9.9.9", {
       headSha: "abc123def456",
       remoteHeadSha: "9999999999999999999999999999999999999999",
@@ -704,20 +613,15 @@ describe("release helper", () => {
   // #1753 review follow-up: build metadata on the channel tip is valid semver
   // and compares by precedence only; an unparseable tip must fail CLOSED
   // (Number() on a garbage core used to yield NaN and pass any candidate).
-  test("channel tip with build metadata compares by precedence, not NaN", async () => {
-    const { result } = await runRelease("2.19.4", { npmLatest: "2.19.3+build.1" });
-    expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
+  test("channel tip with build metadata compares by precedence, not NaN", () => {
+    expect(compareReleaseVersions("2.19.4", "2.19.3+build.1")).toBeGreaterThan(0);
   });
 
-  test("channel tip equal after stripping build metadata does not move forward", async () => {
-    const { result } = await runRelease("2.19.3", { npmLatest: "2.19.3+build.1" });
-    expect(result.status).toBe(1);
-    expect(result.stderr ?? "").toContain("does not move");
+  test("channel tip equal after stripping build metadata does not move forward", () => {
+    expect(compareReleaseVersions("2.19.3", "2.19.3+build.1")).toBe(0);
   });
 
-  test("unparseable channel tip fails closed", async () => {
-    const { result } = await runRelease("2.19.4", { npmLatest: "not-a-version" });
-    expect(result.status).toBe(1);
-    expect(result.stderr ?? "").toContain("cannot compare release versions");
+  test("unparseable channel tip fails closed", () => {
+    expect(() => compareReleaseVersions("2.19.4", "not-a-version")).toThrow(/unparseable release version/);
   });
 });

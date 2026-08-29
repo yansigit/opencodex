@@ -13,6 +13,7 @@ interface RunMessage {
   /** Test-only: block before restore so responsiveness tests can probe /healthz. */
   blockMs?: number;
   restoreTest?: RestoreTestHooks;
+  workerReady?: SharedArrayBuffer;
   /** Env snapshot — Workers may not see parent mutations on all platforms. */
   env?: { CODEX_HOME?: string; OPENCODEX_HOME?: string };
 }
@@ -27,11 +28,16 @@ declare const self: Worker;
 
 self.onmessage = async (event: MessageEvent<unknown>) => {
   if (!isRunMessage(event.data)) return;
-  const { requestId, trashId, codexHome, busyTimeoutMs, blockMs, restoreTest, env } = event.data;
+  const { requestId, trashId, codexHome, busyTimeoutMs, blockMs, restoreTest, workerReady, env } = event.data;
   try {
     if (env?.CODEX_HOME) process.env.CODEX_HOME = env.CODEX_HOME;
     if (env?.OPENCODEX_HOME) process.env.OPENCODEX_HOME = env.OPENCODEX_HOME;
     if (typeof blockMs === "number" && Number.isFinite(blockMs) && blockMs > 0) {
+      if (workerReady) {
+        const ready = new Int32Array(workerReady);
+        Atomics.store(ready, 0, 1);
+        Atomics.notify(ready, 0);
+      }
       await Bun.sleep(Math.floor(blockMs));
     }
     const result = restoreTrashEntry(trashId, {

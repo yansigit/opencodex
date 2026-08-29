@@ -15,6 +15,7 @@ import {
   resolveTrustedWindowsTaskkillExe,
 } from "../lib/windows-elevation";
 import { readCodexCatalogPath } from "./catalog/parsing";
+import { CODEX_CONFIG_PATH } from "./paths";
 
 export const STALE_CODEX_APP_SERVER_HINT =
   "If Codex still shows an older model list, restart its long-lived app-server process after sync (ocx sync --restart-codex). "
@@ -104,6 +105,10 @@ export interface CodexAppServerProcessIo {
   /** Async batch start-time seam used by the request-path Windows collector. */
   readStartMsBatchAsync?: (pids: readonly number[]) => Promise<Map<number, number | null>>;
   catalogMtimeMs?: () => number | null;
+  /** Which on-disk write should be compared with app-server start times. */
+  freshnessTarget?: "catalog" | "config";
+  /** Custom path for the default freshness stat; process-observation identity excludes it. */
+  freshnessPath?: string;
 }
 
 function execFileTextAsync(
@@ -680,9 +685,12 @@ export interface CodexAppServerCatalogStatus {
 }
 
 /** Resolve the catalog file Codex app-servers loaded at startup, for staleness checks. */
-function defaultCatalogMtimeMs(): number | null {
+function defaultCatalogMtimeMs(
+  target: "catalog" | "config" = "catalog",
+  freshnessPath?: string,
+): number | null {
   try {
-    return statSync(readCodexCatalogPath()).mtimeMs;
+    return statSync(freshnessPath ?? (target === "config" ? CODEX_CONFIG_PATH : readCodexCatalogPath())).mtimeMs;
   } catch {
     return null;
   }
@@ -720,23 +728,58 @@ function catalogStatusFromProcesses(
   return { state: stale ? "stale" : "fresh", processes: withStarts, catalogMtimeMs };
 }
 
+function startsHasUnreadable(starts: ReadonlyMap<number, number | null>): boolean {
+  for (const startedAtMs of starts.values()) {
+    if (startedAtMs === null) return true;
+  }
+  return false;
+}
+
 // Short TTL: process listing + stat run once per window even under per-turn
-// guidance calls (#857).
-let catalogStateCache: { atMs: number; status: CodexAppServerCatalogStatus } | null = null;
+// guidance calls (#857). The process evidence is independent of which on-disk
+// write callers compare it with; only the mtime lookup and final status are
+// target-specific.
+interface ProcessEvidence {
+  processes: CodexAppServerProcess[];
+  starts: Map<number, number | null>;
+  enumerationFailed: boolean;
+}
+
+interface ProcessEvidenceIdentity {
+  platform: NodeJS.Platform;
+  getuid?: CodexAppServerProcessIo["getuid"];
+  listSnapshots?: CodexAppServerProcessIo["listSnapshots"];
+  readStartMs?: CodexAppServerProcessIo["readStartMs"];
+}
+
+let processEvidenceCache: {
+  atMs: number;
+  identity: ProcessEvidenceIdentity;
+  evidence: ProcessEvidence;
+  ttlState: CodexAppServerCatalogState;
+} | null = null;
+const catalogStatusCache = new Map<"catalog" | "config", {
+  evidence: ProcessEvidence;
+  status: CodexAppServerCatalogStatus;
+}>();
 interface RequestCatalogStateIdentity {
   platform: NodeJS.Platform;
   listSnapshots?: CodexAppServerProcessIo["listSnapshots"];
   listSnapshotsAsync?: CodexAppServerProcessIo["listSnapshotsAsync"];
   readStartMs?: CodexAppServerProcessIo["readStartMs"];
   readStartMsBatchAsync?: CodexAppServerProcessIo["readStartMsBatchAsync"];
-  catalogMtimeMs?: CodexAppServerProcessIo["catalogMtimeMs"];
   now?: CodexAppServerProcessIo["now"];
 }
 
 interface RequestCatalogStateFlight {
   generation: number;
   identity: RequestCatalogStateIdentity;
-  promise: Promise<CodexAppServerCatalogStatus>;
+  promise: Promise<RequestCatalogStateReading>;
+}
+
+interface RequestCatalogStateReading {
+  status: CodexAppServerCatalogStatus;
+  observationState: CodexAppServerCatalogState;
 }
 
 let requestCatalogStateGeneration = 0;
@@ -745,6 +788,7 @@ let requestCatalogStateCache: {
   identity: RequestCatalogStateIdentity;
   atMs: number;
   status: CodexAppServerCatalogStatus;
+  observationState: CodexAppServerCatalogState;
 } | null = null;
 let requestCatalogStateFlight: RequestCatalogStateFlight | null = null;
 const CATALOG_STATE_TTL_MS = 5_000;
@@ -792,8 +836,32 @@ function sameRequestCatalogStateIdentity(
     && left.listSnapshotsAsync === right.listSnapshotsAsync
     && left.readStartMs === right.readStartMs
     && left.readStartMsBatchAsync === right.readStartMsBatchAsync
-    && left.catalogMtimeMs === right.catalogMtimeMs
     && left.now === right.now;
+}
+
+function statusForFreshnessTarget(
+  status: CodexAppServerCatalogStatus,
+  io: CodexAppServerProcessIo,
+): CodexAppServerCatalogStatus {
+  if (status.processes.length === 0) return status;
+  let catalogMtimeMs: number | null;
+  try {
+    const target = io.freshnessTarget ?? "catalog";
+    catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(target, io.freshnessPath)))();
+  } catch {
+    catalogMtimeMs = null;
+  }
+  if (status.catalogMtimeMs === catalogMtimeMs) return status;
+  return catalogStatusFromProcesses(
+    status.processes.map(proc => ({ pid: proc.pid, commandLine: "" })),
+    catalogMtimeMs,
+    new Map(status.processes.map(proc => [proc.pid, proc.startedAtMs] as const)),
+  );
+}
+
+function processObservationState(status: CodexAppServerCatalogStatus): CodexAppServerCatalogState {
+  if (status.processes.length === 0) return status.state === "unknown" ? "unknown" : "not_running";
+  return status.processes.some(process => process.startedAtMs === null) ? "unknown" : "fresh";
 }
 
 /**
@@ -816,15 +884,26 @@ export function collectCodexAppServerCatalogState(
   io: CodexAppServerProcessIo = {},
 ): CodexAppServerCatalogStatus {
   const now = (io.now ?? Date.now)();
-  const fullyDefault = !io.listSnapshots && !io.readStartMs && !io.catalogMtimeMs
-    && !io.platform && !io.getuid && !io.now;
-  if (fullyDefault
-    && catalogStateCache
-    && now - catalogStateCache.atMs < catalogStateTtlMs(catalogStateCache.status.state)) {
-    return catalogStateCache.status;
-  }
-  const compute = (): CodexAppServerCatalogStatus => {
-    const platform = io.platform ?? process.platform;
+  const target = io.freshnessTarget ?? "catalog";
+  const platform = io.platform ?? process.platform;
+  const identity: ProcessEvidenceIdentity = {
+    platform,
+    getuid: io.getuid,
+    listSnapshots: io.listSnapshots,
+    readStartMs: io.readStartMs,
+  };
+  const cachedEvidence = processEvidenceCache
+    && processEvidenceCache.identity.platform === identity.platform
+    && processEvidenceCache.identity.getuid === identity.getuid
+    && processEvidenceCache.identity.listSnapshots === identity.listSnapshots
+    && processEvidenceCache.identity.readStartMs === identity.readStartMs
+    && now - processEvidenceCache.atMs < catalogStateTtlMs(processEvidenceCache.ttlState)
+    ? processEvidenceCache.evidence
+    : null;
+  let evidence: ProcessEvidence;
+  if (cachedEvidence) {
+    evidence = cachedEvidence;
+  } else {
     const getuid = io.getuid ?? (() => {
       try {
         return typeof process.getuid === "function" ? process.getuid() : undefined;
@@ -841,26 +920,38 @@ export function collectCodexAppServerCatalogState(
       // Enumeration failure must never read as "nothing running" — that would let
       // positive model guidance through on guesswork (#857). The injected seam gets
       // the same contract as the default path: whoever enumerates, a failure to read
-      // the process list is unknown, not an empty machine.
+      // the process list, unknown, not an empty machine.
       snapshots = [];
       enumerationFailed = true;
     }
     const processes = codexAppServerProcessesFromSnapshots(snapshots);
-    if (processes.length === 0) {
-      return enumerationFailed
-        ? { state: "unknown", processes: [], catalogMtimeMs: null }
-        : { state: "not_running", processes: [], catalogMtimeMs: null };
-    }
-    const catalogMtimeMs = (io.catalogMtimeMs ?? defaultCatalogMtimeMs)();
-    const starts = io.readStartMs
-      ? new Map(processes.map(proc => [proc.pid, io.readStartMs!(proc.pid)] as const))
-      : readProcessStartMsBatch(processes.map(proc => proc.pid), platform);
-    return catalogStatusFromProcesses(processes, catalogMtimeMs, starts);
-  };
-  const status = compute();
-  if (fullyDefault) {
-    catalogStateCache = { atMs: now, status };
+    const starts = processes.length === 0
+      ? new Map<number, number | null>()
+      : io.readStartMs
+        ? new Map(processes.map(proc => [proc.pid, io.readStartMs!(proc.pid)] as const))
+        : readProcessStartMsBatch(processes.map(proc => proc.pid), platform);
+    const ttlState: CodexAppServerCatalogState = enumerationFailed || startsHasUnreadable(starts)
+      ? "unknown"
+      : processes.length === 0 ? "not_running" : "fresh";
+    evidence = { processes, starts, enumerationFailed };
+    processEvidenceCache = { atMs: now, identity, evidence, ttlState };
   }
+  if (evidence.processes.length === 0) {
+    const status: CodexAppServerCatalogStatus = evidence.enumerationFailed
+      ? { state: "unknown", processes: [], catalogMtimeMs: null }
+      : { state: "not_running", processes: [], catalogMtimeMs: null };
+    const prior = catalogStatusCache.get(target);
+    if (prior?.evidence === evidence) return prior.status;
+    catalogStatusCache.set(target, { evidence, status });
+    return status;
+  }
+  const catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(target, io.freshnessPath)))();
+  const status = catalogStatusFromProcesses(evidence.processes, catalogMtimeMs, evidence.starts);
+  const prior = catalogStatusCache.get(target);
+  if (prior?.evidence === evidence && prior.status.catalogMtimeMs === status.catalogMtimeMs) {
+    return prior.status;
+  }
+  catalogStatusCache.set(target, { evidence, status });
   return status;
 }
 
@@ -897,7 +988,6 @@ export async function collectCodexAppServerCatalogStateForRequest(
     listSnapshotsAsync: io.listSnapshotsAsync,
     readStartMs: io.readStartMs,
     readStartMsBatchAsync: io.readStartMsBatchAsync,
-    catalogMtimeMs: io.catalogMtimeMs,
     now: io.now,
   };
   const cached = requestCatalogStateCache
@@ -905,8 +995,8 @@ export async function collectCodexAppServerCatalogStateForRequest(
     && sameRequestCatalogStateIdentity(requestCatalogStateCache.identity, identity)
     ? requestCatalogStateCache
     : null;
-  if (cached && now - cached.atMs < catalogStateTtlMs(cached.status.state)) {
-    return cached.status;
+  if (cached && now - cached.atMs < catalogStateTtlMs(cached.observationState)) {
+    return statusForFreshnessTarget(cached.status, io);
   }
   // An expired real reading is still worth handing back while the refresh runs. It
   // cannot have been invalidated by an ocx catalog write: every such write calls
@@ -915,18 +1005,20 @@ export async function collectCodexAppServerCatalogStateForRequest(
   // What it can miss is an app-server that started or stopped meanwhile -- and a
   // server started after the reading is newer than the catalog, which is the `fresh`
   // this entry already says.
+  const targetStatus = cached ? statusForFreshnessTarget(cached.status, io) : null;
   const servableStale = cached
-    && cached.status.state !== "unknown"
-    && now - cached.atMs < catalogStateTtlMs(cached.status.state) + CATALOG_STATE_MAX_STALE_MS
-    ? cached.status
+    && cached.observationState !== "unknown"
+    && targetStatus?.state !== "unknown"
+    && now - cached.atMs < catalogStateTtlMs(cached.observationState) + CATALOG_STATE_MAX_STALE_MS
+    ? targetStatus
     : null;
   if (requestCatalogStateFlight
     && requestCatalogStateFlight.generation === generation
     && sameRequestCatalogStateIdentity(requestCatalogStateFlight.identity, identity)) {
-    return servableStale ?? requestCatalogStateFlight.promise;
+    return servableStale ?? requestCatalogStateFlight.promise.then(reading => statusForFreshnessTarget(reading.status, io));
   }
 
-  const refresh = async (): Promise<CodexAppServerCatalogStatus> => {
+  const refresh = async (): Promise<RequestCatalogStateReading> => {
     let snapshots: ProcessSnapshot[];
     try {
       snapshots = io.listSnapshotsAsync
@@ -935,15 +1027,21 @@ export async function collectCodexAppServerCatalogStateForRequest(
           ? io.listSnapshots()
           : await listWindowsSnapshotsAsync();
     } catch {
-      return { state: "unknown", processes: [], catalogMtimeMs: null };
+      return {
+        status: { state: "unknown", processes: [], catalogMtimeMs: null },
+        observationState: "unknown",
+      };
     }
     const processes = codexAppServerProcessesFromSnapshots(snapshots);
     if (processes.length === 0) {
-      return { state: "not_running", processes: [], catalogMtimeMs: null };
+      return {
+        status: { state: "not_running", processes: [], catalogMtimeMs: null },
+        observationState: "not_running",
+      };
     }
     let catalogMtimeMs: number | null;
     try {
-      catalogMtimeMs = (io.catalogMtimeMs ?? defaultCatalogMtimeMs)();
+      catalogMtimeMs = (io.catalogMtimeMs ?? (() => defaultCatalogMtimeMs(io.freshnessTarget, io.freshnessPath)))();
     } catch {
       catalogMtimeMs = null;
     }
@@ -953,16 +1051,19 @@ export async function collectCodexAppServerCatalogStateForRequest(
       : io.readStartMs
         ? new Map(pids.map(pid => [pid, io.readStartMs!(pid)] as const))
         : await readWindowsProcessStartMsBatchAsync(pids);
-    return catalogStatusFromProcesses(processes, catalogMtimeMs, starts);
+    const status = catalogStatusFromProcesses(processes, catalogMtimeMs, starts);
+    return {
+      status,
+      observationState: processObservationState(status),
+    };
   };
 
   const pending = refresh().catch(() => ({
-    state: "unknown" as const,
-    processes: [],
-    catalogMtimeMs: null,
+    status: { state: "unknown" as const, processes: [], catalogMtimeMs: null },
+    observationState: "unknown" as const,
   }));
   let flight: RequestCatalogStateFlight;
-  const promise = pending.then(status => {
+  const promise = pending.then(reading => {
     // A catalog write can invalidate while slow CIM is still running. The result
     // describes the PRE-write world, so it must neither repopulate the post-write
     // cache nor reach the caller.
@@ -979,7 +1080,10 @@ export async function collectCodexAppServerCatalogStateForRequest(
     // invalidated observation knows, and the guidance path already treats it as
     // "say nothing positive".
     if (requestCatalogStateGeneration !== generation) {
-      return { state: "unknown" as const, processes: [], catalogMtimeMs: null };
+      return {
+        status: { state: "unknown" as const, processes: [], catalogMtimeMs: null },
+        observationState: "unknown" as const,
+      };
     }
     // A refresh that failed must not evict a real reading. Before this function
     // served stale entries, caching `unknown` cost at most the 250ms that state
@@ -988,19 +1092,20 @@ export async function collectCodexAppServerCatalogStateForRequest(
     // them on a transient failure -- `unknown` is not servable, so the next
     // caller waits for a probe instead of getting the reading it would have had.
     // Keep the observation and let its own age retire it.
-    const wouldEvictAnObservation = status.state === "unknown"
+    const wouldEvictAnObservation = reading.observationState === "unknown"
       && requestCatalogStateCache?.generation === generation
-      && requestCatalogStateCache.status.state !== "unknown"
+      && requestCatalogStateCache.observationState !== "unknown"
       && sameRequestCatalogStateIdentity(requestCatalogStateCache.identity, identity);
     if (requestCatalogStateFlight === flight && !wouldEvictAnObservation) {
       requestCatalogStateCache = {
         generation,
         identity,
         atMs: (io.now ?? Date.now)(),
-        status,
+        status: reading.status,
+        observationState: reading.observationState,
       };
     }
-    return status;
+    return reading;
   }).finally(() => {
     if (requestCatalogStateFlight === flight) requestCatalogStateFlight = null;
   });
@@ -1008,7 +1113,7 @@ export async function collectCodexAppServerCatalogStateForRequest(
   requestCatalogStateFlight = flight;
   // `promise` already absorbs its own failures, so leaving it unawaited here cannot
   // surface as an unhandled rejection; the next caller picks up whatever it stored.
-  return servableStale ?? flight.promise;
+  return servableStale ?? flight.promise.then(reading => statusForFreshnessTarget(reading.status, io));
 }
 
 /**
@@ -1018,7 +1123,8 @@ export async function collectCodexAppServerCatalogStateForRequest(
  * write has completed.
  */
 export function resetCodexAppServerCatalogStateCache(): void {
-  catalogStateCache = null;
+  processEvidenceCache = null;
+  catalogStatusCache.clear();
   requestCatalogStateGeneration += 1;
   requestCatalogStateCache = null;
   requestCatalogStateFlight = null;

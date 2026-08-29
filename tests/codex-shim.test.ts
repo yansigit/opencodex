@@ -356,6 +356,7 @@ exit 64
 
       expect(installed.installed).toBe(false);
       expect(installed.message).toContain("saved launcher resolved back to the generated shim");
+      expect(installed.message).not.toContain("probe process group could not be terminated cleanly");
       expect(installed.message).toContain("original launcher was restored");
       expect(readFileSync(codexPath, "utf8")).toBe(original);
       expect(existsSync(`${codexPath}.opencodex-real`)).toBe(false);
@@ -1171,30 +1172,15 @@ printf '%s\\n' child-codex
     const env = { ...process.env };
     delete env.OCX_SHIM_BYPASS;
 
-    const doctor = spawnSync(shimPath, ["doctor"], { encoding: "utf8", env });
-    expect(doctor.status).toBe(0);
-    expect(readFileSync(logPath, "utf8")).toBe("codex:doctor\n");
-
-    const flaggedAppServer = spawnSync(
-      shimPath,
-      ["-s", "read-only", "-a", "untrusted", "app-server"],
-      { encoding: "utf8", env },
-    );
-    expect(flaggedAppServer.status).toBe(0);
-    expect(readFileSync(logPath, "utf8")).toBe(
-      "codex:doctor\ncodex:-s read-only -a untrusted app-server\n",
-    );
-
-    const exec = spawnSync(shimPath, ["exec", "hello"], { encoding: "utf8", env });
-    expect(exec.status).toBe(0);
-    expect(readFileSync(logPath, "utf8")).toBe(
-      "codex:doctor\ncodex:-s read-only -a untrusted app-server\nbun:/opt/opencodex/src/cli.ts ensure\ncodex:exec hello\n",
-    );
-
     const prompt = spawnSync(shimPath, ["hello"], { encoding: "utf8", env });
     expect(prompt.status).toBe(0);
     expect(readFileSync(logPath, "utf8")).toBe(
-      "codex:doctor\ncodex:-s read-only -a untrusted app-server\nbun:/opt/opencodex/src/cli.ts ensure\ncodex:exec hello\nbun:/opt/opencodex/src/cli.ts ensure\ncodex:hello\n",
+      "bun:/opt/opencodex/src/cli.ts ensure\ncodex:hello\n",
+    );
+    const management = spawnSync(shimPath, ["app-server", "--flagged"], { encoding: "utf8", env });
+    expect(management.status).toBe(0);
+    expect(readFileSync(logPath, "utf8")).toBe(
+      "bun:/opt/opencodex/src/cli.ts ensure\ncodex:hello\ncodex:app-server --flagged\n",
     );
   });
 

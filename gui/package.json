@@ -6,9 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "lint": "oxlint .",
+    "lint": "oxlint . --deny-warnings",
     "test": "bun test tests",
-    "lint:i18n": "oxlint src/pages src/components src/App.tsx src/main.tsx src/ui.tsx src/provider-workspace-data.ts",
+    "lint:i18n": "oxlint src/pages src/components src/App.tsx src/main.tsx src/ui.tsx --deny-warnings",
     "doctor": "npx --yes react-doctor@0.9.11 --verbose --scope changed --base origin/main --no-telemetry",
     "doctor:full": "npx --yes react-doctor@0.9.11 --verbose --scope full --no-telemetry",
     "preview": "vite preview"
@@ -20,18 +20,17 @@
   },
   "devDependencies": {
     "@types/estree-jsx": "1.0.5",
-    "@types/node": "^26.3.0",
+    "@types/node": "^26.4.0",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
-    "@vitejs/plugin-react": "^6.1.0",
-    "happy-dom": "20.11.6",
-    "oxlint": "1.78.0",
+    "@vitejs/plugin-react": "^6.1.1",
+    "happy-dom": "20.11.13",
+    "oxlint": "1.80.0",
     "react-refresh": "^0.18.0",
     "typescript": "~7.0.2",
     "vite": "^8.2.2"
   },
   "overrides": {
-    "brace-expansion": "5.0.9",
     "nanoid": "3.3.18",
     "postcss": "8.5.26"
   }

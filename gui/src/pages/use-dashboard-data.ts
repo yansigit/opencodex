@@ -159,7 +159,6 @@ export function useDashboardData(apiBase: string) {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateJob, setUpdateJob] = useState<UpdateJob | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
-  const [error, setError] = useState(false);
   const effortCapHelpTriggerRef = useRef<HTMLButtonElement>(null);
   const updateTriggerRef = useRef<HTMLButtonElement>(null);
   const maHelpTriggerRef = useRef<HTMLButtonElement>(null);
@@ -225,6 +224,10 @@ export function useDashboardData(apiBase: string) {
     { pollMs: 5000 },
   );
   const overviewReady = health !== null || overviewPoll.data !== undefined;
+  // Connectivity is a cold-failure concern. Once health or the overview resource has
+  // succeeded, a failed poll is degraded stale data, not a blank dashboard.
+  const error = overviewPoll.error !== undefined && health === null && !overviewPoll.hasSucceeded;
+  const overviewReconnecting = overviewPoll.error !== undefined && !error;
 
   // Preferences that are just config — never gate on overview or injection.
   const maModePoll = useKeyedClientResource(
@@ -315,7 +318,6 @@ export function useDashboardData(apiBase: string) {
         providers: data.providers,
       });
     }
-    setError(data.error);
   }, [overviewPoll.data, apiBase]);
 
   useEffect(() => {
@@ -624,7 +626,6 @@ export function useDashboardData(apiBase: string) {
       setSettings(prev => prev ? { ...prev, codexAutoStart: data.codexAutoStart, startupHealth: data.startupHealth ?? prev.startupHealth } : prev);
     } catch {
       setSettings(prev => prev ? { ...prev, codexAutoStart: !next } : prev);
-      setError(true);
     } finally {
       settingsMutationInFlightRef.current = false;
       setSettingsSaving(false);
@@ -785,7 +786,8 @@ export function useDashboardData(apiBase: string) {
     effortCap, subagentEffortCap, effortCapSaving, setEffortCap, setSubagentEffortCap, setEffortCapSaving,
     syncResult, syncError, projectConfigWarnings,
     updateOpen, updateChannel, setUpdateRestart, updateRestart, updateLoading,
-    updateCheck, updateError, updateJob, reconnecting, error,
+    updateCheck, updateError, updateJob, reconnecting, error, overviewReconnecting,
+    retryOverview: overviewPoll.refresh,
     effortCapHelpTriggerRef, updateTriggerRef, maHelpTriggerRef, shadowCallHelpTriggerRef,
     effortCapHelpDialogRef, updateDialogRef, maHelpDialogRef, shadowCallHelpDialogRef,
     filteredGroups, sidecarModels, visionModels,

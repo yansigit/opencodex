@@ -357,6 +357,125 @@ describe("Responses custom-tool destination capability", () => {
     expect(body.input[0]).toMatchObject({ type: "custom_tool_call", call_id: "c1", name: "apply_patch" });
     expect(request.convertedRoutedCustomToolNames ?? []).toEqual([]);
   });
+
+  test("canonical Codex Spark lowers namespaced tools and restores both call identities", async () => {
+    const tools = [
+      {
+        type: "namespace",
+        name: "functions",
+        tools: [{
+          type: "custom",
+          name: "exec",
+          description: "Run unified exec code",
+          format: { type: "text" },
+        }],
+      },
+      {
+        type: "namespace",
+        name: "collaboration",
+        tools: [{
+          type: "function",
+          name: "spawn_agent",
+          description: "Spawn an agent",
+          parameters: { type: "object", properties: {} },
+        }],
+      },
+    ];
+    const adapter = createResponsesPassthroughAdapter(provider);
+    const built = adapter.buildRequest({
+      modelId: "gpt-5.3-codex-spark",
+      context: { messages: [] },
+      stream: false,
+      options: {},
+      _rawBody: {
+        model: "gpt-5.3-codex-spark",
+        input: "run pwd",
+        tools,
+        parallel_tool_calls: true,
+      },
+    }, { headers: new Headers({ authorization: "Bearer token" }) });
+    const serialized = JSON.parse(built.body) as {
+      tools: Array<Record<string, unknown>>;
+      parallel_tool_calls: boolean;
+    };
+
+    expect(serialized.tools.map(tool => ({ type: tool.type, name: tool.name }))).toEqual([
+      { type: "function", name: "exec" },
+      { type: "function", name: "collaboration__spawn_agent" },
+    ]);
+    expect(serialized.tools[0]).not.toHaveProperty("format");
+    expect(serialized.parallel_tool_calls).toBe(false);
+    expect([...(built.convertedRoutedCustomToolNames ?? [])]).toEqual(["exec"]);
+    expect([...(built.convertedRoutedNamespaceToolAliases ?? new Map()).entries()]).toEqual([
+      ["collaboration__spawn_agent", {
+        namespace: "collaboration",
+        name: "spawn_agent",
+        kind: "function",
+      }],
+    ]);
+
+    const config = {
+      port: 0,
+      defaultProvider: "fixture",
+      providers: { fixture: provider },
+    } as OcxConfig;
+    const savedFetch = globalThis.fetch;
+    globalThis.fetch = (async () => Response.json({
+      id: "resp_spark_tools",
+      status: "completed",
+      output: [
+        {
+          type: "function_call",
+          id: "fc_exec",
+          call_id: "call_exec",
+          name: "exec",
+          arguments: JSON.stringify({ input: "pwd" }),
+          status: "completed",
+        },
+        {
+          type: "function_call",
+          id: "fc_spawn",
+          call_id: "call_spawn",
+          name: "collaboration__spawn_agent",
+          arguments: "{}",
+          status: "completed",
+        },
+      ],
+    })) as typeof fetch;
+
+    try {
+      const response = await handleResponses(new Request("http://localhost/v1/responses", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "fixture/gpt-5.3-codex-spark",
+          stream: false,
+          input: "run pwd",
+          tools,
+          parallel_tool_calls: true,
+        }),
+      }), config, { model: "", provider: "" });
+      const body = await response.json() as { output: Array<Record<string, unknown>> };
+
+      expect(body.output[0]).toMatchObject({
+        type: "custom_tool_call",
+        name: "exec",
+        input: "pwd",
+      });
+      expect(body.output[0]).not.toHaveProperty("arguments");
+      expect(body.output[1]).toMatchObject({
+        type: "function_call",
+        namespace: "collaboration",
+        name: "spawn_agent",
+        arguments: "{}",
+      });
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  });
 });
 
 describe("routed compaction lowering order", () => {

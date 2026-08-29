@@ -151,7 +151,7 @@ function generatedSyncBaselineDisposition({
   expectedAppId = 15368,
 }) {
   if (!syncGenerated) return "not-applicable";
-  return requiredChecksDisposition(checkRuns, headSha, ["ci", "hygiene"], expectedAppId);
+  return requiredChecksDisposition(checkRuns, headSha, ["ci", "hygiene", "mergeable"], expectedAppId);
 }
 
 function maintenanceReadyEvidence({
@@ -159,7 +159,7 @@ function maintenanceReadyEvidence({
   headSha,
   expectedBugbotAppId,
   expectedChecksAppId = 15368,
-  requiredNames = ["ci", "enforce-target", "hygiene"],
+  requiredNames = ["ci", "enforce-target", "hygiene", "mergeable"],
   bugbotPolicy = "shadow",
   labels = [],
   reviews = [],
@@ -204,7 +204,7 @@ function autonomousMergeEvidence({
   sessionId,
   expectedBugbotAppId,
   expectedChecksAppId = 15368,
-  requiredNames = ["ci", "enforce-target", "hygiene"],
+  requiredNames = ["ci", "enforce-target", "hygiene", "mergeable"],
   labels = (pr?.labels || []),
 }) {
   const names = new Set(labels.map((label) => typeof label === "string" ? label : label?.name));
@@ -249,9 +249,13 @@ function isExpectedJulesHeadAdvance({
   observedPusherId,
   comparison,
   headCommit,
+  currentBaseSha,
+  controllerMerge,
+  sessionStatus,
 }) {
   const expectedId = Number(expectedJulesUserId);
-  return /^[0-9a-f]{40}$/i.test(previousSha ?? "") &&
+  if (sessionStatus && ["queued", "planning", "running", "in_progress", "editing"].includes(String(sessionStatus).toLowerCase())) return false;
+  const directAdvance = /^[0-9a-f]{40}$/i.test(previousSha ?? "") &&
     /^[0-9a-f]{40}$/i.test(currentSha ?? "") &&
     (reason === null || reason === `repair-requested:${previousSha}`) &&
     Number.isSafeInteger(expectedId) && expectedId > 0 &&
@@ -261,6 +265,16 @@ function isExpectedJulesHeadAdvance({
     comparison?.merge_base_commit?.sha === previousSha &&
     headCommit?.sha === currentSha &&
     [headCommit?.author?.id, headCommit?.committer?.id].some((id) => Number(id) === expectedId);
+  const parents = controllerMerge?.parents;
+  const controllerAdvance = controllerMerge?.recorded === true &&
+    /^[0-9a-f]{40}$/i.test(previousSha ?? "") &&
+    /^[0-9a-f]{40}$/i.test(currentSha ?? "") &&
+    /^[0-9a-f]{40}$/i.test(currentBaseSha ?? "") &&
+    controllerMerge.sha === currentSha &&
+    Array.isArray(parents) && parents.length === 2 &&
+    parents[0]?.sha === previousSha && parents[1]?.sha === currentBaseSha &&
+    (reason === "controller-base-merge" || reason === `controller-base-merge:${previousSha}`);
+  return directAdvance || controllerAdvance;
 }
 
 function verifiedBugbotFindings({ comments = [], resolvedCommentIds = new Set(), botUserId, headSha, maxFindings = MAX_FINDINGS, maxBytes = MAX_FINDING_BYTES }) {

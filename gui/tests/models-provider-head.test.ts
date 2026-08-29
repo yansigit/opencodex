@@ -31,6 +31,18 @@ test("Models workspace stacks via content-width container query before mobile dr
   expect(css).toContain("@media (max-width: 768px)");
 });
 
+test("custom model row actions stay together and touch-sized in narrow workspace containers", async () => {
+  const css = await Bun.file(new URL("../src/styles-models-workspace.css", import.meta.url)).text();
+  const narrowStart = css.indexOf("@container models-workspace (max-width: 720px)");
+  const narrowEnd = css.indexOf("@media (max-width: 768px)", narrowStart);
+  const narrowCss = css.slice(narrowStart, narrowEnd);
+
+  expect(css).toMatch(/\.models-model-row-actions\s*\{[^}]*display:\s*inline-flex/s);
+  expect(narrowCss).toMatch(/\.model-row-wrap\s*>\s*\.models-model-row\s*\{[^}]*flex-wrap:\s*wrap/s);
+  expect(narrowCss).toMatch(/\.models-model-row-actions\s*\{[^}]*flex:\s*0 0 100%[^}]*justify-content:\s*flex-end/s);
+  expect(narrowCss).toMatch(/\.models-model-row-actions\s+\.btn\s*\{[^}]*min-width:\s*var\(--control-touch\)[^}]*min-height:\s*var\(--control-touch\)/s);
+});
+
 test("Models exposes provider and per-model context-window controls (#1073)", async () => {
   const page = await Bun.file(new URL("../src/pages/Models.tsx", import.meta.url)).text();
   const groups = await Bun.file(new URL("../src/models-groups.ts", import.meta.url)).text();

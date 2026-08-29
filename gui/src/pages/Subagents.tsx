@@ -7,11 +7,19 @@ import { readSessionListCache, writeSessionListCache } from "../session-list-cac
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState, type V2RoutedDelegationBridgeState } from "./use-subagent-delegation";
+import { CodexStaleBanner } from "../components/codex-stale-banner";
+import { useCodexRestart } from "../use-codex-restart";
 
-type CachedSubagents = { available: string[]; chosen: string[] };
+type CatalogState = "fresh" | "stale" | "not_running" | "unknown";
+type CachedSubagents = { available: string[]; chosen: string[]; catalogState?: { state?: CatalogState } };
 
 function seedSubagents(cacheKey: string): CachedSubagents | null {
   return readSessionListCache<CachedSubagents>(cacheKey);
+}
+
+function readCatalogState(value: CachedSubagents | null): CatalogState {
+  const state = value?.catalogState?.state;
+  return state === "fresh" || state === "stale" || state === "not_running" ? state : "unknown";
 }
 
 export default function Subagents({ apiBase }: { apiBase: string }) {
@@ -24,7 +32,9 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const [busy, setBusy] = useState(false);
   /** Sync guard: state-only `busy` can miss clicks before the disabled re-render commits. */
   const saveInFlight = useRef(false);
+  const catalogLoadGeneration = useRef(0);
   const delegation = useSubagentDelegation(apiBase);
+  const [catalogState, setCatalogState] = useState<CatalogState>(() => readCatalogState(cached));
   const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false });
   const [nativeParentOverride, setNativeParentOverride] = useState<V2NativeParentOverrideState>({ enabled: false, model: null, active: false });
   const [agentTaskRecovery, setAgentTaskRecovery] = useState<AgentTaskRecoveryState>({ enabled: false, model: null });
@@ -251,16 +261,20 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const loadSubagents = useCallback(async (signal?: AbortSignal): Promise<CachedSubagents> => {
     // The resource layer's deadline abort must reach the wire — a signal dropped
     // here is a store that can only settle by race timeout.
+    const generation = ++catalogLoadGeneration.current;
     const res = await fetch(`${apiBase}/api/subagent-models`, { signal });
-    const response = await readJsonOrThrow<{ available?: string[]; chosen?: string[] }>(res, t("sub.loadFail"));
+    const response = await readJsonOrThrow<{ available?: string[]; chosen?: string[]; catalogState?: { state?: CatalogState } }>(res, t("sub.loadFail"));
     if (!response) throw new Error(t("sub.loadFail"));
     const available = response.available ?? [];
     const availableSet = new Set(available);
     const next = {
       available,
       chosen: (response.chosen ?? []).filter(model => availableSet.has(model)),
+      catalogState: response.catalogState,
     };
+    if (generation !== catalogLoadGeneration.current) return next;
     setChosen(next.chosen);
+    setCatalogState(readCatalogState(next));
     writeSessionListCache(cacheKey, next);
     return next;
   }, [apiBase, cacheKey, t]);
@@ -277,6 +291,12 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const load = resource.refresh;
   const snapshot = state.data ?? cached;
   const available = snapshot?.available ?? [];
+  const refreshDelegation = delegation.refresh;
+  const restartSettled = useCallback(() => {
+    load();
+    void refreshDelegation();
+  }, [refreshDelegation, load]);
+  const codexRestart = useCodexRestart(apiBase, { onSettled: restartSettled });
 
   const toggle = (m: string) => {
     if (busy) return;
@@ -302,6 +322,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const save = async () => {
     if (busy || saveInFlight.current) return;
     saveInFlight.current = true;
+    const saveCatalogGeneration = catalogLoadGeneration.current;
     setBusy(true);
     setStatus("");
     try {
@@ -313,7 +334,9 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       const d = await readJsonOrThrow<{ applied?: string[] }>(r, t("sub.saveFailed"));
       const applied = d?.applied ?? chosen;
       if (d?.applied) setChosen(d.applied);
-      writeSessionListCache(cacheKey, { available, chosen: applied });
+      if (saveCatalogGeneration === catalogLoadGeneration.current) {
+        writeSessionListCache(cacheKey, { available, chosen: applied, catalogState: { state: catalogState } });
+      }
       setOk(true);
       setStatus(t("sub.saved", { n: applied.length, cmd: "ocx sync" }));
     } catch (error) {
@@ -347,6 +370,8 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       </div>
       {status && <Notice tone={ok ? "ok" : "err"}>{status}</Notice>}
       {state.showError && <Notice tone="err">{t("sub.loadFail")}</Notice>}
+      <p className="page-sub">{t("sub.catalogState.label")}: {t(`sub.catalogState.${catalogState}`)}</p>
+      <CodexStaleBanner state={catalogState} controller={codexRestart} />
       <SubagentsWorkspace
         available={available}
         chosen={chosen}
@@ -361,6 +386,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
           available: delegation.available,
           guidanceEnabled: delegation.guidanceEnabled,
           syncCodexDefaults: delegation.syncCodexDefaults,
+          nativeDefaultState: delegation.nativeDefaultState,
           saving: delegation.saving,
           onSave: patch => {
             void (async () => {

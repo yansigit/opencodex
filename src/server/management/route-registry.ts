@@ -80,6 +80,7 @@ export interface ManagementRoute {
 /** Every reachable management route. */
 export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   // server/management-api
+  { method: "POST", path: "/api/providers/test", module: "server/management-api", mutates: true },
   { method: "POST", path: "/api/stop", module: "server/management-api", mutates: true },
   // codex/auth-api
   { method: "DELETE", path: "/api/codex-auth/accounts", module: "codex/auth-api", mutates: true },
@@ -123,6 +124,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/injection-model", module: "server/management/agent-settings-routes", mutates: false },
   { method: "GET", path: "/api/subagent-model-fallback", module: "server/management/agent-settings-routes", mutates: false },
   { method: "GET", path: "/api/subagent-models", module: "server/management/agent-settings-routes", mutates: false },
+  { method: "GET", path: "/api/subagent-roles", module: "server/management/agent-settings-routes", mutates: false },
   { method: "GET", path: "/api/v2", module: "server/management/agent-settings-routes", mutates: false },
   { method: "POST", path: "/api/claude-desktop/apply", module: "server/management/agent-settings-routes", mutates: true },
   { method: "POST", path: "/api/grok/apply", module: "server/management/agent-settings-routes", mutates: true },
@@ -134,6 +136,7 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/injection-model", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/subagent-model-fallback", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/subagent-models", module: "server/management/agent-settings-routes", mutates: true },
+  { method: "PUT", path: "/api/subagent-roles", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/v2", module: "server/management/agent-settings-routes", mutates: true },
   // server/management/codex-prompt-routes
   { method: "GET", path: "/api/codex-prompt", module: "server/management/codex-prompt-routes", mutates: false },
@@ -267,6 +270,8 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/providers", module: "server/management/provider-routes", mutates: true },
   { method: "POST", path: "/api/providers/test", module: "server/management/provider-routes", mutates: true },
   { method: "PUT", path: "/api/provider-context-caps", module: "server/management/provider-routes", mutates: true },
+  // server/management/replit-provider-routes
+  { method: "POST", path: "/api/providers/replit-pair", module: "server/management/replit-provider-routes", mutates: true },
   // server/management/request-history-routes
   { method: "GET", path: "/api/request-history", module: "server/management/request-history-routes", mutates: false },
   // server/management/routing-analytics-routes

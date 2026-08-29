@@ -9,31 +9,25 @@ import { usageDisplayTotalTokens } from "./totals";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
+import type { AgentKind } from "../server/effort-policy";
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
-/**
- * A persisted account label: a Codex pool account (`main`/`p<hex6>`) or a non-Codex OAuth
- * provider account (`o<hex6>`, #2699).
- *
- * The old name `CodexUsageAccountLogLabel` is kept as an alias because it is exported and used
- * across modules; the two predicates below are what callers should choose between.
- */
 export type UsageAccountLogLabel = "main" | `p${string}` | `o${string}`;
 export type CodexUsageAccountLogLabel = UsageAccountLogLabel;
 
-/**
- * Accepts EITHER label family. This is the predicate the persistence writers use, so widening
- * it here is what stops six separate call sites from silently dropping an `o`-label -- including
- * two in the live request path (`request-log.ts:972` and `:1187`).
- *
- * The name is unchanged deliberately: renaming it would touch every call site for no behavior,
- * and the widened contract is what every one of those sites wanted.
- */
-export function isCodexUsageAccountLogLabel(value: unknown): value is UsageAccountLogLabel {
-  return value === "main" || (typeof value === "string" && ACCOUNT_LOG_LABEL_RE.test(value));
+export const OAUTH_ACCOUNT_LOG_LABEL_RE = /^[a-f0-9]{8,64}(?:-\d+)?$/;
+
+export function isPersistableAccountLogLabel(value: unknown): value is string {
+  return (
+    typeof value === "string"
+    && (ACCOUNT_LOG_LABEL_RE.test(value) || OAUTH_ACCOUNT_LOG_LABEL_RE.test(value))
+  );
 }
 
-/** Strictly a Codex pool label. Use when the Codex-only distinction actually matters. */
+export function isCodexUsageAccountLogLabel(value: unknown): value is UsageAccountLogLabel {
+  return typeof value === "string" && ACCOUNT_LOG_LABEL_RE.test(value);
+}
+
 export function isCodexPoolAccountLogLabel(value: unknown): value is "main" | `p${string}` {
   return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
 }
@@ -81,8 +75,8 @@ export interface PersistedUsageAttempt {
    * one of them that was missed. Absent on ordinary attempts so old rows keep their exact shape.
    */
   locallyAnswered?: boolean;
-  /** Stable non-PII identity for the Codex pool account that served this attempt. */
-  accountLogLabel?: CodexUsageAccountLogLabel;
+  /** Stable non-PII identity for the account that served this attempt. */
+  accountLogLabel?: string;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -99,6 +93,8 @@ export interface PersistedUsageAttempt {
 }
 
 export interface PersistedUsageEntry {
+  /** Responses request origin; absent for unrelated traffic and old rows. */
+  agentKind?: AgentKind;
   requestedAlias?: string;
   requestId: string;
   timestamp: number;
@@ -111,8 +107,8 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
-  accountLogLabel?: CodexUsageAccountLogLabel;
+  /** Stable non-PII identity for the account that served this request. */
+  accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
   resolvedModel?: string;
@@ -182,6 +178,11 @@ const KNOWN_ADMISSION_KINDS = new Set<NonNullable<PersistedUsageEntry["admission
 const KNOWN_INBOUND_PROTOCOLS = new Set<NonNullable<PersistedUsageEntry["inboundProtocol"]>>([
   "responses", "chat", "messages",
 ]);
+const KNOWN_AGENT_KINDS = new Set<AgentKind>(["main", "subagent", "internal"]);
+
+export function isKnownAgentKind(value: unknown): value is AgentKind {
+  return typeof value === "string" && KNOWN_AGENT_KINDS.has(value as AgentKind);
+}
 
 /** Same closed-set discipline as `isKnownUsageSurface`: an old or corrupted row
  *  carrying an unexpected value drops the field instead of poisoning the enum. */
@@ -410,7 +411,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
-    ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
+    ...(isPersistableAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
       : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
@@ -487,6 +488,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     timestamp: entry.timestamp,
     provider: entry.provider,
     model: entry.model,
+    ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(typeof entry.apiKeyId === "string" && entry.apiKeyId.trim()
       // Deliberately NOT capped. `capMetadataString` protects free-form metadata
@@ -497,7 +499,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+    ...(isPersistableAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()

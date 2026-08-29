@@ -1884,6 +1884,7 @@ async function applyFinalRouteRequestNormalization(args: {
       subagentModelFallback: config.subagentModelFallback,
       injectionPrompt: config.injectionPrompt,
       subagentRoles: config.subagentRoles,
+      syncCodexSubagentDefaults: config.syncCodexSubagentDefaults === true,
     });
     if (guidance) {
       injectDeveloperMessage(parsed, guidance);
@@ -1898,8 +1899,8 @@ async function applyFinalRouteRequestNormalization(args: {
   {
     const { applyEffortCap, effortCapAppliesTo, supportedLadderFor } = await import("../effort-policy");
     const surface = collabSurface(parsed);
-    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true)) {
-      const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route));
+    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true, logCtx.agentKind)) {
+      const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route), logCtx.agentKind);
       if (capped) {
         logCtx.requestedEffort = `${capped.from}->${capped.to}`;
         if (isInjectionDebugEnabled()) {
@@ -2062,6 +2063,7 @@ export async function handleComboResponses(
     const childLog: RequestLogContext = {
       model: pick.target.model,
       provider: pick.target.provider,
+      ...(logCtx.agentKind ? { agentKind: logCtx.agentKind } : {}),
       ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
       ...(logCtx.surface ? { surface: logCtx.surface } : {}),
     };
@@ -2622,7 +2624,7 @@ async function handleResponsesInner(
     && isMultiAgentV2Enabled()
     && isCanonicalOpenAiForwardProvider(route.provider)
     && collabSurface(parsed) === "v2"
-    && !isThreadSpawnRequest(req.headers)
+    && !isThreadSpawnRequest(req.headers, logCtx.agentKind)
     && !req.headers.has("x-openai-subagent")
     && !options.comboAttempt
     && parsed._compactionRequest !== true
@@ -2641,7 +2643,7 @@ async function handleResponsesInner(
   // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
   // also fail closed without polling quota upstream. Cached fallback state can still select a
   // provider with native continuation support below.
-  const threadSpawn = isThreadSpawnRequest(req.headers);
+  const threadSpawn = isThreadSpawnRequest(req.headers, logCtx.agentKind);
   const initialSubagentFallbackChain = threadSpawn && !options.comboAttempt
     ? resolveSubagentFallbackChain(parsed, config)
     : null;
@@ -3513,19 +3515,17 @@ async function handleResponsesInner(
       }
       throw error;
     }
-    if (!isCanonicalOpenAiForwardProvider(route.provider)) {
-      for (const name of request.convertedRoutedCustomToolNames ?? []) {
-        if (
-          toolBridgeMaps.freeformToolNames.has(name)
-          || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
-        ) routedCustomToolNames.add(name);
-      }
-      for (const name of request.routedCustomToolRepairNames ?? []) {
-        if (
-          toolBridgeMaps.freeformToolNames.has(name)
-          || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
-        ) routedCustomToolRepairNames.add(name);
-      }
+    for (const name of request.convertedRoutedCustomToolNames ?? []) {
+      if (
+        toolBridgeMaps.freeformToolNames.has(name)
+        || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
+      ) routedCustomToolNames.add(name);
+    }
+    for (const name of request.routedCustomToolRepairNames ?? []) {
+      if (
+        toolBridgeMaps.freeformToolNames.has(name)
+        || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
+      ) routedCustomToolRepairNames.add(name);
     }
     for (const name of request.convertedRoutedToolSearchNames ?? []) {
       // The adapter already keeps this set empty when tool_choice forbids the private search.

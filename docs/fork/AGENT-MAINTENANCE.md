@@ -29,9 +29,18 @@ Weekly documentation drift is limited to `README.md`, `docs-site/**`, `screensho
 
 ## Ruleset
 
-Protect fork `main` with pull requests, deletion and force-push blocking, dismissed stale approvals, approval of the most recent reviewable push by someone other than its pusher, and no automation bypass. Allow merge commits for upstream sync. Require one maintainer approval ordinarily and the existing two-maintainer trusted gate for protected paths.
+Protect fork `dev` with two rulesets. Keep deletion and force-push blocking unbypassable. Put pull-request and required-check rules in a separate ruleset that only the repository-scoped PR Automation App may bypass, so the verified promotion backmerge and post-release version bump can remain forward-only direct writes. `main` remains the release/promotion branch; do not change its existing policy as part of this setup. Allow merge commits for upstream sync. Set required approvals to zero: the controller's exact-head authorization is the merge gate, with protected-path security review handled by policy.
 
-Require `Cross-platform CI / ci`, `Enforce PR target branch / enforce-target`, and `PR hygiene / hygiene`; bind each check to its expected GitHub App where GitHub supports a source binding. Enable GitHub auto-merge only after a maintainer expresses merge intent. Keep owner-only emergency recovery.
+Require `Cross-platform CI / ci`, `Enforce PR target branch / enforce-target`, `PR hygiene / hygiene`, and `PR mergeability / mergeable`; bind each check to the trusted App ID where GitHub supports a source binding. Enable GitHub auto-merge only after a maintainer expresses merge intent. Keep owner-only emergency recovery.
+
+The intended settings are repository control-plane state, not workflow code. Inspect the two active rulesets and verify that only the PR/check ruleset names the App as a bypass actor:
+
+```bash
+gh api repos/yansigit/opencodex/rulesets
+gh api repos/yansigit/opencodex/rules/branches/dev
+```
+
+Set repository variable `PR_AUTOMATION_MODE=shadow` (promote to `update`/`merge` only after staging), `PR_AUTOMATION_APP_ID`, `PR_AUTOMATION_APP_USER_ID`, `CURSOR_BUGBOT_APP_ID`, `CURSOR_BUGBOT_USER_ID`, and `JULES_BOT_USER_ID`; set secret `PR_AUTOMATION_PRIVATE_KEY` and `JULES_API_KEY`. Install the PR automation, Cursor Bugbot, and Jules Apps on this repository and verify their immutable IDs before enabling writes. The repository-only PR Automation App permission allowlist is: Contents read/write, Pull requests read/write, Issues read/write, Checks read, and Actions read. Grant no Administration, Workflows, Secrets, or Releases permission. The App ID is not a bot user ID: `PR_AUTOMATION_APP_USER_ID` must be the separately verified GitHub user ID that authors/labels sync PRs. Sync provenance, Jules controller-parent checks, active-editing blocks, and 24-hour hold reporting are enforced by the workflows; holds are never removed automatically.
 
 ## Rollout
 

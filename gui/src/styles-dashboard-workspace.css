@@ -54,6 +54,42 @@
   gap: var(--space-4);
 }
 
+.dash-activity-panel { min-width: 0; }
+.dash-activity-plot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+.dash-activity-plot:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 3px; }
+.dash-activity-row {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-label);
+}
+.dash-activity-row svg { display: block; width: 100%; height: 32px; overflow: visible; }
+.dash-activity-row polyline {
+  fill: none;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+.dash-activity-requests { stroke: var(--accent); }
+.dash-activity-tokens { stroke: var(--green); }
+.dash-activity-marker { fill: var(--surface); stroke: var(--text); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.dash-activity-row rect { cursor: crosshair; }
+.dash-activity-detail {
+  display: block;
+  margin-top: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-label);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Sub-agent delegation + Sync models share one row (same auto-fit rhythm as sidecars). */
 .dash-overview-tools {
   display: grid;

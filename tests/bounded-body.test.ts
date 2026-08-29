@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	BOUNDED_BODY_MAX_BYTES,
+	BOUNDED_BODY_TIMEOUT_MS,
 	boundedBodyBufferGrowthsForTests,
 	readBoundedResponseBytes,
 	readBoundedResponseBody,
@@ -21,6 +22,10 @@ function responseFromChunks(...chunks: Uint8Array[]): Response {
 }
 
 describe("readBoundedResponseBody", () => {
+	test("keeps the production timeout default", () => {
+		expect(BOUNDED_BODY_TIMEOUT_MS).toBe(5_000);
+	});
+
 	test("the bounded JSON caller allows a full total deadline for its first byte", () => {
 		expect(UPSTREAM_JSON_BODY_READ_OPTIONS.firstByteTimeoutMs)
 			.toBe(UPSTREAM_JSON_BODY_READ_OPTIONS.totalTimeoutMs);

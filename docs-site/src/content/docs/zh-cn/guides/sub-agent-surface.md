@@ -54,6 +54,7 @@ Dashboard 上的 **Sub-agent delegation** 控件管理三个相关设置：
 | `{{roster}}` | 解析后的、对 picker 可见且与界面兼容的 roster |
 | `{{fallback}}` | 配置的全局 fallback 指引 |
 | `{{roles}}` | 压缩后的已启用角色目录（id、何时使用、模型、可选 effort），会按当前界面和 700 字符预算过滤 |
+| `{{nativeDefaultState}}` | `active`、`disabled`、`pending` 或 `blocked`；只有 `active` 表示配置的原生默认值已具备权威性 |
 
 内置的 v2 指引有 700 字符预算。如果会超出预算，opencodex 会优先删除 roster，而不是截断核心 spawn 指令。内置指引仅在首选模型、可用 roster 或 fallback chain 解析成功时触发。只要配置了 `injectionModel`，自定义提示词就会触发；如果未限定的值无法唯一解析，`{{model}}` 会替换为空字符串。
 

@@ -110,6 +110,8 @@ const ZH_TW_KEEP_ENGLISH: ReadonlySet<string> = new Set([
   "codexAuth.codexApp",
   "codexAuth.creditNextBadge",
   "common.github",
+  // The title template contains only a localized page slot, punctuation, and the product name.
+  "app.pageTitle",
   "grok.title",
   // Integration tabs: client/product proper nouns kept in English
   "integrations.tab.codex",

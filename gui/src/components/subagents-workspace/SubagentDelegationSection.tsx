@@ -3,14 +3,14 @@
  *
  * This panel used to sit on the Dashboard, which is otherwise a read-only status page — the
  * one place you could change something was also the first thing a new user saw. It reads
- * better next to the roster it affects: the roster picks who may be called, this picks who
- * gets called first.
+ * better next to the roster it affects: the roster picks who may be called, while this panel
+ * holds guidance preferences and the native omitted-model synchronization setting.
  */
 import { useState } from "react";
 import { Select, Switch } from "../../ui";
 import { useT } from "../../i18n/shared";
 import { formatNamespacedModelId } from "../../provider-icons";
-import type { DelegationPatch, DelegationModelOption } from "../../pages/use-subagent-delegation";
+import type { DelegationPatch, DelegationModelOption, NativeDefaultState } from "../../pages/use-subagent-delegation";
 import type { UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState, V2RoutedDelegationBridgeState } from "../../pages/use-subagent-delegation";
 
 export interface SubagentDelegationSectionProps {
@@ -20,6 +20,7 @@ export interface SubagentDelegationSectionProps {
   available: DelegationModelOption[];
   guidanceEnabled: boolean;
   syncCodexDefaults: boolean;
+  nativeDefaultState?: NativeDefaultState;
   saving: boolean;
   onSave: (patch: DelegationPatch) => void;
   prompt: string;
@@ -50,6 +51,7 @@ export default function SubagentDelegationSection({
   available,
   guidanceEnabled,
   syncCodexDefaults,
+  nativeDefaultState = "disabled",
   saving,
   onSave,
   prompt,
@@ -77,6 +79,11 @@ export default function SubagentDelegationSection({
   // Proactive message, so it must render as OFF (and the toggle can install the
   // preset). Only a nonblank hint is "on".
   const ultraOn = (ultraMode.hintText ?? "").trim().length > 0;
+  const safeNativeDefaultState = nativeDefaultState === "active"
+    || nativeDefaultState === "pending"
+    || nativeDefaultState === "blocked"
+    ? nativeDefaultState
+    : "disabled";
   const nativeParentTargets = available.filter(option => option.canonical !== true);
   const nativeParentCanActivate = ultraMode.multiAgentV2Enabled && !keepNativeChatGptOnV1 && nativeParentOverride.model !== null;
 
@@ -146,6 +153,7 @@ export default function SubagentDelegationSection({
         <div className="setting-copy">
           <div className="font-semibold">{t("dash.syncCodexSubagentDefaults")}</div>
           <div className="muted setting-hint">{t("dash.syncCodexSubagentDefaultsHint")}</div>
+          <div className="muted setting-hint">{t(`sub.nativeDefaultState.${safeNativeDefaultState}`)}</div>
         </div>
         <button
           type="button"

@@ -17,10 +17,12 @@ import type { AdapterTierMetadata } from "../providers/fastwire";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import {
   appendUsageEntry,
+  isKnownAgentKind,
   isKnownAdmissionKind,
   isKnownInboundProtocol,
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
+  isPersistableAccountLogLabel,
   isValidReasoningWireValue,
   readRecentUsageEntries,
   usageForFinalLog,
@@ -31,6 +33,7 @@ import {
   type PersistedUsageEntry,
   type UsageStatus,
 } from "../usage/log";
+import type { AgentKind } from "./effort-policy";
 import {
   appendUsageDebug,
   isUsageDebugEnabled,
@@ -70,6 +73,7 @@ export interface RequestLogContext {
    * rather than looking like a lost request.
    */
   localTerminalReason?: string;
+  agentKind?: AgentKind;
   /** Stable non-PII Codex Pool account identity for durable usage attribution. */
   accountLogLabel?: string;
   requestedModel?: string;
@@ -156,6 +160,7 @@ export interface RequestLogEntry {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  agentKind?: AgentKind;
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
@@ -269,6 +274,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     timestamp: entry.timestamp,
     model: entry.model,
     provider: entry.provider,
+    ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
@@ -391,7 +397,8 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-      ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
+      ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
+      ...(isPersistableAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
@@ -568,6 +575,7 @@ export function requestLogErrorCode(
   // Keep the high-confidence message fallback for runtimes/providers that stripped the
   // structured code before emitting response.failed.
   if (classifiedCode === CYBER_POLICY_ERROR_CODE) return CYBER_POLICY_ERROR_CODE;
+  if (classifiedCode === "insufficient_quota") return classifiedCode;
   if (status === 400 || status === 409) return "invalid_request_error";
   if (status === 401) return "invalid_api_key";
   if (status === 403) {
@@ -986,7 +994,8 @@ export function addFinalRequestLog(
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),
-    ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel)
+    ...(logCtx.agentKind ? { agentKind: logCtx.agentKind } : {}),
+    ...(isPersistableAccountLogLabel(logCtx.accountLogLabel)
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
@@ -1057,7 +1066,18 @@ export function filterRequestLogs(logs: RequestLogEntry[], params: URLSearchPara
   const model = params.get("model")?.trim();
   if (model) {
     filtered = filtered.filter(entry => entry.model === model
+      || entry.resolvedModel === model
       || entry.attempts?.some(attempt => attempt.model === model));
+  }
+  const sinceRaw = params.get("since")?.trim();
+  if (sinceRaw) {
+    const since = Number(sinceRaw);
+    if (Number.isFinite(since)) filtered = filtered.filter(entry => entry.timestamp >= since);
+  }
+  const untilRaw = params.get("until")?.trim();
+  if (untilRaw) {
+    const until = Number(untilRaw);
+    if (Number.isFinite(until)) filtered = filtered.filter(entry => entry.timestamp <= until);
   }
   const status = params.get("status")?.trim().toLowerCase();
   if (status) {
@@ -1232,6 +1252,7 @@ export function finishRequestAttempt(
   status: number,
   durationMs: number,
   usage?: OcxUsage,
+  upstreamError?: string,
 ): PersistedUsageAttempt {
   const finalized = finalizedUsage(
     attempt.adapter,
@@ -1247,7 +1268,7 @@ export function finishRequestAttempt(
   else delete attempt.usage;
   if (finalized.totalTokens !== undefined) attempt.totalTokens = finalized.totalTokens;
   else delete attempt.totalTokens;
-  const errorCode = requestLogErrorCode(status);
+  const errorCode = requestLogErrorCode(status, upstreamError);
   if (errorCode) attempt.errorCode = errorCode;
   else delete attempt.errorCode;
   return attempt;

@@ -730,13 +730,15 @@ describe("request log metadata", () => {
    * the positive case for free.
    */
   test("filters logs by model, including the attempt that actually served a failover", () => {
+    const now = Date.now();
     const logs = [
-      log({ requestId: "a", model: "gpt-test", provider: "openai" }),
-      log({ requestId: "b", model: "grok-4.6", provider: "xai" }),
+      log({ requestId: "a", model: "gpt-test", resolvedModel: "gpt-test-20260829", provider: "openai", timestamp: now - 3_000 }),
+      log({ requestId: "b", model: "grok-4.6", provider: "xai", timestamp: now - 2_000 }),
       log({
         requestId: "c",
         model: "sonnet-4.6",
         provider: "anthropic",
+        timestamp: now - 1_000,
         attempts: [
           { ordinal: 1, provider: "anthropic", model: "sonnet-4.6", adapter: "anthropic", status: 429, durationMs: 5, sendCount: 1, recoveryKinds: [], usageStatus: "unreported" },
           { ordinal: 2, provider: "xai", model: "grok-4.6", adapter: "openai", status: 200, durationMs: 7, sendCount: 1, recoveryKinds: [], usageStatus: "reported" },
@@ -745,12 +747,15 @@ describe("request log metadata", () => {
     ];
 
     expect(filterRequestLogs(logs, new URLSearchParams("model=gpt-test")).map(entry => entry.requestId)).toEqual(["a"]);
+    expect(filterRequestLogs(logs, new URLSearchParams("model=gpt-test-20260829")).map(entry => entry.requestId)).toEqual(["a"]);
     // "c" matches on its second ATTEMPT, mirroring how `provider` already behaves: the request
     // was ultimately served by grok-4.6, so a grok-4.6 search has to find it.
     expect(filterRequestLogs(logs, new URLSearchParams("model=grok-4.6")).map(entry => entry.requestId)).toEqual(["b", "c"]);
     // The assertion an unfiltered implementation cannot pass.
     expect(filterRequestLogs(logs, new URLSearchParams("model=absent-model"))).toEqual([]);
     expect(filterRequestLogs(logs, new URLSearchParams("model=grok-4.6&provider=xai")).map(entry => entry.requestId)).toEqual(["b", "c"]);
+    expect(filterRequestLogs(logs, new URLSearchParams(`since=${now - 2_500}`)).map(entry => entry.requestId)).toEqual(["b", "c"]);
+    expect(filterRequestLogs(logs, new URLSearchParams(`until=${now - 1_500}`)).map(entry => entry.requestId)).toEqual(["a", "b"]);
   });
 
   test("filters logs by offset and limit", () => {

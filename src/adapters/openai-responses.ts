@@ -1987,6 +1987,8 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       let routedCustomToolRepairNames: Set<string> | undefined;
       let convertedRoutedToolSearchNames: Set<string> | undefined;
       let convertedRoutedNamespaceToolAliases: Map<string, { namespace: string; name: string; kind: "function" | "custom" }> | undefined;
+      const canonicalSpark = isCanonicalOpenAiForwardProvider(provider)
+        && parsed.modelId.includes("codex-spark");
       const unexpandedMiss = !!parsed.previousResponseId && parsed._previousResponseInputExpanded !== true;
       let outBody = stripPreviousResponseId(
         parsed._rawBody,
@@ -2038,10 +2040,10 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (!isCanonicalOpenAiForwardProvider(provider)) {
         outBody = promoteClientLoadedTools(outBody);
       }
-      if (!isCanonicalOpenAiForwardProvider(provider)) {
+      if (!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) {
         const rewritten = rewriteRoutedCustomToolsForUpstream(
           outBody,
-          provider.supportsResponsesCustomTools,
+          canonicalSpark ? false : provider.supportsResponsesCustomTools,
         );
         outBody = rewritten.body;
         convertedRoutedCustomToolNames = rewritten.names;
@@ -2054,13 +2056,15 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = rewritten.body;
         convertedRoutedToolSearchNames = rewritten.names;
       }
-      if (!isCanonicalOpenAiForwardProvider(provider)) {
+      if (!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) {
         // Codex 0.147 emits private namespace tool groups, while public/third-party Responses
-        // gateways accept only flat tool variants. Run after custom/tool-search lowering so
-        // namespace children already carry their final public kind before they are promoted.
+        // gateways and canonical Spark accept only flat tool variants. Run after custom/tool-search
+        // lowering so namespace children already carry their final public kind before promotion.
         const rewritten = rewriteRoutedNamespaceToolsForUpstream(outBody);
         outBody = rewritten.body;
         convertedRoutedNamespaceToolAliases = rewritten.aliases;
+      }
+      if (!isCanonicalOpenAiForwardProvider(provider)) {
         // Preserve xAI's cached-only fail-closed semantics and image-search mapping before the
         // generic capability fallback removes the private OpenAI fields.
         outBody = normalizeXaiResponsesWebSearch(outBody, provider);

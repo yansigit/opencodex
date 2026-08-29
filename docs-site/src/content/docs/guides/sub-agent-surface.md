@@ -119,6 +119,7 @@ Custom `injectionPrompt` text can use these placeholders:
 | `{{roster}}` | The resolved picker-visible, surface-compatible roster |
 | `{{fallback}}` | The configured global fallback guidance |
 | `{{roles}}` | Compact enabled-role catalog (id, when-to-use, model, optional effort), filtered to the current surface and 700-character budget |
+| `{{nativeDefaultState}}` | `active`, `disabled`, `pending`, or `blocked`; only `active` confirms that the configured native default is authoritative |
 
 The built-in v2 guidance has a 700-character budget. If it would exceed the budget, opencodex drops
 the roster first rather than truncating the core spawn instructions. Built-in guidance fires only
@@ -135,6 +136,9 @@ active Codex routing, sync or restart can write the selected values as marker-ow
 opencodex updates or removes only fields bearing its markers. If either target field is user-owned,
 the pair is left unchanged rather than partially written; ambiguous TOML is rejected without a
 write. External provider managers and user-owned root routing also remain authoritative.
+The dashboard's `nativeDefaultState` diagnostic is fail-closed: only `active` means the synchronized
+native default is live. `pending`, `blocked`, `disabled`, or a missing field never claims that an
+omitted-model subagent will inherit the preferred model.
 
 ## Fallback chains
 

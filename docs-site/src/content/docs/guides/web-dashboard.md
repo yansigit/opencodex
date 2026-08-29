@@ -57,11 +57,18 @@ the browser or password manager's decision.
 
 ### Linking to a section
 
-There is a single layout, so there is no layout switch to configure. Dashboard sections are
-addressable instead: `#dashboard` opens Overview, and `#dashboard/providers` and
+There is a single responsive layout, so there is no layout switch to configure. On desktop, the
+sidebar is the primary navigation; on narrow screens, use **Open menu** to reveal the same page
+links. Dashboard sections are addressable instead: `#dashboard` opens Overview, and `#dashboard/providers` and
 `#dashboard/models` open the other two. Reload, bookmark, and Back all keep the section you were
 on. **Logs** works the same way with `#logs` and `#logs/debug`. An older `#providers/workspace`
 bookmark now lands on `#providers`.
+
+Overview includes a **30-day activity** panel with request and token trends. Select a day on either
+sparkline to read its totals, or choose **View usage** for the full Usage page. If a refresh is
+interrupted after Overview has loaded, the last good data stays visible and a reconnecting notice
+offers **Retry**; a cold connection failure instead shows the `ocx start` guidance and the same
+retry action.
 
 Cost values in **Logs** and **Usage** are API list-price equivalents calculated from reported tokens.
 They are not billing receipts or evidence of an actual charge; subscription usage or provider credits
@@ -79,11 +86,18 @@ instructions that use those values. On eligible v2 turns, that guidance tells th
 agent which exact model and reasoning effort to pass to `spawn_agent`; clearing the model also clears
 the stored effort.
 
-The default-off **Use as native Codex subagent defaults** switch applies the same selection to Codex's
+The default-off **Use for omitted-model subagents** switch applies the same selection to Codex's
 native `[agents]` defaults on the next sync/restart when OpenCodex manages the active Codex routing.
 External user-managed provider configs remain untouched. Those defaults affect newly created Codex tasks
 and do not themselves cause delegation. Existing user-owned `[agents]` defaults are preserved rather
 than overwritten, so they may continue to override the requested defaults.
+
+The Subagents page calls the five-entry `subagentModels` list **Advertised overrides**. Its order only
+controls which models `spawn_agent` displays; it is not a default or fallback order. The separate
+**Preferred subagent model** may be outside those five rows and is never inserted automatically. The
+page reports both the catalog state and the native-default authority state: only `active` means an
+omitted-model subagent will use the preference. Stale catalog state exposes the user-confirmed Codex
+restart action; the dashboard never restarts automatically.
 
 :::caution
 Neither control is a proxy-side cross-model spawn router. OpenCodex guidance asks Codex to pass
@@ -261,8 +275,8 @@ The GUI is a thin client over the proxy's JSON management API. Useful endpoints 
 | `PUT /api/codex-auth/active` · `PUT /api/codex-auth/auto-switch` · `PUT /api/codex-auth/failover` | Select the account for the next request and configure pool routing. |
 | `GET /api/codex-auth/active` · `PUT /api/codex-auth/accounts/priority` | Read the effective account (including `pinned` and which account is `pinnedAccountId`) and set one account's selection order. |
 | `POST /api/codex-auth/login` · `GET /api/codex-auth/login-status` | Add a pool account through browser login. |
-| `GET /api/logs?tail=50&limit=20&offset=0&provider=...&status=5xx` | Read recent request metadata with optional tail, provider, and exact/class status filters. With `limit`/`offset`, paging walks backward from the newest row (`offset=0` returns the latest page). Response shape: `{ timeZone, total, logs }` where `total` is the filtered row count before pagination. |
-| `GET` / `PUT /api/subagent-models` | Read or set the five featured `spawn_agent` override models. |
+| `GET /api/logs?tail=50&limit=20&offset=0&provider=...&status=5xx` | Read recent request metadata with optional tail, provider, and exact/class status filters. With `limit`/`offset`, paging walks backward from the newest row (`offset=0` returns the latest page). Response shape: `{ timeZone, total, logs }` where `total` is the filtered row count before pagination. Each row may include `agentKind`: `main`, `subagent`, or `internal`. |
+| `GET` / `PUT /api/subagent-models` | Read or set the five advertised `spawn_agent` override models; `GET` also reports `catalogState`. |
 | `POST /api/stop` | Stop the proxy/service, restore native Codex, and exit. |
 
 :::tip
@@ -270,3 +284,10 @@ Adding **Ollama Cloud** or another catalog provider from the dashboard copies it
 classification into the saved provider config, so the [vision sidecar](/guides/sidecars/)
 is gated correctly without manual classification.
 :::
+
+## Logs agent filter
+
+The Logs page filters the bounded 2,000-row result locally by request origin: **All**, **Main**,
+**Subagent**, **Internal**, or **Unknown**. Unknown matches only rows whose `agentKind` is missing or
+invalid, which keeps historical rows readable without guessing their origin. The same localized badge
+appears in each row and in its detail view; raw protocol headers are never persisted.

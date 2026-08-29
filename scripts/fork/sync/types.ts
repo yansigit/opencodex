@@ -120,7 +120,7 @@ export interface GitHubPullRequest {
   body?: string;
   state: string;
   draft?: boolean;
-  head: { ref: string };
+  head: { ref: string; sha?: string };
   base: { ref: string };
 }
 
@@ -128,5 +128,6 @@ export interface DraftPullRequestClient {
   upsert(input: {
     event: SyncEvent;
     result: PrepareResult;
+    publishResult?: PublishResult;
   }): Promise<number>;
 }

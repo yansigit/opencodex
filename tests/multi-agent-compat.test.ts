@@ -613,6 +613,8 @@ describe("multiAgentGuidanceText", () => {
     );
     expect(text).toContain('"anthropic/claude-sonnet-5"');
     expect(text).toContain("fork_turns");
+    expect(text).toContain("preserve any caller-provided agent_type");
+    expect(text).not.toContain("omit agent_type");
     expect(text).not.toContain("Proactive multi-agent delegation is active");
     // and WITHOUT an injectionModel it stays silent (codex-rs owns the v2 Proactive text)
     expect(await multiAgentGuidanceText(parsedFixture({ reasoning: "ultra", tools: nativeV2 }))).toBeNull();

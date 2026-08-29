@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1095,7 +1095,7 @@ describe("Codex catalog sync hardening", () => {
     expect(slugs).not.toContain("cursor/stale-model");
   });
 
-  test("an identical resync leaves the catalog file untouched, a real change still writes", () => {
+  test("syncCatalogModels preserves mtime for unchanged content and advances it for changed content", () => {
     // The app-server staleness classifier (#857) compares this file's mtime against
     // each running Codex's start time, so a no-op rewrite would report every
     // already-running Codex as holding an outdated catalog — and since #1407 that
@@ -1111,48 +1111,58 @@ describe("Codex catalog sync hardening", () => {
     }, null, 2) + "\n");
 
     const r = runScript(codexHome, opencodexHome, `
-      const { statSync, writeFileSync, readFileSync } = require("node:fs");
+      const { statSync, utimesSync } = require("node:fs");
       const { syncCatalogModels } = require("./src/codex/catalog");
       const path = ${JSON.stringify(catalogPath)};
-      const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const sameContent = { providers: {} };
+      const changedContent = {
+        providers: {
+          cursor: {
+            adapter: "cursor",
+            baseUrl: "https://api2.cursor.sh",
+            liveModels: false,
+            models: ["composer-2.5"],
+          },
+        },
+      };
       (async () => {
-        const first = await syncCatalogModels({ providers: {} });
-        const afterFirst = statSync(path).mtimeMs;
-        await sleep(1100);
-        const second = await syncCatalogModels({ providers: {} });
-        const afterSecond = statSync(path).mtimeMs;
-        // Not vacuous: a catalog that really differs must still be rewritten.
-        const catalog = JSON.parse(readFileSync(path, "utf8"));
-        catalog.models = catalog.models.filter(model => model.slug !== "gpt-5.5");
-        writeFileSync(path, JSON.stringify(catalog, null, 2) + "\\n");
-        const changedAt = statSync(path).mtimeMs;
-        await sleep(1100);
-        const third = await syncCatalogModels({ providers: {} });
+        await syncCatalogModels(sameContent);
+
+        const unchangedTime = new Date("2020-01-01T00:00:00.000Z");
+        utimesSync(path, unchangedTime, unchangedTime);
+        const beforeUnchanged = statSync(path).mtimeMs;
+        const unchanged = await syncCatalogModels(sameContent);
+        const afterUnchanged = statSync(path).mtimeMs;
+
+        const changedTime = new Date("2021-01-01T00:00:00.000Z");
+        utimesSync(path, changedTime, changedTime);
+        const beforeChanged = statSync(path).mtimeMs;
+        const changed = await syncCatalogModels(changedContent);
+        const afterChanged = statSync(path).mtimeMs;
+
         console.log(JSON.stringify({
-          firstWritten: first.catalogWritten,
-          secondWritten: second.catalogWritten,
-          secondAdded: second.added,
-          identicalResyncKeptMtime: afterFirst === afterSecond,
-          thirdWritten: third.catalogWritten,
-          realChangeBumpedMtime: statSync(path).mtimeMs > changedAt,
+          unchangedWritten: unchanged.catalogWritten,
+          beforeUnchanged,
+          afterUnchanged,
+          changedWritten: changed.catalogWritten,
+          beforeChanged,
+          afterChanged,
         }));
       })();
     `);
     expect(r.status).toBe(0);
-
-    const out = JSON.parse(r.stdout) as {
-      firstWritten: boolean;
-      secondWritten: boolean;
-      secondAdded: number;
-      identicalResyncKeptMtime: boolean;
-      thirdWritten: boolean;
-      realChangeBumpedMtime: boolean;
+    const result = JSON.parse(r.stdout) as {
+      unchangedWritten: boolean;
+      beforeUnchanged: number;
+      afterUnchanged: number;
+      changedWritten: boolean;
+      beforeChanged: number;
+      afterChanged: number;
     };
-    expect(out.firstWritten).toBe(true);
-    expect(out.secondWritten).toBe(false);
-    expect(out.identicalResyncKeptMtime).toBe(true);
-    expect(out.thirdWritten).toBe(true);
-    expect(out.realChangeBumpedMtime).toBe(true);
+    expect(result.unchangedWritten).toBe(false);
+    expect(result.afterUnchanged).toBe(result.beforeUnchanged);
+    expect(result.changedWritten).toBe(true);
+    expect(result.afterChanged).toBeGreaterThan(result.beforeChanged);
   }, 15_000);
 
   test("the no-op guard compares bytes, so a malformed byte decoding to U+FFFD is still repaired", () => {

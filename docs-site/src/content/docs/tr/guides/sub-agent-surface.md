@@ -87,6 +87,7 @@ getirmesini söyler.
 | `{{roster}}` | Çözümlenen seçicide görünen, arayüzle uyumlu kadro |
 | `{{fallback}}` | Yapılandırılmış genel geri dönüş rehberliği |
 | `{{roles}}` | Sıkıştırılmış etkin rol kataloğu (id, ne zaman kullanılır, model, isteğe bağlı efor); geçerli yüzey ve 700 karakter bütçesine göre süzülür |
+| `{{nativeDefaultState}}` | `active`, `disabled`, `pending` veya `blocked`; yapılandırılmış yerel varsayılanın yetkili olduğunu yalnızca `active` doğrular |
 
 Yerleşik v2 rehberliğinin 700 karakterlik bir bütçesi vardır. Bütçeyi aşacaksa
 opencodex temel spawn talimatlarını kesmek yerine önce kadroyu bırakır. Yerleşik
@@ -316,5 +317,4 @@ sabitler.
 
 Model bağlam sınırı alt ajan modundan bağımsızdır. Modeller sayfasında
 yapılandırın; yerel OpenAI modelleri gerçek bağlam pencerelerini korur.
-
 

@@ -27,7 +27,11 @@ afterEach(async () => {
 });
 
 test("POST run rejects when a job is already running", async () => {
-  setStorageCleanupPolicyJobTestHooks({ blockMs: 800 });
+  let acquired!: () => void;
+  let release!: () => void;
+  const acquiredPromise = new Promise<void>(resolve => { acquired = resolve; });
+  const releasePromise = new Promise<void>(resolve => { release = resolve; });
+  setStorageCleanupPolicyJobTestHooks({ blockMs: 10, onAcquired: acquired, waitForRelease: releasePromise });
   seedArchived(harness.isolatedCodexHome.path);
   const server = startServer(0);
   try {
@@ -49,6 +53,7 @@ test("POST run rejects when a job is already running", async () => {
     expect(first.status).toBe(200);
     const firstBody = await first.json();
     expect(firstBody.started).toBe(true);
+    await acquiredPromise;
 
     const second = await fetch(new URL("/api/storage/cleanup-policy/run", server.url), {
       method: "POST",
@@ -57,6 +62,7 @@ test("POST run rejects when a job is already running", async () => {
     const secondBody = await second.json();
     expect(secondBody.error).toBe("already_running");
     expect(secondBody.started).toBe(false);
+    release();
 
     await waitForJobIdle(server.url, firstBody.job.startedAt);
   } finally {

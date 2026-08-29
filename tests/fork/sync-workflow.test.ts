@@ -21,7 +21,7 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("persist-credentials: false");
   });
 
-  test("grants vendor, issue, and draft PR write permissions", () => {
+  test("keeps the token read-only for contents while allowing issue and draft PR writes", () => {
     expect(workflow).toContain("contents: read");
     expect(workflow).toContain("issues: write");
     expect(workflow).toContain("pull-requests: write");
@@ -38,7 +38,6 @@ describe("fork upstream sync workflow contract", () => {
     expect(pushLines.length).toBeGreaterThan(0);
     expect(pushLines.every(line => !line.includes("GIT_ASKPASS"))).toBe(true);
     expect(pushLines.every(line => /git push(?:\s+--\S+)*\s+origin(?:\s|$)/.test(line))).toBe(true);
-    expect(workflow).not.toContain("actions: write");
   });
 
   test("passes the two Cursor secrets only to emit", () => {

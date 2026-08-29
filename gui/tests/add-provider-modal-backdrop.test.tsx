@@ -88,6 +88,22 @@ function overlay(): HTMLElement {
   return el!;
 }
 
+test("opens as a labelled native modal dialog and moves focus inside", async () => {
+  const trigger = win.document.createElement("button") as unknown as HTMLButtonElement;
+  win.document.body.appendChild(trigger as never);
+  trigger.focus();
+
+  await mountModal();
+
+  const dialog = host.querySelector<HTMLDialogElement>("dialog.modal-overlay");
+  expect(dialog).toBeTruthy();
+  expect(dialog?.open).toBe(true);
+  const title = host.querySelector(".modal-head h3");
+  expect(title?.id).toBeTruthy();
+  expect(dialog?.getAttribute("aria-labelledby")).toBe(title?.id);
+  expect(dialog?.contains(win.document.activeElement)).toBe(true);
+});
+
 function nameInput(): HTMLInputElement {
   const el = host.querySelector<HTMLInputElement>(".modal-card input.input");
   expect(el).toBeTruthy();
@@ -148,8 +164,20 @@ test("Escape still closes the modal", async () => {
   await mountModal();
 
   await act(async () => {
-    win.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape" }));
+    overlay().dispatchEvent(new win.Event("cancel", { cancelable: true }));
   });
 
   expect(closeCalls).toBe(1);
+});
+
+test("restores focus to the trigger when the modal unmounts", async () => {
+  const trigger = win.document.createElement("button") as unknown as HTMLButtonElement;
+  win.document.body.appendChild(trigger as never);
+  trigger.focus();
+  await mountModal();
+
+  await act(async () => { root?.unmount(); });
+  root = null;
+
+  expect(win.document.activeElement).toBe(trigger);
 });

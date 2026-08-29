@@ -4,7 +4,7 @@
  * rows on the Accounts tab. Presentational: presets/usage arrive via props;
  * view state (tab, query) lives here; selection lifts up.
  */
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import { useT } from "../../i18n/shared";
 import {
   bucketPresets,
@@ -29,11 +29,13 @@ export type CatalogTier = "accounts" | "free" | "paid";
 const EMPTY_USAGE_RANK: Record<string, number> = {};
 const EMPTY_ACCOUNT_ROWS: AccountLoginRow[] = [];
 const EMPTY_ACCOUNT_STATUS: Record<string, AccountLoginStatus> = {};
+const TIERS: CatalogTier[] = ["accounts", "free", "paid"];
 
 export default function ProviderCatalog({
   presets,
   usageRank = EMPTY_USAGE_RANK,
   presetsLoading = false,
+  presetsError = false,
   initialTier = "free",
   onSelectPreset,
   onSelectCustom,
@@ -50,6 +52,7 @@ export default function ProviderCatalog({
   presets: CatalogPreset[];
   usageRank?: Record<string, number>;
   presetsLoading?: boolean;
+  presetsError?: boolean;
   initialTier?: CatalogTier;
   onSelectPreset: (preset: CatalogPreset) => void;
   onSelectCustom: () => void;
@@ -75,6 +78,7 @@ export default function ProviderCatalog({
   onManage?: (provider: string) => void;
 }) {
   const t = useT();
+  const catalogId = useId();
   const [tier, setTier] = useState<CatalogTier>(initialTier);
   const [query, setQuery] = useState("");
 
@@ -97,6 +101,28 @@ export default function ProviderCatalog({
   const buckets = useMemo(() => bucketPresets(ranked), [ranked]);
   const tierList = buckets[tier];
   const rows = useMemo(() => filterPresets(tierList, query), [tierList, query]);
+  // oxlint-disable-next-line local-i18n/no-hardcoded-ui-strings -- DOM id suffix, not UI copy
+  const tabId = (candidate: CatalogTier) => `${catalogId}-tab-${candidate}`;
+  // oxlint-disable-next-line local-i18n/no-hardcoded-ui-strings -- DOM id suffix, not UI copy
+  const panelId = (candidate: CatalogTier) => `${catalogId}-panel-${candidate}`;
+  const selectTier = (candidate: CatalogTier) => {
+    setTier(candidate);
+    setQuery("");
+  };
+
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, candidate: CatalogTier) => {
+    const index = TIERS.indexOf(candidate);
+    const nextIndex = event.key === "ArrowRight" ? (index + 1) % TIERS.length
+      : event.key === "ArrowLeft" ? (index - 1 + TIERS.length) % TIERS.length
+      : event.key === "Home" ? 0
+      : event.key === "End" ? TIERS.length - 1
+      : -1;
+    if (nextIndex < 0) return;
+    event.preventDefault();
+    const nextTier = TIERS[nextIndex]!;
+    selectTier(nextTier);
+    document.getElementById(tabId(nextTier))?.focus();
+  };
 
   const badges = (p: CatalogPreset) => {
     const auth = p.codexAccountMode === "direct" ? <span className="badge badge-green">{t("modal.badge.direct")}</span>
@@ -116,34 +142,53 @@ export default function ProviderCatalog({
 
   return (
     <div className="provider-catalog">
-      <div className="provider-catalog-tabs" role="tablist">
-        {(["accounts", "free", "paid"] as const).map(candidate => (
+      <div className="provider-catalog-tabs" role="tablist" aria-label={t("modal.catalogTabs")}>
+        {TIERS.map(candidate => (
           <button type="button"
             key={candidate}
+            id={tabId(candidate)}
             role="tab"
             aria-selected={tier === candidate}
+            aria-controls={panelId(candidate)}
+            tabIndex={tier === candidate ? 0 : -1}
             className={`provider-catalog-tab${tier === candidate ? " active" : ""}`}
-            onClick={() => { setTier(candidate); setQuery(""); }}
+            onClick={() => selectTier(candidate)}
+            onKeyDown={event => handleTabKeyDown(event, candidate)}
           >
             {t(candidate === "accounts" ? "modal.tab.accounts" : candidate === "free" ? "modal.tab.free" : "modal.tab.paid")}
           </button>
         ))}
       </div>
 
-      {tier === "accounts" && (
-        <div className="provider-catalog-accounts-hint muted text-label">
-          {t("modal.accountsHint")}
-        </div>
-      )}
+      {TIERS.map(candidate => (
+      <div
+        key={candidate}
+        id={panelId(candidate)}
+        role="tabpanel"
+        aria-labelledby={tabId(candidate)}
+        hidden={tier !== candidate}
+        className="provider-catalog-panel"
+      >
+        {tier === candidate && <>
+        {tier === "accounts" && (
+          <div className="provider-catalog-accounts-hint muted text-label">
+            {t("modal.accountsHint")}
+          </div>
+        )}
 
-      <input
-        className="input provider-catalog-search"
-        value={query}
-        onChange={e => setQuery(e.target.value)}
-        placeholder={t("modal.search")}
-      />
+        <label className="text-label" htmlFor={`${catalogId}-search`}>
+          {t("modal.searchLabel")}
+        </label>
+        <input
+          id={`${catalogId}-search`}
+          type="search"
+          className="input provider-catalog-search"
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          placeholder={t("modal.search")}
+        />
 
-      <div className="provider-catalog-rows">
+        <div className="provider-catalog-rows">
         {presetsLoading && rows.length === 0 && (
           <div className="muted text-control provider-catalog-empty">{t("modal.catalogLoading")}</div>
         )}
@@ -156,7 +201,7 @@ export default function ProviderCatalog({
             <div className="provider-catalog-badges">{badges(p)}</div>
           </button>
         ))}
-        {tier !== "accounts" && !presetsLoading && rows.length === 0 && (
+        {tier !== "accounts" && !presetsLoading && !presetsError && rows.length === 0 && (
           <div className="muted text-control provider-catalog-empty">{t("modal.noMatch")}</div>
         )}
 
@@ -249,17 +294,20 @@ export default function ProviderCatalog({
             </div>
           );
         })}
-        {tier === "accounts" && accountRows.length === 0 && !presetsLoading && (
+        {tier === "accounts" && accountRows.length === 0 && !presetsLoading && !presetsError && (
           <div className="muted text-control provider-catalog-empty">{t("modal.noMatch")}</div>
         )}
-      </div>
+        </div>
 
-      <div className="provider-catalog-footer">
-        <div style={{ flex: 1 }} />
-        {tier !== "accounts" && (
-          <button type="button" className="link-btn" onClick={onSelectCustom}>{t("modal.notListed")}</button>
-        )}
+        <div className="provider-catalog-footer">
+          <div style={{ flex: 1 }} />
+          {tier !== "accounts" && (
+            <button type="button" className="link-btn" onClick={onSelectCustom}>{t("modal.notListed")}</button>
+          )}
+        </div>
+        </>}
       </div>
+      ))}
     </div>
   );
 }
