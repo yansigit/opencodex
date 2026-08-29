@@ -17,7 +17,7 @@
 import { clearableDeadline } from "./abort";
 
 // 1 initial + 2 retries: the pool may hold more than one stale socket.
-const RESET_RETRY_MAX_ATTEMPTS = 3;
+const RESET_RETRY_MAX_ATTEMPTS = 1;
 const RESET_RETRY_BASE_DELAY_MS = 150;
 const RESET_RETRY_MAX_DELAY_MS = 1_000;
 
@@ -240,11 +240,15 @@ export interface ResetRetryOptions {
   /** Short host/path label for the retry warn log (no secrets/query strings). */
   label?: string;
   attempts?: number;
+  /** Shared replay allowance across sends in one logical generation. */
+  replayBudget?: { remaining: number };
 }
 
 export interface TransientRetryOptions extends ResetRetryOptions {
   /** Test seam: per-attempt slow budget override (defaults to TRANSIENT_RETRY_SLOW_ATTEMPT_MS). */
   slowAttemptMs?: number;
+  /** Opt in to replaying transient 5xx responses (up to three total sends). */
+  replayTransientFailures?: boolean;
 }
 
 export type UpstreamSendRecovery = "connection-reset" | "transient-5xx";
@@ -330,7 +334,7 @@ export async function fetchWithResetRetry(
         if (sawReset) throw new UpstreamRetryEvidenceError([], err, true);
         throw err;
       }
-      if (attempt === attempts - 1) throw err;
+      if (attempt === attempts - 1 || (opts.replayBudget && opts.replayBudget.remaining <= 0)) throw err;
       sawReset = true;
       lastError = err;
       console.warn(
@@ -340,6 +344,7 @@ export async function fetchWithResetRetry(
         baseDelayMs: RESET_RETRY_BASE_DELAY_MS,
         maxDelayMs: RESET_RETRY_MAX_DELAY_MS,
       }), opts.abortSignal);
+      if (opts.replayBudget) opts.replayBudget.remaining -= 1;
     }
   }
   throw lastError ?? new Error("upstream fetch failed");
@@ -359,34 +364,43 @@ export async function fetchWithTransientRetry(
   doFetch: ReplayableFetch,
   opts: TransientRetryOptions = {},
 ): Promise<Response> {
-  const attempts = Math.max(1, opts.attempts ?? TRANSIENT_RETRY_MAX_ATTEMPTS);
+  const attempts = Math.max(1, opts.attempts ?? (opts.replayTransientFailures ? TRANSIENT_RETRY_MAX_ATTEMPTS : 1));
   const slowAttemptMs = opts.slowAttemptMs ?? TRANSIENT_RETRY_SLOW_ATTEMPT_MS;
   const transientStatuses: number[] = [];
   let attemptStart = Date.now();
-  let res = await fetchWithResetRetry(doFetch, opts);
-  for (let attempt = 0; attempt < attempts - 1; attempt++) {
-    if (res.ok || !isTransientUpstreamStatus(res.status)) return res;
-    if (opts.abortSignal?.aborted) return res;
-    if (Date.now() - attemptStart > slowAttemptMs) return res;
-    console.warn(
-      `[upstream-retry] transient ${res.status}${opts.label ? ` (${opts.label})` : ""} — retrying (${attempt + 2}/${attempts})`,
-    );
-    const delay = retryBackoffDelayMs(attempt, {
-      baseDelayMs: TRANSIENT_RETRY_BASE_DELAY_MS,
-      maxDelayMs: TRANSIENT_RETRY_MAX_DELAY_MS,
-      headers: res.headers,
-    });
-    cancelResponseBodyBestEffort(res);
-    await sleepWithAbort(delay, opts.abortSignal);
-    attemptStart = Date.now();
-    transientStatuses.push(res.status);
+  let sawReset = false;
+  let resetSeen = false;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (opts.abortSignal?.aborted) throw abortError(opts.abortSignal);
     try {
-      res = await fetchWithResetRetry(doFetch, opts, "transient-5xx");
+      const res = await doFetch(attempt === 0 ? undefined : (sawReset ? "connection-reset" : "transient-5xx"));
+      if (res.ok || !isTransientUpstreamStatus(res.status) || attempt === attempts - 1
+        || opts.abortSignal?.aborted || Date.now() - attemptStart > slowAttemptMs
+        || (opts.replayBudget && opts.replayBudget.remaining <= 0)) return res;
+      console.warn(`[upstream-retry] transient ${res.status}${opts.label ? ` (${opts.label})` : ""} — retrying (${attempt + 2}/${attempts})`);
+      const delay = retryBackoffDelayMs(attempt, { baseDelayMs: TRANSIENT_RETRY_BASE_DELAY_MS, maxDelayMs: TRANSIENT_RETRY_MAX_DELAY_MS, headers: res.headers });
+      cancelResponseBodyBestEffort(res);
+      await sleepWithAbort(delay, opts.abortSignal);
+      if (opts.replayBudget) opts.replayBudget.remaining -= 1;
+      transientStatuses.push(res.status);
+      sawReset = false;
+      attemptStart = Date.now();
     } catch (err) {
-      // Keep the prior 5xx evidence attached: the origin already responded, so
-      // this rejection is not pre-connection and must not classify as neutral.
-      throw new UpstreamRetryEvidenceError(transientStatuses, err);
+      if (opts.abortSignal?.aborted) throw err;
+      if (!isConnectionResetError(err)) {
+        if (transientStatuses.length || resetSeen) throw new UpstreamRetryEvidenceError(transientStatuses, err, resetSeen);
+        throw err;
+      }
+      if (attempt === attempts - 1 || (opts.replayBudget && opts.replayBudget.remaining <= 0)) throw err;
+      sawReset = true;
+      resetSeen = true;
+      lastError = err;
+      console.warn(`[upstream-retry] connection reset${opts.label ? ` (${opts.label})` : ""} — retrying (${attempt + 2}/${attempts})`);
+      await sleepWithAbort(retryBackoffDelayMs(attempt, { baseDelayMs: RESET_RETRY_BASE_DELAY_MS, maxDelayMs: RESET_RETRY_MAX_DELAY_MS }), opts.abortSignal);
+      if (opts.replayBudget) opts.replayBudget.remaining -= 1;
+      attemptStart = Date.now();
     }
   }
-  return res;
+  throw lastError ?? new Error("upstream fetch failed");
 }

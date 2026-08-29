@@ -123,7 +123,7 @@ of the HTTP retry loop.
 **Auth:** API key, Vertex ADC, Google Antigravity OAuth, or the local `ai-studio-web` direct session,
 selected by `googleMode`.
 
-`googleMode: "ai-studio-web"` routes directly through Google's internal MakerSuite endpoints using authenticated session tokens and SHA-1 `SAPISIDHASH` credentials. On macOS, sessions are established interactively via native WebKit login (`ocx login` or Connect in the dashboard). Sessions can also be exported via the OpenCodex AI Studio Session Exporter extension for Brave and Chrome. Inference uses direct authenticated HTTP transport rather than browser tabs or WebSocket relays.
+`googleMode: "ai-studio-web"` routes directly through Google's internal MakerSuite endpoints using authenticated session tokens and SHA-1 `SAPISIDHASH` credentials. On macOS, sessions are established interactively via native WebKit login (`ocx login` or Connect in the dashboard). Sessions can also be exported via the OpenCodex AI Studio Session Exporter extension for Brave and Chrome; configure the extension's exact `chrome-extension://<id>` origin in `corsAllowOrigins` and provide a data-plane API key before auto-sync. Inference uses direct authenticated HTTP transport rather than browser tabs or WebSocket relays.
 
 - System prompt → `systemInstruction`; messages → `contents[]` (assistant → `model`); tools →
   `functionDeclarations`. Data-URL images → `inline_data`.

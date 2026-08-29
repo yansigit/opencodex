@@ -160,6 +160,7 @@ describe("terminal continuation provider-owner rotation", () => {
           authMode: "key",
           apiKey: key,
           terminalContinuationGuard: true,
+          replayTransientFailures: true,
         },
       },
     } as OcxConfig;

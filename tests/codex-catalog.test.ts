@@ -3783,7 +3783,7 @@ describe("Codex catalog routed normalization", () => {
       });
       const warningText = warning.mock.calls.flat().join(" ");
       expect(warningText).toContain("blocked by destination policy");
-      expect(warningText).toContain("benchmark address");
+      expect(warningText).toContain("credential-bearing provider GET URL must use HTTPS");
       expect(warningText).toContain("fallback=configured");
     } finally {
       warning.mockRestore();
@@ -3809,7 +3809,6 @@ describe("Codex catalog routed normalization", () => {
             adapter: "openai-chat",
             baseUrl: "http://198.18.0.1/v1",
             allowPrivateNetwork: true,
-            apiKey: "sk-test",
             fetch: globalThis.fetch,
           },
         },

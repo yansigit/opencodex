@@ -130,7 +130,7 @@ GUI はプロキシの JSON 管理 API を使うシンクライアントです�
 
 | エンドポイント | 用途 |
  --- | --- |
-| `GET` / `PUT /api/settings` | 設定を読み、Codex 自動起動、stream/memory、account-targeting picker の表示を更新します。 |
+| `GET` / `PUT /api/settings` | 設定を読み、Codex 自動起動、stream/memory、account-targeting picker の表示、サーバーリスナー設定を更新します。リスナーと証明書の変更にはプロキシの再起動が必要です。 |
 | `GET /api/startup-health` | 秘密情報を含まないルーティング、サービス、shim、再起動安全性診断を読み取ります。 |
 | `GET` / `POST /api/windows-tray` | Windows トレイの導入・表示状態を読み取り、`install`、`start`、`stop`、`uninstall` を実行します。 |
 | `POST /api/sync` | 共有モデルカタログを再構築し Codex モデルキャッシュを古い状態としてマークします。 |

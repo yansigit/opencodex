@@ -10,7 +10,8 @@ description: 監聽器、遠端存取、許可金鑰、逾時、儲存、sidecar
 | 欄位 | 型別 | 預設值 | 意義 |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | 代理監聽連接埠。 |
-| `hostname?` | `string` | `"127.0.0.1"` | 綁定位址。非回送綁定需要 `OPENCODEX_API_AUTH_TOKEN`。 |
+| `hostname?` | `string` | `"127.0.0.1"` | 綁定位址。非回送綁定需要 TLS 與 data-plane 憑證。 |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | 使用指定且可讀的憑證與私密金鑰檔案提供 HTTPS。`publicOrigin` 必須是用於客戶端 URL 的精確 HTTPS origin。 |
 | `proxy?` | `string` | — | 對外 HTTP(S) 代理 URL 或 `${ENV_VAR}`。僅在那些變數未設定時套用至 `HTTP_PROXY` / `HTTPS_PROXY`；回送保留在 `NO_PROXY` 中。 |
 | `emptyCompletionRetry?` | `boolean` | `false` | 明確啟用：當 Responses 完成時沒有文字或工具呼叫，以相同請求重試一次。重試可能產生費用。`OCX_EMPTY_COMPLETION_RETRY=0` 可在不變更設定的情況下停用；combo 與 routed-compaction turn 不適用。 |
 | `stallTimeoutSec?` | `number` | `300` | 在 `response.incomplete` 前無上游資料的秒數。最小 1。 |
@@ -18,7 +19,7 @@ description: 監聽器、遠端存取、許可金鑰、逾時、儲存、sidecar
 | `shutdownTimeoutMs?` | `number` | `5000` | 在中止活躍回合前的優雅排空截止時間。 |
 | `websockets?` | `boolean` | `false` | 廣告並允許面向 client 的 Responses WebSocket 路徑。False 時 client 使用 HTTP/SSE。canonical ChatGPT upstream WS 需另外選擇啟用：設定供應商 `wsUpstream` 時以其為準（`true` 啟用、`false` 停用）；省略時以 `OCX_CODEX_WS_UPSTREAM=true` 或 `1` 啟用，`false`/`0`、未設定或無效值會維持 HTTP/SSE。 |
 | `corsAllowOrigins?` | `string[]` | `[]` | 額外的精確 CORS 來源。回送來源恆被允許。 |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | 生成的 `ocx_…` 憑證，在非回送綁定上被管理與 data-plane 認證接受。由儀表板管理。 |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | 生成的 `ocx_…` 憑證，在非回送綁定上由 data-plane 認證接受。由儀表板管理；管理 API 需要另外的管理員 token。 |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | 停用 | 選擇加入的已封存 session 清理政策。永不隱含啟用。 |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | 以 MiB 為單位、可被驅逐的 app 擁有日誌、快取、blob 與 continuation payload 上限。範圍 64–4096；非 RSS 上限。 |
 | `codexAutoStart?` | `boolean` | `true` | 讓 Codex shim 在啟動 Codex 前執行 `ocx ensure`。False 使 ensure 為 no-op。 |
@@ -34,14 +35,14 @@ description: 監聽器、遠端存取、許可金鑰、逾時、儲存、sidecar
 
 ## 遠端存取
 
-預設的 `127.0.0.1` 綁定僅限回送。如 `0.0.0.0` 的非回送位址需要在 `/api/*` 與 data plane 上都進行 token 認證。在啟動前匯出 token：
+預設的 `127.0.0.1` 綁定僅限回送。如 `0.0.0.0` 的非回送位址需要 TLS 與 data-plane 憑證。遠端儀表板還需要另外的管理員 token（`OPENCODEX_ADMIN_AUTH_TOKEN` 或產生的管理員 token 檔案）。在啟動前匯出 data-plane token：
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-代理在沒有此變數時拒絕遠端綁定。對於背景服務，請在 `ocx service install` 前匯出它，以便 launchd、systemd 或 Task Scheduler 接收它。客戶端應發送：
+代理在沒有 TLS 或此變數時拒絕遠端綁定。憑證和 listener 變更會在重新啟動後生效。對於背景服務，請在 `ocx service install` 前匯出它，以便 launchd、systemd 或 Task Scheduler 接收它。Data-plane 客戶端應發送：
 
 ```text
 x-opencodex-api-key: your-secret-token
@@ -194,3 +195,6 @@ OpenAI backend 需要 ChatGPT 登入與啟用的 ChatGPT `forward` 供應商。C
 視覺僅對發送到其供應商 `noVisionModels` 中模型的圖片啟用。OpenAI 的登入／forward 需求與搜尋相同；明確選擇的 Anthropic 在無可用憑證時 fail closed。成功的 `data:` 描述使用以 backend、模型、細節、圖片位元組與正規化訊息 context 為 key 的有界快取。命中與同回合重複不消耗限制。遠端 `https:` 圖片與失敗或空的描述不被快取。
 
 Anthropic OAuth sidecar 重用 opencodex 既有的 Claude Code OAuth 指紋。請對預期帳號與工作負載進行浸泡測試。
+### TLS 與 WebSocket
+
+`tls` 支援 `certFile`、`keyFile` 與 `publicOrigin`。WebSocket 閒置逾時為 255 秒，達到背壓上限（1 MiB）時關閉連線。

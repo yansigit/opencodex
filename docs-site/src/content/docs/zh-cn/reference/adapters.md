@@ -178,3 +178,4 @@ Cursor 的 HTTP/1.1 兼容传输：通过 `agent.v1.AgentService/RunSSE` 接收 
   Anthropic/Google image block 使用。
 - `contentPartsToText(content)` —— 为纯文本工具消息把 content part 扁平化成文本。未描述的图像
   会变成简短的 `[image]` marker，而不是导致 token 暴涨的 base64 blob。
+AI Studio 扩展 origin 必须是精确的 `chrome-extension://` origin，同步请求需要 data-plane API key。

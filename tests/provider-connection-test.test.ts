@@ -137,7 +137,7 @@ describe("POST /api/providers/test (WP040 connectivity probe)", () => {
     const { body } = await probe(config, "metadata");
 
     expect(body.ok).toBe(false);
-    expect(String(body.error)).toContain("blocked metadata endpoint");
+    expect(String(body.error)).toContain("credential-bearing provider GET URL must use HTTPS");
     expect(fetches).toBe(0);
   });
 

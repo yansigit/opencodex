@@ -196,7 +196,6 @@ import {
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import {
   applyUpstreamRecoveryInit,
-  fetchWithResetRetry,
   fetchWithTransientRetry,
   prepareSameTarget429Wait,
   sleepWithAbort,
@@ -3702,6 +3701,7 @@ async function handleResponsesInner(
     linkAbortSignal(upstream, options.abortSignal);
     const connectMs = config.connectTimeoutMs ?? 200_000;
     let upstreamResponse: Response;
+    const replayBudget = route.provider.replayTransientFailures ? { remaining: 2 } : undefined;
     const transportFailureResponse = (err: unknown): Response => {
       upstream.abort();
       if (options.abortSignal?.aborted) {
@@ -3768,7 +3768,7 @@ async function handleResponsesInner(
               return res;
             });
         },
-        { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
+        { abortSignal: upstream.signal, label: safeHostLabel(request.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
       );
     } catch (err) {
       return transportFailureResponse(err);
@@ -3843,7 +3843,7 @@ async function handleResponsesInner(
                 return response;
               });
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
         );
       } catch (err) {
         return { failed: transportFailureResponse(err) };
@@ -3959,7 +3959,7 @@ async function handleResponsesInner(
                 return res;
               });
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
         );
       } catch (err) {
         return transportFailureResponse(err);
@@ -4021,7 +4021,7 @@ async function handleResponsesInner(
                 return res;
               });
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
         );
       } catch (err) {
         return transportFailureResponse(err);
@@ -5353,6 +5353,7 @@ async function handleResponsesInner(
    */
   const invalidateSameTargetRequest = (): void => { transportToken += 1; };
   let upstreamResponse: Response;
+  const replayBudget = route.provider.replayTransientFailures ? { remaining: 2 } : undefined;
   try {
     if (activeAdapter.fetchResponse) {
       noteDiagnosticAttempt(logCtx.activeAttempt, inputTokenEstimate, undefined, activeAdapter.name);
@@ -5361,20 +5362,17 @@ async function handleResponsesInner(
         abortSignal: upstream.signal,
         timeoutMs: connectMs,
         stream: parsed.stream,
-        executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+          executor: providerFetch(route.provider, options.codexWsRuntimeIdentity, {
           providerName: route.providerName,
           modelId: route.modelId,
           pacingSlotAcquired: true,
-        }),
+          }),
+          replayBudget,
         ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       });
     } else {
-      // #1851 scope guard: transient-5xx retry on this generic adapter path is opt-in for
-      // direct Google AI Studio only (Vertex/Antigravity use fetchResponse above). Other
-      // adapters keep reset-only retry so combo failover still hops on the first 5xx
-      // instead of burning ~1.2s of same-target retries per hop.
-      const fetchWithRetryPolicy = route.provider.adapter === "google" ? fetchWithTransientRetry : fetchWithResetRetry;
-      upstreamResponse = await fetchWithRetryPolicy(
+      // One coordinator owns reset and transient-5xx replay for every generic adapter.
+      upstreamResponse = await fetchWithTransientRetry(
         recovery => {
           noteDiagnosticAttempt(logCtx.activeAttempt, inputTokenEstimate, recovery, activeAdapter.name);
           return fetchWithHeaderTimeout(builtInitialRequest.url, applyUpstreamRecoveryInit({
@@ -5387,7 +5385,7 @@ async function handleResponsesInner(
               modelId: route.modelId,
             }));
         },
-        { abortSignal: upstream.signal, label: safeHostLabel(builtInitialRequest.url) },
+        { abortSignal: upstream.signal, label: safeHostLabel(builtInitialRequest.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
       );
     }
   } catch (err) {
@@ -6055,13 +6053,12 @@ async function handleResponsesInner(
               modelId: nextParsed.modelId,
               pacingSlotAcquired: true,
             }),
+            replayBudget,
             ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
           });
         }
-        // Same #1851 scope guard as the initial send: transient-5xx retry only for direct
-        // Google AI Studio; every other adapter keeps reset-only semantics here.
-        const fetchContinuationWithRetryPolicy = route.provider.adapter === "google" ? fetchWithTransientRetry : fetchWithResetRetry;
-        return await fetchContinuationWithRetryPolicy(
+        // Continuations consume the same generation-scoped transient replay allowance.
+        return await fetchWithTransientRetry(
           recovery => {
             noteDiagnosticAttempt(logCtx.activeAttempt, continuationEstimate, recovery ?? replayKind, activeAdapter.name);
             return fetchWithHeaderTimeout(
@@ -6080,7 +6077,7 @@ async function handleResponsesInner(
               }),
             );
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(builtContinuationRequest.url) },
+          { abortSignal: upstream.signal, label: safeHostLabel(builtContinuationRequest.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
           );
       } finally {
         builtContinuationRequest.releaseBodyObservation?.();

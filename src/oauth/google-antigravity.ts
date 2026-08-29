@@ -13,6 +13,7 @@ import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-ser
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
 import { antigravityUserAgent, ANTIGRAVITY_IDE_VERSION } from "../adapters/client-fingerprint";
+import { oauthFetch } from "./transport";
 
 const CLIENT_ID = process.env.GOOGLE_ANTIGRAVITY_CLIENT_ID
   || "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
@@ -96,7 +97,7 @@ function emailFromToken(accessToken: string, idToken: string | undefined): strin
 }
 
 async function postToken(body: Record<string, string>, signal?: AbortSignal): Promise<GoogleTokenPayload> {
-  const response = await fetch(TOKEN_ENDPOINT, {
+  const response = await oauthFetch(TOKEN_ENDPOINT, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(body).toString(),
@@ -132,7 +133,7 @@ function extractProjectId(data: Record<string, unknown> | undefined): string | u
 }
 
 async function loadCodeAssistProject(accessToken: string, signal?: AbortSignal): Promise<string | undefined> {
-  const response = await fetch(`${PROD_API}/${API_VERSION}:loadCodeAssist`, {
+  const response = await oauthFetch(`${PROD_API}/${API_VERSION}:loadCodeAssist`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, Accept: "*/*", "Content-Type": "application/json", "User-Agent": antigravityUserAgent() },
     body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
@@ -149,7 +150,7 @@ async function onboardProject(
   const sleep = sleepForTests ?? defaultSleep;
   for (let attempt = 0; attempt < ONBOARD_ATTEMPTS; attempt++) {
     if (signal?.aborted) throw signal.reason ?? new Error("Antigravity onboarding aborted");
-    const response = await fetch(`${DAILY_API}/${API_VERSION}:onboardUser`, {
+    const response = await oauthFetch(`${DAILY_API}/${API_VERSION}:onboardUser`, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, Accept: "*/*", "Content-Type": "application/json", "User-Agent": antigravityUserAgent() },
       // `ide_version` is a version, not a User-Agent. `antigravityUserAgent()` returns the whole
@@ -295,7 +296,7 @@ export async function validateAntigravityImportCredential(
   signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
   const credential = await refreshAntigravityToken(refreshToken, signal);
-  const response = await fetch(USERINFO_ENDPOINT, {
+  const response = await oauthFetch(USERINFO_ENDPOINT, {
     method: "GET",
     headers: { Accept: "application/json", Authorization: `Bearer ${credential.access}` },
     signal: requestSignal(signal),

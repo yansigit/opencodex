@@ -150,6 +150,7 @@ export {
   writeRuntimePort,
   type RuntimePortState,
 } from "./config/process-state";
+import { serverTlsConfigError } from "./lib/server-tls";
 import {
   clearPendingConfigTopLevelDeletions,
   configHasRebaseProvenance,
@@ -536,6 +537,7 @@ const providerConfigSchema = z.object({
     .transform(normalizeNonBlankStringArray)
     .optional(),
   retryOn429: retryOn429PolicySchema.optional(),
+  replayTransientFailures: z.boolean().optional(),
   codexAccountMode: z.enum(["pool", "direct"]).optional(),
   // Validated rather than passed through: this schema ends in `.passthrough()`, so an
   // undeclared key survives verbatim. A misspelled `codexToolMode` therefore used to be
@@ -904,6 +906,11 @@ const configSchema = z.object({
   // is safe: startServer() already falls back to 127.0.0.1 for a missing hostname. Write-time
   // rejection lives in validateConfigCandidate() so bad values still surface to the caller.
   hostname: z.string().trim().min(1).optional().catch(undefined),
+  tls: z.object({
+    certFile: z.string().trim().min(1),
+    keyFile: z.string().trim().min(1),
+    publicOrigin: z.string().trim().min(1),
+  }).strict().optional().catch(undefined),
   // Discriminated on `enabled` so a disabled entry cannot be forced to carry a port, and an
   // enabled one cannot omit it (#1102). A malformed value degrades to undefined rather than
   // failing the whole parse: this is an opt-in convenience surface, and a hand-edit typo here
@@ -1418,6 +1425,11 @@ function sanitizeRetryOn429ForLoad(parsed: unknown): void {
     const safeProviderName = JSON.stringify(redactSecretString(name));
     if (!provider || typeof provider !== "object" || Array.isArray(provider)) continue;
     const p = provider as Record<string, unknown>;
+    if (p.replayTransientFailures !== undefined && typeof p.replayTransientFailures !== "boolean") {
+      const receivedType = typeof p.replayTransientFailures;
+      delete p.replayTransientFailures;
+      console.warn(`⚠️  config.json providers.${safeProviderName}.replayTransientFailures (${receivedType}) is invalid — ignoring the field`);
+    }
     const policy = p.retryOn429;
     if (policy === undefined) continue;
     if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
@@ -2385,6 +2397,11 @@ function loopbackListenerPortError(value: unknown): string | null {
 
 export function validateConfigCandidate(value: unknown): { ok: true; config: OcxConfig } | { ok: false; error: string } {
   const boundaryError = blankHostnameError(value)
+    ?? (() => {
+      const raw = rawConfigRecord(value);
+      const error = raw ? serverTlsConfigError(raw.tls) : null;
+      return error ? `schema_invalid: ${error}` : null;
+    })()
     ?? claudeSubagentEffortError(value)
     ?? subagentRolesError(value)
     ?? appOwnedMemoryBudgetError(value)

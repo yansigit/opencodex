@@ -190,6 +190,23 @@ test("unrelated recoverable config damage does not hide pre-version ownership", 
   expect(legacyCustomModelCatalogSlugs(live)).toEqual(new Set(["test/legacy-model"]));
 });
 
+test("an invalid replayTransientFailures value is dropped without hiding providers", () => {
+  writePreVersionCustomConfig({
+    providers: {
+      test: {
+        adapter: "openai-chat",
+        baseUrl: "http://127.0.0.1:1/v1",
+        apiKey: "k",
+        allowPrivateNetwork: true,
+        replayTransientFailures: "true",
+      },
+    },
+  });
+  const live = loadConfig();
+  expect(live.providers.test).toBeDefined();
+  expect(live.providers.test.replayTransientFailures).toBeUndefined();
+});
+
 test("a future migration state survives an older save and grants no deletion authority", () => {
   const futureState = { version: 2, opaque: { keep: true } };
   writeDiskConfig({

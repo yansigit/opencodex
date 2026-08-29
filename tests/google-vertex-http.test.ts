@@ -70,7 +70,7 @@ describe("vertex retry fetch", () => {
       new Response(vertexError(503, "UNAVAILABLE", "overloaded"), { status: 503, headers: { "Retry-After": "0" } }),
       new Response("ok", { status: 200 }),
     ]);
-    const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
+    const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000 }, { replayTransientFailures: true });
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(mock.calls).toHaveLength(2);
@@ -93,7 +93,7 @@ describe("vertex retry fetch", () => {
     const mock = mockFetch([first, new Response("ok", { status: 200 })]);
 
     const res = await Promise.race([
-      fetchVertexWithRetry(request, { timeoutMs: 5_000 }),
+      fetchVertexWithRetry(request, { timeoutMs: 5_000 }, { replayTransientFailures: true }),
       Bun.sleep(250).then(() => { throw new Error("retry waited for response body cancellation"); }),
     ]);
 
@@ -105,7 +105,7 @@ describe("vertex retry fetch", () => {
 
   test("retries a thrown network error then succeeds", async () => {
     const mock = mockFetch([new Error("ECONNRESET"), new Response("ok", { status: 200 })]);
-    const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
+    const res = await fetchVertexWithRetry(request, { timeoutMs: 5_000 }, { replayTransientFailures: true });
     expect(res.status).toBe(200);
     expect(mock.calls).toHaveLength(2);
   });
@@ -124,7 +124,7 @@ describe("vertex retry fetch", () => {
       new Response(vertexError(429, "RESOURCE_EXHAUSTED", "rate limit, try again"), { status: 429, headers: { "Retry-After": "0" } }),
       new Response("ok", { status: 200 }),
     ]);
-    const rres = await fetchVertexWithRetry(request, { timeoutMs: 5_000 });
+    const rres = await fetchVertexWithRetry(request, { timeoutMs: 5_000 }, { replayTransientFailures: true });
     expect(rres.status).toBe(200);
     expect(rate.calls).toHaveLength(2);
   });
@@ -385,7 +385,7 @@ describe("vertex retry fetch", () => {
       new Response(vertexError(503, "UNAVAILABLE", "This model is currently experiencing high demand."), { status: 503, headers: { "Retry-After": "0" } }),
       new Response("ok", { status: 200 }),
     ]);
-    const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 });
+    const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 }, { replayTransientFailures: true });
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(mock.calls).toHaveLength(2);
@@ -410,7 +410,7 @@ describe("vertex retry fetch", () => {
       new Response(raw, { status: 429, headers: { "Retry-After": "0", "x-direct-raw": "quota" } }),
       new Response("ok", { status: 200 }),
     ]);
-    const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 });
+    const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 }, { replayTransientFailures: true });
     expect(mock.calls).toHaveLength(1);
     expect(res.status).toBe(429);
     expect(res.headers.get("x-direct-raw")).toBe("quota");
@@ -424,7 +424,7 @@ describe("vertex retry fetch", () => {
       new Response(raw, { status: 429, headers: { "Retry-After": "0" } }),
       new Response(raw, { status: 429, headers: { "Retry-After": "0", "x-final": "yes" } }),
     ]);
-    const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 });
+    const res = await fetchDirectGeminiWithRetry(request, { timeoutMs: 5_000 }, { replayTransientFailures: true });
     expect(mock.calls).toHaveLength(3);
     expect(res.headers.get("x-final")).toBe("yes");
     expect(await res.text()).toBe(raw);

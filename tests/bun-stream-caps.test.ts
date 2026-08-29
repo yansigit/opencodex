@@ -119,12 +119,12 @@ describe("selectEagerPath (platform policy matrix)", () => {
     { platform: "darwin", mode: "legacy-tee", rewrite: true, expected: null },
     { platform: "darwin", mode: "eager-relay", rewrite: true, expected: configEager },
     { platform: "darwin", mode: "auto", rewrite: true, expected: null },
-    { platform: "linux", mode: "legacy-tee", rewrite: false, expected: null },
-    { platform: "linux", mode: "eager-relay", rewrite: false, expected: null },
-    { platform: "linux", mode: "auto", rewrite: false, expected: null },
-    { platform: "linux", mode: "legacy-tee", rewrite: true, expected: null },
-    { platform: "linux", mode: "eager-relay", rewrite: true, expected: null },
-    { platform: "linux", mode: "auto", rewrite: true, expected: null },
+    { platform: "linux", mode: "legacy-tee", rewrite: false, expected: configLegacy },
+    { platform: "linux", mode: "eager-relay", rewrite: false, expected: configEager },
+    { platform: "linux", mode: "auto", rewrite: false, expected: autoFixed },
+    { platform: "linux", mode: "legacy-tee", rewrite: true, expected: configLegacy },
+    { platform: "linux", mode: "eager-relay", rewrite: true, expected: configEager },
+    { platform: "linux", mode: "auto", rewrite: true, expected: autoFixed },
   ];
 
   for (const { platform, mode, rewrite, expected } of cases) {

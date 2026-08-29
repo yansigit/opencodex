@@ -17,6 +17,8 @@ const EXCLUDED_SUFFIXES = [
   "bun.lock",
   "package-lock.json",
 ];
+// Conspicuously test-only private key used solely by the real local HTTPS/SNI smoke test.
+const EXCLUDED_FILES = new Set(["tests/fixtures/network-tls-test-key.pem"]);
 
 /**
  * The maintainer's local account name. It appears throughout `devlog/` evidence blocks
@@ -61,6 +63,7 @@ function gitLsFiles(): string[] {
 }
 
 function shouldScan(file: string): boolean {
+  if (EXCLUDED_FILES.has(file)) return false;
   if (!TEXT_FILE_RE.test(file)) return false;
   if (EXCLUDED_PREFIXES.some(prefix => file.startsWith(prefix))) return false;
   if (EXCLUDED_SUFFIXES.some(suffix => file.endsWith(suffix))) return false;

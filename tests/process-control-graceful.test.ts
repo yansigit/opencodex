@@ -22,6 +22,20 @@ describe("gracefulStopHost", () => {
 });
 
 describe("stopProxyGracefully", () => {
+  test("prefers the canonical HTTPS runtime origin", async () => {
+    const calls: string[] = [];
+    await stopProxyGracefully(9, {
+      readRuntime: () => ({ port: 10443, hostname: "0.0.0.0", origin: "https://proxy.example.com" }),
+      fetchFn: (async (url: string | URL | Request) => {
+        calls.push(String(url));
+        return okResponse();
+      }) as typeof fetch,
+      waitExit: () => true,
+      env: {},
+    });
+    expect(calls).toEqual(["https://proxy.example.com/api/stop"]);
+  });
+
   test("follows the recorded bind hostname when it names a concrete address", async () => {
     const calls: string[] = [];
     await stopProxyGracefully(9, {

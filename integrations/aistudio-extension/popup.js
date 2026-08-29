@@ -71,10 +71,10 @@ document.getElementById("btnCopyBundle")?.addEventListener("click", async () => 
     const { base64Token } = await harvestSession();
     await navigator.clipboard.writeText(base64Token);
     statusEl.style.color = "#4ade80";
-    statusEl.textContent = "ºw^~)Þu Session Token copied to clipboard!";
+    statusEl.textContent = "w^~)u Session Token copied to clipboard!";
   } catch (err) {
     statusEl.style.color = "#f87171";
-    statusEl.textContent = "ºw^~)Þt " + (err.message || String(err));
+    statusEl.textContent = "w^~)t " + (err.message || String(err));
   }
 });
 
@@ -82,12 +82,15 @@ document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
   const statusEl = document.getElementById("exportStatus");
   try {
     savePort();
+    const proxyApiKey = document.getElementById("proxyApiKey")?.value.trim();
+    if (!proxyApiKey) throw new Error("Proxy API key is required for Auto-Sync");
     const { bundleObj, base64Token } = await harvestSession();
     statusEl.textContent = "Syncing with local OpenCodex proxy...";
 
-    const proxyApiKey = document.getElementById("proxyApiKey")?.value.trim();
-    const headers = { "Content-Type": "application/json" };
-    if (proxyApiKey) headers["x-opencodex-api-key"] = proxyApiKey;
+    const headers = {
+      "Content-Type": "application/json",
+      "x-opencodex-api-key": proxyApiKey,
+    };
 
     const port = getValidatedPort();
     const res = await fetch(`http://127.0.0.1:${port}/api/aistudio/session`, {
@@ -100,10 +103,10 @@ document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
       throw new Error("Proxy returned HTTP " + res.status);
     }
     statusEl.style.color = "#4ade80";
-    statusEl.textContent = "éÝyø§yÕ Synced with OpenCodex successfully!";
+    statusEl.textContent = "yy Synced with OpenCodex successfully!";
   } catch (err) {
     statusEl.style.color = "#f87171";
-    statusEl.textContent = +§uçâçL Sync failed: " + (err.message || String(err)) + ". Use Copy button instead.";
+    statusEl.textContent = "Sync failed: " + (err.message || String(err)) + ". Use Copy button instead.";
   }
 });
 
@@ -116,4 +119,6 @@ document.addEventListener("DOMContentLoaded", () => {
       portEl.value = (data && data.proxyPort) ? data.proxyPort : 10100;
     }
   });
+  const extensionId = document.getElementById("extensionId");
+  if (extensionId) extensionId.textContent = `chrome-extension://${chrome.runtime.id}`;
 });

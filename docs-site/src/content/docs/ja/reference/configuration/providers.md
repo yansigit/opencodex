@@ -364,3 +364,4 @@ OpenRouter は、複数の推論プロバイダーを通じて 1 つのモデル
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures`（既定は無効）はストリーム前の一時的な失敗を再試行します。リクエストが複数回配信される可能性があります。

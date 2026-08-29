@@ -130,7 +130,7 @@ describe("google provider hardening", () => {
       ]);
     }) as typeof fetch;
     try {
-      const adapter = createGoogleAdapter(antigravityProvider());
+      const adapter = createGoogleAdapter(antigravityProvider({ replayTransientFailures: true }));
       const request = await adapter.buildRequest(parsed(false));
       const response = await adapter.fetchResponse!(request, { timeoutMs: 5_000, stream: false });
       const events = await adapter.parseResponse!(response);
@@ -328,7 +328,7 @@ describe("google provider hardening", () => {
         method: "POST",
         headers: {},
         body: "{}",
-      }, { timeoutMs: 5_000 })).rejects.toThrow("peer transport down");
+      }, { timeoutMs: 5_000 }, { replayTransientFailures: true })).rejects.toThrow("peer transport down");
       expect(calls).toEqual([
         "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
         "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
@@ -379,7 +379,7 @@ describe("google provider hardening", () => {
         method: "POST",
         headers: {},
         body: originalBody,
-      }, { timeoutMs: 5_000 });
+      }, { timeoutMs: 5_000 }, { replayTransientFailures: true });
 
       expect(await response.text()).toContain("repaired");
       expect(calls.map(call => call.url)).toEqual([
@@ -409,15 +409,18 @@ describe("google provider hardening", () => {
       );
     }) as typeof fetch;
     try {
-      const adapter = createGoogleAdapter(antigravityProvider());
+      const adapter = createGoogleAdapter(antigravityProvider({ replayTransientFailures: true }));
       const request = await adapter.buildRequest(parsed(false));
-      const response = await adapter.fetchResponse!(request, { timeoutMs: 5_000, stream: false });
+      const response = await adapter.fetchResponse!(request, {
+        timeoutMs: 5_000,
+        stream: false,
+        replayBudget: { remaining: 2 },
+      });
 
       expect(response.status).toBe(503);
       expect(await response.text()).toBe("Antigravity server overloaded: peer overloaded");
       expect(calls).toEqual([
         "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
-        "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
         "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
         "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
       ]);
@@ -530,7 +533,7 @@ describe("google provider hardening", () => {
       ]);
     }) as typeof fetch;
     try {
-      const adapter = createGoogleAdapter(antigravityProvider());
+      const adapter = createGoogleAdapter(antigravityProvider({ replayTransientFailures: true }));
       const request = await adapter.buildRequest(parsed(false));
       const response = await adapter.fetchResponse!(request, { timeoutMs: 5_000, stream: false });
       const events = await adapter.parseResponse!(response);
@@ -709,7 +712,7 @@ describe("google provider hardening", () => {
       };
       const response = await fetchAntigravityWithRetry(request, {
         timeoutMs: 5_000,
-      });
+      }, { replayTransientFailures: true });
       expect(response.status).toBe(429);
       expect(calls).toEqual([
         "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
@@ -744,7 +747,7 @@ describe("google provider hardening", () => {
       };
       const response = await fetchAntigravityWithRetry(request, {
         timeoutMs: 5_000,
-      });
+      }, { replayTransientFailures: true });
       expect(response.status).toBe(403);
       expect(calls).toEqual([
         "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",

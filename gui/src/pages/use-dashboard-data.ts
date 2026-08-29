@@ -632,6 +632,25 @@ export function useDashboardData(apiBase: string) {
     }
   };
 
+  const saveServerSettings = async (
+    server: NonNullable<SettingsData["server"]>["configured"],
+  ): Promise<NonNullable<SettingsData["server"]>> => {
+    settingsMutationInFlightRef.current = true;
+    try {
+      const res = await fetch(`${apiBase}/api/settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ server }),
+      });
+      const data = await requireJson<{ server: NonNullable<SettingsData["server"]> }>(res, t("dash.serverSaveFailed"));
+      settingsMutationEpochRef.current += 1;
+      setSettings(prev => prev ? { ...prev, server: data.server } : prev);
+      return data.server;
+    } finally {
+      settingsMutationInFlightRef.current = false;
+    }
+  };
+
   // Clears the sync result/error in this hook. The dashboard toast owns its own dismissal
   // timer but must publish the dismissal here: syncResult/syncError live above the dashboard
   // tabs, so a component-local flag alone would let a stale result remount as a fresh toast
@@ -791,7 +810,7 @@ export function useDashboardData(apiBase: string) {
     effortCapHelpTriggerRef, updateTriggerRef, maHelpTriggerRef, shadowCallHelpTriggerRef,
     effortCapHelpDialogRef, updateDialogRef, maHelpDialogRef, shadowCallHelpDialogRef,
     filteredGroups, sidecarModels, visionModels,
-    saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, runSync, clearSyncFeedback,
+    saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, saveServerSettings, runSync, clearSyncFeedback,
     fetchUpdateCheck, closeUpdateDialog, openUpdateDialog, changeUpdateChannel, runUpdate,
   };
 }

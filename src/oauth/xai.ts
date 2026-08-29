@@ -2,6 +2,7 @@
 import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-server";
 import { generatePKCE } from "./pkce";
 import type { LocalTokenImportMode, OAuthController, OAuthCredentials } from "./types";
+import { oauthFetch } from "./transport";
 
 const XAI_OAUTH_ISSUER = "https://auth.x.ai";
 export const XAI_OAUTH_DISCOVERY_URL = `${XAI_OAUTH_ISSUER}/.well-known/openid-configuration`;
@@ -54,12 +55,12 @@ function validateXaiEndpoint(rawUrl: string): string {
 }
 
 export async function discoverXaiOAuthEndpoints(signal?: AbortSignal): Promise<XaiDiscovery> {
-  const response = await fetch(XAI_OAUTH_DISCOVERY_URL, {
+  const response = await oauthFetch(XAI_OAUTH_DISCOVERY_URL, {
     headers: { Accept: "application/json" },
     signal: requestSignal(signal),
   });
   if (!response.ok) {
-    throw new Error(`xAI OAuth discovery failed: ${response.status} ${await response.text()}`);
+    throw new Error(`xAI OAuth discovery failed: ${response.status}`);
   }
 
   const payload = (await response.json()) as XaiDiscoveryPayload;
@@ -96,14 +97,14 @@ export class XaiTokenRequestError extends Error { constructor(public readonly st
 export interface XaiTokenRetryDeps { sleep?:(ms:number)=>Promise<void>; random?:()=>number }
 function isAbortError(error:unknown):boolean{return error instanceof DOMException&&error.name==="AbortError";}
 function retryDelay(attempt:number,retryAfter:string|null,random:()=>number):number{const base=attempt===1?100:250,j=Math.round(base*(.75+random()*.5)),seconds=retryAfter!==null&&/^\d+$/.test(retryAfter)?Number(retryAfter):0;return Math.min(2000,Math.max(j,seconds*1000));}
-async function readTokenError(response:Response):Promise<XaiTokenRequestError>{let oauthError:string|undefined,detail="";try{const body=await response.json() as {error?:unknown;error_description?:unknown};if(typeof body.error==="string")oauthError=body.error;if(typeof body.error_description==="string")detail=body.error_description;}catch{}const suffix=detail?`: ${detail}`:oauthError?`: ${oauthError}`:"";return new XaiTokenRequestError(response.status,oauthError,`xAI token request failed: ${response.status}${suffix}`);}
+async function readTokenError(response:Response):Promise<XaiTokenRequestError>{let oauthError:string|undefined;try{const body=await response.json() as {error?:unknown};if(typeof body.error==="string"&&/^(?:access_denied|expired_token|invalid_client|invalid_grant|invalid_request|temporarily_unavailable|unauthorized_client|unsupported_grant_type)$/.test(body.error))oauthError=body.error;}catch{oauthError=undefined;}return new XaiTokenRequestError(response.status,oauthError,`xAI token request failed: ${response.status}`);}
 export async function postXaiToken(
   tokenEndpoint: string,
   body: Record<string, string>,
   signal?: AbortSignal, deps:XaiTokenRetryDeps={},
 ): Promise<XaiTokenPayload> {
  const sleep=deps.sleep??(ms=>Bun.sleep(ms)),random=deps.random??Math.random;let last:unknown;
- for(let attempt=1;attempt<=3;attempt++){let response:Response;try{response=await fetch(tokenEndpoint, {
+ for(let attempt=1;attempt<=3;attempt++){let response:Response;try{response=await oauthFetch(tokenEndpoint, {
     method: "POST",
     headers: {
       Accept: "application/json",

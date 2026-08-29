@@ -16,6 +16,7 @@ export const stubbedProviderFetch = ((input: RequestInfo | URL, init?: RequestIn
 
 /** Attach {@link stubbedProviderFetch} to every provider in a test config. */
 export function withStubbedProviderFetch<T extends { providers?: Record<string, unknown> }>(config: T): T {
+  (globalThis as Record<PropertyKey, unknown>)[Symbol.for("opencodex.test.provider-fetch")] = true;
   for (const provider of Object.values(config.providers ?? {})) {
     if (provider && typeof provider === "object" && !("fetch" in provider)) {
       (provider as { fetch?: typeof fetch }).fetch = stubbedProviderFetch;

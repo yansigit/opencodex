@@ -219,14 +219,14 @@ describe("DigitalOcean and Scaleway providers", () => {
       globalThis.fetch = (async (input, init) => {
         expect(String(input)).toBe(provider.modelsUrl);
         expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${provider.key}`);
-        expect(init?.redirect).toBe("error");
+        expect(init?.redirect).toBe("manual");
         return new Response(provider.fixture, {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }) as typeof fetch;
 
-      expect(await validateApiKey(id, KEY_LOGIN_PROVIDERS[id]!, provider.key)).toBe(true);
+      expect(await validateApiKey(id, KEY_LOGIN_PROVIDERS[id]!, provider.key, { fetch: globalThis.fetch })).toBe(true);
     }
   });
 

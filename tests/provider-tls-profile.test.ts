@@ -97,9 +97,9 @@ describe("Antigravity TLS transport gate", () => {
     resetProviderTlsProfileForTests();
     setProviderTlsRuntimeForTest({ importWreq: async () => { throw new Error("native unavailable"); } });
     const bunFallback = (async () => new Response("bun")) as typeof globalThis.fetch;
-    await providerTlsFetch("google-antigravity", canonicalProvider, bunFallback)(
+    await expect(providerTlsFetch("google-antigravity", canonicalProvider, bunFallback)(
       "https://daily-cloudcode-pa.googleapis.com/v1internal",
-    );
+    )).rejects.toThrow("native transport initialization failed");
     expect(statusFor(canonicalProvider)).toBe("fallback");
     expect(statusFor({ ...canonicalProvider, authMode: "key" as never })).toBe("disabled");
   });
@@ -148,7 +148,8 @@ describe("Antigravity TLS transport gate", () => {
       },
     );
 
-    expect(response).toBe(fakeResponse);
+    expect(response.status).toBe(fakeResponse.status);
+    expect(await response.text()).toBe("event: done\n\n");
     expect(seen.input).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent");
     expect(seen.init).toMatchObject({
       method: "POST",
@@ -161,6 +162,45 @@ describe("Antigravity TLS transport gate", () => {
     });
     expect(new Headers(seen.init?.headers).get("authorization")).toBe("Bearer redacted");
     expect(getProviderTlsProfileStatus("google-antigravity", canonicalProvider)).toBe("active");
+  });
+
+  test("pins each direct native request to its validated DNS snapshot", async () => {
+    for (const key of ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]) delete process.env[key];
+    process.env.NO_PROXY = "";
+    process.env.no_proxy = "";
+    const transportOptions: Array<Record<string, unknown>> = [];
+    const closed: boolean[] = [];
+    let resolution = 0;
+    setProviderTlsRuntimeForTest({
+      resolveDestination: async () => ({
+        addresses: [{ address: resolution++ === 0 ? "203.0.113.10" : "203.0.113.11", family: 4 }],
+        privateNetwork: false,
+      }),
+      importWreq: async () => ({
+        createTransport: async options => {
+          const index = transportOptions.push(options) - 1;
+          closed[index] = false;
+          return { close: async () => { closed[index] = true; } };
+        },
+        fetch: async () => new Response("ok"),
+      }),
+    });
+
+    const executor = providerTlsFetch("google-antigravity", canonicalProvider, globalThis.fetch);
+    const first = await executor("https://daily-cloudcode-pa.googleapis.com/v1internal");
+    expect(transportOptions[0]?.resolve).toEqual({
+      "daily-cloudcode-pa.googleapis.com": ["203.0.113.10"],
+    });
+    expect(closed[0]).toBe(false);
+    expect(await first.text()).toBe("ok");
+    expect(closed[0]).toBe(true);
+
+    const second = await executor("https://daily-cloudcode-pa.googleapis.com/v1internal");
+    expect(transportOptions[1]?.resolve).toEqual({
+      "daily-cloudcode-pa.googleapis.com": ["203.0.113.11"],
+    });
+    expect(await second.text()).toBe("ok");
+    expect(closed[1]).toBe(true);
   });
 
   test("providerFetch routes the opt-in profile while leaving the default executor untouched", async () => {
@@ -184,8 +224,9 @@ describe("Antigravity TLS transport gate", () => {
       return new Response("bun");
     }) as typeof globalThis.fetch;
     // The default provider fetch uses global fetch; inject it through the provider-owned seam.
-    const explicitDefault = providerFetch({ ...canonicalProvider, tlsProfile: undefined, fetch: bun } as never, undefined, {
+    const explicitDefault = providerFetch({ ...canonicalProvider, tlsProfile: undefined }, undefined, {
       providerName: "google-antigravity",
+      fetch: bun,
     });
     await explicitDefault("https://daily-cloudcode-pa.googleapis.com/v1internal");
     expect(bunCalls).toBe(1);
@@ -217,7 +258,7 @@ describe("Antigravity TLS transport gate", () => {
     expect(bunCalls).toBe(0);
   });
 
-  test("keeps OAuth token destinations on Bun fetch", async () => {
+  test("fails closed instead of replaying a noncanonical destination through Bun", async () => {
     let wreqCalls = 0;
     let bunCalls = 0;
     const bunFetch = mock(async () => {
@@ -234,12 +275,13 @@ describe("Antigravity TLS transport gate", () => {
       }),
     });
     const executor = providerTlsFetch("google-antigravity", canonicalProvider, bunFetch);
-    await executor("https://oauth2.googleapis.com/token", { method: "POST" });
-    expect(bunCalls).toBe(1);
+    await expect(executor("https://oauth2.googleapis.com/token", { method: "POST" }))
+      .rejects.toThrow("refused a noncanonical destination");
+    expect(bunCalls).toBe(0);
     expect(wreqCalls).toBe(0);
   });
 
-  test("caches one successful module initialization and falls back if a later import would fail", async () => {
+  test("caches one successful module initialization without a later import or Bun replay", async () => {
     let importCalls = 0;
     let bunCalls = 0;
     const bunFetch = mock(async () => {
@@ -264,7 +306,7 @@ describe("Antigravity TLS transport gate", () => {
     expect(partialTransport.close).not.toHaveBeenCalled();
   });
 
-  test("falls back once when import or construction fails and never replays post-dispatch errors", async () => {
+  test("fails closed when native transport initialization fails", async () => {
     let bunCalls = 0;
     const fallbackInits: RequestInit[] = [];
     const bunFetch = mock(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -279,11 +321,9 @@ describe("Antigravity TLS transport gate", () => {
       }),
     });
     const executor = providerTlsFetch("google-antigravity", canonicalProvider, bunFetch);
-    expect(await executor("https://daily-cloudcode-pa.googleapis.com/v1internal")).toBeInstanceOf(Response);
-    expect(await executor("https://daily-cloudcode-pa.googleapis.com/v1internal")).toBeInstanceOf(Response);
-    expect(bunCalls).toBe(2);
-    expect(fallbackInits).toHaveLength(2);
-    expect(fallbackInits.every(init => init.redirect === "manual")).toBe(true);
+    await expect(executor("https://daily-cloudcode-pa.googleapis.com/v1internal")).rejects.toThrow("native transport initialization failed");
+    expect(bunCalls).toBe(0);
+    expect(fallbackInits).toHaveLength(0);
     expect(getProviderTlsProfileStatus("google-antigravity", canonicalProvider)).toBe("fallback");
 
     resetProviderTlsProfileForTests();
@@ -296,7 +336,7 @@ describe("Antigravity TLS transport gate", () => {
     const noReplay = providerTlsFetch("google-antigravity", canonicalProvider, bunFetch);
     await expect(noReplay("https://daily-cloudcode-pa.googleapis.com/v1internal")).rejects.toThrow("post-dispatch failure");
     await expect(noReplay("https://daily-cloudcode-pa.googleapis.com/v1internal")).rejects.not.toThrow(/proxy-user|proxy-secret|BearerSecret|access_token/);
-    expect(bunCalls).toBe(2);
+    expect(bunCalls).toBe(0);
   });
 
   test("redacts credentials in post-dispatch socks5 proxy errors", async () => {

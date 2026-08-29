@@ -161,7 +161,7 @@ L'interface graphique est un client léger de l'API JSON de gestion du proxy. Pa
 
 | Point de terminaison | Fonction |
 | --- | --- |
-| `GET` / `PUT /api/settings` | Lire les réglages ou modifier le démarrage automatique de Codex, les paramètres de flux et de mémoire, ainsi que la visibilité du sélecteur ciblant les comptes. |
+| `GET` / `PUT /api/settings` | Lire ou modifier le démarrage automatique de Codex, les paramètres de flux et de mémoire, la visibilité du sélecteur ciblant les comptes et les paramètres de l’écouteur du serveur. Les changements d’écouteur et de certificat nécessitent un redémarrage du proxy. |
 | `GET` / `POST /api/github/star` | Lire l'état de mise en vedette dérivé de `gh` ou mettre le dépôt en vedette. Le POST est refusé avec `403` et `agent_consent_required` pour les appels pilotés par un agent sans session de tableau de bord. |
 | `GET /api/startup-health` | Lire, sans secrets, les diagnostics de routage, de service, de lanceur intermédiaire et de sécurité au redémarrage. |
 | `POST /api/startup-action` | Installer le service d'arrière-plan ou le lanceur intermédiaire Codex au moyen d'actions fixes et autorisées. |

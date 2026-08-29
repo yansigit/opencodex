@@ -2,6 +2,7 @@ import type { OcxProviderConfig } from "../types";
 import { deriveKeyLoginMap, enrichProviderFromRegistry, type DerivedKeyLoginProvider } from "../providers/derive";
 import { resolveProviderModelDiscoveryUrl } from "../providers/model-discovery";
 import { parseGoogleCookieJar, validateAiStudioCookies } from "./google-aistudio-auth";
+import { providerOutboundGet, providerOutboundPost, type ProviderOutboundDependencies } from "../lib/provider-outbound";
 
 /**
  * API-key "login" providers: not OAuth — the flow opens the provider's dashboard so the user can
@@ -72,6 +73,7 @@ export async function validateApiKey(
   providerName: string,
   provider: KeyLoginProvider,
   key: string,
+  dependencies: Pick<ProviderOutboundDependencies, "fetch"> = {},
 ): Promise<boolean | "unknown"> {
   try {
     // A public model catalog cannot prove that the supplied key is valid. Returning unknown keeps
@@ -80,17 +82,15 @@ export async function validateApiKey(
 
     if (provider.adapter === "anthropic") {
       const base = provider.baseUrl.replace(/\/v1\/?$/, "");
-      const res = await fetch(`${base}/v1/messages`, {
-        method: "POST",
+      const res = await providerOutboundPost(providerName, provider, `${base}/v1/messages`, {
         headers: anthropicKeyValidationHeaders(provider, key),
+        signal: AbortSignal.timeout(8_000),
         body: JSON.stringify({
           model: provider.defaultModel ?? "claude-haiku-4-5",
           max_tokens: 1,
           messages: [{ role: "user", content: "ping" }],
         }),
-        redirect: "error",
-        signal: AbortSignal.timeout(8000),
-      });
+      }, dependencies);
       if (res.ok) return true;
       if (res.status === 401 || res.status === 403) return false;
       return "unknown";
@@ -106,11 +106,10 @@ export async function validateApiKey(
     if (provider.adapter === "google" && (provider.googleMode ?? "ai-studio") === "ai-studio") {
       // Generative Language API rejects Bearer-wrapped API keys; probe models.list with the
       // documented x-goog-api-key header instead (pageSize=1 — validation only needs a 200).
-      const res = await fetch(`${provider.baseUrl}/v1beta/models?pageSize=1`, {
+      const res = await providerOutboundGet(providerName, provider, `${provider.baseUrl}/v1beta/models?pageSize=1`, {
         headers: { "x-goog-api-key": key },
-        redirect: "error",
-        signal: AbortSignal.timeout(8000),
-      });
+        signal: AbortSignal.timeout(8_000),
+      }, dependencies);
       if (res.ok) return true;
       if (res.status === 400 || res.status === 401 || res.status === 403) return false;
       return "unknown";
@@ -127,11 +126,10 @@ export async function validateApiKey(
       provider.baseUrl,
       `${provider.baseUrl}/models`,
     );
-    const res = await fetch(modelsUrl, {
+    const res = await providerOutboundGet(providerName, configuredProvider, modelsUrl, {
       headers: { Authorization: `Bearer ${key}` },
-      redirect: "error",
-      signal: AbortSignal.timeout(8000),
-    });
+      signal: AbortSignal.timeout(8_000),
+    }, dependencies);
     if (res.ok) return true;
     if (res.status === 401 || res.status === 403) return false;
     return "unknown";
