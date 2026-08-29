@@ -411,13 +411,16 @@ describe("google provider hardening", () => {
     try {
       const adapter = createGoogleAdapter(antigravityProvider({ replayTransientFailures: true }));
       const request = await adapter.buildRequest(parsed(false));
-      const response = await adapter.fetchResponse!(request, { timeoutMs: 5_000, stream: false });
+      const response = await adapter.fetchResponse!(request, {
+        timeoutMs: 5_000,
+        stream: false,
+        replayBudget: { remaining: 2 },
+      });
 
       expect(response.status).toBe(503);
       expect(await response.text()).toBe("Antigravity server overloaded: peer overloaded");
       expect(calls).toEqual([
         "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
-        "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
         "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
         "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse",
       ]);

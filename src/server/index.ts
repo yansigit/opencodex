@@ -215,7 +215,7 @@ import {
 import { SYSTEM_RESTART_CAPABILITY_VERSION } from "../lib/system-restart-contract";
 import { LOCAL_PROVIDER_RELOAD_CAPABILITY_VERSION } from "../lib/local-provider-reload-contract";
 import { createReadinessGate, type ReadinessGate } from "./readiness";
-import { isTestHomeGuardArmed } from "../lib/test-home-guard";
+import { allowPlaintextRemoteForTests } from "../lib/test-server-start";
 import { canonicalServerOrigin } from "../lib/server-tls";
 import {
   createRuntimePackageTreeIntegrityGuard,
@@ -570,7 +570,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
-  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: isTestHomeGuardArmed() });
+  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: allowPlaintextRemoteForTests() });
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   let userCostOverlayReconciler: { stop(): void } | null = null;
   // Arm synchronously before listen. A pending journal therefore makes __main__ unusable

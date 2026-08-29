@@ -22,7 +22,7 @@ runs helper features around provider requests.
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
 | `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE. Idle sockets close after 255 seconds; writes that exceed the bounded backpressure budget close with code 1009. Canonical ChatGPT upstream WS is separately opt-in: a set provider `wsUpstream` takes precedence (`true` enables, `false` disables); when omitted, `OCX_CODEX_WS_UPSTREAM=true` or `1` enables it, while `false`/`0`, absent, or invalid values keep HTTP/SSE. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. Authority-based browser extension origins such as `chrome-extension://<extension-id>` are supported; `*` is not a wildcard. Firefox and Safari regenerate the extension UUID (per install / per browser launch), so update the entry when the origin changes. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` credentials accepted by management and data-plane auth on non-loopback binds. Dashboard-managed. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` data-plane credentials accepted on non-loopback binds. Dashboard-managed; management routes require the separate admin token. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in archived-session cleanup policy. Never enabled implicitly. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Cap in MiB for evictable app-owned logs, caches, blobs, and continuation payloads. Range 64–4096; not an RSS cap. |
 | `codexAutoStart?` | `boolean` | `true` | Let the Codex shim run `ocx ensure` before launching Codex. False makes ensure a no-op. |
@@ -52,8 +52,9 @@ history; review the full-scope warning in the lifecycle reference before running
 ## Remote access
 
 The default `127.0.0.1` bind is loopback-only. A non-loopback address such as `0.0.0.0` requires
-native TLS and token authentication on both `/api/*` and the data plane. Configure the listener
-and export the token before starting:
+native TLS and a data-plane credential. A remote dashboard also needs the separate admin token
+(`OPENCODEX_ADMIN_AUTH_TOKEN`, or the generated admin-token file); `apiKeys` do not grant management
+access. Configure the listener and export the data-plane token before starting:
 
 ```jsonc
 {
@@ -75,7 +76,7 @@ The proxy refuses a remote bind when either requirement is missing. Certificate 
 take effect after restart; certificate trust and renewal remain the operator's responsibility. For a
 background service, export the token before `ocx service install` so launchd, systemd, or Task
 Scheduler receives it. SSH port forwarding to the loopback listener is the plaintext-free alternative.
-Clients should send:
+Data-plane clients should send:
 
 ```text
 x-opencodex-api-key: your-secret-token

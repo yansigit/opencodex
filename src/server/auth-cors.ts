@@ -746,6 +746,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "defaultAliases",
       "disabled",
       "allowPrivateNetwork",
+      "replayTransientFailures",
       "authMode",
       "googleMode",
       "apiKeyTransport",

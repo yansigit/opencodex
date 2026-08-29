@@ -106,7 +106,7 @@ document.getElementById("btnAutoSync")?.addEventListener("click", async () => {
     statusEl.textContent = "yy Synced with OpenCodex successfully!";
   } catch (err) {
     statusEl.style.color = "#f87171";
-    statusEl.textContent = +uL Sync failed: " + (err.message || String(err)) + ". Use Copy button instead.";
+    statusEl.textContent = "Sync failed: " + (err.message || String(err)) + ". Use Copy button instead.";
   }
 });
 

@@ -517,6 +517,30 @@ describe("server local API auth", () => {
     expect(() => assertServerAuthConfig(config("0.0.0.0"))).toThrow("Native TLS is required");
   });
 
+  test("the test home guard cannot bypass native TLS for a remote start", () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
+    saveConfig({ ...config("0.0.0.0"), port: 0 });
+
+    const seam = Symbol.for("opencodex.test.plaintext-remote");
+    const globalTestState = globalThis as Record<PropertyKey, unknown>;
+    const hadSeam = Object.prototype.hasOwnProperty.call(globalTestState, seam);
+    const previousSeam = globalTestState[seam];
+    delete globalTestState[seam];
+    let server: ReturnType<typeof startServer> | undefined;
+    try {
+      expect(() => {
+        server = startServer(0);
+      }).toThrow("Native TLS is required");
+    } finally {
+      server?.stop(true);
+      if (hadSeam) globalTestState[seam] = previousSeam;
+      else delete globalTestState[seam];
+    }
+  });
+
   test("auth header must match env token when non-loopback auth is required", () => {
     process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
     const cfg = config("0.0.0.0");
@@ -600,6 +624,7 @@ describe("server local API auth", () => {
       modelMaxInputTokens: { "gpt-test": 1000 },
       codexAccountMode: "pool",
       reasoningWireFormat: "gateway-object",
+      replayTransientFailures: true,
       virtualModels: { "gpt-test-pro": { wireModelId: "gpt-test", reasoningMode: "pro" } },
       codexAuthContext: { accessToken: "runtime-token" },
       selectedForwardHeaders: { authorization: "Bearer runtime-token" },
@@ -627,6 +652,7 @@ describe("server local API auth", () => {
       hasHeaders: true,
       codexAccountMode: "pool",
       reasoningWireFormat: "gateway-object",
+      replayTransientFailures: true,
     });
     expect(dto.providers.openai).not.toHaveProperty("apiKey");
     expect(dto.providers.openai).not.toHaveProperty("headers");

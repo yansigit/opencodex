@@ -150,7 +150,7 @@ GUI는 프록시의 JSON 관리 API를 사용하는 얇은 클라이언트입니
 
 | 엔드포인트 | 용도 |
 | --- | --- |
-| `GET` / `PUT /api/settings` | 설정을 읽고 Codex 자동 시작, stream/memory, account-targeting picker 표시를 업데이트합니다. |
+| `GET` / `PUT /api/settings` | 설정을 읽고 Codex 자동 시작, stream/memory, account-targeting picker 표시 및 서버 리스너 설정을 업데이트합니다. 리스너와 인증서 변경에는 프록시 재시작이 필요합니다. |
 | `GET` / `POST /api/github/star` | `gh`로 확인한 스타 상태를 읽거나 저장소에 스타를 남깁니다. 대시보드 세션 없이 에이전트가 POST하면 `403` `agent_consent_required`로 거절합니다. |
 | `GET /api/startup-health` | 비밀값 없이 라우팅, 서비스, shim, 재부팅 안전성 진단을 읽습니다. |
 | `GET` / `POST /api/windows-tray` | Windows 트레이 설치 및 표시 상태를 읽거나 `install`, `start`, `stop`, `uninstall` 작업을 수행합니다. |

@@ -12,7 +12,8 @@ yardımcı özellikleri nasıl çalıştıracağını kontrol eder.
 | Alan | Tip | Varsayılan | Anlamı |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Proxy dinleme portu. |
-| `hostname?` | `string` | `"127.0.0.1"` | Bağlama adresi. Geri döngü olmayan bağlamalar `OPENCODEX_API_AUTH_TOKEN` gerektirir. |
+| `hostname?` | `string` | `"127.0.0.1"` | Bağlama adresi. Geri döngü olmayan bağlamalar TLS ve veri düzlemi kimlik bilgisi gerektirir. |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | Belirtilen okunabilir sertifika ve özel anahtar dosyalarıyla HTTPS sunar. `publicOrigin`, istemci URL'lerinde kullanılan tam HTTPS origin olmalıdır. |
 | `proxy?` | `string` | — | Giden HTTP(S) proxy URL'si veya `${ENV_VAR}`. Yalnızca bu değişkenler ayarlanmadığında `HTTP_PROXY` / `HTTPS_PROXY`'ye uygulanır; geri döngü `NO_PROXY` içinde kalır. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Metin veya araç çağrısı içermeyen bir Responses tamamlamasını aynı istekle bir kez yeniden denemeyi açıkça etkinleştirir. Yeniden deneme ücretlendirilebilir. `OCX_EMPTY_COMPLETION_RETRY=0`, yapılandırmayı değiştirmeden devre dışı bırakır; combo ve routed-compaction turları hariçtir. |
 | `stallTimeoutSec?` | `number` | `300` | `response.incomplete` öncesinde yukarı akış verisi olmadan geçen saniye. Minimum 1. |
@@ -20,7 +21,7 @@ yardımcı özellikleri nasıl çalıştıracağını kontrol eder.
 | `shutdownTimeoutMs?` | `number` | `5000` | Aktif turlar iptal edilmeden önce zarif boşaltma süresi sınırı. |
 | `websockets?` | `boolean` | `false` | Responses WebSocket yolu için `supports_websockets` bildirin. False, HTTP/SSE'yi tutar. |
 | `corsAllowOrigins?` | `string[]` | `[]` | CORS tarafından izin verilen ek tam kaynaklar. Geri döngü kaynaklarına her zaman izin verilir. `chrome-extension://<extension-id>` gibi yetki tabanlı tarayıcı uzantısı kaynakları desteklenir; `*` bir joker karakter değildir. Firefox ve Safari uzantı UUID'sini yeniden oluşturur (yükleme başına / tarayıcı başlatma başına), bu nedenle kaynak değiştiğinde girdiyi güncelleyin. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Geri döngü olmayan bağlamalarda yönetim ve veri düzlemi kimlik doğrulaması tarafından kabul edilen oluşturulmuş `ocx_…` kimlik bilgileri. Kontrol paneli tarafından yönetilir. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Geri döngü olmayan bağlamalarda veri düzlemi kimlik doğrulaması tarafından kabul edilen oluşturulmuş `ocx_…` kimlik bilgileri. Kontrol paneli tarafından yönetilir; yönetim API'si ayrı bir yönetici belirteci gerektirir. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | devre dışı | İsteğe bağlı arşivlenmiş oturum temizleme politikası. Asla örtük olarak etkinleştirilmez. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Çıkarılabilir uygulamaya ait günlükler, önbellekler, bloblar ve devam yükleri için MiB cinsinden sınır. Aralık 64–4096; bir RSS sınırı değildir. |
 | `codexAutoStart?` | `boolean` | `true` | Codex dolgusunun Codex'i başlatmadan önce `ocx ensure` çalıştırmasına izin verin. False, ensure'ı bir işlem yapmayan (no-op) hale getirir. |
@@ -39,15 +40,15 @@ Komut, geçerli dedicated-provider geçmişi de dahil olmak üzere kullanıcı i
 ## Uzaktan erişim
 
 Varsayılan `127.0.0.1` bağlaması yalnızca geri döngüdür. `0.0.0.0` gibi geri
-döngü olmayan bir adres hem `/api/*` hem de veri düzleminde belirteç kimlik
-doğrulaması gerektirir. Başlamadan önce belirteci dışa aktarın:
+döngü olmayan bir adres TLS ve veri düzlemi kimlik bilgisi gerektirir. Uzak kontrol paneli ayrıca
+ayrı yönetici belirteci (`OPENCODEX_ADMIN_AUTH_TOKEN` veya oluşturulan yönetici belirteci dosyası) gerektirir. Başlamadan önce veri düzlemi belirtecini dışa aktarın:
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-Proxy bu değişken olmadan uzak bir bağlamayı reddeder. Bir arka plan servisi
+TLS veya bu değişken olmadan proxy uzak bir bağlamayı reddeder. Sertifika ve dinleyici değişiklikleri yeniden başlatma sonrası uygulanır. Bir arka plan servisi
 için launchd, systemd veya Görev Zamanlayıcı'nın alması amacıyla `ocx service
 install`'dan önce dışa aktarın. İstemciler şunu göndermelidir:
 

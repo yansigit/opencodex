@@ -122,7 +122,7 @@ GUI 是代理 JSON 管理 API 之上的轻量客户端。常用 endpoint 包括�
 
 | Endpoint | 用途 |
 | --- | --- |
-| `GET` / `PUT /api/settings` | 读取设置，或更新 Codex 自动启动、流/内存设置以及账号定向 picker 的可见性。 |
+| `GET` / `PUT /api/settings` | 读取或更新 Codex 自动启动、流/内存设置、账号定向 picker 的可见性以及服务器监听器设置。监听器和证书更改需要重启代理。 |
 | `GET /api/startup-health` | 读取不含秘密信息的路由、服务、shim 和重启安全诊断。 |
 | `GET` / `POST /api/windows-tray` | 读取或更改 Windows 托盘安装和显示状态；POST 支持 `install`、`start`、`stop`、`uninstall`。 |
 | `POST /api/sync` | 重建共享模型目录，并把 Codex 模型缓存标记为过期。 |

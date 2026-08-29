@@ -112,7 +112,24 @@ test("replay transient failures toggle is persisted independently", async () => 
   await act(async () => { toggle!.click(); await Promise.resolve(); });
   await save(container);
   expect(patches[0]?.replayTransientFailures).toBe(true);
-  root.unmount();
+  await act(async () => { root.unmount(); });
+});
+
+test("discard restores the replay transient failures toggle", async () => {
+  const { root, container } = await mountSettings(provider());
+  const toggle = [...container.querySelectorAll("label")]
+    .find(candidate => candidate.textContent?.includes("Replay transient failures"))
+    ?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  expect(toggle).toBeTruthy();
+
+  await act(async () => { toggle!.click(); });
+  expect(toggle!.checked).toBe(true);
+  const discard = container.querySelector<HTMLButtonElement>(".pwi-settings-sticky-bar .btn-ghost");
+  expect(discard).toBeTruthy();
+  await act(async () => { discard!.click(); });
+  expect(toggle!.checked).toBe(false);
+  expect(container.querySelector(".pwi-settings-sticky-bar")).toBeNull();
+  await act(async () => { root.unmount(); });
 });
 
 test("changing an omitted effective true to false sends an explicit liveModels choice", async () => {

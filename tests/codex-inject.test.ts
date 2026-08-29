@@ -258,6 +258,16 @@ describe("Design B openai_base_url injection", () => {
     expect(buildOpenaiBaseUrlLine(10100, "::1")).toBe('openai_base_url = "http://[::1]:10100/v1"');
   });
 
+  test("uses the configured public origin for every injected Codex endpoint", () => {
+    const publicOrigin = "https://proxy.example.com";
+    expect(buildOpenaiBaseUrlLine(10443, "127.0.0.1", publicOrigin))
+      .toBe('openai_base_url = "https://proxy.example.com/v1"');
+    expect(buildProviderTableBlock(10443, false, false, "127.0.0.1", publicOrigin))
+      .toContain('base_url = "https://proxy.example.com/v1"');
+    expect(buildProfileFile(10443, null, false, true, "127.0.0.1", undefined, publicOrigin))
+      .toContain('base_url = "https://proxy.example.com/v1"');
+  });
+
   test("inserts marker + root key before the first table header", () => {
     const { content, keptUserBaseUrl } = setRootOpenaiBaseUrl([
       'model = "gpt-5.5"',

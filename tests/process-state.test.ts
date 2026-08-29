@@ -194,4 +194,22 @@ describe("proxy process-state ownership", () => {
     );
     expect(readRuntimePort()).toBeNull();
   });
+
+  test("rejects runtime origins that could redirect graceful-stop credentials", () => {
+    for (const origin of [
+      ["https://user:pass", "proxy.example.com"].join("@"),
+      "https://proxy.example.com/api/stop",
+      "https://proxy.example.com/?forward=1",
+      "http://proxy.example.com/#fragment",
+      "javascript:alert(1)",
+      "not-an-origin",
+    ]) {
+      writeFileSync(
+        getRuntimePortPath(),
+        JSON.stringify({ pid: 1234, port: 58195, origin, attestationSecret: "A".repeat(43) }),
+        "utf-8",
+      );
+      expect(readRuntimePort()).toBeNull();
+    }
+  });
 });

@@ -11,7 +11,8 @@ description: Listener, удалённый доступ, admission key, тайм�
 | Поле | Тип | По умолчанию | Значение |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Порт, который слушает прокси. |
-| `hostname?` | `string` | `"127.0.0.1"` | Адрес bind'а. Не-loopback bind требует `OPENCODEX_API_AUTH_TOKEN`. |
+| `hostname?` | `string` | `"127.0.0.1"` | Адрес bind'а. Не-loopback bind требует TLS и credential data plane. |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | Обслуживает HTTPS с указанными доступными файлами сертификата и закрытого ключа. `publicOrigin` должен быть точным HTTPS origin для клиентских URL. |
 | `proxy?` | `string` | — | URL исходящего HTTP(S)-прокси или `${ENV_VAR}`. Применяется к `HTTP_PROXY` / `HTTPS_PROXY` только когда эти переменные не заданы; loopback всегда остаётся в `NO_PROXY`. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Явно включает один идентичный повтор Responses, если в turn нет ни текста, ни tool call, включая случай, когда stream завершается до terminal event. Повтор может тарифицироваться. `OCX_EMPTY_COMPLETION_RETRY=0` отключает его без изменения config; combo и routed-compaction turn исключены. |
 | `stallTimeoutSec?` | `number` | `300` | Секунды без upstream-данных до `response.incomplete`. Минимум 1. |
@@ -19,7 +20,7 @@ description: Listener, удалённый доступ, admission key, тайм�
 | `shutdownTimeoutMs?` | `number` | `5000` | Дедлайн graceful-drain до принудительного прерывания активных turn'ов. |
 | `websockets?` | `boolean` | `false` | Объявляет и разрешает клиентский WebSocket-путь Responses. При false клиенты используют HTTP/SSE. Upstream WS-оптимизация canonical ChatGPT включается отдельно: заданный `wsUpstream` провайдера имеет приоритет (`true` включает, `false` отключает); если поле не задано, её включает `OCX_CODEX_WS_UPSTREAM=true` или `1`, а `false`/`0`, отсутствие или неверное значение оставляют HTTP/SSE. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Дополнительные точные origin, разрешённые CORS. Loopback-origin разрешены всегда. Поддерживаются authority-based origin браузерных расширений, например `chrome-extension://<extension-id>`; `*` не является маской. Firefox и Safari пересоздают UUID расширения (при каждой установке/запуске браузера), поэтому обновляйте запись при смене origin. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Сгенерированные credentials `ocx_…`, принимаемые для management и data-plane auth на не-loopback bind'ах. Управляются через дашборд. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Сгенерированные credentials `ocx_…` для data-plane auth на не-loopback bind'ах. Управляются через дашборд; management API требует отдельный admin token. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in policy очистки архивированных сессий. Никогда не включается неявно. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Лимит в MiB для eviction-friendly app-owned log'ов, cache'ей, blob'ов и continuation payload'ов. Это не RSS-cap. Диапазон 64–4096. |
 | `codexAutoStart?` | `boolean` | `true` | Разрешает shim'у Codex запускать `ocx ensure` перед стартом Codex. При false `ensure` становится no-op. |
@@ -38,14 +39,16 @@ native-provider history.
 ## Удалённый доступ
 
 По умолчанию bind `127.0.0.1` доступен только на loopback. Не-loopback-адрес, например
-`0.0.0.0`, требует token-auth и для `/api/*`, и для data plane. Экспортируйте токен перед стартом:
+`0.0.0.0`, требует TLS и credential для data plane. Удалённый dashboard дополнительно требует отдельный admin token
+(`OPENCODEX_ADMIN_AUTH_TOKEN` или сгенерированный файл admin token). Экспортируйте data-plane токен перед стартом:
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-Без этой переменной прокси откажется подниматься на удалённом bind'е. Для фоновой службы
+Без TLS или этой переменной прокси откажется подниматься на удалённом bind'е. Изменения сертификата и listener
+вступают в силу после перезапуска. Для фоновой службы
 экспортируйте её до `ocx service install`, чтобы launchd, systemd или Task Scheduler получили
 значение. Затем клиенты должны отправлять:
 

@@ -10,7 +10,8 @@ description: リスナー、リモート アクセス、アドミッション �
 |フィールド |タイプ |デフォルト |意味 |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` |プロキシリッスンポート。 |
-| `hostname?` | `string` | `"127.0.0.1"` |バインドアドレス。非ループバック バインドには `OPENCODEX_API_AUTH_TOKEN` が必要です。 |
+| `hostname?` | `string` | `"127.0.0.1"` |バインドアドレス。非ループバック バインドには TLS とデータプレーン資格情報が必要です。 |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | 指定した証明書と秘密鍵ファイルで HTTPS を提供します。`publicOrigin` はクライアント URL に使う正確な HTTPS origin です。 |
 | `proxy?` | `string` | — |送信 HTTP(S) プロキシ URL または `${ENV_VAR}`。これらの変数が設定されていない場合にのみ、`HTTP_PROXY` / `HTTPS_PROXY` に適用されます。ループバックは `NO_PROXY` に残ります。 |
 | `emptyCompletionRetry?` | `boolean` | `false` | テキストもツール呼び出しもない Responses ターンを、ターミナルイベント前にストリームが終了した場合も含め、同一リクエストで 1 回再試行するよう明示的に有効化します。再試行は課金対象になる場合があります。`OCX_EMPTY_COMPLETION_RETRY=0` で設定を変更せず無効化できます。combo と routed-compaction turn は対象外です。 |
 | `stallTimeoutSec?` | `number` | `300` | `response.incomplete` より前にアップストリーム データがない秒数。最小 1。
@@ -18,7 +19,7 @@ description: リスナー、リモート アクセス、アドミッション �
 | `shutdownTimeoutMs?` | `number` | `5000` |アクティブなターンが中止される前の正常な排出期限。 |
 | `websockets?` | `boolean` | `false` | クライアント向け Responses WebSocket パスを広告して許可します。false の場合クライアントは HTTP/SSE を使います。canonical ChatGPT upstream WS は別途オプトインです。プロバイダーの `wsUpstream` を設定するとそれが優先され、`true` で有効、`false` で無効になります。未設定なら `OCX_CODEX_WS_UPSTREAM=true` または `1` で有効になり、`false`/`0`、未指定または無効な値では HTTP/SSE を使います。 |
 | `corsAllowOrigins?` | `string[]` | `[]` | 追加の正確な CORS origin。ループバック origin は常に許可します。`chrome-extension://<extension-id>` など authority ベースのブラウザー拡張 origin に対応し、`*` はワイルドカードではありません。Firefox と Safari は拡張 UUID を（インストール/ブラウザー起動ごとに）再生成するため、origin が変わったらエントリを更新してください。 |
-| `apiKeys?` | `OcxApiKey[]` | `[]` |生成された `ocx_…` 資格情報は、非ループバック バインドでの管理およびデータ プレーン認証によって受け入れられました。ダッシュボードで管理。 |
+| `apiKeys?` | `OcxApiKey[]` | `[]` |非ループバック バインドのデータプレーン認証で受け入れる生成済み `ocx_…` 資格情報。ダッシュボードで管理します。管理 API には別の管理者トークンが必要です。 |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` |無効 |アーカイブされたセッションのクリーンアップ ポリシーをオプトインします。暗黙的に有効になることはありません。 |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` |排除可能なアプリ所有のログ、キャッシュ、BLOB、および継続ペイロードの MiB の上限。範囲は 64 ～ 4096。 RSSキャップではありません。 |
 | `codexAutoStart?` | `boolean` | `true` | Codex を起動する前に、Codex シムで `ocx ensure` を実行させます。 False を指定すると、操作が行われないことが保証されます。 |
@@ -34,14 +35,14 @@ description: リスナー、リモート アクセス、アドミッション �
 
 ## リモートアクセス
 
-デフォルトの `127.0.0.1` バインドはループバックのみです。 `0.0.0.0` などの非ループバック アドレスには、`/api/*` とデータ プレーンの両方でトークン認証が必要です。開始する前にトークンをエクスポートします。
+デフォルトの `127.0.0.1` バインドはループバックのみです。 `0.0.0.0` などの非ループバック アドレスには TLS とデータプレーン資格情報が必要です。リモート ダッシュボードには別の管理者トークン（`OPENCODEX_ADMIN_AUTH_TOKEN` または生成済み管理者トークン ファイル）も必要です。開始する前にデータプレーン トークンをエクスポートします。
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-プロキシは、この変数がないとリモート バインドを拒否します。バックグラウンド サービスの場合は、`ocx service install` の前にエクスポートして、launchd、systemd、またはタスク スケジューラがそれを受信できるようにします。クライアントは以下を送信する必要があります:
+プロキシは、TLS またはデータプレーン資格情報がないとリモート バインドを拒否します。証明書とリスナーの変更は再起動後に有効になります。バックグラウンド サービスの場合は、`ocx service install` の前にエクスポートして、launchd、systemd、またはタスク スケジューラがそれを受信できるようにします。データプレーン クライアントは以下を送信する必要があります:
 
 ```text
 x-opencodex-api-key: your-secret-token

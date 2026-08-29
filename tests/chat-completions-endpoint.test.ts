@@ -484,6 +484,49 @@ test("POST /v1/chat/completions streams OpenAI-shaped chunks end to end", async 
   }
 });
 
+test("opt-in transient replay reaches /v1/chat/completions and preserves the translated response", async () => {
+  let calls = 0;
+  const upstream = Bun.serve({
+    port: 0,
+    fetch() {
+      calls += 1;
+      if (calls === 1) {
+        return Response.json({ error: { message: "temporary upstream failure" } }, {
+          status: 502,
+          headers: { "retry-after": "0" },
+        });
+      }
+      return new Response([
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: "replayed" } }] })}\n\n`,
+        `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
+        "data: [DONE]\n\n",
+      ].join(""), { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+  saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`, {
+    replayTransientFailures: true,
+  }));
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/chat/completions", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "mock/test-model",
+        stream: false,
+        messages: [{ role: "user", content: "retry this" }],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(calls).toBe(2);
+    const json = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+    expect(json.choices?.[0]?.message?.content).toBe("replayed");
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
 test("non-streaming /v1/chat/completions returns chat.completion JSON", async () => {
   const upstream = mockChatUpstream();
   saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`));
