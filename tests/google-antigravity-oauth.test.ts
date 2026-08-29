@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { AntigravityTokenRequestError, discoverAntigravityProject, refreshAntigravityToken } from "../src/oauth/google-antigravity";
+import { ANTIGRAVITY_ONBOARD_POLL_MS, AntigravityTokenRequestError, discoverAntigravityProject, refreshAntigravityToken } from "../src/oauth/google-antigravity";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -38,6 +38,7 @@ describe("antigravity project discovery", () => {
   });
 
   test("falls back to onboardUser poll loop (not-done then done)", async () => {
+    expect(ANTIGRAVITY_ONBOARD_POLL_MS).toBe(2_000);
     let onboardCalls = 0;
     routeFetch((url, init) => {
       if (url.includes(":onboardUser")) {
@@ -55,8 +56,10 @@ describe("antigravity project discovery", () => {
       }
       return new Response("no", { status: 404 });
     });
-    expect(await discoverAntigravityProject("tok")).toBe("proj-onboarded");
+    const sleeps: number[] = [];
+    expect(await discoverAntigravityProject("tok", undefined, { sleep: async ms => { sleeps.push(ms); } })).toBe("proj-onboarded");
     expect(onboardCalls).toBe(2);
+    expect(sleeps).toEqual([ANTIGRAVITY_ONBOARD_POLL_MS]);
   });
 
   // `ide_version` was sending `antigravityUserAgent()` — the whole header, parentheses and all —
@@ -102,8 +105,10 @@ describe("antigravity project discovery", () => {
       }
       return new Response("no", { status: 404 });
     });
-    expect(await discoverAntigravityProject("tok")).toBe("proj-T");
+    const sleeps: number[] = [];
+    expect(await discoverAntigravityProject("tok", undefined, { sleep: async ms => { sleeps.push(ms); } })).toBe("proj-T");
     expect(onboardCalls).toBe(2);
+    expect(sleeps).toEqual([ANTIGRAVITY_ONBOARD_POLL_MS]);
   });
 });
 

@@ -1111,22 +1111,23 @@ describe("Codex catalog sync hardening", () => {
     }, null, 2) + "\n");
 
     const r = runScript(codexHome, opencodexHome, `
-      const { statSync, writeFileSync, readFileSync } = require("node:fs");
+      const { statSync, writeFileSync, readFileSync, utimesSync } = require("node:fs");
       const { syncCatalogModels } = require("./src/codex/catalog");
       const path = ${JSON.stringify(catalogPath)};
-      const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
       (async () => {
         const first = await syncCatalogModels({ providers: {} });
+        const stableMtime = new Date("2020-01-01T00:00:00.000Z");
+        utimesSync(path, stableMtime, stableMtime);
         const afterFirst = statSync(path).mtimeMs;
-        await sleep(1100);
         const second = await syncCatalogModels({ providers: {} });
         const afterSecond = statSync(path).mtimeMs;
         // Not vacuous: a catalog that really differs must still be rewritten.
         const catalog = JSON.parse(readFileSync(path, "utf8"));
         catalog.models = catalog.models.filter(model => model.slug !== "gpt-5.5");
         writeFileSync(path, JSON.stringify(catalog, null, 2) + "\\n");
+        const changedMtime = new Date("2020-01-02T00:00:00.000Z");
+        utimesSync(path, changedMtime, changedMtime);
         const changedAt = statSync(path).mtimeMs;
-        await sleep(1100);
         const third = await syncCatalogModels({ providers: {} });
         console.log(JSON.stringify({
           firstWritten: first.catalogWritten,

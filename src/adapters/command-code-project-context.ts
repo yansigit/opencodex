@@ -23,7 +23,7 @@ const MAX_SKILLS = 16;
 // directories (millions of entries) to a finite scan while preserving alphabetical
 // selection for any realistic case (≤ MAX_SKILL_DIRS_TO_SCAN valid dirs per root).
 const MAX_SKILL_DIRS_TO_SCAN = 256;
-const FILE_OP_TIMEOUT_MS = 2_000;
+export const COMMAND_CODE_FILE_OP_TIMEOUT_MS = 2_000;
 const PROJECT_CONTEXT_TTL_MS = 30_000;
 const MAX_PROJECT_CONTEXT_CACHE_ENTRIES = 128;
 
@@ -112,7 +112,7 @@ function truncateUtf8(text: string, capBytes: number): string {
   return buf.subarray(0, end).toString("utf8") + TRUNCATION_MARKER;
 }
 
-async function readUtf8File(path: string, capBytes: number): Promise<string | null> {
+async function readUtf8File(path: string, capBytes: number, timeoutMs = COMMAND_CODE_FILE_OP_TIMEOUT_MS): Promise<string | null> {
   type FileHandle = Awaited<ReturnType<typeof open>>;
   let fileHandle: FileHandle | undefined;
   const closedHandles = new WeakSet<object>();
@@ -141,7 +141,7 @@ async function readUtf8File(path: string, capBytes: number): Promise<string | nu
   })();
 
   try {
-    return await withTimeout(read, FILE_OP_TIMEOUT_MS);
+    return await withTimeout(read, timeoutMs);
   } catch {
     if (fileHandle) void closeBestEffort(fileHandle);
     void opened.then(handle => closeBestEffort(handle), () => undefined);
@@ -178,21 +178,21 @@ function parseSkillFrontmatter(text: string): { name: string | null; body: strin
   return { name, body };
 }
 
-async function readMemory(cwd: string, cwdCanonical: string): Promise<string> {
+async function readMemory(cwd: string, cwdCanonical: string, timeoutMs: number): Promise<string> {
   const path = join(cwd, "AGENTS.md");
   const canonical = confinedCanonicalPath(path, cwdCanonical);
   if (!canonical) return "";
-  const text = await readUtf8File(canonical, MEMORY_CAP_BYTES);
+  const text = await readUtf8File(canonical, MEMORY_CAP_BYTES, timeoutMs);
   if (text === null) return "";
   return truncateUtf8(text, MEMORY_CAP_BYTES);
 }
 
-async function readTaste(cwd: string, cwdCanonical: string): Promise<string | null> {
+async function readTaste(cwd: string, cwdCanonical: string, timeoutMs: number): Promise<string | null> {
   const path = join(cwd, ".commandcode", "taste", "taste.md");
   const canonical = confinedCanonicalPath(path, cwdCanonical);
   if (!canonical) return null;
   if (!existsSync(canonical)) return null;
-  const text = await readUtf8File(canonical, TASTE_CAP_BYTES);
+  const text = await readUtf8File(canonical, TASTE_CAP_BYTES, timeoutMs);
   if (text === null) return null;
   return truncateUtf8(text, TASTE_CAP_BYTES);
 }
@@ -202,7 +202,7 @@ interface SkillEntry {
   body: string;
 }
 
-async function listSkillDirs(skillRoot: string, cwdCanonical: string, scanBudget: number): Promise<string[]> {
+async function listSkillDirs(skillRoot: string, cwdCanonical: string, scanBudget: number, timeoutMs: number): Promise<string[]> {
   if (scanBudget <= 0) return [];
   const skillRootCanonical = confinedCanonicalPath(skillRoot, cwdCanonical);
   if (!skillRootCanonical) return [];
@@ -235,7 +235,7 @@ async function listSkillDirs(skillRoot: string, cwdCanonical: string, scanBudget
         names.sort();
         return names;
       })(),
-      FILE_OP_TIMEOUT_MS,
+      timeoutMs,
     );
   } catch {
     if (dir) {
@@ -249,11 +249,11 @@ async function listSkillDirs(skillRoot: string, cwdCanonical: string, scanBudget
   }
 }
 
-async function readSkill(skillRoot: string, dirName: string, cwdCanonical: string): Promise<SkillEntry | null> {
+async function readSkill(skillRoot: string, dirName: string, cwdCanonical: string, timeoutMs: number): Promise<SkillEntry | null> {
   const path = join(skillRoot, dirName, "SKILL.md");
   const canonical = confinedCanonicalPath(path, cwdCanonical);
   if (!canonical) return null;
-  const text = await readUtf8File(canonical, SKILLS_XML_CAP_BYTES);
+  const text = await readUtf8File(canonical, SKILLS_XML_CAP_BYTES, timeoutMs);
   if (text === null) return null;
   const { name, body } = parseSkillFrontmatter(text);
   return { name: name ?? dirName, body };
@@ -322,16 +322,16 @@ function truncateUtf8BodyForXml(body: string, capBytes: number): string | null {
   return best;
 }
 
-async function readSkills(cwd: string, cwdCanonical: string): Promise<string | null> {
+async function readSkills(cwd: string, cwdCanonical: string, timeoutMs: number): Promise<string | null> {
   const seen = new Set<string>();
   const collected: SkillEntry[] = [];
 
   for (const rootRel of SKILL_ROOTS) {
     const skillRoot = join(cwd, ...rootRel.split("/"));
-    const dirs = await listSkillDirs(skillRoot, cwdCanonical, MAX_SKILL_DIRS_TO_SCAN);
+    const dirs = await listSkillDirs(skillRoot, cwdCanonical, MAX_SKILL_DIRS_TO_SCAN, timeoutMs);
     for (const dirName of dirs) {
       if (collected.length >= MAX_SKILLS) break;
-      const skill = await readSkill(skillRoot, dirName, cwdCanonical);
+      const skill = await readSkill(skillRoot, dirName, cwdCanonical, timeoutMs);
       if (!skill) continue;
       if (seen.has(skill.name)) continue;
       seen.add(skill.name);
@@ -343,20 +343,23 @@ async function readSkills(cwd: string, cwdCanonical: string): Promise<string | n
   return buildSkillsXml(collected);
 }
 
-async function collectProjectContext(cwd: string): Promise<CommandCodeProjectContext> {
+async function collectProjectContext(cwd: string, timeoutMs: number): Promise<CommandCodeProjectContext> {
   const cwdCanonical = canonicalPath(cwd);
   if (!cwdCanonical) return { ...EMPTY_COMMAND_CODE_PROJECT_CONTEXT };
 
   const [memory, taste, skills] = await Promise.all([
-    readMemory(cwd, cwdCanonical),
-    readTaste(cwd, cwdCanonical),
-    readSkills(cwd, cwdCanonical),
+    readMemory(cwd, cwdCanonical, timeoutMs),
+    readTaste(cwd, cwdCanonical, timeoutMs),
+    readSkills(cwd, cwdCanonical, timeoutMs),
   ]);
 
   return { memory, taste, skills };
 }
 
-export async function loadCommandCodeProjectContext(cwd: string | undefined): Promise<CommandCodeProjectContext> {
+export async function loadCommandCodeProjectContext(
+  cwd: string | undefined,
+  options?: { /** Internal test seam; omitted in production. */ fileOpTimeoutMs?: number },
+): Promise<CommandCodeProjectContext> {
   if (!cwd) return { ...EMPTY_COMMAND_CODE_PROJECT_CONTEXT };
 
   const hadCachedEntry = projectContextCache.has(cwd);
@@ -365,7 +368,7 @@ export async function loadCommandCodeProjectContext(cwd: string | undefined): Pr
     return cached.value;
   }
 
-  const value = await collectProjectContext(cwd);
+  const value = await collectProjectContext(cwd, options?.fileOpTimeoutMs ?? COMMAND_CODE_FILE_OP_TIMEOUT_MS);
   const now = Date.now();
   if (hadCachedEntry) {
     pruneExpiredProjectContextCache(now);

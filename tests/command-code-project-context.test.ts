@@ -27,6 +27,7 @@ mock.module("node:fs/promises", () => ({
 
 const {
   EMPTY_COMMAND_CODE_PROJECT_CONTEXT,
+  COMMAND_CODE_FILE_OP_TIMEOUT_MS,
   loadCommandCodeProjectContext,
   projectContextCache,
   pruneProjectContextCache,
@@ -159,10 +160,7 @@ describe("loadCommandCodeProjectContext", () => {
     });
 
     try {
-      const result = await Promise.race([
-        loadCommandCodeProjectContext(root),
-        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 2_500)),
-      ]);
+      const result = await loadCommandCodeProjectContext(root, { fileOpTimeoutMs: 20 });
       expect(result).toEqual(EMPTY_COMMAND_CODE_PROJECT_CONTEXT);
       expect(closeCalls).toBe(1);
     } finally {
@@ -296,10 +294,7 @@ describe("loadCommandCodeProjectContext", () => {
 
     try {
       writeFileSync(agentsPath, "hanging", "utf8");
-      const result = await Promise.race([
-        loadCommandCodeProjectContext(root),
-        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 2_500)),
-      ]);
+      const result = await loadCommandCodeProjectContext(root, { fileOpTimeoutMs: 20 });
 
       expect(result).not.toBe("timeout");
       expect(result).toEqual(EMPTY_COMMAND_CODE_PROJECT_CONTEXT);
@@ -308,6 +303,10 @@ describe("loadCommandCodeProjectContext", () => {
       openMock.mockImplementation(realOpen);
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("keeps the production file-operation timeout default", () => {
+    expect(COMMAND_CODE_FILE_OP_TIMEOUT_MS).toBe(2_000);
   });
 
   test("omits symlink escape for AGENTS.md", async () => {
