@@ -142,8 +142,10 @@ jobs:
       # step. A missing or malformed filter output must fail this job instead
       # of silently making every expensive job skip.
       ci: ${{ steps.scope.outputs.ci }}
-      gui: ${{ steps.filter.outputs.gui }}
-      packaging: ${{ steps.filter.outputs.packaging }}
+      gui: ${{ steps.scope.outputs.gui }}
+      packaging: ${{ steps.scope.outputs.packaging }}
+      macos: ${{ steps.scope.outputs.macos }}
+      swift: ${{ steps.scope.outputs.swift }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -209,35 +211,54 @@ jobs:
               - 'README.md'
               - 'LICENSE'
               - 'scripts/prepare-package.ts'
+            macos:
+              - '.github/workflows/**'
+              - '.github/actions/**'
+              - 'scripts/ci/**'
+              - 'scripts/test.ts'
+              - 'src/adapters/cursor/native-exec-shell.ts'
+              - 'src/lib/machine-test-lock.ts'
+              - 'src/oauth/**'
+              - 'src/service.ts'
+              - 'integrations/aistudio-daemon/**'
+              - 'tests/aistudio-native-webkit.test.ts'
+              - 'tests/codex-app-server-processes.test.ts'
+              - 'tests/cursor-native-exec-shell.test.ts'
+              - 'tests/preload.ts'
+              - 'tests/process-state.test.ts'
+              - 'tests/process-control*.test.ts'
+              - 'tests/service*.test.ts'
+              - 'tests/storage-worker*.test.ts'
+              - 'tests/test-runner.test.ts'
+            swift:
+              - 'integrations/aistudio-daemon/**'
+              - 'tests/aistudio-native-webkit.test.ts'
+              - 'src/oauth/aistudio-native-daemon.ts'
 
       - name: Assert the scope output is usable
         id: scope
         shell: bash
         env:
           CI_SCOPE: ${{ steps.filter.outputs.ci }}
+          GUI_SCOPE: ${{ steps.filter.outputs.gui }}
+          PACKAGING_SCOPE: ${{ steps.filter.outputs.packaging }}
+          MACOS_SCOPE: ${{ steps.filter.outputs.macos }}
+          SWIFT_SCOPE: ${{ steps.filter.outputs.swift }}
         run: |
           set -euo pipefail
-          case "$CI_SCOPE" in
-            true|false)
-              printf 'ci=%s\n' "$CI_SCOPE" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              printf '::error::changes.outputs.ci was %q, expected true or false\n' "$CI_SCOPE"
-              exit 1
-              ;;
-          esac
+          for scope in ci gui packaging macos swift; do
+            name="${scope^^}_SCOPE"
+            value="${!name}"
+            case "$value" in
+              true|false) printf '%s=%s\n' "$scope" "$value" >> "$GITHUB_OUTPUT" ;;
+              *) printf '::error::changes.outputs.%s was %q, expected true or false\n' "$scope" "$value"; exit 1 ;;
+            esac
+          done
 
-  # The suite, split by file across four Linux runners.
-  #
-  # `scripts/ci/run-bun-test-batches.sh` mirrors Bun's sorted round-robin shard
-  # assignment, then runs each shard in small batches so every batch gets a fresh
-  # Bun process. The helper prints the exact files before each batch and retries
-  # only a Bun runtime crash once; ordinary test failures are never retried.
-  # Storage-policy API tests and api-usage are deliberately excluded here and run
-  # in dedicated jobs below. Bun 1.3.14 can corrupt the Linux isolate/epoll state
-  # around those Worker-heavy harnesses; keeping them out of the general shards
-  # prevents one runtime failure from wedging ~150 unrelated files while preserving
-  # the same coverage in fresh Bun processes.
+  # The general suite retains fresh-process containment after direct native
+  # sharding failed qualification. The lane manifest is authoritative for
+  # membership; validated Bun 1.4 timings only drive longest-processing-time
+  # allocation. The batching helper remains the process boundary.
   #
   # Only the suite lives here. Typecheck, lint, build, and the scans run once in
   # `gates` rather than four times — they are fixed cost, and paying it per shard
@@ -300,10 +321,34 @@ jobs:
           cd gui
           bun run build
 
-      - name: Test in fresh-process batches
+      - name: Restore canonical test timings
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .bun-timings.json
+          key: ocx-test-timings-dev-${{ github.sha }}
+          restore-keys: |
+            ocx-test-timings-dev-
+
+      - name: Validate restored timing data
+        if: hashFiles('.bun-timings.json') != ''
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
+
+      - name: Test in fresh-process timing-aware batches
+        shell: bash
         env:
           TEST_SHARD: ${{ matrix.shard }}/4
-        run: bash scripts/ci/run-bun-test-batches.sh "$TEST_SHARD"
+        run: |
+          bash scripts/ci/run-bun-test-batches.sh "$TEST_SHARD"
+
+      - name: Upload trusted-dev shard timing report
+        if: >-
+          success() && github.event_name == 'push' && github.ref == 'refs/heads/dev' &&
+          hashFiles('.bun-timings.json') != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-timings-general-${{ matrix.shard }}
+          path: .bun-timings.json
+          if-no-files-found: error
 
   # Bun 1.3.14 has shown a Linux isolate/epoll race around the storage-policy
   # harness. Keep the entire six-file family in one fresh process so a runtime
@@ -336,13 +381,8 @@ jobs:
 
       - name: Test storage policy API
         run: |
-          bun test --isolate \
-            ./tests/api-storage-policy-already-running.test.ts \
-            ./tests/api-storage-policy-mutation-busy.test.ts \
-            ./tests/api-storage-policy-put-race.test.ts \
-            ./tests/api-storage-policy-run.test.ts \
-            ./tests/api-storage-policy.test.ts \
-            ./tests/api-storage.test.ts
+          mapfile -t dedicated_files < <(bun scripts/ci/test-lanes.ts --lane dedicated-storage)
+          bun test --isolate "${dedicated_files[@]}"
 
   # Bun 1.3.14 has shown a Linux isolate wedge around startServer() plus the user
   # cost overlay reconciler. Keep api-usage in one fresh process so a runtime
@@ -374,7 +414,84 @@ jobs:
           bun run build
 
       - name: Test api usage API
-        run: bun test --isolate ./tests/api-usage.test.ts
+        run: |
+          mapfile -t dedicated_files < <(bun scripts/ci/test-lanes.ts --lane dedicated-api)
+          bun test --isolate "${dedicated_files[@]}"
+
+  serial-load-sensitive:
+    name: serial load-sensitive tests
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-tags: true
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd gui
+          bun install --frozen-lockfile
+
+      - name: Build GUI
+        run: |
+          cd gui
+          bun run build
+
+      - name: Test serial lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t serial_files < <(bun scripts/ci/test-lanes.ts --lane serial)
+          bun test --isolate --parallel=1 "${serial_files[@]}"
+
+  # Only trusted dev pushes may turn the four partial reports into the one
+  # canonical timing cache. PRs and release branches can restore that cache,
+  # but never publish data under a key they could later restore.
+  publish-test-timings:
+    name: publish test timings
+    needs: test
+    if: >-
+      needs.test.result == 'success' && github.event_name == 'push' &&
+      github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Download trusted-dev shard timing reports
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: ci-timings-general-*
+          path: .tmp/ci-timings
+
+      - name: Merge and validate timing reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t timing_files < <(find .tmp/ci-timings -type f -name .bun-timings.json -print)
+          test "${#timing_files[@]}" -eq 4
+          bun scripts/ci/merge-timings.ts "${timing_files[@]}"
+          bun scripts/ci/validate-timings.ts .bun-timings.json
+
+      - name: Save canonical dev timing cache
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .bun-timings.json
+          key: ocx-test-timings-dev-${{ github.sha }}
 
   # Everything that is not the suite: type safety, privacy, lint, build, smoke.
   # One runner, once per push. Splitting these across the shards would repeat a
@@ -441,22 +558,14 @@ jobs:
       - name: CLI help smoke
         run: bun run src/cli/index.ts help
 
-  # macOS runs the WHOLE suite unsharded. The four Linux shards each cover a
-  # quarter of the files, which quietly assumes no test depends on a sibling
-  # file having run in the same process pool. This leg is the control that
-  # would notice if that assumption ever broke.
-  #
-  # Pull requests skip it: the unsharded run regularly hits the 30-minute
-  # timeout and is not a useful merge gate. Push to main/preview/dev and
-  # workflow_dispatch still run it. The aggregate `ci` job treats `skipped`
-  # as a deliberate pass.
-  #
-  # It does not repeat the gates: typecheck, privacy, lint, and build are
-  # platform-independent and already ran once above.
+  # macOS is focused on dev pushes and relevant pull requests, while main,
+  # preview, and dispatch retain the full unsharded control. This keeps Darwin
+  # process coverage on the fast path without dropping the release control.
   platform-macos:
     name: macos
     needs: changes
-    if: github.event_name != 'pull_request'
+    if: >-
+      github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'
     runs-on: macos-latest
     # The unsharded control for the sharded Linux lane: the only place the whole
     # suite runs in one pool, so it is the place that catches what sharding
@@ -498,50 +607,48 @@ jobs:
           cd gui
           bun run build
 
-      # Bun 1.3.14 segfaults while reclaiming a Worker at an `--isolate` file
-      # boundary: the header shows BALANCED `workers_spawned(N)
-      # workers_terminated(N)` and the process dies with exit 133 after the last
-      # assertion in the file already passed. It landed on
-      # `storage-worker-lifecycle` and `server-background-lifecycle` — the two
-      # files that tear down a still-busy policy Worker — and accounted for most
-      # of this leg's red runs on `dev` while every failing SHA passed on rerun.
-      #
-      # This is a runtime crash, not a test result, and the Linux shards already
-      # retry exactly this class through `scripts/ci/run-bun-test-batches.sh`
-      # (`is_bun_runtime_crash`). The unsharded macOS control had no equivalent,
-      # so the same crash that Linux absorbs failed the whole promotion here.
-      #
-    # Keep the signature list in sync with `is_bun_runtime_crash` in
-    # scripts/ci/run-bun-test-batches.sh. An assertion failure still fails on
-    # the first attempt — only the crash signature is retried, exactly once.
-      - name: Test
+      - name: Restore canonical test timings
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .bun-timings.json
+          key: ocx-test-timings-dev-${{ github.sha }}
+          restore-keys: |
+            ocx-test-timings-dev-
+
+      - name: Validate restored timing data
+        if: hashFiles('.bun-timings.json') != ''
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
+
+      - name: Swift/WebKit integration
+        if: >-
+          needs.changes.outputs.swift == 'true' &&
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'push' && github.ref == 'refs/heads/dev'))
+        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 tests/aistudio-native-webkit.test.ts
+
+      - name: Focused Darwin/process lifecycle tests
+        if: >-
+          github.event_name == 'pull_request' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/dev')
         run: |
-          # GitHub Actions starts bash `run:` blocks with `-e`. Disable
-          # errexit so a Bun crash reaches PIPESTATUS and the bounded retry.
-          set +e
-          set -uo pipefail
-          suite_log="$(mktemp -t ocx-macos-suite.XXXXXX)"
-          for attempt in 1 2; do
-            # --timeout: Bun's default 5s per-test ceiling is the recurring flake
-            # class on this loaded shared runner (real retry windows + server
-            # round-trips exceed 5s under contention; a 10s-floor in-test
-            # watchdog fired at 10.16s there). 60s keeps hangs bounded (the 30m
-            # job timeout is the outer backstop) while removing the timing
-            # flakes — assertions are untouched. Pairs with the 30s CI floor in
-            # tests/helpers/ci-watchdog.ts.
-            bun test --isolate --timeout 60000 tests 2>&1 | tee "$suite_log"
-            suite_status="${PIPESTATUS[0]}"
-            if [ "$suite_status" -eq 0 ]; then
-              exit 0
-            fi
-            if ! grep -Eqi 'oh no: Bun has crashed|Internal assertion failure|Segmentation fault at address|Illegal instruction|Bus error|Aborted \(core dumped\)' "$suite_log"; then
-              echo "::error::macOS suite failed on attempt ${attempt} (exit ${suite_status}); assertion failures are not retried."
-              exit "$suite_status"
-            fi
-            echo "::warning::Bun runtime crash in the macOS suite (exit ${suite_status}, attempt ${attempt})."
-          done
-          echo "::error::Bun runtime crash repeated on the macOS suite; failing after one retry."
-          exit 1
+          bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 \
+            --timings .bun-timings.json --update-timings \
+            tests/codex-app-server-processes.test.ts \
+            tests/cursor-native-exec-shell.test.ts \
+            tests/process-control.test.ts \
+            tests/process-state.test.ts \
+            tests/service.test.ts \
+            tests/storage-worker-lifecycle.test.ts \
+            tests/storage-worker-os-join-settle.test.ts \
+            tests/storage-worker-teardown-isolate.test.ts \
+            tests/test-runner.test.ts
+
+      - name: Full macOS suite
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' &&
+           (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview'))
+        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests
 
       - name: CLI help smoke
         run: bun run src/cli/index.ts help
@@ -805,7 +912,7 @@ jobs:
     # direct dependencies only, so a failing `select-windows-runner` would
     # otherwise reach this gate as nothing at all while its dependents report
     # `skipped` — which the gate is required to read as a deliberate skip.
-    needs: [changes, select-windows-runner, test, storage-policy, api-usage, gates, platform-macos, platform-windows, keyring-smoke, npm-global-smoke]
+    needs: [changes, select-windows-runner, test, storage-policy, api-usage, serial-load-sensitive, publish-test-timings, gates, platform-macos, platform-windows, keyring-smoke, npm-global-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

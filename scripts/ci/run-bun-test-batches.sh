@@ -10,6 +10,7 @@ readonly BATCH_KILL_GRACE_SECONDS="${BUN_TEST_BATCH_KILL_GRACE_SECONDS:-15}"
 # the candidate binary. Without this the lane would export an override, run the
 # bundled stable runtime anyway, and report a qualification it never performed.
 readonly BUN_BIN="${OPENCODEX_BUN_PATH:-bun}"
+readonly TIMING_FILE="${BUN_TEST_TIMINGS_FILE:-.bun-timings.json}"
 
 usage() {
   echo "usage: $0 <shard/total>" >&2
@@ -42,25 +43,6 @@ if ! command -v timeout >/dev/null 2>&1; then
   echo "GNU timeout is required to bound Bun test batches." >&2
   exit 69
 fi
-
-is_general_test_file() {
-  local path="$1"
-
-  case "$path" in
-    tests/api-storage-policy*.test.ts|tests/api-storage.test.ts|tests/api-usage.test.ts)
-      return 1
-      ;;
-  esac
-
-  case "$path" in
-    *.test.js|*.test.jsx|*.test.ts|*.test.tsx|*_test.js|*_test.jsx|*_test.ts|*_test.tsx|*.spec.js|*.spec.jsx|*.spec.ts|*.spec.tsx|*_spec.js|*_spec.jsx|*_spec.ts|*_spec.tsx)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
 
 is_bun_runtime_crash() {
   local status="$1"
@@ -111,7 +93,7 @@ run_test_once() {
   set +e
   timeout --signal=TERM --kill-after="${BATCH_KILL_GRACE_SECONDS}s" \
     "${BATCH_TIMEOUT_SECONDS}s" \
-    "$BUN_BIN" test --isolate --timeout 60000 "${files[@]}" 2>&1 | tee "$log_file"
+    "$BUN_BIN" test --isolate --timeout 60000 --timings "$TIMING_FILE" --update-timings "${files[@]}" 2>&1 | tee "$log_file"
   status="${PIPESTATUS[0]}"
   set -e
 
@@ -191,23 +173,12 @@ recover_batch_file_by_file() {
   return 0
 }
 
-mapfile -d '' -t ALL_TEST_FILES < <(
-  find tests -type f -print0 \
-    | LC_ALL=C sort -z
+mapfile -t ORDERED_GENERAL_FILES < <(
+  "$BUN_BIN" scripts/ci/test-lanes.ts --lane general --timings "$TIMING_FILE" --shard "$SHARD_SPEC"
 )
 
 SELECTED_FILES=()
-general_index=0
-for path in "${ALL_TEST_FILES[@]}"; do
-  if ! is_general_test_file "$path"; then
-    continue
-  fi
-
-  if (( general_index % SHARD_COUNT == SHARD_INDEX - 1 )); then
-    SELECTED_FILES+=("$path")
-  fi
-  ((general_index += 1))
-done
+SELECTED_FILES=("${ORDERED_GENERAL_FILES[@]}")
 
 if (( ${#SELECTED_FILES[@]} == 0 )); then
   echo "No tests selected for shard ${SHARD_SPEC}." >&2
@@ -215,7 +186,7 @@ if (( ${#SELECTED_FILES[@]} == 0 )); then
 fi
 
 readonly TOTAL_BATCHES=$(( (${#SELECTED_FILES[@]} + BATCH_SIZE - 1) / BATCH_SIZE ))
-echo "Shard ${SHARD_SPEC}: ${#SELECTED_FILES[@]} files in ${TOTAL_BATCHES} primary Bun processes (batch size <= ${BATCH_SIZE}, timeout ${BATCH_TIMEOUT_SECONDS}s)."
+echo "Shard ${SHARD_SPEC}: ${#SELECTED_FILES[@]} files in ${TOTAL_BATCHES} primary Bun processes (timing-aware longest-first allocation, batch size <= ${BATCH_SIZE}, timeout ${BATCH_TIMEOUT_SECONDS}s)."
 echo "Runtime crashes and timeouts fall back to one-file-per-process isolation; assertion/test failures do not retry."
 
 for ((batch_index = 0; batch_index < TOTAL_BATCHES; batch_index += 1)); do
@@ -240,3 +211,8 @@ for ((batch_index = 0; batch_index < TOTAL_BATCHES; batch_index += 1)); do
     exit $?
   fi
 done
+
+# Bun updates the timing file in place, including restored entries from the
+# canonical cache. Publish only this shard's entries so the trusted-dev merge
+# job receives four disjoint reports rather than four copies of the baseline.
+"$BUN_BIN" scripts/ci/select-timings.ts "$TIMING_FILE" "${SELECTED_FILES[@]}"
