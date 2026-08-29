@@ -92,9 +92,11 @@ test("Dashboard overview status widgets do not wait on injection-model", async (
 
 test("server overview exposes editable security settings and replacement state", async () => {
   const source = await Bun.file(new URL("../src/pages/dashboard-overview-panels.tsx", import.meta.url)).text();
-  expect(source).toContain("/api/settings");
-  expect(source).toContain("JSON.stringify({ server: draft })");
-  expect(source).toContain("setView(data.server)");
+  const hook = await Bun.file(new URL("../src/pages/use-dashboard-data.ts", import.meta.url)).text();
+  expect(source).toContain("saveServerSettings(draft)");
+  expect(source).toContain("draftOverride ?? server?.configured");
+  expect(hook).toContain("JSON.stringify({ server })");
+  expect(hook).toContain("server: data.server");
   expect(source).toContain("restartRequired");
   expect(source).toContain('role="alert"');
 });
