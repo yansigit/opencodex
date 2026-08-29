@@ -2180,7 +2180,11 @@ function mergeConfigDefaults(parsed: unknown): unknown {
   return merged;
 }
 
-function configNeedsDefaultRepair(parsed: Record<string, unknown>): boolean {
+function configNeedsProviderRepair(parsed: Record<string, unknown>): boolean {
+  const providers = parsed.providers;
+  if (parsed.defaultProvider !== undefined
+    || (providers && typeof providers === "object" && !Array.isArray(providers)
+      && Object.keys(providers).length > 0)) return false;
   const candidate = structuredClone(parsed);
   sanitizeAliasesForLoad(candidate);
   sanitizeRetryOn429ForLoad(candidate);
@@ -2730,7 +2734,7 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
 function persistConfigUnlocked(config: OcxConfig): boolean {
   const configPath = getConfigPath();
   const raw = readRawConfigJson();
-  if (raw && configNeedsDefaultRepair(raw)) {
+  if (raw && configNeedsProviderRepair(raw)) {
     throw new Error("refusing to overwrite a config repaired with defaults; fix the persisted config first");
   }
   // External editors can add provider rows the live config deliberately does
@@ -3366,7 +3370,7 @@ function warnConfigRepaired(configPath: string, error: z.ZodError): void {
   if (warnedConfigFallbacks.has(configPath)) return;
   warnedConfigFallbacks.add(configPath);
   const fields = error.issues.map(i => i.path.join(".") || "config").join(", ");
-  console.error(`opencodex config at ${configPath}: repaired invalid or missing field(s) [${fields}] in memory. Automatic config writes are blocked until config.json is fixed.`);
+  console.error(`opencodex config at ${configPath}: repaired invalid or missing field(s) [${fields}] in memory. A providerless fallback config will not be written automatically.`);
 }
 
 /**

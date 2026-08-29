@@ -1395,12 +1395,7 @@ describe("opencodex config defaults", () => {
   });
 
   test("refuses to persist a config synthesized by missing-field repair", () => {
-    const before = JSON.stringify({
-      port: 10100,
-      providers: {
-        cursor: { adapter: "openai-chat", baseUrl: "https://cursor.example.test/v1" },
-      },
-    });
+    const before = JSON.stringify({ port: 10100 });
     writeConfig(before);
     const errorSpy = spyOn(console, "error").mockImplementation(() => {});
 
