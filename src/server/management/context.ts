@@ -102,6 +102,49 @@ export interface ManagementApiDeps {
   codexPromptPaths?: CodexPromptPaths;
 }
 
+/** A direct route dispatch has no authority to write the operator's config. */
+export class MissingManagementPersistenceError extends Error {
+  constructor() {
+    super("Management config persistence is unavailable.");
+    this.name = "MissingManagementPersistenceError";
+  }
+}
+
+/** Marks a failed management persistence dependency so dispatch can restore its live snapshot. */
+export class ManagementPersistenceError extends Error {
+  readonly code: unknown;
+  response?: Response;
+
+  constructor(cause: unknown) {
+    super("Management config persistence failed.", { cause });
+    this.name = "ManagementPersistenceError";
+    this.code = cause && typeof cause === "object" ? (cause as { code?: unknown }).code : undefined;
+  }
+}
+
+/** The only whole-live-config persistence boundary available to management routes. */
+export function saveManagementConfig(deps: ManagementApiDeps, config: OcxConfig): void {
+  if (!deps.saveConfigPreservingClaudeCode) throw new MissingManagementPersistenceError();
+  try {
+    deps.saveConfigPreservingClaudeCode(config);
+  } catch (error) {
+    throw new ManagementPersistenceError(error);
+  }
+}
+
+/** The only locked, field-scoped on-disk mutation boundary available to management routes. */
+export function mutateManagementConfig<T>(
+  deps: ManagementApiDeps,
+  mutate: Parameters<NonNullable<ManagementApiDeps["mutatePersistedConfig"]>>[0],
+): ReturnType<NonNullable<ManagementApiDeps["mutatePersistedConfig"]>> {
+  if (!deps.mutatePersistedConfig) throw new MissingManagementPersistenceError();
+  try {
+    return deps.mutatePersistedConfig(mutate) as ReturnType<NonNullable<ManagementApiDeps["mutatePersistedConfig"]>>;
+  } catch (error) {
+    throw new ManagementPersistenceError(error);
+  }
+}
+
 
 export interface ManagementContext {
   req: Request;

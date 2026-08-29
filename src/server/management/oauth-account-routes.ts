@@ -12,7 +12,6 @@ import {
   providerHeadersConfigError,
   readConfigDiagnostics,
   reconcileLiveConfigFromDisk,
-  saveConfigPreservingClaudeCode,
 } from "../../config";
 import {
   clearLoginState,
@@ -68,7 +67,7 @@ import { isAzureIdentityProvider } from "../../config/provider-validation";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { saveManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, readManagementJsonBodyOr, rethrowManagementBodyTooLarge } from "./body";
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
 import { ACCOUNT_IMPORT_DEADLINE_MS, ACCOUNT_IMPORT_MAX_REQUEST_BYTES } from "../../oauth/account-import";
@@ -374,7 +373,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
         enabled = body.enabled;
       }
       config.cursorAccountPool = { enabled };
-      saveConfigPreservingClaudeCode(config);
+      saveManagementConfig(deps, config);
       reconcileLiveStateStores();
       return jsonResponse({
         ok: true,
@@ -422,7 +421,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       ...(strategy !== undefined ? { strategy } : {}),
       ...(stickyLimit !== undefined ? { stickyLimit } : {}),
     };
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     return jsonResponse({
       ok: true,
@@ -667,7 +666,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const key = "ocx_data_" + randomBytes(20).toString("hex");
     const entry = { id: randomUUID(), name, key, createdAt: new Date().toISOString() };
     config.apiKeys = [...(config.apiKeys ?? []), entry];
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     return jsonResponse({ id: entry.id, name: entry.name, key: entry.key, createdAt: entry.createdAt }, 201, req, config);
   }
@@ -681,7 +680,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const entry = (config.apiKeys ?? []).find(k => k.id === body.id);
     if (!entry) return jsonResponse({ error: "key not found" }, 404, req, config);
     entry.name = nameField.value;
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     // Never echo key material from a rename.
     return jsonResponse({ id: entry.id, name: entry.name, createdAt: entry.createdAt }, 200, req, config);
@@ -695,7 +694,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     config.apiKeys = (config.apiKeys ?? []).filter(k => k.id !== body.id);
     // A stale id must not read as a successful revocation.
     if (config.apiKeys.length === before) return jsonResponse({ error: "key not found" }, 404, req, config);
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     return jsonResponse({ success: true }, 200, req, config);
   }

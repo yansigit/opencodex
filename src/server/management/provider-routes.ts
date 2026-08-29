@@ -16,7 +16,6 @@ import {
   providerHeadersConfigError,
   requestPacingConfigError,
   readConfigAdmissionSnapshot,
-  saveConfigPreservingClaudeCode,
   upstreamHttpVersionConfigError,
   withConfigMutationLockSync,
 } from "../../config";
@@ -95,7 +94,7 @@ import {
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { saveManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import { resolveAiStudioCredentials } from "../../oauth/aistudio-credentials";
 import { buildAiStudioHeaders, parseGoogleCookieJar } from "../../oauth/google-aistudio-auth";
@@ -743,7 +742,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const submittedModelAutoCompactTokenLimits = Object.hasOwn(prov, "modelAutoCompactTokenLimits");
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
     enrichProviderFromCatalog(name, prov);
-    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
     // Overwriting an existing provider must not drop its multi-key pool: carry it over, then
     // let the (possibly new) apiKey join the pool as the active entry.
     const existingPool = config.providers[name]?.apiKeyPool;
@@ -786,7 +784,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     }
     config.providers[name] = stripRegistryOnlyStaticHeaders(name, prov);
     if (body.setDefault === true) config.defaultProvider = name;
-    save(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     if (prov.apiKey && prov.apiKeyPool) {
       const { addProviderApiKey } = await import("../../providers/api-keys");
@@ -826,9 +824,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (!provider || !isCanonicalOpenAiForwardProvider(provider)) {
         return jsonResponse({ error: "provider openai must be the canonical built-in provider" }, 400);
       }
-      const { saveConfigPreservingClaudeCode: save } = await import("../../config");
       config.providers.openai = { ...provider, codexAccountMode: mode };
-      save(config);
+      saveManagementConfig(deps, config);
       reconcileLiveStateStores();
       (deps.clearProviderQuotaCache ?? clearProviderQuotaCache)();
       (deps.clearThreadAccountMap ?? clearThreadAccountMap)();
@@ -853,9 +850,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (config.providers[name]!.disabled) {
         return jsonResponse({ error: "cannot set a disabled provider as default", code: "default_provider_disabled" }, 400);
       }
-      const { saveConfigPreservingClaudeCode: save } = await import("../../config");
       config.defaultProvider = name;
-      save(config);
+      saveManagementConfig(deps, config);
       reconcileLiveStateStores();
       return jsonResponse({ success: true, name, defaultProvider: name });
     }
@@ -926,7 +922,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       // A PATCH that managed headers owns the resulting block: the clear path restores
       // registry static headers, so exact-match stripping must not erase them again.
       config.providers[name] = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
-      saveConfigPreservingClaudeCode(config);
+      saveManagementConfig(deps, config);
     });
     if (replayError !== undefined) return jsonResponse({ error: replayError }, 409);
     reconcileLiveStateStores();
@@ -1125,13 +1121,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         combos: dependentCombos,
       }, 409);
     }
-    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
     if (fallbackDefault) config.defaultProvider = fallbackDefault;
     delete config.providers[name];
     const { dropProviderCustomModels } = await import("../../providers/provider-id-rewrite");
     const droppedCustomModels = dropProviderCustomModels(config, name);
     setProviderContextCap(config, name, false);
-    save(config);
+    saveManagementConfig(deps, config);
     await replaceProviderAccountSet(name, null);
     reconcileLiveStateStores();
     const { clearModelCache: clearCache } = await import("../../codex/model-cache");
@@ -1156,7 +1151,6 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // property access, with the route's consistent 400 response.
     if (!isPlainRecord(rawBody)) return jsonResponse({ error: "provider-context-caps body must be a plain object" }, 400);
     const body = rawBody as { provider?: unknown; enabled?: unknown; value?: unknown; setAll?: unknown };
-    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
     const { clearModelCache } = await import("../../codex/model-cache");
     const respond = (catalogRefresh: Awaited<ReturnType<typeof convergeCodexCatalog>>) => jsonResponse({
       ok: true,
@@ -1202,7 +1196,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return jsonResponse({ error: "value must be a positive number" }, 400);
       }
       setProviderContextCap(config, provider, body.enabled, perProviderValue);
-      save(config);
+    saveManagementConfig(deps, config);
       reconcileLiveStateStores();
       clearModelCache(provider);
       const catalogRefresh = await convergeCodexCatalog();
@@ -1228,7 +1222,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       const affected = Object.keys(providerContextCaps(config));
       const applyToAll = body.setAll === true;
       setGlobalContextCapValue(config, normalizedValue, applyToAll);
-      save(config);
+      saveManagementConfig(deps, config);
       reconcileLiveStateStores();
       if (applyToAll) {
         for (const provider of affected) clearModelCache(provider);
@@ -1245,7 +1239,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       const before = Object.keys(providerContextCaps(config));
       const names = Object.keys(config.providers);
       setAllProviderContextCaps(config, names, body.setAll);
-      save(config);
+      saveManagementConfig(deps, config);
       reconcileLiveStateStores();
       for (const provider of new Set([...before, ...names])) clearModelCache(provider);
       const catalogRefresh = await convergeCodexCatalog();

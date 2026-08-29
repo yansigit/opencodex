@@ -10,10 +10,8 @@ import {
   isValidProviderName,
   loadConfig,
   multiAgentGuidanceEnabled,
-  mutatePersistedConfig,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
-  saveConfigPreservingClaudeCode,
   subagentDefaultSyncEffective,
 } from "../../config";
 import {
@@ -92,8 +90,12 @@ let grokApplyTestHooks: { now?: () => number; run?: () => Promise<unknown> } | n
 type V2NativeParentOverrideInput = { enabled: boolean; model: string | null };
 type AgentTaskRecoveryInput = { enabled: boolean; model: string | null };
 
-function persistV2RoutedDelegationBridge(config: OcxConfig, enabled: boolean): { ok: true } | { ok: false; reason: string } {
-  const outcome = mutatePersistedConfig(persisted => {
+function persistV2RoutedDelegationBridge(
+  deps: ManagementApiDeps,
+  config: OcxConfig,
+  enabled: boolean,
+): { ok: true } | { ok: false; reason: string } {
+  const outcome = mutateManagementConfig(deps, persisted => {
     const changed = persisted.v2RoutedDelegationBridge !== enabled;
     if (changed) persisted.v2RoutedDelegationBridge = enabled;
     return { changed, value: true };
@@ -114,10 +116,11 @@ function agentTaskRecoveryDto(
 }
 
 function persistAgentTaskRecovery(
+  deps: ManagementApiDeps,
   config: OcxConfig,
   next: AgentTaskRecoveryInput,
 ): { ok: true } | { ok: false; reason: string } {
-  const outcome = mutatePersistedConfig(persisted => {
+  const outcome = mutateManagementConfig(deps, persisted => {
     const nextPersisted = {
       enabled: next.enabled,
       ...(next.model === null ? {} : { model: next.model }),
@@ -163,10 +166,11 @@ function v2NativeParentOverrideTargetIsNoncanonical(config: OcxConfig, model: st
 }
 
 function persistV2NativeParentOverride(
+  deps: ManagementApiDeps,
   config: OcxConfig,
   next: V2NativeParentOverrideInput,
 ): { ok: true } | { ok: false; reason: string } {
-  const outcome = mutatePersistedConfig(persisted => {
+  const outcome = mutateManagementConfig(deps, persisted => {
     const nextPersisted = {
       enabled: next.enabled,
       ...(next.model === null ? {} : { model: next.model }),
@@ -215,10 +219,11 @@ function mirrorDesiredEnabledOntoSnapshot(config: OcxConfig, client: "claude-des
  * unrelated key another writer just committed.
  */
 function persistDesktopProfileField(
+  deps: ManagementApiDeps,
   config: OcxConfig,
   desktopProfile: NonNullable<OcxConfig["claudeCode"]>["desktopProfile"],
 ): { ok: true } | { ok: false; reason: "missing" | "invalid" | "conflict" } {
-  const outcome = mutatePersistedConfig(persisted => {
+  const outcome = mutateManagementConfig(deps, persisted => {
     persisted.claudeCode = { ...(persisted.claudeCode ?? {}), desktopProfile };
     return { changed: true, value: true };
   });
@@ -281,7 +286,7 @@ export function setGrokApplyFlightTestHooks(
   grokApplyFlight = null;
   grokApplyHighWaterBytes = 0;
 }
-import type { ManagementContext } from "./context";
+import { ManagementPersistenceError, MissingManagementPersistenceError, mutateManagementConfig, saveManagementConfig, type ManagementApiDeps, type ManagementContext } from "./context";
 
 export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
@@ -321,7 +326,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       );
       if (result.written && result.fingerprint) {
         current.claudeCode = { ...current.claudeCode, desktopProfile: { ...current.claudeCode.desktopProfile, appliedFingerprint: result.fingerprint, appliedAt: new Date().toISOString() } };
-        saveConfigPreservingClaudeCode(current);
+        saveManagementConfig(deps, current);
       }
     } catch { /* best-effort */ }
   }
@@ -512,19 +517,19 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     }
     if (wantsV2RoutedDelegationBridge && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
         && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride && !wantsAgentTaskRecovery) {
-      const persisted = persistV2RoutedDelegationBridge(config, body.v2RoutedDelegationBridge as boolean);
+      const persisted = persistV2RoutedDelegationBridge(deps, config, body.v2RoutedDelegationBridge as boolean);
       if (!persisted.ok) return jsonResponse({ error: `persisting v2RoutedDelegationBridge failed: ${persisted.reason}` }, 502);
       return jsonResponse({ ok: true, v2RoutedDelegationBridge: config.v2RoutedDelegationBridge === true });
     }
     if (agentTaskRecovery && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
         && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride) {
-      const persisted = persistAgentTaskRecovery(config, agentTaskRecovery);
+      const persisted = persistAgentTaskRecovery(deps, config, agentTaskRecovery);
       if (!persisted.ok) return jsonResponse({ error: `persisting agentTaskRecovery failed: ${persisted.reason}` }, 502);
       return jsonResponse({ ok: true, agentTaskRecovery: agentTaskRecoveryDto(config) });
     }
     if (v2NativeParentOverride && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
         && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText) {
-      const persisted = persistV2NativeParentOverride(config, v2NativeParentOverride);
+      const persisted = persistV2NativeParentOverride(deps, config, v2NativeParentOverride);
       if (!persisted.ok) return jsonResponse({ error: `persisting v2NativeParentOverride failed: ${persisted.reason}` }, 502);
       return jsonResponse({ ok: true, v2NativeParentOverride: v2NativeParentOverrideDto(config, readMultiAgentV2Enabled()) });
     }
@@ -568,13 +573,14 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     if (wantsMode) {
       if (mode === "default") deleteConfigTopLevelKey(config, "multiAgentMode");
       else config.multiAgentMode = mode;
-      saveConfigPreservingClaudeCode(config);
+      saveManagementConfig(deps, config);
       warnings.push(`Multi-agent mode set to '${mode}'. Applies to new sessions.`);
     }
     if (wantsKeepNative) {
       if (body.keepNativeChatGptOnV1 === true) config.keepNativeChatGptOnV1 = true;
       else deleteConfigTopLevelKey(config, "keepNativeChatGptOnV1");
-      saveConfigPreservingClaudeCode(config);
+      saveManagementConfig(deps, config);
+      const effectiveMode = mode ?? config.multiAgentMode ?? "default";
       warnings.push(body.keepNativeChatGptOnV1 === true
         ? (effectiveMode === "v2"
           ? "ChatGPT-native models stay on v1 while other models use v2. Applies to new sessions."
@@ -613,15 +619,15 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       warnings.push("agents.enabled = false has no effect while features.multi_agent_v2 is enabled; upstream keeps V2 active.");
     }
     if (v2NativeParentOverride) {
-      const persisted = persistV2NativeParentOverride(config, v2NativeParentOverride);
+      const persisted = persistV2NativeParentOverride(deps, config, v2NativeParentOverride);
       if (!persisted.ok) return jsonResponse({ error: `persisting v2NativeParentOverride failed: ${persisted.reason}` }, 502);
     }
     if (wantsV2RoutedDelegationBridge) {
-      const persisted = persistV2RoutedDelegationBridge(config, body.v2RoutedDelegationBridge as boolean);
+      const persisted = persistV2RoutedDelegationBridge(deps, config, body.v2RoutedDelegationBridge as boolean);
       if (!persisted.ok) return jsonResponse({ error: `persisting v2RoutedDelegationBridge failed: ${persisted.reason}` }, 502);
     }
     if (agentTaskRecovery) {
-      const persisted = persistAgentTaskRecovery(config, agentTaskRecovery);
+      const persisted = persistAgentTaskRecovery(deps, config, agentTaskRecovery);
       if (!persisted.ok) return jsonResponse({ error: `persisting agentTaskRecovery failed: ${persisted.reason}` }, 502);
     }
     const catalogRefresh = await convergeCodexCatalog();
@@ -806,7 +812,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     if (nextPrompt) config.injectionPrompt = nextPrompt;
     else deleteConfigTopLevelKey(config, "injectionPrompt");
 
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     return jsonResponse({
       ok: true,
       multiAgentGuidanceEnabled: multiAgentGuidanceEnabled(config),
@@ -841,7 +847,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       }
       config[key] = value;
     }
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     return jsonResponse({ ok: true, effortCap: config.effortCap ?? null, subagentEffortCap: config.subagentEffortCap ?? null });
   }
 
@@ -887,8 +893,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const chosen = Array.isArray(body.models) ? body.models.filter((m): m is string => typeof m === "string").slice(0, 5) : [];
     config.subagentModels = chosen;
-    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
-    save(config);
+    saveManagementConfig(deps, config);
     const catalogRefresh = await convergeCodexCatalog();
     await syncClaudeAgentDefsBestEffort();
     await autoApplyDesktopBestEffort();
@@ -935,8 +940,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       }
       const id = body.remove.trim();
       config.subagentRoles = (config.subagentRoles ?? []).filter(role => role.id !== id);
-      const { saveConfigPreservingClaudeCode: save } = await import("../../config");
-      save(config);
+      saveManagementConfig(deps, config);
       const warnings = [...syncCodexAgentRoles(config).warnings];
       const catalogRefresh = await convergeCodexCatalog();
       await syncClaudeAgentDefsBestEffort();
@@ -967,8 +971,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     if ("syncCodexAgentRoles" in body && typeof body.syncCodexAgentRoles === "boolean") {
       config.syncCodexAgentRoles = body.syncCodexAgentRoles;
     }
-    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
-    save(config);
+    saveManagementConfig(deps, config);
     warnings.push(...syncCodexAgentRoles(config).warnings);
     const catalogRefresh = await convergeCodexCatalog();
     await syncClaudeAgentDefsBestEffort();
@@ -1045,7 +1048,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     else deleteConfigTopLevelKey(config, "subagentModelFallback");
     if (nextPollMs !== undefined) config.subagentModelFallbackPollMs = nextPollMs;
     else deleteConfigTopLevelKey(config, "subagentModelFallbackPollMs");
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     return jsonResponse({
       ok: true,
       models: config.subagentModelFallback ?? [],
@@ -1087,7 +1090,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     if (excluded.length > 2000) return jsonResponse({ error: "excluded list is too large" }, 400);
     if (excluded.length === 0) deleteConfigTopLevelKey(config, "grokExcludedModels");
     else config.grokExcludedModels = excluded;
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     return jsonResponse({ ok: true, excluded });
   }
 
@@ -1144,11 +1147,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       }
       const state = await buildClaudeDesktopState(config, parsed);
       config.claudeCode = { ...(config.claudeCode ?? {}), desktopProfile: reconcileDesktopProfile(state.profile, state.models) };
-      saveConfigPreservingClaudeCode(config);
+      saveManagementConfig(deps, config);
       const saved = await buildClaudeDesktopState(config);
       const runtimePort = Number(url.port) || config.port;
       return jsonResponse({ ok: true, ...saved, port: runtimePort });
     } catch (error) {
+      if (error instanceof MissingManagementPersistenceError || error instanceof ManagementPersistenceError) throw error;
       return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
   }
@@ -1197,7 +1201,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       // its stale `clientIntegrations` back over that write and turn the enable
       // action into an immediate self-cancelling OFF — the guard below would then
       // refuse the apply it was asked to perform. Persist ONLY the profile field.
-      const profileSaved = persistDesktopProfileField(config, state.profile);
+      const profileSaved = persistDesktopProfileField(deps, config, state.profile);
       if (!profileSaved.ok) {
         return jsonResponse({
           error: `Claude Desktop profile could not be saved (${profileSaved.reason}); nothing was applied.`,
@@ -1240,7 +1244,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       if (result.fingerprint) {
         // The Desktop write already landed, so a failed bookkeeping save is not
         // an apply failure: report the miss instead of claiming a clean apply.
-        const marked = persistDesktopProfileField(config, {
+        const marked = persistDesktopProfileField(deps, config, {
           ...state.profile,
           appliedFingerprint: result.fingerprint,
           appliedAt: new Date().toISOString(),
@@ -1635,8 +1639,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         else delete next.modelMap;
       }
     }
-    if (body.fastMode !== undefined) config.fastMode = nextFastMode;
-    config.claudeCode = next;
     // Stamp the migration sentinel on EVERY persist of this block. The migration reads
     // "a claudeCode block with no authMode" as a pre-upgrade subscriber and pins it to
     // literal subscription — correct for a config written before `auto` existed, fatal
@@ -1645,8 +1647,20 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     // would be converted into a sticky manual subscription by the next startServer, and
     // auto would survive exactly one proxy lifetime with no way back.
     if (!next.authModeMigratedAt) next.authModeMigratedAt = new Date().toISOString();
-    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
-    save(config);
+    const persisted = mutateManagementConfig(deps, disk => {
+      disk.claudeCode = next;
+      if (body.fastMode !== undefined) {
+        if (nextFastMode === undefined) delete disk.fastMode;
+        else disk.fastMode = nextFastMode;
+      }
+      return { changed: true, value: true };
+    });
+    if (persisted.status === "unavailable") return jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
+    config.claudeCode = next;
+    if (body.fastMode !== undefined) {
+      if (nextFastMode === undefined) deleteConfigTopLevelKey(config, "fastMode");
+      else config.fastMode = nextFastMode;
+    }
     const warnings: string[] = [];
     // authMode changes must reconcile the injected system env too: switching back to
     // Subscription has to remove the opencodex-owned dummy ANTHROPIC_AUTH_TOKEN

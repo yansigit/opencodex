@@ -11,7 +11,6 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
-  saveConfigPreservingClaudeCode,
 } from "../../config";
 import {
   clearLoginState,
@@ -102,7 +101,7 @@ import { displayCodexRuntimePath, effortClampAppliesToRuntime, loadLastEffortCla
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { mutateManagementConfig, saveManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 
 async function sidecarVisionResponseSettings(config: OcxConfig): Promise<{
@@ -469,7 +468,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         config.showCodexSparkQuota = body.showCodexSparkQuota;
       }
       pickerIsEnabled = codexAccountPickerEnabled(config);
-      (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+      saveManagementConfig(deps, config);
     } catch (error) {
       if (previousSettings.hasCodexAutoStart) config.codexAutoStart = previousSettings.codexAutoStart;
       else deleteConfigTopLevelKey(config, "codexAutoStart");
@@ -698,6 +697,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         : normalizeVisionReasoningForModel(model, sourceReasoning);
     }
 
+    const nextConfig = structuredClone(config);
     if (body.webSearch) {
       const pairTouched = body.webSearch.model !== undefined || body.webSearch.backend !== undefined;
       // Validate against the backend the caller SUBMITTED, across the whole
@@ -723,7 +723,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
           return jsonResponse(webSearchModelRejection("webSearch.model", effectiveBackend, effectiveModel, candidates), 400);
         }
       }
-      const webSearchCandidate = { ...config.webSearchSidecar };
+      const webSearchCandidate = { ...nextConfig.webSearchSidecar };
       if (typeof body.webSearch.model === "string") {
         if (body.webSearch.model === "") delete webSearchCandidate.model;
         else webSearchCandidate.model = body.webSearch.model;
@@ -793,36 +793,43 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         if (body.webSearch.streamRoutedModelOutput) webSearchCandidate.streamRoutedModelOutput = true;
         else delete webSearchCandidate.streamRoutedModelOutput;
       }
-      config.webSearchSidecar = webSearchCandidate;
+      nextConfig.webSearchSidecar = webSearchCandidate;
     }
     if (body.vision) {
-      config.visionSidecar = { ...config.visionSidecar };
+      nextConfig.visionSidecar = { ...nextConfig.visionSidecar };
       if (typeof body.vision.model === "string") {
-        if (body.vision.model === "") delete config.visionSidecar.model;
-        else config.visionSidecar.model = body.vision.model;
+        if (body.vision.model === "") delete nextConfig.visionSidecar.model;
+        else nextConfig.visionSidecar.model = body.vision.model;
       }
-      if (body.vision.backend === null) delete config.visionSidecar.backend;
+      if (body.vision.backend === null) delete nextConfig.visionSidecar.backend;
       else if (body.vision.backend === "openai" || body.vision.backend === "anthropic"
         || body.vision.backend === "routed") {
-        config.visionSidecar.backend = body.vision.backend;
+        nextConfig.visionSidecar.backend = body.vision.backend;
       }
       if (typeof body.vision.maxDescriptionsPerTurn === "number") {
-        config.visionSidecar.maxDescriptionsPerTurn = body.vision.maxDescriptionsPerTurn;
+        nextConfig.visionSidecar.maxDescriptionsPerTurn = body.vision.maxDescriptionsPerTurn;
       }
       if (typeof body.vision.enabled === "boolean") {
         // `true` is the default — drop the key so disable/re-enable does not rewrite the file.
-        if (body.vision.enabled) delete config.visionSidecar.enabled;
-        else config.visionSidecar.enabled = false;
+        if (body.vision.enabled) delete nextConfig.visionSidecar.enabled;
+        else nextConfig.visionSidecar.enabled = false;
       }
       if (typeof body.vision.timeoutMs === "number") {
-        config.visionSidecar.timeoutMs = body.vision.timeoutMs;
+        nextConfig.visionSidecar.timeoutMs = body.vision.timeoutMs;
       }
       if (visionReasoningTouched) {
-        if (normalizedVisionReasoning === undefined) delete config.visionSidecar.reasoning;
-        else config.visionSidecar.reasoning = normalizedVisionReasoning;
+        if (normalizedVisionReasoning === undefined) delete nextConfig.visionSidecar.reasoning;
+        else nextConfig.visionSidecar.reasoning = normalizedVisionReasoning;
       }
     }
-    saveConfigPreservingClaudeCode(config);
+    const persisted = mutateManagementConfig(deps, disk => {
+      if (body.webSearch) disk.webSearchSidecar = nextConfig.webSearchSidecar;
+      if (body.vision) disk.visionSidecar = nextConfig.visionSidecar;
+      return { changed: true, value: true };
+    });
+    if (persisted.status === "unavailable") return jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
+    if (body.webSearch) config.webSearchSidecar = nextConfig.webSearchSidecar;
+    if (body.vision) config.visionSidecar = nextConfig.visionSidecar;
     const ws = config.webSearchSidecar ?? {};
     const vision = await sidecarVisionResponseSettings(config);
     const savedWebSearchCandidates = await webSearchCandidateRows(config);
@@ -869,7 +876,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (body.model === "") delete config.shadowCallIntercept.model;
       else config.shadowCallIntercept.model = body.model;
     }
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     const sci = config.shadowCallIntercept;
     return jsonResponse({
       ok: true,

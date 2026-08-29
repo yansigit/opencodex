@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
+import { inMemoryManagementPersistence } from "./helpers/management-auth";
 import type { OcxConfig } from "../src/types";
 
 const savedHome = process.env.OPENCODEX_HOME;
@@ -42,7 +43,7 @@ async function put(config: OcxConfig, body: unknown): Promise<Response> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const res = await handleManagementAPI(req, new URL(req.url), config);
+  const res = await handleManagementAPI(req, new URL(req.url), config, inMemoryManagementPersistence(config));
   expect(res).not.toBeNull();
   return res!;
 }

@@ -75,6 +75,7 @@ import { handleIntegrationRoutes } from "./management/integration-routes";
 import { handleNativeIntegrationRoutes } from "./management/native-integration-routes";
 import type { ManagementContext } from "./management/context";
 import type { ManagementPrincipal } from "./management-auth";
+import { ManagementPersistenceError, MissingManagementPersistenceError } from "./management/context";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
 import { CatalogGatherBusyError } from "../codex/catalog/provider-fetch";
@@ -216,6 +217,10 @@ export async function handleManagementAPI(
     } catch { /* best-effort */ }
   }
   const ctx: ManagementContext = { req, url, config, deps, principal, convergeCodexCatalog, syncClaudeAgentDefsBestEffort };
+  const configBeforeDispatch = (["GET", "HEAD", "OPTIONS"].includes(req.method)
+    || (req.method === "POST" && url.pathname === "/api/providers/test"))
+    ? undefined
+    : structuredClone(config);
   let routed: Response | null;
   try {
     routed = (await handleConfigRoutes(ctx))
@@ -239,6 +244,13 @@ export async function handleManagementAPI(
   } catch (error) {
     const tooLarge = managementBodyTooLargeResponse(error, req, config);
     if (tooLarge) return tooLarge;
+    if (error instanceof MissingManagementPersistenceError || error instanceof ManagementPersistenceError) {
+      if (configBeforeDispatch === undefined) throw error;
+      const response = error instanceof ManagementPersistenceError ? error.response : undefined;
+      for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
+      Object.assign(config, configBeforeDispatch);
+      return response ?? jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
+    }
     if (error instanceof OAuthMutationBusyError) {
       return new Response(JSON.stringify({ error: { type: "server_error", code: "oauth_mutation_busy", message: error.message } }), {
         status: 503,

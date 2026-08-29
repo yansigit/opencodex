@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
+import { inMemoryManagementPersistence } from "./helpers/management-auth";
 
 function config(): OcxConfig {
   return { port: 10100, defaultProvider: "alpha", apiKeys: [{ id: "test", name: "test", key: "test-key", createdAt: new Date(0).toISOString() }], providers: {
@@ -17,7 +18,7 @@ async function request(c: OcxConfig, path: string, body?: unknown) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return handleManagementAPI(req, new URL(req.url), c, {
-    saveConfigPreservingClaudeCode: () => {}, createManagementConvergeCodex: catalogConvergenceFactory(),
+    ...inMemoryManagementPersistence(c), createManagementConvergeCodex: catalogConvergenceFactory(),
   });
 }
 
