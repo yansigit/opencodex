@@ -29,6 +29,7 @@ test("Linux shards isolate api-usage into its own gated job", async () => {
     new URL("../scripts/ci/run-bun-test-batches.sh", import.meta.url),
   ).text();
   expect(batchHelper).toContain("scripts/ci/test-lanes.ts --lane general");
+  expect(batchHelper).toContain("scripts/test.ts --isolate");
   expect(batchHelper).not.toContain("is_general_test_file");
 
   const apiUsageJob = workflow.jobs?.["api-usage"];
@@ -39,7 +40,7 @@ test("Linux shards isolate api-usage into its own gated job", async () => {
     step => step.name === "Test api usage API",
   )?.run ?? "";
   expect(apiUsageRun).toContain("scripts/ci/test-lanes.ts --lane dedicated-api");
-  expect(apiUsageRun).toContain("bun test --isolate");
+  expect(apiUsageRun).toContain("bun scripts/test.ts --isolate");
   expect(apiUsageRun).not.toContain("--timings");
   expect(apiUsageRun).not.toContain("--shard");
 

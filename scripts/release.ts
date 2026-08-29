@@ -556,13 +556,13 @@ const ISOLATED_TEST_FILES = [
   "./tests/api-usage.test.ts",
 ];
 await runLoud([
-  "bun", "test", "--isolate", "tests",
+  "bun", "scripts/test.ts", "--isolate", "tests",
   "--path-ignore-patterns=**/api-storage-policy*.test.ts",
   "--path-ignore-patterns=**/api-storage.test.ts",
   "--path-ignore-patterns=**/api-usage.test.ts",
 ]);
 for (const isolated of ISOLATED_TEST_FILES) {
-  await runLoud(["bun", "test", "--isolate", isolated]);
+  await runLoud(["bun", "scripts/test.ts", "--isolate", isolated]);
 }
 console.log("→ privacy scan");
 await runLoud(["bun", "run", "privacy:scan"]);

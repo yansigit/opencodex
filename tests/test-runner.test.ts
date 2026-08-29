@@ -96,6 +96,15 @@ describe("test runner isolation", () => {
     expect(existsSync(isolated.root)).toBe(false);
   });
 
+  test("sharded lanes arm the home guard before Bun starts", async () => {
+    const exitCode = await runTestLaneForTests(
+      { label: "shard guard", args: ["--shard=1/1"], timeoutMs: 1_000 },
+      "shard-guard-fixture",
+      { command: [process.execPath, "-e", "process.exit(process.env.OCX_TEST_HOME_GUARD === '1' ? 0 : 2)"] },
+    );
+    expect(exitCode).toBe(0);
+  });
+
   test.if(process.platform === "win32")("gives the Windows sandbox a real profile shape", () => {
     const isolated = createIsolatedTestEnvironment({ PATH: "C:\\test\\bin" });
     try {

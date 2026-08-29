@@ -70,12 +70,12 @@ export function finalGatePlan(root: string, evidenceDir: string, unitRoot = dirn
   const env = { ...process.env, OCX_EVIDENCE_DIR: evidenceDir } as Record<string, string>;
   const unitPath = relative(root, unitRoot);
   return [
-    { name: "openai-provider-option-e2e", command: ["bun", "test", "tests/openai-provider-option-e2e.test.ts"], cwd: root, env },
-    { name: "provider-option-focused", command: ["bun", "test", "--isolate", ...focusedTests], cwd: root, env },
+    { name: "openai-provider-option-e2e", command: ["bun", "scripts/test.ts", "tests/openai-provider-option-e2e.test.ts"], cwd: root, env },
+    { name: "provider-option-focused", command: ["bun", "scripts/test.ts", "--isolate", ...focusedTests], cwd: root, env },
     { name: "isolated-runtime-smoke", command: ["bun", "scripts/openai-provider-option-runtime-smoke.ts", "--unit-root", unitPath, "--evidence-dir", evidenceDir], cwd: root },
     { name: "live-key-status", command: ["bun", "scripts/openai-provider-option-runtime-smoke.ts", "--check-live-key", "--unit-root", unitPath, "--evidence-dir", evidenceDir], cwd: root },
     { name: "typescript", command: ["bun", "x", "tsc", "--noEmit"], cwd: root },
-    { name: "full-isolated-tests", command: ["bun", "test", "--isolate", "tests"], cwd: root },
+    { name: "full-isolated-tests", command: ["bun", "scripts/test.ts", "--isolate", "tests"], cwd: root },
     { name: "privacy-scan", command: ["bun", "run", "privacy:scan"], cwd: root },
     { name: "gui-i18n", command: ["bun", "run", "lint:i18n"], cwd: join(root, "gui") },
     { name: "gui-build", command: ["bun", "run", "build"], cwd: join(root, "gui") },
