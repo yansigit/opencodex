@@ -1,6 +1,25 @@
 import { expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { API } from "typescript/unstable/async";
+import {
+  isAwaitExpression,
+  isBinaryExpression,
+  isCallExpression,
+  isElementAccessExpression,
+  isIdentifier,
+  isImportDeclaration,
+  isNamedImports,
+  isNamespaceImport,
+  isParenthesizedExpression,
+  isPropertyAccessExpression,
+  isStringLiteral,
+  SyntaxKind,
+  type Expression,
+  type Node,
+  type SourceFile,
+} from "typescript/unstable/ast";
 
 /**
  * "Every live-config writer goes through the guarded saver" is a claim until something
@@ -13,6 +32,54 @@ import { join } from "node:path";
  */
 
 const SRC = join(import.meta.dir, "..", "src");
+
+function fullReplacementReferences(source: SourceFile): number[] {
+  const namespaces = new Set<string>();
+  const hits: number[] = [];
+  const isConfigModule = (node: Node): boolean => isStringLiteral(node)
+    && resolve(dirname(source.fileName), node.text).replace(/\.ts$/, "") === join(SRC, "config");
+  const staticString = (node: Expression): string | undefined => {
+    if (isStringLiteral(node)) return node.text;
+    if (isBinaryExpression(node) && node.operatorToken.kind === SyntaxKind.PlusToken) {
+      const left = staticString(node.left);
+      const right = staticString(node.right);
+      return left === undefined || right === undefined ? undefined : left + right;
+    }
+    return undefined;
+  };
+  const unwrap = (node: Expression): Expression => {
+    while (isParenthesizedExpression(node) || isAwaitExpression(node)) node = node.expression;
+    return node;
+  };
+  const isConfigNamespace = (node: Expression): boolean => {
+    node = unwrap(node);
+    return (isIdentifier(node) && namespaces.has(node.text))
+      || (isCallExpression(node) && node.expression.kind === SyntaxKind.ImportKeyword
+        && node.arguments.length === 1 && isConfigModule(node.arguments[0]!));
+  };
+  const collectNamespaces = (node: Node): void => {
+    if (isImportDeclaration(node) && isConfigModule(node.moduleSpecifier)) {
+      const bindings = node.importClause?.namedBindings;
+      if (bindings && isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
+      if (bindings && isNamedImports(bindings) && bindings.elements.some(
+        item => (item.propertyName ?? item.name).text === "replacePersistedConfig",
+      )) hits.push(node.getStart(source));
+    }
+    node.forEachChild(collectNamespaces);
+  };
+  const collectAccesses = (node: Node): void => {
+    if (isPropertyAccessExpression(node)
+      && node.name.text === "replacePersistedConfig"
+      && isConfigNamespace(node.expression)) hits.push(node.getStart(source));
+    if (isElementAccessExpression(node)
+      && staticString(node.argumentExpression) === "replacePersistedConfig"
+      && isConfigNamespace(node.expression)) hits.push(node.getStart(source));
+    node.forEachChild(collectAccesses);
+  };
+  collectNamespaces(source);
+  collectAccesses(source);
+  return hits;
+}
 
 /** Modules that hold a LIVE server config and must use the wrapper. */
 const GUARDED_FILES = [
@@ -74,26 +141,56 @@ test("startServer arms the baseline before it can serve a request", () => {
   expect(bareSaveConfigCalls(after)).toEqual([]);
 });
 
-test("full config replacement is limited to explicit import and init", () => {
+test("full config replacement is limited to explicit import and init", async () => {
   const allowed = new Set([
     "cli/config-command.ts",
     "cli/init.ts",
     "config.ts",
   ]);
-  const offenders: string[] = [];
-  const visit = (dir: string): void => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        visit(path);
-        continue;
-      }
-      if (!entry.name.endsWith(".ts")) continue;
-      const relative = path.slice(SRC.length + 1);
-      const text = readFileSync(path, "utf8");
-      if (!allowed.has(relative) && /\breplacePersistedConfig\b/.test(text)) offenders.push(relative);
+  const fixtureDir = mkdtempSync(join(tmpdir(), "ocx-config-policy-"));
+  const fixture = join(fixtureDir, "fixture.ts");
+  const configModule = join(SRC, "config");
+  writeFileSync(fixture, [
+    `import { replacePersistedConfig as replace } from ${JSON.stringify(configModule)}; replace(value);`,
+    `import * as config from ${JSON.stringify(configModule)}; config.replacePersistedConfig(value);`,
+    `config["replacePersistedConfig"](value);`,
+    `config["replace" + "PersistedConfig"](value);`,
+    `(await import(${JSON.stringify(configModule)})).replacePersistedConfig(value);`,
+  ].join("\n"));
+  const api = new API({ cwd: join(SRC, "..") });
+  try {
+    const snapshot = await api.updateSnapshot({
+      openProjects: [join(SRC, "..", "tsconfig.json")],
+      openFiles: [fixture],
+    });
+    try {
+      const fixtureProject = await snapshot.getDefaultProjectForFile(fixture);
+      const fixtureSource = await fixtureProject?.program.getSourceFile(fixture);
+      expect(fixtureSource && fullReplacementReferences(fixtureSource)).toHaveLength(5);
+
+      const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
+      if (!project) throw new Error("TypeScript did not load the repository project");
+      const paths: string[] = [];
+      const visit = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const path = join(dir, entry.name);
+          if (entry.isDirectory()) visit(path);
+          else if (entry.name.endsWith(".ts")) paths.push(path);
+        }
+      };
+      visit(SRC);
+      const sources = await Promise.all(paths.map(path => project.program.getSourceFile(path)));
+      const offenders = sources.flatMap(source => {
+        if (!source) throw new Error("TypeScript omitted a production source file");
+        const relative = source.fileName.slice(SRC.length + 1);
+        return !allowed.has(relative) && fullReplacementReferences(source).length > 0 ? [relative] : [];
+      });
+      expect(offenders).toEqual([]);
+    } finally {
+      await snapshot.dispose();
     }
-  };
-  visit(SRC);
-  expect(offenders).toEqual([]);
+  } finally {
+    await api.close();
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
 });

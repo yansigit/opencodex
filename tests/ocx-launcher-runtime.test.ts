@@ -1,11 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { bundledBunPath } from "../src/lib/bun-runtime";
 import { killProxy } from "../src/lib/process-control";
+import { OPENAI_PROVIDER_TIER_VERSION } from "../src/types";
 
 const BIN_OCX = join(import.meta.dir, "..", "bin", "ocx.mjs");
 const nodeAvailable = spawnSync("node", ["--version"], {
@@ -299,6 +300,75 @@ function isolatedLauncherEnv(root: string, override: string): NodeJS.ProcessEnv 
     OPENCODEX_BUN_PATH: override,
   };
 }
+
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise(resolveExit => {
+    const timer = setTimeout(() => resolveExit(false), timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolveExit(true);
+    });
+  });
+}
+
+describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
+  test("preserves an existing six-provider registry when startup defaults are saved", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-launcher-first-start-"));
+    const env = { ...isolatedLauncherEnv(root, process.execPath), CI: "1" };
+    const configPath = join(env.OPENCODEX_HOME!, "config.json");
+    const providers = {
+      openai: { adapter: "openai-chat", baseUrl: "https://openai.example.test/v1" },
+      anthropic: { adapter: "openai-chat", baseUrl: "https://anthropic.example.test/v1" },
+      google: { adapter: "openai-chat", baseUrl: "https://google.example.test/v1" },
+      grok: { adapter: "openai-chat", baseUrl: "https://grok.example.test/v1" },
+      deepseek: { adapter: "openai-chat", baseUrl: "https://deepseek.example.test/v1" },
+      ollama: { adapter: "openai-chat", baseUrl: "https://ollama.example.test/v1" },
+    };
+    let launcher: ChildProcess | null = null;
+    let health: Health | null = null;
+    try {
+      const port = await freePort();
+      writeFileSync(configPath, JSON.stringify({
+        port,
+        openaiProviderTierVersion: OPENAI_PROVIDER_TIER_VERSION,
+        providers,
+        defaultProvider: "openai",
+      }, null, 2));
+      launcher = spawn("node", [BIN_OCX, "start", "--port", String(port)], {
+        env,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      health = await waitForHealth(port, 25_000, launcher);
+      if (!health) throw new Error("proxy did not become healthy through bin/ocx.mjs");
+
+      const during = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+      expect(during.subagentModels).toBeArray();
+      expect(Object.keys(during.providers as object)).toEqual(Object.keys(providers));
+      expect(during.providers).toEqual(providers);
+      expect(during.defaultProvider).toBe("openai");
+
+      const stopped = spawnSync("node", [BIN_OCX, "stop"], {
+        env,
+        encoding: "utf8",
+        timeout: 30_000,
+        windowsHide: true,
+      });
+      expect(stopped.status).toBe(0);
+      expect(await waitForExit(launcher, 15_000)).toBe(true);
+
+      const after = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;
+      expect(Object.keys(after.providers as object)).toEqual(Object.keys(providers));
+      expect(after.providers).toEqual(providers);
+      expect(after.defaultProvider).toBe("openai");
+    } finally {
+      if (health && await healthAt(health.port)) killProxy(health.pid);
+      if (launcher?.pid && launcher.exitCode === null && launcher.signalCode === null) killProxy(launcher.pid);
+      removeTree(root);
+    }
+  }, 60_000);
+});
 
 describe.skipIf(!nodeAvailable)("ocx npm launcher relative Bun override", () => {
   test("resolves a valid bare relative override before spawning", () => {
