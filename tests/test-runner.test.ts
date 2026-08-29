@@ -197,6 +197,12 @@ describe("bun test argv", () => {
     expect(plan.find(lane => lane.label === "codex-shim.test.ts")?.timeoutMs).toBe(3 * 60 * 1000);
   });
 
+  test("isolates the journal suite in its own one-worker lane", () => {
+    expect(SERIAL_FULL_SUITE_FILES).toContain("codex-journal.test.ts");
+    expect(resolveBunTestPlan([]).find(lane => lane.label === "codex-journal.test.ts")?.args)
+      .toEqual(["--isolate", "--parallel=1", "./tests/codex-journal.test.ts"]);
+  });
+
   test("serial lanes override caller parallelism without changing the main lane", () => {
     const plan = resolveBunTestPlan(["--parallel=2", "--only-failures"]);
     expect(plan[0]?.args).toContain("--parallel=2");
