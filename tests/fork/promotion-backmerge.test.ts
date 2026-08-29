@@ -23,7 +23,7 @@ function fixture() {
   roots.push(cwd);
   git(cwd, "init", "-q");
   git(cwd, "config", "user.name", "test");
-  git(cwd, "config", "user.email", "test@example.invalid");
+  git(cwd, "config", "user.email", "sync-test@example.test");
   const oldMain = commit(cwd, "old main", "base\n");
   const promotedDev = commit(cwd, "promoted dev", "promoted\n");
   const promotedTree = git(cwd, "rev-parse", `${promotedDev}^{tree}`);
