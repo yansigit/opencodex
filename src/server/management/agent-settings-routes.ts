@@ -554,6 +554,48 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         error: "body.enabled=true conflicts with keepNativeChatGptOnV1: Codex's global multi_agent_v2 override outranks catalog pins",
       }, 400);
     }
+    if (wantsMode || wantsKeepNative || v2NativeParentOverride || wantsV2RoutedDelegationBridge || agentTaskRecovery) {
+      let committed!: OcxConfig;
+      const persisted = mutateManagementConfig(deps, disk => {
+        if (wantsMode) {
+          if (mode === "default") deleteConfigTopLevelKey(disk, "multiAgentMode");
+          else disk.multiAgentMode = mode;
+        }
+        if (wantsKeepNative) {
+          if (body.keepNativeChatGptOnV1 === true) disk.keepNativeChatGptOnV1 = true;
+          else deleteConfigTopLevelKey(disk, "keepNativeChatGptOnV1");
+        }
+        if (v2NativeParentOverride) {
+          disk.v2NativeParentOverride = {
+            enabled: v2NativeParentOverride.enabled,
+            ...(v2NativeParentOverride.model === null ? {} : { model: v2NativeParentOverride.model }),
+          };
+        }
+        if (wantsV2RoutedDelegationBridge) disk.v2RoutedDelegationBridge = body.v2RoutedDelegationBridge as boolean;
+        if (agentTaskRecovery) {
+          disk.agentTaskRecovery = {
+            enabled: agentTaskRecovery.enabled,
+            ...(agentTaskRecovery.model === null ? {} : { model: agentTaskRecovery.model }),
+          };
+        }
+        committed = structuredClone(disk);
+        return { changed: true, value: true };
+      });
+      if (persisted.status === "unavailable") {
+        return jsonResponse({ error: `persisting V2 settings failed: ${persisted.reason}` }, 502);
+      }
+      if (wantsMode) {
+        if (committed.multiAgentMode === undefined) deleteConfigTopLevelKey(config, "multiAgentMode");
+        else config.multiAgentMode = committed.multiAgentMode;
+      }
+      if (wantsKeepNative) {
+        if (committed.keepNativeChatGptOnV1 === undefined) deleteConfigTopLevelKey(config, "keepNativeChatGptOnV1");
+        else config.keepNativeChatGptOnV1 = committed.keepNativeChatGptOnV1;
+      }
+      if (v2NativeParentOverride) config.v2NativeParentOverride = committed.v2NativeParentOverride;
+      if (wantsV2RoutedDelegationBridge) config.v2RoutedDelegationBridge = committed.v2RoutedDelegationBridge;
+      if (agentTaskRecovery) config.agentTaskRecovery = committed.agentTaskRecovery;
+    }
     const requestedFlag = wantsFlag
       ? body.enabled as boolean
       : modeFlag ?? (wantsKeepNative && hybridPinActive ? false : undefined);
@@ -605,48 +647,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         const message = err instanceof Error ? err.message : String(err);
         return jsonResponse({ error: `writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
       }
-    }
-    if (wantsMode || wantsKeepNative || v2NativeParentOverride || wantsV2RoutedDelegationBridge || agentTaskRecovery) {
-      let committed!: OcxConfig;
-      const persisted = mutateManagementConfig(deps, disk => {
-        if (wantsMode) {
-          if (mode === "default") deleteConfigTopLevelKey(disk, "multiAgentMode");
-          else disk.multiAgentMode = mode;
-        }
-        if (wantsKeepNative) {
-          if (body.keepNativeChatGptOnV1 === true) disk.keepNativeChatGptOnV1 = true;
-          else deleteConfigTopLevelKey(disk, "keepNativeChatGptOnV1");
-        }
-        if (v2NativeParentOverride) {
-          disk.v2NativeParentOverride = {
-            enabled: v2NativeParentOverride.enabled,
-            ...(v2NativeParentOverride.model === null ? {} : { model: v2NativeParentOverride.model }),
-          };
-        }
-        if (wantsV2RoutedDelegationBridge) disk.v2RoutedDelegationBridge = body.v2RoutedDelegationBridge as boolean;
-        if (agentTaskRecovery) {
-          disk.agentTaskRecovery = {
-            enabled: agentTaskRecovery.enabled,
-            ...(agentTaskRecovery.model === null ? {} : { model: agentTaskRecovery.model }),
-          };
-        }
-        committed = structuredClone(disk);
-        return { changed: true, value: true };
-      });
-      if (persisted.status === "unavailable") {
-        return jsonResponse({ error: `persisting V2 settings failed: ${persisted.reason}` }, 502);
-      }
-      if (wantsMode) {
-        if (committed.multiAgentMode === undefined) deleteConfigTopLevelKey(config, "multiAgentMode");
-        else config.multiAgentMode = committed.multiAgentMode;
-      }
-      if (wantsKeepNative) {
-        if (committed.keepNativeChatGptOnV1 === undefined) deleteConfigTopLevelKey(config, "keepNativeChatGptOnV1");
-        else config.keepNativeChatGptOnV1 = committed.keepNativeChatGptOnV1;
-      }
-      if (v2NativeParentOverride) config.v2NativeParentOverride = committed.v2NativeParentOverride;
-      if (wantsV2RoutedDelegationBridge) config.v2RoutedDelegationBridge = committed.v2RoutedDelegationBridge;
-      if (agentTaskRecovery) config.agentTaskRecovery = committed.agentTaskRecovery;
     }
     // Derived from fresh post-write readers (readConfigText is uncached): upstream
     // lets an enabled multi_agent_v2 feature override [agents].enabled = false, so

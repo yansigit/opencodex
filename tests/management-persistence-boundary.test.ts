@@ -159,6 +159,38 @@ test("a combined V2 config update performs one persistence transaction", async (
   expect(config.multiAgentMode).toBeUndefined();
 });
 
+test("V2 persistence failure happens before toggle and scalar side effects", async () => {
+  const previousCodexHome = process.env.CODEX_HOME;
+  const codexHome = mkdtempSync(join(tmpdir(), "ocx-v2-persist-first-"));
+  const codexConfig = join(codexHome, "config.toml");
+  const before = "[features.multi_agent_v2]\nenabled = false\n";
+  writeFileSync(codexConfig, before);
+  process.env.CODEX_HOME = codexHome;
+  let toggles = 0;
+  try {
+    const config = structuredClone(historicalFixture);
+    const url = new URL("http://localhost/api/v2");
+    const response = await handleManagementAPI(new Request(url, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true, agentsEnabled: true, v2RoutedDelegationBridge: true }),
+    }), url, config, {
+      toggleCodexMultiAgentV2: enabled => {
+        toggles++;
+        writeFileSync(codexConfig, before.replace("false", String(enabled)));
+      },
+      mutatePersistedConfig: () => { throw new Error("disk unavailable"); },
+    });
+    expect(response?.status).toBe(500);
+    expect(toggles).toBe(0);
+    expect(readFileSync(codexConfig, "utf8")).toBe(before);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
 test("a direct management mutation without a persistence seam does not touch disk", async () => {
   const before = readFileSync(getConfigPath(), "utf8");
   const config = structuredClone(historicalFixture);
