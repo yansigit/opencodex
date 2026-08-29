@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as accountStoreModule from "../src/codex/account-store";
 import {
@@ -147,6 +147,29 @@ describe("Codex account delete persistence ordering", () => {
       const persisted = loadConfig();
       expect(persisted.port).toBe(12345);
       expect(persisted.codexAccounts?.some(account => account.id === ACCOUNT_ID)).toBe(false);
+      expect(config).toEqual(before);
+      expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
+      expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(true);
+      expect(getAccountQuota(ACCOUNT_ID)).not.toBeNull();
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
+
+  test("a missing config after uncertain failure is not recreated", () => {
+    const config = seededConfig();
+    const before = structuredClone(config);
+    const realSave = configModule.saveConfigPreservingClaudeCode;
+    const saveSpy = spyOn(configModule, "saveConfigPreservingClaudeCode")
+      .mockImplementation(candidate => {
+        realSave(candidate);
+        unlinkSync(getConfigPath());
+        throw new Error("forced missing-file failure");
+      });
+
+    try {
+      expect(() => deleteCodexAccount(config, ACCOUNT_ID)).toThrow(CodexAccountDeleteRollbackError);
+      expect(existsSync(getConfigPath())).toBe(false);
       expect(config).toEqual(before);
       expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
       expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(true);
