@@ -35,6 +35,8 @@ export interface RestoreJobTestHooks extends StorageMutationCoordinatorTestHooks
   enableTestStream?: boolean;
   /** Forwarded to restoreTrashEntry _test hooks. */
   restoreTest?: RestoreTestHooks;
+  /** Notify responsiveness tests once the worker is about to block. */
+  workerReady?: SharedArrayBuffer;
 }
 
 const WORKER_TIMEOUT_MS = 10 * 60 * 1000;
@@ -159,6 +161,7 @@ function runInWorker(opts: {
   busyTimeoutMs?: number;
   blockMs?: number;
   restoreTest?: RestoreTestHooks;
+  workerReady?: SharedArrayBuffer;
 }): Promise<RestoreResult> {
   const reservation = tryReserveStorageWorker();
   if (!reservation) return Promise.reject(new StorageWorkerAdmissionBusyError());
@@ -222,6 +225,7 @@ function runInWorker(opts: {
       ...(opts.busyTimeoutMs !== undefined ? { busyTimeoutMs: opts.busyTimeoutMs } : {}),
       ...(opts.blockMs !== undefined ? { blockMs: opts.blockMs } : {}),
       ...(opts.restoreTest ? { restoreTest: opts.restoreTest } : {}),
+      ...(opts.workerReady ? { workerReady: opts.workerReady } : {}),
       env: {
         ...(process.env.CODEX_HOME ? { CODEX_HOME: process.env.CODEX_HOME } : {}),
         ...(process.env.OPENCODEX_HOME ? { OPENCODEX_HOME: process.env.OPENCODEX_HOME } : {}),
@@ -258,6 +262,7 @@ async function executeRestore(opts: {
       ...(opts.busyTimeoutMs !== undefined ? { busyTimeoutMs: opts.busyTimeoutMs } : {}),
       ...(typeof blockMs === "number" && blockMs > 0 ? { blockMs } : {}),
       ...(restoreTest ? { restoreTest } : {}),
+      ...(testHooks?.workerReady ? { workerReady: testHooks.workerReady } : {}),
     });
   } catch (err) {
     if (err instanceof StorageWorkerAdmissionBusyError) return busyRestoreResult();

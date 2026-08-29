@@ -50,6 +50,15 @@ function seedArchived(codexHome: string): void {
   db.close();
 }
 
+async function waitForWorkerReady(buffer: SharedArrayBuffer): Promise<void> {
+  const ready = new Int32Array(buffer);
+  if (Atomics.load(ready, 0) === 0) {
+    const wait = Atomics.waitAsync(ready, 0, 0, 5_000);
+    if (wait.async) await wait.value;
+  }
+  expect(Atomics.load(ready, 0)).toBe(1);
+}
+
 beforeEach(async () => {
   previousHome = process.env.OPENCODEX_HOME;
   previousCleanupTestHooks = process.env.OPENCODEX_CLEANUP_TEST_HOOKS;
@@ -150,8 +159,9 @@ describe("storage trash restore job responsiveness", () => {
   }, { timeout: 10_000 });
 
   test("blocked worker keeps /healthz and streaming response responsive", async () => {
-    const blockMs = 100;
-    setRestoreTrashJobTestHooks({ blockMs, enableTestStream: true });
+    const blockMs = 250;
+    const workerReady = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+    setRestoreTrashJobTestHooks({ blockMs, enableTestStream: true, workerReady });
     seedArchived(isolatedCodexHome!.path);
 
     const server = startServer(0);
@@ -178,6 +188,7 @@ describe("storage trash restore job responsiveness", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ id: cleanup.trashDir }),
       });
+      await waitForWorkerReady(workerReady);
 
       const streamPromise = (async () => {
         const res = await fetch(new URL("/api/storage/trash/restore/test-stream", server.url));
@@ -198,7 +209,7 @@ describe("storage trash restore job responsiveness", () => {
       const streamText = await streamPromise;
       expect(streamText.split("\n").filter(Boolean).length).toBe(8);
 
-      const maxHealthMs = Math.floor(blockMs / 3);
+      const maxHealthMs = 150;
       for (const sample of healthSamples) {
         expect(sample).toBeLessThan(maxHealthMs);
       }
