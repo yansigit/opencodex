@@ -24,7 +24,7 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("github.event.workflow_run.name == 'Cross-platform CI'");
   });
 
-  test("fast-forwards dev after a successful identical-tree main push", () => {
+  test("reconciles main ancestry after successful main or dev push CI", () => {
     expect(workflow.jobs?.backmerge?.permissions).toEqual({
       contents: "read",
       actions: "read",
@@ -37,9 +37,9 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("github.event.workflow_run.head_sha");
     expect(workflowSource).toContain("refs/heads/main");
     expect(workflowSource).toContain("refs/heads/dev");
-    expect(workflowSource).toContain("git merge-base --is-ancestor");
-    expect(workflowSource).toContain('git diff --quiet "$verified_main_sha" "$live_dev_sha" --');
-    expect(workflowSource).toContain('git push origin "$VERIFIED_MAIN_SHA:refs/heads/dev"');
+    expect(workflowSource).toContain("fork-promotion-backmerge.cjs");
+    expect(workflowSource).toContain('"$verified_main_sha" =~ ^[0-9a-f]{40}$ && "$live_dev_sha" =~ ^[0-9a-f]{40}$');
+    expect(workflowSource).toContain('"$VERIFIED_TARGET_SHA:refs/heads/dev"');
     expect(workflowSource).toContain("GIT_ASKPASS");
     expect(workflowSource).toContain("git-askpass.sh");
     expect(workflowSource).toContain("GIT_TERMINAL_PROMPT: 0");
@@ -48,6 +48,8 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("post_main_sha");
     expect(workflowSource).toContain("post_dev_sha");
     expect(workflowSource).toContain("dev back-merge postcheck failed");
+    expect(workflowSource).toContain("back-merge push remained uncertain after 3 attempts");
+    expect(workflowSource).toContain("back-merge refs moved during retry");
     expect(workflowSource).not.toContain("gh api --method PATCH");
     expect(workflowSource).toContain("main moved before the dev back-merge");
     expect(workflowSource).toContain("dev moved before the dev back-merge");
@@ -64,6 +66,8 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("expected_ci_sha");
     expect(workflowSource).toContain("dev moved before the promotion PR mutation");
     expect(workflowSource).toContain("promotion PR head changed before verification");
+    expect(workflowSource).toContain("main_ancestor=true");
+    expect(workflowSource).toContain("steps.verify.outputs.main_ancestor == 'true'");
     expect(workflowSource).toContain("exit 1");
   });
 
@@ -88,7 +92,7 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("persist-credentials: false");
   });
 
-  test("mints contents-only App tokens only for the two dev writers", () => {
+  test("mints least-privilege App tokens only for the two dev writers", () => {
     const backmergeSteps = workflow.jobs?.backmerge?.steps ?? [];
     const postReleaseSteps = workflow.jobs?.post_release?.steps ?? [];
     const tokenUse = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1";
@@ -102,6 +106,7 @@ describe("dev promotion workflow contract", () => {
         owner: "${{ github.repository_owner }}",
         repositories: "${{ github.event.repository.name }}",
         "permission-contents": "write",
+        "permission-workflows": "write",
       },
     });
     expect(postReleaseSteps.find((step) => step.id === "post-release-app-token")).toMatchObject({
@@ -113,9 +118,10 @@ describe("dev promotion workflow contract", () => {
         owner: "${{ github.repository_owner }}",
         repositories: "${{ github.event.repository.name }}",
         "permission-contents": "write",
+        "permission-workflows": "write",
       },
     });
-    expect(backmergeSteps.find((step) => step.name === "Fast-forward dev to verified main")).toMatchObject({
+    expect(backmergeSteps.find((step) => step.name === "Reconcile verified main ancestry into dev")).toMatchObject({
       env: { GH_TOKEN: "${{ steps.backmerge-app-token.outputs.token }}" },
     });
     expect(postReleaseSteps.find((step) => step.name === "Bump and push the next stable dev version")).toMatchObject({
@@ -142,7 +148,7 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).not.toContain("\\`");
     expect(workflowSource).not.toMatch(/gh\s+pr\s+merge/);
     expect(workflowSource).not.toMatch(/--force(?!-with-lease)/);
-    expect(workflowSource).toMatch(/git\s+push\s+origin\s+\"\$VERIFIED_MAIN_SHA:refs\/heads\/dev\"/);
+    expect(workflowSource).toContain('"$VERIFIED_TARGET_SHA:refs/heads/dev"');
     expect(workflowSource).not.toMatch(/git\s+push[^\n]*refs\/heads\/main/);
   });
 
@@ -168,6 +174,8 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("npm view");
     expect(workflowSource).toContain("gh api \"repos/$EXPECTED_REPOSITORY/releases/tags/v${release_version}\"");
     expect(workflowSource).toContain("--atomic");
+    expect(workflowSource).toContain("post-release push remained uncertain after 3 attempts");
+    expect(workflowSource).toContain("post-release refs moved during retry");
     expect(workflowSource).toContain("--force-with-lease=\"refs/tags/v${RELEASE_VERSION}:$VERIFIED_MAIN_SHA\"");
     expect(workflowSource).toContain("post-release dev version check failed");
     expect(workflowSource).toContain('git diff --name-only "$EXPECTED_RELEASE_SHA" "$live_dev_sha"');

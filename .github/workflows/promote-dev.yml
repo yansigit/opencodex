@@ -48,7 +48,7 @@ jobs:
           set -euo pipefail
           live_dev_sha="$(git ls-remote origin refs/heads/dev | awk 'NR == 1 { print $1 }')"
           expected_ci_sha="${EXPECTED_CI_SHA:-$live_dev_sha}"
-          if ! printf '%s\n' "$live_dev_sha" "$expected_ci_sha" | grep -Eq '^[0-9a-f]{40}$'; then
+          if ! [[ "$live_dev_sha" =~ ^[0-9a-f]{40}$ && "$expected_ci_sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::dev or CI head did not return a full commit SHA"
             exit 1
           fi
@@ -73,12 +73,20 @@ jobs:
           if git diff --quiet HEAD "$fetched_dev_sha" --; then
             trees_differ=false
           fi
+          main_ancestor=true
+          if ! git merge-base --is-ancestor HEAD "$fetched_dev_sha"; then
+            main_ancestor=false
+            echo "Current main ancestry is missing from dev; waiting for protected dev reconciliation"
+          fi
           echo "Promoting verified dev commit $expected_ci_sha"
-          echo "verified_sha=$expected_ci_sha" >> "$GITHUB_OUTPUT"
-          echo "trees_differ=$trees_differ" >> "$GITHUB_OUTPUT"
+          {
+            echo "verified_sha=$expected_ci_sha"
+            echo "trees_differ=$trees_differ"
+            echo "main_ancestor=$main_ancestor"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create or update the human promotion PR
-        if: steps.verify.outputs.trees_differ == 'true'
+        if: steps.verify.outputs.trees_differ == 'true' && steps.verify.outputs.main_ancestor == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERIFIED_CI_SHA: ${{ steps.verify.outputs.verified_sha }}
@@ -135,11 +143,14 @@ jobs:
 
   backmerge:
     if: >-
-      github.event_name == 'workflow_run' &&
+      (github.event_name == 'workflow_run' &&
       github.event.workflow_run.name == 'Cross-platform CI' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main'
+      (github.event.workflow_run.head_branch == 'main' ||
+      github.event.workflow_run.head_branch == 'dev')) ||
+      (github.event_name == 'workflow_dispatch' &&
+      github.ref_name == github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -156,48 +167,46 @@ jobs:
       - name: Verify main and dev are eligible
         id: verify-main
         env:
-          EXPECTED_CI_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT_BRANCH: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || '' }}
+          EXPECTED_CI_SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          live_main_sha="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
-          if ! printf '%s\n' "$live_main_sha" "$EXPECTED_CI_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
-            echo "::error::main or CI head did not return a full commit SHA"
-            exit 1
-          fi
-          if [ "$live_main_sha" != "$EXPECTED_CI_SHA" ]; then
-            echo "::error::main moved after CI completed; waiting for the newer CI run"
-            exit 1
-          fi
-          ci_runs="$(gh run list --workflow ci.yml --commit "$live_main_sha" --event push --limit 20 --json conclusion,status,headSha,event)"
-          if ! jq -e --arg sha "$live_main_sha" \
-            'any(.[]; .headSha == $sha and .event == "push" and .status == "completed" and .conclusion == "success")' \
-            <<<"$ci_runs" >/dev/null; then
-            echo "::error::no successful Cross-platform CI push run exists for verified main"
-            exit 1
-          fi
           git fetch --no-tags origin \
             refs/heads/main:refs/remotes/origin/main \
             refs/heads/dev:refs/remotes/origin/dev
           verified_main_sha="$(git rev-parse refs/remotes/origin/main)"
           live_dev_sha="$(git rev-parse refs/remotes/origin/dev)"
-          if [ "$verified_main_sha" != "$EXPECTED_CI_SHA" ]; then
-            echo "::error::fetched main ref did not match the verified CI commit"
+          if ! [[ "$verified_main_sha" =~ ^[0-9a-f]{40}$ && "$live_dev_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::main or dev did not return a full commit SHA"
             exit 1
           fi
-          eligible=true
-          if ! git merge-base --is-ancestor "$live_dev_sha" "$verified_main_sha"; then
-            echo "dev is not an ancestor of verified main; leaving dev unchanged"
-            eligible=false
-          elif ! git diff --quiet "$verified_main_sha" "$live_dev_sha" --; then
-            echo "main and dev trees differ; leaving dev unchanged"
-            eligible=false
+          if [ "$EVENT_BRANCH" = main ] && [ "$verified_main_sha" != "$EXPECTED_CI_SHA" ]; then
+            echo "::error::main moved after CI completed; waiting for the newer CI run"
+            exit 1
           fi
+          if [ "$EVENT_BRANCH" = dev ] && [ "$live_dev_sha" != "$EXPECTED_CI_SHA" ]; then
+            echo "::error::dev moved after CI completed; waiting for the newer CI run"
+            exit 1
+          fi
+          ci_runs="$(gh run list --workflow ci.yml --commit "$verified_main_sha" --event push --limit 20 --json conclusion,status,headBranch,headSha,event)"
+          if ! jq -e --arg sha "$verified_main_sha" \
+            'any(.[]; .headSha == $sha and .headBranch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")' \
+            <<<"$ci_runs" >/dev/null; then
+            echo "::error::no successful Cross-platform CI push run exists for verified main"
+            exit 1
+          fi
+          reconciliation="$(node .github/scripts/fork-promotion-backmerge.cjs "$verified_main_sha" "$live_dev_sha" --json)"
+          action="$(jq -r .action <<<"$reconciliation")"
+          target_sha="$(jq -r .targetSha <<<"$reconciliation")"
+          eligible=true
+          [ "$action" = unchanged ] && eligible=false
           {
             echo "eligible=$eligible"
             if [ "$eligible" = true ]; then
               echo "verified_main_sha=$verified_main_sha"
               echo "live_dev_sha=$live_dev_sha"
+              echo "target_sha=$target_sha"
             fi
           } >> "$GITHUB_OUTPUT"
           if [ "$eligible" != true ]; then
@@ -214,14 +223,16 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
+          permission-workflows: write
 
-      - name: Fast-forward dev to verified main
+      - name: Reconcile verified main ancestry into dev
         if: steps.verify-main.outputs.eligible == 'true'
         env:
           GH_TOKEN: ${{ steps.backmerge-app-token.outputs.token }}
           GIT_TERMINAL_PROMPT: 0
           VERIFIED_MAIN_SHA: ${{ steps.verify-main.outputs.verified_main_sha }}
           VERIFIED_DEV_SHA: ${{ steps.verify-main.outputs.live_dev_sha }}
+          VERIFIED_TARGET_SHA: ${{ steps.verify-main.outputs.target_sha }}
         run: |
           set -euo pipefail
           live_main_sha="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
@@ -243,11 +254,32 @@ jobs:
           esac
           EOF
           chmod 700 "$askpass"
-          GIT_ASKPASS="$askpass" git push origin "$VERIFIED_MAIN_SHA:refs/heads/dev"
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            if GIT_ASKPASS="$askpass" git push origin "$VERIFIED_TARGET_SHA:refs/heads/dev"; then
+              break
+            fi
+            retry_refs="$(git ls-remote origin refs/heads/main refs/heads/dev)"
+            retry_main_sha="$(awk '$2 == "refs/heads/main" { print $1 }' <<<"$retry_refs")"
+            retry_dev_sha="$(awk '$2 == "refs/heads/dev" { print $1 }' <<<"$retry_refs")"
+            if [ "$retry_main_sha" = "$VERIFIED_MAIN_SHA" ] && [ "$retry_dev_sha" = "$VERIFIED_TARGET_SHA" ]; then
+              break
+            fi
+            if [ "$retry_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$retry_dev_sha" != "$VERIFIED_DEV_SHA" ]; then
+              echo "::error::back-merge refs moved during retry"
+              exit 1
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::back-merge push remained uncertain after 3 attempts"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep 2
+          done
           post_refs="$(git ls-remote origin refs/heads/main refs/heads/dev)"
           post_main_sha="$(awk '$2 == "refs/heads/main" { print $1 }' <<<"$post_refs")"
           post_dev_sha="$(awk '$2 == "refs/heads/dev" { print $1 }' <<<"$post_refs")"
-          if [ "$post_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$post_dev_sha" != "$VERIFIED_MAIN_SHA" ]; then
+          if [ "$post_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$post_dev_sha" != "$VERIFIED_TARGET_SHA" ]; then
             echo "::error::dev back-merge postcheck failed; main or dev moved during the update"
             exit 1
           fi
@@ -395,6 +427,7 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
+          permission-workflows: write
 
       - name: Bump and push the next stable dev version
         if: steps.verify-release.outputs.action == 'bump'
@@ -464,9 +497,31 @@ jobs:
           esac
           EOF
           chmod 700 "$askpass"
-          GIT_ASKPASS="$askpass" git push --atomic \
-            --force-with-lease="refs/tags/v${RELEASE_VERSION}:$VERIFIED_MAIN_SHA" \
-            origin "$new_dev_sha:refs/heads/dev" "$VERIFIED_MAIN_SHA:refs/tags/v${RELEASE_VERSION}"
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            if GIT_ASKPASS="$askpass" git push --atomic \
+              --force-with-lease="refs/tags/v${RELEASE_VERSION}:$VERIFIED_MAIN_SHA" \
+              origin "$new_dev_sha:refs/heads/dev" "$VERIFIED_MAIN_SHA:refs/tags/v${RELEASE_VERSION}"; then
+              break
+            fi
+            retry_refs="$(git ls-remote origin refs/heads/main refs/heads/dev "refs/tags/v${RELEASE_VERSION}")"
+            retry_main_sha="$(awk '$2 == "refs/heads/main" { print $1 }' <<<"$retry_refs")"
+            retry_dev_sha="$(awk '$2 == "refs/heads/dev" { print $1 }' <<<"$retry_refs")"
+            retry_tag_sha="$(awk -v ref="refs/tags/v${RELEASE_VERSION}" '$2 == ref { print $1 }' <<<"$retry_refs")"
+            if [ "$retry_main_sha" = "$VERIFIED_MAIN_SHA" ] && [ "$retry_dev_sha" = "$new_dev_sha" ] && [ "$retry_tag_sha" = "$VERIFIED_MAIN_SHA" ]; then
+              break
+            fi
+            if [ "$retry_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$retry_dev_sha" != "$VERIFIED_DEV_SHA" ] || [ "$retry_tag_sha" != "$VERIFIED_MAIN_SHA" ]; then
+              echo "::error::post-release refs moved during retry"
+              exit 1
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::post-release push remained uncertain after 3 attempts"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep 2
+          done
           post_refs="$(git ls-remote origin refs/heads/main refs/heads/dev)"
           post_main_sha="$(awk '$2 == "refs/heads/main" { print $1 }' <<<"$post_refs")"
           post_dev_sha="$(awk '$2 == "refs/heads/dev" { print $1 }' <<<"$post_refs")"
