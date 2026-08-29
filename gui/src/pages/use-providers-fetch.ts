@@ -1,40 +1,46 @@
-import { useCallback } from "react";
-import type { TFn } from "../i18n/shared";
+import { useCallback, useRef } from "react";
 import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
 import { writeSessionListCache } from "../session-list-cache";
 import type { OAuthStatus, ProvidersConfig } from "./providers-shared";
 
 export function useProvidersFetch({
   apiBase,
-  t,
   setConfig,
   setOauthProviders,
   setOauthStatus,
-  notify,
   invalidateProviderQuotas,
+  setConfigLoadFailed,
   configCacheKey,
 }: {
   apiBase: string;
-  t: TFn;
   setConfig: React.Dispatch<React.SetStateAction<ProvidersConfig | null>>;
   setOauthProviders: React.Dispatch<React.SetStateAction<string[]>>;
   setOauthStatus: React.Dispatch<React.SetStateAction<Record<string, OAuthStatus>>>;
-  notify: (msg: string, ok: boolean) => void;
   /** Bump the shell's quota revision; `force` adds `?refresh=1` to its next read. */
   invalidateProviderQuotas: (force?: boolean) => void;
+  /** Mirrors config fetch health so the page can offer an inline retry without replacing cached data. */
+  setConfigLoadFailed?: (failed: boolean) => void;
   /** Session seed key for instant Providers shell paint (no secrets — hasApiKey flags only). */
   configCacheKey?: string;
 }) {
+  const configRequestEpochRef = useRef(0);
   const fetchConfig = useCallback(async () => {
+    const requestEpoch = ++configRequestEpochRef.current;
     try {
       const res = await fetch(`${apiBase}/api/config`);
       const data = await readJsonOrThrow<ProvidersConfig>(res);
+      if (!data || typeof data !== "object" || !data.providers || typeof data.providers !== "object") {
+        throw new Error("empty config response");
+      }
+      if (requestEpoch !== configRequestEpochRef.current) return;
       setConfig(data ?? null);
       if (configCacheKey && data) writeSessionListCache(configCacheKey, data);
+      setConfigLoadFailed?.(false);
     } catch {
-      notify(t("prov.loadConfigFail"), false);
+      if (requestEpoch !== configRequestEpochRef.current) return;
+      setConfigLoadFailed?.(true);
     }
-  }, [apiBase, configCacheKey, notify, setConfig, t]);
+  }, [apiBase, configCacheKey, setConfig, setConfigLoadFailed]);
 
   const fetchOauth = useCallback(async () => {
     try {

@@ -49,7 +49,9 @@ bun run dev:gui
 
 ### 链接到某个部分
 
-布局只有一种，无需切换。Dashboard 的各个部分都有自己的地址：`#dashboard` 打开 Overview，`#dashboard/providers` 与 `#dashboard/models` 打开另外两个。刷新、收藏和后退都会保留当前所在的部分。**Logs** 同理，使用 `#logs` 与 `#logs/debug`。旧的 `#providers/workspace` 书签现在会跳转到 `#providers`。
+布局只有一种且会自适应，无需切换。桌面端使用侧边栏进行主要导航；窄屏时点击 **打开菜单** 可展开相同的页面链接。Dashboard 的各个部分都有自己的地址：`#dashboard` 打开 Overview，`#dashboard/providers` 与 `#dashboard/models` 打开另外两个。刷新、收藏和后退都会保留当前所在的部分。**Logs** 同理，使用 `#logs` 与 `#logs/debug`。旧的 `#providers/workspace` 书签现在会跳转到 `#providers`。
+
+Overview 还提供 **30 天活动** 面板，显示 30 天的请求和 token 趋势。点击任一迷你折线图中的某一天即可查看当天总量，点击 **查看用量** 可打开完整的 Usage 页面。Overview 已加载后如果刷新被中断，页面会保留最近一次成功的数据并显示重新连接提示与 **重试**；首次连接失败时则显示 `ocx start` 指引和相同的重试操作。
 
 **Logs** 和 **Usage** 中的费用是根据已报告 token 计算的 API 标价折算值，不是账单，也不能证明
 实际发生了扣费；实际可能计入订阅用量或消耗服务商额度。

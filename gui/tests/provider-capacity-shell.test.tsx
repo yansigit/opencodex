@@ -222,6 +222,13 @@ test("provider quota fetch preserves aggregate capacity through shell state and 
   expect(text).not.toMatch(/configured units|weighted units|units remaining|projected/i);
 });
 
+test("provider workspace uses a labelled section instead of nesting a main landmark", async () => {
+  await mountShell();
+
+  expect(host.querySelectorAll("main")).toHaveLength(0);
+  expect(host.querySelector("section.pws-main")?.getAttribute("aria-label")).toBe("Provider details");
+});
+
 test("successful empty quota response removes cached providers and updates session cache", async () => {
   const seeded = (aggregatePayload().reports[0]);
   const { provider: _provider, ...cached } = seeded;

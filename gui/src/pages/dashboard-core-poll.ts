@@ -50,7 +50,6 @@ export type EffortCapPoll = {
 export type DashboardOverviewPoll = {
   health: HealthData | null;
   providers: ProviderInfo[];
-  error: boolean;
 };
 
 /** Multi-agent extras — slower peers must not gate status/uptime/provider counts. */
@@ -259,9 +258,17 @@ export async function fetchDashboardOverview(
     ]);
     const health = await requireJson<HealthData>(hRes);
     const providers = await requireJson<ProviderInfo[]>(pRes);
-    return { health, providers, error: false };
-  } catch {
-    return { health: null, providers: [], error: true };
+    if (
+      !health
+      || typeof health.status !== "string"
+      || typeof health.version !== "string"
+      || typeof health.uptime !== "number"
+      || !Array.isArray(providers)
+    ) throw new Error("empty overview response");
+    return { health, providers };
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+    throw error instanceof Error ? error : new Error("overview unavailable");
   }
 }
 
