@@ -92,6 +92,15 @@ export function parseInitArgs(args: string[]): { yes: boolean; error?: string } 
     : { yes: false, error: `Unknown option: ${unknown}. Usage: ocx init [--yes]` };
 }
 
+export type InitOverwriteDecision = "create" | "replace" | "refuse" | "cancel";
+
+export function decideInitOverwrite(existing: boolean, yes: boolean, isTTY: boolean, answer?: string): InitOverwriteDecision {
+  if (!existing) return "create";
+  if (yes) return "replace";
+  if (!isTTY) return "refuse";
+  return /^(y|yes)$/i.test(answer?.trim() ?? "") ? "replace" : "cancel";
+}
+
 export async function runInit(args: string[] = []): Promise<void> {
   const parsedArgs = parseInitArgs(args);
   if (parsedArgs.error) {
@@ -104,16 +113,16 @@ export async function runInit(args: string[] = []): Promise<void> {
     console.log("\n🔧 opencodex (ocx) setup\n");
 
     const existingConfig = existsSync(getConfigPath());
-    let replaceExisting = parsedArgs.yes;
-    if (existingConfig && !replaceExisting) {
-      if (!process.stdin.isTTY) {
+    let overwriteDecision = decideInitOverwrite(existingConfig, parsedArgs.yes, Boolean(process.stdin.isTTY));
+    if (overwriteDecision === "refuse") {
         console.error("❌ An opencodex config already exists. Re-run `ocx init --yes` to replace it.");
         process.exitCode = 2;
         return;
-      }
+    }
+    if (overwriteDecision === "cancel") {
       const answer = await prompt.ask("Overwrite existing config? [y/N]: ");
-      replaceExisting = answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes";
-      if (!replaceExisting) {
+      overwriteDecision = decideInitOverwrite(true, false, true, answer);
+      if (overwriteDecision === "cancel") {
         console.log("Keeping existing config.");
         return;
       }
@@ -197,7 +206,7 @@ export async function runInit(args: string[] = []): Promise<void> {
       modelDiscovery: { newModelPolicy: "off" },
     };
 
-    if (replaceExisting) {
+    if (overwriteDecision === "replace") {
       replacePersistedConfig(config);
     } else {
       const outcome = initializePersistedConfigIfMissing(config);
