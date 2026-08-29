@@ -96,7 +96,6 @@ import {
   isValidCost4Rate,
   refreshPreservedProviderOwner,
   refreshUserCostOverlays,
-  withPreservedDiskOnlyProviders,
 } from "./usage/user-cost-overlays";
 import { MAX_COST4_RATE } from "./usage/expected-prices";
 import {
@@ -2742,13 +2741,21 @@ function persistConfigUnlocked(config: OcxConfig): boolean {
   if (raw && configNeedsProviderRepair(raw)) {
     throw new Error("refusing to overwrite a config repaired with defaults; fix the persisted config first");
   }
-  // External editors can add provider rows the live config deliberately does
-  // not route with yet; merge them at the serialization boundary so an
-  // unrelated in-process save cannot erase the provider or its overlay.
-  // Provider preservation reads symbol-keyed live-owner state, which structuredClone
-  // intentionally drops. Resolve that ownership before projecting JSON provenance.
+  const snapshot = readConfigFileSnapshot();
+  if (snapshot.diagnostics.source === "fallback") {
+    throw new Error("refusing to overwrite an invalid persisted config; fix the persisted config first");
+  }
+  // Automatic whole-config writes own non-provider settings only. A valid disk
+  // registry is authoritative; provider changes use the locked mutation path.
+  const base = snapshot.diagnostics.source === "file"
+    ? {
+      ...config,
+      providers: snapshot.diagnostics.config.providers,
+      defaultProvider: snapshot.diagnostics.config.defaultProvider,
+    }
+    : config;
   const provenanceProjection = projectConfigRebaseProvenance(config);
-  const persisted = withPreservedDiskOnlyProviders(config);
+  const persisted = base;
   if (provenanceProjection.configRebaseProvenance === undefined) delete persisted.configRebaseProvenance;
   else persisted.configRebaseProvenance = provenanceProjection.configRebaseProvenance;
   const bytes = JSON.stringify(persisted, null, 2) + "\n";
