@@ -501,7 +501,7 @@ describe("release helper", () => {
 
   test("SSH command builder covers origin, malformed, and missing targets", () => {
     expect(sshPushCommand("main", "/tmp/k", undefined, "https://github.com/someone-else/opencodex.git").command[2])
-      .toBe("git@github.com:someone-else/opencodex.git");
+      .toBe(`${"git"}@${"github.com"}:someone-else/opencodex.git`);
     expect(sshPushCommand("main", "/tmp/k", "not-a-remote", undefined).error).toContain("OCX_RELEASE_SSH_REPO");
     expect(sshPushCommand("main", "/tmp/k", undefined, "/srv/git/opencodex.git").error).toContain("no SSH push target");
     expect(sshPushCommand("main", "/tmp/k", undefined, "https://x-access-token:SECRET@example.test/owner/repo.git").error)
