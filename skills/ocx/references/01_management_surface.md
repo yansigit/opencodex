@@ -578,7 +578,7 @@ Resolve subagent model authority for a supplied request.
 |---|---|---|
 | `--file` | string | Read authority JSON from a file instead of stdin. |
 
-JSON mode: `payload`.
+JSON mode: `none`.
 
 ## Counts
 

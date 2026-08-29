@@ -56,7 +56,16 @@ let previousCodexHome: string | undefined;
 let previousOpencodexHome: string | undefined;
 
 function config(port = 10100): OcxConfig {
-  return { port, providers: {}, defaultProvider: "openai" };
+  return {
+    port,
+    defaultProvider: "openai",
+    providers: {
+      openai: {
+        adapter: "openai-responses",
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+      },
+    },
+  };
 }
 
 async function waitForPaths(paths: readonly string[]): Promise<void> {

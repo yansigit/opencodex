@@ -226,6 +226,7 @@ describe("ocx provider", () => {
         "--base-url", "http://localhost:8080/v1",
         "--api-key", "test-key",
         "--default-model", "my-model",
+        "--allow-private-network",
       ], { OPENCODEX_HOME: dir });
       expect(result.status).toBe(0);
 
@@ -325,6 +326,27 @@ describe("ocx provider", () => {
         version: 1,
         legacyOwnedSlugs: ["huggingface/DeepSeek-V4-Flash-0731", "openai/kept-model"],
       });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("provider remove rejects routing profile dependencies", () => {
+    const { dir, configPath } = freshConfig({
+      providers: {
+        openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+        deepseek: { adapter: "openai-chat", baseUrl: "https://api.deepseek.com/v1", apiKey: "k" },
+      },
+      routingProfiles: {
+        daily: { candidates: [{ provider: "deepseek", model: "deepseek-chat" }] },
+      },
+    });
+    try {
+      const before = readFileSync(configPath, "utf8");
+      const result = runCli(["provider", "remove", "deepseek"], { OPENCODEX_HOME: dir });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("routing profile(s) depend on it: daily");
+      expect(readFileSync(configPath, "utf8")).toBe(before);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

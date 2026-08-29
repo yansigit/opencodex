@@ -18,7 +18,7 @@ import {
   isCodexAccountSoftAvoided,
   recordCodexUpstreamOutcome,
 } from "../src/codex/routing";
-import { loadConfig, saveConfig } from "../src/config";
+import { loadConfig, replacePersistedConfig, saveConfig } from "../src/config";
 import { clearUpstreamHostHealth, getUpstreamHostHealth, recordUpstreamHostFailure, upstreamHostHealthKey } from "../src/codex/upstream-host-health";
 import { deriveProviderPresets } from "../src/providers/derive";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
@@ -1485,7 +1485,7 @@ describe("server local API auth", () => {
       updateAccountQuota("direct-unusable", 99);
       markAccountNeedsReauth("direct-unusable");
       recordCodexUpstreamOutcome(directConfig, "direct-unusable", 429, { retryAfter: "60" });
-      saveConfig(directConfig);
+      replacePersistedConfig(directConfig);
       const direct = startServer(0, { inspectNativeCodexOwnership });
       const directBaseline = {
         config: readFileSync(join(TEST_DIR, "config.json"), "utf8"),
@@ -1540,7 +1540,7 @@ describe("server local API auth", () => {
         clearCodexUpstreamHealth();
         const cfg = mainOnlyConfig();
         writeMainToken(state === "expired" ? `header.${expiredPayload}.signature` : "opaque-live-main-token");
-        saveConfig(cfg);
+        replacePersistedConfig(cfg);
         const before = seen.length;
         const unusableMain = startServer(0, { inspectNativeCodexOwnership });
         try {
@@ -1559,7 +1559,7 @@ describe("server local API auth", () => {
       clearCodexUpstreamHealth();
       rmSync(join(isolatedCodexHome!.path, "auth.json"), { force: true });
 
-      saveConfig({
+      replacePersistedConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,
@@ -1618,7 +1618,7 @@ describe("server local API auth", () => {
         await multi.stop(true);
       }
 
-      saveConfig({
+      replacePersistedConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,
@@ -1649,7 +1649,7 @@ describe("server local API auth", () => {
         expiresAt: Date.now() + 300_000,
         chatgptAccountId: "acct-pool-b",
       });
-      saveConfig({
+      replacePersistedConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,

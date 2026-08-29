@@ -511,7 +511,7 @@ export const CAPABILITIES: readonly Capability[] = [
     routes: [{ method: "POST", path: "/api/subagent-model-authority" }],
     flags: [{ name: "--file", value: "string", summary: "Read authority JSON from a file instead of stdin." }],
     mutates: true,
-    json: "payload",
+    json: "none",
   },
 ];
 

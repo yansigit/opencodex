@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { nativeModelRows } from "../src/codex/catalog";
-import { loadConfig, saveConfig } from "../src/config";
+import { loadConfig, replacePersistedConfig, saveConfig } from "../src/config";
 import { handleManagementAPI } from "../src/server/management-api";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
-import { isolatedDiskManagementPersistence } from "./helpers/management-auth";
+import { inMemoryManagementPersistence, isolatedDiskManagementPersistence } from "./helpers/management-auth";
 
 const TEST_DIR = join(tmpdir(), `.tmp-model-visibility-management-${process.pid}`);
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -25,9 +25,9 @@ beforeEach(() => {
     defaultProvider: "google-antigravity",
     providers: {
       "google-antigravity": {
-        adapter: "openai-chat",
-        baseUrl: "https://api.example.test/v1",
-        apiKey: "test-key",
+        adapter: "google",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        authMode: "oauth",
         liveModels: false,
         models: ["claude-opus-4-6-thinking", "claude-sonnet-4-6", "gemini-3.1-pro", "gemini-3.6-flash", "gpt-oss-120b-medium", "vendor/model"],
         selectedModels: ["gemini-3.1-pro", "gemini-3.6-flash"],
@@ -49,13 +49,17 @@ afterEach(() => {
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
 });
 
-async function putWithConfig(body: unknown, config = loadConfig()): Promise<Response> {
+async function putWithConfig(
+  body: unknown,
+  config = loadConfig(),
+  persistence = isolatedDiskManagementPersistence(),
+): Promise<Response> {
   const url = new URL("http://localhost/api/model-visibility");
   const response = await handleManagementAPI(new Request(url, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: typeof body === "string" ? body : JSON.stringify(body),
-  }), url, config, { ...isolatedDiskManagementPersistence(), createManagementConvergeCodex: catalogConvergenceFactory(() => { refreshes += 1; }) });
+  }), url, config, { ...persistence, createManagementConvergeCodex: catalogConvergenceFactory(() => { refreshes += 1; }) });
   if (!response) throw new Error("model visibility route was not handled");
   return response;
 }
@@ -134,7 +138,7 @@ describe("atomic model visibility management", () => {
   });
 
   test("treats a physical combo provider with no configured combos as a routed provider", async () => {
-    saveConfig({
+    replacePersistedConfig({
       port: 0,
       defaultProvider: "combo",
       providers: {
@@ -199,7 +203,7 @@ describe("atomic model visibility management", () => {
       "other/keep",
       "other/provider",
     ];
-    saveConfig(config);
+    replacePersistedConfig(config);
 
     expect((await put({ scope: "provider", provider: "anthropic", targets: [{ id: "claude-a" }], enabled: true })).status).toBe(200);
     expect(loadConfig().providers.anthropic.selectedModels).toBeUndefined();
@@ -229,14 +233,14 @@ describe("atomic model visibility management", () => {
       free: { alias: "anthropic/fast", targets: [{ provider: "google-antigravity", model: "gemini-3.1-pro" }] },
     };
     config.disabledModels = ["anthropic/fast", "other/keep"];
-
-    expect((await putWithConfig({ scope: "models", provider: "combo", targets: [{ id: "free" }], enabled: true }, config)).status).toBe(200);
+    const persistence = inMemoryManagementPersistence(config);
+    expect((await putWithConfig({ scope: "models", provider: "combo", targets: [{ id: "free" }], enabled: true }, config, persistence)).status).toBe(200);
     expect(config.providers.combo.selectedModels).toEqual(["physical-only"]);
     expect(config.disabledModels).toEqual(["other/keep"]);
     expect(refreshes).toBe(1);
 
     config.disabledModels = ["combo/free", "anthropic/fast", "other/keep"];
-    expect((await putWithConfig({ scope: "provider", provider: "combo", targets: [{ id: "free" }], enabled: true }, config)).status).toBe(200);
+    expect((await putWithConfig({ scope: "provider", provider: "combo", targets: [{ id: "free" }], enabled: true }, config, persistence)).status).toBe(200);
     expect(config.providers.combo.selectedModels).toEqual(["physical-only"]);
     expect(config.disabledModels).toEqual(["other/keep"]);
     expect(refreshes).toBe(2);

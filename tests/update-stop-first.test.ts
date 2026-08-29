@@ -185,6 +185,7 @@ describe("update stops the running proxy before replacing files", () => {
       const bundledBun = join(repoRoot, "node_modules", "bun");
       const env = {
         ...process.env,
+        OPENCODEX_BUN_PATH: process.env.OPENCODEX_BUN_PATH ?? process.execPath,
         HOME: root,
         USERPROFILE: root,
         OPENCODEX_HOME: opencodexHome,
@@ -203,7 +204,53 @@ describe("update stops the running proxy before replacing files", () => {
         mkdirSync(cache, { recursive: true });
         copyFileSync(join(repoRoot, "bin", "ocx.mjs"), launcher);
         chmodSync(launcher, 0o755);
-        symlinkSync(join(repoRoot, "src"), join(packageRoot, "src"), "dir");
+        for (const relative of [
+          "src/lib/bun-binary-validator.mjs",
+          "src/update/npm-invocation.mjs",
+          "src/update/npm-cache-preflight.mjs",
+          "src/update/tray-update-plan.mjs",
+          "src/update/transactional-install.mjs",
+        ]) {
+          const fixturePath = join(packageRoot, relative);
+          mkdirSync(dirname(fixturePath), { recursive: true });
+          symlinkSync(join(repoRoot, relative), fixturePath);
+        }
+        mkdirSync(join(packageRoot, "src", "cli"), { recursive: true });
+        writeFileSync(join(packageRoot, "src", "cli", "index.ts"), `#!/usr/bin/env bun
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+const args = process.argv.slice(2).filter(arg => !arg.startsWith("--ocx-internal-launch-proof="));
+const home = process.env.OPENCODEX_HOME!;
+const pidPath = join(home, "ocx.pid");
+const runtimePath = join(home, "runtime-port.json");
+
+if (args[0] === "stop") {
+  let pid = 0;
+  try { pid = Number(JSON.parse(readFileSync(runtimePath, "utf8")).pid); } catch { pid = 0; }
+  if (Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid) {
+    try { process.kill(pid, "SIGTERM"); } catch { pid = 0; }
+  }
+  rmSync(pidPath, { force: true });
+  rmSync(runtimePath, { force: true });
+  process.exit(0);
+}
+
+if (args[0] !== "start") process.exit(1);
+const port = Number(args[args.indexOf("--port") + 1]);
+const server = Bun.serve({
+  hostname: "127.0.0.1",
+  port,
+  fetch(request) {
+    return new URL(request.url).pathname === "/healthz"
+      ? Response.json({ status: "ok", service: "opencodex", pid: process.pid, port })
+      : new Response("Not found", { status: 404 });
+  },
+});
+writeFileSync(pidPath, String(process.pid));
+writeFileSync(runtimePath, JSON.stringify({ port: server.port, pid: process.pid, hostname: "127.0.0.1" }));
+await new Promise(() => {});
+`);
         symlinkSync(bundledBun, join(packageRoot, "node_modules", "bun"), "dir");
         writeFileSync(join(packageRoot, "package.json"), JSON.stringify({
           name: "@bitkyc08/opencodex",

@@ -1,6 +1,6 @@
 import * as readline from "node:readline";
 import { openUrl } from "../lib/open-url";
-import { loadConfig, saveConfig } from "../config";
+import { initializePersistedConfigIfMissing, loadConfig, mutatePersistedConfig } from "../config";
 import { findLiveProxy } from "../server/proxy-liveness";
 import {
   requestBoundLocalProviderReload,
@@ -11,6 +11,7 @@ import { KEY_LOGIN_PROVIDERS, isKeyLoginProvider, validateApiKey, type KeyLoginP
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { configuredAdminToken } from "../lib/admin-secrets";
 import { codexAccountNamespaceProviderCollisionError } from "../codex/account-namespace-match";
+import { apiKeyPoolEntryId } from "../providers/api-keys";
 
 const LIVE_RELOAD_PROVIDERS = new Set<string>([
   ...listOAuthProviders(),
@@ -121,7 +122,7 @@ async function handleAiStudioLogin(): Promise<void> {
 
   const config = loadConfig();
   if (!config.providers["google-aistudio"]) {
-    config.providers["google-aistudio"] = {
+    await commitKeyLoginProvider(config, "google-aistudio", {
       adapter: "google",
       googleMode: "ai-studio-web",
       baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
@@ -129,8 +130,7 @@ async function handleAiStudioLogin(): Promise<void> {
       liveModels: false,
       defaultModel: "gemini-3.7-flash",
       models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
-    };
-    saveConfig(config);
+    });
     console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
   }
 
@@ -200,10 +200,28 @@ export function mergeKeyLoginProviderRow(
   provider: OcxProviderConfig,
   existing: OcxProviderConfig | undefined,
 ): OcxProviderConfig {
-  return {
-    ...provider,
-    ...(existing?.modelCosts !== undefined ? { modelCosts: existing.modelCosts } : {}),
-  };
+  if (!existing) return structuredClone(provider);
+  const merged = structuredClone(existing);
+  merged.adapter = provider.adapter;
+  merged.baseUrl = provider.baseUrl;
+  if (provider.authMode !== undefined) merged.authMode = provider.authMode;
+  else delete merged.authMode;
+  delete merged.azureCredential;
+  if (provider.apiKeyTransport !== undefined) merged.apiKeyTransport = provider.apiKeyTransport;
+  if (provider.apiKey) {
+    const pool = merged.apiKeyPool ?? (merged.apiKey
+      ? [{ id: apiKeyPoolEntryId(merged.apiKey), key: merged.apiKey }]
+      : []);
+    const existingKey = pool.find(entry => entry.key === provider.apiKey);
+    if (!existingKey) {
+      const id = apiKeyPoolEntryId(provider.apiKey);
+      if (pool.some(entry => entry.id === id)) throw new Error("API-key pool ID collision");
+      pool.push({ id, key: provider.apiKey, addedAt: Date.now() });
+    }
+    if (pool.length > 0) merged.apiKeyPool = pool;
+    merged.apiKey = provider.apiKey;
+  }
+  return merged;
 }
 
 /**
@@ -219,9 +237,33 @@ export async function commitKeyLoginProvider(
   provider: OcxProviderConfig,
   onLiveReload?: (result: LocalProviderReloadResult | null) => void,
 ): Promise<OcxProviderConfig> {
-  const mergedProvider = mergeKeyLoginProviderRow(provider, config.providers[name]);
-  config.providers[name] = mergedProvider;
-  saveConfig(config);
+  let mergedProvider = mergeKeyLoginProviderRow(provider, config.providers[name]);
+  const mutate = () => mutatePersistedConfig(fresh => {
+    const collision = codexAccountNamespaceProviderCollisionError(fresh.codexAccountNamespaces, name);
+    if (collision) throw new Error(collision);
+    mergedProvider = mergeKeyLoginProviderRow(provider, fresh.providers[name]);
+    fresh.providers[name] = mergedProvider;
+    return { changed: true, value: { config: structuredClone(fresh), provider: structuredClone(mergedProvider) } };
+  });
+  let outcome = mutate();
+  if (outcome.status === "unavailable" && outcome.reason === "missing") {
+    const initial = structuredClone(config);
+    const collision = codexAccountNamespaceProviderCollisionError(initial.codexAccountNamespaces, name);
+    if (collision) throw new Error(collision);
+    mergedProvider = mergeKeyLoginProviderRow(provider, initial.providers[name]);
+    initial.providers[name] = mergedProvider;
+    const initialized = initializePersistedConfigIfMissing(initial);
+    if (initialized === "invalid") throw new Error("config is invalid");
+    outcome = initialized === "created"
+      ? { status: "committed", value: { config: initial, provider: structuredClone(mergedProvider) } }
+      : mutate();
+  }
+  if (outcome.status === "unavailable") throw new Error(outcome.reason === "conflict"
+    ? "config changed while saving provider; retry"
+    : `config is ${outcome.reason}`);
+  for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
+  Object.assign(config, outcome.value.config);
+  mergedProvider = outcome.value.provider;
   // Evaluate the reload BEFORE the optional call: `onLiveReload?.(await ...)` short-circuits
   // the whole argument list when no callback is supplied, so the reload would never fire for
   // callers that do not care about the outcome.
