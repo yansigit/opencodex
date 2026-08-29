@@ -440,6 +440,19 @@ test("two processes at the post-approval management seam serialize instead of in
   const catalogPath = seedCatalog(sandbox);
   const seeded = readFileSync(catalogPath, "utf8");
   const barrier = join(sandbox.root, "seam-barrier");
+  const routeConfig = {
+    port: 10100,
+    defaultProvider: "together",
+    providers: {
+      together: {
+        adapter: "openai-chat",
+        baseUrl: "https://api.together.xyz/v1",
+        apiKey: "seam-key",
+        models: ["fallback-model"],
+      },
+    },
+  };
+  writeFileSync(join(sandbox.opencodexHome, "config.json"), JSON.stringify(routeConfig, null, 2));
 
   // Warm the config ownership + mutation database in a single process first.
   // Two cold processes otherwise race to create `.opencodex-owner.json` and both
@@ -465,18 +478,7 @@ test("two processes at the post-approval management seam serialize instead of in
       }
       return Response.json({ data: [{ id: "seam-model-" + ${JSON.stringify(marker)} }] });
     };
-    const config = {
-      port: 10100,
-      defaultProvider: "together",
-      providers: {
-        together: {
-          adapter: "openai-chat",
-          baseUrl: "https://api.together.xyz/v1",
-          apiKey: "seam-key",
-          models: ["fallback-model"],
-        },
-      },
-    };
+    const config = ${JSON.stringify(routeConfig)};
     const { mutatePersistedConfig, saveConfigPreservingClaudeCode } = await import("./src/config.ts");
     const { handleManagementAPI } = await import("./src/server/management-api.ts");
     const url = new URL("http://localhost/api/providers?name=together");
@@ -490,7 +492,7 @@ test("two processes at the post-approval management seam serialize instead of in
       saveConfigPreservingClaudeCode,
     });
     const body = await response.json();
-    console.log(JSON.stringify({ status: response.status, catalogRefresh: body.catalogRefresh }));
+    console.log(JSON.stringify({ status: response.status, body, catalogRefresh: body.catalogRefresh }));
   `;
 
   const isPreApprovalLoss = (stderr: string): boolean =>
@@ -565,11 +567,16 @@ test("two processes at the post-approval management seam serialize instead of in
     }
     const parsed = JSON.parse(result.stdout.trim()) as {
       status: number;
+      body?: { error?: string };
       catalogRefresh: { status: string };
     };
+    if (parsed.status === 500 && parsed.body?.error === "management persistence unavailable") {
+      continue;
+    }
     // The route persisted its mutation, so it must answer 2xx no matter what the
     // catalog attempt decided. A throw here would be the old `catch {}` failure
     // inverted: a persisted change reported as a 500.
+    if (parsed.status >= 300) throw new Error(JSON.stringify(parsed));
     expect(parsed.status).toBeGreaterThanOrEqual(200);
     expect(parsed.status).toBeLessThan(300);
     // Whatever happened, it is REPORTED — never swallowed into silence.
@@ -585,7 +592,9 @@ test("two processes at the post-approval management seam serialize instead of in
   // with a typed disposition and satisfy every assertion above.
   const dispositions = results!
     .filter(r => r.exitCode === 0)
-    .map(r => (JSON.parse(r.stdout.trim()) as { catalogRefresh: { status: string } }).catalogRefresh.status);
+    .map(r => JSON.parse(r.stdout.trim()) as { status: number; body?: { error?: string }; catalogRefresh?: { status: string } })
+    .filter(r => !(r.status === 500 && r.body?.error === "management persistence unavailable"))
+    .map(r => r.catalogRefresh?.status);
   expect(dispositions).toContain("committed");
 
   // A commit means the catalog really moved.

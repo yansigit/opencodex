@@ -73,3 +73,27 @@ test("startServer arms the baseline before it can serve a request", () => {
   expect(bareSaveConfigCalls(body).length).toBeGreaterThan(0);
   expect(bareSaveConfigCalls(after)).toEqual([]);
 });
+
+test("full config replacement is limited to explicit import and init", () => {
+  const allowed = new Set([
+    "cli/config-command.ts",
+    "cli/init.ts",
+    "config.ts",
+  ]);
+  const offenders: string[] = [];
+  const visit = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(path);
+        continue;
+      }
+      if (!entry.name.endsWith(".ts")) continue;
+      const relative = path.slice(SRC.length + 1);
+      const text = readFileSync(path, "utf8");
+      if (!allowed.has(relative) && /\breplacePersistedConfig\b/.test(text)) offenders.push(relative);
+    }
+  };
+  visit(SRC);
+  expect(offenders).toEqual([]);
+});

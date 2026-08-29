@@ -57,6 +57,22 @@ async function put(path: string, body: unknown): Promise<Response> {
   return response;
 }
 
+async function request(method: string, path: string, body?: unknown, liveConfig: OcxConfig = structuredClone(historicalFixture)): Promise<Response> {
+  const url = new URL(`http://localhost${path}`);
+  const response = await handleManagementAPI(new Request(url, {
+    method,
+    ...(body === undefined ? {} : {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  }), url, liveConfig, {
+    mutatePersistedConfig,
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  if (!response) throw new Error("management route declined request");
+  return response;
+}
+
 function persisted(): typeof richOnDisk {
   return JSON.parse(readFileSync(getConfigPath(), "utf8"));
 }
@@ -79,6 +95,106 @@ test("sidecar web-search mutation is field-scoped", async () => {
   expect(persisted().providers).toEqual(richOnDisk.providers);
   expect(persisted().defaultProvider).toBe("openai");
   expect(persisted() as OcxConfig).toMatchObject({ webSearchSidecar: { streamRoutedModelOutput: true } });
+});
+
+test("provider POST adds one row without replacing the persisted registry", async () => {
+  const response = await request("POST", "/api/providers", {
+    name: "new-provider",
+    provider: {
+      adapter: "openai-chat",
+      baseUrl: "http://8.8.8.8/v1",
+      apiKey: "new-key",
+      liveModels: false,
+    },
+  });
+  expect(response.status).toBe(200);
+  expect(Object.keys(persisted().providers)).toEqual([...Object.keys(richOnDisk.providers), "new-provider"]);
+  expect(persisted().providers["new-provider"]).toMatchObject({ apiKey: "new-key" });
+});
+
+test("provider set-default updates only the persisted defaultProvider", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": historicalFixture.providers.openai,
+    },
+  };
+  const response = await request("PATCH", "/api/providers?name=command-code", { setDefault: true }, liveConfig);
+  expect(response.status).toBe(200);
+  expect(persisted().defaultProvider).toBe("command-code");
+  expect(persisted().providers).toEqual(richOnDisk.providers);
+});
+
+test("provider PATCH replays onto the persisted row without replacing sibling providers", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": { ...historicalFixture.providers.openai, note: "stale-live" },
+    },
+  };
+  const response = await request("PATCH", "/api/providers?name=command-code", { note: "fresh-note" }, liveConfig);
+  expect(response.status).toBe(200);
+  expect(persisted().providers["command-code"]).toMatchObject({
+    ...richOnDisk.providers["command-code"],
+    note: "fresh-note",
+  });
+  expect(persisted().providers.cursor).toEqual(richOnDisk.providers.cursor);
+});
+
+test("provider DELETE removes one row and preserves the rest of the persisted registry", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": historicalFixture.providers.openai,
+    },
+  };
+  const response = await request("DELETE", "/api/providers?name=command-code", undefined, liveConfig);
+  expect(response.status).toBe(200);
+  const saved = persisted();
+  expect(saved.providers["command-code"]).toBeUndefined();
+  expect(saved.defaultProvider).toBe("openai");
+  expect(saved.providers.cursor).toEqual(richOnDisk.providers.cursor);
+  expect(saved.providers["google-aistudio"]).toEqual(richOnDisk.providers["google-aistudio"]);
+});
+
+test("selected-models PUT scopes its provider row mutation to the persisted config", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": { ...historicalFixture.providers.openai, selectedModels: ["stale"] },
+    },
+  };
+  const response = await request("PUT", "/api/selected-models", {
+    provider: "command-code",
+    models: ["fresh-model"],
+  }, liveConfig);
+  expect(response.status).toBe(200);
+  expect(persisted().providers["command-code"]).toMatchObject({
+    ...richOnDisk.providers["command-code"],
+    selectedModels: ["fresh-model"],
+  });
+  expect(persisted().providers.cursor).toEqual(richOnDisk.providers.cursor);
+});
+
+test("provider alias PUT scopes its provider row mutation to the persisted config", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": { ...historicalFixture.providers.openai, alias: "stale-alias" },
+    },
+  };
+  const response = await request("PUT", "/api/providers/command-code/alias", { alias: "fresh-alias" }, liveConfig);
+  expect(response.status).toBe(200);
+  expect(persisted().providers["command-code"]).toMatchObject({
+    ...richOnDisk.providers["command-code"],
+    alias: "fresh-alias",
+  });
+  expect(persisted().providers.cursor).toEqual(richOnDisk.providers.cursor);
 });
 
 test("sidecar retries preserve a concurrent edit to another leaf", async () => {

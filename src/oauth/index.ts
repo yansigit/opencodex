@@ -1,7 +1,7 @@
 import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
 import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
-import { loadConfig, resolveEnvValue, saveConfig } from "../config";
+import { loadConfig, mutatePersistedConfig, resolveEnvValue } from "../config";
 import { maskEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
 import { getAccountCredential, getAccountSet, removeAccount, saveAccountCredential, saveCredential, setActiveAccount, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, markOAuthRefreshIntentStaleOwner, clearOAuthRefreshIntent, normalizeAuthStoreBuffer, OAuthMutationBusyError } from "./store";
@@ -1023,7 +1023,7 @@ function migrateLegacyAntigravityStaticCatalog(config: OcxConfig): boolean {
   return true;
 }
 
-export function reconcileOAuthProviders(config: OcxConfig): boolean {
+export function reconcileOAuthProviders(config: OcxConfig, persist = true): boolean {
   let changed = migrateLegacyAntigravityStaticCatalog(config);
   for (const [name, prov] of Object.entries(config.providers)) {
     const def = OAUTH_PROVIDERS[name];
@@ -1057,7 +1057,17 @@ export function reconcileOAuthProviders(config: OcxConfig): boolean {
       changed = true;
     }
   }
-  if (changed) saveConfig(config);
+  if (changed && persist) {
+    const outcome = mutatePersistedConfig(fresh => {
+      const before = JSON.stringify(fresh);
+      reconcileOAuthProviders(fresh, false);
+      return { changed: JSON.stringify(fresh) !== before, value: structuredClone(fresh) };
+    });
+    if (outcome.status !== "unavailable") {
+      for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
+      Object.assign(config, outcome.value);
+    }
+  }
   return changed;
 }
 
@@ -1138,6 +1148,12 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   if (existing?.modelCosts !== undefined) {
     next.modelCosts = existing.modelCosts;
   }
+  if (existing?.alias !== undefined) next.alias = existing.alias;
+  if (existing?.modelAliases !== undefined) next.modelAliases = structuredClone(existing.modelAliases);
+  if (existing?.defaultAliases !== undefined) next.defaultAliases = existing.defaultAliases;
+  if (existing?.newModelPolicy !== undefined) next.newModelPolicy = existing.newModelPolicy;
+  if (existing?.selectedModels !== undefined) next.selectedModels = [...existing.selectedModels];
+  if (existing?.modelPreset !== undefined) next.modelPreset = structuredClone(existing.modelPreset);
   // The per-provider account-failover opt-out is operator intent about SPENDING, and the login
   // path is exactly where losing it does damage: adding a second account both rebuilds this row
   // from the preset and creates the 2-account quorum that turns presence-driven rotation on
@@ -1175,7 +1191,7 @@ interface RunLoginDeps {
   saveCredential?: typeof saveCredential;
   saveAccountCredential?: typeof saveAccountCredential;
   loadConfig?: typeof loadConfig;
-  saveConfig?: typeof saveConfig;
+  mutatePersistedConfig?: typeof mutatePersistedConfig;
   settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
   removeAccount?: typeof removeAccount;
   setActiveAccount?: typeof setActiveAccount;
@@ -1210,7 +1226,7 @@ export async function runLogin(
   const def = OAUTH_PROVIDERS[provider];
   if (!def) throw new UnsupportedOAuthProviderError(provider);
   const loadLatestConfig = deps.loadConfig ?? loadConfig;
-  const saveLatestConfig = deps.saveConfig ?? saveConfig;
+  const mutateLatestConfig = deps.mutatePersistedConfig ?? mutatePersistedConfig;
   if (provider !== "chatgpt") {
     const preflightConfig = loadLatestConfig();
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
@@ -1265,16 +1281,18 @@ export async function runLogin(
     if (provider !== "chatgpt") {
       // Re-run against post-credential state so same-provider API-key additions, removals,
       // and active-key switches survive. A late namespace claim wins over provider creation.
-      const latestConfig = loadLatestConfig();
-      const lateCollision = codexAccountNamespaceProviderCollisionError(
-        latestConfig.codexAccountNamespaces,
-        provider,
-      );
-      if (lateCollision) {
+      const outcome = mutateLatestConfig<{ error: string } | { config: OcxConfig }>(fresh => {
+        const lateCollision = codexAccountNamespaceProviderCollisionError(
+          fresh.codexAccountNamespaces,
+          provider,
+        );
+        if (lateCollision) return { changed: false, value: { error: lateCollision } };
+        upsertOAuthProvider(fresh, provider);
+        return { changed: true, value: { config: structuredClone(fresh) } };
+      });
+      if (outcome.status === "unavailable" || "error" in outcome.value) {
         throw new OAuthProviderPublicationError();
       }
-      upsertOAuthProvider(latestConfig, provider);
-      saveLatestConfig(latestConfig);
     }
   } catch (error) {
     const errors: unknown[] = [error];

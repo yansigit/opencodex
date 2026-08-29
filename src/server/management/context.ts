@@ -1,4 +1,5 @@
 import type { OcxConfig } from "../../types";
+import type { PersistedConfigMutation, PersistedConfigMutationOutcome } from "../../config";
 import type { NativeProfileApiDeps } from "../../codex/native-profile-api";
 import type { CodexLogGuardProtectionDeps } from "../../codex/log-guard/protection";
 import type { CodexLogGuardMaintenanceDeps } from "../../codex/log-guard/maintenance";
@@ -142,11 +143,11 @@ export function saveManagementConfig(deps: ManagementApiDeps, config: OcxConfig)
 /** The only locked, field-scoped on-disk mutation boundary available to management routes. */
 export function mutateManagementConfig<T>(
   deps: ManagementApiDeps,
-  mutate: Parameters<NonNullable<ManagementApiDeps["mutatePersistedConfig"]>>[0],
-): ReturnType<NonNullable<ManagementApiDeps["mutatePersistedConfig"]>> {
+  mutate: (config: OcxConfig) => PersistedConfigMutation<T>,
+): PersistedConfigMutationOutcome<T> {
   if (!deps.mutatePersistedConfig) throw new MissingManagementPersistenceError();
   try {
-    return deps.mutatePersistedConfig(mutate) as ReturnType<NonNullable<ManagementApiDeps["mutatePersistedConfig"]>>;
+    return deps.mutatePersistedConfig(mutate);
   } catch (error) {
     throw new ManagementPersistenceError(error);
   }

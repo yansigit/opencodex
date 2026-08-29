@@ -94,7 +94,7 @@ import {
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import { saveManagementConfig, type ManagementContext } from "./context";
+import { mutateManagementConfig, saveManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import { resolveAiStudioCredentials } from "../../oauth/aistudio-credentials";
 import { buildAiStudioHeaders, parseGoogleCookieJar } from "../../oauth/google-aistudio-auth";
@@ -109,6 +109,22 @@ type ProviderPatchApplication =
       enablingOpenAi: boolean;
       headersTouched: boolean;
     };
+
+type ProviderMutationValue =
+  | { config: OcxConfig; fallbackDefault?: string; droppedCustomModels?: number }
+  | { error: string; code?: string; status?: number; combos?: string[] };
+
+function adoptCommittedConfig(target: OcxConfig, source: OcxConfig): void {
+  for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
+  Object.assign(target, structuredClone(source));
+}
+
+function unavailableMutationResponse(reason: "missing" | "invalid" | "conflict", req: Request, config: OcxConfig): Response {
+  const message = reason === "conflict"
+    ? "config changed while applying this update; retry"
+    : `config is ${reason}`;
+  return jsonResponse({ error: message }, reason === "conflict" ? 409 : 500, req, config);
+}
 
 const AI_STUDIO_REAUTH_ERROR = "Session expired or missing — re-authentication required";
 const AI_STUDIO_PROBE_TIMEOUT_MS = 8_000;
@@ -731,60 +747,47 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (body.setDefault === true && prov.disabled) {
       return jsonResponse({ error: "cannot set a disabled provider as default", code: "default_provider_disabled" }, 400);
     }
-    // Catalog providers (e.g. ollama-cloud) carry a models + vision/reasoning classification the GUI
-    // doesn't send — merge it in so the sidecars are gated correctly.
-    // Sample request ownership BEFORE enrichment. Enrichment fills absent fields from the
-    // registry seed, after which "the client omitted this" and "the registry supplied it" are
-    // indistinguishable — so a carry-over guard written as `prov.x === undefined` after this
-    // call can never fire.
     const submittedContextWindow = Object.hasOwn(prov, "contextWindow");
     const submittedModelContextWindows = Object.hasOwn(prov, "modelContextWindows");
     const submittedModelAutoCompactTokenLimits = Object.hasOwn(prov, "modelAutoCompactTokenLimits");
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
-    enrichProviderFromCatalog(name, prov);
-    // Overwriting an existing provider must not drop its multi-key pool: carry it over, then
-    // let the (possibly new) apiKey join the pool as the active entry.
-    const existingPool = config.providers[name]?.apiKeyPool;
-    if (existingPool && !prov.apiKeyPool && !prov.azureCredential) prov.apiKeyPool = existingPool;
-    // The same rule applies to user-configured price overlays: the dashboard's
-    // add/edit form does not send modelCosts, so an overwrite must not silently
-    // erase hand-edited per-model prices from Logs/Usage estimates.
-    const existingCosts = config.providers[name]?.modelCosts;
-    if (existingCosts && !prov.modelCosts) prov.modelCosts = existingCosts;
-    // And to the per-provider account-failover opt-out (#2568d). `ProviderPayload` has no
-    // member for it either, so an add/edit save structurally cannot carry it — and dropping it
-    // silently ENABLES rotation, because activation is presence-driven once the knob is gone.
-    // An overwrite must not spend a second subscription account's quota as a side effect.
-    const existingFailover = config.providers[name]?.oauthAccountFailover;
-    if (existingFailover && !prov.oauthAccountFailover) prov.oauthAccountFailover = existingFailover;
-    // ...and to hand-edited context windows. `ProviderPayload` (gui/src/provider-payload.ts)
-    // has no member for either field, so the add/edit form structurally cannot send them:
-    // absence in the request means "not carried", never "the user deleted it". Deletion goes
-    // through PATCH with an explicit null (#1409).
-    const existing = config.providers[name];
-    if (!submittedRequestPacing && existing?.requestPacing) {
-      prov.requestPacing = structuredClone(existing.requestPacing);
-    }
-    if (!submittedContextWindow && existing?.contextWindow !== undefined) {
-      prov.contextWindow = existing.contextWindow;
-    }
-    if (existing?.modelContextWindows) {
-      // When the client did send a map, its keys win and the user's other keys survive. When
-      // it did not, the stored value is the user's map alone: merging the registry seed in
-      // would persist seed keys into user config as a side effect of an unrelated save, and
-      // router.ts already fills registry values beneath user entries at resolve time.
-      prov.modelContextWindows = submittedModelContextWindows
-        ? { ...existing.modelContextWindows, ...(prov.modelContextWindows ?? {}) }
-        : { ...existing.modelContextWindows };
-    }
-    if (existing?.modelAutoCompactTokenLimits) {
-      prov.modelAutoCompactTokenLimits = submittedModelAutoCompactTokenLimits
-        ? { ...existing.modelAutoCompactTokenLimits, ...(prov.modelAutoCompactTokenLimits ?? {}) }
-        : { ...existing.modelAutoCompactTokenLimits };
-    }
-    config.providers[name] = stripRegistryOnlyStaticHeaders(name, prov);
-    if (body.setDefault === true) config.defaultProvider = name;
-    saveManagementConfig(deps, config);
+    const buildProvider = (existing: OcxProviderConfig | undefined): OcxProviderConfig => {
+      const next = structuredClone(prov);
+      enrichProviderFromCatalog(name, next);
+      const existingPool = existing?.apiKeyPool;
+      if (existingPool && !next.apiKeyPool && !next.azureCredential) next.apiKeyPool = existingPool;
+      const existingCosts = existing?.modelCosts;
+      if (existingCosts && !next.modelCosts) next.modelCosts = existingCosts;
+      const existingFailover = existing?.oauthAccountFailover;
+      if (existingFailover && !next.oauthAccountFailover) next.oauthAccountFailover = existingFailover;
+      if (!submittedRequestPacing && existing?.requestPacing) next.requestPacing = structuredClone(existing.requestPacing);
+      if (!submittedContextWindow && existing?.contextWindow !== undefined) next.contextWindow = existing.contextWindow;
+      if (existing?.modelContextWindows) {
+        next.modelContextWindows = submittedModelContextWindows
+          ? { ...existing.modelContextWindows, ...(next.modelContextWindows ?? {}) }
+          : { ...existing.modelContextWindows };
+      }
+      if (existing?.modelAutoCompactTokenLimits) {
+        next.modelAutoCompactTokenLimits = submittedModelAutoCompactTokenLimits
+          ? { ...existing.modelAutoCompactTokenLimits, ...(next.modelAutoCompactTokenLimits ?? {}) }
+          : { ...existing.modelAutoCompactTokenLimits };
+      }
+      return stripRegistryOnlyStaticHeaders(name, next);
+    };
+    const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
+      const namespaceCollision = codexAccountNamespaceProviderCollisionError(fresh.codexAccountNamespaces, name);
+      if (namespaceCollision) return { changed: false, value: { error: namespaceCollision, status: 409 } };
+      const next = buildProvider(fresh.providers[name]);
+      const providerError = providerManagementConfigError(name, next)
+        ?? providerServiceTierConfigError(name, next);
+      if (providerError) return { changed: false, value: { error: providerError, status: 400 } };
+      fresh.providers[name] = next;
+      if (body.setDefault === true) fresh.defaultProvider = name;
+      return { changed: true, value: { config: structuredClone(fresh) } };
+    });
+    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status, req, config);
+    adoptCommittedConfig(config, outcome.value.config);
     reconcileLiveStateStores();
     if (prov.apiKey && prov.apiKeyPool) {
       const { addProviderApiKey } = await import("../../providers/api-keys");
@@ -824,8 +827,17 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (!provider || !isCanonicalOpenAiForwardProvider(provider)) {
         return jsonResponse({ error: "provider openai must be the canonical built-in provider" }, 400);
       }
-      config.providers.openai = { ...provider, codexAccountMode: mode };
-      saveManagementConfig(deps, config);
+      const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
+        const provider = fresh.providers.openai;
+        if (!provider || !isCanonicalOpenAiForwardProvider(provider)) {
+          return { changed: false, value: { error: "provider openai must be the canonical built-in provider" } };
+        }
+        fresh.providers.openai = { ...provider, codexAccountMode: mode };
+        return { changed: true, value: { config: structuredClone(fresh) } };
+      });
+      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 409);
+      adoptCommittedConfig(config, outcome.value.config);
       reconcileLiveStateStores();
       (deps.clearProviderQuotaCache ?? clearProviderQuotaCache)();
       (deps.clearThreadAccountMap ?? clearThreadAccountMap)();
@@ -850,8 +862,17 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (config.providers[name]!.disabled) {
         return jsonResponse({ error: "cannot set a disabled provider as default", code: "default_provider_disabled" }, 400);
       }
-      config.defaultProvider = name;
-      saveManagementConfig(deps, config);
+      const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
+        if (!hasOwnProvider(fresh.providers, name)) return { changed: false, value: { error: "unknown provider" } };
+        if (fresh.providers[name]!.disabled) {
+          return { changed: false, value: { error: "cannot set a disabled provider as default", code: "default_provider_disabled" } };
+        }
+        fresh.defaultProvider = name;
+        return { changed: true, value: { config: structuredClone(fresh) } };
+      });
+      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+      if ("error" in outcome.value) return jsonResponse(outcome.value, outcome.value.error === "unknown provider" ? 404 : 400);
+      adoptCommittedConfig(config, outcome.value.config);
       reconcileLiveStateStores();
       return jsonResponse({ success: true, name, defaultProvider: name });
     }
@@ -894,36 +915,41 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // concurrent PATCHes updating different fields/headers both survive instead of the
     // later save clobbering the earlier snapshot.
     let replayError: string | undefined;
-    withConfigMutationLockSync(() => {
-      const replay = applyProviderPatchFields(name, config.providers[name]!, rawBody, keys, config);
+    const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
+      const provider = fresh.providers[name];
+      if (!provider) return { changed: false, value: { error: "unknown provider" } };
+      const replay = applyProviderPatchFields(name, provider, rawBody, keys, fresh);
       if ("error" in replay) {
         replayError = replay.error;
-        return;
+        return { changed: false, value: { error: replay.error } };
       }
       if (replay.editorTouched && !pacingOnly) {
         const syncError = canonicalBudgetOnly
-          ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, config)
+          ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, fresh)
           : providerManagementConfigError(name, replay.next);
         if (syncError) {
           replayError = syncError;
-          return;
+          return { changed: false, value: { error: syncError } };
         }
         if (!canonicalBudgetOnly) {
           const serviceTierError = providerServiceTierConfigError(name, replay.next);
           if (serviceTierError) {
             replayError = serviceTierError;
-            return;
+            return { changed: false, value: { error: serviceTierError } };
           }
         }
       } else if (replay.enablingOpenAi && !isCanonicalOpenAiForwardProvider(replay.next)) {
         replayError = "provider openai must be the canonical built-in provider";
-        return;
+        return { changed: false, value: { error: replayError } };
       }
       // A PATCH that managed headers owns the resulting block: the clear path restores
       // registry static headers, so exact-match stripping must not erase them again.
-      config.providers[name] = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
-      saveManagementConfig(deps, config);
+      fresh.providers[name] = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
+      return { changed: true, value: { config: structuredClone(fresh) } };
     });
+    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.error === "unknown provider" ? 404 : 409);
+    adoptCommittedConfig(config, outcome.value.config);
     if (replayError !== undefined) return jsonResponse({ error: replayError }, 409);
     reconcileLiveStateStores();
     if (applied.editorTouched && !pacingOnly) {
@@ -1121,12 +1147,36 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         combos: dependentCombos,
       }, 409);
     }
-    if (fallbackDefault) config.defaultProvider = fallbackDefault;
-    delete config.providers[name];
     const { dropProviderCustomModels } = await import("../../providers/provider-id-rewrite");
-    const droppedCustomModels = dropProviderCustomModels(config, name);
-    setProviderContextCap(config, name, false);
-    saveManagementConfig(deps, config);
+    const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
+      if (!hasOwnProvider(fresh.providers, name)) return { changed: false, value: { error: "unknown provider" } };
+      const fallbackDefault = name === fresh.defaultProvider
+        ? Object.entries(fresh.providers)
+          .find(([provider, providerConfig]) => provider !== name && providerConfig.disabled !== true)
+          ?.[0]
+        : undefined;
+      if (name === fresh.defaultProvider && !fallbackDefault) {
+        return { changed: false, value: { error: "cannot delete the default provider when no enabled replacement remains", code: "last_provider" } };
+      }
+      const dependentCombos = Object.entries(fresh.combos ?? {})
+        .filter(([, combo]) => combo.targets.some(target => target.provider === name))
+        .map(([id]) => id)
+        .sort((a, b) => a.localeCompare(b));
+      if (dependentCombos.length > 0) {
+        return { changed: false, value: { error: `cannot delete provider "${name}" while combos depend on it`, code: "provider_has_dependent_combos", combos: dependentCombos } };
+      }
+      if (fallbackDefault) fresh.defaultProvider = fallbackDefault;
+      delete fresh.providers[name];
+      const droppedCustomModels = dropProviderCustomModels(fresh, name);
+      setProviderContextCap(fresh, name, false);
+      return { changed: true, value: { config: structuredClone(fresh), fallbackDefault, droppedCustomModels } };
+    });
+    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+    if ("error" in outcome.value) {
+      const status = outcome.value.code === "provider_has_dependent_combos" || outcome.value.code === "last_provider" ? 409 : 404;
+      return jsonResponse(outcome.value, status);
+    }
+    adoptCommittedConfig(config, outcome.value.config);
     await replaceProviderAccountSet(name, null);
     reconcileLiveStateStores();
     const { clearModelCache: clearCache } = await import("../../codex/model-cache");
@@ -1134,8 +1184,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const catalogRefresh = await convergeCodexCatalog();
     return jsonResponse({
       success: true,
-      ...(fallbackDefault ? { defaultProvider: fallbackDefault } : {}),
-      ...(droppedCustomModels > 0 ? { droppedCustomModels } : {}),
+      ...(outcome.value.fallbackDefault ? { defaultProvider: outcome.value.fallbackDefault } : {}),
+      ...((outcome.value.droppedCustomModels ?? 0) > 0 ? { droppedCustomModels: outcome.value.droppedCustomModels } : {}),
       catalogRefresh,
     });
   }

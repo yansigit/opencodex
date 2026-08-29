@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig, writePid, writeRuntimePort } from "../src/config";
@@ -61,6 +61,24 @@ afterEach(() => {
 });
 
 describe("CLI key-login live-update overlay preservation", () => {
+  test("key-login commit updates one provider without replacing sibling providers on disk", async () => {
+    const richConfig = umansKeyConfig();
+    richConfig.providers.extra = {
+      adapter: "openai-chat",
+      baseUrl: "https://extra.example/v1",
+      apiKey: "extra-key",
+    };
+    writeFileSync(join(testDir, "config.json"), `${JSON.stringify(richConfig, null, 2)}\n`);
+
+    const staleConfig = umansKeyConfig();
+    const replacement = providerConfigFromKeyLoginProvider(KEY_LOGIN_PROVIDERS.umans, "sk-rotated");
+    await commitKeyLoginProvider(staleConfig, "umans", replacement);
+
+    const disk = JSON.parse(readFileSync(join(testDir, "config.json"), "utf-8")) as OcxConfig;
+    expect(disk.providers.umans!.apiKey).toBe("sk-rotated");
+    expect(disk.providers.extra).toEqual(richConfig.providers.extra);
+  });
+
   test("notify after key login pushes the merged row and keeps modelCosts on live and disk", async () => {
     const localAttestationSecret = createLocalAttestationSecret();
     const server = startServer(0, { localAttestationSecret });
@@ -78,14 +96,14 @@ describe("CLI key-login live-update overlay preservation", () => {
       saveConfig(boot);
 
       // The proxy booted before the overlay existed; a hand-edit then adds
-      // modelCosts to disk only, so the live in-memory row has no overlay yet.
+      // modelCosts before the key-login commit.
       const edited = loadConfig();
       edited.providers.umans!.modelCosts = {
         "umans-coder": { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
       };
       saveConfig(edited);
 
-      const config = loadConfig();
+      const config = edited;
       const replacement = providerConfigFromKeyLoginProvider(KEY_LOGIN_PROVIDERS.umans, "sk-rotated");
       const merged = await commitKeyLoginProvider(config, "umans", replacement);
       expect(merged.modelCosts).toEqual(edited.providers.umans!.modelCosts);

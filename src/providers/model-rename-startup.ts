@@ -1,10 +1,10 @@
-import { saveConfig } from "../config";
+import { mutatePersistedConfig } from "../config";
 import { projectModelRenames } from "./model-rename-migration";
 import type { OcxConfig } from "../types";
 
 export interface ModelRenameStartupDeps {
   project: typeof projectModelRenames;
-  save: (config: OcxConfig) => void;
+  save?: (config: OcxConfig) => void;
 }
 
 /**
@@ -18,11 +18,18 @@ export interface ModelRenameStartupDeps {
  */
 export function runModelRenameStartupMigration(
   config: OcxConfig,
-  deps: ModelRenameStartupDeps = { project: projectModelRenames, save: saveConfig },
+  deps: ModelRenameStartupDeps = { project: projectModelRenames },
 ): OcxConfig {
   const projection = deps.project(config);
   for (const warning of projection.warnings) console.warn(`[model-rename-migration] ${warning}`);
   if (!projection.changed) return projection.config;
-  deps.save(projection.config);
-  return projection.config;
+  if (deps.save) {
+    deps.save(projection.config);
+    return projection.config;
+  }
+  const outcome = mutatePersistedConfig(fresh => {
+    const next = deps.project(fresh);
+    return { changed: next.changed, value: next.config };
+  });
+  return outcome.status === "unavailable" ? config : outcome.value;
 }

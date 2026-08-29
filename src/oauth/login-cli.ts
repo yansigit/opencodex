@@ -1,6 +1,6 @@
 import * as readline from "node:readline";
 import { openUrl } from "../lib/open-url";
-import { loadConfig, saveConfig } from "../config";
+import { loadConfig, mutatePersistedConfig } from "../config";
 import { findLiveProxy } from "../server/proxy-liveness";
 import {
   requestBoundLocalProviderReload,
@@ -121,7 +121,7 @@ async function handleAiStudioLogin(): Promise<void> {
 
   const config = loadConfig();
   if (!config.providers["google-aistudio"]) {
-    config.providers["google-aistudio"] = {
+    await commitKeyLoginProvider(config, "google-aistudio", {
       adapter: "google",
       googleMode: "ai-studio-web",
       baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
@@ -129,8 +129,7 @@ async function handleAiStudioLogin(): Promise<void> {
       liveModels: false,
       defaultModel: "gemini-3.7-flash",
       models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
-    };
-    saveConfig(config);
+    });
     console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
   }
 
@@ -219,9 +218,18 @@ export async function commitKeyLoginProvider(
   provider: OcxProviderConfig,
   onLiveReload?: (result: LocalProviderReloadResult | null) => void,
 ): Promise<OcxProviderConfig> {
-  const mergedProvider = mergeKeyLoginProviderRow(provider, config.providers[name]);
-  config.providers[name] = mergedProvider;
-  saveConfig(config);
+  let mergedProvider = mergeKeyLoginProviderRow(provider, config.providers[name]);
+  const outcome = mutatePersistedConfig(fresh => {
+    mergedProvider = mergeKeyLoginProviderRow(provider, fresh.providers[name]);
+    fresh.providers[name] = mergedProvider;
+    return { changed: true, value: { config: structuredClone(fresh), provider: structuredClone(mergedProvider) } };
+  });
+  if (outcome.status === "unavailable") throw new Error(outcome.reason === "conflict"
+    ? "config changed while saving provider; retry"
+    : `config is ${outcome.reason}`);
+  for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
+  Object.assign(config, outcome.value.config);
+  mergedProvider = outcome.value.provider;
   // Evaluate the reload BEFORE the optional call: `onLiveReload?.(await ...)` short-circuits
   // the whole argument list when no callback is supplied, so the reload would never fire for
   // callers that do not care about the outcome.

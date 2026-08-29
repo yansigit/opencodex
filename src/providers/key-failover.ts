@@ -8,7 +8,7 @@
  *
  * Modelled after src/codex/routing.ts cooldown logic but scoped to plain API-key pools.
  */
-import { saveConfigPreservingClaudeCode } from "../config";
+import { mutatePersistedConfig } from "../config";
 import { isAzureIdentityProvider } from "../config/provider-validation";
 import type { OcxConfig, OcxProviderConfig, RateLimitRetryPolicy } from "../types";
 import { resolveProviderTransport, type OcxProviderTransport } from "./xai-transport";
@@ -189,9 +189,20 @@ export function rotateKeyOn429(
   for (let i = 1; i < pool.length; i++) {
     const candidate = pool[(currentIndex + i) % pool.length]!;
     if (!isKeyInCooldown(providerName, candidate.id, now)) {
-      // Swap active key
-      provider.apiKey = candidate.key;
-      saveConfigPreservingClaudeCode(config);
+      const outcome = mutatePersistedConfig(fresh => {
+        const freshProvider = fresh.providers[providerName];
+        if (!freshProvider) return { changed: false, value: null };
+        const freshCandidate = freshProvider.apiKeyPool?.find(entry => entry.id === candidate.id);
+        if (!freshCandidate || isKeyInCooldown(providerName, freshCandidate.id, now)) {
+          return { changed: false, value: null };
+        }
+        freshProvider.apiKey = freshCandidate.key;
+        return { changed: true, value: structuredClone(freshProvider) };
+      });
+      if (outcome.status === "unavailable" || outcome.value === null) return null;
+      // Swap active key after the disk commit.
+      Object.assign(provider, outcome.value);
+      config.providers[providerName] = provider;
       console.warn(
         // Log ids only — labels are user-supplied free text and could carry secret material.
         `[key-failover] ${providerName}: 429 on key ${currentEntry?.id ?? "?"}; rotating to key ${candidate.id}`,
