@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { applyEffortCap, effortCapAppliesTo, effortCapFor, isThreadSpawnRequest, resolveCappedEffort, stripEmptyLadderEffort, supportedLadderFor } from "../src/server/effort-policy";
 import { collabSurface } from "../src/server/responses";
 import { handleManagementAPI } from "../src/server/management-api";
+import { inMemoryManagementPersistence } from "./helpers/management-auth";
 import { NoEnabledOpenAiProviderError, routeModel } from "../src/router";
 import { mapReasoningEffort } from "../src/reasoning-effort";
 import { nativeEffortClamp } from "../src/codex/catalog";
@@ -451,7 +452,7 @@ describe("/api/effort-caps", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const res = await handleManagementAPI(req, new URL(req.url), config);
+    const res = await handleManagementAPI(req, new URL(req.url), config, inMemoryManagementPersistence(config));
     expect(res).not.toBeNull();
     return res!;
   }

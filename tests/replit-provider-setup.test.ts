@@ -534,7 +534,7 @@ describe("replit provider management route", () => {
       const response = await replitPairApi(config, {
         origin: ORIGIN,
         gatewayKey: GATEWAY_KEY,
-      }, { probeFetch: stubFetch });
+      }, { mutatePersistedConfig, probeFetch: stubFetch });
       expect(response?.status).toBe(200);
       const body = await response!.json() as Record<string, unknown>;
       expect(body.success).toBe(true);

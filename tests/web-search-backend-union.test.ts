@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parseRequest } from "../src/responses/parser";
 import { planWebSearch, resolveSidecarBackend, shouldResolveOpenAiWebSearchSidecar } from "../src/web-search";
 import { handleManagementAPI } from "../src/server/management-api";
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 import { redactSecrets } from "../src/lib/redact";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
 
@@ -45,7 +45,7 @@ async function putSidecar(cfg: OcxConfig, webSearch: Record<string, unknown>): P
   const url = new URL("http://localhost/api/sidecar-settings");
   const response = await handleManagementAPI(
     new Request(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ webSearch }) }),
-    url, cfg,
+    url, cfg, inMemoryManagementPersistence(cfg),
   );
   if (!response) throw new Error("route did not handle PUT");
   return response;
@@ -85,7 +85,7 @@ async function putClaudeCode(cfg: OcxConfig, body: Record<string, unknown>): Pro
   const url = new URL("http://localhost/api/claude-code");
   const response = await handleManagementAPI(
     new Request(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
-    url, cfg,
+    url, cfg, inMemoryManagementPersistence(cfg),
   );
   if (!response) throw new Error("route did not handle PUT");
   return response;

@@ -41,6 +41,7 @@ import type { OcxConfig } from "../src/types";
 import { syncCatalogModels } from "../src/codex/catalog";
 import { injectClaudeAgentDefs } from "../src/claude/agents-inject";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
+import { isolatedDiskManagementPersistence } from "./helpers/management-auth";
 
 const VALID_COMBO = { targets: [{ provider: "a", model: "m1" }] };
 
@@ -128,6 +129,7 @@ async function comboApi(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   return handleManagementAPI(req, new URL(req.url), config, {
+    ...isolatedDiskManagementPersistence(),
     createManagementConvergeCodex: catalogConvergenceFactory(refreshCodexCatalog),
   });
 }
@@ -139,6 +141,7 @@ async function comboApiRaw(config: OcxConfig, method: string, path: string, body
     body,
   });
   return handleManagementAPI(req, new URL(req.url), config, {
+    ...isolatedDiskManagementPersistence(),
     createManagementConvergeCodex: catalogConvergenceFactory(),
   });
 }

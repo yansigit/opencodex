@@ -17,7 +17,7 @@
  * Design of record: devlog/_fin/260803_integrations_toggle_all/030 (routes),
  * 011 (Claude Code), 012 (Grok).
  */
-import { loadConfig, saveConfigPreservingClaudeCode } from "../../config";
+import { loadConfig } from "../../config";
 import { readRuntimePort } from "../../config/process-state";
 import { desktopVisibleNativeSlugs, filterCatalogVisibleModels, nativeContextLimits, nativeOpenAiContextWindow, visibleNativeSlugs } from "../../codex/catalog";
 import { providerContextCap } from "../../providers/context-cap";
@@ -31,7 +31,7 @@ import type { CodexNativeRestoreResult } from "../../codex/inject";
 import type { OcxConfig } from "../../types";
 import { jsonResponse } from "../auth-cors";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
-import type { ManagementContext } from "./context";
+import { ManagementPersistenceError, saveManagementConfig, type ManagementContext } from "./context";
 
 export type NativeIntegrationClientId = "claude" | "grok" | "codex" | "claude-desktop";
 
@@ -221,9 +221,10 @@ function grokStatus(config: ManagementContext["config"]): NativeStatus {
  * cannot open, which fails identically forever (audit r8 #2).
  */
 function isLockContention(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  const cause = (error as { cause?: { code?: unknown } }).cause;
-  return cause?.code === "SQLITE_BUSY";
+  for (let current = error; current && typeof current === "object"; current = (current as { cause?: unknown }).cause) {
+    if ((current as { code?: unknown }).code === "SQLITE_BUSY") return true;
+  }
+  return false;
 }
 
 function isConfigLockError(error: unknown): boolean {
@@ -732,10 +733,20 @@ export async function handleNativeIntegrationRoutes(ctx: ManagementContext): Pro
      * `deps.` first: ManagementApiDeps carries this seam so route tests with an
      * in-memory fixture cannot overwrite the developer's real OPENCODEX_HOME.
      */
-    const persist = deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode;
+    const persist = (candidate: OcxConfig) => saveManagementConfig(deps, candidate);
     try {
       persist(config);
     } catch (error) {
+      if (error instanceof ManagementPersistenceError) {
+        if (isConfigLockError(error)) {
+          error.response = isLockContention(error)
+            ? refusal(409, "claude", "config_busy",
+                "Another process is saving the configuration right now. Try again in a moment.")
+            : refusal(500, "claude", "write_failed",
+                `The configuration lock could not be acquired: ${error.message}`);
+        }
+        throw error;
+      }
       if (isConfigLockError(error)) {
         return isLockContention(error)
           ? refusal(409, "claude", "config_busy",
