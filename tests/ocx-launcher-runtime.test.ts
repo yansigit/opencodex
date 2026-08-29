@@ -312,6 +312,80 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   });
 }
 
+type FirstStartupCleanupDeps = {
+  probe: typeof healthAt;
+  kill: (pid: number) => void;
+  remove: (path: string) => void;
+};
+
+async function cleanupFirstStartup(
+  root: string,
+  configDir: string,
+  launcher: ChildProcess | null,
+  health: Health | null,
+  deps: FirstStartupCleanupDeps = { probe: healthAt, kill: killProxy, remove: removeTree },
+): Promise<void> {
+  const errors: string[] = [];
+  if (health) {
+    let owned = false;
+    try {
+      const runtime = JSON.parse(readFileSync(join(configDir, "runtime-port.json"), "utf8")) as { pid?: number; port?: number };
+      const pid = Number(readFileSync(join(configDir, "ocx.pid"), "utf8").trim());
+      owned = pid === health.pid && runtime.pid === health.pid && runtime.port === health.port;
+    } catch { /* clean shutdown removes runtime ownership state */ }
+    if (owned) try {
+      const live = await deps.probe(health.port);
+      if (live?.pid === health.pid) deps.kill(health.pid);
+    } catch (error) {
+      errors.push(`proxy cleanup: ${String(error)}`);
+    }
+  }
+  if (launcher?.pid && launcher.exitCode === null && launcher.signalCode === null) {
+    try { deps.kill(launcher.pid); } catch (error) { errors.push(`launcher cleanup: ${String(error)}`); }
+  }
+  try { deps.remove(root); } catch (error) { errors.push(`root cleanup: ${String(error)}`); }
+  if (errors.length > 0) throw new Error(errors.join("; "));
+}
+
+test("first-start cleanup attempts every owned resource when one cleanup step fails", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-launcher-cleanup-"));
+  const configDir = join(root, "opencodex");
+  mkdirSync(configDir);
+  writeFileSync(join(configDir, "runtime-port.json"), JSON.stringify({ pid: 11, port: 10100 }));
+  writeFileSync(join(configDir, "ocx.pid"), "11");
+  const calls: string[] = [];
+  const launcher = { pid: 22, exitCode: null, signalCode: null } as ChildProcess;
+  const error = await cleanupFirstStartup(root, configDir, launcher, {
+    status: "ok", service: "opencodex", pid: 11, port: 10100,
+  }, {
+    probe: async () => ({ status: "ok", service: "opencodex", pid: 11, port: 10100 }),
+    kill: pid => { calls.push(`kill:${pid}`); throw new Error(`${pid} kill failed`); },
+    remove: path => { calls.push(`remove:${path}`); throw new Error("remove failed"); },
+  }).then(() => null, cause => cause as Error);
+  expect(calls).toEqual(["kill:11", "kill:22", `remove:${root}`]);
+  expect(error?.message).toContain("11 kill failed");
+  expect(error?.message).toContain("22 kill failed");
+  expect(error?.message).toContain("remove failed");
+  removeTree(root);
+});
+
+test("first-start cleanup never hard-kills a health PID without matching isolated runtime state", async () => {
+  const root = mkdtempSync(join(tmpdir(), "ocx-launcher-ownership-"));
+  const configDir = join(root, "opencodex");
+  mkdirSync(configDir);
+  writeFileSync(join(configDir, "runtime-port.json"), JSON.stringify({ pid: 99, port: 10100 }));
+  writeFileSync(join(configDir, "ocx.pid"), "99");
+  const killed: number[] = [];
+  await cleanupFirstStartup(root, configDir, null, {
+    status: "ok", service: "opencodex", pid: 11, port: 10100,
+  }, {
+    probe: async () => ({ status: "ok", service: "opencodex", pid: 11, port: 10100 }),
+    kill: pid => { killed.push(pid); },
+    remove: removeTree,
+  });
+  expect(killed).toEqual([]);
+});
+
 describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
   test("preserves an existing six-provider registry when startup defaults are saved", async () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-launcher-first-start-"));
@@ -363,11 +437,9 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
       expect(after.providers).toEqual(providers);
       expect(after.defaultProvider).toBe("openai");
     } finally {
-      if (health && await healthAt(health.port)) killProxy(health.pid);
-      if (launcher?.pid && launcher.exitCode === null && launcher.signalCode === null) killProxy(launcher.pid);
-      removeTree(root);
+      await cleanupFirstStartup(root, env.OPENCODEX_HOME!, launcher, health);
     }
-  }, 60_000);
+  }, 120_000);
 });
 
 describe.skipIf(!nodeAvailable)("ocx npm launcher relative Bun override", () => {

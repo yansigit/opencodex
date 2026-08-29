@@ -12,9 +12,12 @@ import {
   isImportDeclaration,
   isNamedImports,
   isNamespaceImport,
+  isNoSubstitutionTemplateLiteral,
+  isObjectBindingPattern,
   isParenthesizedExpression,
   isPropertyAccessExpression,
   isStringLiteral,
+  isVariableDeclaration,
   SyntaxKind,
   type Expression,
   type Node,
@@ -39,7 +42,8 @@ function fullReplacementReferences(source: SourceFile): number[] {
   const isConfigModule = (node: Node): boolean => isStringLiteral(node)
     && resolve(dirname(source.fileName), node.text).replace(/\.ts$/, "") === join(SRC, "config");
   const staticString = (node: Expression): string | undefined => {
-    if (isStringLiteral(node)) return node.text;
+    while (isParenthesizedExpression(node)) node = node.expression;
+    if (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node)) return node.text;
     if (isBinaryExpression(node) && node.operatorToken.kind === SyntaxKind.PlusToken) {
       const left = staticString(node.left);
       const right = staticString(node.right);
@@ -64,6 +68,18 @@ function fullReplacementReferences(source: SourceFile): number[] {
       if (bindings && isNamedImports(bindings) && bindings.elements.some(
         item => (item.propertyName ?? item.name).text === "replacePersistedConfig",
       )) hits.push(node.getStart(source));
+    }
+    if (isVariableDeclaration(node) && node.initializer && isConfigNamespace(node.initializer)) {
+      if (isIdentifier(node.name)) namespaces.add(node.name.text);
+      if (isObjectBindingPattern(node.name) && node.name.elements.some(element => {
+        const imported = element.propertyName ?? element.name;
+        return (isIdentifier(imported) || isStringLiteral(imported))
+          && imported.text === "replacePersistedConfig";
+      })) hits.push(node.getStart(source));
+    }
+    if (isBinaryExpression(node) && node.operatorToken.kind === SyntaxKind.EqualsToken
+      && isIdentifier(node.left) && isConfigNamespace(node.right)) {
+      namespaces.add(node.left.text);
     }
     node.forEachChild(collectNamespaces);
   };
@@ -156,6 +172,11 @@ test("full config replacement is limited to explicit import and init", async () 
     `config["replacePersistedConfig"](value);`,
     `config["replace" + "PersistedConfig"](value);`,
     `(await import(${JSON.stringify(configModule)})).replacePersistedConfig(value);`,
+    `const loaded = (await import(${JSON.stringify(configModule)})); loaded.replacePersistedConfig(value);`,
+    `let assigned; assigned = (await import(${JSON.stringify(configModule)})); assigned.replacePersistedConfig(value);`,
+    `const { replacePersistedConfig: destructured } = await import(${JSON.stringify(configModule)}); destructured(value);`,
+    "config[`replacePersistedConfig`](value);",
+    `config[("replace" + "PersistedConfig")](value);`,
   ].join("\n"));
   const api = new API({ cwd: join(SRC, "..") });
   try {
@@ -166,7 +187,7 @@ test("full config replacement is limited to explicit import and init", async () 
     try {
       const fixtureProject = await snapshot.getDefaultProjectForFile(fixture);
       const fixtureSource = await fixtureProject?.program.getSourceFile(fixture);
-      expect(fixtureSource && fullReplacementReferences(fixtureSource)).toHaveLength(5);
+      expect(fixtureSource && fullReplacementReferences(fixtureSource)).toHaveLength(10);
 
       const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
       if (!project) throw new Error("TypeScript did not load the repository project");
