@@ -107,9 +107,9 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(entrypoint).toContain('const workspace = "/tmp/ocx-test-workspace"');
   expect(entrypoint).toContain('["cp", "-a", "/app/.", workspace]');
   expect(entrypoint).toContain('["chmod", "-R", "u+rwX", workspace]');
-  expect(entrypoint).toContain('await run(workspace, ["run", "test"])');
-  expect(entrypoint).toContain('await run(`${workspace}/integrations/replit-gateway`, ["run", "test"])');
-  expect(entrypoint).toContain("[\"run\", \"test\"]");
+  expect(entrypoint).toContain('await run(workspace, ["run", "test", "--timeout", "60000"])');
+  expect(entrypoint).toContain('await run(`${workspace}/integrations/replit-gateway`, ["run", "test", "--timeout", "60000"])');
+  expect(entrypoint).toContain("[\"run\", \"test\", \"--timeout\", \"60000\"]");
   expect(entrypoint.indexOf('writeFileSync("/app/.ocx-write-test"')).toBeLessThan(entrypoint.indexOf('const workspace = "/tmp/ocx-test-workspace"'));
   expect(entrypoint).not.toContain('await run("/app", ["run", "test"])');
   expect(entrypoint).not.toContain('await run("/app/integrations/replit-gateway", ["run", "test"])');

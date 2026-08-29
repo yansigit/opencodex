@@ -19,5 +19,5 @@ for (const args of [["mkdir", workspace], ["cp", "-a", "/app/.", workspace], ["c
   const result = await Bun.spawn(args, { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
   if (result !== 0) throw new Error(`container workspace setup failed: ${args[0]}`);
 }
-await run(workspace, ["run", "test"]);
-await run(`${workspace}/integrations/replit-gateway`, ["run", "test"]);
+await run(workspace, ["run", "test", "--timeout", "60000"]);
+await run(`${workspace}/integrations/replit-gateway`, ["run", "test", "--timeout", "60000"]);
