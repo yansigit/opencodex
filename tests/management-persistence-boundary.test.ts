@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, mutatePersistedConfig } from "../src/config";
-import { handleManagementAPI } from "../src/server/management-api";
+import { handleManagementAPI, type ManagementApiDeps } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
 import { ManagementRequest as Request } from "./helpers/management-auth";
 
@@ -281,6 +281,45 @@ test("V2 scalar failure rolls back its committed config fields", async () => {
     expect(response?.status).toBe(502);
     expect(disk.v2RoutedDelegationBridge).toBeUndefined();
     expect(config.v2RoutedDelegationBridge).toBeUndefined();
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("V2 retains config when a later scalar fails after external changes landed", async () => {
+  const previousCodexHome = process.env.CODEX_HOME;
+  const codexHome = mkdtempSync(join(tmpdir(), "ocx-v2-partial-success-"));
+  const codexConfig = join(codexHome, "config.toml");
+  writeFileSync(codexConfig, "[features.multi_agent_v2]\nenabled = false\n");
+  process.env.CODEX_HOME = codexHome;
+  const config = structuredClone(historicalFixture);
+  let disk = structuredClone(config);
+  try {
+    const url = new URL("http://localhost/api/v2");
+    const response = await handleManagementAPI(new Request(url, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true, agentsEnabled: true, agentsMaxDepth: 3, v2RoutedDelegationBridge: true }),
+    }), url, config, {
+      toggleCodexMultiAgentV2: enabled => writeFileSync(codexConfig, `[features.multi_agent_v2]\nenabled = ${enabled}\n`),
+      mutatePersistedConfig: mutate => {
+        const candidate = structuredClone(disk);
+        const result = mutate(candidate);
+        disk = candidate;
+        return { status: result.changed ? "committed" : "unchanged", value: result.value };
+      },
+      v2ScalarWriters: {
+        setAgentsEnabled: () => ({ ok: true, changed: true }),
+        setAgentsMaxDepth: () => ({ ok: false, error: "later scalar refused" }),
+      },
+    } as unknown as ManagementApiDeps);
+    expect(response?.status).toBe(502);
+    const text = await response?.text();
+    expect(text).toContain("config retained because earlier external side effects were applied: multi_agent_v2, agentsEnabled");
+    expect(disk.v2RoutedDelegationBridge).toBe(true);
+    expect(config.v2RoutedDelegationBridge).toBe(true);
   } finally {
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;

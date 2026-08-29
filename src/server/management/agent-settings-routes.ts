@@ -647,6 +647,10 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const failure = rollbackV2Config?.();
       return failure ? `${message}; config rollback failed: ${failure}` : message;
     };
+    const externalChanged: string[] = [];
+    const scalarFailureDiagnostic = (message: string): string => externalChanged.length > 0
+      ? `${message}; config retained because earlier external side effects were applied: ${externalChanged.join(", ")}`
+      : rollbackDiagnostic(message);
     const requestedFlag = wantsFlag
       ? body.enabled as boolean
       : modeFlag ?? (wantsKeepNative && hybridPinActive ? false : undefined);
@@ -661,6 +665,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         ...(wantsThreads ? { threadLimit: body.maxConcurrentThreadsPerSession as number } : {}),
       });
       if (!result.ok) return jsonResponse({ error: rollbackDiagnostic(`multi_agent_v2 transition failed: ${result.error}`) }, 502);
+      if (result.changed) externalChanged.push("multi_agent_v2");
       if (result.changed && result.threadLimit !== null) warnings.push(`Thread limit ${result.threadLimit} preserved for ${targetFlag ? "v2" : "v1"}.`);
     }
     if (wantsMode) {
@@ -682,21 +687,22 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     // asserts this route file contains no direct write primitive, and matches on the
     // symbol name even inside a comment.
     const scalarWrites: Array<{ field: string; run: () => { ok: true; changed: boolean } | { ok: false; error: string } }> = [];
-    if (wantsAgentsEnabled) scalarWrites.push({ field: "agentsEnabled", run: () => setAgentsEnabled(body.agentsEnabled as boolean | null) });
-    if (wantsMaxDepth) scalarWrites.push({ field: "agentsMaxDepth", run: () => setAgentsMaxDepth(body.agentsMaxDepth as number | null) });
-    if (wantsSubagentInstructions) scalarWrites.push({ field: "subagentDeveloperInstructions", run: () => setSubagentDeveloperInstructions(body.subagentDeveloperInstructions as string | null) });
-    if (wantsModeHintText) scalarWrites.push({ field: "multiAgentModeHintText", run: () => setMultiAgentModeHintText(body.multiAgentModeHintText as string | null) });
+    if (wantsAgentsEnabled) scalarWrites.push({ field: "agentsEnabled", run: () => (deps.v2ScalarWriters?.setAgentsEnabled ?? setAgentsEnabled)(body.agentsEnabled as boolean | null) });
+    if (wantsMaxDepth) scalarWrites.push({ field: "agentsMaxDepth", run: () => (deps.v2ScalarWriters?.setAgentsMaxDepth ?? setAgentsMaxDepth)(body.agentsMaxDepth as number | null) });
+    if (wantsSubagentInstructions) scalarWrites.push({ field: "subagentDeveloperInstructions", run: () => (deps.v2ScalarWriters?.setSubagentDeveloperInstructions ?? setSubagentDeveloperInstructions)(body.subagentDeveloperInstructions as string | null) });
+    if (wantsModeHintText) scalarWrites.push({ field: "multiAgentModeHintText", run: () => (deps.v2ScalarWriters?.setMultiAgentModeHintText ?? setMultiAgentModeHintText)(body.multiAgentModeHintText as string | null) });
     const landed: string[] = [];
     for (const write of scalarWrites) {
       try {
         const result = write.run();
         if (!result.ok) {
-          return jsonResponse({ error: rollbackDiagnostic(`writing ${write.field} failed: ${result.error}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}`) }, 502);
+          return jsonResponse({ error: scalarFailureDiagnostic(`writing ${write.field} failed: ${result.error}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}`) }, 502);
         }
         landed.push(write.field);
+        if (result.changed) externalChanged.push(write.field);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return jsonResponse({ error: rollbackDiagnostic(`writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}`) }, 502);
+        return jsonResponse({ error: scalarFailureDiagnostic(`writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}`) }, 502);
       }
     }
     // Derived from fresh post-write readers (readConfigText is uncached): upstream

@@ -20,6 +20,13 @@ export interface ManagementApiDeps {
   /** Platform seam for capability projections; does not alter host-level startup behavior. */
   platform?: NodeJS.Platform;
   toggleCodexMultiAgentV2?: (enabled: boolean) => void;
+  /** Test seam for ordered V2 scalar side effects. */
+  v2ScalarWriters?: Partial<{
+    setAgentsEnabled: (value: boolean | null) => { ok: true; changed: boolean } | { ok: false; error: string };
+    setAgentsMaxDepth: (value: number | null) => { ok: true; changed: boolean } | { ok: false; error: string };
+    setSubagentDeveloperInstructions: (value: string | null) => { ok: true; changed: boolean } | { ok: false; error: string };
+    setMultiAgentModeHintText: (value: string | null) => { ok: true; changed: boolean } | { ok: false; error: string };
+  }>;
   toggleDefaultModeRequestUserInput?: (enabled: boolean) => void;
   createManagementConvergeCodex?: (config: Readonly<OcxConfig>) => ConvergeCodex;
   /** Startup-health seam keeps route tests from launching platform probes. */
