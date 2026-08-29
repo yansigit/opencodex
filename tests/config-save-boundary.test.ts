@@ -5,10 +5,12 @@ import { dirname, join, resolve } from "node:path";
 import { API } from "typescript/unstable/async";
 import {
   isAwaitExpression,
+  isArrowFunction,
   isBinaryExpression,
   isCallExpression,
   isElementAccessExpression,
   isExportDeclaration,
+  isFunctionExpression,
   isIdentifier,
   isImportDeclaration,
   isNamedImports,
@@ -42,8 +44,13 @@ const SRC = join(import.meta.dir, "..", "src");
 function moduleSymbolReferences(source: SourceFile, modulePath: string, symbol: string): number[] {
   const namespaces = new Set<string>();
   const hits: number[] = [];
-  const isTargetModule = (node: Node): boolean => isStringLiteral(node)
-    && resolve(dirname(source.fileName), node.text).replace(/\.ts$/, "") === modulePath;
+  const moduleText = (node: Node): string | undefined => (
+    isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node) ? node.text : undefined
+  );
+  const isTargetModule = (node: Node): boolean => {
+    const text = moduleText(node);
+    return text !== undefined && resolve(dirname(source.fileName), text).replace(/\.ts$/, "") === modulePath;
+  };
   const staticString = (node: Expression): string | undefined => {
     while (isParenthesizedExpression(node)) node = node.expression;
     if (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node)) return node.text;
@@ -90,6 +97,18 @@ function moduleSymbolReferences(source: SourceFile, modulePath: string, symbol: 
       && isIdentifier(node.left) && isConfigNamespace(node.right)) {
       namespaces.add(node.left.text);
     }
+    if (isCallExpression(node) && isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "then" && isConfigNamespace(node.expression.expression)) {
+      const callback = node.arguments[0];
+      if (callback && (isArrowFunction(callback) || isFunctionExpression(callback))) {
+        const parameter = callback.parameters[0]?.name;
+        if (parameter && isIdentifier(parameter)) namespaces.add(parameter.text);
+        if (parameter && isObjectBindingPattern(parameter) && parameter.elements.some(element => {
+          const imported = element.propertyName ?? element.name;
+          return (isIdentifier(imported) || isStringLiteral(imported)) && imported.text === symbol;
+        })) hits.push(node.getStart(source));
+      }
+    }
     node.forEachChild(collectNamespaces);
   };
   const collectAccesses = (node: Node): void => {
@@ -113,7 +132,7 @@ function configReplacementReferences(source: SourceFile, symbol: string): number
 function localRuntimeImports(source: SourceFile): string[] {
   const imports = new Set<string>();
   const add = (node: Node): void => {
-    if (!isStringLiteral(node) || !node.text.startsWith(".")) return;
+    if ((!isStringLiteral(node) && !isNoSubstitutionTemplateLiteral(node)) || !node.text.startsWith(".")) return;
     const base = resolve(dirname(source.fileName), node.text);
     for (const candidate of [`${base}.ts`, join(base, "index.ts")]) {
       if (candidate.startsWith(`${SRC}/`) && existsSync(candidate)) imports.add(candidate);
@@ -206,6 +225,8 @@ test("full config replacement is limited to explicit import and init", async () 
     `const loaded = (await import(${JSON.stringify(configModule)})); loaded.replacePersistedConfig(value);`,
     `let assigned; assigned = (await import(${JSON.stringify(configModule)})); assigned.replacePersistedConfig(value);`,
     `const { replacePersistedConfig: destructured } = await import(${JSON.stringify(configModule)}); destructured(value);`,
+    `import(\`${configModule}\`).then(({ replacePersistedConfig }) => replacePersistedConfig(value));`,
+    `const promised = import(${JSON.stringify(configModule)}); promised.then(config => config.replacePersistedConfig(value));`,
     "config[`replacePersistedConfig`](value);",
     `config[("replace" + "PersistedConfig")](value);`,
     `(await import(${JSON.stringify(configModule)})).initializePersistedConfigIfMissing(value);`,
@@ -225,7 +246,7 @@ test("full config replacement is limited to explicit import and init", async () 
     try {
       const fixtureProject = await snapshot.getDefaultProjectForFile(fixture);
       const fixtureSource = await fixtureProject?.program.getSourceFile(fixture);
-      expect(fixtureSource && configReplacementReferences(fixtureSource, "replacePersistedConfig")).toHaveLength(14);
+      expect(fixtureSource && configReplacementReferences(fixtureSource, "replacePersistedConfig")).toHaveLength(16);
       expect(fixtureSource && configReplacementReferences(fixtureSource, "initializePersistedConfigIfMissing")).toHaveLength(5);
 
       const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
