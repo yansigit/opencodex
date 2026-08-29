@@ -139,8 +139,25 @@ async function runLoud(command: string[], env?: Record<string, string>): Promise
  * backslash path. Escape the characters that stay special inside double quotes so a path can never
  * introduce a second word or a substitution.
  */
-function quoteSshArgument(value: string): string {
+export function quoteSshArgument(value: string): string {
   return `"${value.replace(/(["\\`$])/g, "\\$1")}"`;
+}
+
+export interface ReleasePolicy {
+  tag?: string;
+  error?: string;
+}
+
+export function releasePolicy(version: string, branch: string, requestedTag?: string): ReleasePolicy {
+  const allowedBranches = ["main", "preview", "dev"];
+  if (!allowedBranches.includes(branch)) return { error: `✗ must be on ${allowedBranches.join(", ")} (currently ${branch}).` };
+  const expectedTag = branch === "preview" ? "preview" : branch === "dev" ? "dev" : "latest";
+  const tag = requestedTag ?? expectedTag;
+  if (tag !== expectedTag) return { error: `Release tag mismatch: ${branch} releases must use npm dist-tag '${expectedTag}' (got '${tag}').` };
+  if (branch === "preview" && !version.includes("-preview.")) return { error: `Preview releases must use a preview prerelease version (got ${version}).` };
+  if (branch === "dev" && !version.includes("-dev.")) return { error: `Dev releases must use a dev prerelease version (got ${version}).` };
+  if (branch === "main" && version.includes("-")) return { error: `Main releases must use a stable semver version (got ${version}).` };
+  return { tag };
 }
 
 /**
@@ -160,10 +177,7 @@ export function sshTargetFromOrigin(originUrl: string): string | undefined {
   // log. The host capture below therefore excludes '@' as well as '/'.
   const https = /^https?:\/\/([^/@]+)\/(.+?)(?:\.git)?\/?$/.exec(trimmed);
   if (https) return `${SSH_USER}@${https[1]}:${https[2]}.git`;
-  if (/^https?:\/\//.test(trimmed)) {
-    console.error("✗ origin carries credentials in its URL; refusing to build a release push target from it.");
-    process.exit(1);
-  }
+  if (/^https?:\/\//.test(trimmed)) return undefined;
   // Already an SSH remote (either scp-like or ssh://): reuse it verbatim.
   if (isSshRemote(trimmed)) return trimmed;
   return undefined;
@@ -218,31 +232,40 @@ export function isSshRemote(value: string): boolean {
 /** Split out so the scp-like SSH target is assembled rather than written as an address literal. */
 const SSH_USER = "git";
 
-async function releasePushCommand(branch: string): Promise<{ command: string[]; env?: Record<string, string> }> {
-  const keyPath = process.env.OCX_RELEASE_SSH_KEY?.trim();
-  if (!keyPath) return { command: ["git", "push", "origin", branch] };
-  const configured = process.env.OCX_RELEASE_SSH_REPO?.trim();
+export function sshPushCommand(branch: string, keyPath: string | undefined, configured: string | undefined, origin: string | undefined): { command: string[]; env?: Record<string, string>; error?: string } {
+  const key = keyPath?.trim();
+  if (!key) return { command: ["git", "push", "origin", branch] };
+  const target = configured?.trim();
   // An unvalidated override outranking origin means a stale exported value from a fork session can
   // silently retarget a production release. Check the shape, and print the resolved target either
   // way so the destination is visible before the push rather than inferred afterwards.
-  if (configured && !isSshRemote(configured)) {
-    console.error("✗ OCX_RELEASE_SSH_REPO is not a credential-free ssh:// or git@host:owner/repo remote; refusing to push.");
-    process.exit(1);
-  }
-  const slug = configured || sshTargetFromOrigin(await capture(["git", "remote", "get-url", "origin"]));
-  if (!slug) {
-    console.error("✗ OCX_RELEASE_SSH_KEY is set but no SSH push target could be derived from origin; set OCX_RELEASE_SSH_REPO.");
-    process.exit(1);
-  }
-  console.log(`→ release push target: ${slug}`);
+  if (target && !isSshRemote(target)) return { command: [], error: "✗ OCX_RELEASE_SSH_REPO is not a credential-free ssh:// or git@host:owner/repo remote; refusing to push." };
+  const slug = target || sshTargetFromOrigin(origin ?? "");
+  if (!slug) return { command: [], error: /^https?:\/\/[^/]*@/.test(origin?.trim() ?? "")
+    ? "✗ origin carries credentials in its URL; refusing to build a release push target from it."
+    : "✗ OCX_RELEASE_SSH_KEY is set but no SSH push target could be derived from origin; set OCX_RELEASE_SSH_REPO." };
   return {
     // Push to the SSH URL explicitly rather than rewriting the `origin` remote: the remote stays
     // HTTPS for every other command, so nothing outside this call inherits the key.
     command: ["git", "push", slug, `HEAD:${branch}`],
     // IdentitiesOnly stops ssh from offering the agent's other keys first, which would authenticate
     // as the maintainer and get rejected by the ruleset again.
-    env: { GIT_SSH_COMMAND: `ssh -i ${quoteSshArgument(keyPath)} -o IdentitiesOnly=yes` },
+    env: { GIT_SSH_COMMAND: `ssh -i ${quoteSshArgument(key)} -o IdentitiesOnly=yes` },
   };
+}
+
+async function releasePushCommand(branch: string): Promise<{ command: string[]; env?: Record<string, string> }> {
+  const keyPath = process.env.OCX_RELEASE_SSH_KEY;
+  const configured = process.env.OCX_RELEASE_SSH_REPO;
+  const origin = keyPath ? await capture(["git", "remote", "get-url", "origin"]) : undefined;
+  const result = sshPushCommand(branch, keyPath, configured, origin);
+  if (result.error) { console.error(result.error); process.exit(1); }
+  if (result.command[2] && result.command[2] !== "origin") console.log(`→ release push target: ${result.command[2]}`);
+  return result;
+}
+
+export function remoteHeadMatches(localSha: string, remoteSha: string): boolean {
+  return localSha === remoteSha;
 }
 
 async function readPackageName(): Promise<string> {
@@ -494,26 +517,9 @@ const dryRun = !args.includes("--publish");
 
 // 1. Preflight — must be on main, preview, or dev, and local verification must pass.
 const branch = await capture(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
-const allowedBranches = ["main", "preview", "dev"];
-const expectedTag = branch === "preview" ? "preview" : branch === "dev" ? "dev" : "latest";
-const tag = args.includes("--tag") ? (args[args.indexOf("--tag") + 1] ?? expectedTag) : expectedTag;
-if (tag !== expectedTag) {
-  console.error(`Release tag mismatch: ${branch} releases must use npm dist-tag '${expectedTag}' (got '${tag}').`);
-  process.exit(1);
-}
-if (branch === "preview" && !version.includes("-preview.")) {
-  console.error(`Preview releases must use a preview prerelease version (got ${version}).`);
-  process.exit(1);
-}
-if (branch === "dev" && !version.includes("-dev.")) {
-  console.error(`Dev releases must use a dev prerelease version (got ${version}).`);
-  process.exit(1);
-}
-if (branch === "main" && version.includes("-")) {
-  console.error(`Main releases must use a stable semver version (got ${version}).`);
-  process.exit(1);
-}
-if (!allowedBranches.includes(branch)) { console.error(`✗ must be on ${allowedBranches.join(", ")} (currently ${branch}).`); process.exit(1); }
+const policy = releasePolicy(version, branch, args.includes("--tag") ? (args[args.indexOf("--tag") + 1] ?? undefined) : undefined);
+if (policy.error) { console.error(policy.error); process.exit(1); }
+const tag = policy.tag as string;
 if ((await capture(["git", "status", "--porcelain"])).trim()) { console.error("✗ working tree not clean — commit or stash first."); process.exit(1); }
 const packageName = await readPackageName();
 console.log(`→ release metadata preflight (${packageName}@${version})`);
@@ -610,7 +616,7 @@ await waitForSuccessfulCi(releaseSha, SERVICE_WORKFLOW, "Service lifecycle");
 // workflow_dispatch below resolves a mutable branch — so this is the last chance
 // to refuse publishing an unaudited newer commit.
 const liveOriginSha = await remoteBranchHead(branch);
-if (liveOriginSha !== releaseSha) {
+if (!remoteHeadMatches(releaseSha, liveOriginSha)) {
   console.error(`✗ origin/${branch} moved while waiting for CI (${liveOriginSha} != ${releaseSha}); aborting release dispatch.`);
   process.exit(1);
 }
