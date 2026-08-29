@@ -255,6 +255,8 @@ allowed to answer for you:
 
 The GUI is a thin client over the proxy's JSON management API. Useful endpoints include:
 
+![Server listener settings in the dashboard](/screenshots/server-listener-settings.jpg)
+
 | Endpoint | Purpose |
 | --- | --- |
 | `GET` / `PUT /api/settings` | Read or update Codex autostart, stream/memory settings, account-targeting picker visibility, and the dashboard's server listener settings. Listener and certificate changes require a proxy restart. |

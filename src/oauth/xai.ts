@@ -97,7 +97,7 @@ export class XaiTokenRequestError extends Error { constructor(public readonly st
 export interface XaiTokenRetryDeps { sleep?:(ms:number)=>Promise<void>; random?:()=>number }
 function isAbortError(error:unknown):boolean{return error instanceof DOMException&&error.name==="AbortError";}
 function retryDelay(attempt:number,retryAfter:string|null,random:()=>number):number{const base=attempt===1?100:250,j=Math.round(base*(.75+random()*.5)),seconds=retryAfter!==null&&/^\d+$/.test(retryAfter)?Number(retryAfter):0;return Math.min(2000,Math.max(j,seconds*1000));}
-async function readTokenError(response:Response):Promise<XaiTokenRequestError>{let oauthError:string|undefined;try{const body=await response.json() as {error?:unknown};if(typeof body.error==="string"&&/^(?:access_denied|expired_token|invalid_client|invalid_grant|invalid_request|temporarily_unavailable|unauthorized_client|unsupported_grant_type)$/.test(body.error))oauthError=body.error;}catch{}return new XaiTokenRequestError(response.status,oauthError,`xAI token request failed: ${response.status}`);}
+async function readTokenError(response:Response):Promise<XaiTokenRequestError>{let oauthError:string|undefined;try{const body=await response.json() as {error?:unknown};if(typeof body.error==="string"&&/^(?:access_denied|expired_token|invalid_client|invalid_grant|invalid_request|temporarily_unavailable|unauthorized_client|unsupported_grant_type)$/.test(body.error))oauthError=body.error;}catch{oauthError=undefined;}return new XaiTokenRequestError(response.status,oauthError,`xAI token request failed: ${response.status}`);}
 export async function postXaiToken(
   tokenEndpoint: string,
   body: Record<string, string>,
