@@ -176,6 +176,7 @@ Required merge checks are `ci`, `hygiene`, `enforce-target`, and `mergeable` fro
 bun install
 bun run typecheck      # bun x tsc --noEmit (strict)
 bun run test           # full tests/ suite
+bun run test:container # macOS with Apple Container: isolated container suite
 bun scripts/test.ts --shard=1/4  # supported isolated manual shard
 bun run lint:gui       # GUI eslint
 bun run privacy:scan   # credential/privacy scan used by CI
@@ -203,7 +204,10 @@ the user explicitly asks for full validation.
 
 Before creating or updating a non-trivial PR as review-ready, or before
 approving such a PR, run `bun run typecheck` and `bun run test`. CI runs these
-on Linux, Windows, and macOS.
+on Linux, Windows, and macOS. On a Mac with Apple Container available, also run
+`bun run test:container` as a non-trivial pre-PR gate. Start the service with
+`container system start` first if needed. Ordinary `bun run prepush` remains
+host-native and does not include this suite; it is not a GitHub-hosted CI job.
 
 Do not rerun passing checks on unchanged code merely for additional confidence.
 

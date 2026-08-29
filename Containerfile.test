@@ -1,0 +1,20 @@
+FROM oven/bun:1.4.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends git procps net-tools ca-certificates && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY gui/package.json gui/bun.lock ./gui/
+RUN cd gui && bun install --frozen-lockfile
+COPY integrations/replit-gateway/package.json integrations/replit-gateway/bun.lock ./integrations/replit-gateway/
+RUN cd integrations/replit-gateway && bun install --frozen-lockfile
+
+COPY . .
+RUN cd gui && bun run build
+RUN rm -rf .git && git init -q && git add -A && test -z "$(git remote)"
+RUN addgroup --system ocx && adduser --system --ingroup ocx --home /home/ocx ocx && chown -R ocx:ocx /app && chmod -R a-w /app
+
+ENV OCX_REPLIT_GATEWAY_DEPS_PREINSTALLED=1
+USER ocx
