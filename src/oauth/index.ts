@@ -1201,7 +1201,9 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
       // Keep routing and listProviderApiKeys in sync: never leave a hidden active key that
       // is absent from the pool (listing would fall back to pool[0] as "active").
       if (!pool.some(entry => entry.key === storedApiKey)) {
-        pool.push({ id: apiKeyPoolEntryId(storedApiKey), key: storedApiKey });
+        const id = apiKeyPoolEntryId(storedApiKey);
+        if (pool.some(entry => entry.id === id)) throw new Error("API-key pool ID collision");
+        pool.push({ id, key: storedApiKey });
       }
       next.apiKey = storedApiKey;
       next.apiKeyPool = pool;

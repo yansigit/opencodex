@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveConfig } from "../src/config";
+import { getConfigPath, mutatePersistedConfig, saveConfig } from "../src/config";
 import { OAUTH_PROVIDERS, upsertOAuthProvider } from "../src/oauth";
 import {
   apiKeyPoolEntryId,
@@ -268,6 +268,43 @@ describe("upsertOAuthProvider credential preservation", () => {
       expect(config.providers.xai!.apiKey).toBe("pool-visible-key");
       expect(config.providers.xai!.apiKeyPool).toEqual([{ id: "pool-visible", key: "pool-visible-key" }]);
       expect(listProviderApiKeys(config, "xai").activeId).toBe("pool-visible");
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      rmSync(testHome, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects a derived key ID collision without changing live or persisted config", () => {
+    const activeKey = "routing-only-key";
+    const config = {
+      port: 10100,
+      defaultProvider: "xai",
+      providers: {
+        xai: {
+          adapter: "openai-chat",
+          baseUrl: "https://api.x.ai/v1",
+          authMode: "key",
+          apiKey: activeKey,
+          apiKeyPool: [{ id: apiKeyPoolEntryId(activeKey), key: "different-key" }],
+        },
+      },
+    } as OcxConfig;
+    const previousHome = process.env.OPENCODEX_HOME;
+    const testHome = mkdtempSync(join(tmpdir(), "ocx-oauth-upsert-collision-"));
+    process.env.OPENCODEX_HOME = testHome;
+    try {
+      const liveBefore = structuredClone(config);
+      expect(() => upsertOAuthProvider(config, "xai")).toThrow(/pool ID collision/);
+      expect(config).toEqual(liveBefore);
+
+      saveConfig(config);
+      const diskBefore = readFileSync(getConfigPath());
+      expect(() => mutatePersistedConfig(fresh => {
+        upsertOAuthProvider(fresh, "xai");
+        return { changed: true, value: undefined };
+      })).toThrow(/pool ID collision/);
+      expect(readFileSync(getConfigPath())).toEqual(diskBefore);
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
