@@ -57,11 +57,18 @@ the browser or password manager's decision.
 
 ### Linking to a section
 
-There is a single layout, so there is no layout switch to configure. Dashboard sections are
-addressable instead: `#dashboard` opens Overview, and `#dashboard/providers` and
+There is a single responsive layout, so there is no layout switch to configure. On desktop, the
+sidebar is the primary navigation; on narrow screens, use **Open menu** to reveal the same page
+links. Dashboard sections are addressable instead: `#dashboard` opens Overview, and `#dashboard/providers` and
 `#dashboard/models` open the other two. Reload, bookmark, and Back all keep the section you were
 on. **Logs** works the same way with `#logs` and `#logs/debug`. An older `#providers/workspace`
 bookmark now lands on `#providers`.
+
+Overview includes a **30-day activity** panel with request and token trends. Select a day on either
+sparkline to read its totals, or choose **View usage** for the full Usage page. If a refresh is
+interrupted after Overview has loaded, the last good data stays visible and a reconnecting notice
+offers **Retry**; a cold connection failure instead shows the `ocx start` guidance and the same
+retry action.
 
 Cost values in **Logs** and **Usage** are API list-price equivalents calculated from reported tokens.
 They are not billing receipts or evidence of an actual charge; subscription usage or provider credits

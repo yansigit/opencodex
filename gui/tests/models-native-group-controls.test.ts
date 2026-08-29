@@ -94,7 +94,7 @@ test("the native group exposes the context modal alongside the custom-model and 
   // contextWindow/modelContextWindows as user-owned overlays, and the native accessors only
   // ever narrow the measured window with them.
   expect(src).not.toContain("{!nativeProviderGroup && (");
-  expect(src).toContain('onClick={() => openContextSettings(group)}');
+  expect(src).toContain('onClick={event => openContextSettings(group, event.currentTarget)}');
   // Badge and hint follow provider identity, not row composition.
   expect(src).toContain("{nativeProviderGroup && <span");
   expect(src).toContain("{nativeProviderGroup && <p");
