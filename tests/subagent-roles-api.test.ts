@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
+import { inMemoryManagementPersistence } from "./helpers/management-auth";
 import { AGENT_ROLE_MARKER } from "../src/codex/agent-roles-sync";
 import type { OcxConfig, OcxSubagentRole } from "../src/types";
 import { ManagementRequest as Request } from "./helpers/management-auth";
@@ -56,7 +57,7 @@ async function put(config: OcxConfig, body: unknown): Promise<Response> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const res = await handleManagementAPI(req, new URL(req.url), config);
+  const res = await handleManagementAPI(req, new URL(req.url), config, inMemoryManagementPersistence(config));
   expect(res).not.toBeNull();
   return res!;
 }

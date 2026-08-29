@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig } from "../src/config";
+import { loadConfig, saveConfig } from "../src/config";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 
 async function getSidecarSettings(config: OcxConfig): Promise<Response> {
   const url = new URL("http://localhost/api/sidecar-settings");
@@ -24,8 +24,10 @@ async function putSidecarSettings(config: OcxConfig, webSearch: Record<string, u
     }),
     url,
     config,
+    inMemoryManagementPersistence(config),
   );
   if (!response) throw new Error("sidecar settings route did not handle PUT");
+  if (response.ok) saveConfig(config);
   return response;
 }
 

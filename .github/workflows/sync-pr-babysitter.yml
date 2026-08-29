@@ -21,60 +21,17 @@ jobs:
     if: github.repository == 'yansigit/opencodex'
     permissions:
       actions: write
-      contents: write
-      pull-requests: write
+      checks: read
+      contents: read
       issues: write
+      pull-requests: read
     steps:
       - name: Checkout dev
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: dev
-          fetch-depth: 0
-          persist-credentials: true
-      - name: Auto-rebase stale sync/upstream-* PRs onto origin/dev
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -eu
-          git config user.name "Yumi"
-          # Keep the temporary address out of repository privacy scan patterns.
-          git config user.email "automation""@""sbyoon.com"
-          echo "Listing open sync/upstream-* PRs..."
-          prs="$(gh api repos/"${GITHUB_REPOSITORY}"/pulls --paginate --jq '.[] | select(.head.ref | startswith("sync/upstream-")) | select(.state=="open") | "\(.number) \(.head.ref) \(.base.ref)"')"
-          if [ -z "$prs" ]; then
-            echo "No open sync/upstream-* PRs."
-            exit 0
-          fi
-          echo "$prs" | while read -r number head base; do
-            [ -n "$number" ] || continue
-            echo "--- PR #$number $head -> $base ---"
-            git fetch origin "$head:refs/remotes/origin/$head" 2>/dev/null || { echo "Head $head not on origin, skip"; continue; }
-            git fetch origin dev:refs/remotes/origin/dev
-            if git merge-base --is-ancestor origin/dev origin/"$head"; then
-              echo "Already descendant of origin/dev, skip."
-              continue
-            fi
-            echo "Rebasing $head onto origin/dev..."
-            git checkout -B "$head" "origin/$head"
-            if ! git merge --no-edit origin/dev; then
-              echo "Merge conflicts on $head - leaving for Cursor/Jules/human (not auto-resolving)"
-              git merge --abort 2>/dev/null || true
-              git checkout dev
-              continue
-            fi
-            git push origin "HEAD:refs/heads/$head"
-            echo "Pushed rebased $head"
-            # Update sticky progress comment if present
-            comment_id="$(gh api repos/"${GITHUB_REPOSITORY}"/issues/"$number"/comments --paginate --jq '.[] | select(.body | contains("<!-- cursor-sync-progress -->")) | .id' | head -n1)"
-            if [ -n "$comment_id" ]; then
-              body="$(gh api repos/"${GITHUB_REPOSITORY}"/issues/"$number"/comments/"$comment_id" --jq .body)"
-              # Flip the rebase checklist line to done
-              updated="$(printf '%s' "$body" | sed 's/- \[ \] Rebase onto .*/- [x] Rebase onto `origin\/dev` — done (auto-merged)/' )"
-              gh api -X PATCH repos/"${GITHUB_REPOSITORY}"/issues/comments/"$comment_id" -f body="$updated" >/dev/null && echo "Updated sticky comment $comment_id" || true
-            fi
-            git checkout dev
-          done
-          echo "Babysitter complete."
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: Reconcile sync PR checks and progress
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9

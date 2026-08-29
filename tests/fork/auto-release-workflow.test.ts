@@ -90,4 +90,15 @@ describe("fork auto-release workflow contract", () => {
     expect(workflowText).not.toMatch(/^\s*node <</m);
     expect(workflowText).toContain("node .github/scripts/fork-auto-release.cjs");
   });
+
+  test("passes the exact audited commit message to the decision before npm lookup", () => {
+    const decideStep = workflow.jobs?.["auto-release"]?.steps?.find(step =>
+      step.run?.includes("fork-auto-release.cjs")
+    );
+    expect(decideStep?.run).toContain('git show -s --format=%B "$HEAD_SHA"');
+    expect(decideStep?.env?.RAW_COMMIT_MESSAGE).toBeUndefined();
+    expect(decideStep?.run?.indexOf("git show -s --format=%B")).toBeLessThan(
+      decideStep?.run?.indexOf("npm view") ?? -1,
+    );
+  });
 });

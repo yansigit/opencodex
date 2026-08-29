@@ -1394,6 +1394,21 @@ describe("opencodex config defaults", () => {
     }
   });
 
+  test("refuses to persist a config synthesized by missing-field repair", () => {
+    const before = JSON.stringify({ port: 10100 });
+    writeConfig(before);
+    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
+
+    try {
+      const repaired = { ...loadConfig(), openaiProviderTierVersion: 2 as const };
+
+      expect(() => saveConfig(repaired)).toThrow("refusing to overwrite a config repaired with defaults");
+      expect(readFileSync(getConfigPath(), "utf-8")).toBe(before);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   test("backs up config when defaultProvider is absent from providers", () => {
     writeConfig({
       port: 10100,

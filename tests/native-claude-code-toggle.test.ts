@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
+import { isolatedDiskManagementPersistence } from "./helpers/management-auth";
 
 /**
  * Route contract for devlog/_fin/260803_integrations_toggle_all/011.
@@ -185,8 +186,8 @@ test("a held REAL config transaction refuses 409 config_busy, and release lets a
    * a mocked throw. The holder runs the same `PRAGMA busy_timeout = 0;
    * BEGIN IMMEDIATE` the lock itself uses (src/config.ts:1771), so the route's
    * own acquisition fails with SQLITE_BUSY exactly as cross-process contention
-   * would. The route runs the REAL saveConfigPreservingClaudeCode — no seam —
-   * against a fixture OPENCODEX_HOME.
+   * would. The explicitly injected production persistence runs against a
+   * fixture OPENCODEX_HOME.
    */
   const { Database } = await import("bun:sqlite");
   const { mkdtempSync, rmSync } = await import("node:fs");
@@ -208,8 +209,7 @@ test("a held REAL config transaction refuses 409 config_busy, and release lets a
         }),
         url,
         config,
-        // NO persistence seam: the real saveConfigPreservingClaudeCode runs.
-        {},
+        isolatedDiskManagementPersistence(),
       );
     };
     const refused = await putReal(baseConfig({ claudeCode: { enabled: true } }));

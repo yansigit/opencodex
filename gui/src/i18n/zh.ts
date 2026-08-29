@@ -2448,7 +2448,7 @@ export const zh: Record<TKey, string> = {
   "dash.visionTimeoutInvalid": "请输入 {min} 到 {max} 毫秒之间的整数。",
   "dash.visionAdvancedPopover": "高级视觉设置",
   "sub.routedDelegationBridge": "路由 V2 委派桥接",
-  "sub.routedDelegationBridgeHint": "实验性功能。Codex 仍可能显示原始模型；路由后的提示、仓库上下文、工具结果、可用性、上下文、行为、计费和隐私均遵循所选提供商。工具由模型选择。",
+  "sub.routedDelegationBridgeHint": "实验性功能。启用期间，生成、发送和后续消息均为明文，包括原生代理之间的委派。Codex 仍可能显示原始模型；路由内容和隐私遵循所选提供商。",
   "sub.routedDelegationBridgeInactive": "已就绪；仅对符合条件的原生 V2 根任务激活。",
   "sub.routedDelegationBridgeSaveFail": "无法保存路由 V2 委派桥接",
   "sub.routedDelegationBridgeSaved": "已保存路由 V2 委派桥接。禁用会立即生效。",

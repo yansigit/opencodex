@@ -9,6 +9,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const unavailableMutation = <T,>() => ({ status: "unavailable" as const, reason: "missing" as const });
+
 export async function handleReplitProviderRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, convergeCodexCatalog } = ctx;
 
@@ -41,7 +43,6 @@ export async function handleReplitProviderRoutes(ctx: ManagementContext): Promis
   if (body.setDefault !== undefined && typeof body.setDefault !== "boolean") {
     return jsonResponse({ error: "setDefault must be a boolean" }, 400);
   }
-
   const result = await installReplitProviderPair(config, {
     origin,
     gatewayKey,
@@ -49,9 +50,14 @@ export async function handleReplitProviderRoutes(ctx: ManagementContext): Promis
     replace: body.replace === true,
     setDefault: body.setDefault === true,
   }, {
-    mutatePersistedConfig: deps.mutatePersistedConfig,
+    // Direct management dispatch has no authority to activate the service's CLI fallback.
+    mutatePersistedConfig: deps.mutatePersistedConfig ?? unavailableMutation,
     probeFetch: deps.probeFetch,
   });
+
+  if (!deps.mutatePersistedConfig) {
+    return jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
+  }
 
   if (!result.ok) {
     const status = result.code === "provider_collision"

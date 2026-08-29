@@ -17,6 +17,8 @@ import {
   armClaudeCodeBaseline,
   loadConfig,
   saveConfig,
+  saveConfigPreservingClaudeCode,
+  mutatePersistedConfig,
   getConfigDir,
   websocketsEnabled,
 } from "../config";
@@ -531,6 +533,11 @@ export function warnAgentTaskRecoveryStartup(config: {
 }
 
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
+  const managementApi: ManagementApiDeps = {
+    saveConfigPreservingClaudeCode,
+    mutatePersistedConfig,
+    ...deps.managementApi,
+  };
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();
   const config = runModelRenameStartupMigration(runAlibabaRegionStartupMigration(runOpenAiTierStartupMigration(loadConfig())));
   warnAgentTaskRecoveryStartup(config);
@@ -1044,7 +1051,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             method: "POST",
             headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
           });
-          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, deps.managementApi);
+          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, managementApi);
           const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
           if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
           return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
@@ -1122,7 +1129,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         // gate used. Consent-bearing routes need this: request headers are forgeable
         // by anything holding the admin token, the credential is not.
         const principal = managementPrincipal(req, managementAuth, config, localManagementAuth) ?? undefined;
-        const mgmtResponse = await handleManagementAPI(req, url, config, deps.managementApi, principal);
+        const mgmtResponse = await handleManagementAPI(req, url, config, managementApi, principal);
         if (mgmtResponse) return withManagementCors(mgmtResponse, req, config);
         return withManagementCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
       }

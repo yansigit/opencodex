@@ -11,7 +11,6 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
-  saveConfigPreservingClaudeCode,
 } from "../../config";
 import {
   clearLoginState,
@@ -63,7 +62,7 @@ import { applySystemEnvToggle } from "../system-env";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { saveManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 
 
@@ -236,7 +235,7 @@ export async function handleComboRoutes(ctx: ManagementContext): Promise<Respons
         oldDisabledSelectors.has(model) ? newDisabledModel : model
       )))];
     }
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     clearComboSelectionState(id);
     clearComboTargetCooldowns(id);
@@ -259,7 +258,7 @@ export async function handleComboRoutes(ctx: ManagementContext): Promise<Respons
     const { clearComboSelectionState, clearComboTargetCooldowns } = await import("../../combos");
     delete config.combos![id];
     if (Object.keys(config.combos!).length === 0) deleteConfigTopLevelKey(config, "combos");
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     clearComboSelectionState(id);
     clearComboTargetCooldowns(id);

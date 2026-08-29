@@ -20,12 +20,12 @@ import { assemblePolicyCandidateEvidence } from "../../routing/compatibility/ass
 import { activateLab, labActivationRequired } from "../../lib/lab-activation";
 import { quotaEvidenceForCandidate } from "../../routing/quota";
 import { routedProviderConfig } from "../../router";
-import { deleteConfigTopLevelKey, saveConfigPreservingClaudeCode, getConfigDir } from "../../config";
+import { deleteConfigTopLevelKey, getConfigDir } from "../../config";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { isPlainRecord } from "./shared";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import { jsonResponse } from "../auth-cors";
-import type { ManagementContext } from "./context";
+import { saveManagementConfig, type ManagementContext } from "./context";
 import type { OcxConfig, OcxRoutingProfileConfig } from "../../types";
 
 function profileDto(config: Parameters<typeof getRoutingProfile>[0], id: string): Record<string, unknown> | null {
@@ -310,8 +310,7 @@ export async function handleRoutingProfileRoutes(ctx: ManagementContext): Promis
       const newPublicModel = policyPublicModelId(id, getRoutingProfile(config, id)!);
       shouldSyncClaudeAgentDefs = migrateProfileModelReferences(config, oldPublicModel, newPublicModel);
     }
-    const save = deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode;
-    save(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     const catalogRefresh = await convergeCodexCatalog();
     if (shouldSyncClaudeAgentDefs) await syncClaudeAgentDefsBestEffort();
@@ -338,8 +337,7 @@ export async function handleRoutingProfileRoutes(ctx: ManagementContext): Promis
     delete nextProfiles[id];
     if (Object.keys(nextProfiles).length > 0) config.routingProfiles = nextProfiles;
     else deleteConfigTopLevelKey(config, "routingProfiles");
-    const saveConfigPreservingClaudeCodeSafe = deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode;
-    saveConfigPreservingClaudeCodeSafe(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     const catalogRefresh = await convergeCodexCatalog();
     return jsonResponse({ success: true, id, catalogRefresh }, 200, req, config);

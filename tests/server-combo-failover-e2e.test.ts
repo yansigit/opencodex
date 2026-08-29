@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
 import { logsFromApiBody } from "./helpers/logs-api";
-import { managementFetch as fetch, ManagementRequest as Request } from "./helpers/management-auth";
+import {
+  isolatedDiskManagementPersistence,
+  managementFetch as fetch,
+  ManagementRequest as Request,
+} from "./helpers/management-auth";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -379,6 +383,7 @@ async function management(
   });
   return handleManagementAPI(request, new URL(request.url), config, {
     createManagementConvergeCodex: catalogConvergenceFactory(),
+    ...isolatedDiskManagementPersistence(),
   });
 }
 

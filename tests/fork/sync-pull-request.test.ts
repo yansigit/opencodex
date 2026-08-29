@@ -64,15 +64,15 @@ describe("fork sync draft pull requests", () => {
     expect(body.body).toContain("## Summary");
   });
 
-  test("updates the existing same-tag and head PR instead of creating another", async () => {
+  test("leaves an existing exact-head PR body and title untouched", async () => {
     const requests: Array<{ input: string; init?: RequestInit }> = [];
     const fetchImpl: FetchImplementation = async (input, init) => {
       requests.push({ input: String(input), init });
       return requests.length === 1
         ? response([{
           number: 23,
-          title: "sync: upstream v2.32.0",
-          body: `tag SHA: ${event.latestTagSha}`,
+          title: "human-edited resolution ready for review",
+          body: "Do not replace these investigation notes.",
           state: "open",
           draft: true,
           head: { ref: result.branch },
@@ -87,12 +87,7 @@ describe("fork sync draft pull requests", () => {
       fetchImpl,
     }).upsert({ event, result });
 
-    expect(requests[1]?.input).toBe(
-      "https://api.github.com/repos/yansigit/opencodex/pulls/23",
-    );
-    expect(requests[1]?.init?.method).toBe("PATCH");
-    expect(JSON.parse(String(requests[1]?.init?.body)).draft).toBe(true);
-    expect(String(requests[1]?.init?.body)).not.toContain("secret-token");
+    expect(requests).toHaveLength(1);
   });
 
   test("does not expose a merge endpoint", async () => {

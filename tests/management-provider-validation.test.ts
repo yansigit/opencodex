@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
-import { managementFetch as fetch, ManagementRequest as Request } from "./helpers/management-auth";
+import { inMemoryManagementPersistence, isolatedDiskManagementPersistence, managementFetch as fetch, ManagementRequest as Request } from "./helpers/management-auth";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -583,7 +583,7 @@ describe("provider management validation", () => {
     let catalogRefreshes = 0;
     const request = async (path: string, init?: RequestInit) => {
       const req = new Request(`http://127.0.0.1${path}`, init);
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
       });
     };
@@ -2175,7 +2175,7 @@ describe("provider management validation", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),
         });
-        return handleManagementAPI(request, new URL(request.url), liveConfig, {
+        return handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
       };
@@ -2230,7 +2230,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: "openai", provider: canonicalDirect }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(400);
@@ -2384,7 +2384,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(200);
@@ -2440,7 +2440,7 @@ describe("provider management validation", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ disabled: false }),
         });
-        const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+        const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
         expect(response?.status).toBe(400);
@@ -2499,7 +2499,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(400);
@@ -2551,7 +2551,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(200);
@@ -2645,6 +2645,7 @@ describe("provider management validation", () => {
     let catalogRefreshes = 0;
     const primes: string[] = [];
     const deps = {
+      ...isolatedDiskManagementPersistence(),
       clearThreadAccountMap: () => { affinityClears += 1; },
       clearProviderQuotaCache: () => { quotaCacheClears += 1; },
       createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
@@ -2732,7 +2733,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
     };
@@ -2743,7 +2744,7 @@ describe("provider management validation", () => {
         listedRequest,
         new URL(listedRequest.url),
         liveConfig,
-        { createManagementConvergeCodex: catalogConvergenceFactory() },
+        { ...isolatedDiskManagementPersistence(), createManagementConvergeCodex: catalogConvergenceFactory() },
       );
       const listed = await listedResponse!.json() as Array<Record<string, unknown>>;
       expect(listed.find(row => row.name === "xai")?.xaiResponsesOptInState).toBe("mixed");
@@ -2820,7 +2821,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
       });
     };
@@ -2921,7 +2922,7 @@ describe("provider management validation", () => {
         headers: body === undefined ? undefined : { "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(() => {}),
       });
     };
@@ -3032,7 +3033,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         // This branch replaced the best-effort `refreshCodexCatalog` dep with the
         // convergence entry point; every other test in this file already wires it
         // that way, and this one arrived from dev still using the old shape.
@@ -3159,7 +3160,7 @@ describe("provider management validation", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
     });
-    const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {});
+    const response = await handleManagementAPI(request, new URL(request.url), liveConfig, inMemoryManagementPersistence(liveConfig));
     expect(response?.status).toBe(200);
     expect(liveConfig.providers["google-antigravity"]?.tlsProfile).toBe("antigravity-browser");
   });
@@ -3345,7 +3346,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         refreshCodexCatalog: async () => {},
       });
     };
@@ -3385,7 +3386,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         refreshCodexCatalog: async () => {},
       });
     };
@@ -3425,7 +3426,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         refreshCodexCatalog: async () => {},
       });
     };
@@ -3739,7 +3740,7 @@ describe("provider upstreamHttpVersion management contract (#1668)", () => {
     try {
       const request = async (path: string, init?: RequestInit) => {
         const req = new Request(`http://127.0.0.1${path}`, init);
-        return handleManagementAPI(req, new URL(req.url), liveConfig, {
+        return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
       };

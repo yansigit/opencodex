@@ -5761,7 +5761,7 @@ describe("auto_review_model configuration (#1225)", () => {
     expect(entries[1].auto_review_model_override).toBe(trimmedValue);
   });
 });
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 
 describe("#2465 model preset management routes", () => {
   const originalFetchForPresets = globalThis.fetch;
@@ -5795,7 +5795,7 @@ describe("#2465 model preset management routes", () => {
     const init: RequestInit = body === undefined
       ? { method }
       : { method, body: JSON.stringify(body), headers: { "content-type": "application/json" } };
-    const response = await handleManagementAPI(new Request(url, init), url, config);
+    const response = await handleManagementAPI(new Request(url, init), url, config, inMemoryManagementPersistence(config));
     return { status: response!.status, body: await response!.json() as Record<string, unknown> };
   }
 

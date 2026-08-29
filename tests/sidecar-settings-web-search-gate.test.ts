@@ -27,7 +27,7 @@ import {
   webSearchModelRejection,
 } from "../src/server/management/web-search-sidecar-options";
 import { handleManagementAPI } from "../src/server/management-api";
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/account-id";
 import { xaiSearchOptionsFromConfig } from "../src/web-search";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
@@ -115,7 +115,7 @@ async function sidecarSettings(config: OcxConfig, init?: { method: string; body:
   const request = init
     ? new Request(url, { method: init.method, headers: { "content-type": "application/json" }, body: JSON.stringify(init.body) })
     : new Request(url);
-  const response = await handleManagementAPI(request, url, config);
+  const response = await handleManagementAPI(request, url, config, inMemoryManagementPersistence(config));
   if (!response) throw new Error("sidecar settings route did not handle the request");
   return response;
 }
@@ -126,6 +126,7 @@ async function claudeCodeSettings(config: OcxConfig, body: unknown): Promise<Res
     new Request(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
     url,
     config,
+    inMemoryManagementPersistence(config),
   );
   if (!response) throw new Error("claude-code route did not handle the request");
   return response;
@@ -506,7 +507,7 @@ describe("claude-code webSearchSidecar override honors the submitted backend (#2
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    const response = await handleManagementAPI(request, url, cfg);
+    const response = await handleManagementAPI(request, url, cfg, inMemoryManagementPersistence(cfg));
     if (!response) throw new Error("claude-code route did not handle the request");
     return response;
   }

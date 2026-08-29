@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
+import { saveConfig } from "../src/config";
 import type { OcxConfig } from "../src/types";
 import {
   DEFAULT_VISION_TIMEOUT_MS,
@@ -11,7 +12,7 @@ import {
   resolveMaxDescriptionsPerTurn,
   resolveVisionTimeoutMs,
 } from "../src/vision";
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 
 async function getSidecarSettings(config: OcxConfig): Promise<Response> {
   const url = new URL("http://localhost/api/sidecar-settings");
@@ -33,8 +34,10 @@ async function putSidecarSettings(
     }),
     url,
     config,
+    inMemoryManagementPersistence(config),
   );
   if (!response) throw new Error("sidecar settings route did not handle PUT");
+  if (response.ok) saveConfig(config);
   return response;
 }
 

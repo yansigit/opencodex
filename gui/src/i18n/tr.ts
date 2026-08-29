@@ -2450,7 +2450,7 @@ export const tr: Record<TKey, string> = {
   "dash.visionTimeoutInvalid": "{min} ile {max} milisaniye arasında bir tam sayı girin.",
   "dash.visionAdvancedPopover": "Gelişmiş görsel ayarları",
   "sub.routedDelegationBridge": "Yönlendirilmiş V2 yetkilendirme köprüsü",
-  "sub.routedDelegationBridgeHint": "Deneyseldir. Codex özgün modeli göstermeye devam edebilir; yönlendirilmiş istemler, depo bağlamı, araç sonuçları, kullanılabilirlik, bağlam, davranış, faturalandırma ve gizlilik seçilen sağlayıcıyı izler. Araçları model seçer.",
+  "sub.routedDelegationBridgeHint": "Deneyseldir. Etkinken oluşturma, gönderme ve takip mesajları, yerel ajanlar arası delegasyon dahil düz metindir. Codex özgün modeli gösterebilir; yönlendirilen içerik ve gizlilik seçilen sağlayıcıya bağlıdır.",
   "sub.routedDelegationBridgeInactive": "Hazır; yalnızca uygun yerel V2 kökleri için etkinleşir.",
   "sub.routedDelegationBridgeSaveFail": "Yönlendirilmiş V2 yetkilendirme köprüsü kaydedilemedi",
   "sub.routedDelegationBridgeSaved": "Yönlendirilmiş V2 yetkilendirme köprüsü kaydedildi. Devre dışı bırakma hemen uygulanır.",

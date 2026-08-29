@@ -2427,7 +2427,7 @@ export const de: Record<TKey, string> = {
   "dash.visionTimeoutInvalid": "Geben Sie eine ganze Zahl von {min} bis {max} Millisekunden ein.",
   "dash.visionAdvancedPopover": "Erweiterte Vision-Einstellungen",
   "sub.routedDelegationBridge": "Geroutete V2-Delegationsbrücke",
-  "sub.routedDelegationBridgeHint": "Experimentell. Codex zeigt möglicherweise weiterhin das ursprüngliche Modell; geroutete Prompts, Repository-Kontext, Tool-Ergebnisse, Verfügbarkeit, Kontext, Verhalten, Abrechnung und Datenschutz richten sich nach dem ausgewählten Anbieter. Das Modell wählt die Tools.",
+  "sub.routedDelegationBridgeHint": "Experimentell. Solange aktiv, sind Spawn-, Sende- und Follow-up-Nachrichten Klartext, auch bei nativer Delegation. Codex kann weiterhin das ursprüngliche Modell anzeigen; geroutete Inhalte und Datenschutz folgen dem ausgewählten Anbieter.",
   "sub.routedDelegationBridgeInactive": "Bereitgestellt; wird nur für geeignete native V2-Roots aktiviert.",
   "sub.routedDelegationBridgeSaveFail": "Geroutete V2-Delegationsbrücke konnte nicht gespeichert werden",
   "sub.routedDelegationBridgeSaved": "Geroutete V2-Delegationsbrücke gespeichert. Das Deaktivieren wirkt sofort.",

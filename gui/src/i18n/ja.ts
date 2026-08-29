@@ -2448,7 +2448,7 @@ export const ja: Record<TKey, string> = {
   "dash.visionTimeoutInvalid": "{min} から {max} ミリ秒の整数を入力してください。",
   "dash.visionAdvancedPopover": "詳細なビジョン設定",
   "sub.routedDelegationBridge": "ルーティングされた V2 委任ブリッジ",
-  "sub.routedDelegationBridgeHint": "実験的機能です。Codex には元のモデルが表示され続ける場合があります。ルーティングされたプロンプト、リポジトリコンテキスト、ツール結果、可用性、コンテキスト、動作、課金、プライバシーは選択したプロバイダーに従います。ツールはモデルが選択します。",
+  "sub.routedDelegationBridgeHint": "実験的機能です。有効中は、生成・送信・フォローアップのメッセージが、ネイティブ間の委任を含め平文になります。Codex には元のモデルが表示される場合がありますが、ルーティングされた内容とプライバシーは選択したプロバイダーに従います。",
   "sub.routedDelegationBridgeInactive": "有効化済みです。対象となるネイティブ V2 ルートでのみ動作します。",
   "sub.routedDelegationBridgeSaveFail": "ルーティングされた V2 委任ブリッジを保存できませんでした",
   "sub.routedDelegationBridgeSaved": "ルーティングされた V2 委任ブリッジを保存しました。無効化は直ちに適用されます。",

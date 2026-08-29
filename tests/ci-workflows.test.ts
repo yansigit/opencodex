@@ -214,12 +214,11 @@ describe("GitHub Actions hardening", () => {
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test --isolate tests")).toBe(true);
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test tests")).toBe(false);
 
-    // macOS is the unsharded control for push and dispatch. Pull requests skip
-    // it so merge feedback is not gated on that 30-minute runtime.
+    // macOS is focused on dev and relevant PRs; main/preview keep full control.
     const macosSteps = (ci.jobs?.["platform-macos"] as { steps?: { run?: string }[] })?.steps ?? [];
     // The 60s per-test ceiling is part of the pinned shape: dropping it silently
     // restores the timing-flake class this lane kept surfacing.
-    expect(macosSteps.some(step => step.run?.includes("bun test --isolate --timeout 60000 tests"))).toBe(true);
+    expect(macosSteps.some(step => step.run?.includes("run-bun-with-crash-retry.sh"))).toBe(true);
     expect(macosSteps.some(step => step.run?.includes("--shard"))).toBe(false);
 
     // The macOS leg retries ONLY a Bun runtime crash, and only once. Bun 1.3.14
@@ -229,21 +228,16 @@ describe("GitHub Actions hardening", () => {
     // `scripts/ci/run-bun-test-batches.sh`. Two ways to break this silently:
     // drop the crash-signature guard so an assertion failure gets retried into
     // green, or let the retry loop swallow a repeated crash. Pin both.
-    const macosTestRun = macosSteps.find(step => step.run?.includes("bun test --isolate --timeout 60000 tests"))?.run ?? "";
-    // Actions invokes multiline `run:` blocks with `bash -e`. The retry loop
-    // must disable errexit before the crash-prone command or exit 133 aborts
-    // the step before PIPESTATUS can be inspected and the retry can run.
-    expect(hasExactShellCommand(macosTestRun, "set +e")).toBe(true);
-    expect(macosTestRun).toContain("Segmentation fault at address");
-    expect(macosTestRun).toContain("oh no: Bun has crashed");
-    expect(macosTestRun).toContain("assertion failures are not retried");
-    expect(macosTestRun).toContain("failing after one retry");
-    // `for attempt in 1 2` — one retry, never an unbounded loop.
-    expect(macosTestRun).toContain("for attempt in 1 2");
-    expect(macosTestRun).not.toContain("while true");
+    const macosTestRun = macosSteps.find(step => step.run?.includes("run-bun-with-crash-retry.sh"))?.run ?? "";
+    expect(macosTestRun).toContain("bun test --isolate --timeout 60000");
+    const crashRetry = await readText("scripts/ci/run-bun-with-crash-retry.sh");
+    expect(crashRetry).toContain("for attempt in 1 2");
+    expect(crashRetry).toContain("assertion failures are not retried");
+    expect(crashRetry).toContain("failing after one retry");
+    expect(crashRetry).not.toContain("while true");
     expect((ci.jobs?.["platform-macos"] as { needs?: string; if?: string })?.needs).toBe("changes");
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
-      .toBe("github.event_name != 'pull_request'");
+      .toBe("github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'");
 
     // Windows is dispatch-only: it gates nothing, not even the shipping
     // boundary. The sharded promotion run surfaced ~207 Windows-only failures
@@ -297,13 +291,14 @@ describe("GitHub Actions hardening", () => {
     ];
     const windowsTestRun = windowsTestSteps[0]?.run ?? "";
     const batchScript = await readText("scripts/ci/run-bun-test-batches.sh");
+    const crashRetryScript = await readText("scripts/ci/run-bun-with-crash-retry.sh");
     for (const signature of crashSignatures) {
-      expect(`macos:${signature}:${macosTestRun.includes(signature)}`).toBe(`macos:${signature}:true`);
+      expect(`macos:${signature}:${crashRetryScript.includes(signature)}`).toBe(`macos:${signature}:true`);
       expect(`windows:${signature}:${windowsTestRun.includes(signature)}`).toBe(`windows:${signature}:true`);
       expect(`script:${signature}:${batchScript.includes(signature)}`).toBe(`script:${signature}:true`);
     }
     // The thread-numbered form must not be the anchor anywhere.
-    expect(macosTestRun).not.toContain("panic\\(thread");
+    expect(crashRetryScript).not.toContain("panic\\(thread");
     expect(windowsTestRun).not.toContain("panic\\(thread");
     expect(batchScript).not.toContain("panic\\(thread");
 
@@ -478,9 +473,9 @@ describe("GitHub Actions hardening", () => {
     expect(scopeStep?.shell).toBe("bash");
     expect(scopeStep?.env?.CI_SCOPE).toBe("${{ steps.filter.outputs.ci }}");
     expect(scopeStep?.run).not.toContain("${{");
-    expect(scopeStep?.run).toContain('case "$CI_SCOPE" in');
+    expect(scopeStep?.run).toContain('case "$value" in');
     expect(scopeStep?.run).toContain("true|false)");
-    expect(scopeStep?.run).toContain(`printf 'ci=%s\\n' "$CI_SCOPE" >> "$GITHUB_OUTPUT"`);
+    expect(scopeStep?.run).toContain('printf \'%s=%s\\n\' "$scope" "$value" >> "$GITHUB_OUTPUT"');
     expect(scopeStep?.run).toContain("exit 1");
     const filterIndex = changesJob?.steps?.findIndex(step => step.id === "filter") ?? -1;
     const scopeIndex = changesJob?.steps?.findIndex(step => step.id === "scope") ?? -1;
@@ -495,7 +490,7 @@ describe("GitHub Actions hardening", () => {
     }
     const macosJob = ci.jobs?.["platform-macos"] as { needs?: string; if?: string } | undefined;
     expect(`platform-macos:${macosJob?.needs}`).toBe("platform-macos:changes");
-    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:github.event_name != 'pull_request'");
+    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'");
   });
 
   test("cross-platform CI keeps the GUI lint and build gates", async () => {
@@ -546,7 +541,7 @@ describe("GitHub Actions hardening", () => {
     // running the Windows smoke jobs (keyring, npm-global) now that the full
     // Windows suite runs only on manual dispatch.
     const filters = String(filterStep?.with?.filters ?? "");
-    const packagingBlock = filters.split(/\n\s*packaging:\s*\n/)[1] ?? "";
+    const packagingBlock = (filters.split(/\n\s*packaging:\s*\n/)[1] ?? "").split(/\n\s*(?:macos|swift):\s*\n/)[0] ?? "";
     const packaging = [...packagingBlock.matchAll(/-\s*'([^']+)'/g)].map(match => match[1]).sort();
     expect(packaging).toEqual([
       ".npmignore",
