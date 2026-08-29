@@ -2180,6 +2180,15 @@ function mergeConfigDefaults(parsed: unknown): unknown {
   return merged;
 }
 
+function configNeedsDefaultRepair(parsed: Record<string, unknown>): boolean {
+  const candidate = structuredClone(parsed);
+  sanitizeAliasesForLoad(candidate);
+  sanitizeRetryOn429ForLoad(candidate);
+  sanitizeModelCostsForLoad(candidate);
+  return !configSchema.safeParse(candidate).success
+    && configSchema.safeParse(mergeConfigDefaults(candidate)).success;
+}
+
 function schemaDiagnosticsError(error: z.ZodError): string {
   const details = error.issues.map(issue => {
     const path = issue.path.join(".") || "config";
@@ -2720,6 +2729,10 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
  */
 function persistConfigUnlocked(config: OcxConfig): boolean {
   const configPath = getConfigPath();
+  const raw = readRawConfigJson();
+  if (raw && configNeedsDefaultRepair(raw)) {
+    throw new Error("refusing to overwrite a config repaired with defaults; fix the persisted config first");
+  }
   // External editors can add provider rows the live config deliberately does
   // not route with yet; merge them at the serialization boundary so an
   // unrelated in-process save cannot erase the provider or its overlay.
@@ -3353,7 +3366,7 @@ function warnConfigRepaired(configPath: string, error: z.ZodError): void {
   if (warnedConfigFallbacks.has(configPath)) return;
   warnedConfigFallbacks.add(configPath);
   const fields = error.issues.map(i => i.path.join(".") || "config").join(", ");
-  console.error(`opencodex config at ${configPath}: repaired missing field(s) [${fields}] with defaults. Your providers and accounts are preserved.`);
+  console.error(`opencodex config at ${configPath}: repaired invalid or missing field(s) [${fields}] in memory. Automatic config writes are blocked until config.json is fixed.`);
 }
 
 /**
