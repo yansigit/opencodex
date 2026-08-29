@@ -40,3 +40,18 @@ Ruling: stacked topology outranks terminal agent state during classification. �
 Review round 2 remediation: `botMergeEvidence` recomputes the exact-head gate from raw evidence and restricts Jules authorization to the completed, open, non-draft, same-repository `dev` lane with no hold, stacked, promotion, fork, or active-session classification. Focused policy/helper suite: 82/82 passing.
 
 Final stacked-Jules remediation: stacked classification now outranks Jules active/terminal states, preventing an `openParentPullRequest` PR targeting `dev` from entering automatic merge. Focused policy/helper suite: 83/83 passing.
+
+## Task 2 — complete
+
+- Added `.github/workflows/pr-automation.yml` as the single trusted controller for open `dev` PR reconciliation, guarded branch updates, exact-head status, target-gate dispatch, and optional merge.
+- Removed the superseded sync babysitter workflow/script/tests.
+- Added `.github/scripts/pr-automation-workflow.test.cjs` with trigger, permissions, trusted-checkout, token-boundary, race, pagination, immutable bot-state, raw-evidence, promotion, and merge-response contracts.
+- Focused verification: actionlint clean; embedded script syntax clean; workflow/policy/helper suite 81/81 passing.
+
+Ruling: branch updates use GitHub's `update-branch` endpoint with an expected SHA and a single proven stale-head retry; no local branch writer or force push is permitted. — GitHub owns the merge-base operation and the expected SHA prevents overwriting concurrent work. — If wrong, the controller must remain status-only for that PR.
+
+Ruling: automatic merge requires the pure policy engine's raw exact-head authorization plus a final live SHA/current-base reread and an affirmative merge response. — A fresh read closes stale event/check/comment races without duplicating policy in workflow code. — If wrong, merge mode must be disabled pending a stronger GitHub primitive.
+
+Task 2 security review remediation: approval state is now minted only on the exact maintainer `pull_request_target` label event and never rebound from an old timeline event; stale head/controller updates clear the label and marker. Final merge rereads all raw evidence and rejects unresolved threads or current `CHANGES_REQUESTED`; maintenance state is parsed only from immutable bot-owned issue comments and duplicate/conflicting records fail closed. The 422 retry requires an explicit expected-head mismatch and a full fresh eligibility reclassification. Hardened focused suite: 85/85 passing.
+
+Final Task 2 remediation: autonomous-sync provenance is head-bound to an immutable bot label event and hidden bot-owned record; malformed maintenance state is isolated to the exact PR (or only clearly agent-owned candidates for orphan records); update races and label invalidation reread before status rendering; post-update success requires an open, non-draft PR still targeting `dev`, the intended base SHA, fresh eligibility, and confirmed ancestry. Focused workflow/policy/helper suite: 88/88 passing; actionlint and embedded script syntax clean.
