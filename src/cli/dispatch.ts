@@ -52,9 +52,9 @@ export interface CliDispatchDeps {
 type CommandRunner = (deps: CliDispatchDeps) => Promise<number>;
 
 const commandRunners: Record<string, CommandRunner> = {
-  init: async () => {
+  init: async deps => {
     const { runInit } = await import("./init");
-    await runInit();
+    await runInit(deps.args.slice(1));
     // runInit sets process.exitCode = 1 on stdin EOF/closed; preserve it.
     return Number(process.exitCode ?? 0);
   },
