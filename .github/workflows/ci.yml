@@ -215,15 +215,21 @@ jobs:
               - '.github/workflows/**'
               - '.github/actions/**'
               - 'scripts/ci/**'
+              - 'scripts/test.ts'
+              - 'src/adapters/cursor/native-exec-shell.ts'
+              - 'src/lib/machine-test-lock.ts'
               - 'src/oauth/**'
               - 'src/service.ts'
               - 'integrations/aistudio-daemon/**'
               - 'tests/aistudio-native-webkit.test.ts'
               - 'tests/codex-app-server-processes.test.ts'
+              - 'tests/cursor-native-exec-shell.test.ts'
+              - 'tests/preload.ts'
               - 'tests/process-state.test.ts'
               - 'tests/process-control*.test.ts'
               - 'tests/service*.test.ts'
               - 'tests/storage-worker*.test.ts'
+              - 'tests/test-runner.test.ts'
             swift:
               - 'integrations/aistudio-daemon/**'
               - 'tests/aistudio-native-webkit.test.ts'
@@ -325,7 +331,7 @@ jobs:
 
       - name: Validate restored timing data
         if: hashFiles('.bun-timings.json') != ''
-        run: bun scripts/ci/validate-timings.ts .bun-timings.json
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
 
       - name: Test in fresh-process timing-aware batches
         shell: bash
@@ -611,7 +617,7 @@ jobs:
 
       - name: Validate restored timing data
         if: hashFiles('.bun-timings.json') != ''
-        run: bun scripts/ci/validate-timings.ts .bun-timings.json
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
 
       - name: Swift/WebKit integration
         if: >-
@@ -628,12 +634,14 @@ jobs:
           bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 \
             --timings .bun-timings.json --update-timings \
             tests/codex-app-server-processes.test.ts \
+            tests/cursor-native-exec-shell.test.ts \
             tests/process-control.test.ts \
             tests/process-state.test.ts \
             tests/service.test.ts \
             tests/storage-worker-lifecycle.test.ts \
             tests/storage-worker-os-join-settle.test.ts \
-            tests/storage-worker-teardown-isolate.test.ts
+            tests/storage-worker-teardown-isolate.test.ts \
+            tests/test-runner.test.ts
 
       - name: Full macOS suite
         if: >-

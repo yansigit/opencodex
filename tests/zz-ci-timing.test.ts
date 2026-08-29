@@ -5,7 +5,6 @@ import {
   SERIAL_TEST_FILES,
   discoverTestFiles,
   laneFiles,
-  orderFilesByTiming,
   allocateFilesByTiming,
   validateLaneManifest,
 } from "../scripts/ci/test-lanes";
@@ -35,15 +34,14 @@ describe("CI lane manifest", () => {
       .toThrow(/outside tests/);
   });
 
-  test("timing order changes scheduling only, never lane membership", async () => {
+  test("timing data changes allocation only, never lane membership", () => {
     const files = ["tests/slow.test.ts", "tests/fast.test.ts"];
-    const timingPath = "/tmp/opencodex-ci-timings-test.json";
-    await Bun.write(timingPath, JSON.stringify({ version: 1, files: {
-      [files[0]]: 100,
-      [files[1]]: 1,
-    } }));
-    expect(new Set(orderFilesByTiming(files, timingPath))).toEqual(new Set(files));
-    expect(orderFilesByTiming(files, timingPath)[0]).toBe(files[0]);
+    const shards = allocateFilesByTiming(files, 2, new Map([
+      [files[0], 100],
+      [files[1], 1],
+    ]));
+    expect(new Set(shards.flat())).toEqual(new Set(files));
+    expect(shards[0]?.[0]).toBe(files[0]);
   });
 
   test("longest processing time allocation balances bins without dropping files", () => {
@@ -52,6 +50,14 @@ describe("CI lane manifest", () => {
       [files[0], 10], [files[1], 9], [files[2], 1],
     ]));
     expect(shards).toEqual([[files[0]], [files[1], files[2]]]);
+  });
+
+  test("cold timing caches still distribute files across shards", () => {
+    const files = ["tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts", "tests/d.test.ts"];
+    expect(allocateFilesByTiming(files, 2)).toEqual([
+      [files[0], files[2]],
+      [files[1], files[3]],
+    ]);
   });
 });
 
@@ -72,9 +78,11 @@ describe("timing data validation", () => {
       { version: 2, files: {} },
       { version: 1, files: { "../secret": 1 } },
       { version: 1, files: { "tests/missing.test.ts": 1 } },
-      { version: 1, files: { "tests/good.test.ts": 0 } },
+      { version: 1, files: { "tests/good.test.ts": -1 } },
       { version: 1, files: { "tests/good.test.ts": Infinity } },
     ]) expect(() => validateTimingData(value, files)).toThrow();
+    expect(validateTimingData({ version: 1, files: { "tests/good.test.ts": 0 } }, files)
+      .files["tests/good.test.ts"]).toBe(0);
   });
 
   test("merges only validated repository timing maps", () => {
@@ -121,6 +129,7 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
   const testIndex = generalSteps.findIndex(step => step.run?.includes("run-bun-test-batches.sh"));
   expect(validateIndex).toBeGreaterThan(generalSteps.indexOf(restore!));
   expect(validateIndex).toBeLessThan(testIndex);
+  expect(generalSteps[validateIndex]?.run).toContain("--discard-invalid");
   const upload = general.steps?.find(step => step.uses?.startsWith("actions/upload-artifact@"));
   expect(upload?.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
   expect(upload?.if).toContain("github.ref == 'refs/heads/dev'");
@@ -145,6 +154,8 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
     step.name === "Focused Darwin/process lifecycle tests",
   );
   expect(focused?.run).not.toContain("tests/aistudio-native-webkit.test.ts");
+  expect(focused?.run).toContain("tests/test-runner.test.ts");
+  expect(focused?.run).toContain("tests/cursor-native-exec-shell.test.ts");
 });
 
 test("nightly macOS is timed at 08:17 UTC and names its timing file", async () => {
@@ -158,6 +169,8 @@ test("nightly macOS is timed at 08:17 UTC and names its timing file", async () =
   expect(steps.find(step => step.name === "Checkout")?.with?.ref).toBe("dev");
   expect(steps.findIndex(step => step.run?.includes("validate-timings.ts")))
     .toBeLessThan(steps.findIndex(step => step.name === "Full macOS suite"));
+  expect(steps.find(step => step.run?.includes("validate-timings.ts"))?.run)
+    .toContain("--discard-invalid");
   expect(text).toContain("--timings .bun-timings.json --update-timings");
   expect(text).toContain("ocx-test-timings-dev-");
 });

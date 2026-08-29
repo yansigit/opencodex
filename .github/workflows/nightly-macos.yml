@@ -48,7 +48,7 @@ jobs:
 
       - name: Validate restored timing data
         if: hashFiles('.bun-timings.json') != ''
-        run: bun scripts/ci/validate-timings.ts .bun-timings.json
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
 
       - name: Full macOS suite
         run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests

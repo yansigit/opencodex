@@ -1,4 +1,5 @@
 import { discoverTestFiles } from "./test-lanes";
+import { renameSync } from "node:fs";
 
 export const TIMING_VERSION = 1;
 export const MAX_DURATION_MS = 24 * 60 * 60 * 1000;
@@ -21,7 +22,7 @@ export function validateTimingData(value: unknown, files: Set<string>): TimingDa
       throw new Error(`timing entry has an invalid or unknown path: ${path}`);
     }
     if (typeof durationMs !== "number" || !Number.isFinite(durationMs)
-      || durationMs <= 0 || durationMs > MAX_DURATION_MS) {
+      || durationMs < 0 || durationMs > MAX_DURATION_MS) {
       throw new Error(`timing entry has an invalid duration: ${path}`);
     }
   }
@@ -31,7 +32,13 @@ export function validateTimingData(value: unknown, files: Set<string>): TimingDa
 if (import.meta.main) {
   const path = process.argv[2];
   if (!path) throw new Error("usage: validate-timings.ts <timings.json>");
-  const value = await Bun.file(path).json();
-  validateTimingData(value, new Set(discoverTestFiles()));
-  console.log(`validated ${Object.keys(value.files).length} timing entries`);
+  try {
+    const value = await Bun.file(path).json();
+    const timings = validateTimingData(value, new Set(discoverTestFiles()));
+    console.log(`validated ${Object.keys(timings.files).length} timing entries`);
+  } catch (error) {
+    if (!process.argv.includes("--discard-invalid")) throw error;
+    renameSync(path, `${path}.invalid`);
+    console.warn(`::warning::discarded invalid restored timing data: ${error}`);
+  }
 }

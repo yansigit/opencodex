@@ -32,7 +32,7 @@ export function discoverTestFiles(root = process.cwd()): string[] {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) visit(path);
-      else if (/\.(?:test|spec)\.(?:c|m)?(?:js|jsx|ts|tsx)$/.test(entry.name)) {
+      else if (/[._](?:test|spec)\.(?:c|m)?(?:js|jsx|ts|tsx)$/.test(entry.name)) {
         files.push(relative(root, path).replaceAll("\\", "/"));
       }
     }
@@ -76,52 +76,28 @@ export function laneFiles(lane: TestLane, root = process.cwd()): string[] {
   return lanes[lane];
 }
 
-export function orderFilesByTiming(files: string[], timingPath?: string): string[] {
-  if (!timingPath) return [...files].sort();
-  let value: unknown;
-  try { value = JSON.parse(readFileSync(timingPath, "utf8")); } catch { return [...files].sort(); }
-  const durations = new Map<string, number>();
-  if (value && typeof value === "object" && (value as TimingLike).files
-    && typeof (value as TimingLike).files === "object") {
-    for (const [path, durationMs] of Object.entries((value as TimingLike).files!)) {
-      if (typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs > 0) {
-        durations.set(path, durationMs);
-      }
-    }
-  }
-  return [...files].sort((left, right) =>
-    (durations.get(right) ?? 0) - (durations.get(left) ?? 0) || left.localeCompare(right));
-}
-
 export function allocateFilesByTiming(files: string[], shardCount: number, durations = new Map<string, number>()): string[][] {
   const shards = Array.from({ length: shardCount }, () => [] as string[]);
   const loads = Array.from({ length: shardCount }, () => 0);
+  const measured = [...durations.values()].filter(duration => duration > 0);
+  const fallbackDuration = measured.length === 0
+    ? 1
+    : measured.reduce((total, duration) => total + duration, 0) / measured.length;
   for (const file of [...files].sort((left, right) =>
     (durations.get(right) ?? 0) - (durations.get(left) ?? 0) || left.localeCompare(right))) {
     const target = loads.reduce((best, load, index) => load < loads[best]! ? index : best, 0);
     shards[target]!.push(file);
-    loads[target] += durations.get(file) ?? 0;
+    loads[target] += durations.get(file) || fallbackDuration;
   }
   return shards;
 }
 
 interface TimingLike { files?: Record<string, unknown> }
 
-function printIgnoreArgs(): void {
-  for (const path of [...SERIAL_TEST_FILES, ...DEDICATED_TEST_FILES]) {
-    console.log("--path-ignore-patterns");
-    console.log(`**/${path.slice("tests/".length)}`);
-  }
-}
-
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const command = args[0];
-  if (command === "--ignore-args") {
-    if (args[1] !== "general") throw new Error("usage: --ignore-args general");
-    validateLaneManifest(discoverTestFiles());
-    printIgnoreArgs();
-  } else if (command === "--lane") {
+  if (command === "--lane") {
     const lane = args[1] as TestLane;
     if (!laneNames.includes(lane)) throw new Error(`unknown lane: ${args[1]}`);
     const timingFlag = args.indexOf("--timings");
@@ -143,8 +119,8 @@ if (import.meta.main) {
         }
       }
       for (const path of allocateFilesByTiming(files, count, durations)[index - 1]!) console.log(path);
-    } else for (const path of orderFilesByTiming(files, timingPath)) console.log(path);
+    } else for (const path of files) console.log(path);
   } else {
-    throw new Error("usage: --ignore-args general | --lane general|serial|dedicated|dedicated-storage|dedicated-api");
+    throw new Error("usage: --lane general|serial|dedicated|dedicated-storage|dedicated-api");
   }
 }
