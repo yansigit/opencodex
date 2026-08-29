@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../src/codex/catalog/native-models";
-import { catalogContentChangedForTests } from "../src/codex/catalog/sync";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -1096,7 +1095,7 @@ describe("Codex catalog sync hardening", () => {
     expect(slugs).not.toContain("cursor/stale-model");
   });
 
-  test("the catalog byte guard leaves an identical file untouched and admits a real change", () => {
+  test("syncCatalogModels preserves mtime for unchanged content and advances it for changed content", () => {
     // The app-server staleness classifier (#857) compares this file's mtime against
     // each running Codex's start time, so a no-op rewrite would report every
     // already-running Codex as holding an outdated catalog — and since #1407 that
@@ -1111,16 +1110,59 @@ describe("Codex catalog sync hardening", () => {
       ],
     }, null, 2) + "\n");
 
-    const stableMtime = new Date("2020-01-01T00:00:00.000Z");
-    utimesSync(catalogPath, stableMtime, stableMtime);
-    const before = statSync(catalogPath).mtimeMs;
-    const identical = readFileSync(catalogPath, "utf8");
+    const r = runScript(codexHome, opencodexHome, `
+      const { statSync, utimesSync } = require("node:fs");
+      const { syncCatalogModels } = require("./src/codex/catalog");
+      const path = ${JSON.stringify(catalogPath)};
+      const sameContent = { providers: {} };
+      const changedContent = {
+        providers: {
+          cursor: {
+            adapter: "cursor",
+            baseUrl: "https://api2.cursor.sh",
+            liveModels: false,
+            models: ["composer-2.5"],
+          },
+        },
+      };
+      (async () => {
+        await syncCatalogModels(sameContent);
 
-    if (catalogContentChangedForTests(catalogPath, identical)) writeFileSync(catalogPath, identical);
-    expect(statSync(catalogPath).mtimeMs).toBe(before);
+        const unchangedTime = new Date("2020-01-01T00:00:00.000Z");
+        utimesSync(path, unchangedTime, unchangedTime);
+        const beforeUnchanged = statSync(path).mtimeMs;
+        const unchanged = await syncCatalogModels(sameContent);
+        const afterUnchanged = statSync(path).mtimeMs;
 
-    const changed = identical.replace('"gpt-5.5"', '"gpt-5.4"');
-    expect(catalogContentChangedForTests(catalogPath, changed)).toBe(true);
+        const changedTime = new Date("2021-01-01T00:00:00.000Z");
+        utimesSync(path, changedTime, changedTime);
+        const beforeChanged = statSync(path).mtimeMs;
+        const changed = await syncCatalogModels(changedContent);
+        const afterChanged = statSync(path).mtimeMs;
+
+        console.log(JSON.stringify({
+          unchangedWritten: unchanged.catalogWritten,
+          beforeUnchanged,
+          afterUnchanged,
+          changedWritten: changed.catalogWritten,
+          beforeChanged,
+          afterChanged,
+        }));
+      })();
+    `);
+    expect(r.status).toBe(0);
+    const result = JSON.parse(r.stdout) as {
+      unchangedWritten: boolean;
+      beforeUnchanged: number;
+      afterUnchanged: number;
+      changedWritten: boolean;
+      beforeChanged: number;
+      afterChanged: number;
+    };
+    expect(result.unchangedWritten).toBe(false);
+    expect(result.afterUnchanged).toBe(result.beforeUnchanged);
+    expect(result.changedWritten).toBe(true);
+    expect(result.afterChanged).toBeGreaterThan(result.beforeChanged);
   }, 15_000);
 
   test("the no-op guard compares bytes, so a malformed byte decoding to U+FFFD is still repaired", () => {
