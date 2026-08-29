@@ -203,6 +203,12 @@ describe("bun test argv", () => {
       .toEqual(["--isolate", "--parallel=1", "./tests/codex-journal.test.ts"]);
   });
 
+  test("isolates request decompression memory spikes in their own one-worker lane", () => {
+    expect(SERIAL_FULL_SUITE_FILES).toContain("request-decompress.test.ts");
+    expect(resolveBunTestPlan([]).find(lane => lane.label === "request-decompress.test.ts")?.args)
+      .toEqual(["--isolate", "--parallel=1", "./tests/request-decompress.test.ts"]);
+  });
+
   test("serial lanes override caller parallelism without changing the main lane", () => {
     const plan = resolveBunTestPlan(["--parallel=2", "--only-failures"]);
     expect(plan[0]?.args).toContain("--parallel=2");
