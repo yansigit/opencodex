@@ -191,6 +191,103 @@ test("V2 persistence failure happens before toggle and scalar side effects", asy
   }
 });
 
+test("V2 transition failure rolls back its committed config fields", async () => {
+  const previousCodexHome = process.env.CODEX_HOME;
+  const codexHome = mkdtempSync(join(tmpdir(), "ocx-v2-transition-rollback-"));
+  writeFileSync(join(codexHome, "config.toml"), "[features.multi_agent_v2]\nenabled = false\n");
+  process.env.CODEX_HOME = codexHome;
+  const config = structuredClone(historicalFixture);
+  let disk = structuredClone(config);
+  let mutations = 0;
+  try {
+    const url = new URL("http://localhost/api/v2");
+    const response = await handleManagementAPI(new Request(url, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true, v2RoutedDelegationBridge: true }),
+    }), url, config, {
+      toggleCodexMultiAgentV2: () => {},
+      mutatePersistedConfig: mutate => {
+        const candidate = structuredClone(disk);
+        if (++mutations === 2) candidate.v2RoutedDelegationBridge = false;
+        const result = mutate(candidate);
+        disk = candidate;
+        return { status: result.changed ? "committed" : "unchanged", value: result.value };
+      },
+    });
+    expect(response?.status).toBe(502);
+    expect(disk.v2RoutedDelegationBridge).toBe(false);
+    expect(config.v2RoutedDelegationBridge).toBe(false);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("V2 reports a failed compensating rollback", async () => {
+  const previousCodexHome = process.env.CODEX_HOME;
+  const codexHome = mkdtempSync(join(tmpdir(), "ocx-v2-rollback-failure-"));
+  writeFileSync(join(codexHome, "config.toml"), "[features.multi_agent_v2]\nenabled = false\n");
+  process.env.CODEX_HOME = codexHome;
+  const config = structuredClone(historicalFixture);
+  let disk = structuredClone(config);
+  let mutations = 0;
+  try {
+    const url = new URL("http://localhost/api/v2");
+    const response = await handleManagementAPI(new Request(url, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true, v2RoutedDelegationBridge: true }),
+    }), url, config, {
+      toggleCodexMultiAgentV2: () => {},
+      mutatePersistedConfig: mutate => {
+        if (++mutations === 2) throw new Error("rollback disk failure");
+        const candidate = structuredClone(disk);
+        const result = mutate(candidate);
+        disk = candidate;
+        return { status: result.changed ? "committed" : "unchanged", value: result.value };
+      },
+    });
+    expect(response?.status).toBe(502);
+    expect(await response?.text()).toContain("config rollback failed: Management config persistence failed.");
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("V2 scalar failure rolls back its committed config fields", async () => {
+  const previousCodexHome = process.env.CODEX_HOME;
+  const codexHome = mkdtempSync(join(tmpdir(), "ocx-v2-scalar-rollback-"));
+  process.env.CODEX_HOME = codexHome;
+  const config = structuredClone(historicalFixture);
+  let disk = structuredClone(config);
+  try {
+    const url = new URL("http://localhost/api/v2");
+    const response = await handleManagementAPI(new Request(url, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentsEnabled: true, v2RoutedDelegationBridge: true }),
+    }), url, config, {
+      mutatePersistedConfig: mutate => {
+        const candidate = structuredClone(disk);
+        const result = mutate(candidate);
+        disk = candidate;
+        return { status: result.changed ? "committed" : "unchanged", value: result.value };
+      },
+    });
+    expect(response?.status).toBe(502);
+    expect(disk.v2RoutedDelegationBridge).toBeUndefined();
+    expect(config.v2RoutedDelegationBridge).toBeUndefined();
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
 test("a direct management mutation without a persistence seam does not touch disk", async () => {
   const before = readFileSync(getConfigPath(), "utf8");
   const config = structuredClone(historicalFixture);

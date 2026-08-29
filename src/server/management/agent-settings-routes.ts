@@ -89,6 +89,22 @@ let grokApplyTestHooks: { now?: () => number; run?: () => Promise<unknown> } | n
 
 type V2NativeParentOverrideInput = { enabled: boolean; model: string | null };
 type AgentTaskRecoveryInput = { enabled: boolean; model: string | null };
+const V2_CONFIG_KEYS = ["multiAgentMode", "keepNativeChatGptOnV1", "v2NativeParentOverride", "v2RoutedDelegationBridge", "agentTaskRecovery"] as const;
+type V2ConfigKey = typeof V2_CONFIG_KEYS[number];
+type V2ConfigSnapshot = Pick<OcxConfig, V2ConfigKey>;
+
+function v2ConfigSnapshot(config: OcxConfig): V2ConfigSnapshot {
+  return Object.fromEntries(V2_CONFIG_KEYS.map(key => [key, structuredClone(config[key])])) as V2ConfigSnapshot;
+}
+
+function setV2ConfigField(config: OcxConfig, key: V2ConfigKey, value: OcxConfig[V2ConfigKey]): void {
+  if (value === undefined) delete (config as unknown as Record<string, unknown>)[key];
+  else (config as unknown as Record<string, unknown>)[key] = structuredClone(value);
+}
+
+function sameV2ConfigField(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
 
 function persistV2RoutedDelegationBridge(
   deps: ManagementApiDeps,
@@ -554,9 +570,19 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         error: "body.enabled=true conflicts with keepNativeChatGptOnV1: Codex's global multi_agent_v2 override outranks catalog pins",
       }, 400);
     }
+    let rollbackV2Config: (() => string | null) | undefined;
     if (wantsMode || wantsKeepNative || v2NativeParentOverride || wantsV2RoutedDelegationBridge || agentTaskRecovery) {
+      const requestedKeys = V2_CONFIG_KEYS.filter(key => (
+        (key === "multiAgentMode" && wantsMode)
+        || (key === "keepNativeChatGptOnV1" && wantsKeepNative)
+        || (key === "v2NativeParentOverride" && v2NativeParentOverride !== undefined)
+        || (key === "v2RoutedDelegationBridge" && wantsV2RoutedDelegationBridge)
+        || (key === "agentTaskRecovery" && agentTaskRecovery !== undefined)
+      ));
+      let before!: V2ConfigSnapshot;
       let committed!: OcxConfig;
       const persisted = mutateManagementConfig(deps, disk => {
+        before = v2ConfigSnapshot(disk);
         if (wantsMode) {
           if (mode === "default") deleteConfigTopLevelKey(disk, "multiAgentMode");
           else disk.multiAgentMode = mode;
@@ -595,7 +621,32 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       if (v2NativeParentOverride) config.v2NativeParentOverride = committed.v2NativeParentOverride;
       if (wantsV2RoutedDelegationBridge) config.v2RoutedDelegationBridge = committed.v2RoutedDelegationBridge;
       if (agentTaskRecovery) config.agentTaskRecovery = committed.agentTaskRecovery;
+      const committedSnapshot = v2ConfigSnapshot(committed);
+      rollbackV2Config = () => {
+        let finalSnapshot!: V2ConfigSnapshot;
+        try {
+          const rollback = mutateManagementConfig(deps, disk => {
+            let changed = false;
+            for (const key of requestedKeys) {
+              if (!sameV2ConfigField(disk[key], committedSnapshot[key])) continue;
+              setV2ConfigField(disk, key, before[key]);
+              changed = true;
+            }
+            finalSnapshot = v2ConfigSnapshot(disk);
+            return { changed, value: true };
+          });
+          if (rollback.status === "unavailable") return rollback.reason;
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+        for (const key of requestedKeys) setV2ConfigField(config, key, finalSnapshot[key]);
+        return null;
+      };
     }
+    const rollbackDiagnostic = (message: string): string => {
+      const failure = rollbackV2Config?.();
+      return failure ? `${message}; config rollback failed: ${failure}` : message;
+    };
     const requestedFlag = wantsFlag
       ? body.enabled as boolean
       : modeFlag ?? (wantsKeepNative && hybridPinActive ? false : undefined);
@@ -609,7 +660,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const result = transitionMultiAgentV2(targetFlag, toggle, {
         ...(wantsThreads ? { threadLimit: body.maxConcurrentThreadsPerSession as number } : {}),
       });
-      if (!result.ok) return jsonResponse({ error: `multi_agent_v2 transition failed: ${result.error}` }, 502);
+      if (!result.ok) return jsonResponse({ error: rollbackDiagnostic(`multi_agent_v2 transition failed: ${result.error}`) }, 502);
       if (result.changed && result.threadLimit !== null) warnings.push(`Thread limit ${result.threadLimit} preserved for ${targetFlag ? "v2" : "v1"}.`);
     }
     if (wantsMode) {
@@ -640,12 +691,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       try {
         const result = write.run();
         if (!result.ok) {
-          return jsonResponse({ error: `writing ${write.field} failed: ${result.error}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
+          return jsonResponse({ error: rollbackDiagnostic(`writing ${write.field} failed: ${result.error}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}`) }, 502);
         }
         landed.push(write.field);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return jsonResponse({ error: `writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
+        return jsonResponse({ error: rollbackDiagnostic(`writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}`) }, 502);
       }
     }
     // Derived from fresh post-write readers (readConfigText is uncached): upstream
