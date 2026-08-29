@@ -477,6 +477,7 @@ test("two processes at the post-approval management seam serialize instead of in
         },
       },
     };
+    const { mutatePersistedConfig, saveConfigPreservingClaudeCode } = await import("./src/config.ts");
     const { handleManagementAPI } = await import("./src/server/management-api.ts");
     const url = new URL("http://localhost/api/providers?name=together");
     const req = new Request(url, {
@@ -484,7 +485,10 @@ test("two processes at the post-approval management seam serialize instead of in
       headers: { Host: "localhost", "content-type": "application/json" },
       body: JSON.stringify({ note: "seam-" + ${JSON.stringify(marker)} }),
     });
-    const response = await handleManagementAPI(req, url, config);
+    const response = await handleManagementAPI(req, url, config, {
+      mutatePersistedConfig,
+      saveConfigPreservingClaudeCode,
+    });
     const body = await response.json();
     console.log(JSON.stringify({ status: response.status, catalogRefresh: body.catalogRefresh }));
   `;
