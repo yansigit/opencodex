@@ -132,7 +132,7 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       const native = { type: "namespace", name: "collaboration", tools: [{ type: "function", name: "spawn_agent", parameters: { type: "object" } }, { type: "function", name: "send_message", parameters: { type: "object" } }] };
       const response = await handleResponses(request(rootBody({ tools: [], input: [{ type: "additional_tools", tools: [native] }] })), config(), { model: "", provider: "" });
       const outbound = requests[0]!;
-      expect((outbound.input as Array<Record<string, unknown>>)[0]?.tools).toEqual([native, {
+      expect((outbound.input as Array<Record<string, unknown>>)[0]?.tools).toEqual([{ ...native, tools: [] }, {
         type: "namespace", name: "ocx_agents", description: "Use this routed-child mirror for collaboration operations.", tools: [{ type: "function", name: "spawn_agent", description: "Use this routed-child mirror for collaboration operations. spawn_agent.", parameters: { type: "object" } }, { type: "function", name: "send_message", description: "Use this routed-child mirror for collaboration operations. send_message.", parameters: { type: "object" } }],
       }]);
       expect((await response.json() as { output: Array<Record<string, unknown>> }).output[0]).toMatchObject({ namespace: "collaboration", encrypted_function_args: [] });
@@ -145,6 +145,7 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       { type: "function", name: "spawn_agent", parameters: { type: "object" } },
       { type: "function", name: "send_message", parameters: { type: "object" } },
     ] };
+    const originalNative = structuredClone(native);
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
       requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
@@ -162,7 +163,7 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       const catalogs = (requests[1]?.input as Array<Record<string, unknown>>)
         .filter(item => item.type === "additional_tools")
         .map(item => item.tools);
-      expect(catalogs).toEqual([[native], [native, expect.objectContaining({ name: "ocx_agents" })]]);
+      expect(catalogs).toEqual([[originalNative], [{ ...native, tools: [] }, expect.objectContaining({ name: "ocx_agents" })]]);
     } finally { globalThis.fetch = originalFetch; }
   });
 

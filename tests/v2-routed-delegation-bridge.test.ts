@@ -26,30 +26,44 @@ const send = { type: "function", name: "send_message", description: "native send
 const followup = { type: "function", name: "followup_task", description: "native follow", parameters: { type: "object" } };
 
 describe("V2 routed delegation bridge", () => {
-  test("mirrors available collaboration functions without changing native declarations", () => {
-    const body = { tools: [{ type: "namespace", name: "collaboration", tools: [spawn, send, { type: "function", name: "list_agents", parameters: {} }] }] };
+  test("moves message operations to plaintext mirrors while preserving native control operations", () => {
+    const encrypted = (tool: Record<string, any>) => ({
+      ...tool,
+      parameters: { type: "object", properties: {
+        target: { type: "string" },
+        message: { type: "string", encrypted: true, description: `${tool.name} message` },
+      } },
+    });
+    const messages = [encrypted(spawn), encrypted(send), encrypted(followup)];
+    const controls = ["wait_agent", "interrupt_agent", "list_agents"].map(name => (
+      { type: "function", name, parameters: { type: "object", properties: { id: { type: "string" } } } }
+    ));
+    const body = { tools: [{ type: "namespace", name: "collaboration", tools: [...messages, ...controls] }] };
     const request = parsed(body);
-    const native = structuredClone(body.tools[0]);
+    request.context.tools = [...messages, ...controls].map(tool => ({
+      namespace: "collaboration", name: tool.name, description: tool.description, parameters: tool.parameters,
+    }));
+    const original = structuredClone(body);
 
     const active = injectV2RoutedDelegationBridge(request);
 
-    expect(active?.names).toEqual(new Set(["spawn_agent", "send_message"]));
-    expect(body.tools[0]).toEqual(native);
+    expect(active?.names).toEqual(new Set(["spawn_agent", "send_message", "followup_task"]));
+    expect(active?.requestStateBody).toEqual(original);
+    expect(body.tools[0]).toEqual({ type: "namespace", name: "collaboration", tools: controls });
     expect(body.tools).toHaveLength(2);
-    expect(body.tools[1]).toEqual({
-      type: "namespace",
-      name: "ocx_agents",
-      description: GUIDANCE,
-      tools: [
-        { ...spawn, description: `${GUIDANCE} spawn_agent.` },
-        { ...send, description: `${GUIDANCE} send_message.` },
-      ],
-    });
-    expect(request.context.tools).toEqual([
-      { namespace: "collaboration", name: "spawn_agent", description: "native spawn", parameters: spawn.parameters },
-      { namespace: "ocx_agents", name: "spawn_agent", description: `${GUIDANCE} spawn_agent.`, parameters: spawn.parameters },
-      { namespace: "ocx_agents", name: "send_message", description: `${GUIDANCE} send_message.`, parameters: send.parameters },
-    ]);
+    const mirrored = (body.tools[1] as { tools: Array<Record<string, any>> }).tools;
+    expect(mirrored.map(tool => tool.name)).toEqual(["spawn_agent", "send_message", "followup_task"]);
+    for (const tool of mirrored) {
+      expect(tool.parameters.properties).toEqual({
+        target: { type: "string" },
+        message: { type: "string", description: `${tool.name} message` },
+      });
+    }
+    expect(request.context.tools?.filter(tool => tool.namespace === "collaboration")).toEqual(
+      controls.map(tool => ({ namespace: "collaboration", name: tool.name, parameters: tool.parameters })),
+    );
+    expect(request.context.tools?.filter(tool => tool.namespace === "ocx_agents").map(tool => tool.name))
+      .toEqual(["spawn_agent", "send_message", "followup_task"]);
   });
 
   test("mirrors every catalog shape, exactly the available three functions, and is idempotent", () => {
@@ -80,6 +94,23 @@ describe("V2 routed delegation bridge", () => {
       { type: "namespace", name: "collaboration", tools: [spawn] },
       { type: "namespace", name: "ocx_agents", tools: [] },
     ] });
+    expect(() => injectV2RoutedDelegationBridge(request)).toThrow("v2 routed delegation bridge namespace collision");
+  });
+
+  test("rejects an adjacent mirror whose schema differs from native collaboration", () => {
+    const request = parsed({ tools: [
+      { type: "namespace", name: "collaboration", tools: [spawn] },
+      { type: "namespace", name: "ocx_agents", description: GUIDANCE, tools: [{ ...spawn, description: `${GUIDANCE} spawn_agent.`, parameters: { type: "object" } }] },
+    ] });
+    expect(() => injectV2RoutedDelegationBridge(request)).toThrow("v2 routed delegation bridge namespace collision");
+  });
+
+  test("rejects a caller-supplied canonical mirror beside native control tools", () => {
+    const request = parsed({ tools: [
+      { type: "namespace", name: "collaboration", tools: [{ type: "function", name: "wait_agent", parameters: {} }] },
+      { type: "namespace", name: "ocx_agents", description: GUIDANCE, tools: [{ ...spawn, description: `${GUIDANCE} spawn_agent.` }] },
+    ] });
+
     expect(() => injectV2RoutedDelegationBridge(request)).toThrow("v2 routed delegation bridge namespace collision");
   });
 

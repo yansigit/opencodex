@@ -1,4 +1,3 @@
-import { isDeepStrictEqual } from "node:util";
 import type { OcxParsedRequest, OcxTool } from "../../types";
 import type { SsePayloadRewrite } from "../sse-payload-rewrite";
 
@@ -7,6 +6,7 @@ const NATIVE_NAMESPACE = "collaboration";
 const MIRRORED_NAMES = new Set(["spawn_agent", "send_message", "followup_task"]);
 const GUIDANCE = "Use this routed-child mirror for collaboration operations.";
 const MAX_SSE_BINDINGS = 128;
+const injectedGroups = new WeakSet<object>();
 
 type RecordValue = Record<string, unknown>;
 
@@ -33,21 +33,38 @@ function rawToolLists(body: unknown, replayPrefixLength: number): unknown[][] {
 }
 
 function requestStateBody(body: unknown): unknown {
-  if (!isRecord(body) || !Array.isArray(body.input)) return body;
-  // Only additional_tools containers are mutated below. Clone that narrow path so the
-  // continuation cache retains the caller's catalog without copying unrelated context.
+  if (!isRecord(body)) return body;
+  const cloneTools = (tools: unknown[]) => tools.map(tool => (
+    isRecord(tool) && tool.type === "namespace" && Array.isArray(tool.tools)
+      ? { ...tool, tools: [...tool.tools] }
+      : tool
+  ));
+  if (!Array.isArray(body.tools) && !Array.isArray(body.input)) return body;
+  // Only tool catalogs are mutated below. Clone that narrow path so the continuation
+  // cache retains the caller's catalog without copying unrelated context.
   return {
     ...body,
-    input: body.input.map(item => (
+    ...(Array.isArray(body.tools) ? { tools: cloneTools(body.tools) } : {}),
+    ...(Array.isArray(body.input) ? { input: body.input.map(item => (
       isRecord(item) && item.type === "additional_tools" && Array.isArray(item.tools)
-        ? { ...item, tools: [...item.tools] }
+        ? { ...item, tools: cloneTools(item.tools) }
         : item
-    )),
+    )) } : {}),
   };
 }
 
 function mirrorTool(tool: RecordValue): RecordValue {
-  return { ...tool, description: `${GUIDANCE} ${tool.name}.` };
+  const parameters = isRecord(tool.parameters) ? tool.parameters : undefined;
+  const properties = isRecord(parameters?.properties) ? parameters.properties : undefined;
+  const message = isRecord(properties?.message) ? properties.message : undefined;
+  const { encrypted: _, ...plaintextMessage } = message ?? {};
+  return {
+    ...tool,
+    description: `${GUIDANCE} ${tool.name}.`,
+    ...(message && Object.hasOwn(message, "encrypted") ? {
+      parameters: { ...parameters, properties: { ...properties, message: plaintextMessage } },
+    } : {}),
+  };
 }
 
 function mirrorChildren(group: RecordValue): RecordValue[] {
@@ -85,25 +102,31 @@ export function injectV2RoutedDelegationBridge(
   for (const { group } of nativeGroups) {
     for (const child of mirrorChildren(group)) names.add(child.name as string);
   }
+  for (const { group } of existing) {
+    for (const child of mirrorChildren(group)) names.add(child.name as string);
+  }
   if (names.size === 0) return undefined;
 
   const expected = nativeGroups.map(({ list, index, group }) => ({ list, index: index + 1, group: mirrorGroup(group) }));
-  const idempotent = existing.length === expected.length && expected.every(candidate => {
-    const actual = candidate.list[candidate.index];
-    return isRecord(actual) && isDeepStrictEqual(actual, candidate.group);
-  });
+  const idempotent = existing.length === nativeGroups.length && existing.every(({ list, index, group }) => (
+    injectedGroups.has(group)
+    && nativeGroups.some(native => native.list === list && native.index + 1 === index)
+  ));
   if (existing.length > 0 && !idempotent) {
     throw new Error("v2 routed delegation bridge namespace collision");
   }
   if (!idempotent) {
-    for (const { list, index, group } of [...expected].reverse()) list.splice(index, 0, group);
+    for (const { list, index, group } of [...expected].reverse()) {
+      injectedGroups.add(group);
+      list.splice(index, 0, group);
+    }
   }
 
   const mirrorTools: OcxTool[] = [];
   for (const name of names) {
     const source = parsed.context.tools?.find(tool => tool.namespace === NATIVE_NAMESPACE && tool.name === name);
     if (source) {
-      mirrorTools.push({ ...source, namespace: MIRROR_NAMESPACE, description: `${GUIDANCE} ${name}.` });
+      mirrorTools.push({ ...mirrorTool(source as unknown as RecordValue), namespace: MIRROR_NAMESPACE } as OcxTool);
       continue;
     }
     const raw = nativeGroups.flatMap(entry => mirrorChildren(entry.group)).find(tool => tool.name === name);
@@ -114,7 +137,15 @@ export function injectV2RoutedDelegationBridge(
       parameters: isRecord(raw?.parameters) ? raw.parameters : {},
     });
   }
+  for (const { group } of nativeGroups) {
+    if (Array.isArray(group.tools)) group.tools = group.tools.filter(tool => (
+      !isRecord(tool) || typeof tool.name !== "string" || !MIRRORED_NAMES.has(tool.name)
+    ));
+  }
   if (mirrorTools.length > 0) {
+    parsed.context.tools = (parsed.context.tools ?? []).filter(tool => (
+      tool.namespace !== NATIVE_NAMESPACE || !MIRRORED_NAMES.has(tool.name)
+    ));
     const present = new Set((parsed.context.tools ?? [])
       .filter(tool => tool.namespace === MIRROR_NAMESPACE)
       .map(tool => tool.name));
