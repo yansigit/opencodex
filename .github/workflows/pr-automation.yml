@@ -104,7 +104,8 @@ jobs:
               });
               const text = await response.text();
               let data = null;
-              try { data = text ? JSON.parse(text) : null; } catch {}
+              try { data = text ? JSON.parse(text) : null; }
+              catch (error) { core.debug(`GitHub API response was not JSON: ${error.message}`); }
               return { status: response.status, ok: response.ok, data };
             }
             async function getPr(number) {

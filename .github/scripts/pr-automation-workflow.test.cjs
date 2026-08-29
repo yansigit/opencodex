@@ -16,6 +16,7 @@ function workflow() {
 describe("PR automation workflow contract", () => {
   it("replaces the old sync babysitter and scans trusted dev PR events", () => {
     const source = workflow();
+    const issueQuality = fs.readFileSync(path.join(root, "workflows", "issue-quality-tests.yml"), "utf8");
     assert.match(source, /^name: PR automation$/m);
     assert.match(source, /push:\s*\n\s+branches:\s*\[dev\]/);
     assert.match(source, /pull_request_target:/);
@@ -26,6 +27,8 @@ describe("PR automation workflow contract", () => {
     assert.equal(fs.existsSync(path.join(root, "workflows", "sync-pr-babysitter.yml")), false);
     assert.equal(fs.existsSync(path.join(__dirname, "sync-pr-babysitter.cjs")), false);
     assert.equal(fs.existsSync(path.join(__dirname, "sync-pr-babysitter.test.cjs")), false);
+    assert.doesNotMatch(issueQuality, /sync-pr-babysitter/);
+    assert.match(issueQuality, /pr-automation\*\.test\.cjs/);
   });
 
   it("uses a repository-wide non-cancelling lock and least-privilege trusted checkout", () => {
