@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTrustedWindowsElevationExecutablesForTests } from "../src/lib/windows-elevation";
 import { createWindowsPowerShellFixture, type WindowsPowerShellFixture } from "./helpers/windows-power-shell-fixture";
@@ -207,6 +208,109 @@ afterAll(() => stallingFakePowerShell?.cleanup());
     now += 2;
     expect((await collectCodexAppServerCatalogStateForRequest(io)).state).toBe("fresh");
     expect(calls).toBe(2);
+    resetCodexAppServerCatalogStateCache();
+  });
+
+  test("Windows request collection shares process evidence across freshness targets", async () => {
+    resetCodexAppServerCatalogStateCache();
+    const dir = mkdtempSync(join(tmpdir(), "ocx-catalog-targets-"));
+    const catalogPath = join(dir, "catalog.json");
+    const configPath = join(dir, "config.toml");
+    let calls = 0;
+    let starts = 0;
+    let releaseSnapshots: ((snapshots: Array<{ pid: number; commandLine: string }>) => void) | undefined;
+    try {
+      writeFileSync(catalogPath, "{}");
+      writeFileSync(configPath, "[agents]\n");
+      utimesSync(catalogPath, 1, 1);
+      utimesSync(configPath, 2, 2);
+      const snapshots = new Promise<Array<{ pid: number; commandLine: string }>>(resolve => {
+        releaseSnapshots = resolve;
+      });
+      const base = {
+        platform: "win32" as const,
+        listSnapshotsAsync: async () => {
+          calls += 1;
+          return snapshots;
+        },
+        readStartMsBatchAsync: async (pids: readonly number[]) => {
+          starts += 1;
+          return new Map(pids.map(pid => [pid, 3_000] as const));
+        },
+        now: () => 5_000,
+      };
+      const catalog = collectCodexAppServerCatalogStateForRequest({
+        ...base, freshnessTarget: "catalog", freshnessPath: catalogPath,
+      });
+      const config = collectCodexAppServerCatalogStateForRequest({
+        ...base, freshnessTarget: "config", freshnessPath: configPath,
+      });
+      releaseSnapshots?.([{ pid: 42, commandLine: APP_SERVER_CMD }]);
+      await expect(catalog).resolves.toMatchObject({ state: "fresh", catalogMtimeMs: 1_000 });
+      await expect(config).resolves.toMatchObject({ state: "fresh", catalogMtimeMs: 2_000 });
+      expect(calls).toBe(1);
+      expect(starts).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      resetCodexAppServerCatalogStateCache();
+    }
+  });
+
+  test("target mtime failure does not shorten healthy process evidence TTL", async () => {
+    resetCodexAppServerCatalogStateCache();
+    let now = 1_000;
+    let enumerations = 0;
+    let mtime: number | null = null;
+    const io = {
+      platform: "win32" as const,
+      now: () => now,
+      listSnapshotsAsync: async () => {
+        enumerations += 1;
+        return [{ pid: 42, commandLine: APP_SERVER_CMD }];
+      },
+      readStartMsBatchAsync: async (pids: readonly number[]) => new Map(pids.map(pid => [pid, 2_000] as const)),
+      catalogMtimeMs: () => mtime,
+    };
+    await expect(collectCodexAppServerCatalogStateForRequest({ ...io, freshnessTarget: "config" }))
+      .resolves.toMatchObject({ state: "unknown" });
+    now += 300;
+    mtime = 1_000;
+    await expect(collectCodexAppServerCatalogStateForRequest({ ...io, freshnessTarget: "catalog" }))
+      .resolves.toMatchObject({ state: "fresh" });
+    expect(enumerations).toBe(1);
+    resetCodexAppServerCatalogStateCache();
+  });
+
+  test("target-adjusted unknown is not served stale while refreshing", async () => {
+    resetCodexAppServerCatalogStateCache();
+    let now = 1_000;
+    let mtime: number | null = 1_000;
+    let enumerations = 0;
+    let releaseRefresh: (() => void) | undefined;
+    const io = {
+      platform: "win32" as const,
+      now: () => now,
+      listSnapshotsAsync: async () => {
+        enumerations += 1;
+        if (enumerations > 1) await new Promise<void>(resolve => { releaseRefresh = resolve; });
+        return [{ pid: 42, commandLine: APP_SERVER_CMD }];
+      },
+      readStartMsBatchAsync: async (pids: readonly number[]) => new Map(pids.map(pid => [pid, 2_000] as const)),
+      catalogMtimeMs: () => mtime,
+    };
+    await expect(collectCodexAppServerCatalogStateForRequest({ ...io, freshnessTarget: "catalog" }))
+      .resolves.toMatchObject({ state: "fresh" });
+    now += catalogStateTtlMs("fresh") + 1;
+    mtime = null;
+    const config = collectCodexAppServerCatalogStateForRequest({ ...io, freshnessTarget: "config" });
+    const settled = await Promise.race([
+      config.then(() => "settled" as const),
+      new Promise<"waiting">(resolve => setTimeout(() => resolve("waiting"), 25)),
+    ]);
+    expect(settled).toBe("waiting");
+    releaseRefresh?.();
+    await expect(config).resolves.toMatchObject({ state: "unknown" });
+    expect(enumerations).toBe(2);
     resetCodexAppServerCatalogStateCache();
   });
 
@@ -911,15 +1015,14 @@ describe("warnIfStaleCodexAppServersAfterStartupWrite (#1046)", () => {
   /*
    * The masking risk this layer has to defend against, stated honestly.
    *
-   * `collectCodexAppServerCatalogState` memoizes for 5s, but ONLY when every io
-   * field is defaulted (`fullyDefault`). That has two consequences:
+   * `collectCodexAppServerCatalogState` memoizes process evidence for 5s and keeps
+   * target-specific status objects separately. That has two consequences:
    *
    * - Production startup runs on the default path, so a `fresh` reading taken
    *   before the catalog write CAN be replayed after it, and the helper drops the
    *   memo first for exactly that reason.
-   * - Any test that injects io bypasses the cache, so it cannot reproduce the
-   *   masking and would pass with or without the reset. Writing one anyway would
-   *   be a test that looks like proof and is not.
+   * - Injected process seams participate in the evidence cache when their identity
+   *   is stable, while the freshness mtime is still read for each target.
    *
    * So this asserts the mechanism the fix depends on — that a defaulted read is
    * memoized and an explicit invalidation clears it — rather than pretending to

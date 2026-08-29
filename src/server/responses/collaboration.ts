@@ -77,6 +77,7 @@ import { registerTurn, trackStreamLifetime, unregisterTurn } from "../lifecycle"
 import { redactSecretString } from "../../lib/redact";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { supportedLadderFor } from "../effort-policy";
+import { resolveNativeDefaultState, type NativeDefaultState } from "../../codex/subagent-defaults";
 import {
   beginRequestAttempt,
   catalogModelSupportsServiceTier,
@@ -216,11 +217,18 @@ export interface MultiAgentGuidanceOptions {
   subagentModelFallback?: string[];
   injectionPrompt?: string;
   subagentRoles?: OcxSubagentRole[];
+  nativeDefaultState?: NativeDefaultState;
+  syncCodexSubagentDefaults?: boolean;
 }
 
 
 
 export interface MultiAgentGuidanceDeps {
+  resolveNativeDefaultState?: (config: {
+    injectionModel?: string;
+    injectionEffort?: string;
+    syncCodexSubagentDefaults?: boolean;
+  }) => NativeDefaultState | Promise<NativeDefaultState>;
   resolveEffectiveSubagentRoster?: (
     configuredModels: readonly string[],
     surface: SpawnAgentSurface,
@@ -308,6 +316,8 @@ export async function multiAgentGuidanceText(
     subagentModelFallback,
     injectionPrompt,
     subagentRoles,
+    nativeDefaultState: configuredNativeDefaultState,
+    syncCodexSubagentDefaults,
   } = options;
   const activeAccountNamespace = codexAccountNamespace?.length
     ? codexAccountNamespace
@@ -340,6 +350,10 @@ export async function multiAgentGuidanceText(
     if (catalogState.state === "stale" || catalogState.state === "unknown") {
       return null;
     }
+    const nativeDefaultState = configuredNativeDefaultState
+      ?? await (deps.resolveNativeDefaultState ?? resolveNativeDefaultState)({
+        injectionModel, injectionEffort, syncCodexSubagentDefaults,
+      });
     // codex-rs supplies the Proactive text on v2; the proxy only adds model-designation
     // guidance, and only when there is something concrete to designate: a configured
     // injectionModel and/or a roster entry that resolves in the injected catalog.
@@ -417,7 +431,7 @@ export async function multiAgentGuidanceText(
       // fallback only for explicit routed/account-qualified ids.
       const promptModel = preferred?.model
         ?? (injectionModel?.includes("/") ? injectionModel : undefined);
-      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, customRolesText)}</multi_agent_mode>`;
+      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, customRolesText, nativeDefaultState)}</multi_agent_mode>`;
     }
     if (!preferred && roster === "" && fallbackGuidance === "" && customRolesText === "") return null;
     const preamble = "When the active spawn_agent tool supports optional \"model\" or \"reasoning_effort\" overrides, "
@@ -425,13 +439,14 @@ export async function multiAgentGuidanceText(
       + "When setting either override, set fork_turns to \"none\" "
       + "(or a positive turn count such as \"3\"; full-history forks reject overrides) "
       + "and make the task message self-contained. "
-      + "When specifying model overrides, omit agent_type or use \"worker\" to prevent enforcing locked default models. "
+      + "When specifying model overrides, preserve any caller-provided agent_type; do not replace it with \"worker\". "
       + "Subagent exec runs in a pure V8 isolate without require('fs'); "
       + "escape nested template literals in tools.apply_patch to prevent JavaScript syntax errors (e.g., write \\` and \\\${var}).";
     let preferredText = "";
     if (preferred) {
       preferredText = ` Preferred sub-agent: model "${preferred.model}"`
         + (injectionEffort ? `, reasoning_effort "${injectionEffort}"` : "")
+        + `; nativeDefaultState: ${nativeDefaultState}.`
         + " — use it unless the user names another.";
     }
     const specialist = (catalog: string): string =>
@@ -465,13 +480,14 @@ export async function multiAgentGuidanceText(
 
 export const V2_GUIDANCE_CHAR_BUDGET = 1200;
 
-export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, roles?: string): string {
+export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, roles?: string, nativeDefaultState?: NativeDefaultState): string {
   return prompt
     .replaceAll("{{model}}", model ?? "")
     .replaceAll("{{effort}}", effort ?? "")
     .replaceAll("{{roster}}", roster ?? "")
     .replaceAll("{{fallback}}", fallback ?? "")
-    .replaceAll("{{roles}}", roles ?? "");
+    .replaceAll("{{roles}}", roles ?? "")
+    .replaceAll("{{nativeDefaultState}}", nativeDefaultState ?? "");
 }
 
 

@@ -7,6 +7,7 @@ import type { ResponsesTerminalStatus } from "../bridge";
 import type { DataPlaneAdmission } from "./auth-cors";
 import type { AdmissionLease, AdmissionReservation } from "../lib/admission";
 import { BoundedSseFrameBuffer } from "./sse-frame-buffer";
+import { classifyAgentKind, type AgentKind } from "./effort-policy";
 
 const OPEN = 1;
 type ResponsesTerminalReporter = (status: ResponsesTerminalStatus) => void;
@@ -23,6 +24,7 @@ const SAFE_RESPONSE_HEADER_EXACT = new Set([
 
 export interface WsData {
   headers?: Headers; // base inbound forward headers only; per-turn auth refresh injects current pool tokens
+  agentKind?: AgentKind;
   /**
    * Resolved once at the handshake. Auth is handshake-time only on this path, so
    * the per-frame log contexts have no request headers left to re-resolve from.
@@ -67,11 +69,14 @@ export function buildResponsesWsData(
   admission: DataPlaneAdmission,
   admissionLease?: AdmissionReservation<ServerWebSocket<WsData>>,
   sessionLaneId?: string,
+  agentKind?: AgentKind,
 ): WsData {
   // Auth is handshake-time only on this path: the per-frame contexts have no
   // request headers left to re-resolve from, so the decision rides along here.
+  const resolvedAgentKind = arguments.length >= 5 ? agentKind : classifyAgentKind(headers, "responses");
   return {
     headers,
+    agentKind: resolvedAgentKind,
     admission,
     ...(admissionLease ? { admissionLease } : {}),
     ...(sessionLaneId ? { sessionLaneId } : {}),

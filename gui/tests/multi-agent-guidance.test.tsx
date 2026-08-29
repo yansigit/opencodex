@@ -79,7 +79,7 @@ async function mount(p: Props) {
   // import binds to the prior document state and corrupts sibling suites.
   const { createRoot } = await import("react-dom/client");
   await act(async () => {
-    root = createRoot(host);
+    root ??= createRoot(host);
     root.render(
       <LanguageProvider>
         <SubagentDelegationSection {...p} />
@@ -87,6 +87,20 @@ async function mount(p: Props) {
     );
   });
 }
+
+test("fails closed unless native-default authority is active", async () => {
+  // Missing state is the same fail-closed case as the hook's disabled fallback.
+  for (const nativeDefaultState of [undefined, "disabled", "pending", "blocked"] as const) {
+    await mount(props({ nativeDefaultState }));
+    expect(host.textContent).not.toContain("Live: omitted-model subagents use this preference after sync.");
+  }
+
+  await mount(props({ nativeDefaultState: "invalid" as Props["nativeDefaultState"] }));
+  expect(host.textContent).toContain(en["sub.nativeDefaultState.disabled"]);
+
+  await mount(props({ nativeDefaultState: "active" }));
+  expect(host.textContent).toContain("Live: omitted-model subagents use this preference after sync.");
+});
 
 test("renders independent guidance and native-default controls with editable selection", async () => {
   await mount(props());

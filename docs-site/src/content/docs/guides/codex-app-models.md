@@ -227,9 +227,10 @@ exact ids; saving the page replaces the list with dashboard-visible choices. ope
 catalog priorities in the selected order; when account-qualified picker rows are enabled, bare native selections
 expand into selector-qualified groups. Other models remain callable by exact id.
 
-The featured-model list is separate from the Dashboard's **Sub-agent delegation** selection. It
-controls which overrides Codex offers first; it does not select a model or trigger delegation by
-itself.
+The **Advertised overrides** list is separate from the Dashboard's **Preferred subagent model**
+selection. It controls which overrides Codex offers; its order does not select a default or trigger
+delegation. A preferred model outside the five advertised rows remains callable by its exact id and
+is not inserted or evicted implicitly.
 
 ## Desktop remote servers
 

@@ -113,6 +113,7 @@ import {
   type RequestLogEntry,
 } from "./request-log";
 import { sessionLaneIdFromRequest } from "./request-log-conversation";
+import { classifyAgentKind } from "./effort-policy";
 export {
   addFinalRequestLog,
   filterRequestLogs,
@@ -972,12 +973,14 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         // binding. They are the same object for the public listener, but the
         // unauthenticated loopback listener (#1102) is a second Bun.serve, and handing its
         // request to the public server's upgrade would fail or cross sockets.
+        const agentKind = classifyAgentKind(req.headers, "responses");
         if (requestServer.upgrade(req, {
           data: buildResponsesWsData(
             selectForwardHeaders(req.headers),
             admission,
             websocketLease,
             sessionLaneIdFromRequest(req.headers),
+            agentKind,
           ),
         })) return undefined as unknown as Response;
         websocketLease.release();
@@ -1395,6 +1398,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
@@ -1508,6 +1512,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;
@@ -1857,6 +1862,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             provider: "unknown",
             ...(wsAdmission ? admissionFields(wsAdmission) : {}),
             inboundProtocol: "responses",
+            agentKind: ws.data.agentKind,
           };
           let logged = false;
           const finalizeLog = (
