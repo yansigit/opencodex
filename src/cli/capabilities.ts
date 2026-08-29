@@ -131,6 +131,22 @@ export const CAPABILITIES: readonly Capability[] = [
     details: ["Reads local config; drives no management API route."],
   },
   {
+    command: ["provider", "install-replit"],
+    summary: "Install the paired Replit OpenAI and Anthropic providers.",
+    routes: [{ method: "POST", path: "/api/providers/replit-pair" }],
+    flags: [
+      { name: "--origin", value: "string", required: true, summary: "Replit gateway origin." },
+      { name: "--stdin", value: "boolean", summary: "Read the gateway key from stdin." },
+      { name: "--gateway-key-file", value: "string", summary: "Read the gateway key from a private file." },
+      { name: "--allow-custom-domain", value: "boolean", summary: "Allow a non-Replit gateway domain." },
+      { name: "--replace", value: "boolean", summary: "Replace an existing provider pair." },
+      { name: "--set-default", value: "boolean", summary: "Select Replit as the default provider." },
+      { name: "--json", value: "boolean", summary: "Emit the installation result as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+  },
+  {
     command: ["account", "list"],
     summary: "Codex OAuth accounts with pool priority and pause state.",
     routes: [{ method: "GET", path: "/api/codex-auth/accounts" }],
@@ -473,6 +489,29 @@ export const CAPABILITIES: readonly Capability[] = [
     mutates: true,
     json: "payload",
     details: ["A bare invocation reads and never writes."],
+  },
+  {
+    command: ["agent", "roles"],
+    summary: "Show, replace, or remove subagent roles.",
+    routes: [
+      { method: "GET", path: "/api/subagent-roles" },
+      { method: "PUT", path: "/api/subagent-roles" },
+    ],
+    flags: [
+      { name: "--file", value: "string", summary: "Read role JSON from a file instead of stdin." },
+      { name: "--json", value: "boolean", summary: "Emit role state as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: ["A status invocation reads and never writes."],
+  },
+  {
+    command: ["agent", "authority"],
+    summary: "Resolve subagent model authority for a supplied request.",
+    routes: [{ method: "POST", path: "/api/subagent-model-authority" }],
+    flags: [{ name: "--file", value: "string", summary: "Read authority JSON from a file instead of stdin." }],
+    mutates: true,
+    json: "payload",
   },
 ];
 

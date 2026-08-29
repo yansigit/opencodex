@@ -320,6 +320,26 @@ JSON mode: `payload`.
 
 Each of these writes. Check the flags column before running one unattended.
 
+### `ocx provider install-replit`
+
+Install the paired Replit OpenAI and Anthropic providers.
+
+| Method | Route |
+|---|---|
+| POST | `/api/providers/replit-pair` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--origin` | string | Replit gateway origin. |
+| `--stdin` | boolean | Read the gateway key from stdin. |
+| `--gateway-key-file` | string | Read the gateway key from a private file. |
+| `--allow-custom-domain` | boolean | Allow a non-Replit gateway domain. |
+| `--replace` | boolean | Replace an existing provider pair. |
+| `--set-default` | boolean | Select Replit as the default provider. |
+| `--json` | boolean | Emit the installation result as JSON. |
+
+JSON mode: `payload`.
+
 ### `ocx account pause`
 
 Stop routing new requests to one account in the Codex pool.
@@ -528,8 +548,40 @@ JSON mode: `payload`.
 
 - A bare invocation reads and never writes.
 
+### `ocx agent roles`
+
+Show, replace, or remove subagent roles.
+
+| Method | Route |
+|---|---|
+| GET | `/api/subagent-roles` |
+| PUT | `/api/subagent-roles` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--file` | string | Read role JSON from a file instead of stdin. |
+| `--json` | boolean | Emit role state as JSON. |
+
+JSON mode: `payload`.
+
+- A status invocation reads and never writes.
+
+### `ocx agent authority`
+
+Resolve subagent model authority for a supplied request.
+
+| Method | Route |
+|---|---|
+| POST | `/api/subagent-model-authority` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--file` | string | Read authority JSON from a file instead of stdin. |
+
+JSON mode: `payload`.
+
 ## Counts
 
-- declared capabilities: 29
-- of those, state-changing: 11
+- declared capabilities: 32
+- of those, state-changing: 14
 - head-resolved invocations: 2

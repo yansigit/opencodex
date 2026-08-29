@@ -38,6 +38,7 @@ import {
   writeJournal,
 } from "./journal";
 import { withCatalogWriteSerialization } from "./catalog-write-serialization";
+import { resetCodexAppServerCatalogStateCache } from "./app-server-processes";
 import { restoreCodexCatalogWithPermit } from "./catalog/sync";
 import { syncCodexHistoryProvider, type CodexHistoryFailureReason } from "./history-provider";
 import {
@@ -931,6 +932,7 @@ export async function injectCodexConfig(
       configContent: baselineContent,
     });
     atomicWriteFile(CODEX_CONFIG_PATH, content);
+    resetCodexAppServerCatalogStateCache();
     atomicWriteFile(CODEX_PROFILE_PATH, profileContent);
     markJournalInjectedState(content, profileContent, {
       // A root override is ours only in loopback Design B when no user-owned value won.
