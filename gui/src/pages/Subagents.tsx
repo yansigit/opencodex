@@ -32,6 +32,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const [busy, setBusy] = useState(false);
   /** Sync guard: state-only `busy` can miss clicks before the disabled re-render commits. */
   const saveInFlight = useRef(false);
+  const catalogLoadGeneration = useRef(0);
   const delegation = useSubagentDelegation(apiBase);
   const [catalogState, setCatalogState] = useState<CatalogState>(() => readCatalogState(cached));
   const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false });
@@ -260,6 +261,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const loadSubagents = useCallback(async (signal?: AbortSignal): Promise<CachedSubagents> => {
     // The resource layer's deadline abort must reach the wire — a signal dropped
     // here is a store that can only settle by race timeout.
+    catalogLoadGeneration.current++;
     const res = await fetch(`${apiBase}/api/subagent-models`, { signal });
     const response = await readJsonOrThrow<{ available?: string[]; chosen?: string[]; catalogState?: { state?: CatalogState } }>(res, t("sub.loadFail"));
     if (!response) throw new Error(t("sub.loadFail"));
@@ -319,6 +321,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const save = async () => {
     if (busy || saveInFlight.current) return;
     saveInFlight.current = true;
+    const saveCatalogGeneration = catalogLoadGeneration.current;
     setBusy(true);
     setStatus("");
     try {
@@ -330,7 +333,9 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       const d = await readJsonOrThrow<{ applied?: string[] }>(r, t("sub.saveFailed"));
       const applied = d?.applied ?? chosen;
       if (d?.applied) setChosen(d.applied);
-      writeSessionListCache(cacheKey, { available, chosen: applied, catalogState: { state: catalogState } });
+      if (saveCatalogGeneration === catalogLoadGeneration.current) {
+        writeSessionListCache(cacheKey, { available, chosen: applied, catalogState: { state: catalogState } });
+      }
       setOk(true);
       setStatus(t("sub.saved", { n: applied.length, cmd: "ocx sync" }));
     } catch (error) {

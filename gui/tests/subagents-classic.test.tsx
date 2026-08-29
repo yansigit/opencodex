@@ -24,6 +24,8 @@ let catalogState: "fresh" | "stale" | "not_running" | "unknown" | undefined;
 let rosterAfterRefresh: string[] | null = null;
 let subagentCatalogReads = 0;
 let subagentCatalogFails = false;
+let deferSubagentSave = false;
+let releaseSubagentSave: (() => void) | null = null;
 
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map((k) => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
@@ -46,6 +48,8 @@ beforeEach(() => {
   rosterAfterRefresh = null;
   subagentCatalogReads = 0;
   subagentCatalogFails = false;
+  deferSubagentSave = false;
+  releaseSubagentSave = null;
   testWindow.sessionStorage.clear();
   clearClientResourceStoresForTests();
   Object.defineProperty(globalThis, "confirm", { configurable: true, value: () => true });
@@ -79,6 +83,9 @@ beforeEach(() => {
         } as unknown as Response;
       }
       const isSubagentCatalog = String(url).includes("/api/subagent-models");
+      if (isSubagentCatalog && init?.method === "PUT" && deferSubagentSave) {
+        await new Promise<void>((resolve) => { releaseSubagentSave = resolve; });
+      }
       if (isSubagentCatalog && subagentCatalogFails) {
         return { ok: false, status: 503, text: async () => JSON.stringify({ error: "offline" }) } as unknown as Response;
       }
@@ -249,5 +256,33 @@ test("cached stale catalog state survives a failed refresh and save cache rewrit
 
   expect(JSON.parse(testWindow.sessionStorage.getItem("ocx.subagents.v1:")!)).toMatchObject({
     catalogState: { state: "stale" },
+  });
+});
+
+test("a refresh completing during save cannot be overwritten by the stale save cache write", async () => {
+  catalogState = "stale";
+  available = ["old-model"];
+  rosterAfterRefresh = ["new-model"];
+  deferSubagentSave = true;
+
+  await mount();
+  const save = Array.from(container.querySelectorAll("button"))
+    .find((b) => b.textContent?.trim() === "Save") as HTMLButtonElement | undefined;
+  await act(async () => { save!.click(); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  expect(releaseSubagentSave).toBeTruthy();
+
+  catalogState = "fresh";
+  const restart = container.querySelector<HTMLButtonElement>(".codex-stale-banner button");
+  expect(restart).toBeTruthy();
+  await act(async () => { restart!.click(); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+
+  releaseSubagentSave!();
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+  expect(JSON.parse(testWindow.sessionStorage.getItem("ocx.subagents.v1:")!)).toMatchObject({
+    available: ["new-model"],
+    catalogState: { state: "fresh" },
   });
 });
