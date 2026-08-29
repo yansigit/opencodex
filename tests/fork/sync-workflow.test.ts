@@ -22,10 +22,23 @@ describe("fork upstream sync workflow contract", () => {
   });
 
   test("grants vendor, issue, and draft PR write permissions", () => {
-    expect(workflow).toContain("actions: write");
-    expect(workflow).toContain("contents: write");
+    expect(workflow).toContain("contents: read");
     expect(workflow).toContain("issues: write");
     expect(workflow).toContain("pull-requests: write");
+  });
+
+  test("uses the deploy key for every push that may carry workflow files", () => {
+    const pushLines = workflow.match(/^\s+.*git push .*$/gm) ?? [];
+
+    expect(workflow).toContain("FORK_SYNC_SSH_KEY: ${{ secrets.FORK_SYNC_SSH_KEY }}");
+    expect(workflow).toContain(
+      "git remote set-url --push origin \"$(printf 'git@%s:%s.git' github.com \"$GITHUB_REPOSITORY\")\"",
+    );
+    expect(workflow.match(/git remote set-url --push origin/g)).toHaveLength(1);
+    expect(pushLines.length).toBeGreaterThan(0);
+    expect(pushLines.every(line => !line.includes("GIT_ASKPASS"))).toBe(true);
+    expect(pushLines.every(line => /git push(?:\s+--\S+)*\s+origin(?:\s|$)/.test(line))).toBe(true);
+    expect(workflow).not.toContain("actions: write");
   });
 
   test("passes the two Cursor secrets only to emit", () => {
@@ -49,7 +62,7 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("refs/heads/$branch:refs/heads/$branch");
     expect(workflow).toContain('git ls-remote origin "refs/heads/$branch"');
     expect(workflow).toContain("--force-with-lease=refs/heads/$branch:$remote_sha");
-    expect(workflow).toContain('GIT_ASKPASS="$askpass" git push');
+    expect(workflow).toContain("git push origin");
     expect(workflow).toContain("GH_TOKEN: ${{ github.token }}");
   });
 
