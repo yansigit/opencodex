@@ -99,6 +99,14 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(entrypoint).toContain("/home/ocx");
   expect(entrypoint).toContain('readdirSync("/sys/class/net")');
   expect(entrypoint).toContain('writeFileSync("/app/.ocx-write-test"');
+  expect(entrypoint).toContain('const workspace = "/tmp/ocx-test-workspace"');
+  expect(entrypoint).toContain('["cp", "-a", "/app/.", workspace]');
+  expect(entrypoint).toContain('["chmod", "-R", "u+rwX", workspace]');
+  expect(entrypoint).toContain('await run(workspace, ["run", "test"])');
+  expect(entrypoint).toContain('await run(`${workspace}/integrations/replit-gateway`, ["run", "test"])');
   expect(entrypoint).toContain("[\"run\", \"test\"]");
+  expect(entrypoint.indexOf('writeFileSync("/app/.ocx-write-test"')).toBeLessThan(entrypoint.indexOf('const workspace = "/tmp/ocx-test-workspace"'));
+  expect(entrypoint).not.toContain('await run("/app", ["run", "test"])');
+  expect(entrypoint).not.toContain('await run("/app/integrations/replit-gateway", ["run", "test"])');
   for (const pattern of [".git", ".worktrees", ".tmp", ".planning", ".agents", ".claude", ".cursor", ".windsurf", ".ssh", ".gnupg", ".aws", ".docker/config.json", "**/.docker/config.json", ".config/containers/auth.json", "**/.config/containers/auth.json", ".config/gh/hosts.yml", "**/.config/gh/hosts.yml", "**/.opencodex", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "dist", "gui/dist", "*.log", "coverage", "*.tgz", "*.tar", "*.zip"]) expect(ignored).toContain(pattern);
 });

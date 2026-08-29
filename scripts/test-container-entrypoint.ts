@@ -14,5 +14,10 @@ const run = async (cwd: string, args: string[]) => {
   const result = await Bun.spawn(["bun", ...args], { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
   if (result !== 0) process.exit(result);
 };
-await run("/app", ["run", "test"]);
-await run("/app/integrations/replit-gateway", ["run", "test"]);
+const workspace = "/tmp/ocx-test-workspace";
+for (const args of [["mkdir", workspace], ["cp", "-a", "/app/.", workspace], ["chmod", "-R", "u+rwX", workspace]] as const) {
+  const result = await Bun.spawn(args, { stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
+  if (result !== 0) throw new Error(`container workspace setup failed: ${args[0]}`);
+}
+await run(workspace, ["run", "test"]);
+await run(`${workspace}/integrations/replit-gateway`, ["run", "test"]);
