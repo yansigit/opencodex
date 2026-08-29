@@ -39,6 +39,7 @@ export function createIsolatedTestEnvironment(
       // real-home write guard can still know which path to protect.
       // (devlog 260730_codex_rs_upstream_v2_live_handoff/070.)
       OCX_REAL_HOME: baseEnv.OCX_REAL_HOME ?? homedir(),
+      OCX_TEST_HOME_GUARD: "1",
       // Pin git's global config to the developer's real one before HOME moves.
       //
       // git resolves ~/.gitconfig from HOME, so a sandboxed HOME makes it invisible.
