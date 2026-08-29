@@ -8,7 +8,7 @@ import { handleResponses } from "../src/server/responses/core";
 import { collectCodexAppServerCatalogState, resetCodexAppServerCatalogStateCache } from "../src/codex/app-server-processes";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 
 const config = (overrides: Partial<OcxConfig> = {}): OcxConfig => ({
   port: 10100,
@@ -74,6 +74,7 @@ describe("native default authority", () => {
     const response = await handleManagementAPI(
       new Request("http://localhost/api/injection-model", { method: "PUT", body: JSON.stringify({ model: "gpt-5.6-sol" }) }),
       new URL("http://localhost/api/injection-model"), current,
+      inMemoryManagementPersistence(current),
     );
     expect(await response!.json()).toEqual({
       ok: true, multiAgentGuidanceEnabled: true, syncCodexSubagentDefaults: true,
