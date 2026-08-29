@@ -140,6 +140,14 @@ describe("systemd service unit", () => {
     expect(invalid).toMatchObject({ ok: false, message: "Unknown service option: --bogus" });
     expect(probes).toBe(0);
 
+    const unknownSubcommand = planServiceCommand(["nope"], {
+      probeInstallation: () => { throw new Error("platform probe must not run"); },
+    });
+    expect(unknownSubcommand).toEqual({
+      ok: false,
+      message: "Usage: ocx service [install|repair|restart|start|stop|status|uninstall|remove] [--native|--scheduler]",
+    });
+
     const explicitInstall = planServiceCommand(["install"], {
       probeInstallation: () => { probes += 1; return { state: "unknown" }; },
     });
