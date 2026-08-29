@@ -210,6 +210,37 @@ describe("POST /api/providers/test (WP040 connectivity probe)", () => {
     expect(JSON.parse(String(seen[0]?.init?.body))).toEqual({ project: "test-project-id" });
   });
 
+  test("Google Antigravity warns when consumer OAuth may be pointed at the enterprise endpoint", async () => {
+    const seen: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen.push(String(input));
+      return Response.json({
+        models: { "any-agent-model": { maxTokens: 123_456 } },
+        agentModelSorts: [{ groups: [{ modelIds: ["any-agent-model"] }] }],
+      });
+    }) as typeof fetch;
+    await saveCredential("google-antigravity", {
+      access: "test-access-token",
+      refresh: "test-refresh-token",
+      expires: Date.now() + 3_600_000,
+      projectId: "test-project-id",
+    });
+    const config = baseConfig({
+      "google-antigravity": {
+        ...structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig),
+        baseUrl: "https://cloudcode-pa.googleapis.com",
+      },
+    });
+
+    const { body } = await probe(config, "google-antigravity");
+
+    expect(body.ok).toBe(true);
+    expect(String(body.message)).toContain("consumer Google Antigravity accounts may receive 429 RESOURCE_EXHAUSTED");
+    expect(String(body.message)).toContain("https://daily-cloudcode-pa.googleapis.com");
+    expect(String(body.message)).toContain("enterprise/GCP accounts");
+    expect(seen).toEqual(["https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"]);
+  });
+
   test("Google Antigravity rejects an explicit ai-studio mode before probing", async () => {
     let fetches = 0;
     globalThis.fetch = (async () => {
