@@ -30,6 +30,7 @@ const {
   loadCommandCodeProjectContext,
   projectContextCache,
   pruneProjectContextCache,
+  setCommandCodeFileOpTimeoutForTests,
 } = await import("../src/adapters/command-code-project-context");
 
 const MAX_PROJECT_CONTEXT_CACHE_ENTRIES = 128;
@@ -54,10 +55,12 @@ function writeSkill(
 
 beforeEach(() => {
   projectContextCache.clear();
+  setCommandCodeFileOpTimeoutForTests(undefined);
 });
 
 afterEach(() => {
   projectContextCache.clear();
+  setCommandCodeFileOpTimeoutForTests(undefined);
 });
 
 describe("loadCommandCodeProjectContext", () => {
@@ -159,10 +162,8 @@ describe("loadCommandCodeProjectContext", () => {
     });
 
     try {
-      const result = await Promise.race([
-        loadCommandCodeProjectContext(root),
-        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 2_500)),
-      ]);
+      setCommandCodeFileOpTimeoutForTests(20);
+      const result = await loadCommandCodeProjectContext(root);
       expect(result).toEqual(EMPTY_COMMAND_CODE_PROJECT_CONTEXT);
       expect(closeCalls).toBe(1);
     } finally {
@@ -296,16 +297,24 @@ describe("loadCommandCodeProjectContext", () => {
 
     try {
       writeFileSync(agentsPath, "hanging", "utf8");
-      const result = await Promise.race([
-        loadCommandCodeProjectContext(root),
-        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 2_500)),
-      ]);
+      setCommandCodeFileOpTimeoutForTests(20);
+      const result = await loadCommandCodeProjectContext(root);
 
       expect(result).not.toBe("timeout");
       expect(result).toEqual(EMPTY_COMMAND_CODE_PROJECT_CONTEXT);
       expect(closeCalls).toBe(1);
     } finally {
       openMock.mockImplementation(realOpen);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("uses the production file-operation timeout by default", async () => {
+    const root = makeTempDir("ocx-cc-ctx-default-timeout-");
+    try {
+      writeFileSync(join(root, "AGENTS.md"), "memory", "utf8");
+      expect((await loadCommandCodeProjectContext(root)).memory).toBe("memory");
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });

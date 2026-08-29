@@ -16,6 +16,10 @@ export type StorageMutationBusyError = "storage_mutation_busy";
 export interface StorageMutationCoordinatorTestHooks {
   /** Block after acquiring the slot, before mutation work (race tests). */
   blockMs?: number;
+  /** Notify race tests as soon as the per-home lease is owned. */
+  onAcquired?: () => void;
+  /** Keep the lease held until a race test has issued its competing operation. */
+  waitForRelease?: Promise<void>;
 }
 
 interface ActiveSlot {
@@ -79,6 +83,7 @@ export function tryBeginStorageMutation(
     },
   };
   slots.set(key, { kind, startedAt: Date.now(), lease: ownerLease });
+  testHooks?.onAcquired?.();
   return { acquired: true, lease: ownerLease };
 }
 
@@ -94,6 +99,7 @@ export function endStorageMutation(codexHome?: string): void {
 }
 
 async function applyCoordinatorBlock(): Promise<void> {
+  await testHooks?.waitForRelease;
   const blockMs = testHooks?.blockMs;
   if (typeof blockMs === "number" && Number.isFinite(blockMs) && blockMs > 0) {
     await Bun.sleep(Math.floor(blockMs));

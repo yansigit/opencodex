@@ -141,7 +141,7 @@ describe("Codex shim CLI auto-restore policy", () => {
       expect(installCodexShim().installed).toBe(true);
       writeFileSync(wrapper, replacement, "utf8");
       chmodSync(wrapper, 0o755);
-      await Bun.sleep(120);
+      await Bun.sleep(75);
 
       const result = spawnSync(process.execPath, [join(import.meta.dir, "..", "src", "cli", "index.ts"), "codex-shim", "status"], {
         encoding: "utf8",

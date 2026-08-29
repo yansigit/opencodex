@@ -37,7 +37,13 @@ const CALLBACK_PATH = "/callback";
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const ONBOARD_ATTEMPTS = 5;
-const ONBOARD_POLL_MS = 2_000;
+const ANTIGRAVITY_ONBOARD_POLL_MS = 2_000;
+const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+let sleepForTests: ((ms: number) => Promise<void>) | undefined;
+
+export function setAntigravityOnboardSleepForTests(sleep: ((ms: number) => Promise<void>) | undefined): void {
+  sleepForTests = sleep;
+}
 
 function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -136,7 +142,11 @@ async function loadCodeAssistProject(accessToken: string, signal?: AbortSignal):
   return extractProjectId((await response.json().catch(() => undefined)) as Record<string, unknown> | undefined);
 }
 
-async function onboardProject(accessToken: string, signal?: AbortSignal): Promise<string | undefined> {
+async function onboardProject(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const sleep = sleepForTests ?? defaultSleep;
   for (let attempt = 0; attempt < ONBOARD_ATTEMPTS; attempt++) {
     if (signal?.aborted) throw signal.reason ?? new Error("Antigravity onboarding aborted");
     const response = await fetch(`${DAILY_API}/${API_VERSION}:onboardUser`, {
@@ -153,7 +163,7 @@ async function onboardProject(accessToken: string, signal?: AbortSignal): Promis
     if (!response.ok) {
       // Transient (429/5xx): keep polling within the attempt budget. Hard 4xx: give up now.
       if (response.status === 429 || response.status >= 500) {
-        await new Promise(resolve => setTimeout(resolve, ONBOARD_POLL_MS));
+        await sleep(ANTIGRAVITY_ONBOARD_POLL_MS);
         continue;
       }
       return undefined;
@@ -162,13 +172,16 @@ async function onboardProject(accessToken: string, signal?: AbortSignal): Promis
     if (data.done === true) {
       return extractProjectId(data.response as Record<string, unknown> | undefined);
     }
-    await new Promise(resolve => setTimeout(resolve, ONBOARD_POLL_MS));
+    await sleep(ANTIGRAVITY_ONBOARD_POLL_MS);
   }
   return undefined;
 }
 
 /** Discover the CCA project for an access token (loadCodeAssist → onboardUser fallback). */
-export async function discoverAntigravityProject(accessToken: string, signal?: AbortSignal): Promise<string | undefined> {
+export async function discoverAntigravityProject(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   return (await loadCodeAssistProject(accessToken, signal)) ?? (await onboardProject(accessToken, signal));
 }
 

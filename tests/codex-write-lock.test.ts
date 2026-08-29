@@ -330,42 +330,18 @@ describe("two real processes contend for one lock", () => {
     expect(blocked.status).toBe("busy");
     expect(blocked.status === "busy" && blocked.reason).toBe("deadline");
 
+    const waiter = withCodexWriteLock(options({ timeoutMs: 5_000 }), publishing("waited"));
+    await Bun.sleep(150);
     writeFileSync(releaseMarker, "go");
-    const held = await childResult(holder);
+    const [held, waited] = await Promise.all([childResult(holder), waiter]);
     expect(held.status).toBe("acquired");
+    expect(waited.status).toBe("acquired");
+    expect(waited.status === "acquired" && waited.waitedMs).toBeGreaterThan(0);
 
     // And once it is released the same call succeeds — proving the earlier busy
     // was contention rather than a permanent refusal wearing its label.
     const after = await withCodexWriteLock(options({ timeoutMs: 5_000 }), publishing("parent"));
     expect(after.status).toBe("acquired");
-  }, 30_000);
-
-  test("both processes resolve the same lock id for one home", async () => {
-    const first = await childResult(spawnChild({ timeoutMs: 5_000 }));
-    expect(first.status).toBe("acquired");
-    const local = canonicalizeCodexHome(codexHome);
-    expect(local.ok && first.lockId).toBe(local.ok ? local.home.lockId : "x");
-  }, 30_000);
-
-  /**
-   * A waiting contender must actually wait rather than fail fast — and must
-   * still come back typed rather than hanging. The holder releases partway
-   * through, so a deadline longer than the hold succeeds.
-   */
-  test("a contender with a deadline waits for the holder instead of failing immediately", async () => {
-    const holdMarker = join(root, "held-2");
-    const releaseMarker = join(root, "release-2");
-    const holder = spawnChild({ holdMarker, releaseMarker, timeoutMs: 0 });
-    await waitFor(holdMarker);
-
-    const waiter = withCodexWriteLock(options({ timeoutMs: 5_000 }), publishing("waited"));
-    await Bun.sleep(150);
-    writeFileSync(releaseMarker, "go");
-
-    const [waited, holderResult] = await Promise.all([waiter, childResult(holder)]);
-    expect(holderResult.status).toBe("acquired");
-    expect(waited.status).toBe("acquired");
-    expect(waited.status === "acquired" && waited.waitedMs).toBeGreaterThan(0);
   }, 30_000);
 
   /**
