@@ -1,0 +1,54 @@
+name: Nightly full macOS
+
+on:
+  schedule:
+    - cron: "17 8 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-macos
+  cancel-in-progress: true
+
+jobs:
+  full-macos:
+    name: full macOS
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+          fetch-tags: true
+          ref: dev
+
+      - name: Setup project Bun
+        uses: ./.github/actions/setup-project-bun
+
+      - name: Install dependencies
+        run: |
+          bun install --frozen-lockfile
+          cd gui
+          bun install --frozen-lockfile
+
+      - name: Build GUI
+        run: |
+          cd gui
+          bun run build
+
+      - name: Restore canonical test timings
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: .bun-timings.json
+          key: ocx-test-timings-dev-${{ github.sha }}
+          restore-keys: ocx-test-timings-dev-
+
+      - name: Validate restored timing data
+        if: hashFiles('.bun-timings.json') != ''
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
+
+      - name: Full macOS suite
+        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests
