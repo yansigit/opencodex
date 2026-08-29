@@ -81,6 +81,84 @@ test("sidecar web-search mutation is field-scoped", async () => {
   expect(persisted() as OcxConfig).toMatchObject({ webSearchSidecar: { streamRoutedModelOutput: true } });
 });
 
+test("sidecar retries preserve a concurrent edit to another leaf", async () => {
+  const config = { ...structuredClone(historicalFixture), webSearchSidecar: { model: "old", reasoning: "low" as const } };
+  let committed!: OcxConfig;
+  const url = new URL("http://localhost/api/sidecar-settings");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ webSearch: { streamRoutedModelOutput: true } }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const latest = structuredClone(config);
+      latest.webSearchSidecar = { ...latest.webSearchSidecar, reasoning: "high" };
+      const result = mutate(latest);
+      committed = latest;
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+  });
+  expect(response?.status).toBe(200);
+  expect(committed.webSearchSidecar).toMatchObject({ model: "old", reasoning: "high", streamRoutedModelOutput: true });
+  expect(config.webSearchSidecar).toEqual(committed.webSearchSidecar);
+});
+
+test("Claude retries preserve concurrent leaves and adopt the committed subtree", async () => {
+  const config = { ...structuredClone(historicalFixture), claudeCode: { enabled: true, blockedSkills: ["old"] } };
+  let committed!: OcxConfig;
+  const url = new URL("http://localhost/api/claude-code");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled: false }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const latest = structuredClone(config);
+      latest.claudeCode = { ...latest.claudeCode, blockedSkills: ["concurrent"] };
+      const result = mutate(latest);
+      committed = latest;
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+  });
+  expect(response?.status).toBe(200);
+  expect(committed.claudeCode).toMatchObject({ enabled: false, blockedSkills: ["concurrent"] });
+  expect(config.claudeCode).toEqual(committed.claudeCode);
+});
+
+test("a combined V2 config update performs one persistence transaction", async () => {
+  const config = structuredClone(historicalFixture);
+  let calls = 0;
+  const url = new URL("http://localhost/api/v2");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      multiAgentMode: "default",
+      keepNativeChatGptOnV1: true,
+      v2RoutedDelegationBridge: true,
+    }),
+  }), url, config, {
+    toggleCodexMultiAgentV2: () => {},
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+    saveConfigPreservingClaudeCode: () => {
+      calls++;
+      if (calls === 2) throw new Error("second write refused");
+    },
+    mutatePersistedConfig: mutate => {
+      calls++;
+      if (calls === 2) throw new Error("second write refused");
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      Object.assign(config, candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+  });
+  expect(response?.status).toBe(200);
+  expect(calls).toBe(1);
+  expect(config).toMatchObject({ keepNativeChatGptOnV1: true, v2RoutedDelegationBridge: true });
+  expect(config.multiAgentMode).toBeUndefined();
+});
+
 test("a direct management mutation without a persistence seam does not touch disk", async () => {
   const before = readFileSync(getConfigPath(), "utf8");
   const config = structuredClone(historicalFixture);

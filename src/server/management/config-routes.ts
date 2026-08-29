@@ -822,14 +822,34 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         else nextConfig.visionSidecar.reasoning = normalizedVisionReasoning;
       }
     }
+    let committedWebSearch: OcxConfig["webSearchSidecar"];
+    let committedVision: OcxConfig["visionSidecar"];
     const persisted = mutateManagementConfig(deps, disk => {
-      if (body.webSearch) disk.webSearchSidecar = nextConfig.webSearchSidecar;
-      if (body.vision) disk.visionSidecar = nextConfig.visionSidecar;
+      if (body.webSearch) {
+        const latest = { ...disk.webSearchSidecar };
+        for (const key of ["model", "backend", "reasoning", "streamRoutedModelOutput", "exaApiKey", "xSearch"] as const) {
+          if (!Object.hasOwn(body.webSearch, key)) continue;
+          if (Object.hasOwn(nextConfig.webSearchSidecar ?? {}, key)) latest[key] = nextConfig.webSearchSidecar![key] as never;
+          else delete latest[key];
+        }
+        disk.webSearchSidecar = latest;
+        committedWebSearch = structuredClone(latest);
+      }
+      if (body.vision) {
+        const latest = { ...disk.visionSidecar };
+        for (const key of ["model", "backend", "reasoning", "maxDescriptionsPerTurn", "enabled", "timeoutMs"] as const) {
+          if (!Object.hasOwn(body.vision, key)) continue;
+          if (Object.hasOwn(nextConfig.visionSidecar ?? {}, key)) latest[key] = nextConfig.visionSidecar![key] as never;
+          else delete latest[key];
+        }
+        disk.visionSidecar = latest;
+        committedVision = structuredClone(latest);
+      }
       return { changed: true, value: true };
     });
     if (persisted.status === "unavailable") return jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
-    if (body.webSearch) config.webSearchSidecar = nextConfig.webSearchSidecar;
-    if (body.vision) config.visionSidecar = nextConfig.visionSidecar;
+    if (body.webSearch) config.webSearchSidecar = committedWebSearch;
+    if (body.vision) config.visionSidecar = committedVision;
     const ws = config.webSearchSidecar ?? {};
     const vision = await sidecarVisionResponseSettings(config);
     const savedWebSearchCandidates = await webSearchCandidateRows(config);
