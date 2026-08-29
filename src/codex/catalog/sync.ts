@@ -1374,6 +1374,12 @@ function currentCatalogFileContent(path: string): Buffer | null {
   }
 }
 
+/** Internal byte guard shared by sync and its focused no-op-write test. */
+export function catalogContentChangedForTests(path: string, content: string): boolean {
+  const current = currentCatalogFileContent(path);
+  return current === null || !current.equals(Buffer.from(content, "utf8"));
+}
+
 function pristineCatalogBytes(read: RetainedCatalogSyncRead): string | null {
   if (read.onDiskCatalog && !catalogHasRoutedEntries(read.onDiskCatalog)) {
     try {
@@ -1735,8 +1741,7 @@ function writeRetainedCatalogSync({
   // nothing about the catalog changed. Skipping the no-op write keeps both the mtime
   // and `catalogWritten` honest; `added` still reports the routed rows the catalog
   // carries, because they are on disk either way.
-  const onDiskBytes = currentCatalogFileContent(catalogPath);
-  if (onDiskBytes !== null && onDiskBytes.equals(Buffer.from(content, "utf8"))) {
+  if (!catalogContentChangedForTests(catalogPath, content)) {
     return { added, path: catalogPath, catalogWritten: false, comboOmissions };
   }
 

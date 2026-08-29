@@ -394,7 +394,8 @@ describe("storage mutation coordinator", () => {
       });
 
       const restoredPath = join(home, "archived_sessions", "rollout-old.jsonl");
-      while (Atomics.load(new Int32Array(releaseBuffer), 1) === 0) await Bun.sleep(1);
+      const moved = new Int32Array(releaseBuffer);
+      if (Atomics.load(moved, 1) === 0) await Atomics.waitAsync(moved, 1, 0).value;
       expect(existsSync(restoredPath)).toBe(true);
       expect(existsSync(join(trashStage, "rollout-old.jsonl"))).toBe(false);
       expect(existsSync(join(trashStage, "restore-pending.json"))).toBe(true);
