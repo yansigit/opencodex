@@ -241,6 +241,7 @@ export async function runCli(
     const envelope = JSON.parse(input) as {
       event: SyncEvent;
       result: Parameters<DraftPullRequestClient["upsert"]>[0]["result"];
+      publishResult?: Parameters<DraftPullRequestClient["upsert"]>[0]["publishResult"];
     };
     let client = options.draftClient;
     if (!client) {

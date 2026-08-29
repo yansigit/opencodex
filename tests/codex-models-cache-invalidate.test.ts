@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { invalidateCodexModelsCache } from "../src/codex/catalog";
 import { invalidateCodexModelsCacheWithPermit } from "../src/codex/catalog/sync";
 import { withCatalogWriteSerialization } from "../src/codex/catalog-write-serialization";
-import { afterCatalogWriteHandleAppServers } from "../src/codex/app-server-processes";
+import {
+  afterCatalogWriteHandleAppServers,
+  collectCodexAppServerCatalogState,
+  resetCodexAppServerCatalogStateCache,
+} from "../src/codex/app-server-processes";
 import { refreshCodexModelCatalog } from "../src/codex/refresh";
 import { syncModelsToCodex } from "../src/codex/sync";
 import type { OcxConfig } from "../src/types";
@@ -296,5 +300,51 @@ describe("invalidateCodexModelsCache write gate (#476 / #518)", () => {
     expect(listed).toBe(0);
     expect(errors).toEqual([]);
     expect(logs).toEqual([]);
+  });
+
+  test("sync invalidates a cached not-running observation before a catalog write", async () => {
+    let snapshots: Array<{ pid: number; commandLine: string }> = [];
+    const io = {
+      platform: "linux" as const,
+      listSnapshots: () => snapshots,
+      readStartMs: () => 1_000,
+      catalogMtimeMs: () => 2_000,
+    };
+    resetCodexAppServerCatalogStateCache();
+    expect(collectCodexAppServerCatalogState(io).state).toBe("not_running");
+    snapshots = [{ pid: 42, commandLine: "codex app-server" }];
+
+    writeFileSync(join(codexHome, "opencodex-catalog.json"), JSON.stringify({ models: [{ slug: "gpt-5.5" }] }));
+    expect(invalidateCodexModelsCache({ allowWhenDesiredDisabled: true })).toBe(true);
+
+    expect(collectCodexAppServerCatalogState(io).state).toBe("stale");
+  });
+
+  test("sync invalidates cached process state even when catalog refresh is a no-op", async () => {
+    let snapshots: Array<{ pid: number; commandLine: string }> = [];
+    const io = {
+      platform: "linux" as const,
+      listSnapshots: () => snapshots,
+      readStartMs: () => 1_000,
+      catalogMtimeMs: () => 2_000,
+    };
+    resetCodexAppServerCatalogStateCache();
+    expect(collectCodexAppServerCatalogState(io).state).toBe("not_running");
+    snapshots = [{ pid: 42, commandLine: "codex app-server" }];
+
+    await syncModelsToCodex(10100, emptyConfig, null, {
+      refreshCodexModelCatalog: async () => ({
+        added: 0,
+        path: join(codexHome, "opencodex-catalog.json"),
+        catalogExists: false,
+        catalogWritten: false,
+        cacheSynced: false,
+        comboOmissions: [],
+      }),
+      injectCodexConfig: async () => ({ success: true, message: "injected" }),
+      currentExternalCodexModelProvider: () => null,
+    });
+
+    expect(collectCodexAppServerCatalogState(io).state).toBe("stale");
   });
 });

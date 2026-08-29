@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { logsFromApiBody } from "./helpers/logs-api";
 import {
   hasValidApiAuth,
   isDataPlaneAdmissionSecret,
@@ -13,7 +14,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
 import { startServer } from "../src/server";
-import { buildResponsesWsData } from "../src/server/ws-bridge";
+import { buildResponsesWsData, selectForwardHeaders } from "../src/server/ws-bridge";
+import { classifyAgentKind } from "../src/server/effort-policy";
+import { handleResponses } from "../src/server/responses";
+import { addFinalRequestLog, type RequestLogEntry, type RequestLogContext } from "../src/server/request-log";
 import type { OcxConfig } from "../src/types";
 
 // The admission path already knew WHICH key matched and threw it away. These
@@ -177,6 +181,55 @@ describe("loopback binds", () => {
   });
 });
 
+describe("Responses HTTP ingress", () => {
+  test("finalizes an unknown origin for malformed body before normal parsing/routing", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-agent-kind-http-"));
+    const previousHome = process.env.OPENCODEX_HOME;
+    const previousAdmin = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    const managementToken = ["management", "test", "value", "agent", "kind", "http"].join("-");
+    process.env.OPENCODEX_HOME = home;
+    process.env.OPENCODEX_ADMIN_AUTH_TOKEN = managementToken;
+    saveConfig(remoteConfig());
+    const server = startServer(0);
+    try {
+      const response = await fetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opencodex-api-key": "ocx_data_secondsecret",
+          "x-codex-turn-metadata": "{bad",
+        },
+        body: "{bad",
+      });
+      expect(response.status).toBe(400);
+      const spawnedResponse = await fetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opencodex-api-key": "ocx_data_secondsecret",
+          "x-openai-subagent": "collab_spawn",
+        },
+        body: "{bad",
+      });
+      expect(spawnedResponse.status).toBe(400);
+      const body = await fetch(new URL("/api/logs?tail=2", server.url), {
+        headers: { authorization: `Bearer ${managementToken}` },
+      }).then(result => result.json());
+      const logs = logsFromApiBody(body);
+      expect(logs[0]).toMatchObject({ status: 400, inboundProtocol: "responses" });
+      expect(logs[0]).not.toHaveProperty("agentKind");
+      expect(logs[1]).toMatchObject({ status: 400, inboundProtocol: "responses", agentKind: "subagent" });
+    } finally {
+      await server.stop(true);
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      if (previousAdmin === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+      else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdmin;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the Responses WebSocket handshake", () => {
   test("opens for a configured key", async () => {
     const home = mkdtempSync(join(tmpdir(), "ocx-admission-ws-"));
@@ -235,6 +288,62 @@ describe("the Responses WebSocket handshake", () => {
     const payload = buildResponsesWsData(headers, { kind: "configured", keyId: "second-key", source: "dedicated" });
     expect(payload.admission).toEqual({ kind: "configured", keyId: "second-key", source: "dedicated" });
     expect(payload.headers).toBe(headers);
+  });
+
+  test("the upgrade payload classifies the same Responses origin as HTTP", () => {
+    const payload = buildResponsesWsData(
+      new Headers({ "x-openai-subagent": "collab_spawn" }),
+      { kind: "configured", keyId: "second-key", source: "dedicated" },
+    );
+    expect(payload.agentKind).toBe("subagent");
+  });
+
+  test("raw HTTP and filtered WS headers preserve origin classification", () => {
+    const cases: Array<[string, Record<string, string>, "main" | "subagent" | "internal" | undefined]> = [
+      ["absent", {}, "main"],
+      ["empty", { "x-openai-subagent": "" }, undefined],
+      ["malformed metadata", { "x-codex-turn-metadata": "{bad" }, undefined],
+      ["whitespace metadata", {
+        "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "   " }),
+      }, undefined],
+      ["contradictory", {
+        "x-openai-subagent": "review",
+        "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "compact" }),
+      }, undefined],
+    ];
+    for (const [, rawInit, expected] of cases) {
+      const raw = new Headers(rawInit);
+      const httpKind = classifyAgentKind(raw, "responses");
+      const wsKind = buildResponsesWsData(
+        selectForwardHeaders(raw),
+        { kind: "configured", keyId: "second-key", source: "dedicated" },
+        undefined,
+        undefined,
+        httpKind,
+      ).agentKind;
+      expect(httpKind).toBe(expected);
+      expect(wsKind).toBe(expected);
+    }
+  });
+
+  test("classification survives a body parse failure finalized before routing", async () => {
+    const headers = new Headers({ "x-openai-subagent": "collab_spawn" });
+    const start = Date.now();
+    const logCtx: RequestLogContext = {
+      model: "unknown",
+      provider: "unknown",
+      inboundProtocol: "responses",
+      agentKind: classifyAgentKind(headers, "responses"),
+    };
+    const response = await handleResponses(
+      new Request("http://localhost/v1/responses", { method: "POST", headers, body: "{bad" }),
+      remoteConfig(),
+      logCtx,
+    );
+    const captured: RequestLogEntry[] = [];
+    addFinalRequestLog("ocx-early-agent-kind", start, logCtx, response.status, undefined, entry => captured.push(entry));
+    expect(response.status).toBe(400);
+    expect(captured[0]?.agentKind).toBe("subagent");
   });
 
   // The phase-2 guard that asserted no telemetry symbols existed yet has served

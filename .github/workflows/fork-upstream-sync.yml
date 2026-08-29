@@ -37,6 +37,16 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
 
+      - name: Create PR automation App token
+        id: sync-app-token
+        if: vars.PR_AUTOMATION_MODE == 'merge'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PR_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Install script dependencies
         run: bun install --frozen-lockfile --ignore-scripts
 
@@ -171,7 +181,9 @@ jobs:
           dev_sha="$(git rev-parse HEAD)"
           bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" prepare < "$event_file" > "$result_file"
           status="$(jq -r '.status' "$result_file")"
-          echo "status=$status" >> "$GITHUB_OUTPUT"
+          {
+            echo "status=$status"
+          } >> "$GITHUB_OUTPUT"
           if [ "$status" = "history-diverged" ]; then
             branch="$(jq -r '.branch' "$result_file")"
             git switch -C "$branch"
@@ -186,16 +198,19 @@ jobs:
               '{event: $event[0], result: $result[0], devSha: $devSha}' \
               > "$publish_input"
             bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" publish < "$publish_input" > "$publish_result"
-            echo "publish_action=$(jq -r '.action' "$publish_result")" >> "$GITHUB_OUTPUT"
-            echo "handoff_required=$(jq -r '.handoffRequired' "$publish_result")" >> "$GITHUB_OUTPUT"
-            echo "escalation_required=$(jq -r '.escalationRequired' "$publish_result")" >> "$GITHUB_OUTPUT"
-            echo "contains_vendor_main=$(jq -r '.containsVendorMain' "$publish_result")" >> "$GITHUB_OUTPUT"
+            {
+              echo "publish_action=$(jq -r '.action' "$publish_result")"
+              echo "handoff_required=$(jq -r '.handoffRequired' "$publish_result")"
+              echo "escalation_required=$(jq -r '.escalationRequired' "$publish_result")"
+              echo "contains_vendor_main=$(jq -r '.containsVendorMain' "$publish_result")"
+            } >> "$GITHUB_OUTPUT"
             if [ "$status" = "merged" ] && [ "$(jq -r '.containsVendorMain' "$publish_result")" = "true" ]; then
               echo "ready_for_pr=true" >> "$GITHUB_OUTPUT"
               jq -n \
                 --slurpfile event "$event_file" \
                 --slurpfile result "$result_file" \
-                '{event: $event[0], result: $result[0]}' \
+                --slurpfile publishResult "$publish_result" \
+                '{event: $event[0], result: $result[0], publishResult: $publishResult[0]}' \
                 > "$RUNNER_TEMP/fork-sync-draft-pr.json"
             fi
           fi
@@ -237,7 +252,7 @@ jobs:
       - name: Create or update draft sync PR
         if: steps.prepare.outputs.ready_for_pr == 'true'
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ steps.sync-app-token.outputs.token || github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -eu

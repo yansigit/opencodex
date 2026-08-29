@@ -13,7 +13,7 @@ Agent 設定控制要廣告哪個 Codex 協作介面，以及 opencodex 如何�
 | `subagentModels?` | `string[]` | `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.4-mini` | 最多五個原生或路由 id，在子代理 picker 中優先顯示。明確的空清單會被保留。 |
 | `injectionModel?` | `string` | — | 在代理撰寫的 v2 委派指引中使用的偏好原生或路由子代理模型。 |
 | `injectionEffort?` | `string` | — | 偏好 effort（`low` 到 `ultra`），僅在搭配 `injectionModel` 時有意義。 |
-| `injectionPrompt?` | `string` | — | 取代內建指引本文。支援 `{{model}}`、`{{effort}}`、`{{roster}}` 與 `{{fallback}}`。觸發閘門保持不變。 |
+| `injectionPrompt?` | `string` | — | 取代內建指引本文。支援 `{{model}}`、`{{effort}}`、`{{roster}}`、`{{fallback}}` 與 `{{nativeDefaultState}}`。後者為 `active`、`disabled`、`pending` 或 `blocked`；只有 `active` 表示設定的原生預設值具備權威性。觸發閘門保持不變。 |
 | `multiAgentGuidanceEnabled?` | `boolean` | `true` | 僅控制 opencodex 撰寫的 v1/v2 開發者指引；不改變原生 agent 預設值、工具、路由、roster 或 effort 上限。 |
 | `syncCodexSubagentDefaults?` | `boolean` | `false` | 選擇在 sync/restart 時將 `injectionModel` 與可選的 `injectionEffort` 寫入 Codex 的原生預設值。需要 `injectionModel`。 |
 | `subagentModelFallback?` | `string[]` | `[]` | 為生成的子任務回合排序的全域 fallback 模型。 |

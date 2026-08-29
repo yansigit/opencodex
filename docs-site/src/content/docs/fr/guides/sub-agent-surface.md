@@ -78,6 +78,7 @@ Le texte personnalisé de `injectionPrompt` peut utiliser les espaces réservés
 | `{{roster}}` | La liste résolue, visible par le sélecteur et compatible avec la surface |
 | `{{fallback}}` | Les conseils de repli globaux configurés |
 | `{{roles}}` | Catalogue compact des rôles activés (id, quand l’utiliser, modèle, effort optionnel), filtré selon la surface courante et le budget de 700 caractères |
+| `{{nativeDefaultState}}` | `active`, `disabled`, `pending` ou `blocked` ; seul `active` confirme que la valeur native par défaut configurée fait autorité |
 
 Le guide v2 intégré dispose d’un budget de 700 caractères. S’il devait dépasser ce budget, opencodex réduit
 la liste d'abord plutôt que de tronquer les instructions d'apparition principales. Le guidage intégré déclenche uniquement

@@ -28,8 +28,8 @@ on:
       - ".github/scripts/run-copilot-inference*.cjs"
       - ".github/scripts/parse-issue-translation-response.cjs"
       - ".github/scripts/parse-issue-translation-response.test.cjs"
-      - ".github/scripts/sync-pr-babysitter.cjs"
-      - ".github/scripts/sync-pr-babysitter.test.cjs"
+      - ".github/scripts/pr-automation*.cjs"
+      - ".github/workflows/pr-automation.yml"
       - ".github/workflows/enforce-issue-quality.yml"
       - ".github/workflows/enforce-pr-target.yml"
       - ".github/workflows/pr-labeler.yml"
@@ -63,8 +63,8 @@ on:
       - ".github/scripts/run-copilot-inference*.cjs"
       - ".github/scripts/parse-issue-translation-response.cjs"
       - ".github/scripts/parse-issue-translation-response.test.cjs"
-      - ".github/scripts/sync-pr-babysitter.cjs"
-      - ".github/scripts/sync-pr-babysitter.test.cjs"
+      - ".github/scripts/pr-automation*.cjs"
+      - ".github/workflows/pr-automation.yml"
       - ".github/workflows/enforce-issue-quality.yml"
       - ".github/workflows/enforce-pr-target.yml"
       - ".github/workflows/pr-labeler.yml"
@@ -100,7 +100,7 @@ jobs:
           node --test .github/scripts/copilot-workflows.test.cjs
           node --test .github/scripts/run-copilot-inference.test.cjs
           node --test .github/scripts/parse-issue-translation-response.test.cjs
-          node --test .github/scripts/sync-pr-babysitter.test.cjs
+          node --test .github/scripts/pr-automation*.test.cjs
 
       - name: Validate issue-form YAML
         run: |

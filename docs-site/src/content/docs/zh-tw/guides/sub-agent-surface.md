@@ -57,6 +57,7 @@ opencodex 允許你為目錄中的所有模型選擇多代理協作介面。儀�
 | `{{roster}}` | 解析出的 picker 可見、介面相容名冊 |
 | `{{fallback}}` | 設定的全域 fallback 指引 |
 | `{{roles}}` | 壓縮後的已啟用角色目錄（id、何時使用、模型、可選 effort），會依目前介面與 700 字元預算過濾 |
+| `{{nativeDefaultState}}` | `active`、`disabled`、`pending` 或 `blocked`；只有 `active` 表示設定的原生預設值具備權威性 |
 
 內建 v2 指引有 700 字元的預算。若會超過預算，opencodex 會先丟掉名冊而不是截斷核心 spawn 指示。
 內建指引只在偏好模型、合格名冊或 fallback 鏈解析成功時觸發。設定了 `injectionModel` 就足以渲染

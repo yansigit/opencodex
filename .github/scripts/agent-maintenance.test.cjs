@@ -121,6 +121,7 @@ describe("baseline CI evidence", () => {
     const pending = [
       { id: 1, name: "hygiene", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
       { id: 2, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "queued", conclusion: null },
+      { id: 3, name: "mergeable", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
     ];
     assert.equal(generatedSyncBaselineDisposition({ syncGenerated: true, checkRuns: pending, headSha: SHA }), "pending");
     assert.equal(generatedSyncBaselineDisposition({
@@ -153,6 +154,7 @@ describe("maintenance PR readiness", () => {
     { id: 1, name: "ci", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
     { id: 2, name: "enforce-target", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
     { id: 3, name: "hygiene", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
+    { id: 4, name: "mergeable", app: { id: 15368 }, head_sha: SHA, status: "completed", conclusion: "success" },
   ];
 
   it("accepts an exact-head Bugbot success with all baseline checks", () => {
@@ -197,6 +199,48 @@ describe("maintenance PR readiness", () => {
   });
 });
 
+describe("Jules controller head advances", () => {
+  it("accepts only a recorded controller merge with prior Jules and current dev parents", () => {
+    const previousSha = "a".repeat(40);
+    const currentSha = "b".repeat(40);
+    const devSha = "c".repeat(40);
+    assert.equal(isExpectedJulesHeadAdvance({
+      previousSha,
+      currentSha,
+      currentBaseSha: devSha,
+      reason: "controller-base-merge",
+      expectedJulesUserId: 77,
+      observedPusherId: 15368,
+      controllerMerge: {
+        recorded: true,
+        sha: currentSha,
+        parents: [{ sha: previousSha }, { sha: devSha }],
+      },
+      sessionStatus: "reviewing",
+      comparison: { status: "ahead", ahead_by: 1, merge_base_commit: { sha: previousSha } },
+      headCommit: { sha: currentSha, author: { id: 15368 }, committer: { id: 15368 } },
+    }), true);
+    assert.equal(isExpectedJulesHeadAdvance({
+      previousSha,
+      currentSha,
+      currentBaseSha: devSha,
+      reason: "controller-base-merge",
+      expectedJulesUserId: 77,
+      controllerMerge: { recorded: true, sha: currentSha, parents: [{ sha: previousSha }, { sha: devSha }] },
+      sessionStatus: "running",
+    }), false);
+    assert.equal(isExpectedJulesHeadAdvance({
+      previousSha,
+      currentSha,
+      currentBaseSha: devSha,
+      reason: "controller-base-merge",
+      expectedJulesUserId: 77,
+      controllerMerge: { recorded: true, sha: currentSha, parents: [{ sha: devSha }, { sha: previousSha }] },
+      sessionStatus: "reviewing",
+    }), false);
+  });
+});
+
 describe("autonomous merge evidence", () => {
   const pr = {
     number: 42,
@@ -207,11 +251,11 @@ describe("autonomous merge evidence", () => {
     labels: [{ name: "autonomous-fix" }],
   };
   const checks = [
-    ...["ci", "enforce-target", "hygiene"].map((name, id) => ({
+    ...["ci", "enforce-target", "hygiene", "mergeable"].map((name, id) => ({
       id: id + 1, name, app: { id: 15368 }, head_sha: SHA,
       status: "completed", conclusion: "success",
     })),
-    { id: 4, name: "Cursor Bugbot", app: { id: 99 }, head_sha: SHA,
+    { id: 5, name: "Cursor Bugbot", app: { id: 99 }, head_sha: SHA,
       status: "completed", conclusion: "success" },
   ];
   const valid = {
@@ -227,7 +271,7 @@ describe("autonomous merge evidence", () => {
   it("accepts a labeled exact-head Jules fix with all required checks", () => {
     const result = autonomousMergeEvidence(valid);
     assert.equal(result.ready, true);
-    assert.equal(result.bugbotEvidence.checkRunId, 4);
+    assert.equal(result.bugbotEvidence.checkRunId, 5);
   });
 
   it("rejects a waiver or missing autonomous-fix label", () => {

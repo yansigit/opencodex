@@ -4,13 +4,14 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import Subagents from "../src/pages/Subagents";
 import { LanguageProvider } from "../src/i18n/provider";
+import { clearClientResourceStoresForTests } from "../src/client-resource";
 
 /**
  * Behavioural contract for the denser Subagents workspace: five-slot cap,
  * add/remove via the rail, and the exact save request.
  */
 
-const globals = ["document", "window", "navigator", "localStorage", "fetch", "IS_REACT_ACT_ENVIRONMENT"] as const;
+const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "fetch", "confirm", "alert", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
 let testWindow: Window;
 let container: HTMLElement;
@@ -18,6 +19,15 @@ let root: Root | null = null;
 let requests: { url: string; init?: RequestInit }[] = [];
 let available: string[] = [];
 let chosen: string[] = [];
+let injectionModel = "";
+let catalogState: "fresh" | "stale" | "not_running" | "unknown" | undefined;
+let rosterAfterRefresh: string[] | null = null;
+let subagentCatalogReads = 0;
+let subagentCatalogFails = false;
+let deferSubagentSave = false;
+let releaseSubagentSave: (() => void) | null = null;
+let deferCatalogGets = false;
+let releaseCatalogGets: Array<() => void> = [];
 
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map((k) => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
@@ -28,17 +38,67 @@ beforeEach(() => {
     window: { configurable: true, value: testWindow },
     navigator: { configurable: true, value: testWindow.navigator },
     localStorage: { configurable: true, value: testWindow.localStorage },
+    sessionStorage: { configurable: true, value: testWindow.sessionStorage },
   });
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
   requests = [];
   available = ["a-1", "a-2", "a-3", "a-4", "a-5", "a-6"];
   chosen = [];
+  injectionModel = "";
+  catalogState = undefined;
+  rosterAfterRefresh = null;
+  subagentCatalogReads = 0;
+  subagentCatalogFails = false;
+  deferSubagentSave = false;
+  releaseSubagentSave = null;
+  deferCatalogGets = false;
+  releaseCatalogGets = [];
+  testWindow.sessionStorage.clear();
+  clearClientResourceStoresForTests();
+  Object.defineProperty(globalThis, "confirm", { configurable: true, value: () => true });
+  Object.defineProperty(globalThis, "alert", { configurable: true, value: () => {} });
   Object.defineProperty(globalThis, "fetch", {
     configurable: true,
     value: async (url: string, init?: RequestInit) => {
       requests.push({ url: String(url), init });
-      const body = JSON.stringify({ available, chosen });
+      if (String(url).includes("/api/injection-model")) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({ model: injectionModel, effort: "high", available: available.map(model => ({ provider: "openai", model, namespaced: model })) }),
+          json: async () => ({ model: injectionModel, effort: "high", available: available.map(model => ({ provider: "openai", model, namespaced: model })) }),
+        } as unknown as Response;
+      }
+      if (String(url).includes("/api/system/codex-restart")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            success: true,
+            stateBefore: "stale",
+            synced: true,
+            requested: [123],
+            stopped: [123],
+            surviving: [],
+            failed: [],
+            code: "stopped",
+          }),
+        } as unknown as Response;
+      }
+      const isSubagentCatalog = String(url).includes("/api/subagent-models");
+      if (isSubagentCatalog && init?.method === undefined && deferCatalogGets) {
+        await new Promise<void>((resolve) => { releaseCatalogGets.push(resolve); });
+      }
+      if (isSubagentCatalog && init?.method === "PUT" && deferSubagentSave) {
+        await new Promise<void>((resolve) => { releaseSubagentSave = resolve; });
+      }
+      if (isSubagentCatalog && subagentCatalogFails) {
+        return { ok: false, status: 503, text: async () => JSON.stringify({ error: "offline" }) } as unknown as Response;
+      }
+      const refreshed = isSubagentCatalog && rosterAfterRefresh !== null && subagentCatalogReads++ > 0;
+      const roster = refreshed ? rosterAfterRefresh : available;
+      const body = JSON.stringify({ available: roster, chosen: refreshed ? [] : chosen, ...(catalogState ? { catalogState: { state: catalogState } } : {}) });
       return {
         ok: true,
         status: 200,
@@ -61,6 +121,7 @@ afterEach(async () => {
   for (const key of globals) {
     Object.defineProperty(globalThis, key, { configurable: true, value: previousGlobals[key] });
   }
+  clearClientResourceStoresForTests();
 });
 
 async function mount() {
@@ -76,15 +137,15 @@ async function mount() {
   await act(async () => { await new Promise((r) => setTimeout(r, 50)); });
 }
 
-/** Rail add/remove toggles are labelled from sub.workspace.addToFeatured / removeFromFeatured. */
+/** Picker add/remove toggles use the advertised override labels. */
 function addToggle(id: string): HTMLButtonElement {
   const row = Array.from(container.querySelectorAll("button"))
-    .find((b) => (b.getAttribute("aria-label") ?? "").includes(`Add ${id} to featured`));
+    .find((b) => (b.getAttribute("aria-label") ?? "").includes(`Add ${id} to advertised overrides`));
   if (!row) throw new Error(`add toggle not found: ${id}`);
   return row as unknown as HTMLButtonElement;
 }
 
-/** Featured-list remove only (rail also has "Remove … from featured"). */
+/** Advertised-list remove only. */
 function removeButtons(): HTMLButtonElement[] {
   return Array.from(container.querySelectorAll(".swi-featured-actions button")).filter((b) =>
     /^Remove /.test(b.getAttribute("aria-label") ?? "")) as unknown as HTMLButtonElement[];
@@ -99,7 +160,7 @@ test("renders one featured list and one picker, never the same list twice", asyn
   expect(container.querySelector(".subagents-workspace-rail")).toBeNull();
   const featuredHeadings = Array.from(container.querySelectorAll(".swi-featured-title"))
     .map(node => node.textContent?.trim());
-  expect(featuredHeadings.filter(text => text === "Featured").length).toBe(1);
+  expect(featuredHeadings.filter(text => text === "Advertised overrides").length).toBe(1);
 });
 
 test("caps featured selections at five", async () => {
@@ -147,4 +208,121 @@ test("saves the featured order with PUT and the models payload", async () => {
   expect(put).toBeDefined();
   expect(put!.url).toContain("/api/subagent-models");
   expect(put!.init?.body).toBe(JSON.stringify({ models: ["a-1", "a-2"] }));
+});
+
+test("marks the preferred model and lets Prefer update it without changing roster order", async () => {
+  injectionModel = "a-2";
+  await mount();
+  await act(async () => { addToggle("a-1").click(); });
+  expect(container.textContent).toContain("Preferred");
+  const prefer = [...container.querySelectorAll("button")]
+    .find(button => button.textContent?.trim() === "Prefer");
+  expect(prefer).toBeTruthy();
+  await act(async () => { prefer!.click(); });
+  const patch = requests.find(row => row.init?.method === "PUT" && String(row.url).includes("/api/injection-model"));
+  expect(JSON.parse(String(patch!.init!.body))).toEqual({ model: "a-1", effort: "high" });
+  expect(removeButtons().map(button => button.getAttribute("aria-label"))).toEqual(["Remove a-1"]);
+});
+
+test("stale catalog shows the existing restart control and refreshes the roster after restart", async () => {
+  catalogState = "stale";
+  available = ["stale-model"];
+  rosterAfterRefresh = ["fresh-model"];
+
+  await mount();
+  expect(container.textContent).toContain("Stale");
+  const restart = container.querySelector<HTMLButtonElement>(".codex-stale-banner button");
+  expect(restart).toBeTruthy();
+
+  await act(async () => { restart!.click(); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+
+  expect(requests.some(request => request.url.includes("/api/system/codex-restart"))).toBe(true);
+  expect(requests.filter(request => request.url.includes("/api/subagent-models") && !request.init?.method).length).toBeGreaterThan(1);
+  expect(container.textContent).toContain("fresh-model");
+  expect(container.textContent).not.toContain("stale-model");
+});
+
+test("cached stale catalog state survives a failed refresh and save cache rewrite", async () => {
+  catalogState = "stale";
+  available = ["cached-model"];
+  subagentCatalogFails = true;
+  testWindow.sessionStorage.setItem("ocx.subagents.v1:", JSON.stringify({
+    available,
+    chosen: [],
+    catalogState: { state: "stale" },
+  }));
+
+  await mount();
+  expect(container.querySelector(".codex-stale-banner button")).toBeTruthy();
+
+  subagentCatalogFails = false;
+  const save = Array.from(container.querySelectorAll("button"))
+    .find((b) => b.textContent?.trim() === "Save") as HTMLButtonElement | undefined;
+  await act(async () => { save!.click(); });
+
+  expect(JSON.parse(testWindow.sessionStorage.getItem("ocx.subagents.v1:")!)).toMatchObject({
+    catalogState: { state: "stale" },
+  });
+});
+
+test("a refresh completing during save cannot be overwritten by the stale save cache write", async () => {
+  catalogState = "stale";
+  available = ["old-model"];
+  rosterAfterRefresh = ["new-model"];
+  deferSubagentSave = true;
+
+  await mount();
+  const save = Array.from(container.querySelectorAll("button"))
+    .find((b) => b.textContent?.trim() === "Save") as HTMLButtonElement | undefined;
+  await act(async () => { save!.click(); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+  expect(releaseSubagentSave).toBeTruthy();
+
+  catalogState = "fresh";
+  const restart = container.querySelector<HTMLButtonElement>(".codex-stale-banner button");
+  expect(restart).toBeTruthy();
+  await act(async () => { restart!.click(); });
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+
+  releaseSubagentSave!();
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+  expect(JSON.parse(testWindow.sessionStorage.getItem("ocx.subagents.v1:")!)).toMatchObject({
+    available: ["new-model"],
+    catalogState: { state: "fresh" },
+  });
+});
+
+test("an older catalog GET resolving last cannot overwrite the newer cache", async () => {
+  catalogState = "stale";
+  available = ["old-model"];
+  rosterAfterRefresh = ["new-model"];
+  await mount();
+
+  deferCatalogGets = true;
+  const restart = container.querySelector<HTMLButtonElement>(".codex-stale-banner button");
+  expect(restart).toBeTruthy();
+  await act(async () => {
+    restart!.click();
+    restart!.click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+  expect(releaseCatalogGets).toHaveLength(2);
+
+  available = ["new-model"];
+  catalogState = "fresh";
+  releaseCatalogGets[1]!();
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+  available = ["old-model"];
+  catalogState = "stale";
+  rosterAfterRefresh = null;
+  releaseCatalogGets[0]!();
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+
+  expect(JSON.parse(testWindow.sessionStorage.getItem("ocx.subagents.v1:")!)).toMatchObject({
+    available: ["new-model"],
+    catalogState: { state: "fresh" },
+  });
 });
