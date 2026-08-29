@@ -55,13 +55,15 @@ the prerequisites are restored.
 
 `v2RoutedDelegationBridge` is a separate experimental, default-off boolean. When armed, it activates
 only for eligible native V2 roots after parent-override routing. It exposes mirror collaboration tools
-so the routed child receives plaintext task, repository-context, and tool-result flow; it does not add
-a model picker or choose tools. Tool choice remains model-directed. Disabling takes effect on the next
-request immediately.
+so the routed child receives plaintext task, repository-context, and tool-result flow. It exposes
+`spawn_agent`, `send_message`, and `followup_task` only through that plaintext mirror while leaving
+`wait_agent`, `interrupt_agent`, and `list_agents` native. While active, this makes every use of those
+three delegation-message operations plaintext, including native-to-native delegation. Disabling takes
+effect on the next request immediately.
 
 The native Codex UI can still display the original model. Routed prompts, repository context, and tool
 results follow the selected provider's availability, context window, behavior, billing, and privacy
-terms. The bridge differs from native GPT-to-GPT delegation (which keeps native collaboration), the
+terms. The bridge differs from ordinary native GPT-to-GPT delegation, the
 parent override (which reroutes the root), and recovery (which makes an additional ChatGPT request for
 an already encrypted child task). It cannot rewrite a native child delegating to a routed grandchild.
 
