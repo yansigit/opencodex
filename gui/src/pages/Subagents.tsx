@@ -6,7 +6,7 @@ import SubagentsWorkspace, { FEATURED_MAX } from "../components/subagents-worksp
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
-import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState, type V2RoutedDelegationBridgeState, type NativeDefaultState } from "./use-subagent-delegation";
+import { useSubagentDelegation, type UltraModePatch, type UltraModeState, type V2NativeParentOverrideState, type AgentTaskRecoveryState, type V2RoutedDelegationBridgeState } from "./use-subagent-delegation";
 import { CodexStaleBanner } from "../components/codex-stale-banner";
 import { useCodexRestart } from "../use-codex-restart";
 
