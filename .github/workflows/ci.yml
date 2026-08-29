@@ -348,6 +348,7 @@ jobs:
         with:
           name: ci-timings-general-${{ matrix.shard }}
           path: .bun-timings.json
+          include-hidden-files: true
           if-no-files-found: error
 
   # Bun 1.3.14 has shown a Linux isolate/epoll race around the storage-policy

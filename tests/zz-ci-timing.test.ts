@@ -133,6 +133,8 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
   const upload = general.steps?.find(step => step.uses?.startsWith("actions/upload-artifact@"));
   expect(upload?.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
   expect(upload?.if).toContain("github.ref == 'refs/heads/dev'");
+  expect(upload?.with?.path).toBe(".bun-timings.json");
+  expect(upload?.with?.["include-hidden-files"]).toBe(true);
   expect(ci.jobs["publish-test-timings"].if).toContain("github.ref == 'refs/heads/dev'");
   expect(ci.jobs["publish-test-timings"].needs).toBe("test");
   expect(ci.jobs["publish-test-timings"].steps?.some(step =>
