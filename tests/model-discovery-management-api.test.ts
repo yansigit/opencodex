@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { handleManagementAPI } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { inMemoryManagementPersistence, ManagementRequest as Request } from "./helpers/management-auth";
 
 function config(): OcxConfig {
   return { port: 10100, defaultProvider: "vendor", providers: { vendor: { liveModels: false, models: ["known"] } }, disabledModels: ["vendor/new"] };
@@ -12,7 +12,7 @@ async function call(live: OcxConfig, path: string, method = "GET", body?: unknow
   const response = await handleManagementAPI(new Request(url, {
     method, ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
   }), url, live, {
-    saveConfigPreservingClaudeCode: () => {},
+    ...inMemoryManagementPersistence(live),
     fetchAllModels: async () => [{ provider: "vendor", id: "known" } as never],
     createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", changed: false, catalogRefresh: { status: "unchanged" }, observed: {} as never, history: {} as never }),
   });
