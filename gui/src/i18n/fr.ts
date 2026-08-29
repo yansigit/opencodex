@@ -2446,7 +2446,7 @@ export const fr: Record<TKey, string> = {
   "sub.nativeDefaultState.disabled": "La synchronisation des sous-agents sans modèle est désactivée ; cette préférence n’est pas une valeur native par défaut.",
   "sub.nativeDefaultState.pending": "En attente : synchronisation ou redémarrage requis avant l’activation du comportement.",
   "sub.nativeDefaultState.blocked": "Bloqué : un réglage Codex appartenant à l’utilisateur ou incompatible empêche la synchronisation native.",
-  "logs.filter.agent.label": "Agent",
+  "logs.filter.agent.label": "Type d’agent",
   "logs.filter.agent.all": "Tous",
   "logs.filter.agent.main": "Principal",
   "logs.filter.agent.subagent": "Sous-agent",
