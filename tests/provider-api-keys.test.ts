@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { replacePersistedConfig, saveConfig } from "../src/config";
 import {
   addProviderApiKey,
+  apiKeyPoolEntryId,
   isKeyAuthProvider,
   listProviderApiKeys,
   removeProviderApiKey,
@@ -78,6 +79,30 @@ describe("provider API key pool", () => {
     expect(config.providers["opencode-go"]).toEqual(before);
   });
 
+  test("direct key upsert preserves legacy ids and refuses derived-id collisions", () => {
+    const key = "key-second-444555666777";
+    const config = baseConfig();
+    config.providers["opencode-go"] = {
+      ...config.providers["opencode-go"]!,
+      apiKey: key,
+      apiKeyPool: [{ id: "legacy-slot", key }],
+    };
+    replacePersistedConfig(config);
+    expect(addProviderApiKey(config, "opencode-go", key)).toEqual({ id: "legacy-slot" });
+    expect(config.providers["opencode-go"]?.apiKeyPool).toHaveLength(1);
+
+    const collisionId = apiKeyPoolEntryId("colliding-new-key");
+    config.providers["opencode-go"] = {
+      ...config.providers["opencode-go"]!,
+      apiKey: "existing-key",
+      apiKeyPool: [{ id: collisionId, key: "existing-key" }],
+    };
+    replacePersistedConfig(config);
+    const before = readFileSync(join(testDir, "config.json"), "utf8");
+    expect(addProviderApiKey(config, "opencode-go", "colliding-new-key")).toEqual({ error: "key id collision" });
+    expect(readFileSync(join(testDir, "config.json"), "utf8")).toBe(before);
+  });
+
   test("GET seeds legacy bare apiKey into a one-entry pool with masked value", async () => {
     const server = startServer(0);
     try {
@@ -135,6 +160,68 @@ describe("provider API key pool", () => {
       expect(list.activeId).toBe(secondId);
       const cfg2 = JSON.parse(readFileSync(join(testDir, "config.json"), "utf-8"));
       expect(cfg2.providers["opencode-go"].apiKey).toBe("key-second-444555666777");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("key POST preserves a legacy ID and rejects an ID collision with another key", async () => {
+    const collisionKey = "key-collision-888999000111";
+    const config = baseConfig();
+    config.providers["opencode-go"]!.apiKeyPool = [
+      { id: "legacy-slot", key: "key-first-000111222333" },
+      { id: apiKeyPoolEntryId(collisionKey), key: "different-key-222333444555" },
+    ];
+    replacePersistedConfig(config);
+    const server = startServer(0);
+    try {
+      const same = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", key: "key-first-000111222333" }),
+      });
+      expect(same.status).toBe(201);
+      expect(await same.json()).toMatchObject({ id: "legacy-slot" });
+      expect(JSON.parse(readFileSync(join(testDir, "config.json"), "utf-8")).providers["opencode-go"].apiKeyPool)
+        .toEqual(config.providers["opencode-go"]!.apiKeyPool);
+
+      const beforeCollision = readFileSync(join(testDir, "config.json"), "utf-8");
+      const collision = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", key: collisionKey }),
+      });
+      expect(collision.status).toBe(409);
+      expect(readFileSync(join(testDir, "config.json"), "utf-8")).toBe(beforeCollision);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("provider POST preserves a legacy key ID and rejects an ID collision", async () => {
+    const collisionKey = "key-collision-888999000111";
+    const config = baseConfig();
+    config.providers["opencode-go"]!.apiKeyPool = [
+      { id: "legacy-slot", key: "key-first-000111222333" },
+      { id: apiKeyPoolEntryId(collisionKey), key: "different-key-222333444555" },
+    ];
+    replacePersistedConfig(config);
+    const server = startServer(0);
+    const submit = (apiKey: string) => fetch(new URL("/api/providers", server.url), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "opencode-go",
+        provider: { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", apiKey, liveModels: false },
+      }),
+    });
+    try {
+      const same = await submit("key-first-000111222333");
+      expect(same.status).toBe(200);
+      expect(JSON.parse(readFileSync(join(testDir, "config.json"), "utf-8")).providers["opencode-go"].apiKeyPool)
+        .toEqual(config.providers["opencode-go"]!.apiKeyPool);
+
+      const beforeCollision = readFileSync(join(testDir, "config.json"), "utf-8");
+      const collision = await submit(collisionKey);
+      expect(collision.status).toBe(409);
+      expect(readFileSync(join(testDir, "config.json"), "utf-8")).toBe(beforeCollision);
     } finally {
       await server.stop(true);
     }

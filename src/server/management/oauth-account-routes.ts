@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
@@ -64,6 +64,7 @@ import { AUTH_MATRIX, isAllowedRequestOrigin, jsonResponse, providerManagementCo
 import { applySystemEnvToggle } from "../system-env";
 import { buildApiAccessEndpoints } from "./api-access";
 import { isAzureIdentityProvider } from "../../config/provider-validation";
+import { apiKeyPoolEntryId } from "../../providers/api-keys";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
@@ -98,7 +99,7 @@ async function readJsonBody(req: Request): Promise<Record<string, unknown> | nul
 function providerKeyPool(provider: OcxProviderConfig): NonNullable<OcxProviderConfig["apiKeyPool"]> {
   const pool = provider.apiKeyPool ??= [];
   if (pool.length === 0 && provider.apiKey) {
-    pool.push({ id: createHash("sha256").update(provider.apiKey).digest("hex").slice(0, 8), key: provider.apiKey });
+    pool.push({ id: apiKeyPoolEntryId(provider.apiKey), key: provider.apiKey });
   }
   return pool;
 }
@@ -602,27 +603,30 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     if (typeof body.key !== "string" || !body.key.trim()) return jsonResponse({ error: "key is required" }, 400);
     const key = body.key.trim();
     if (/[\r\n]/.test(key)) return jsonResponse({ error: "key must not include line breaks" }, 400);
-    const id = createHash("sha256").update(key).digest("hex").slice(0, 8);
     const result = mutateProviderKey(deps, config, name, provider => {
       const pool = providerKeyPool(provider);
-      const existing = pool.find(entry => entry.id === id);
       const label = body.label?.trim();
+      const existing = pool.find(entry => entry.key === key);
       if (existing) {
         if (label) existing.label = label;
-      } else {
-        pool.push({ id, key, ...(label ? { label } : {}), addedAt: Date.now() });
+        provider.apiKey = existing.key;
+        return { id: existing.id };
       }
+      const id = apiKeyPoolEntryId(key);
+      if (pool.some(entry => entry.id === id)) return { error: "API-key pool ID collision" };
+      pool.push({ id, key, ...(label ? { label } : {}), addedAt: Date.now() });
       provider.apiKey = key;
-      return id;
+      return { id };
     });
     if (!result.ok) return jsonResponse({ error: result.error }, result.status);
+    if ("error" in result.value) return jsonResponse({ error: result.value.error }, 409);
     const { clearModelCache } = await import("../../codex/model-cache");
     clearModelCache(name);
     const { clearProviderQuotaCache } = await import("../../providers/quota");
     clearProviderQuotaCache();
     const { clearKeyCooldowns } = await import("../../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
-    return jsonResponse({ ok: true, id: result.value }, 201);
+    return jsonResponse({ ok: true, id: result.value.id }, 201);
   }
   if (url.pathname === "/api/providers/keys/active" && req.method === "PUT") {
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; id?: string };

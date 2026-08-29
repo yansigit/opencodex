@@ -103,19 +103,21 @@ export function addProviderApiKey(config: OcxConfig, name: string, key: string, 
   if (typeof key !== "string" || !key.trim()) return { error: "key is required" };
   const trimmed = sanitizeApiKeyValue(key);
   if (!trimmed) return { error: "key must not include line breaks" };
-  const id = apiKeyPoolEntryId(trimmed);
   const saved = mutateProvider(config, name, fresh => {
     const pool = ensurePool(fresh);
-    const existing = pool.find(entry => entry.id === id);
+    const existing = pool.find(entry => entry.key === trimmed);
     if (existing) {
       if (label?.trim()) existing.label = label.trim();
-    } else {
-      pool.push({ id, key: trimmed, ...(label?.trim() ? { label: label.trim() } : {}), addedAt: Date.now() });
+      fresh.apiKey = trimmed;
+      return { id: existing.id };
     }
+    const id = apiKeyPoolEntryId(trimmed);
+    if (pool.some(entry => entry.id === id)) return { error: "key id collision" };
+    pool.push({ id, key: trimmed, ...(label?.trim() ? { label: label.trim() } : {}), addedAt: Date.now() });
     fresh.apiKey = trimmed;
-    return id;
+    return { id };
   });
-  return saved === null ? { error: "config is unavailable" } : { id: saved };
+  return saved === null ? { error: "config is unavailable" } : saved;
 }
 
 /** Switch the ACTIVE key (mirrors into `provider.apiKey`). Persists config. */

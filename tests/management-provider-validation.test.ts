@@ -1829,7 +1829,7 @@ describe("provider management validation", () => {
     }
   });
 
-  test("provider deletion refuses while custom models still depend on it", async () => {
+  test("provider deletion drops dependent custom models atomically", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -1866,17 +1866,14 @@ describe("provider management validation", () => {
       const response = await fetch(new URL("/api/providers?name=removable", server.url), {
         method: "DELETE",
       });
-      expect(response.status).toBe(409);
+      expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({
-        code: "provider_has_dependent_custom_models",
-        customModels: ["drop-1"],
+        droppedCustomModels: 1,
       });
 
-      // Refusal keeps both the provider and its dependent row intact.
       const customModels = await fetch(new URL("/api/custom-models", server.url));
       expect(await customModels.json()).toEqual([
         { id: "keep-1", provider: "test-openai", modelId: "kept-model" },
-        { id: "drop-1", provider: "removable", modelId: "ghost-model" },
       ]);
 
       const persisted = JSON.parse(readFileSync(join(TEST_DIR, "config.json"), "utf8")) as {
@@ -1885,7 +1882,6 @@ describe("provider management validation", () => {
       };
       expect(persisted.customModels).toEqual([
         { id: "keep-1", provider: "test-openai", modelId: "kept-model" },
-        { id: "drop-1", provider: "removable", modelId: "ghost-model" },
       ]);
       expect(persisted.customModelCatalogMigration).toEqual({
         version: 1,

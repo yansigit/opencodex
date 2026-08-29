@@ -6,7 +6,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { bundledBunPath } from "../src/lib/bun-runtime";
 import { killProxy } from "../src/lib/process-control";
-import { OPENAI_PROVIDER_TIER_VERSION } from "../src/types";
 
 const BIN_OCX = join(import.meta.dir, "..", "bin", "ocx.mjs");
 const nodeAvailable = spawnSync("node", ["--version"], {
@@ -394,7 +393,12 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
     const packDir = join(root, "pack");
     const installDir = join(root, "install");
     const providers = {
-      openai: { adapter: "openai-chat", baseUrl: "https://openai.example.test/v1" },
+      openai: {
+        adapter: "openai-responses",
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        authMode: "forward",
+        codexAccountMode: "direct",
+      },
       anthropic: { adapter: "openai-chat", baseUrl: "https://anthropic.example.test/v1" },
       google: { adapter: "openai-chat", baseUrl: "https://google.example.test/v1" },
       grok: { adapter: "openai-chat", baseUrl: "https://grok.example.test/v1" },
@@ -430,7 +434,7 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
       const port = await freePort();
       writeFileSync(configPath, JSON.stringify({
         port,
-        openaiProviderTierVersion: OPENAI_PROVIDER_TIER_VERSION,
+        openaiProviderTierVersion: 1,
         providers,
         defaultProvider: "openai",
       }, null, 2));
@@ -447,6 +451,7 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
       expect(Object.keys(during.providers as object)).toEqual(Object.keys(providers));
       expect(during.providers).toEqual(providers);
       expect(during.defaultProvider).toBe("openai");
+      expect(during.openaiProviderTierVersion).toBe(2);
 
       const stopped = spawnSync("node", [installedOcx, "stop"], {
         env,
@@ -461,6 +466,7 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
       expect(Object.keys(after.providers as object)).toEqual(Object.keys(providers));
       expect(after.providers).toEqual(providers);
       expect(after.defaultProvider).toBe("openai");
+      expect(after.openaiProviderTierVersion).toBe(2);
     } finally {
       await cleanupFirstStartup(root, env.OPENCODEX_HOME!, launcher, health);
     }

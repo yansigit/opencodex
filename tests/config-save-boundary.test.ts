@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { API } from "typescript/unstable/async";
@@ -39,11 +39,11 @@ import {
 
 const SRC = join(import.meta.dir, "..", "src");
 
-function configReplacementReferences(source: SourceFile, symbol: string): number[] {
+function moduleSymbolReferences(source: SourceFile, modulePath: string, symbol: string): number[] {
   const namespaces = new Set<string>();
   const hits: number[] = [];
-  const isConfigModule = (node: Node): boolean => isStringLiteral(node)
-    && resolve(dirname(source.fileName), node.text).replace(/\.ts$/, "") === join(SRC, "config");
+  const isTargetModule = (node: Node): boolean => isStringLiteral(node)
+    && resolve(dirname(source.fileName), node.text).replace(/\.ts$/, "") === modulePath;
   const staticString = (node: Expression): string | undefined => {
     while (isParenthesizedExpression(node)) node = node.expression;
     if (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node)) return node.text;
@@ -62,17 +62,17 @@ function configReplacementReferences(source: SourceFile, symbol: string): number
     node = unwrap(node);
     return (isIdentifier(node) && namespaces.has(node.text))
       || (isCallExpression(node) && node.expression.kind === SyntaxKind.ImportKeyword
-        && node.arguments.length === 1 && isConfigModule(node.arguments[0]!));
+        && node.arguments.length === 1 && isTargetModule(node.arguments[0]!));
   };
   const collectNamespaces = (node: Node): void => {
-    if (isImportDeclaration(node) && isConfigModule(node.moduleSpecifier)) {
+    if (isImportDeclaration(node) && !node.importClause?.isTypeOnly && isTargetModule(node.moduleSpecifier)) {
       const bindings = node.importClause?.namedBindings;
       if (bindings && isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
       if (bindings && isNamedImports(bindings) && bindings.elements.some(
-        item => (item.propertyName ?? item.name).text === symbol,
+        item => !item.isTypeOnly && (item.propertyName ?? item.name).text === symbol,
       )) hits.push(node.getStart(source));
     }
-    if (isExportDeclaration(node) && node.moduleSpecifier && isConfigModule(node.moduleSpecifier)) {
+    if (isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier && isTargetModule(node.moduleSpecifier)) {
       const bindings = node.exportClause;
       if (!bindings || isNamespaceExport(bindings) || (isNamedExports(bindings) && bindings.elements.some(
         item => (item.propertyName ?? item.name).text === symbol,
@@ -104,6 +104,29 @@ function configReplacementReferences(source: SourceFile, symbol: string): number
   collectNamespaces(source);
   collectAccesses(source);
   return hits;
+}
+
+function configReplacementReferences(source: SourceFile, symbol: string): number[] {
+  return moduleSymbolReferences(source, join(SRC, "config"), symbol);
+}
+
+function localRuntimeImports(source: SourceFile): string[] {
+  const imports = new Set<string>();
+  const add = (node: Node): void => {
+    if (!isStringLiteral(node) || !node.text.startsWith(".")) return;
+    const base = resolve(dirname(source.fileName), node.text);
+    for (const candidate of [`${base}.ts`, join(base, "index.ts")]) {
+      if (candidate.startsWith(`${SRC}/`) && existsSync(candidate)) imports.add(candidate);
+    }
+  };
+  const visit = (node: Node): void => {
+    if (isImportDeclaration(node) && !node.importClause?.isTypeOnly) add(node.moduleSpecifier);
+    else if (isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier) add(node.moduleSpecifier);
+    else if (isCallExpression(node) && node.expression.kind === SyntaxKind.ImportKeyword && node.arguments.length === 1) add(node.arguments[0]!);
+    node.forEachChild(visit);
+  };
+  visit(source);
+  return [...imports];
 }
 
 /** Modules that hold a LIVE server config and must use the wrapper. */
@@ -169,7 +192,7 @@ test("startServer arms the baseline before it can serve a request", () => {
 test("full config replacement is limited to explicit import and init", async () => {
   const allowed = new Map([
     ["replacePersistedConfig", new Set(["cli/config-command.ts", "cli/init.ts", "config.ts"])],
-    ["initializePersistedConfigIfMissing", new Set(["config.ts", "oauth/index.ts"])],
+    ["initializePersistedConfigIfMissing", new Set(["config.ts", "oauth/index.ts", "oauth/login-cli.ts"])],
   ]);
   const fixtureDir = mkdtempSync(join(tmpdir(), "ocx-config-policy-"));
   const fixture = join(fixtureDir, "fixture.ts");
@@ -232,5 +255,69 @@ test("full config replacement is limited to explicit import and init", async () 
   } finally {
     await api.close();
     rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("management routes cannot reach global config writers through any runtime helper", async () => {
+  const forbidden = new Map([
+    [join(SRC, "config"), ["saveConfig", "saveConfigPreservingClaudeCode", "mutatePersistedConfig"]],
+    [join(SRC, "providers", "api-keys"), [
+      "addProviderApiKey",
+      "setActiveProviderApiKey",
+      "setProviderApiKeyLabel",
+      "removeProviderApiKey",
+    ]],
+  ]);
+  const allowed = new Set([
+    "cli/v2.ts: saveConfig",
+    "codex/account-lifecycle.ts: saveConfigPreservingClaudeCode",
+    "codex/auth-api.ts: mutatePersistedConfig",
+    "codex/auth-api.ts: saveConfigPreservingClaudeCode",
+    "codex/convergence.ts: mutatePersistedConfig",
+    "codex/desired-state.ts: mutatePersistedConfig",
+    "codex/log-guard/policy.ts: saveConfigPreservingClaudeCode",
+    "codex/plan-from-token.ts: mutatePersistedConfig",
+    "codex/routing.ts: saveConfigPreservingClaudeCode",
+    "oauth/index.ts: mutatePersistedConfig",
+    "providers/api-keys.ts: mutatePersistedConfig",
+    "providers/key-failover.ts: mutatePersistedConfig",
+    "providers/replit/setup.ts: mutatePersistedConfig",
+    "server/management-api.ts: saveConfigPreservingClaudeCode",
+    "storage/policy.ts: saveConfigPreservingClaudeCode",
+  ]);
+  const api = new API({ cwd: join(SRC, "..") });
+  try {
+    const snapshot = await api.updateSnapshot({ openProjects: [join(SRC, "..", "tsconfig.json")] });
+    try {
+      const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
+      if (!project) throw new Error("TypeScript did not load the repository project");
+      const managementDir = join(SRC, "server", "management");
+      const pending = readdirSync(managementDir)
+        .filter(name => name.endsWith(".ts") && name !== "context.ts")
+        .map(name => join(managementDir, name));
+      const visited = new Set<string>();
+      const offenders: string[] = [];
+      while (pending.length > 0) {
+        const path = pending.pop()!;
+        if (visited.has(path)) continue;
+        visited.add(path);
+        const source = await project.program.getSourceFile(path);
+        if (!source) throw new Error(`TypeScript omitted ${path}`);
+        for (const [modulePath, symbols] of forbidden) {
+          for (const symbol of symbols) {
+            if (moduleSymbolReferences(source, modulePath, symbol).length > 0) {
+              const reference = `${path.slice(SRC.length + 1)}: ${symbol}`;
+              if (!allowed.has(reference)) offenders.push(reference);
+            }
+          }
+        }
+        pending.push(...localRuntimeImports(source));
+      }
+      expect(offenders).toEqual([]);
+    } finally {
+      await snapshot.dispose();
+    }
+  } finally {
+    await api.close();
   }
 });
