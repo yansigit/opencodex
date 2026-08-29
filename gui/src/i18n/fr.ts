@@ -593,8 +593,6 @@ export const fr: Record<TKey, string> = {
   "models.customSaving": "Enregistrement…",
   "models.customAddBtn": "Ajouter",
   "models.customEditBtn": "Mettre à jour",
-  "models.customEdit": "Modifier",
-  "models.customDelete": "Supprimer",
   "models.customEditNamed": "Modifier {name}",
   "models.customDeleteNamed": "Supprimer {name}",
   "models.customDeleteConfirm": "Supprimer le modèle {name} ?",

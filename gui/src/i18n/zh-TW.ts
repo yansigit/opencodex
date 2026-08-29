@@ -464,8 +464,6 @@ export const zhTW: Record<TKey, string> = {
   "models.customSaving": "正在儲存…",
   "models.customAddBtn": "新增",
   "models.customEditBtn": "更新",
-  "models.customEdit": "編輯",
-  "models.customDelete": "刪除",
   "models.customEditNamed": "編輯{name}",
   "models.customDeleteNamed": "刪除{name}",
   "models.customDeleteConfirm": "要刪除模型 {name} 嗎？",

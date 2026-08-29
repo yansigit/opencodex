@@ -27,4 +27,3 @@ test("calendar series zero-fills sparse days without invalid sparkline coordinat
   expect(calendar!.sparklinePoints([], 120, 32)).toBe("");
   expect(calendar!.sparklinePoints([9], 120, 32)).toBe("60,16");
 });
-

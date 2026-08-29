@@ -20,6 +20,7 @@ let previous: Record<(typeof globals)[number], PropertyDescriptor | undefined>;
 let win: Window;
 let root: Root | null = null;
 let scrollCalls = 0;
+let reducedMotion = false;
 
 function restore(key: PropertyKey, descriptor: PropertyDescriptor | undefined) {
   if (descriptor) Object.defineProperty(globalThis, key, descriptor);
@@ -32,11 +33,12 @@ beforeEach(() => {
   ) as typeof previous;
   win = new Window({ url: "http://localhost/#dashboard" });
   scrollCalls = 0;
+  reducedMotion = false;
   Object.defineProperties(win, {
     matchMedia: {
       configurable: true,
-      value: () => ({
-        matches: false,
+      value: (query: string) => ({
+        matches: query === "(prefers-reduced-motion: reduce)" && reducedMotion,
         addEventListener() {},
         removeEventListener() {},
       }),
@@ -95,6 +97,15 @@ function nav(label: string): HTMLButtonElement {
   return button;
 }
 
+async function openDrawer(waitForMotion = true) {
+  const menu = document.querySelector<HTMLButtonElement>(".mobile-topbar .menu-toggle")!;
+  await act(async () => { menu.click(); });
+  if (waitForMotion) {
+    await act(async () => { await new Promise(resolve => win.setTimeout(resolve, 210)); });
+  }
+  expect(document.activeElement?.id).toBe("app-sidebar");
+}
+
 test("a deliberate top-level route change owns title, scroll, focus, announcement, and motion", async () => {
   await mountApp();
   expect(document.title).toBe("Dashboard — opencodex");
@@ -125,19 +136,31 @@ test("a deliberate top-level route change owns title, scroll, focus, announcemen
   expect(document.querySelector(".main-inner")?.classList.contains("route-enter")).toBe(false);
 });
 
-test("only Escape restores mobile-drawer focus; navigation leaves focus on main", async () => {
+test("drawer dismissal restores focus except for a real route change and honors reduced motion", async () => {
   await mountApp();
-  const menu = document.querySelector<HTMLButtonElement>(".mobile-topbar .menu-toggle")!;
-
-  await act(async () => { menu.click(); });
-  await act(async () => { await new Promise(resolve => win.setTimeout(resolve, 210)); });
-  expect(document.activeElement?.id).toBe("app-sidebar");
+  await openDrawer();
 
   await act(async () => { win.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape" })); });
-  expect(document.activeElement).toBe(menu);
+  expect(document.activeElement?.getAttribute("aria-controls")).toBe("app-sidebar");
 
-  await act(async () => { menu.click(); });
-  await act(async () => { await new Promise(resolve => win.setTimeout(resolve, 210)); });
+  await openDrawer();
+  await act(async () => { document.querySelector<HTMLButtonElement>(".drawer-close")!.click(); });
+  expect(document.activeElement?.getAttribute("aria-controls")).toBe("app-sidebar");
+
+  await openDrawer();
+  await act(async () => { document.querySelector<HTMLElement>(".drawer-scrim")!.click(); });
+  expect(document.activeElement?.getAttribute("aria-controls")).toBe("app-sidebar");
+
+  await openDrawer();
+  await act(async () => { nav("Dashboard").click(); });
+  expect(document.activeElement?.getAttribute("aria-controls")).toBe("app-sidebar");
+
+  reducedMotion = true;
+  await openDrawer(false);
+  await act(async () => { nav("Dashboard").click(); });
+  expect(document.activeElement?.getAttribute("aria-controls")).toBe("app-sidebar");
+
+  await openDrawer(false);
   await act(async () => { nav("Providers").click(); });
   await act(async () => { await new Promise(resolve => win.setTimeout(resolve, 30)); });
 

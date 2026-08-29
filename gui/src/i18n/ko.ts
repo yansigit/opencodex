@@ -593,8 +593,6 @@ export const ko: Record<TKey, string> = {
   "models.customSaving": "저장 중…",
   "models.customAddBtn": "추가",
   "models.customEditBtn": "수정",
-  "models.customEdit": "편집",
-  "models.customDelete": "삭제",
   "models.customEditNamed": "{name} 편집",
   "models.customDeleteNamed": "{name} 삭제",
   "models.customDeleteConfirm": "{name} 모델을 삭제하시겠습니까?",

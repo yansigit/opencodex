@@ -590,8 +590,6 @@ export const zh: Record<TKey, string> = {
   "models.customSaving": "正在保存…",
   "models.customAddBtn": "添加",
   "models.customEditBtn": "更新",
-  "models.customEdit": "编辑",
-  "models.customDelete": "删除",
   "models.customEditNamed": "编辑{name}",
   "models.customDeleteNamed": "删除{name}",
   "models.customDeleteConfirm": "要删除模型 {name} 吗？",

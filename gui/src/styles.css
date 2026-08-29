@@ -2211,6 +2211,13 @@ button.prov-account-row.active { cursor: default; }
   .mobile-topbar-actions .sidebar-orb { width: 44px; height: 44px; flex: 0 0 44px; min-width: 44px; min-height: 44px; }
   .mobile-topbar-actions .sidebar-orb svg { width: 18px; height: 18px; }
   .menu-toggle { display: inline-flex; }
+  .startup-health-bar { padding-block: var(--space-2); }
+  .startup-health-bar__summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    white-space: normal;
+  }
   /* drawer: the desktop sidebar kept intact (nav groups + foot + GitHub link), off-canvas */
   .sidebar {
     position: fixed; top: 0; left: 0; bottom: 0; z-index: var(--z-popover);

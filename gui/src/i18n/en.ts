@@ -608,8 +608,6 @@ export const en = {
   "models.customSaving": "Saving…",
   "models.customAddBtn": "Add",
   "models.customEditBtn": "Update",
-  "models.customEdit": "Edit",
-  "models.customDelete": "Delete",
   "models.customEditNamed": "Edit {name}",
   "models.customDeleteNamed": "Delete {name}",
   "models.customDeleteConfirm": "Delete the {name} model?",

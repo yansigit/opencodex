@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useKeyedClientResource } from "./client-resource";
 import Dashboard from "./pages/Dashboard";
 import ErrorBoundary from "./components/ErrorBoundary";
@@ -7,7 +7,7 @@ import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconH
 import { useI18n, useT, LOCALES, localeDisplayName, type Locale, type TKey } from "./i18n/shared";
 import { Select } from "./ui";
 import { installApiAuthFetch } from "./api";
-import { type Page } from "./app-routing";
+import { readPageFromHash, type Page } from "./app-routing";
 import { readModelsTab, type ModelsTab } from "./pages/models-tab";
 import { useAppRouteState } from "./use-app-route-state";
 import { requestProxyStop } from "./stop-proxy";
@@ -113,6 +113,11 @@ export default function App() {
   const restoreMenuFocus = useRef(false);
   const previousPage = useRef(page);
 
+  const dismissNav = useCallback((destination?: Page) => {
+    restoreMenuFocus.current = destination === undefined || destination === page;
+    setNavOpen(false);
+  }, [page]);
+
   useEffect(() => {
     document.title = t("app.pageTitle", { page: t(PAGE_TKEY[page]) });
   }, [page, t]);
@@ -127,14 +132,14 @@ export default function App() {
 
   useEffect(() => {
     // External navigation (hash edit, back/forward) also dismisses the mobile drawer.
-    const dismissNav = () => setNavOpen(false);
-    window.addEventListener("hashchange", dismissNav);
-    window.addEventListener("popstate", dismissNav);
+    const dismissForRoute = () => dismissNav(readPageFromHash());
+    window.addEventListener("hashchange", dismissForRoute);
+    window.addEventListener("popstate", dismissForRoute);
     return () => {
-      window.removeEventListener("hashchange", dismissNav);
-      window.removeEventListener("popstate", dismissNav);
+      window.removeEventListener("hashchange", dismissForRoute);
+      window.removeEventListener("popstate", dismissForRoute);
     };
-  }, []);
+  }, [dismissNav]);
 
   useEffect(() => {
     const el = document.documentElement;
@@ -163,14 +168,13 @@ export default function App() {
     if (!navOpen) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      restoreMenuFocus.current = true;
-      setNavOpen(false);
+      dismissNav();
     };
     window.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";         // no background scroll behind the drawer
     return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; };
-  }, [navOpen]);
+  }, [dismissNav, navOpen]);
 
   // Move focus into the drawer on open; hand it back to the toggle on close.
   useEffect(() => {
@@ -178,6 +182,10 @@ export default function App() {
       navWasOpen.current = true;
       restoreMenuFocus.current = false;
       // after the 180ms slide-in: while visibility is transitioning, focus() no-ops
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        sidebarRef.current?.focus();
+        return;
+      }
       const timer = setTimeout(() => sidebarRef.current?.focus(), 200);
       return () => clearTimeout(timer);
     }
@@ -250,11 +258,11 @@ export default function App() {
           </button>
         </div>
       </header>
-      {navOpen && <div className="drawer-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />}
+      {navOpen && <div className="drawer-scrim" onClick={() => dismissNav()} aria-hidden="true" />}
       <aside id="app-sidebar" className={`sidebar${navOpen ? " open" : ""}`} ref={sidebarRef} tabIndex={-1}>
         <div className="drawer-head">
           {brand}
-          <button type="button" className="menu-toggle drawer-close" onClick={() => setNavOpen(false)}
+          <button type="button" className="menu-toggle drawer-close" onClick={() => dismissNav()}
             aria-label={t("nav.closeMenu")} title={t("nav.closeMenu")}>
             <IconX />
           </button>
@@ -280,8 +288,8 @@ export default function App() {
                   data-page={id}
                   onClick={() => {
                     // Deliberate sidebar navigation — push a history entry.
+                    dismissNav(id);
                     navigateToPage(id);
-                    setNavOpen(false);
                   }}
                   aria-current={active ? "page" : undefined}>
                   <Icon /> {t(tkey)}
@@ -330,7 +338,7 @@ export default function App() {
               // The update dialog lives on the dashboard maintenance panel. Deep-link to
               // `#dashboard/update` and let the dashboard own the check/run flow — no
               // cross-component event bus, and the link survives a refresh.
-              setNavOpen(false);
+              dismissNav("dashboard");
               navigateToPage("dashboard", "update");
             }}
           />
