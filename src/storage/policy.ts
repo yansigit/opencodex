@@ -72,6 +72,8 @@ export interface PolicyRunDeps {
    * land before completion merges run metadata.
    */
   holdAfterLoadMs?: number;
+  /** Test-only synchronization seam; omitted in production. */
+  onPolicyLoaded?: () => void;
 }
 
 /** Canonical defaults — enabled is always false. */
@@ -436,6 +438,7 @@ export function runStorageCleanupPolicy(deps: PolicyRunDeps): PolicyRunResult {
   const execute = deps.execute ?? executeArchivedCleanup;
 
   const policy = normalizeStorageCleanupPolicy(load());
+  deps.onPolicyLoaded?.();
 
   if (typeof deps.holdAfterLoadMs === "number" && Number.isFinite(deps.holdAfterLoadMs) && deps.holdAfterLoadMs > 0) {
     Bun.sleepSync(Math.floor(deps.holdAfterLoadMs));

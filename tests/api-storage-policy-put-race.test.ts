@@ -27,8 +27,13 @@ afterEach(async () => {
 });
 
 test("blocked worker completion preserves concurrent policy PUT edits", async () => {
-  const blockMs = 1_500;
-  setStorageCleanupPolicyJobTestHooks({ blockMs });
+  let acquired!: () => void;
+  const acquiredPromise = new Promise<void>(resolve => { acquired = resolve; });
+  const releaseBuffer = new SharedArrayBuffer(4);
+  setStorageCleanupPolicyJobTestHooks({
+    onPolicyLoaded: acquired,
+    waitAfterPolicyLoadedBuffer: releaseBuffer,
+  });
   seedArchived(harness.isolatedCodexHome.path);
   const server = startServer(0);
   try {
@@ -52,19 +57,7 @@ test("blocked worker completion preserves concurrent policy PUT edits", async ()
     expect(runStart.started).toBe(true);
     expect(runStart.job?.status).toBe("running");
 
-    const editDeadline = Date.now() + 5_000;
-    let sawRunning = false;
-    while (Date.now() < editDeadline) {
-      const peek = await fetch(new URL("/api/storage/cleanup-policy", server.url));
-      const peekBody = await peek.json() as { job?: { status?: string } };
-      if (peekBody.job?.status === "running") {
-        sawRunning = true;
-        break;
-      }
-      await Bun.sleep(20);
-    }
-    expect(sawRunning).toBe(true);
-    await Bun.sleep(800);
+    await acquiredPromise;
 
     const put = await fetch(new URL("/api/storage/cleanup-policy", server.url), {
       method: "PUT",
@@ -82,6 +75,8 @@ test("blocked worker completion preserves concurrent policy PUT edits", async ()
     expect(putBody.ok).toBe(true);
     expect(putBody.policy?.enabled).toBe(false);
 
+    Atomics.store(new Int32Array(releaseBuffer), 0, 1);
+    Atomics.notify(new Int32Array(releaseBuffer), 0);
     const done = await waitForJobIdle(server.url, runStart.job!.startedAt);
     expect(done.job.lastOutcome?.ok).toBe(true);
     expect(done.job.lastOutcome?.skipped).toBeUndefined();
@@ -109,6 +104,8 @@ test("blocked worker completion preserves concurrent policy PUT edits", async ()
     expect(typeof body.lastRun?.at).toBe("number");
     expect(typeof body.nextRun).toBe("number");
   } finally {
+    Atomics.store(new Int32Array(releaseBuffer), 0, 1);
+    Atomics.notify(new Int32Array(releaseBuffer), 0);
     await stopPolicyServer(server);
     await resetStorageCleanupPolicyJobForTestsAsync();
   }

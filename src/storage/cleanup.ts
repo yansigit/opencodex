@@ -2578,6 +2578,10 @@ export interface RestoreTestHooks {
    * reconcile, so cleanup can race an in-flight restore.
    */
   holdAfterFileMovesMs?: number;
+  /** Internal test seam: pause after moves until the owner releases it. */
+  waitAfterFileMoves?: SharedArrayBuffer;
+  /** Internal worker-only notification after rollout moves complete. */
+  notifyAfterFileMoves?: boolean;
 }
 
 /**
@@ -2923,6 +2927,13 @@ export function restoreTrashEntry(
       const deadline = Date.now() + holdMs;
       while (Date.now() < deadline) { /* test-only spin wait */ }
     }
+  }
+  if (hooks?.waitAfterFileMoves) {
+    if (hooks.notifyAfterFileMoves) {
+      Atomics.store(new Int32Array(hooks.waitAfterFileMoves), 1, 1);
+      Atomics.notify(new Int32Array(hooks.waitAfterFileMoves), 1);
+    }
+    Atomics.wait(new Int32Array(hooks.waitAfterFileMoves), 0, 0);
   }
 
   if (hooks?.failAfterFileMoves) {

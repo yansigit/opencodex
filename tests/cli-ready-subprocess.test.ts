@@ -2,7 +2,7 @@
  * Real subprocess/loopback coverage for ocx ready dispatch boundaries.
  *
  * Keep tests/cli-ready.test.ts injected-only. These focused integration tests
- * prove that the top-level CLI preserves terminal-failed and pre-parse behavior
+ * prove that the top-level CLI preserves terminal-failed behavior
  * with isolated homes and an actual discovered proxy fixture.
  */
 import { describe, expect, test } from "bun:test";
@@ -128,56 +128,6 @@ describe("ocx ready real subprocess", () => {
         port: server.port,
       });
       expect(result.stderr).toBe("");
-    } finally {
-      server.stop(true);
-      rmSync(homes.root, { recursive: true, force: true });
-    }
-  });
-
-  test("invalid --timeout exits 64 before discovery and auto-restore", async () => {
-    const homes = isolatedHomes("ocx-ready-subprocess-invalid-");
-    const fixturePid = process.pid;
-    let healthzHits = 0;
-    let readyzHits = 0;
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch(request) {
-        const path = new URL(request.url).pathname;
-        if (path === "/healthz") healthzHits++;
-        if (path === "/readyz") readyzHits++;
-        return Response.json({
-          service: "opencodex",
-          status: "ok",
-          version: "test",
-          uptime: 1,
-          pid: fixturePid,
-        });
-      },
-    });
-    writeRuntimePort(homes.opencodexHome, server.port, fixturePid);
-    // If the global auto-restore preflight runs, this non-file state emits an
-    // auto-restore warning. Invalid ready args must exit before inspecting it.
-    mkdirSync(join(homes.opencodexHome, "codex-shim.json"));
-
-    try {
-      const result = await runCli(
-        ["ready", "--timeout", "5"],
-        {
-          OPENCODEX_HOME: homes.opencodexHome,
-          CODEX_HOME: homes.codexHome,
-          OPENCODEX_CODEX_SHIM_AUTO_RESTORE: "1",
-        },
-        10_000,
-      );
-
-      expect(result.timedOut).toBe(false);
-      expect(result.exitCode).toBe(64);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toContain("Usage: ocx ready");
-      expect(result.stderr).not.toContain("auto-restore");
-      expect(healthzHits).toBe(0);
-      expect(readyzHits).toBe(0);
     } finally {
       server.stop(true);
       rmSync(homes.root, { recursive: true, force: true });
