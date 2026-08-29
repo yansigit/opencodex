@@ -3502,19 +3502,17 @@ async function handleResponsesInner(
       }
       throw error;
     }
-    if (!isCanonicalOpenAiForwardProvider(route.provider)) {
-      for (const name of request.convertedRoutedCustomToolNames ?? []) {
-        if (
-          toolBridgeMaps.freeformToolNames.has(name)
-          || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
-        ) routedCustomToolNames.add(name);
-      }
-      for (const name of request.routedCustomToolRepairNames ?? []) {
-        if (
-          toolBridgeMaps.freeformToolNames.has(name)
-          || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
-        ) routedCustomToolRepairNames.add(name);
-      }
+    for (const name of request.convertedRoutedCustomToolNames ?? []) {
+      if (
+        toolBridgeMaps.freeformToolNames.has(name)
+        || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
+      ) routedCustomToolNames.add(name);
+    }
+    for (const name of request.routedCustomToolRepairNames ?? []) {
+      if (
+        toolBridgeMaps.freeformToolNames.has(name)
+        || toolBridgeMaps.toolNsMap.get(name)?.freeform === true
+      ) routedCustomToolRepairNames.add(name);
     }
     for (const name of request.convertedRoutedToolSearchNames ?? []) {
       // The adapter already keeps this set empty when tool_choice forbids the private search.
