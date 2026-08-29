@@ -143,7 +143,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
       actions: read
     steps:
       - name: Checkout trusted promotion controller
@@ -204,10 +204,21 @@ jobs:
             exit 0
           fi
 
+      - name: Create backmerge App token
+        id: backmerge-app-token
+        if: steps.verify-main.outputs.eligible == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PR_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
       - name: Fast-forward dev to verified main
         if: steps.verify-main.outputs.eligible == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.backmerge-app-token.outputs.token }}
           GIT_TERMINAL_PROMPT: 0
           VERIFIED_MAIN_SHA: ${{ steps.verify-main.outputs.verified_main_sha }}
           VERIFIED_DEV_SHA: ${{ steps.verify-main.outputs.live_dev_sha }}
@@ -251,7 +262,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Checkout trusted release controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -374,10 +385,21 @@ jobs:
             echo "release_version=$release_version"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Create post-release App token
+        id: post-release-app-token
+        if: steps.verify-release.outputs.action == 'bump'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PR_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
       - name: Bump and push the next stable dev version
         if: steps.verify-release.outputs.action == 'bump'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.post-release-app-token.outputs.token }}
           GIT_TERMINAL_PROMPT: 0
           VERIFIED_MAIN_SHA: ${{ steps.verify-release.outputs.verified_main_sha }}
           VERIFIED_DEV_SHA: ${{ steps.verify-release.outputs.verified_dev_sha }}
@@ -443,7 +465,6 @@ jobs:
           EOF
           chmod 700 "$askpass"
           GIT_ASKPASS="$askpass" git push --atomic \
-            --force-with-lease="refs/heads/dev:$VERIFIED_DEV_SHA" \
             --force-with-lease="refs/tags/v${RELEASE_VERSION}:$VERIFIED_MAIN_SHA" \
             origin "$new_dev_sha:refs/heads/dev" "$VERIFIED_MAIN_SHA:refs/tags/v${RELEASE_VERSION}"
           post_refs="$(git ls-remote origin refs/heads/main refs/heads/dev)"
