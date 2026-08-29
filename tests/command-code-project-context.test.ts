@@ -27,10 +27,10 @@ mock.module("node:fs/promises", () => ({
 
 const {
   EMPTY_COMMAND_CODE_PROJECT_CONTEXT,
-  COMMAND_CODE_FILE_OP_TIMEOUT_MS,
   loadCommandCodeProjectContext,
   projectContextCache,
   pruneProjectContextCache,
+  setCommandCodeFileOpTimeoutForTests,
 } = await import("../src/adapters/command-code-project-context");
 
 const MAX_PROJECT_CONTEXT_CACHE_ENTRIES = 128;
@@ -55,10 +55,12 @@ function writeSkill(
 
 beforeEach(() => {
   projectContextCache.clear();
+  setCommandCodeFileOpTimeoutForTests(undefined);
 });
 
 afterEach(() => {
   projectContextCache.clear();
+  setCommandCodeFileOpTimeoutForTests(undefined);
 });
 
 describe("loadCommandCodeProjectContext", () => {
@@ -160,7 +162,8 @@ describe("loadCommandCodeProjectContext", () => {
     });
 
     try {
-      const result = await loadCommandCodeProjectContext(root, { fileOpTimeoutMs: 20 });
+      setCommandCodeFileOpTimeoutForTests(20);
+      const result = await loadCommandCodeProjectContext(root);
       expect(result).toEqual(EMPTY_COMMAND_CODE_PROJECT_CONTEXT);
       expect(closeCalls).toBe(1);
     } finally {
@@ -294,7 +297,8 @@ describe("loadCommandCodeProjectContext", () => {
 
     try {
       writeFileSync(agentsPath, "hanging", "utf8");
-      const result = await loadCommandCodeProjectContext(root, { fileOpTimeoutMs: 20 });
+      setCommandCodeFileOpTimeoutForTests(20);
+      const result = await loadCommandCodeProjectContext(root);
 
       expect(result).not.toBe("timeout");
       expect(result).toEqual(EMPTY_COMMAND_CODE_PROJECT_CONTEXT);
@@ -305,8 +309,14 @@ describe("loadCommandCodeProjectContext", () => {
     }
   });
 
-  test("keeps the production file-operation timeout default", () => {
-    expect(COMMAND_CODE_FILE_OP_TIMEOUT_MS).toBe(2_000);
+  test("uses the production file-operation timeout by default", async () => {
+    const root = makeTempDir("ocx-cc-ctx-default-timeout-");
+    try {
+      writeFileSync(join(root, "AGENTS.md"), "memory", "utf8");
+      expect((await loadCommandCodeProjectContext(root)).memory).toBe("memory");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   test("omits symlink escape for AGENTS.md", async () => {

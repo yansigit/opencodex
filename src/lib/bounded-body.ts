@@ -2,7 +2,7 @@
 export const BOUNDED_BODY_MAX_BYTES = 65_536;
 
 /** Default wall-clock and continuous-silence deadlines. */
-export const BOUNDED_BODY_TIMEOUT_MS = 5_000;
+const BOUNDED_BODY_TIMEOUT_MS = 5_000;
 
 export interface BoundedBodyOptions {
 	/** Abort the read with this signal. Its reason is rethrown by identity. */

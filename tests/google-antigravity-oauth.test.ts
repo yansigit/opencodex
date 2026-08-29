@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { ANTIGRAVITY_ONBOARD_POLL_MS, AntigravityTokenRequestError, discoverAntigravityProject, refreshAntigravityToken } from "../src/oauth/google-antigravity";
+import { AntigravityTokenRequestError, discoverAntigravityProject, refreshAntigravityToken, setAntigravityOnboardSleepForTests } from "../src/oauth/google-antigravity";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +8,7 @@ import { getValidAccessTokenForAccount, getValidAccessTokenSnapshotForAccount } 
 import { ANTIGRAVITY_IDE_VERSION } from "../src/adapters/client-fingerprint";
 
 const realFetch = globalThis.fetch;
-afterEach(() => { globalThis.fetch = realFetch; });
+afterEach(() => { globalThis.fetch = realFetch; setAntigravityOnboardSleepForTests(undefined); });
 
 function routeFetch(handler: (url: string, init?: RequestInit) => Response | Promise<Response>): { calls: string[] } {
   const calls: string[] = [];
@@ -38,7 +38,6 @@ describe("antigravity project discovery", () => {
   });
 
   test("falls back to onboardUser poll loop (not-done then done)", async () => {
-    expect(ANTIGRAVITY_ONBOARD_POLL_MS).toBe(2_000);
     let onboardCalls = 0;
     routeFetch((url, init) => {
       if (url.includes(":onboardUser")) {
@@ -57,9 +56,10 @@ describe("antigravity project discovery", () => {
       return new Response("no", { status: 404 });
     });
     const sleeps: number[] = [];
-    expect(await discoverAntigravityProject("tok", undefined, { sleep: async ms => { sleeps.push(ms); } })).toBe("proj-onboarded");
+    setAntigravityOnboardSleepForTests(async ms => { sleeps.push(ms); });
+    expect(await discoverAntigravityProject("tok")).toBe("proj-onboarded");
     expect(onboardCalls).toBe(2);
-    expect(sleeps).toEqual([ANTIGRAVITY_ONBOARD_POLL_MS]);
+    expect(sleeps).toEqual([2_000]);
   });
 
   // `ide_version` was sending `antigravityUserAgent()` — the whole header, parentheses and all —
@@ -106,9 +106,10 @@ describe("antigravity project discovery", () => {
       return new Response("no", { status: 404 });
     });
     const sleeps: number[] = [];
-    expect(await discoverAntigravityProject("tok", undefined, { sleep: async ms => { sleeps.push(ms); } })).toBe("proj-T");
+    setAntigravityOnboardSleepForTests(async ms => { sleeps.push(ms); });
+    expect(await discoverAntigravityProject("tok")).toBe("proj-T");
     expect(onboardCalls).toBe(2);
-    expect(sleeps).toEqual([ANTIGRAVITY_ONBOARD_POLL_MS]);
+    expect(sleeps).toEqual([2_000]);
   });
 });
 

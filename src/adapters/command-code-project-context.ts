@@ -23,7 +23,12 @@ const MAX_SKILLS = 16;
 // directories (millions of entries) to a finite scan while preserving alphabetical
 // selection for any realistic case (≤ MAX_SKILL_DIRS_TO_SCAN valid dirs per root).
 const MAX_SKILL_DIRS_TO_SCAN = 256;
-export const COMMAND_CODE_FILE_OP_TIMEOUT_MS = 2_000;
+const COMMAND_CODE_FILE_OP_TIMEOUT_MS = 2_000;
+let fileOpTimeoutForTests: number | undefined;
+
+export function setCommandCodeFileOpTimeoutForTests(timeoutMs: number | undefined): void {
+  fileOpTimeoutForTests = timeoutMs;
+}
 const PROJECT_CONTEXT_TTL_MS = 30_000;
 const MAX_PROJECT_CONTEXT_CACHE_ENTRIES = 128;
 
@@ -356,10 +361,7 @@ async function collectProjectContext(cwd: string, timeoutMs: number): Promise<Co
   return { memory, taste, skills };
 }
 
-export async function loadCommandCodeProjectContext(
-  cwd: string | undefined,
-  options?: { /** Internal test seam; omitted in production. */ fileOpTimeoutMs?: number },
-): Promise<CommandCodeProjectContext> {
+export async function loadCommandCodeProjectContext(cwd: string | undefined): Promise<CommandCodeProjectContext> {
   if (!cwd) return { ...EMPTY_COMMAND_CODE_PROJECT_CONTEXT };
 
   const hadCachedEntry = projectContextCache.has(cwd);
@@ -368,7 +370,7 @@ export async function loadCommandCodeProjectContext(
     return cached.value;
   }
 
-  const value = await collectProjectContext(cwd, options?.fileOpTimeoutMs ?? COMMAND_CODE_FILE_OP_TIMEOUT_MS);
+  const value = await collectProjectContext(cwd, fileOpTimeoutForTests ?? COMMAND_CODE_FILE_OP_TIMEOUT_MS);
   const now = Date.now();
   if (hadCachedEntry) {
     pruneExpiredProjectContextCache(now);

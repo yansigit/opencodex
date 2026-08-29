@@ -37,8 +37,13 @@ const CALLBACK_PATH = "/callback";
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const ONBOARD_ATTEMPTS = 5;
-export const ANTIGRAVITY_ONBOARD_POLL_MS = 2_000;
+const ANTIGRAVITY_ONBOARD_POLL_MS = 2_000;
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+let sleepForTests: ((ms: number) => Promise<void>) | undefined;
+
+export function setAntigravityOnboardSleepForTests(sleep: ((ms: number) => Promise<void>) | undefined): void {
+  sleepForTests = sleep;
+}
 
 function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -137,17 +142,11 @@ async function loadCodeAssistProject(accessToken: string, signal?: AbortSignal):
   return extractProjectId((await response.json().catch(() => undefined)) as Record<string, unknown> | undefined);
 }
 
-type AntigravityDiscoveryOptions = {
-  /** Internal test seam; omitted in production. */
-  sleep?: (ms: number) => Promise<void>;
-};
-
 async function onboardProject(
   accessToken: string,
   signal?: AbortSignal,
-  options?: AntigravityDiscoveryOptions,
 ): Promise<string | undefined> {
-  const sleep = options?.sleep ?? defaultSleep;
+  const sleep = sleepForTests ?? defaultSleep;
   for (let attempt = 0; attempt < ONBOARD_ATTEMPTS; attempt++) {
     if (signal?.aborted) throw signal.reason ?? new Error("Antigravity onboarding aborted");
     const response = await fetch(`${DAILY_API}/${API_VERSION}:onboardUser`, {
@@ -182,9 +181,8 @@ async function onboardProject(
 export async function discoverAntigravityProject(
   accessToken: string,
   signal?: AbortSignal,
-  options?: AntigravityDiscoveryOptions,
 ): Promise<string | undefined> {
-  return (await loadCodeAssistProject(accessToken, signal)) ?? (await onboardProject(accessToken, signal, options));
+  return (await loadCodeAssistProject(accessToken, signal)) ?? (await onboardProject(accessToken, signal));
 }
 
 function credentialsFromPayload(payload: GoogleTokenPayload, refreshFallback = ""): OAuthCredentials {
