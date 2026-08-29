@@ -303,6 +303,9 @@ describe("the Responses WebSocket handshake", () => {
       ["absent", {}, "main"],
       ["empty", { "x-openai-subagent": "" }, undefined],
       ["malformed metadata", { "x-codex-turn-metadata": "{bad" }, undefined],
+      ["whitespace metadata", {
+        "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "   " }),
+      }, undefined],
       ["contradictory", {
         "x-openai-subagent": "review",
         "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "compact" }),

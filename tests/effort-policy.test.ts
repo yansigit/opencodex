@@ -100,6 +100,12 @@ describe("classifyAgentKind", () => {
     }
   });
 
+  test("classifies whitespace-only subagent metadata as unknown", () => {
+    expect(classifyAgentKind(new Headers({
+      "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "   " }),
+    }), "responses")).toBeUndefined();
+  });
+
   test("classifies marker-free Responses traffic as main and rejects malformed or contradictory evidence", () => {
     expect(classifyAgentKind(new Headers(), "responses")).toBe("main");
     expect(classifyAgentKind(new Headers({

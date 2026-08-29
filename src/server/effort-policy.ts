@@ -30,7 +30,7 @@ function turnMetadataMarker(headers: Headers): MarkerValue {
     const metadata = parsed as Record<string, unknown>;
     if (!("subagent_kind" in metadata)) return undefined;
     const value = metadata.subagent_kind;
-    if (typeof value !== "string" || !value) return { value: "", valid: false };
+    if (typeof value !== "string" || value.trim().length === 0) return { value: "", valid: false };
     return { value, valid: true };
   } catch {
     return { value: "", valid: false };
