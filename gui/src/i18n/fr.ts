@@ -2404,7 +2404,7 @@ export const fr: Record<TKey, string> = {
   "lab.layer.live_route_compatibility": "Compatibilité des routes en direct",
   "lab.layer.task_effectiveness": "Efficacité des tâches",
   "sub.routedDelegationBridge": "Pont de délégation V2 routé",
-  "sub.routedDelegationBridgeHint": "Expérimental. Codex peut encore afficher le modèle d’origine ; les invites routées, le contexte du dépôt, les résultats d’outils, la disponibilité, le contexte, le comportement, la facturation et la confidentialité suivent le fournisseur sélectionné. Le modèle choisit les outils.",
+  "sub.routedDelegationBridgeHint": "Expérimental. Lorsqu’il est actif, les messages de création, d’envoi et de suivi sont en clair, y compris entre agents natifs. Codex peut encore afficher le modèle d’origine ; le contenu routé et la confidentialité suivent le fournisseur sélectionné.",
   "sub.routedDelegationBridgeInactive": "Armé ; ne s’active que pour les racines V2 natives éligibles.",
   "sub.routedDelegationBridgeSaveFail": "Échec de l’enregistrement du pont de délégation V2 routé",
   "sub.routedDelegationBridgeSaved": "Pont de délégation V2 routé enregistré. La désactivation s’applique immédiatement.",

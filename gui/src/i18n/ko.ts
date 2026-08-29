@@ -2438,7 +2438,7 @@ export const ko: Record<TKey, string> = {
   "dash.visionTimeoutInvalid": "{min}에서 {max} 밀리초 사이의 정수를 입력하세요.",
   "dash.visionAdvancedPopover": "고급 비전 설정",
   "sub.routedDelegationBridge": "라우팅된 V2 위임 브리지",
-  "sub.routedDelegationBridgeHint": "실험 기능입니다. Codex에는 원래 모델이 계속 표시될 수 있습니다. 라우팅된 프롬프트, 리포지토리 컨텍스트, 도구 결과, 가용성, 컨텍스트, 동작, 청구 및 개인정보 보호는 선택한 제공업체를 따릅니다. 도구는 모델이 선택합니다.",
+  "sub.routedDelegationBridgeHint": "실험 기능입니다. 활성화 중에는 생성, 전송, 후속 메시지가 네이티브 간 위임을 포함해 평문입니다. Codex에는 원래 모델이 표시될 수 있으며, 라우팅된 내용과 개인정보 보호는 선택한 제공업체를 따릅니다.",
   "sub.routedDelegationBridgeInactive": "설정됨: 적격 네이티브 V2 루트에서만 활성화됩니다.",
   "sub.routedDelegationBridgeSaveFail": "라우팅된 V2 위임 브리지를 저장하지 못했습니다",
   "sub.routedDelegationBridgeSaved": "라우팅된 V2 위임 브리지를 저장했습니다. 비활성화는 즉시 적용됩니다.",

@@ -2402,7 +2402,7 @@ export const zhTW: Record<TKey, string> = {
   "dash.visionTimeoutInvalid": "請輸入 {min} 到 {max} 毫秒之間的整數。",
   "dash.visionAdvancedPopover": "進階視覺設定",
   "sub.routedDelegationBridge": "路由 V2 委派橋接",
-  "sub.routedDelegationBridgeHint": "實驗性功能。Codex 仍可能顯示原始模型；路由後的提示、儲存庫內容、工具結果、可用性、內容、行為、計費和隱私皆依所選提供者而定。工具由模型選擇。",
+  "sub.routedDelegationBridgeHint": "實驗性功能。啟用期間，建立、傳送和後續訊息皆為明文，包括原生代理之間的委派。Codex 仍可能顯示原始模型；路由內容和隱私依所選提供者而定。",
   "sub.routedDelegationBridgeInactive": "已就緒；僅會為符合資格的原生 V2 根任務啟用。",
   "sub.routedDelegationBridgeSaveFail": "無法儲存路由 V2 委派橋接",
   "sub.routedDelegationBridgeSaved": "已儲存路由 V2 委派橋接。停用會立即生效。",
