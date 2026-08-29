@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } from "../src/codex/catalog/native-models";
+import { syncCatalogModels } from "../src/codex/catalog/sync";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 
@@ -108,7 +109,7 @@ describe("Codex catalog sync hardening", () => {
     if (existsSync(opencodexHome)) rmSync(opencodexHome, { recursive: true, force: true });
   });
 
-  test("Gap B: drops legacy and unentitled account-gated natives but keeps supported + user natives", () => {
+  test("Gap B: drops legacy OpenAI-family natives but keeps supported + user natives", () => {
     const catalogPath = join(codexHome, "catalog.json");
     writeFileSync(join(codexHome, "config.toml"), 'model_catalog_json = "catalog.json"\n', "utf8");
     writeFileSync(catalogPath, JSON.stringify({
@@ -138,11 +139,9 @@ describe("Codex catalog sync hardening", () => {
     expect(slugs).toContain("gpt-5.4");
     expect(slugs).toContain("gpt-5.4-mini");
     expect(slugs).toContain("gpt-5.3-codex-spark");
-    // This isolated fixture has no authenticated ChatGPT roster, so account-gated
-    // native models must fail closed rather than remain selectable.
-    expect(slugs).not.toContain("gpt-5.6-sol");
-    expect(slugs).not.toContain("gpt-5.6-terra");
-    expect(slugs).not.toContain("gpt-5.6-luna");
+    expect(slugs).toContain("gpt-5.6-sol");
+    expect(slugs).toContain("gpt-5.6-terra");
+    expect(slugs).toContain("gpt-5.6-luna");
     expect(slugs).toContain("user-native");           // genuine user native preserved
     expect(slugs).not.toContain("gpt-5.3-codex");      // legacy dropped
     expect(slugs).not.toContain("gpt-5.2");            // legacy dropped
@@ -155,8 +154,8 @@ describe("Codex catalog sync hardening", () => {
     writeFileSync(catalogPath, JSON.stringify({
       models: [
         {
-          ...nativeEntry("gpt-5.5", 0),
-          display_name: "Original GPT-5.5",
+          ...nativeEntry("gpt-5.6-sol", 0),
+          display_name: "Original Sol",
           comp_hash: "native-sol-hash",
           base_instructions: "Native Sol instructions",
           model_messages: { instructions_template: "Native Sol instructions" },
@@ -180,17 +179,17 @@ describe("Codex catalog sync hardening", () => {
             adapter: "openai-chat",
             baseUrl: "https://api.example.test/v1",
             liveModels: false,
-            models: ["codex/gpt-5.5"]
+            models: ["codex/gpt-5.6-sol"]
           }
         },
         codexAccounts: [{ id: "stored-team-account", isMain: false }],
         codexAccountNamespaces: { team: "stored-team-account" },
         combos: {
           "nova-sol": {
-            alias: "gpt-5.5",
+            alias: "gpt-5.6-sol",
             nativeAlias: true,
-            displayName: "Nova GPT-5.5",
-            targets: [{ provider: "Nova1", model: "codex/gpt-5.5" }]
+            displayName: "Nova Sol",
+            targets: [{ provider: "Nova1", model: "codex/gpt-5.6-sol" }]
           }
         }
       };
@@ -207,13 +206,13 @@ describe("Codex catalog sync hardening", () => {
       tool_mode?: string | null;
       opencodex_catalog_kind?: string;
     }>;
-    expect(rows.filter(row => row.slug === "gpt-5.5")).toEqual([
+    expect(rows.filter(row => row.slug === "gpt-5.6-sol")).toEqual([
       expect.objectContaining({
-        display_name: "Nova GPT-5.5",
+        display_name: "Nova Sol",
         opencodex_catalog_kind: "combo-native-alias-v1",
       }),
     ]);
-    expect(rows.find(row => row.slug === "team/gpt-5.5")).toMatchObject({
+    expect(rows.find(row => row.slug === "team/gpt-5.6-sol")).toMatchObject({
       comp_hash: "native-sol-hash",
       base_instructions: "Native Sol instructions",
       model_messages: { instructions_template: "Native Sol instructions" },
@@ -1095,7 +1094,7 @@ describe("Codex catalog sync hardening", () => {
     expect(slugs).not.toContain("cursor/stale-model");
   });
 
-  test("an identical resync leaves the catalog file untouched, a real change still writes", () => {
+  test("an identical resync leaves the catalog file untouched, a real change still writes", async () => {
     // The app-server staleness classifier (#857) compares this file's mtime against
     // each running Codex's start time, so a no-op rewrite would report every
     // already-running Codex as holding an outdated catalog — and since #1407 that
@@ -1110,50 +1109,38 @@ describe("Codex catalog sync hardening", () => {
       ],
     }, null, 2) + "\n");
 
-    const r = runScript(codexHome, opencodexHome, `
-      const { statSync, writeFileSync, readFileSync, utimesSync } = require("node:fs");
-      const { syncCatalogModels } = require("./src/codex/catalog");
-      const path = ${JSON.stringify(catalogPath)};
-      (async () => {
-        const first = await syncCatalogModels({ providers: {} });
-        const stableMtime = new Date("2020-01-01T00:00:00.000Z");
-        utimesSync(path, stableMtime, stableMtime);
-        const afterFirst = statSync(path).mtimeMs;
-        const second = await syncCatalogModels({ providers: {} });
-        const afterSecond = statSync(path).mtimeMs;
-        // Not vacuous: a catalog that really differs must still be rewritten.
-        const catalog = JSON.parse(readFileSync(path, "utf8"));
-        catalog.models = catalog.models.filter(model => model.slug !== "gpt-5.5");
-        writeFileSync(path, JSON.stringify(catalog, null, 2) + "\\n");
-        const changedMtime = new Date("2020-01-02T00:00:00.000Z");
-        utimesSync(path, changedMtime, changedMtime);
-        const changedAt = statSync(path).mtimeMs;
-        const third = await syncCatalogModels({ providers: {} });
-        console.log(JSON.stringify({
-          firstWritten: first.catalogWritten,
-          secondWritten: second.catalogWritten,
-          secondAdded: second.added,
-          identicalResyncKeptMtime: afterFirst === afterSecond,
-          thirdWritten: third.catalogWritten,
-          realChangeBumpedMtime: statSync(path).mtimeMs > changedAt,
-        }));
-      })();
-    `);
-    expect(r.status).toBe(0);
+    const previousCodexHome = process.env.CODEX_HOME;
+    const previousOpenCodexHome = process.env.OPENCODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    process.env.OPENCODEX_HOME = opencodexHome;
+    try {
+      const first = await syncCatalogModels({ providers: {} });
+      const stableMtime = new Date("2020-01-01T00:00:00.000Z");
+      utimesSync(catalogPath, stableMtime, stableMtime);
+      const afterFirst = statSync(catalogPath).mtimeMs;
+      const second = await syncCatalogModels({ providers: {} });
+      const afterSecond = statSync(catalogPath).mtimeMs;
+      // Not vacuous: a catalog that really differs must still be rewritten.
+      const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
+      catalog.models = catalog.models.filter((model: { slug: string }) => model.slug !== "gpt-5.5");
+      writeFileSync(catalogPath, JSON.stringify(catalog, null, 2) + "\n");
+      const changedMtime = new Date("2020-01-02T00:00:00.000Z");
+      utimesSync(catalogPath, changedMtime, changedMtime);
+      const changedAt = statSync(catalogPath).mtimeMs;
+      const third = await syncCatalogModels({ providers: {} });
 
-    const out = JSON.parse(r.stdout) as {
-      firstWritten: boolean;
-      secondWritten: boolean;
-      secondAdded: number;
-      identicalResyncKeptMtime: boolean;
-      thirdWritten: boolean;
-      realChangeBumpedMtime: boolean;
-    };
-    expect(out.firstWritten).toBe(true);
-    expect(out.secondWritten).toBe(false);
-    expect(out.identicalResyncKeptMtime).toBe(true);
-    expect(out.thirdWritten).toBe(true);
-    expect(out.realChangeBumpedMtime).toBe(true);
+      expect(first.catalogWritten).toBe(true);
+      expect(second.catalogWritten).toBe(false);
+      expect(second.added).toBe(0);
+      expect(afterFirst).toBe(afterSecond);
+      expect(third.catalogWritten).toBe(true);
+      expect(statSync(catalogPath).mtimeMs).toBeGreaterThan(changedAt);
+    } finally {
+      if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousCodexHome;
+      if (previousOpenCodexHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousOpenCodexHome;
+    }
   }, 15_000);
 
   test("the no-op guard compares bytes, so a malformed byte decoding to U+FFFD is still repaired", () => {

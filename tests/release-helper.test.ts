@@ -560,6 +560,11 @@ describe("release helper", () => {
 
   test.each([
     "ssh://git:SECRET@example.test/owner/repository.git",
+    "ssh://SECRET@example.test/owner/repository.git",
+    "ssh://git%3ASECRET@example.test/owner/repository.git",
+    "ssh://git:@example.test/owner/repository.git",
+    "git@example.test:owner/repository.git?token=SECRET",
+    "git:SECRET@example.test:owner/repository.git",
     "git@SECRET@example.test:owner/repository.git",
   ])("credential-bearing SSH target is rejected by the pure classifier", value => {
     expect(isSshRemote(value)).toBe(false);
@@ -567,9 +572,27 @@ describe("release helper", () => {
 
   test.each([
     "ssh://git@example.test/owner/repository.git",
+    "ssh://example.test/owner/repository.git",
     "git@example.test:owner/repository.git",
   ])("credential-free SSH target remains accepted by the pure classifier", value => {
     expect(isSshRemote(value)).toBe(true);
+  });
+
+  test.each([
+    "ssh://git:SECRET@example.test/owner/repository.git",
+    "ssh://git%3ASECRET@example.test/owner/repository.git",
+    "git@example.test:owner/repository.git?token=SECRET",
+    "git:SECRET@example.test:owner/repository.git",
+  ])("credential-bearing origin form yields no SSH target", origin => {
+    expect(sshTargetFromOrigin(origin)).toBeUndefined();
+  });
+
+  test.each([
+    "ssh://git@example.test/owner/repository.git",
+    "ssh://example.test/owner/repository.git",
+    "git@example.test:owner/repository.git",
+  ])("credential-free origin form is reused verbatim", origin => {
+    expect(sshTargetFromOrigin(origin)).toBe(origin);
   });
 
   test("credential-free origin is converted to the deploy-key target", () => {
