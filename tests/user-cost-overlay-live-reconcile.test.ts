@@ -108,10 +108,11 @@ describe("cross-process user cost overlay reconciliation", () => {
     // Separate writer process: exactly what `ocx config set` does — a fresh
     // module instance calling saveConfig() under the same OPENCODEX_HOME.
     const { exitCode, stderr } = await runChild(`
-      const { loadConfig, saveConfig } = await import("./src/config.ts");
-      const config = loadConfig();
-      config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
-      saveConfig(config);
+      const { mutatePersistedConfig } = await import("./src/config.ts");
+      mutatePersistedConfig(config => {
+        config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
+        return { changed: true, value: undefined };
+      });
     `);
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");
@@ -170,10 +171,11 @@ describe("cross-process user cost overlay reconciliation", () => {
 
     // Make the overlay live first through the same cross-process path.
     const seed = await runChild(`
-      const { loadConfig, saveConfig } = await import("./src/config.ts");
-      const config = loadConfig();
-      config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
-      saveConfig(config);
+      const { mutatePersistedConfig } = await import("./src/config.ts");
+      mutatePersistedConfig(config => {
+        config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
+        return { changed: true, value: undefined };
+      });
     `);
     expect(seed.exitCode).toBe(0);
     expect(seed.stderr).toBe("");
@@ -234,10 +236,11 @@ describe("cross-process user cost overlay reconciliation", () => {
     // External edit: with the 20ms owner active it must become live well
     // inside the 500ms owner's cadence.
     const { exitCode, stderr } = await runChild(`
-      const { loadConfig, saveConfig } = await import("./src/config.ts");
-      const config = loadConfig();
-      config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
-      saveConfig(config);
+      const { mutatePersistedConfig } = await import("./src/config.ts");
+      mutatePersistedConfig(config => {
+        config.providers.acme.modelCosts = { "model-x": ${JSON.stringify(OVERLAY)} };
+        return { changed: true, value: undefined };
+      });
     `);
     expect(exitCode).toBe(0);
     expect(stderr).toBe("");

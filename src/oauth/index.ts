@@ -1,7 +1,7 @@
 import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
 import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
-import { loadConfig, resolveEnvValue, saveConfig } from "../config";
+import { initializePersistedConfigIfMissing, loadConfig, mutatePersistedConfig, resolveEnvValue } from "../config";
 import { maskEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
 import { getAccountCredential, getAccountSet, removeAccount, saveAccountCredential, saveCredential, setActiveAccount, getCredential, credentialGeneration, createOAuthRefreshIntentLock, mergeAccountCredential, markAccountNeedsReauthIfGeneration, readOAuthRefreshIntent, writeOAuthRefreshIntent, markOAuthRefreshIntentStaleOwner, clearOAuthRefreshIntent, normalizeAuthStoreBuffer, OAuthMutationBusyError } from "./store";
@@ -1023,42 +1023,107 @@ function migrateLegacyAntigravityStaticCatalog(config: OcxConfig): boolean {
   return true;
 }
 
-export function reconcileOAuthProviders(config: OcxConfig): boolean {
-  let changed = migrateLegacyAntigravityStaticCatalog(config);
-  for (const [name, prov] of Object.entries(config.providers)) {
+interface OAuthReconcileProjection {
+  config: OcxConfig;
+  changed: boolean;
+  touchedProviders: string[];
+  touchedAntigravityVersion: boolean;
+}
+
+function projectOAuthProviderReconciliation(config: OcxConfig): OAuthReconcileProjection {
+  const projected = structuredClone(config);
+  const touchedProviders = new Set<string>();
+  const beforeAntigravity = JSON.stringify(projected.providers[GOOGLE_ANTIGRAVITY_PROVIDER]);
+  const beforeAntigravityVersion = projected.googleAntigravityStaticCatalogVersion;
+  let changed = migrateLegacyAntigravityStaticCatalog(projected);
+  if (JSON.stringify(projected.providers[GOOGLE_ANTIGRAVITY_PROVIDER]) !== beforeAntigravity) {
+    touchedProviders.add(GOOGLE_ANTIGRAVITY_PROVIDER);
+  }
+  const touchedAntigravityVersion = projected.googleAntigravityStaticCatalogVersion !== beforeAntigravityVersion;
+
+  for (const [name, prov] of Object.entries(projected.providers)) {
+    const beforeProvider = JSON.stringify(prov);
     const def = OAUTH_PROVIDERS[name];
     if (name === "command-code" && isLegacyCommandCodeStaticCatalog(prov)) {
       // The former experimental preset was the exact three-model seed above. It was not a user
       // choice to disable discovery, so promote only that shape to the account live catalog.
       prov.liveModels = true;
-      changed = true;
     }
-    if (!def || prov.authMode !== "oauth") continue;
-    const preset = def.providerConfig;
-    for (const field of OAUTH_RECONCILE_FIELDS) {
-      if (JSON.stringify(prov[field]) === JSON.stringify(preset[field])) continue;
-      if (preset[field] !== undefined) {
-        prov[field] = cloneProviderField(preset[field]) as never;
-      } else {
-        delete prov[field];
+    if (def && prov.authMode === "oauth") {
+      const preset = def.providerConfig;
+      for (const field of OAUTH_RECONCILE_FIELDS) {
+        if (JSON.stringify(prov[field]) === JSON.stringify(preset[field])) continue;
+        if (preset[field] !== undefined) {
+          prov[field] = cloneProviderField(preset[field]) as never;
+        } else {
+          delete prov[field];
+        }
       }
-      changed = true;
+      if (prov.liveModels === undefined && preset.liveModels !== undefined) {
+        prov.liveModels = preset.liveModels;
+      }
+      // Heal a defaultModel that no longer exists in the refreshed list (e.g. a deprecated snapshot).
+      // Skip providers without a static preset `models` list: for live-discovery providers
+      // (e.g. command-code OAuth) the account-scoped catalog is not enumerable here, so any
+      // persisted defaultModel is a user selection and must not be overwritten by the seed.
+      if (prov.defaultModel && preset.defaultModel && preset.models && preset.models.length > 0 && !(prov.models ?? []).includes(prov.defaultModel)) {
+        prov.defaultModel = preset.defaultModel;
+      }
     }
-    if (prov.liveModels === undefined && preset.liveModels !== undefined) {
-      prov.liveModels = preset.liveModels;
+    if (JSON.stringify(prov) !== beforeProvider) {
       changed = true;
-    }
-    // Heal a defaultModel that no longer exists in the refreshed list (e.g. a deprecated snapshot).
-    // Skip providers without a static preset `models` list: for live-discovery providers
-    // (e.g. command-code OAuth) the account-scoped catalog is not enumerable here, so any
-    // persisted defaultModel is a user selection and must not be overwritten by the seed.
-    if (prov.defaultModel && preset.defaultModel && preset.models && preset.models.length > 0 && !(prov.models ?? []).includes(prov.defaultModel)) {
-      prov.defaultModel = preset.defaultModel;
-      changed = true;
+      touchedProviders.add(name);
     }
   }
-  if (changed) saveConfig(config);
-  return changed;
+
+  return {
+    config: projected,
+    changed,
+    touchedProviders: [...touchedProviders],
+    touchedAntigravityVersion,
+  };
+}
+
+function adoptOAuthReconciliation(config: OcxConfig, projection: OAuthReconcileProjection): void {
+  for (const name of projection.touchedProviders) {
+    const provider = projection.config.providers[name];
+    if (provider) config.providers[name] = structuredClone(provider);
+    else delete config.providers[name];
+  }
+  if (projection.touchedAntigravityVersion) {
+    config.googleAntigravityStaticCatalogVersion = projection.config.googleAntigravityStaticCatalogVersion;
+  }
+}
+
+function withOAuthReconciliationTouchedKeys(
+  projection: OAuthReconcileProjection,
+  required: OAuthReconcileProjection,
+): OAuthReconcileProjection {
+  return {
+    ...projection,
+    touchedProviders: [...new Set([...projection.touchedProviders, ...required.touchedProviders])],
+    touchedAntigravityVersion: projection.touchedAntigravityVersion || required.touchedAntigravityVersion,
+  };
+}
+
+export function reconcileOAuthProviders(config: OcxConfig, persist = true): boolean {
+  const projection = projectOAuthProviderReconciliation(config);
+  if (!projection.changed) return false;
+  if (!persist) {
+    adoptOAuthReconciliation(config, projection);
+    return true;
+  }
+  if (persist) {
+    const outcome = mutatePersistedConfig(fresh => {
+      const next = projectOAuthProviderReconciliation(fresh);
+      if (next.changed) adoptOAuthReconciliation(fresh, next);
+      return { changed: next.changed, value: next };
+    });
+    if (outcome.status !== "unavailable") {
+      adoptOAuthReconciliation(config, withOAuthReconciliationTouchedKeys(outcome.value, projection));
+    }
+  }
+  return true;
 }
 
 /** Runtime guards: provider config is intentionally passthrough, so persisted fields may be malformed. */
@@ -1091,24 +1156,19 @@ function preservableApiKeyPool(value: unknown): NonNullable<OcxProviderConfig["a
   return pool.length > 0 ? pool : undefined;
 }
 
-/**
- * Add/refresh an OAuth provider's config entry on a config object (does not persist).
- *
- * Providers whose registry entry sets `allowKeyAuthOverride` (xai, github-copilot) can be
- * billed through a stored API key instead of the OAuth login (router.ts honors
- * `authMode: "key"` for them). A blind preset overwrite here deletes `apiKey`/`apiKeyPool`
- * on every OAuth login, silently destroying the stored key and forcing a re-paste — and it
- * flips billing back to the subscription without the user asking. Carry the key fields over
- * and keep key billing while usable key material remains and the user was not explicitly on
- * oauth. If the final key was removed and only the old key mode remains, let the OAuth
- * preset restore `authMode: "oauth"` so the newly saved OAuth credential can be used.
- *
- * After preservation, `apiKey` always has exactly one matching pool entry (inserting via the
- * same content-derived id as the API-key manager when the active key was missing from the
- * pool). Key mode reflects stored user intent (explicit `"key"` or omitted mode with safe
- * key material) — never whether the login CLI process can resolve an env reference. Env-backed
- * availability is decided at proxy routing time in `router.ts`.
- */
+const OAUTH_LOGIN_OWNED_PROVIDER_FIELDS = [
+  "adapter",
+  "baseUrl",
+  "authMode",
+  "headers",
+  "apiKeyTransport",
+  "responsesPath",
+  "tlsProfile",
+  "googleMode",
+  "keyOptional",
+] as const satisfies readonly (keyof OcxProviderConfig)[];
+
+/** Add/refresh only an OAuth provider's login-owned config fields (does not persist). */
 export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   if (provider === "chatgpt") return;
   const def = OAUTH_PROVIDERS[provider];
@@ -1117,35 +1177,16 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, provider);
   if (namespaceCollision) throw new Error(namespaceCollision);
   const existing = config.providers[provider];
-  const next: OcxProviderConfig = { ...def.providerConfig };
-  // `liveModels` is a user-facing provider toggle. Preserve either explicit setting across login;
-  // Antigravity's CCA discovery now uses its real RPC, so legacy `true` remains a valid choice.
-  if (typeof existing?.liveModels === "boolean" && !isLegacyCommandCodeStaticCatalog(existing)) {
-    next.liveModels = existing.liveModels;
+  const next: OcxProviderConfig = structuredClone(existing ?? def.providerConfig);
+  for (const field of OAUTH_LOGIN_OWNED_PROVIDER_FIELDS) {
+    const value = def.providerConfig[field];
+    if (value === undefined) delete next[field];
+    else next[field] = structuredClone(value) as never;
   }
-  // The Command Code protocol-version pin is an operator compatibility control. A re-login,
-  // add-account, or reauth rebuilds the row from the preset, which has no version; carry the
-  // existing pin so authentication changes do not silently revert the documented control.
-  if (existing?.commandCodeVersion !== undefined) {
-    next.commandCodeVersion = existing.commandCodeVersion;
-  }
-  if (existing?.projectContext !== undefined) {
-    next.projectContext = existing.projectContext;
-  }
-  // User-configured price overlays are operator data, not preset state; a
-  // re-login, add-account, or reauth must not silently drop them from the
-  // Logs/Usage estimates.
-  if (existing?.modelCosts !== undefined) {
-    next.modelCosts = existing.modelCosts;
-  }
-  // The per-provider account-failover opt-out is operator intent about SPENDING, and the login
-  // path is exactly where losing it does damage: adding a second account both rebuilds this row
-  // from the preset and creates the 2-account quorum that turns presence-driven rotation on
-  // (#2568d). Dropping the opt-out here would enable the thing the operator switched off, at the
-  // moment they were doing something unrelated.
-  if (existing?.oauthAccountFailover !== undefined) {
-    next.oauthAccountFailover = existing.oauthAccountFailover;
-  }
+  // OAuth-only providers must never retain credentials for a different auth mechanism.
+  delete next.apiKey;
+  delete next.apiKeyPool;
+  delete next.azureCredential;
   if (existing && getProviderRegistryEntry(provider)?.allowKeyAuthOverride === true) {
     // Shared sanitizeApiKeyValue trim / no-CRLF checks from api-key pool writes.
     let storedApiKey = sanitizeApiKeyValue(existing.apiKey);
@@ -1160,7 +1201,9 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
       // Keep routing and listProviderApiKeys in sync: never leave a hidden active key that
       // is absent from the pool (listing would fall back to pool[0] as "active").
       if (!pool.some(entry => entry.key === storedApiKey)) {
-        pool.push({ id: apiKeyPoolEntryId(storedApiKey), key: storedApiKey });
+        const id = apiKeyPoolEntryId(storedApiKey);
+        if (pool.some(entry => entry.id === id)) throw new Error("API-key pool ID collision");
+        pool.push({ id, key: storedApiKey });
       }
       next.apiKey = storedApiKey;
       next.apiKeyPool = pool;
@@ -1175,7 +1218,8 @@ interface RunLoginDeps {
   saveCredential?: typeof saveCredential;
   saveAccountCredential?: typeof saveAccountCredential;
   loadConfig?: typeof loadConfig;
-  saveConfig?: typeof saveConfig;
+  mutatePersistedConfig?: typeof mutatePersistedConfig;
+  initializePersistedConfigIfMissing?: typeof initializePersistedConfigIfMissing;
   settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
   removeAccount?: typeof removeAccount;
   setActiveAccount?: typeof setActiveAccount;
@@ -1210,7 +1254,8 @@ export async function runLogin(
   const def = OAUTH_PROVIDERS[provider];
   if (!def) throw new UnsupportedOAuthProviderError(provider);
   const loadLatestConfig = deps.loadConfig ?? loadConfig;
-  const saveLatestConfig = deps.saveConfig ?? saveConfig;
+  const mutateLatestConfig = deps.mutatePersistedConfig ?? mutatePersistedConfig;
+  const initializeLatestConfig = deps.initializePersistedConfigIfMissing ?? initializePersistedConfigIfMissing;
   if (provider !== "chatgpt") {
     const preflightConfig = loadLatestConfig();
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
@@ -1265,16 +1310,32 @@ export async function runLogin(
     if (provider !== "chatgpt") {
       // Re-run against post-credential state so same-provider API-key additions, removals,
       // and active-key switches survive. A late namespace claim wins over provider creation.
-      const latestConfig = loadLatestConfig();
-      const lateCollision = codexAccountNamespaceProviderCollisionError(
-        latestConfig.codexAccountNamespaces,
-        provider,
-      );
-      if (lateCollision) {
+      const publish = () => mutateLatestConfig<{ error: string } | { config: OcxConfig }>(fresh => {
+        const lateCollision = codexAccountNamespaceProviderCollisionError(
+          fresh.codexAccountNamespaces,
+          provider,
+        );
+        if (lateCollision) return { changed: false, value: { error: lateCollision } };
+        upsertOAuthProvider(fresh, provider);
+        return { changed: true, value: { config: structuredClone(fresh) } };
+      });
+      let outcome = publish();
+      let published = false;
+      if (outcome.status === "unavailable" && outcome.reason === "missing") {
+        const initial = loadLatestConfig();
+        const lateCollision = codexAccountNamespaceProviderCollisionError(
+          initial.codexAccountNamespaces,
+          provider,
+        );
+        if (lateCollision) throw new OAuthProviderPublicationError();
+        upsertOAuthProvider(initial, provider);
+        const initialized = initializeLatestConfig(initial);
+        published = initialized === "created";
+        if (initialized === "exists") outcome = publish();
+      }
+      if (!published && (outcome.status === "unavailable" || "error" in outcome.value)) {
         throw new OAuthProviderPublicationError();
       }
-      upsertOAuthProvider(latestConfig, provider);
-      saveLatestConfig(latestConfig);
     }
   } catch (error) {
     const errors: unknown[] = [error];

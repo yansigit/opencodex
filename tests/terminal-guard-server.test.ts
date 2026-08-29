@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { saveConfig } from "../src/config";
 import { handleResponses } from "../src/server/responses";
 import type { OcxConfig } from "../src/types";
 
@@ -79,8 +83,13 @@ describe("server terminal guard integration", () => {
   let originalFetch: typeof fetch;
   let calls: number;
   let requestBodies: Record<string, unknown>[];
+  let previousHome: string | undefined;
+  let testHome = "";
 
   beforeEach(() => {
+    previousHome = process.env.OPENCODEX_HOME;
+    testHome = mkdtempSync(join(tmpdir(), "ocx-terminal-guard-"));
+    process.env.OPENCODEX_HOME = testHome;
     originalFetch = globalThis.fetch;
     calls = 0;
     requestBodies = [];
@@ -93,6 +102,9 @@ describe("server terminal guard integration", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    rmSync(testHome, { recursive: true, force: true });
   });
 
   test("re-asks Claude once inside the same Responses turn and forwards the tool call", async () => {
@@ -181,6 +193,7 @@ describe("server terminal guard integration", () => {
         },
       },
     } as unknown as OcxConfig;
+    saveConfig(budgetConfig);
     let sends = 0;
     globalThis.fetch = (async (_input, init) => {
       sends += 1;

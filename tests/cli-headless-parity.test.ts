@@ -570,6 +570,37 @@ describe("headless GUI parity CLI", () => {
     }
   });
 
+  test("config set/unset cannot replace the provider registry root", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-cli-provider-root-"));
+    const previous = process.env.OPENCODEX_HOME;
+    process.env.OPENCODEX_HOME = home;
+    try {
+      const configPath = join(home, "config.json");
+      const original = JSON.stringify({
+        port: 10100,
+        providers: {
+          openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+          keeper: { adapter: "openai-chat", baseUrl: "https://keeper.example/v1" },
+        },
+        defaultProvider: "openai",
+      });
+      writeFileSync(configPath, original);
+
+      const replacement = JSON.stringify({
+        openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+      });
+      expect(await handleConfigCommand(["set", "providers", replacement, "--json"])).not.toBe(0);
+      expect(await handleConfigCommand(["unset", "providers", "--json"])).not.toBe(0);
+      expect(readFileSync(configPath, "utf8")).toBe(original);
+      expect(await handleConfigCommand(["set", "providers.openai.disabled", "true", "--json"])).toBe(0);
+      expect(JSON.parse(readFileSync(configPath, "utf8")).providers.openai.disabled).toBe(true);
+    } finally {
+      if (previous === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previous;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test("config set and import reject an invalid app-owned memory budget without persisting the normalized default", async () => {
     const home = mkdtempSync(join(tmpdir(), "ocx-cli-memory-budget-"));
     const previous = process.env.OPENCODEX_HOME;

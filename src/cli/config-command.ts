@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { clearCodexAccountPin } from "../codex/account-priority";
-import { getConfigPath, mutatePersistedConfig, readConfigDiagnostics, sanitizeModelCostsForDisplay, saveConfig, validateConfigCandidate } from "../config";
+import { getConfigPath, mutatePersistedConfig, readConfigDiagnostics, replacePersistedConfig, sanitizeModelCostsForDisplay, validateConfigCandidate } from "../config";
 import { VISION_REASONING_EFFORTS, isVisionReasoningEffort } from "../reasoning-effort";
 import type { OcxConfig } from "../types";
 import { normalizeVisionReasoningForModel } from "../vision/reasoning";
@@ -130,6 +130,10 @@ export async function handleConfigCommand(argv: string[]): Promise<number> {
       const raw = action === "set" ? args.shift() : undefined;
       if (!path || (action === "set" && raw === undefined)) throw new CliUsageError("config path and value are required", USAGE);
       rejectArgs(args, USAGE);
+      const segments = pathSegments(path);
+      if (segments.length === 1 && segments[0] === "providers") {
+        throw new CliUsageError("replacing the provider registry requires config import --yes", USAGE);
+      }
       // #1835/#1838: the read used to happen OUTSIDE the mutation lock, so a concurrent
       // edit landing between it and the save was reverted by this whole-snapshot write.
       // `mutatePersistedConfig` reruns this callback against the latest validated disk
@@ -150,7 +154,7 @@ export async function handleConfigCommand(argv: string[]): Promise<number> {
         // account's tier with nothing on any surface explaining why. `import` is
         // deliberately not covered — that file supplies its own pin, so there is no
         // stale one to release.
-        if (pathSegments(path)[0] === "codexAccountPriorities") clearCodexAccountPin(config);
+        if (segments[0] === "codexAccountPriorities") clearCodexAccountPin(config);
         // REPLACE rather than merge: `Object.assign` alone cannot remove a key that
         // `unset` deleted, which would make unset silently succeed while changing nothing.
         for (const key of Object.keys(fresh)) {
@@ -198,7 +202,7 @@ export async function handleConfigCommand(argv: string[]): Promise<number> {
       if (!path) throw new CliUsageError("import path is required", USAGE);
       if (!yes) throw new CliUsageError("import requires --yes", USAGE);
       rejectArgs(args, USAGE);
-      saveConfig(validate(loadInput(path)));
+      replacePersistedConfig(validate(loadInput(path)));
       printData({ ok: true, source: path }, wantsJson, [`Imported config from ${path}. Restart or run ocx sync if needed.`]);
       return;
     }

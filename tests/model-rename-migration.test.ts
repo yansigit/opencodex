@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadConfig, saveConfig } from "../src/config";
 import {
   MODEL_RENAMES,
   projectModelRenames,
   type ModelRename,
 } from "../src/providers/model-rename-migration";
+import { runModelRenameStartupMigration } from "../src/providers/model-rename-startup";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
 import type { OcxConfig } from "../src/types";
 
@@ -125,6 +130,46 @@ describe("registry model rename migration (#1610)", () => {
       expect(entry?.models).toContain(rename.to);
       // A rename whose source id is still seeded would fight the registry.
       expect(entry?.models).not.toContain(rename.from);
+    }
+  });
+
+  test("startup persistence replays model renames onto the latest disk config", () => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-model-rename-startup-"));
+    try {
+      process.env.OPENCODEX_HOME = home;
+      const rich = staleConfig();
+      rich.providers.cursor = { adapter: "openai-chat", baseUrl: "https://cursor.example/v1", apiKey: "cursor-key" };
+      saveConfig(rich);
+
+      runModelRenameStartupMigration(staleConfig());
+
+      const disk = loadConfig();
+      expect(disk.providers["alibaba-token-plan-intl"]!.models).toContain("qwen3.8-max");
+      expect(disk.providers.cursor).toEqual(rich.providers.cursor);
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test("startup persistence failure leaves live model-rename input unchanged", () => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-model-rename-unavailable-"));
+    try {
+      process.env.OPENCODEX_HOME = home;
+      const live = staleConfig();
+      const before = structuredClone(live);
+
+      const returned = runModelRenameStartupMigration(live);
+
+      expect(returned).toBe(live);
+      expect(live).toEqual(before);
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
     }
   });
 });

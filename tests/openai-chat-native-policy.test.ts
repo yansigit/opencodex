@@ -11,6 +11,7 @@ import {
   tierValueAfterDecision,
 } from "../src/providers/fastwire";
 import { clearKeyCooldowns } from "../src/providers/key-failover";
+import { saveConfig } from "../src/config";
 import { fastPolicyForModel } from "../src/providers/service-tier";
 import { handleChatCompletions } from "../src/server/chat-completions";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../src/types";
@@ -282,6 +283,7 @@ describe("native Chat passthrough service-tier policy", () => {
       defaultProvider: PROVIDER_NAME,
       providers: { [PROVIDER_NAME]: target },
     } as OcxConfig;
+    saveConfig(config);
 
     try {
       const response = await handleChatCompletions(
