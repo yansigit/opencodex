@@ -12,6 +12,9 @@
  * module load, and that must happen BEFORE this file replaces HOME.
  */
 import { isTestHomeGuardArmed, protectedHomeForTests } from "../src/lib/test-home-guard";
+
+(globalThis as Record<PropertyKey, unknown>)[Symbol.for("opencodex.test.provider-fetch")] = true;
+(globalThis as Record<PropertyKey, unknown>)[Symbol.for("opencodex.test.plaintext-remote")] = true;
 import { createIsolatedTestEnvironment } from "../scripts/test";
 import { rmSync } from "node:fs";
 

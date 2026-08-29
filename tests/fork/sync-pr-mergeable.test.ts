@@ -36,15 +36,14 @@ describe("fork PR mergeable workflow", () => {
     expect(source).toContain("GitHub has not computed mergeability");
   });
 
-  test("rejects sync branches that are not descendants of the base", () => {
+  test("rejects branches that are not descendants of the base with promotion-specific recovery", () => {
     const source = workflow();
 
     expect(source).toContain("git merge-base --is-ancestor");
-    expect(source).toContain("origin/${{ github.base_ref }}");
+    expect(source).toContain('"origin/$BASE_REF"');
     expect(source).toContain("HEAD");
-    expect(source).toContain(
-      "Recovery: merge \\`origin/${{ github.base_ref }}\\` into the sync branch before retrying.",
-    );
+    expect(source).toContain("Protected dev reconciliation must finish before this promotion can merge.");
+    expect(source).toContain("merge the base into the pull request branch before retrying");
     expect(source).toContain("GitHub's 3-way");
   });
 

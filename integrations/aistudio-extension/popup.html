@@ -84,14 +84,15 @@
     <label class="field-label" for="proxyPort">Proxy Port</label>
     <input id="proxyPort" class="input-text" type="number" min="1" max="65535" placeholder="10100">
 
-    <label class="field-label" for="proxyApiKey">Proxy API key (optional)</label>
-    <input id="proxyApiKey" class="input-text" type="password" autocomplete="off" placeholder="Optional">
+    <label class="field-label" for="proxyApiKey">Proxy API key (required for Auto-Sync)</label>
+    <input id="proxyApiKey" class="input-text" type="password" autocomplete="off" placeholder="Required">
+    <p style="font-size: 0.7rem;">Allow this exact origin in <code>corsAllowOrigins</code>: <code id="extensionId"></code></p>
 
-    <button id="btnAutoSync" class="btn">∫w^~)ﬁu Auto-Sync to OpenCodex</button>
-    <button id="btnCopyBundle" class="btn btn-secondary">È›y¯ßy€ßuÁ‚ùÁK Copy Session Token</button>
+    <button id="btnAutoSync" class="btn">w^~)u Auto-Sync to OpenCodex</button>
+    <button id="btnCopyBundle" class="btn btn-secondary">yy€ßuK Copy Session Token</button>
     <div id="exportStatus"></div>
 
-    <p style="margin-top: 0.8rem;"><a href="https://aistudio.google.com/prompts/new_chat" target="_blank">Open AI Studio Tab ∫w^~)ﬁw</a></p>
+    <p style="margin-top: 0.8rem;"><a href="https://aistudio.google.com/prompts/new_chat" target="_blank">Open AI Studio Tab w^~)w</a></p>
     <script src="popup.js"></script>
   </body>
 </html>

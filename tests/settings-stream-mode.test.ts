@@ -121,6 +121,33 @@ describe("GET /api/settings", () => {
     expect(body.appOwnedMemoryBudgetMb).toBe(256);
   });
 
+  test("reports configured and active server security without secrets", async () => {
+    const config = {
+      ...baseConfig(),
+      hostname: "0.0.0.0",
+      apiKeys: [{ id: "remote", key: "must-not-leak", label: "Remote" }],
+      tls: { certFile: "/tls/cert.pem", keyFile: "/tls/key.pem", publicOrigin: "https://proxy.example.com" },
+      corsAllowOrigins: ["chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef"],
+    };
+    const req = new Request("http://127.0.0.1:10100/api/settings");
+    const body = await (await handleManagementAPI(req, new URL(req.url), config, {
+      getCachedStartupHealth: readTestStartupHealth,
+      activeServerOrigin: "https://old.example.com",
+    }))!.json() as any;
+    expect(body.server).toEqual({
+      configured: {
+        hostname: "0.0.0.0",
+        port: 10100,
+        tls: config.tls,
+        aiStudioOrigin: "chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef",
+      },
+      activeOrigin: "https://old.example.com",
+      credentialConfigured: true,
+      restartRequired: true,
+    });
+    expect(JSON.stringify(body)).not.toContain("must-not-leak");
+  });
+
   test("reports the effective account-picker state", async () => {
     const absent = await (await getSettings(baseConfig()))!.json() as {
       codexAccountPickerEnabled?: boolean;
@@ -304,6 +331,138 @@ describe("PUT /api/settings", () => {
     const config = baseConfig();
     const res = await putSettings(config, {});
     expect(res!.status).toBe(400);
+  });
+
+  test("server settings persist atomically and report restart required", async () => {
+    const config = {
+      ...baseConfig(),
+      apiKeys: [{ id: "remote", name: "Remote", key: "remote-secret", createdAt: "" }],
+    };
+    const certFile = join(TEST_DIR, "cert.pem");
+    const keyFile = join(TEST_DIR, "key.pem");
+    writeFileSync(certFile, "test certificate");
+    writeFileSync(keyFile, "test key");
+    const response = await putSettings(config, {
+      server: {
+        hostname: "0.0.0.0",
+        port: 10443,
+        tls: { certFile, keyFile, publicOrigin: "https://proxy.example.com" },
+        aiStudioOrigin: "chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef",
+      },
+    }, { activeServerOrigin: "http://127.0.0.1:10100" });
+    expect(response!.status).toBe(200);
+    expect(await response!.json()).toMatchObject({
+      server: { activeOrigin: "http://127.0.0.1:10100", restartRequired: true },
+    });
+    expect(config).toMatchObject({ hostname: "0.0.0.0", port: 10443, tls: { publicOrigin: "https://proxy.example.com" } });
+    expect(config.corsAllowOrigins).toEqual(["chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef"]);
+  });
+
+  test("server settings reject an unsafe remote candidate before mutation or persistence", async () => {
+    const config = baseConfig();
+    const before = structuredClone(config);
+    let persisted = false;
+    const response = await putSettings(config, {
+      codexAutoStart: false,
+      server: { hostname: "0.0.0.0", port: 10443, tls: null, aiStudioOrigin: null },
+    }, { saveConfigPreservingClaudeCode: () => { persisted = true; } });
+
+    expect(response!.status).toBe(400);
+    expect(await response!.json()).toMatchObject({ error: expect.stringContaining("data-plane credential") });
+    expect(config).toEqual(before);
+    expect(persisted).toBe(false);
+  });
+
+  test("server settings require both TLS and a data-plane credential for remote binds", async () => {
+    const certFile = join(TEST_DIR, "cert.pem");
+    const keyFile = join(TEST_DIR, "key.pem");
+    writeFileSync(certFile, "test certificate");
+    writeFileSync(keyFile, "test key");
+    const tls = { certFile, keyFile, publicOrigin: "https://proxy.example.com" };
+    const remote = { hostname: "0.0.0.0", port: 10443, aiStudioOrigin: null };
+
+    const noTls = await putSettings({
+      ...baseConfig(),
+      apiKeys: [{ id: "remote", name: "Remote", key: "remote-secret", createdAt: "" }],
+    }, { server: { ...remote, tls: null } });
+    expect(noTls!.status).toBe(400);
+    expect(await noTls!.json()).toMatchObject({ error: expect.stringContaining("Native TLS") });
+
+    const noCredential = await putSettings({ ...baseConfig(), tls }, { server: { ...remote, tls } });
+    expect(noCredential!.status).toBe(400);
+    expect(await noCredential!.json()).toMatchObject({ error: expect.stringContaining("data-plane credential") });
+  });
+
+  test("failed server persistence rolls back listener settings", async () => {
+    const config = {
+      ...baseConfig(),
+      apiKeys: [{ id: "remote", name: "Remote", key: "remote-secret", createdAt: "" }],
+    };
+    const before = structuredClone(config);
+    const certFile = join(TEST_DIR, "cert.pem");
+    const keyFile = join(TEST_DIR, "key.pem");
+    writeFileSync(certFile, "test certificate");
+    writeFileSync(keyFile, "test key");
+    const response = await putSettings(config, {
+      server: {
+        hostname: "0.0.0.0",
+        port: 10443,
+        tls: { certFile, keyFile, publicOrigin: "https://proxy.example.com" },
+        aiStudioOrigin: null,
+      },
+    }, { saveConfigPreservingClaudeCode: () => { throw new Error("save failed"); } });
+
+    expect(response!.status).toBe(500);
+    expect(config).toEqual(before);
+  });
+
+  test("server settings reject unknown TLS fields before persistence", async () => {
+    const config = baseConfig();
+    let persisted = false;
+    const response = await putSettings(config, {
+      server: {
+        hostname: "127.0.0.1",
+        port: 10443,
+        tls: { certFile: "/tls/cert.pem", keyFile: "/tls/key.pem", publicOrigin: "https://proxy.example.com", extra: true },
+        aiStudioOrigin: null,
+      },
+    }, { saveConfigPreservingClaudeCode: () => { persisted = true; } });
+
+    expect(response!.status).toBe(400);
+    expect(await response!.json()).toMatchObject({ error: expect.stringContaining("tls.extra") });
+    expect(persisted).toBe(false);
+  });
+
+  test("same-origin certificate changes still report restart required", async () => {
+    const config = {
+      ...baseConfig(),
+      hostname: "0.0.0.0",
+      port: 10443,
+      tls: { certFile: "/new/cert.pem", keyFile: "/new/key.pem", publicOrigin: "https://proxy.example.com" },
+    };
+    const req = new Request("http://127.0.0.1:10100/api/settings");
+    const body = await (await handleManagementAPI(req, new URL(req.url), config, {
+      getCachedStartupHealth: readTestStartupHealth,
+      activeServerOrigin: "https://proxy.example.com",
+      activeServerConfig: {
+        hostname: "0.0.0.0",
+        port: 10443,
+        tls: { certFile: "/old/cert.pem", keyFile: "/old/key.pem", publicOrigin: "https://proxy.example.com" },
+      },
+    }))!.json() as any;
+    expect(body.server.restartRequired).toBe(true);
+  });
+
+  test("server settings reject non-origin TLS URLs", async () => {
+    const response = await putSettings(baseConfig(), {
+      server: {
+        hostname: "0.0.0.0",
+        port: 10443,
+        tls: { certFile: "/tls/cert.pem", keyFile: "/tls/key.pem", publicOrigin: "https://proxy.example.com/path" },
+        aiStudioOrigin: null,
+      },
+    });
+    expect(response!.status).toBe(400);
   });
 
   test.each([[null], [[]], ["settings"], [42]] as const)(

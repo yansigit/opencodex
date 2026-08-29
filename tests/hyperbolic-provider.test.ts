@@ -114,14 +114,14 @@ describe("Hyperbolic provider", () => {
     globalThis.fetch = (async (input, init) => {
       expect(String(input)).toBe(`${BASE_URL}/models`);
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${API_KEY}`);
-      expect(init?.redirect).toBe("error");
+      expect(init?.redirect).toBe("manual");
       return new Response(FIXTURE, {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     }) as typeof fetch;
 
-    expect(await validateApiKey("hyperbolic", KEY_LOGIN_PROVIDERS.hyperbolic!, API_KEY)).toBe(true);
+    expect(await validateApiKey("hyperbolic", KEY_LOGIN_PROVIDERS.hyperbolic!, API_KEY, { fetch: globalThis.fetch })).toBe(true);
   });
 
   test("preserves slash ids and routes both selector forms", async () => {

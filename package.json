@@ -1,6 +1,6 @@
 {
   "name": "@yansigit/opencodex",
-  "version": "2.36.1",
+  "version": "2.36.2",
   "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
@@ -39,6 +39,7 @@
     "dev:gui": "cd gui && bun run dev",
     "start": "bun run src/cli/index.ts start",
     "test": "bun scripts/test.ts",
+    "test:container": "bun scripts/test-container.ts",
     "test:v2-bridge": "bun scripts/test.ts tests/config.test.ts tests/multi-agent-keep-native-v1.test.ts tests/namespace-tool-compat.test.ts tests/v2-routed-delegation-bridge.test.ts tests/responses-v2-routed-delegation-bridge.test.ts tests/v2-agent-message-failfast.test.ts tests/responses-compaction-routing.test.ts tests/responses-v2-native-parent-override.test.ts tests/passthrough-abort.test.ts tests/ws-upstream.test.ts tests/core-lab-boundary.test.ts",
     "typecheck": "bun x tsc --noEmit",
     "verify:v2-bridge": "bun run typecheck && bun run test:v2-bridge && cd gui && bun test tests/subagents-ultra-mode.test.tsx && bun run lint:i18n",

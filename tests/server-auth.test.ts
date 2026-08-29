@@ -508,13 +508,37 @@ describe("server local API auth", () => {
     expect(isApiAuthRequired(config("127.0.0.1"))).toBe(false);
   });
 
-  test("non-loopback binding requires env token before startup", () => {
+  test("non-loopback binding requires both an env token and native TLS before startup", () => {
     delete process.env.OPENCODEX_API_AUTH_TOKEN;
     expect(isApiAuthRequired(config("0.0.0.0"))).toBe(true);
     expect(() => assertServerAuthConfig(config("0.0.0.0"))).toThrow("OPENCODEX_API_AUTH_TOKEN");
 
     process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
-    expect(() => assertServerAuthConfig(config("0.0.0.0"))).not.toThrow();
+    expect(() => assertServerAuthConfig(config("0.0.0.0"))).toThrow("Native TLS is required");
+  });
+
+  test("the test home guard cannot bypass native TLS for a remote start", () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
+    saveConfig({ ...config("0.0.0.0"), port: 0 });
+
+    const seam = Symbol.for("opencodex.test.plaintext-remote");
+    const globalTestState = globalThis as Record<PropertyKey, unknown>;
+    const hadSeam = Object.prototype.hasOwnProperty.call(globalTestState, seam);
+    const previousSeam = globalTestState[seam];
+    delete globalTestState[seam];
+    let server: ReturnType<typeof startServer> | undefined;
+    try {
+      expect(() => {
+        server = startServer(0);
+      }).toThrow("Native TLS is required");
+    } finally {
+      server?.stop(true);
+      if (hadSeam) globalTestState[seam] = previousSeam;
+      else delete globalTestState[seam];
+    }
   });
 
   test("auth header must match env token when non-loopback auth is required", () => {
@@ -600,6 +624,7 @@ describe("server local API auth", () => {
       modelMaxInputTokens: { "gpt-test": 1000 },
       codexAccountMode: "pool",
       reasoningWireFormat: "gateway-object",
+      replayTransientFailures: true,
       virtualModels: { "gpt-test-pro": { wireModelId: "gpt-test", reasoningMode: "pro" } },
       codexAuthContext: { accessToken: "runtime-token" },
       selectedForwardHeaders: { authorization: "Bearer runtime-token" },
@@ -627,6 +652,7 @@ describe("server local API auth", () => {
       hasHeaders: true,
       codexAccountMode: "pool",
       reasoningWireFormat: "gateway-object",
+      replayTransientFailures: true,
     });
     expect(dto.providers.openai).not.toHaveProperty("apiKey");
     expect(dto.providers.openai).not.toHaveProperty("headers");
@@ -3334,7 +3360,7 @@ describe("server local API auth", () => {
     }
   });
 
-  test("passthrough pool send relays a 307 with Location and records no health evidence (#914)", async () => {
+  test("passthrough pool send refuses a 307 without exposing Location (#914)", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -3343,8 +3369,8 @@ describe("server local API auth", () => {
     clearAccountNeedsReauth("pool-a");
     clearUpstreamHostHealth();
 
-    // The upstream answers 307 -> dead.invalid. Manual redirects must relay it
-    // (with Location) instead of following into a dead-host rejection.
+    // The upstream answers 307 -> dead.invalid. Manual redirects must reject it
+    // without following or exposing the destination.
     const redirectTarget = "https://dead.invalid/x";
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -3379,8 +3405,7 @@ describe("server local API auth", () => {
     });
     updateAccountQuota("pool-a", 10, 5);
 
-    // Seed a pre-connection streak: the 307 is also a real HTTP response and
-    // must clear it.
+    // Seed a pre-connection streak: redirect refusal must not clear it.
     const hostKey = upstreamHostHealthKey("openai", "https://chatgpt.com");
     recordUpstreamHostFailure(hostKey, { code: "ECONNREFUSED" });
 
@@ -3396,13 +3421,19 @@ describe("server local API auth", () => {
         redirect: "manual",
       });
 
-      expect(response.status).toBe(307);
-      expect(response.headers.get("location")).toBe(redirectTarget);
-      // Neutral class: no account streak, no soft-avoid, no rotation, and the
-      // real response cleared the seeded host streak.
-      expect(getCodexUpstreamHealth("pool-a")).toBeNull();
+      expect(response.status).toBe(502);
+      const body = await response.json() as { error?: { message?: string } };
+      expect(body.error?.message).toContain("upstream returned 307 redirect");
+      expect(response.headers.get("location")).toBeNull();
+      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
+        consecutiveFailures: 1,
+        lastFailureStatus: 0,
+      });
       expect(isCodexAccountSoftAvoided("pool-a")).toBe(false);
-      expect(getUpstreamHostHealth(hostKey)).toBeNull();
+      expect(getUpstreamHostHealth(hostKey)).toMatchObject({
+        consecutiveFailures: 1,
+        lastFailureCode: "ECONNREFUSED",
+      });
     } finally {
       await server.stop(true);
     }
@@ -3462,11 +3493,25 @@ describe("server local API auth", () => {
 
       expect(response.status).toBe(200);
       await response.text();
-      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
+      // The passthrough response has a client-facing tee branch and an async
+      // inspection branch. Wait for the latter to record its outcome before
+      // asserting the health/log contract.
+      const deadline = Date.now() + 1_000;
+      let health = getCodexUpstreamHealth("pool-a");
+      let logs: ReturnType<typeof logsFromApiBody> = [];
+      while (Date.now() < deadline) {
+        health = getCodexUpstreamHealth("pool-a");
+        logs = logsFromApiBody(await fetch(new URL("/api/logs?tail=1", server.url), { headers: managementHeaders() }).then(r => r.json()));
+        if (health?.consecutiveFailures === 3 && logs.at(-1)?.terminalStatus === "failed") break;
+        await Bun.sleep(10);
+      }
+      if (health?.consecutiveFailures !== 3 || logs.at(-1)?.terminalStatus !== "failed") {
+        throw new Error(`timed out waiting for passthrough terminal inspection (health=${JSON.stringify(health)}, lastLog=${JSON.stringify(logs.at(-1))})`);
+      }
+      expect(health).toMatchObject({
         consecutiveFailures: 3,
         lastFailureStatus: 502,
       });
-      const logs = logsFromApiBody(await fetch(new URL("/api/logs?tail=1", server.url), { headers: managementHeaders() }).then(r => r.json()));
       expect(logs.at(-1)).toMatchObject({
         status: 502,
         errorCode: "upstream_server_error",

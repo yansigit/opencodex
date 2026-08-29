@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { assertServerTlsFiles, serverTlsConfigError } from "../lib/server-tls";
 import { formatErrorResponse } from "../bridge";
 import {
   codexAutoStartEnabled,
@@ -294,7 +295,10 @@ export function requestPolicyView(config: OcxConfig, bindHostname: string): Requ
   };
 }
 
-export function assertServerAuthConfig(config: OcxConfig): void {
+export function assertServerAuthConfig(
+  config: OcxConfig,
+  options: { allowPlaintextRemoteForTests?: boolean } = {},
+): void {
   const hasConfiguredDataCredential = !!configuredApiAuthToken(config)
     || (config.apiKeys ?? []).some(entry => !!entry.key.trim());
   if (isApiAuthRequired(config) && !hasConfiguredDataCredential) {
@@ -302,6 +306,12 @@ export function assertServerAuthConfig(config: OcxConfig): void {
       "A data-plane credential (OPENCODEX_API_AUTH_TOKEN or config.apiKeys) is required when binding opencodex to a non-loopback hostname",
     );
   }
+  const tlsError = serverTlsConfigError(config.tls);
+  if (tlsError) throw new Error(`Invalid server TLS configuration: ${tlsError}`);
+  if (isApiAuthRequired(config) && !config.tls && !options.allowPlaintextRemoteForTests) {
+    throw new Error("Native TLS is required when binding opencodex to a non-loopback hostname; configure tls.certFile, tls.keyFile, and tls.publicOrigin or bind to loopback behind a TLS tunnel");
+  }
+  if (config.tls) assertServerTlsFiles(config.tls);
 }
 
 function secretEquals(actual: string, expected: string | undefined): boolean {
@@ -607,6 +617,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // it before it reaches the management API response.
     return `provider ${JSON.stringify(redactSecretString(name))} ${retryOn429Error}`;
   }
+  if (raw.replayTransientFailures !== undefined && typeof raw.replayTransientFailures !== "boolean") {
+    return `provider ${JSON.stringify(redactSecretString(name))} replayTransientFailures must be a boolean`;
+  }
   const requestPacingError = requestPacingConfigError(raw.requestPacing);
   if (requestPacingError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${requestPacingError}`;
@@ -733,6 +746,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "defaultAliases",
       "disabled",
       "allowPrivateNetwork",
+      "replayTransientFailures",
       "authMode",
       "googleMode",
       "apiKeyTransport",

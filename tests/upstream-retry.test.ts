@@ -144,23 +144,21 @@ describe("releaseResponseBodyBestEffort", () => {
 });
 
 describe("fetchWithResetRetry", () => {
-  test("retries a Bun-shaped reset and returns the second attempt's response", async () => {
+  test("does not replay a reset without an explicit attempt budget", async () => {
     silenceWarn();
     const mock = mockDoFetch([bunResetError(), new Response("ok", { status: 200 })]);
-    const res = await fetchWithResetRetry(mock.doFetch, { label: "test" });
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe("ok");
-    expect(mock.calls).toHaveLength(2);
-    expect(warnSpies[0]).toHaveBeenCalledTimes(1);
+    await expect(fetchWithResetRetry(mock.doFetch, { label: "test" })).rejects.toThrow("socket connection was closed unexpectedly");
+    expect(mock.calls).toHaveLength(1);
+    expect(warnSpies[0]).not.toHaveBeenCalled();
   });
 
-  test("retries on message-only reset (no code property)", async () => {
+  test("opt-in retries on message-only reset (no code property)", async () => {
     silenceWarn();
     const mock = mockDoFetch([
       new Error("The socket connection was closed unexpectedly."),
       new Response("ok", { status: 200 }),
     ]);
-    const res = await fetchWithResetRetry(mock.doFetch);
+    const res = await fetchWithResetRetry(mock.doFetch, { attempts: 3 });
     expect(res.status).toBe(200);
     expect(mock.calls).toHaveLength(2);
   });
@@ -189,7 +187,7 @@ describe("fetchWithResetRetry", () => {
   test("gives up after max attempts and rethrows the last reset error", async () => {
     silenceWarn();
     const mock = mockDoFetch([bunResetError(), bunResetError(), bunResetError(), bunResetError()]);
-    await expect(fetchWithResetRetry(mock.doFetch)).rejects.toThrow("socket connection was closed unexpectedly");
+    await expect(fetchWithResetRetry(mock.doFetch, { attempts: 3 })).rejects.toThrow("socket connection was closed unexpectedly");
     expect(mock.calls).toHaveLength(3);
     expect(warnSpies[0]).toHaveBeenCalledTimes(2);
   });
@@ -206,7 +204,7 @@ describe("fetchWithResetRetry", () => {
     silenceWarn();
     const ac = new AbortController();
     const mock = mockDoFetch([bunResetError(), new Response("ok", { status: 200 })]);
-    const pending = fetchWithResetRetry(mock.doFetch, { abortSignal: ac.signal });
+    const pending = fetchWithResetRetry(mock.doFetch, { abortSignal: ac.signal, attempts: 3 });
     // First attempt rejects with a reset synchronously-ish; abort lands mid-backoff.
     setTimeout(() => ac.abort(new DOMException("client closed", "AbortError")), 10);
     await expect(pending).rejects.toThrow("client closed");
@@ -220,7 +218,7 @@ describe("fetchWithResetRetry", () => {
       ac.abort(new DOMException("client closed", "AbortError"));
       throw bunResetError();
     };
-    await expect(fetchWithResetRetry(doFetch, { abortSignal: ac.signal })).rejects.toThrow("socket connection was closed unexpectedly");
+    await expect(fetchWithResetRetry(doFetch, { abortSignal: ac.signal, attempts: 3 })).rejects.toThrow("socket connection was closed unexpectedly");
   });
 });
 

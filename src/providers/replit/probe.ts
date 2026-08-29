@@ -1,4 +1,4 @@
-import { providerOutboundGet, providerRedirectError } from "../../lib/provider-outbound";
+import { ProviderOutboundPolicyError, providerOutboundGet, providerRedirectError } from "../../lib/provider-outbound";
 import { extractProviderModelItems, readBoundedDiscoveryJson } from "../model-discovery";
 import type { OcxProviderConfig } from "../../types";
 import {
@@ -39,6 +39,11 @@ function probeProviderStub(origin: ValidatedReplitOrigin): ProbeProviderConfig {
     adapter: "openai-chat",
     baseUrl: origin,
   };
+}
+
+function probeFailureCategory(error: unknown): "redirect_rejected" | "timeout" | "internal" {
+  if (error instanceof ProviderOutboundPolicyError && / returned 3\d\d redirect;/.test(error.message)) return "redirect_rejected";
+  return error instanceof DOMException && error.name === "TimeoutError" ? "timeout" : "internal";
 }
 
 async function cancelResponseBody(response: Response): Promise<void> {
@@ -96,7 +101,7 @@ export async function probeReplitGateway(
     return {
       ok: false,
       stage: "healthz",
-      category: error instanceof DOMException && error.name === "TimeoutError" ? "timeout" : "internal",
+      category: probeFailureCategory(error),
       error: error instanceof Error ? error.message : "healthz probe failed",
       latencyMs: Date.now() - healthzStarted,
     };
@@ -132,7 +137,7 @@ export async function probeReplitGateway(
     return {
       ok: false,
       stage: "models",
-      category: error instanceof DOMException && error.name === "TimeoutError" ? "timeout" : "internal",
+      category: probeFailureCategory(error),
       error: error instanceof Error ? error.message : "models probe failed",
       latencyMs: Date.now() - modelsStarted,
     };

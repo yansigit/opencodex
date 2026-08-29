@@ -14,6 +14,7 @@ import { identifyRoutedModel } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { parseDataUrl } from "./image";
 import { redactSecretString } from "../lib/redact";
+import { testProviderFetch } from "../lib/test-provider-fetch";
 
 // Retain the short ids emitted by the first local integration. New requests use the live catalog's
 // provider-native IDs directly; this map is compatibility-only and is not a model fallback list.
@@ -600,7 +601,7 @@ function supportedCommandCodeEffort(provider: OcxProviderConfig, modelId: string
 }
 
 export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderAdapter {
-  const executor = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
+  const executor = testProviderFetch(provider) ?? globalThis.fetch;
   return {
     name: "command-code",
     formatErrorBody: formatCommandCodeErrorBody,

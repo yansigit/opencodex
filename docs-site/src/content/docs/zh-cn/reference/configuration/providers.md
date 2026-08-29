@@ -368,3 +368,4 @@ OpenRouter 可以通过多个推理提供者来提供同一个模型。`openRout
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures`（默认关闭）会在流开始前重试暂时性失败；请求可能被传递多次。

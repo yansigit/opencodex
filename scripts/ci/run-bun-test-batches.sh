@@ -93,7 +93,7 @@ run_test_once() {
   set +e
   timeout --signal=TERM --kill-after="${BATCH_KILL_GRACE_SECONDS}s" \
     "${BATCH_TIMEOUT_SECONDS}s" \
-    "$BUN_BIN" test --isolate --timeout 60000 --timings "$TIMING_FILE" --update-timings "${files[@]}" 2>&1 | tee "$log_file"
+    "$BUN_BIN" scripts/test.ts --isolate --timeout 60000 --timings "$TIMING_FILE" --update-timings "${files[@]}" 2>&1 | tee "$log_file"
   status="${PIPESTATUS[0]}"
   set -e
 

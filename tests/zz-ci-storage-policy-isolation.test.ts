@@ -29,6 +29,7 @@ test("Linux shards isolate the storage API runtime family into its own gated job
     new URL("../scripts/ci/run-bun-test-batches.sh", import.meta.url),
   ).text();
   expect(batchHelper).toContain("scripts/ci/test-lanes.ts --lane general");
+  expect(batchHelper).toContain("scripts/test.ts --isolate");
   expect(batchHelper).not.toContain("is_general_test_file");
 
   const storageJob = workflow.jobs?.["storage-policy"];

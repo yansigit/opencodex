@@ -25,7 +25,7 @@ export function waitForExit(pid: number, timeoutMs: number): boolean {
 /** Injectable seams so the graceful-stop flow is unit-testable without a live proxy. */
 export interface GracefulStopIo {
   fetchFn?: typeof fetch;
-  readRuntime?: (pid: number) => { port: number; hostname?: string } | null;
+  readRuntime?: (pid: number) => { port: number; hostname?: string; origin?: string } | null;
   waitExit?: (pid: number, timeoutMs: number) => boolean;
   env?: Record<string, string | undefined>;
   exitTimeoutMs?: number;
@@ -75,7 +75,8 @@ export async function stopProxyGracefully(pid: number, io: GracefulStopIo = {}):
   if (token) headers["x-opencodex-api-key"] = token;
   const fetchFn = io.fetchFn ?? fetch;
   try {
-    const res = await fetchFn(`http://${gracefulStopHost(runtime.hostname)}:${runtime.port}/api/stop`, {
+    const baseUrl = runtime.origin ?? `http://${gracefulStopHost(runtime.hostname)}:${runtime.port}`;
+    const res = await fetchFn(`${baseUrl}/api/stop`, {
       method: "POST",
       headers,
       // Hung proxies with many CLOSE_WAIT clients can be slow to accept; give them

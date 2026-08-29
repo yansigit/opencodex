@@ -18,6 +18,10 @@ import type {
 } from "../../codex/app-server-restart-service";
 
 export interface ManagementApiDeps {
+  /** Canonical origin captured from the running listener; management writes must not change it. */
+  activeServerOrigin?: string;
+  /** Listener settings captured at bind time so same-origin certificate/path edits still require restart. */
+  activeServerConfig?: Pick<OcxConfig, "hostname" | "port" | "tls">;
   /** Platform seam for capability projections; does not alter host-level startup behavior. */
   platform?: NodeJS.Platform;
   toggleCodexMultiAgentV2?: (enabled: boolean) => void;

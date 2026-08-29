@@ -20,7 +20,7 @@ import { resolveClientRetryAfter } from "../lib/retry-after";
 import { isModelTextOnly } from "../vision";
 import {
   applyUpstreamRecoveryInit,
-  fetchWithResetRetry,
+  fetchWithTransientRetry,
   prepareSameTarget429Wait,
   type UpstreamSendRecovery,
 } from "../lib/upstream-retry";
@@ -202,9 +202,10 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     return fail(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
   }
 
+  const replayBudget = activeProvider.replayTransientFailures ? { remaining: 2 } : undefined;
   const send = async (request: AdapterRequest, recovery?: "rate-limit-429" | "key-429"): Promise<Response> => {
     try {
-      return await fetchWithResetRetry(
+      return await fetchWithTransientRetry(
         (transportRecovery?: UpstreamSendRecovery) => {
           noteAttemptSend(attempt, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
           return fetchWithHeaderTimeout(
@@ -223,7 +224,12 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
             }),
           );
         },
-        { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
+        {
+          abortSignal: upstream.signal,
+          label: safeHostLabel(request.url),
+          replayTransientFailures: activeProvider.replayTransientFailures,
+          replayBudget,
+        },
       );
     } finally {
       request.releaseBodyObservation?.();

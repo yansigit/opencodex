@@ -10,7 +10,8 @@ description: 리스너, 원격 접근, admission 키, 타임아웃, 저장소, �
 | 필드 | 형식 | 기본값 | 의미 |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | 프록시 수신 포트입니다. |
-| `hostname?` | `string` | `"127.0.0.1"` | 바인드 주소입니다. 루프백이 아닌 바인드에는 `OPENCODEX_API_AUTH_TOKEN`이 필요합니다. |
+| `hostname?` | `string` | `"127.0.0.1"` | 바인드 주소입니다. 루프백이 아닌 바인드에는 TLS와 데이터 플레인 자격 증명이 필요합니다. |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | 지정한 인증서와 개인 키 파일로 HTTPS를 제공합니다. `publicOrigin`은 클라이언트 URL에 사용하는 정확한 HTTPS origin이어야 합니다. |
 | `proxy?` | `string` | — | 송신용 HTTP(S) 프록시 URL 또는 `${ENV_VAR}`입니다. 해당 변수가 비어 있을 때만 `HTTP_PROXY` / `HTTPS_PROXY`에 적용되며, 루프백은 `NO_PROXY`에 그대로 남습니다. |
 | `emptyCompletionRetry?` | `boolean` | `false` | 텍스트나 도구 호출이 없는 Responses 턴을, 터미널 이벤트 전에 스트림이 종료된 경우를 포함해 동일한 요청으로 한 번 재시도하도록 선택합니다. 재시도에는 비용이 발생할 수 있습니다. `OCX_EMPTY_COMPLETION_RETRY=0`은 설정을 바꾸지 않고 비활성화하며, combo 및 routed-compaction turn은 제외됩니다. |
 | `stallTimeoutSec?` | `number` | `300` | 업스트림 데이터가 없을 때 `response.incomplete`가 되기까지의 초 수입니다. 최소 1입니다. |
@@ -18,7 +19,7 @@ description: 리스너, 원격 접근, admission 키, 타임아웃, 저장소, �
 | `shutdownTimeoutMs?` | `number` | `5000` | 진행 중인 turn을 중단하기 전에 허용하는 정상 종료 드레인 기한입니다. |
 | `websockets?` | `boolean` | `false` | 클라이언트용 Responses WebSocket 경로를 광고하고 허용합니다. `false`이면 클라이언트는 HTTP/SSE를 사용합니다. canonical ChatGPT 업스트림 WS는 별도 옵트인입니다. 공급자의 `wsUpstream`이 우선하며 (`true` 활성화, `false` 비활성화), 생략하면 `OCX_CODEX_WS_UPSTREAM=true` 또는 `1`로 활성화됩니다. `false`/`0`, 누락 또는 잘못된 값이면 HTTP/SSE를 사용합니다. |
 | `corsAllowOrigins?` | `string[]` | `[]` | CORS에서 추가로 허용할 정확한 origin입니다. 루프백 origin은 항상 허용됩니다. `chrome-extension://<extension-id>` 같은 authority 기반 브라우저 확장 origin을 지원하며, `*`는 와일드카드가 아닙니다. Firefox와 Safari는 확장 UUID를 (설치/브라우저 실행 때마다) 새로 만드므로 origin이 바뀌면 항목을 갱신하세요. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | 비루프백 바인드에서 관리 API와 데이터 플레인 인증이 허용하는 생성된 `ocx_…` 자격 증명입니다. 대시보드에서 관리합니다. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | 비루프백 바인드의 데이터 플레인 인증이 허용하는 생성된 `ocx_…` 자격 증명입니다. 대시보드에서 관리하며, 관리 API에는 별도의 관리자 토큰이 필요합니다. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | 선택적으로 활성화하는 보관 세션 정리 정책입니다. 절대 암묵적으로 활성화되지 않습니다. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | 제거 가능한 앱 소유 로그, 캐시, blob, continuation payload에 대한 MiB 단위 상한입니다. 범위는 64–4096이며 RSS 상한은 아닙니다. |
 | `codexAutoStart?` | `boolean` | `true` | Codex shim이 Codex를 실행하기 전에 `ocx ensure`를 돌리도록 허용합니다. `false`이면 ensure는 아무 작업도 하지 않습니다. |
@@ -34,14 +35,14 @@ description: 리스너, 원격 접근, admission 키, 타임아웃, 저장소, �
 
 ## Remote access
 
-기본 `127.0.0.1` 바인드는 루프백 전용입니다. `0.0.0.0` 같은 루프백이 아닌 주소는 `/api/*`와 데이터 플레인 모두에서 토큰 인증이 필요합니다. 시작하기 전에 토큰을 내보냅니다:
+기본 `127.0.0.1` 바인드는 루프백 전용입니다. `0.0.0.0` 같은 루프백이 아닌 주소는 TLS와 데이터 플레인 자격 증명이 필요합니다. 원격 대시보드에는 별도의 관리자 토큰(`OPENCODEX_ADMIN_AUTH_TOKEN` 또는 생성된 관리자 토큰 파일)도 필요합니다. 시작하기 전에 데이터 플레인 토큰을 내보냅니다:
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-이 변수가 없으면 프록시는 원격 바인드를 거부합니다. 백그라운드 서비스라면 `ocx service install` 전에 내보내서 launchd, systemd, 또는 Task Scheduler가 이를 받도록 합니다. 클라이언트는 다음을 보내야 합니다:
+TLS 또는 이 변수가 없으면 프록시는 원격 바인드를 거부합니다. 인증서와 리스너 변경은 재시작 후 적용됩니다. 백그라운드 서비스라면 `ocx service install` 전에 내보내서 launchd, systemd, 또는 Task Scheduler가 이를 받도록 합니다. 데이터 플레인 클라이언트는 다음을 보내야 합니다:
 
 ```text
 x-opencodex-api-key: your-secret-token
@@ -161,3 +162,6 @@ OpenAI 백엔드는 ChatGPT 로그인과 활성화된 ChatGPT `forward` provider
 지원되는 수준은 업스트림 제공자의 역량과 선택한 모델이 공개한 추론 사다리에 따라 제한됩니다. Vision은 provider의 `noVisionModels`에 속한 모델로 보낸 이미지에만 활성화됩니다. OpenAI는 검색과 같은 로그인/forward 요건을 갖고 있으며, 명시적으로 선택한 Anthropic은 사용할 수 있는 자격 증명이 없으면 닫힌 상태로 실패합니다. 성공한 `data:` 설명은 backend, model, detail, image bytes, 그리고 정규화된 메시지 컨텍스트를 키로 하는 bounded cache를 사용합니다. OpenAI 키에는 reasoning effort도 포함됩니다(Anthropic 키에는 없습니다). 히트와 같은 턴의 중복은 한도를 소모하지 않습니다. 원격 `https:` 이미지와 실패했거나 비어 있는 설명은 캐시하지 않습니다.
 
 Anthropic OAuth 사이드카는 opencodex의 기존 Claude Code OAuth fingerprint를 재사용합니다. 의도한 계정과 워크로드로 소크 테스트를 수행합니다.
+### TLS 및 WebSocket
+
+`tls`에는 `certFile`, `keyFile`, `publicOrigin`을 설정합니다. WebSocket 유휴 시간 제한은 255초이며 백프레셔 한도(1MiB)에 도달하면 연결을 닫습니다.

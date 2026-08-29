@@ -560,6 +560,18 @@ describe("provider management validation", () => {
     expect(secretNameError).toContain("[REDACTED]");
   });
 
+  test("provider management validates transient replay as a boolean", () => {
+    const base = { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" };
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      replayTransientFailures: true,
+    })).toBeNull();
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      replayTransientFailures: "true",
+    })).toContain("replayTransientFailures must be a boolean");
+  });
+
   test("provider management redacts provider names from auto-compaction validation errors", () => {
     const secretName = "sk-super-secret-9876";
     const error = providerManagementConfigError(secretName, {
@@ -3104,6 +3116,7 @@ describe("provider management validation", () => {
           adapter: "openai-chat",
           baseUrl: "http://127.0.0.1:9/v1",
           allowPrivateNetwork: true,
+          replayTransientFailures: true,
           headers: { [sentinelName]: sentinelValue },
         },
       },
@@ -3113,8 +3126,9 @@ describe("provider management validation", () => {
     const res = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
     expect(res?.status).toBe(200);
     const raw = await res!.text();
-    const rows = JSON.parse(raw) as { name: string; hasHeaders?: boolean }[];
+    const rows = JSON.parse(raw) as { name: string; hasHeaders?: boolean; replayTransientFailures?: boolean }[];
     expect(rows.find(row => row.name === "hdr")?.hasHeaders).toBe(true);
+    expect(rows.find(row => row.name === "hdr")?.replayTransientFailures).toBe(true);
     expect(rows.find(row => row.name === "openai")?.hasHeaders).toBe(false);
     expect(raw).not.toContain(sentinelName);
     expect(raw).not.toContain(sentinelValue);

@@ -126,7 +126,6 @@ describe.skipIf(process.platform !== "darwin")("AI Studio status & re-auth", () 
       () => new Response("<!doctype html><html>accounts.google.com/v3/signin</html>", { status: 200, headers: { "content-type": "text/html" } }),
       () => jsonResponse(401, { error: "unauthorized" }),
       () => jsonResponse(403, { error: "forbidden" }),
-      () => new Response(null, { status: 302, headers: { location: "https://accounts.google.com/v3/signin" } }),
     ] as Array<() => Response>) {
       mockProbe(handler);
       saveAiStudioSession({ selectedProject: "p", windowId: "w", cookies: [{ name: "SAPISID", value: "valid" }] });
@@ -135,6 +134,13 @@ describe.skipIf(process.platform !== "darwin")("AI Studio status & re-auth", () 
       expect(String(body.error)).toContain("re-authentication required");
       expect(body.authState).not.toBe("connected");
     }
+
+    mockProbe(() => new Response(null, { status: 302, headers: { location: "https://accounts.google.com/v3/signin" } }));
+    saveAiStudioSession({ selectedProject: "p", windowId: "w", cookies: [{ name: "SAPISID", value: "valid" }] });
+    const redirected = await probe(cfg());
+    expect(redirected.body.ok).toBe(false);
+    expect(redirected.body.error).toBe("AI Studio connection probe failed");
+    expect(redirected.body.authState).not.toBe("connected");
   });
 
   test("POST /api/providers/test 5xx or network failure is not reauthentication", async () => {

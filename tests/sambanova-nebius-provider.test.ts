@@ -191,14 +191,14 @@ describe("SambaNova and Nebius providers", () => {
     globalThis.fetch = (async (input, init) => {
       expect(String(input)).toBe(provider.modelsUrl);
       expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${provider.key}`);
-      expect(init?.redirect).toBe("error");
+      expect(init?.redirect).toBe("manual");
       return new Response(provider.fixture, {
         status: 200,
         headers: { "content-type": "application/json" },
       });
     }) as typeof fetch;
 
-    expect(await validateApiKey("nebius", KEY_LOGIN_PROVIDERS.nebius!, provider.key)).toBe(true);
+    expect(await validateApiKey("nebius", KEY_LOGIN_PROVIDERS.nebius!, provider.key, { fetch: globalThis.fetch })).toBe(true);
   });
 
   test("does not treat SambaNova's public model catalog as proof that a key is valid", async () => {

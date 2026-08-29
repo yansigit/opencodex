@@ -98,6 +98,25 @@
   align-items: stretch;
 }
 
+.server-settings-form {
+  display: grid;
+  gap: var(--space-3);
+}
+.server-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: var(--text-label);
+}
+.server-settings-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: var(--text-label);
+}
+
 .dash-overview-tools > .panel {
   min-width: 0;
   height: 100%;

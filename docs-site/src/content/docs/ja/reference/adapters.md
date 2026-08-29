@@ -150,3 +150,4 @@ model discovery の両方に適用されます。
 - `parseDataUrl(url)` — `data:<type>;base64,<data>` URL を `{ mediaType, base64 }` に分け、Anthropic/Google の画像 block に使います。
 - `contentPartsToText(content)` — テキスト専用ツールメッセージのために content part をテキストに
   平坦化します。説明のない画像はトークンを増やす base64 blob の代わりに短い `[image]` marker になります。
+AI Studio の extension origin は正確な `chrome-extension://` origin とし、同期リクエストには data-plane API key が必要です。

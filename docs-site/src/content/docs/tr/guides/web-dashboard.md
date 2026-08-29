@@ -234,7 +234,7 @@ noktalar şunları içerir:
 
 | Uç nokta | Amaç |
 | --- | --- |
-| `GET` / `PUT /api/settings` | Ayarları okuyun veya Codex otomatik başlatmayı, akış/bellek ayarlarını ve hesap hedefli seçici görünürlüğünü güncelleyin. |
+| `GET` / `PUT /api/settings` | Ayarları okuyun veya Codex otomatik başlatmayı, akış/bellek ayarlarını, hesap hedefli seçici görünürlüğünü ve sunucu dinleyicisi ayarlarını güncelleyin. Dinleyici ve sertifika değişiklikleri proxy'nin yeniden başlatılmasını gerektirir. |
 | `GET` / `POST /api/github/star` | `gh` kaynaklı yıldız durumunu okuyun veya depoya yıldız verin. POST, bir kontrol paneli oturumu olmayan ajan odaklı arayanlar için `403` `agent_consent_required` ile reddedilir. |
 | `GET /api/startup-health` | Sırsız yönlendirme, servis, dolgu ve yeniden başlatma güvenliği tanılamalarını okuyun. |
 | `POST /api/startup-action` | Sabit, izin listesine alınmış eylemler aracılığıyla arka plan servisini veya Codex başlatıcı dolgusunu kurun. |

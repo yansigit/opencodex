@@ -131,7 +131,7 @@ describe("issue #914 — pre-connection failures never touch account health", ()
         calls++;
         if (calls === 1) return new Response("gw", { status: 503 });
         throw rejection;
-      }, { slowAttemptMs: 60_000 }).catch(err => err));
+      }, { slowAttemptMs: 60_000, replayTransientFailures: true }).catch(err => err));
       expect(calls).toBe(2);
       expect(outcome).toBe("connect_error");
       recordCodexUpstreamOutcome(config, "a", outcome, { threadId: "t-mixed" });

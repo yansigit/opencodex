@@ -61,6 +61,25 @@ describe("pinned HTTP timeouts", () => {
     expect(error).toMatchObject({ code: "first_byte_timeout" });
   });
 
+  test("pauses the Node response when the web-stream queue is full", async () => {
+    const port = await listen((socket) => {
+      socket.write("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\na");
+      const tail = setTimeout(() => socket.end("b"), 20);
+      socket.on("close", () => clearTimeout(tail));
+    });
+
+    const response = await pinnedHttpGet(
+      `http://backpressure.invalid:${port}/`,
+      { address: "127.0.0.1", family: 4 },
+      undefined,
+      { maxBytes: 1 },
+    );
+    const reader = response.body!.getReader();
+    await new Promise(resolve => setTimeout(resolve, 80));
+    expect(new TextDecoder().decode((await reader.read()).value)).toBe("a");
+    await expect(reader.read()).rejects.toMatchObject({ code: "output_byte_limit" });
+  });
+
   test("legacy idleTimeoutMs zero still disables the header and socket timers", async () => {
     const port = await listen((socket) => {
       let bodyReply: ReturnType<typeof setTimeout> | undefined;

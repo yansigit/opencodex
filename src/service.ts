@@ -3400,6 +3400,9 @@ export type ServiceCommandPlan =
   | { ok: true; parsed: ParsedServiceArgs; command: string }
   | { ok: false; message: string };
 
+const SERVICE_SUBCOMMANDS = new Set(["install", "repair", "start", "stop", "status", "uninstall", "remove"]);
+const SERVICE_USAGE = "Usage: ocx service [install|repair|restart|start|stop|status|uninstall|remove] [--native|--scheduler]";
+
 export function planServiceCommand(
   args: string[],
   options: { platform?: NodeJS.Platform; probeInstallation?: () => ServiceInstallationProbe } = {},
@@ -3407,6 +3410,12 @@ export function planServiceCommand(
   const parsed = parseServiceArgs(args);
   if (parsed.invalid.length > 0) {
     return { ok: false, message: `Unknown service option: ${parsed.invalid.join(" ")}` };
+  }
+  // Validate the requested action before touching platform probes. In a Linux
+  // test container (and on a host without systemd), invalid CLI input must
+  // report usage rather than an unrelated service-manager capability error.
+  if (!SERVICE_SUBCOMMANDS.has(parsed.sub)) {
+    return { ok: false, message: SERVICE_USAGE };
   }
   if (parsed.backend && parsed.sub !== "install") {
     return { ok: false, message: "--native/--scheduler apply to `ocx service install` only; other subcommands use the installed backend." };
@@ -3603,7 +3612,7 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
       console.log("✅ service uninstalled.");
       break;
     default:
-      console.error("Usage: ocx service [install|repair|restart|start|stop|status|uninstall|remove] [--native|--scheduler]");
+      console.error(SERVICE_USAGE);
       console.error("       With no subcommand, installs when absent or repairs/restarts an existing service.");
       console.error("       repair: refresh assets and restart an already-installed service (no admin re-prompt).");
       console.error("       restart: alias of repair.");

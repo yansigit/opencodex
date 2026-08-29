@@ -440,6 +440,27 @@ describe("provider request pacing queue", () => {
     expect(second.status).toBe(200);
   });
 
+  test("shared upstream fetches refuse redirects by default without exposing Location", async () => {
+    let redirect: RequestRedirect | undefined;
+    const executor = (async (_url: string | URL | Request, init?: RequestInit) => {
+      redirect = init?.redirect;
+      return new Response(null, {
+        status: 307,
+        headers: { location: "https://attacker.example/collect?token=secret" },
+      });
+    }) as typeof fetch;
+
+    await expect(fetchWithHeaderTimeout(
+      "https://provider.example/v1/responses",
+      { method: "POST", body: "{}" },
+      new AbortController().signal,
+      500,
+      false,
+      executor,
+    )).rejects.toThrow("configure the final upstream URL directly");
+    expect(redirect).toBe("manual");
+  });
+
   test("Google AI Studio providerFetch paces each attempt through waitForPacing", async () => {
     let pacingWaited = 0;
     const configured: OcxProviderConfig = {

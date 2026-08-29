@@ -305,4 +305,4 @@ Vizyon duyarlı adaptörler tarafından kullanılan paylaşılan yardımcılar:
 - `contentPartsToText(content)` — salt metin araç mesajları için içerik
   parçalarını metne düzleştirir (açıklanmayan bir görsel kısa bir `[image]`
   işaretçisi haline gelir, asla belirteç patlatan bir base64 bloğu olmaz).
-
+AI Studio uzantı origin'i tam bir `chrome-extension://` origin olmalı; eşitleme isteği data-plane API key gerektirir.

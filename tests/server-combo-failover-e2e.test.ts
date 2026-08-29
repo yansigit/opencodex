@@ -2855,7 +2855,9 @@ describe("server combo failover 030 activation matrix", () => {
     let cancels = 0;
     let bHits = 0;
     const cancelled = deferred();
-    customTransientResponse = async () => new Response(new ReadableStream<Uint8Array>({
+    customTransientResponse = async () => {
+      customTransientResponse = undefined;
+      return new Response(new ReadableStream<Uint8Array>({
         start(controller) {
           reads += 1;
           controller.enqueue(new TextEncoder().encode("hostile-stalled-prefix"));
@@ -2865,6 +2867,7 @@ describe("server combo failover 030 activation matrix", () => {
           cancelled.resolve();
         },
       }), { status: 429, headers: { "content-type": "application/json" } });
+    };
     const b = serve(() => {
       bHits += 1;
       return chatSuccess("bounded backup", "m2");

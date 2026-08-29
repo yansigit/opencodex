@@ -140,7 +140,7 @@ GUI — это тонкий клиент поверх JSON-API управлен�
 
 | Эндпоинт | Назначение |
 | --- | --- |
-| `GET` / `PUT /api/settings` | Чтение настроек и изменение автозапуска Codex, stream/memory и видимости account-targeting picker. |
+| `GET` / `PUT /api/settings` | Чтение настроек и изменение автозапуска Codex, stream/memory, видимости account-targeting picker и настроек серверного listener. Изменения listener и сертификата требуют перезапуска прокси. |
 | `GET /api/startup-health` | Чтение безопасной диагностики маршрутизации, службы, shim и устойчивости к перезагрузке. |
 | `GET` / `POST /api/windows-tray` | Чтение или изменение установки и видимости трея Windows; POST поддерживает `install`, `start`, `stop`, `uninstall`. |
 | `POST /api/sync` | Пересборка общего каталога моделей и инвалидация кэша моделей Codex. |

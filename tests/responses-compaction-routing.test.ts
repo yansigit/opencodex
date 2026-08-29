@@ -1130,8 +1130,9 @@ describe("compact alternate-account attempt (#913)", () => {
 
   test("the first account keeps its transient-retry ladder", async () => {
     // The control for the test above: A's recovery is unchanged, so a transient 5xx
-    // on A is still retried in place rather than treated as a reason to fail over.
+    // on A is retried in place only when the provider explicitly opts into replay.
     await withPoolEnv("ocx-compact-alt-ladder-", async config => {
+      config.providers.openai!.replayTransientFailures = true;
       let sends = 0;
       globalThis.fetch = (async () => {
         sends += 1;

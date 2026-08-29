@@ -148,3 +148,4 @@ Kiro 的 assistant 文字本身沒有可靠的回合結束標記，但終止的 
   Anthropic/Google image block 使用。
 - `contentPartsToText(content)` —— 為純文字工具訊息把 content part 扁平化成文字。未描述的圖像
   會變成簡短的 `[image]` marker，而不是導致 token 暴漲的 base64 blob。
+AI Studio 擴充功能 origin 必須是精確的 `chrome-extension://` origin，同步請求需要 data-plane API key。

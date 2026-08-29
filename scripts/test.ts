@@ -204,6 +204,10 @@ export const SERIAL_FULL_SUITE_FILES = [
   "openai-provider-option-e2e.test.ts",
   "release-helper.test.ts",
   "update-stop-first.test.ts",
+  // This suite creates shared journal subprocesses; keep it out of the parallel lane.
+  "codex-journal.test.ts",
+  // This suite inflates ~256 MiB bodies; keep aggregate memory below container limits.
+  "request-decompress.test.ts",
 ] as const;
 
 const SERIAL_LANE_TIMEOUT_MS: Partial<Record<(typeof SERIAL_FULL_SUITE_FILES)[number], number>> = {

@@ -365,3 +365,4 @@ OpenRouter는 하나의 모델을 여러 추론 공급자로 제공할 수 있�
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures`(기본값 false)은 스트리밍 전 일시적 실패를 재시도하며 요청이 여러 번 전달될 수 있습니다.

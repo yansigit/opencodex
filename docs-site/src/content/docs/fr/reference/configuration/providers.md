@@ -446,3 +446,4 @@ avec un contexte de `922000` et une entrée maximale de `922000` ; OpenRouter i
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures` (désactivé par défaut) réessaie les erreurs transitoires avant le flux ; une requête peut être livrée plusieurs fois.

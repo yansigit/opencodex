@@ -568,6 +568,8 @@ export interface OcxProviderConfig {
    * before any response bytes are relayed, so the replay is lossless.
    */
   retryOn429?: RateLimitRetryPolicy;
+  /** Opt in to replaying transient upstream 5xx responses (at most three total sends). */
+  replayTransientFailures?: boolean;
   /**
    * Model ids whose OpenAI-compatible chat endpoint accepts `reasoning_split: true` and returns
    * thinking separately in `reasoning_content` / `reasoning_details` instead of visible content.

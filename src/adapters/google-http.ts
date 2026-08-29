@@ -281,6 +281,8 @@ export interface GoogleRetryOptions {
   repairInvalid400?: boolean;
   /** Let the Responses layer own Antigravity's single same-account 429 replay. */
   retry429?: boolean;
+  replayTransientFailures?: boolean;
+  replayBudget?: { remaining: number };
 }
 
 async function normalizeFinalGoogleError(label: string, res: Response, signal?: AbortSignal): Promise<Response> {
@@ -358,7 +360,13 @@ async function fetchGoogleWithRetryInternal(
   let antigravityHostIndex = 0;
   let lastError: unknown;
   let compatibilityReplayUsed = false;
-  for (let attempt = 0; attempt < GOOGLE_RETRY_ATTEMPTS; attempt++) {
+  const maxAttempts = opts.replayTransientFailures ? GOOGLE_RETRY_ATTEMPTS : 1;
+  const consumeReplay = (): boolean => {
+    if (!opts.replayTransientFailures || (opts.replayBudget && opts.replayBudget.remaining <= 0)) return false;
+    if (opts.replayBudget) opts.replayBudget.remaining -= 1;
+    return true;
+  };
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (ctx.abortSignal?.aborted) throw abortError(ctx.abortSignal);
     try {
       const res = await fetchWithAttemptDeadline(activeRequest.url, {
@@ -374,7 +382,7 @@ async function fetchGoogleWithRetryInternal(
       }
       if (antigravityHosts.length > 1 && antigravityHostIndex === 0) {
         const shouldTryPeer = res.status === 404 || isUnavailableResponse(res);
-        if (shouldTryPeer) {
+        if (shouldTryPeer && consumeReplay()) {
           cancelResponseBodyBestEffort(res);
           antigravityHostIndex = 1;
           activeRequest = requestForHost(activeRequest, antigravityHosts[antigravityHostIndex]!);
@@ -382,14 +390,16 @@ async function fetchGoogleWithRetryInternal(
         }
       }
       if (label === "Antigravity" && isAntigravitySseRequest(activeRequest) && res.ok) {
-        const fetchPeer = antigravityHosts.length > 1 && antigravityHostIndex === 0
-          ? () => fetchGoogleWithRetryInternal(
+        const fetchPeer = antigravityHosts.length > 1 && antigravityHostIndex === 0 && opts.replayTransientFailures
+          ? () => consumeReplay()
+            ? fetchGoogleWithRetryInternal(
             label,
             requestForHost(activeRequest, antigravityHosts[1]!),
             ctx,
             false,
             opts,
-          )
+            )
+            : Promise.reject(new Error("Antigravity transient replay budget exhausted"))
           : undefined;
         return prepareCcaSseResponse(res, fetchPeer, ctx.accountId);
       }
@@ -422,7 +432,8 @@ async function fetchGoogleWithRetryInternal(
       if (res.status === 429 && !retry429) {
         return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
       }
-      if (!retryableGoogleStatus(res.status) || attempt === GOOGLE_RETRY_ATTEMPTS - 1) {
+      if (!retryableGoogleStatus(res.status) || attempt === maxAttempts - 1
+        || (opts.replayBudget && opts.replayBudget.remaining <= 0)) {
         return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
       }
       // A 429 may be a transient rate limit (retry) or hard quota exhaustion (do NOT retry —
@@ -443,19 +454,21 @@ async function fetchGoogleWithRetryInternal(
         maxDelayMs: GOOGLE_RETRY_MAX_MS,
         headers: res.headers,
       }), ctx.abortSignal);
+      if (!consumeReplay()) return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
     } catch (err) {
       if (ctx.abortSignal?.aborted) throw err;
       lastError = err;
-      if (antigravityHosts.length > 1 && antigravityHostIndex === 0) {
+      if (antigravityHosts.length > 1 && antigravityHostIndex === 0 && consumeReplay()) {
         antigravityHostIndex = 1;
         activeRequest = requestForHost(activeRequest, antigravityHosts[antigravityHostIndex]!);
         continue;
       }
-      if (attempt === GOOGLE_RETRY_ATTEMPTS - 1) throw err;
+      if (attempt === maxAttempts - 1 || (opts.replayBudget && opts.replayBudget.remaining <= 0)) throw err;
       await sleepWithAbort(retryBackoffDelayMs(attempt, {
         baseDelayMs: GOOGLE_RETRY_BASE_MS,
         maxDelayMs: GOOGLE_RETRY_MAX_MS,
       }), ctx.abortSignal);
+      if (!consumeReplay()) throw err;
     }
   }
   throw lastError ?? new Error(`${label} fetch failed`);
@@ -480,16 +493,23 @@ export function fetchGoogleWithRetry(
  * demand" spikes, plus plain rate-limit 429s, both of which previously failed immediately
  * because the default server fetch path only retries connection resets.
  */
-export function fetchDirectGeminiWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}): Promise<Response> {
-  return fetchGoogleWithRetry("Gemini", request, { ...ctx, returnRawErrors: true }, { repairInvalid400: false });
+export function fetchDirectGeminiWithRetry(
+  request: AdapterRequest,
+  ctx: AdapterFetchContext = {},
+  opts: GoogleRetryOptions = {},
+): Promise<Response> {
+  return fetchGoogleWithRetry("Gemini", request, { ...ctx, returnRawErrors: true }, {
+    ...opts,
+    repairInvalid400: false,
+  });
 }
 
 /** Vertex AI retry wrapper. */
-export function fetchVertexWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}): Promise<Response> {
-  return fetchGoogleWithRetry("Vertex AI", request, ctx);
+export function fetchVertexWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}, opts: GoogleRetryOptions = {}): Promise<Response> {
+  return fetchGoogleWithRetry("Vertex AI", request, ctx, opts);
 }
 
 /** Antigravity (Cloud Code Assist) retry wrapper. */
-export function fetchAntigravityWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}): Promise<Response> {
-  return fetchGoogleWithRetry("Antigravity", request, ctx, { retry429: false });
+export function fetchAntigravityWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}, opts: GoogleRetryOptions = {}): Promise<Response> {
+  return fetchGoogleWithRetry("Antigravity", request, ctx, { ...opts, retry429: false });
 }

@@ -171,7 +171,7 @@ describe("live provider model discovery (authority + fallback)", () => {
     expect(ids.sort()).toEqual(["grok-4.3", "grok-4.5"]);
   });
 
-  test("redirect responses log a credential-safe final-URL hint and fall back", async () => {
+  test("redirect responses log guidance without exposing Location and fall back", async () => {
     const warning = spyOn(console, "warn").mockImplementation(() => {});
     const redirectTarget = new URL("https://final.example/v1/models?token=secret#fragment");
     redirectTarget.username = "user";
@@ -190,7 +190,8 @@ describe("live provider model discovery (authority + fallback)", () => {
 
       expect(ids.sort()).toEqual(["grok-4.3", "grok-4.5"]);
       expect(warningText).toContain("returned 302 redirect");
-      expect(warningText).toContain("https://final.example/v1/models");
+      expect(warningText).toContain("https://api.x.ai/v1/models");
+      expect(warningText).not.toContain("final.example");
       expect(warningText).not.toContain("user:password");
       expect(warningText).not.toContain("token=secret");
     } finally {
