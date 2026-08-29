@@ -93,11 +93,12 @@ behavior, latency, cost, and privacy characteristics.
 
 ## Routed V2 delegation bridge
 
-`v2RoutedDelegationBridge` is an experimental default-off boolean. It does not replace the native
-GPT-to-GPT tools or reroute a parent like `v2NativeParentOverride`; after parent-override routing,
-it exposes plaintext mirror collaboration tools only for eligible native V2 roots so routed children
+`v2RoutedDelegationBridge` is an experimental default-off boolean. It does not reroute a parent like
+`v2NativeParentOverride`; after parent-override routing, it moves `spawn_agent`, `send_message`, and
+`followup_task` from native collaboration to plaintext mirrors for eligible native V2 roots so routed children
 can receive task, repository-context, and tool-result flow without `agentTaskRecovery`'s additional
-ChatGPT request. The model selects the tool; this setting has no model picker or automatic fallback.
+ChatGPT request. `wait_agent`, `interrupt_agent`, and `list_agents` remain native. While active, every use
+of the three delegation-message operations is plaintext, including native-to-native delegation.
 
 It can be armed while the current surface is not explicit V2, but is inactive until an eligible root
 arrives. A false value disables it immediately for subsequent requests. The original native model can

@@ -161,8 +161,10 @@ must not optimistically change it, sends only that scalar, and refreshes the ser
 write. The switch remains usable outside explicit V2 so operators can arm it; it is active only for
 eligible native V2 roots and disabling is immediate for later requests.
 
-The bridge exposes plaintext mirror collaboration tools after parent-override routing. It has no model
-picker and tool choice stays model-directed. The native Codex UI may retain the original model while
+The bridge moves `spawn_agent`, `send_message`, and `followup_task` from native collaboration to its
+plaintext mirror after parent-override routing; native `wait_agent`, `interrupt_agent`, and `list_agents`
+remain unchanged. Thus all uses of those three delegation-message operations are plaintext while the
+experiment is active, including native-to-native delegation. The native Codex UI may retain the original model while
 routed prompts, repository context, and tool results follow the selected provider's availability,
 context, behavior, billing, and privacy boundaries. Its rewrite is root-only: native children are not
 rewritten and a native child delegating to a routed grandchild can still face encrypted content.

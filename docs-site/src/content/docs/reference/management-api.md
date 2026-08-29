@@ -143,10 +143,12 @@ accepts the scalar boolean as a partial update:
 { "v2RoutedDelegationBridge": true }
 ```
 
-It can be armed outside explicit V2 but activates only for eligible native V2 roots. It preserves
-native GPT-to-GPT delegation and is distinct from parent override and encrypted-task recovery. The
-bridge is root-only; a native child creating a routed grandchild remains subject to the encrypted
-boundary. There is no model selector: tool choice is model-directed. The native Codex UI can show the
+It can be armed outside explicit V2 but activates only for eligible native V2 roots. It moves
+`spawn_agent`, `send_message`, and `followup_task` to plaintext mirrors while leaving `wait_agent`,
+`interrupt_agent`, and `list_agents` native. Consequently those three message operations are plaintext
+even for native-to-native delegation while active. The bridge is distinct from parent override and
+encrypted-task recovery. It is root-only; a native child creating a routed grandchild remains subject
+to the encrypted boundary. The native Codex UI can show the
 original model while routed prompts, repository context, and tool results follow the selected
 provider's availability, context, behavior, billing, and privacy terms. `false` disables subsequent
 requests immediately.
