@@ -11,7 +11,7 @@ import { clearClientResourceStoresForTests } from "../src/client-resource";
  * add/remove via the rail, and the exact save request.
  */
 
-const globals = ["document", "window", "navigator", "localStorage", "fetch", "confirm", "alert", "IS_REACT_ACT_ENVIRONMENT"] as const;
+const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "fetch", "confirm", "alert", "IS_REACT_ACT_ENVIRONMENT"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
 let testWindow: Window;
 let container: HTMLElement;
@@ -23,6 +23,7 @@ let injectionModel = "";
 let catalogState: "fresh" | "stale" | "not_running" | "unknown" | undefined;
 let rosterAfterRefresh: string[] | null = null;
 let subagentCatalogReads = 0;
+let subagentCatalogFails = false;
 
 beforeEach(() => {
   previousGlobals = Object.fromEntries(globals.map((k) => [k, Reflect.get(globalThis, k)])) as typeof previousGlobals;
@@ -33,6 +34,7 @@ beforeEach(() => {
     window: { configurable: true, value: testWindow },
     navigator: { configurable: true, value: testWindow.navigator },
     localStorage: { configurable: true, value: testWindow.localStorage },
+    sessionStorage: { configurable: true, value: testWindow.sessionStorage },
   });
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -43,6 +45,8 @@ beforeEach(() => {
   catalogState = undefined;
   rosterAfterRefresh = null;
   subagentCatalogReads = 0;
+  subagentCatalogFails = false;
+  testWindow.sessionStorage.clear();
   clearClientResourceStoresForTests();
   Object.defineProperty(globalThis, "confirm", { configurable: true, value: () => true });
   Object.defineProperty(globalThis, "alert", { configurable: true, value: () => {} });
@@ -75,6 +79,9 @@ beforeEach(() => {
         } as unknown as Response;
       }
       const isSubagentCatalog = String(url).includes("/api/subagent-models");
+      if (isSubagentCatalog && subagentCatalogFails) {
+        return { ok: false, status: 503, text: async () => JSON.stringify({ error: "offline" }) } as unknown as Response;
+      }
       const refreshed = isSubagentCatalog && rosterAfterRefresh !== null && subagentCatalogReads++ > 0;
       const roster = refreshed ? rosterAfterRefresh : available;
       const body = JSON.stringify({ available: roster, chosen: refreshed ? [] : chosen, ...(catalogState ? { catalogState: { state: catalogState } } : {}) });
@@ -220,4 +227,27 @@ test("stale catalog shows the existing restart control and refreshes the roster 
   expect(requests.filter(request => request.url.includes("/api/subagent-models") && !request.init?.method).length).toBeGreaterThan(1);
   expect(container.textContent).toContain("fresh-model");
   expect(container.textContent).not.toContain("stale-model");
+});
+
+test("cached stale catalog state survives a failed refresh and save cache rewrite", async () => {
+  catalogState = "stale";
+  available = ["cached-model"];
+  subagentCatalogFails = true;
+  testWindow.sessionStorage.setItem("ocx.subagents.v1:", JSON.stringify({
+    available,
+    chosen: [],
+    catalogState: { state: "stale" },
+  }));
+
+  await mount();
+  expect(container.querySelector(".codex-stale-banner button")).toBeTruthy();
+
+  subagentCatalogFails = false;
+  const save = Array.from(container.querySelectorAll("button"))
+    .find((b) => b.textContent?.trim() === "Save") as HTMLButtonElement | undefined;
+  await act(async () => { save!.click(); });
+
+  expect(JSON.parse(testWindow.sessionStorage.getItem("ocx.subagents.v1:")!)).toMatchObject({
+    catalogState: { state: "stale" },
+  });
 });

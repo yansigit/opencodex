@@ -17,6 +17,11 @@ function seedSubagents(cacheKey: string): CachedSubagents | null {
   return readSessionListCache<CachedSubagents>(cacheKey);
 }
 
+function readCatalogState(value: CachedSubagents | null): CatalogState {
+  const state = value?.catalogState?.state;
+  return state === "fresh" || state === "stale" || state === "not_running" ? state : "unknown";
+}
+
 export default function Subagents({ apiBase }: { apiBase: string }) {
   const t = useT();
   const cacheKey = `ocx.subagents.v1:${apiBase}`;
@@ -28,7 +33,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   /** Sync guard: state-only `busy` can miss clicks before the disabled re-render commits. */
   const saveInFlight = useRef(false);
   const delegation = useSubagentDelegation(apiBase);
-  const [catalogState, setCatalogState] = useState<CatalogState>("unknown");
+  const [catalogState, setCatalogState] = useState<CatalogState>(() => readCatalogState(cached));
   const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false });
   const [nativeParentOverride, setNativeParentOverride] = useState<V2NativeParentOverrideState>({ enabled: false, model: null, active: false });
   const [agentTaskRecovery, setAgentTaskRecovery] = useState<AgentTaskRecoveryState>({ enabled: false, model: null });
@@ -266,9 +271,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       catalogState: response.catalogState,
     };
     setChosen(next.chosen);
-    setCatalogState(response.catalogState?.state === "fresh" || response.catalogState?.state === "stale" || response.catalogState?.state === "not_running"
-      ? response.catalogState.state
-      : "unknown");
+    setCatalogState(readCatalogState(next));
     writeSessionListCache(cacheKey, next);
     return next;
   }, [apiBase, cacheKey, t]);
@@ -327,7 +330,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       const d = await readJsonOrThrow<{ applied?: string[] }>(r, t("sub.saveFailed"));
       const applied = d?.applied ?? chosen;
       if (d?.applied) setChosen(d.applied);
-      writeSessionListCache(cacheKey, { available, chosen: applied });
+      writeSessionListCache(cacheKey, { available, chosen: applied, catalogState: { state: catalogState } });
       setOk(true);
       setStatus(t("sub.saved", { n: applied.length, cmd: "ocx sync" }));
     } catch (error) {
