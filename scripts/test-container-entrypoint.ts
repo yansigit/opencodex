@@ -1,8 +1,12 @@
 import { readdirSync, unlinkSync, writeFileSync } from "node:fs";
 
 if (process.getuid?.() === 0) throw new Error("container test must run as an unprivileged user");
-try { writeFileSync("/app/.ocx-write-test", "must fail"); unlinkSync("/app/.ocx-write-test"); throw new Error("/app must be unwritable"); }
-catch (error) { if (error instanceof Error && error.message === "/app must be unwritable") throw error; }
+let appWriteSucceeded = false;
+try { writeFileSync("/app/.ocx-write-test", "must fail"); appWriteSucceeded = true; } catch {}
+if (appWriteSucceeded) {
+  try { unlinkSync("/app/.ocx-write-test"); } catch {}
+  throw new Error("/app must be unwritable");
+}
 for (const path of ["/tmp", "/home/ocx"]) {
   const probe = `${path}/.ocx-write-test`;
   writeFileSync(probe, "ok");

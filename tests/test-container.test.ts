@@ -106,6 +106,8 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(entrypoint).toContain("/home/ocx");
   expect(entrypoint).toContain('readdirSync("/sys/class/net")');
   expect(entrypoint).toContain('writeFileSync("/app/.ocx-write-test"');
+  expect(entrypoint).toContain("let appWriteSucceeded = false");
+  expect(entrypoint).toMatch(/if \(appWriteSucceeded\)[\s\S]*throw new Error\("\/app must be unwritable"\)/);
   expect(entrypoint).toContain('const workspace = "/tmp/ocx-test-workspace"');
   expect(entrypoint).toContain('["cp", "-a", "/app/.", workspace]');
   expect(entrypoint).toContain('["chmod", "-R", "u+rwX", workspace]');
