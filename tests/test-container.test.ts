@@ -84,14 +84,19 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   const image = readFileSync(join(ROOT, "Containerfile.test"), "utf8");
   const ignored = readFileSync(join(ROOT, ".dockerignore"), "utf8").split("\n");
   const entrypoint = readFileSync(join(ROOT, "scripts/test-container-entrypoint.ts"), "utf8");
-  expect(image).toContain("FROM oven/bun:1.4.0");
+  expect(image).toContain("FROM oven/bun:1.4.0@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6");
   expect(image.match(/bun install --frozen-lockfile/g)).toHaveLength(3);
   expect(image).toContain("bun run build");
   expect(image).toContain("git init");
   expect(image).toContain("git add -A");
   expect(image).toContain("test -z \"$(git remote)\"");
   expect(image).toContain("USER ocx");
-  expect(image).toContain("apt-get install -y --no-install-recommends adduser");
+  for (const pin of ["adduser=3.152", "git=1:2.47.3-0+deb13u1", "procps=2:4.0.4-9", "net-tools=2.10-1.3", "ca-certificates=20250419"]) expect(image).toContain(pin);
+  expect(image).toContain("find /app -path");
+  expect(image).toContain("-name '*.pem'");
+  expect(image).toContain("-name '*.db'");
+  expect(image).toContain("-path '*/node_modules' -prune -o");
+  expect(image.indexOf("-name '*.db' \\) -print -quit")).toBeGreaterThan(image.indexOf("find /app -path"));
   expect(image).not.toContain("OCX_REPLIT_GATEWAY_DEPS_PREINSTALLED");
   expect(entrypoint).toContain("process.getuid?.() === 0");
   expect(entrypoint).toContain("/app");
@@ -108,5 +113,5 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(entrypoint.indexOf('writeFileSync("/app/.ocx-write-test"')).toBeLessThan(entrypoint.indexOf('const workspace = "/tmp/ocx-test-workspace"'));
   expect(entrypoint).not.toContain('await run("/app", ["run", "test"])');
   expect(entrypoint).not.toContain('await run("/app/integrations/replit-gateway", ["run", "test"])');
-  for (const pattern of [".git", ".worktrees", ".tmp", ".planning", ".agents", ".claude", ".cursor", ".windsurf", ".ssh", ".gnupg", ".aws", ".docker/config.json", "**/.docker/config.json", ".config/containers/auth.json", "**/.config/containers/auth.json", ".config/gh/hosts.yml", "**/.config/gh/hosts.yml", "**/.opencodex", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "dist", "gui/dist", "*.log", "coverage", "*.tgz", "*.tar", "*.zip"]) expect(ignored).toContain(pattern);
+  for (const pattern of [".git", ".worktrees", ".tmp", ".planning", ".agents", ".claude", ".cursor", ".windsurf", ".ssh", ".gnupg", ".aws", ".docker/config.json", "**/.docker/config.json", ".config/containers/auth.json", "**/.config/containers/auth.json", ".config/gh/hosts.yml", "**/.config/gh/hosts.yml", "**/.opencodex", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "dist", "gui/dist", "*.log", "coverage", "*.tgz", "*.tar", "*.zip", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/*.sqlite", "**/*.sqlite3", "**/*.db"]) expect(ignored).toContain(pattern);
 });

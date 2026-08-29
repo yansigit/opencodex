@@ -51,3 +51,15 @@ test("source development docs require a local Bun CLI while preserving the bundl
     expect(normalizedRequirementParagraph(text)).toBe(entry.paragraph);
   }
 });
+
+test("contributing pages use the isolated repository test wrapper", async () => {
+  const pages = [
+    "contributing.md", "ru/contributing.md", "ko/contributing.md", "ja/contributing.md",
+    "zh-cn/contributing.md", "zh-tw/contributing.md", "fr/contributing.md", "tr/contributing.md",
+  ];
+  for (const page of pages) {
+    const text = await Bun.file(new URL(`../docs-site/src/content/docs/${page}`, import.meta.url)).text();
+    expect(text).not.toMatch(/bun test(?:\s|`)/);
+    expect(text).toContain("bun scripts/test.ts tests/router.test.ts");
+  }
+});

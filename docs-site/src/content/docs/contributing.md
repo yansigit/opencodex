@@ -15,7 +15,7 @@ bun install
 bun run dev:proxy    # proxy API in dev mode
 bun run dev:gui      # dashboard dev server (another terminal)
 bun run typecheck    # bun x tsc --noEmit
-bun run test         # bun test ./tests/
+bun run test         # tests/ suite
 ```
 
 `bun run dev` remains an alias for `bun run dev:proxy`. The dashboard dev server is `bun run dev:gui`;
@@ -220,5 +220,5 @@ startup path must not import the manifest catalog or activate Compatibility Lab.
 ## Verify before you claim done
 
 Run the narrowest command that proves your change — `bun run typecheck` for types, a focused
-`bun test tests/<name>.test.ts` or runtime probe for behavior, then the broader gates appropriate to
+`bun scripts/test.ts tests/<name>.test.ts` or runtime probe for behavior, then the broader gates appropriate to
 the affected surface. opencodex favors small, verifiable commits over large batches.

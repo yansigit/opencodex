@@ -34,3 +34,11 @@ coverage
 *.tgz
 *.tar
 *.zip
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.sqlite
+**/*.sqlite3
+**/*.db

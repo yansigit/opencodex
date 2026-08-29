@@ -12,7 +12,7 @@ bun install
 bun run dev:proxy    # 開発モードのプロキシ API
 bun run dev:gui      # ダッシュボード dev サーバー(別ターミナル)
 bun run typecheck    # bun x tsc --noEmit
-bun run test         # bun test ./tests/
+bun run test         # tests/ suite
 ```
 
 `bun run dev` は引き続き `bun run dev:proxy` のエイリアスとして動作します。ダッシュボード dev サーバーは
@@ -27,7 +27,7 @@ bun run test         # bun test ./tests/
 ```bash
 bun run typecheck                 # 厳密な TypeScript 検査
 bun run test                      # tests/ の全体スイート
-bun test tests/router.test.ts     # 特定テストファイル
+bun scripts/test.ts tests/router.test.ts     # 特定テストファイル
 bun run build:gui                 # Vite GUI ビルド + パッケージ準備
 bun run privacy:scan              # CI で使う資格情報/個人情報検査
 bun run prepare:package           # パッケージランチャー/asset 更新
@@ -156,5 +156,5 @@ manifest catalog を import したり、Compatibility Lab を有効化したり�
 ## 完了を主張する前に検証
 
 変更を証明する最も狭いコマンドから実行してください。型は `bun run typecheck`、動作は集中した
-`bun test tests/<name>.test.ts` またはランタイム probe で確認した後、影響範囲に応じた広い gate を
+`bun scripts/test.ts tests/<name>.test.ts` またはランタイム probe で確認した後、影響範囲に応じた広い gate を
 実行します。opencodex は大きな batch より小さく検証可能な commit を好みます。
