@@ -154,6 +154,38 @@ test("provider POST reconciles a replacement API key into the inherited pool in 
   ]);
 });
 
+test.each([
+  ["omitted", undefined],
+  ["blank", ""],
+] as const)("provider POST preserves the active key when a redacted key is %s", async (_label, submittedKey) => {
+  const config = structuredClone(historicalFixture);
+  config.providers["command-code"] = {
+    ...config.providers["command-code"]!,
+    apiKey: "active-key",
+    apiKeyPool: [{ id: "active", key: "active-key" }, { id: "fallback", key: "fallback-key" }],
+  };
+  let committed = structuredClone(config);
+  const provider = { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", liveModels: false } as Record<string, unknown>;
+  if (submittedKey !== undefined) provider.apiKey = submittedKey;
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "command-code", provider }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      committed = candidate;
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(200);
+  expect(committed.providers["command-code"]?.apiKey).toBe("active-key");
+  expect(committed.providers["command-code"]?.apiKeyPool?.map(entry => entry.key)).toEqual(["active-key", "fallback-key"]);
+});
+
 test("provider POST rechecks account namespace collisions inside its transaction", async () => {
   const config = structuredClone(historicalFixture);
   const url = new URL("http://localhost/api/providers");

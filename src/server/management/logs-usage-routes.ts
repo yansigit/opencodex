@@ -39,7 +39,6 @@ import { getRestoreTrashTestStreamResponse, runRestoreTrashEntryJob } from "../.
 import {
   normalizeStorageCleanupPolicy,
   parseStorageCleanupPolicyInput,
-  writeStorageCleanupPolicyToConfig,
 } from "../../storage/policy";
 import {
   getStorageCleanupPolicyJobState,
@@ -77,7 +76,7 @@ import { applySystemEnvToggle } from "../system-env";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { mutateManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import {
   discardUsageSummaryCacheEntry,
@@ -575,12 +574,19 @@ export async function handleLogsUsageRoutes(ctx: ManagementContext): Promise<Res
     const previous = normalizeStorageCleanupPolicy(config.storageCleanupPolicy);
     const parsed = parseStorageCleanupPolicyInput(raw, previous);
     if (!parsed.ok) return jsonResponse({ error: parsed.error }, 400);
-    // Never enable implicitly: if client omitted enabled, keep previous (default false).
     const body = raw as Record<string, unknown>;
-    if (body.enabled === undefined) parsed.policy.enabled = previous.enabled;
-    const saved = writeStorageCleanupPolicyToConfig(parsed.policy);
-    config.storageCleanupPolicy = saved;
-    return jsonResponse({ ok: true, policy: saved, job: getStorageCleanupPolicyJobState() });
+    const persisted = mutateManagementConfig(deps, disk => {
+      const latest = normalizeStorageCleanupPolicy(disk.storageCleanupPolicy);
+      const rebased = parseStorageCleanupPolicyInput(raw, latest);
+      if (!rebased.ok) throw new Error(rebased.error);
+      // Never enable implicitly: if client omitted enabled, keep the latest persisted value.
+      if (body.enabled === undefined) rebased.policy.enabled = latest.enabled;
+      disk.storageCleanupPolicy = rebased.policy;
+      return { changed: true, value: structuredClone(rebased.policy) };
+    });
+    if (persisted.status === "unavailable") return jsonResponse({ error: "management persistence unavailable" }, 500);
+    config.storageCleanupPolicy = persisted.value;
+    return jsonResponse({ ok: true, policy: persisted.value, job: getStorageCleanupPolicyJobState() });
   }
 
   if (url.pathname === "/api/storage/cleanup-policy/run" && req.method === "POST") {

@@ -833,6 +833,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (name !== "openai") enrichProviderFromCatalog(name, next);
       const existingPool = existing?.apiKeyPool;
       if (existingPool && !next.apiKeyPool && !next.azureCredential) next.apiKeyPool = existingPool;
+      if (typeof next.apiKey === "string" && !next.apiKey.trim()) delete next.apiKey;
+      if (!next.apiKey && existing?.apiKey && !next.azureCredential
+        && next.authMode !== "oauth" && next.authMode !== "forward") next.apiKey = existing.apiKey;
       const existingCosts = existing?.modelCosts;
       if (existingCosts && !next.modelCosts) next.modelCosts = existingCosts;
       const existingFailover = existing?.oauthAccountFailover;

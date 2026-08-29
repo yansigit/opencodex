@@ -69,6 +69,8 @@ function moduleSymbolReferences(source: SourceFile, modulePath: string, symbol: 
     node = unwrap(node);
     return (isIdentifier(node) && namespaces.has(node.text))
       || (isCallExpression(node) && node.expression.kind === SyntaxKind.ImportKeyword
+        && node.arguments.length === 1 && isTargetModule(node.arguments[0]!))
+      || (isCallExpression(node) && isIdentifier(node.expression) && node.expression.text === "require"
         && node.arguments.length === 1 && isTargetModule(node.arguments[0]!));
   };
   const collectNamespaces = (node: Node): void => {
@@ -133,15 +135,17 @@ function localRuntimeImports(source: SourceFile): string[] {
   const imports = new Set<string>();
   const add = (node: Node): void => {
     if ((!isStringLiteral(node) && !isNoSubstitutionTemplateLiteral(node)) || !node.text.startsWith(".")) return;
-    const base = resolve(dirname(source.fileName), node.text);
+    const base = resolve(dirname(source.fileName), node.text).replace(/\.(?:[cm]?[jt]s)$/, "");
     for (const candidate of [`${base}.ts`, join(base, "index.ts")]) {
-      if (candidate.startsWith(`${SRC}/`) && existsSync(candidate)) imports.add(candidate);
+      if (existsSync(candidate)) imports.add(candidate);
     }
   };
   const visit = (node: Node): void => {
     if (isImportDeclaration(node) && !node.importClause?.isTypeOnly) add(node.moduleSpecifier);
     else if (isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier) add(node.moduleSpecifier);
-    else if (isCallExpression(node) && node.expression.kind === SyntaxKind.ImportKeyword && node.arguments.length === 1) add(node.arguments[0]!);
+    else if (isCallExpression(node) && node.arguments.length === 1
+      && (node.expression.kind === SyntaxKind.ImportKeyword
+        || (isIdentifier(node.expression) && node.expression.text === "require"))) add(node.arguments[0]!);
     node.forEachChild(visit);
   };
   visit(source);
@@ -215,8 +219,11 @@ test("full config replacement is limited to explicit import and init", async () 
   ]);
   const fixtureDir = mkdtempSync(join(tmpdir(), "ocx-config-policy-"));
   const fixture = join(fixtureDir, "fixture.ts");
+  const helper = join(fixtureDir, "helper.ts");
   const configModule = join(SRC, "config");
+  writeFileSync(helper, "export {};\n");
   writeFileSync(fixture, [
+    `import "./helper.js";`,
     `import { replacePersistedConfig as replace } from ${JSON.stringify(configModule)}; replace(value);`,
     `import * as config from ${JSON.stringify(configModule)}; config.replacePersistedConfig(value);`,
     `config["replacePersistedConfig"](value);`,
@@ -227,6 +234,7 @@ test("full config replacement is limited to explicit import and init", async () 
     `const { replacePersistedConfig: destructured } = await import(${JSON.stringify(configModule)}); destructured(value);`,
     `import(\`${configModule}\`).then(({ replacePersistedConfig }) => replacePersistedConfig(value));`,
     `const promised = import(${JSON.stringify(configModule)}); promised.then(config => config.replacePersistedConfig(value));`,
+    `const required = require(${JSON.stringify(configModule)}); required.replacePersistedConfig(value);`,
     "config[`replacePersistedConfig`](value);",
     `config[("replace" + "PersistedConfig")](value);`,
     `(await import(${JSON.stringify(configModule)})).initializePersistedConfigIfMissing(value);`,
@@ -241,13 +249,14 @@ test("full config replacement is limited to explicit import and init", async () 
   try {
     const snapshot = await api.updateSnapshot({
       openProjects: [join(SRC, "..", "tsconfig.json")],
-      openFiles: [fixture],
+      openFiles: [fixture, helper],
     });
     try {
       const fixtureProject = await snapshot.getDefaultProjectForFile(fixture);
       const fixtureSource = await fixtureProject?.program.getSourceFile(fixture);
-      expect(fixtureSource && configReplacementReferences(fixtureSource, "replacePersistedConfig")).toHaveLength(16);
+      expect(fixtureSource && configReplacementReferences(fixtureSource, "replacePersistedConfig")).toHaveLength(17);
       expect(fixtureSource && configReplacementReferences(fixtureSource, "initializePersistedConfigIfMissing")).toHaveLength(5);
+      expect(fixtureSource && localRuntimeImports(fixtureSource)).toContain(helper);
 
       const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
       if (!project) throw new Error("TypeScript did not load the repository project");
@@ -288,6 +297,7 @@ test("management routes cannot reach global config writers through any runtime h
       "setProviderApiKeyLabel",
       "removeProviderApiKey",
     ]],
+    [join(SRC, "storage", "policy"), ["writeStorageCleanupPolicyToConfig"]],
   ]);
   const allowed = new Set([
     "cli/v2.ts: saveConfig",
@@ -332,7 +342,7 @@ test("management routes cannot reach global config writers through any runtime h
             }
           }
         }
-        pending.push(...localRuntimeImports(source));
+        pending.push(...localRuntimeImports(source).filter(imported => imported.startsWith(`${SRC}/`)));
       }
       expect(offenders).toEqual([]);
     } finally {

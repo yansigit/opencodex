@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { upsertOAuthProvider } from "../src/oauth";
+import { saveConfig } from "../src/config";
+import { OAUTH_PROVIDERS, upsertOAuthProvider } from "../src/oauth";
 import {
   apiKeyPoolEntryId,
   listProviderApiKeys,
@@ -35,6 +36,45 @@ function configWithKey(provider: string, adapter: string, baseUrl: string): OcxC
 }
 
 describe("upsertOAuthProvider credential preservation", () => {
+  test("login, add-account, and reauth preserve non-auth provider settings", () => {
+    const preserved = {
+      disabled: true,
+      requestPacing: { enabled: true, requestsPerMinute: 3, minIntervalMs: 20_000 },
+      retryOn429: { enabled: true, attempts: 2 },
+      refreshPolicy: "disabled" as const,
+      selectedModels: ["operator-model"],
+      note: "operator-note",
+    };
+    const config = {
+      port: 10100,
+      defaultProvider: "google-antigravity",
+      providers: {
+        "google-antigravity": {
+          ...structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig),
+          ...structuredClone(preserved),
+          adapter: "openai-chat",
+          baseUrl: "https://stale.example/v1",
+          authMode: "key",
+          googleMode: "ai-studio",
+          apiKey: "stale-key",
+          apiKeyPool: [{ id: "stale", key: "stale-key" }],
+        },
+      },
+    } as OcxConfig;
+
+    for (const action of ["login", "add-account", "reauth"]) {
+      upsertOAuthProvider(config, "google-antigravity");
+      const provider = config.providers["google-antigravity"]!;
+      expect(provider).toMatchObject(preserved);
+      expect(provider.adapter).toBe("google");
+      expect(provider.baseUrl).toBe("https://daily-cloudcode-pa.googleapis.com");
+      expect(provider.authMode).toBe("oauth");
+      expect(provider.googleMode).toBe("cloud-code-assist");
+      expect(provider.apiKey, action).toBeUndefined();
+      expect(provider.apiKeyPool, action).toBeUndefined();
+    }
+  });
+
   test("keeps a stored API key and the explicit key billing mode for xai", () => {
     const config = configWithKey("xai", "openai-chat", "https://api.x.ai/v1");
     upsertOAuthProvider(config, "xai");
@@ -211,6 +251,7 @@ describe("upsertOAuthProvider credential preservation", () => {
         { id: "pool-visible", key: "pool-visible-key" },
         { id: activeId, key: "routing-only-key" },
       ]);
+      saveConfig(config);
 
       const listed = listProviderApiKeys(config, "xai");
       expect(listed.activeId).toBe(activeId);
@@ -306,6 +347,7 @@ describe("upsertOAuthProvider credential preservation", () => {
     const testHome = mkdtempSync(join(tmpdir(), "ocx-oauth-upsert-"));
     process.env.OPENCODEX_HOME = testHome;
     try {
+      saveConfig(config);
       expect(removeProviderApiKey(config, "xai", "aaaaaaaa")).toBe(true);
       expect(config.providers.xai!.authMode).toBe("key");
       expect(config.providers.xai!.apiKey).toBeUndefined();
@@ -323,7 +365,7 @@ describe("upsertOAuthProvider credential preservation", () => {
     }
   });
 
-  test("still applies the plain preset for oauth-only providers", () => {
+  test("removes incompatible credentials without dropping unrelated fields for oauth-only providers", () => {
     const config = {
       port: 10100,
       defaultProvider: "anthropic",
@@ -334,6 +376,9 @@ describe("upsertOAuthProvider credential preservation", () => {
           authMode: "key",
           apiKey: "stale-key",
           apiKeyPool: [{ id: "stale", key: "stale-key" }],
+          apiKeyTransport: "bearer",
+          azureCredential: { type: "default-azure-credential" },
+          headers: { Authorization: "Bearer stale-secret" },
           note: "stale-note",
         },
       },
@@ -343,7 +388,10 @@ describe("upsertOAuthProvider credential preservation", () => {
     expect(provider.authMode).toBe("oauth");
     expect(provider.apiKey).toBeUndefined();
     expect(provider.apiKeyPool).toBeUndefined();
-    expect(provider.note).toBeUndefined();
+    expect(provider.apiKeyTransport).toBeUndefined();
+    expect(provider.azureCredential).toBeUndefined();
+    expect(provider.headers).toBeUndefined();
+    expect(provider.note).toBe("stale-note");
   });
 
   test("a fresh login on an unconfigured provider gets the untouched preset", () => {

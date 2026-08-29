@@ -118,6 +118,39 @@ describe("CLI key-login live-update overlay preservation", () => {
     expect(disk.providers.extra).toEqual(richConfig.providers.extra);
   });
 
+  test("key rotation preserves the complete operator-owned provider state and alternate keys", async () => {
+    const richConfig = umansKeyConfig();
+    Object.assign(richConfig.providers.umans!, {
+      disabled: true,
+      apiKeyPool: [{ id: "legacy-key", key: "sk-old", label: "fallback" }],
+      modelAliases: { "umans-coder": "daily" },
+      selectedModels: ["umans-coder"],
+      modelPreset: { mode: "custom" },
+      requestPacing: { enabled: true, requestsPerMinute: 12 },
+      contextWindow: 123_456,
+      modelCosts: { "umans-coder": { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 } },
+    });
+    writeFileSync(getConfigPath(), `${JSON.stringify(richConfig, null, 2)}\n`);
+
+    const live = structuredClone(richConfig);
+    const merged = await commitKeyLoginProvider(
+      live,
+      "umans",
+      providerConfigFromKeyLoginProvider(KEY_LOGIN_PROVIDERS.umans, "sk-rotated"),
+    );
+    expect(merged).toMatchObject({
+      disabled: true,
+      apiKey: "sk-rotated",
+      modelAliases: { "umans-coder": "daily" },
+      selectedModels: ["umans-coder"],
+      modelPreset: { mode: "custom" },
+      requestPacing: { enabled: true, requestsPerMinute: 12 },
+      contextWindow: 123_456,
+    });
+    expect(merged.apiKeyPool?.map(entry => entry.key)).toEqual(["sk-old", "sk-rotated"]);
+    expect(loadConfig().providers.umans).toEqual(merged);
+  });
+
   test("notify after key login pushes the merged row and keeps modelCosts on live and disk", async () => {
     const localAttestationSecret = createLocalAttestationSecret();
     const server = startServer(0, { localAttestationSecret });
