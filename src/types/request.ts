@@ -2,6 +2,12 @@ import type { KiroOAuthMetadata } from "../oauth/types";
 import type { OcxTool, OcxToolChoice } from "./tools";
 import type { TierDecision, TierObservationContext } from "./provider";
 
+/** Request-local source envelope for fidelity-preserving Anthropic transport. Never persisted. */
+export type ClaudeSourceEnvelope = {
+  readonly body: Readonly<Record<string, unknown>>;
+  readonly headers: Readonly<Record<string, string>>;
+};
+
 /** Exact provider/credential namespace for process-local reasoning replay. */
 export interface OcxReasoningReplayIdentity {
   providerName: string;
@@ -127,11 +133,13 @@ export interface OcxParsedRequest {
    */
   _compactionRequest?: boolean;
   /**
-   * True when the current request newly introduced a stored compaction summary/marker. Historical
-   * markers restored by previous_response_id expansion were already acknowledged and do not reset
-   * provider-private continuation caches again on every later turn.
-   */
+  * True when the current request newly introduced a stored compaction summary/marker. Historical
+  * markers restored by previous_response_id expansion were already acknowledged and do not reset
+  * provider-private continuation caches again on every later turn.
+  */
   _contextCompactionBoundary?: boolean;
+  /** Request-local Anthropic source envelope; never serialized into response state or logs. */
+  _claudeSourceEnvelope?: ClaudeSourceEnvelope;
 }
 
 export interface OcxContext {

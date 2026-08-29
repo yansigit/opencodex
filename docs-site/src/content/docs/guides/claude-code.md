@@ -316,6 +316,44 @@ entirely). The stub keeps tool call/result pairing intact.
 
 Lookup order: discovery alias → exact id → id with date suffix stripped (`-20250514`) → passthrough.
 
+## Compatibility mode
+
+Routed Claude requests are evaluated for feature compatibility before the proxy contacts any upstream. The analyzer is a small pure function with no network or routing side effects and no Lab dependency.
+
+```json
+{
+  "claudeCode": {
+    "compatibility": "enforce"
+  }
+}
+```
+
+| Mode | Value | Behavior |
+| --- | --- | --- |
+| `enforce` | default | Pre-network check: requests carrying incompatible features are rejected with `400 invalid_request_error` and a reason naming the feature codes. Compatible requests pass through unchanged. |
+| `shadow` | opt-in escape | Same feature-code detection, but never rejects; the decision is recorded for diagnostics only. |
+
+Invalid values are ignored on load and therefore use the `enforce` default.
+
+Feature codes (stable, also visible in the bounded debug ring):
+
+| Code | Meaning | Enforce result |
+| --- | --- | --- |
+| `cache_control` | Positional Anthropic prompt-cache marker | reject on translated targets; preserved on Anthropic targets |
+| `context_management` | Top-level `context_management` field | reject |
+| `thinking_block` | `thinking` param or `thinking`/`redacted_thinking` content blocks | allowed (informational) |
+| `tool_search` | Claude tool-search declaration, call, or result | translate through Responses tool search |
+| `web_search_tool` | Claude web-search declaration, call, or result | translate through the existing web-search path |
+| `deferred_tools` | Tools with `defer_loading: true` or a top-level deferred flag | translate only on the native Responses adapter; reject elsewhere |
+| `input_examples` | Anthropic-native tool input examples | preserve on Anthropic targets; reject on translated targets |
+| `documents`, `code_execution`, `computer_use`, `mcp_tool`, `server_tool` | Anthropic-native content or server tools without a lossless Responses lowering | reject on translated targets; preserve on Anthropic targets |
+| `container`, `inference_geo`, `user_profile`, `unknown_body_field`, `unknown_content_block` | Anthropic-only or unrecognized semantic request fields | reject on translated targets; preserve on Anthropic targets |
+| `structured_output` | `output_config.format` `json_schema`/`json_object` | translate |
+| `service_tier` | Anthropic service tier | translate through provider capability sanitation |
+| `beta_*` | Each `anthropic-beta` token, sanitized to `beta_<name>` (sorted, de-duplicated) | allowed (informational) |
+
+Diagnostics: the inbound debug ring (`GET /api/claude/inbound-debug`) carries `featureCodes`, `adapter`, and `decision` (`allow`/`reject`/`shadow`) per entry when capture is enabled. Check `featureCodes` there before changing the mode. Native passthrough is unchanged and never gated by this mode.
+
 ## Sidecar matrix: web search and image understanding
 
 Routed models do not all have the same hosted tools or image support. opencodex fills those gaps

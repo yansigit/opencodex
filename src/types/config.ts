@@ -136,10 +136,12 @@ export interface OcxClaudeCodeConfig {
   /** Auto-reconcile Desktop 3P config when provider catalog changes. Default: enabled. */
   desktopAutoApply?: boolean;
   /**
-   * When false, omit `native/*` rows from Claude Desktop show/export/apply. Default: enabled.
-   * Routing-sidecar alias decoding is unchanged — only the Desktop model list writer.
-   */
+  * When false, omit `native/*` rows from Claude Desktop show/export/apply. Default: enabled.
+  * Routing-sidecar alias decoding is unchanged — only the Desktop model list writer.
+  */
   desktopNativeModels?: boolean;
+  /** Claude ingress compatibility gate. Defaults to enforce. */
+  compatibility?: "shadow" | "enforce";
 }
 
 export type OcxClaudeDesktopFamily = "opus" | "fable" | "sonnet" | "haiku";

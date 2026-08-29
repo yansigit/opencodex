@@ -15,7 +15,11 @@ const SCOPES = "org:create_api_key user:profile user:inference";
 export const ANTHROPIC_OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
 export const CLAUDE_CODE_SYSTEM_INSTRUCTION = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const CLAUDE_TOOL_PREFIX = "custom_";
-const ANTHROPIC_BUILTIN_TOOLS = new Set(["web_search", "code_execution", "text_editor", "computer"]);
+const ANTHROPIC_BUILTIN_TOOLS = new Set([
+  "web_search", "web_fetch", "code_execution", "bash_code_execution",
+  "text_editor", "text_editor_code_execution", "computer",
+  "tool_search_tool_regex", "tool_search_tool_bm25",
+]);
 
 /** OAuth tokens reject arbitrary tool names; prefix custom tools (Anthropic builtins are exempt). */
 export function applyClaudeToolPrefix(name: string): string {

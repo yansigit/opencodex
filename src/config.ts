@@ -1009,7 +1009,10 @@ const configSchema = z.object({
   if (claudeCode !== undefined && (!claudeCode || typeof claudeCode !== "object" || Array.isArray(claudeCode))) {
     ctx.addIssue({ code: "custom", path: ["claudeCode"], message: "claudeCode must be an object" });
   } else if (claudeCode) {
-    const claude = claudeCode as { desktopProfile?: unknown };
+    const claude = claudeCode as {
+      desktopProfile?: unknown;
+      compatibility?: unknown;
+    };
     if (claude.desktopProfile !== undefined) {
       try {
         parseDesktopProfile(claude.desktopProfile);
@@ -1020,6 +1023,13 @@ const configSchema = z.object({
           message: error instanceof Error ? error.message : String(error),
         });
       }
+    }
+    if (claude.compatibility !== undefined && claude.compatibility !== "shadow" && claude.compatibility !== "enforce") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["claudeCode", "compatibility"],
+        message: "compatibility must be \"shadow\" or \"enforce\"",
+      });
     }
   }
 
@@ -1702,6 +1712,8 @@ function normalizePersistedClaudeCode(claudeCode: unknown): OcxConfig["claudeCod
   if (Object.hasOwn(normalized, "subagentEffort") && !isClaudeSubagentEffort(normalized.subagentEffort)) {
     delete normalized.subagentEffort;
   }
+  const isValidMode = (v: unknown): v is "shadow" | "enforce" => v === "shadow" || v === "enforce";
+  if (Object.hasOwn(normalized, "compatibility") && !isValidMode(normalized.compatibility)) delete normalized.compatibility;
   // A hand-authored config never passes through the management validator, so coerce here too.
   // A malformed classifierFallbacks (a bare string, or an array with non-string entries) would
   // otherwise reach the resolver unchecked.
