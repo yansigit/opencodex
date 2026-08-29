@@ -356,6 +356,7 @@ exit 64
 
       expect(installed.installed).toBe(false);
       expect(installed.message).toContain("saved launcher resolved back to the generated shim");
+      expect(installed.message).not.toContain("probe process group could not be terminated cleanly");
       expect(installed.message).toContain("original launcher was restored");
       expect(readFileSync(codexPath, "utf8")).toBe(original);
       expect(existsSync(`${codexPath}.opencodex-real`)).toBe(false);
