@@ -29,6 +29,7 @@ scripts so local commands match CI:
 ```bash
 bun run typecheck                 # strict TypeScript check
 bun run test                      # complete tests/ suite
+bun run test:container            # macOS with Apple Container: isolated container suite
 bun test tests/router.test.ts     # focused test file
 bun run build:gui                 # Vite GUI build + package preparation
 bun run privacy:scan              # credential/privacy scan used by CI
@@ -39,6 +40,10 @@ Most tests are flat `tests/*.test.ts` Bun tests. `tests/helpers/` contains share
 `tests/e2e-style/` contains broader native-parity scenarios. Keep a focused regression near the
 existing tests for the subsystem you change; run the full suite for shared routing, adapters, config,
 or server behavior.
+
+For a non-trivial pre-PR check on a Mac with Apple Container available, also run `bun run test:container`.
+Start the service with `container system start` first if needed. Ordinary `bun run prepush` remains
+host-native and does not include this suite; it is not a GitHub-hosted CI job.
 
 The docs site you're reading lives in `docs-site/` (Astro + Starlight):
 
