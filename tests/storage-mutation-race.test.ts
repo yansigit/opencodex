@@ -208,6 +208,14 @@ async function stopRaceServer(server: ReturnType<typeof startServer>): Promise<v
   await drainAndShutdown(server, 5_000);
 }
 
+function acquiredSignal(): { promise: Promise<void>; notify: () => void; release: () => void; releasePromise: Promise<void> } {
+  let notify!: () => void;
+  let release!: () => void;
+  const promise = new Promise<void>(resolve => { notify = resolve; });
+  const releasePromise = new Promise<void>(resolve => { release = resolve; });
+  return { promise, notify, release, releasePromise };
+}
+
 describe("storage mutation coordinator", () => {
   test("cleanup restore and policy retain their exact mutation lease through worker join", () => {
     const home = join(testDir, "exact-lease-home");
@@ -220,7 +228,7 @@ describe("storage mutation coordinator", () => {
   });
   test("policy run is rejected while restore holds the shared mutation slot", async () => {
     const home = isolatedCodexHome!.path;
-    setRestoreTrashJobTestHooks({ blockMs: 400, runInProcess: true });
+    const acquired = acquiredSignal();
     seedArchivedPair(home);
 
     const server = startServer(0);
@@ -234,13 +242,15 @@ describe("storage mutation coordinator", () => {
       const cleanup = await cleanupRes.json();
       const trashId = cleanup.trashDir as string;
 
+      setRestoreTrashJobTestHooks({ blockMs: 10, runInProcess: true, onAcquired: acquired.notify, waitForRelease: acquired.releasePromise });
       const restorePromise = runRestoreTrashEntryJob(trashId, { codexHome: home });
-      await Bun.sleep(50);
+      await acquired.promise;
 
       const { startedAt } = await enablePolicyAndRun(server.url);
       const done = await waitForPolicyJob(server.url, startedAt);
       expect(done.job.lastOutcome?.ok).toBe(false);
       expect(done.job.lastOutcome?.error).toBe("storage_mutation_busy");
+      acquired.release();
 
       const restoreResult = await restorePromise;
       expect(restoreResult.ok).toBe(true);
@@ -251,7 +261,8 @@ describe("storage mutation coordinator", () => {
 
   test("policy run is rejected while manual cleanup holds the shared mutation slot", async () => {
     const home = isolatedCodexHome!.path;
-    setArchivedCleanupJobTestHooks({ blockMs: 1200 });
+    const acquired = acquiredSignal();
+    setArchivedCleanupJobTestHooks({ blockMs: 10, onAcquired: acquired.notify, waitForRelease: acquired.releasePromise });
     seedArchivedPair(home);
 
     const server = startServer(0);
@@ -262,12 +273,13 @@ describe("storage mutation coordinator", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ percent: 50, mode: "quarantine", digest: preview.digest }),
       });
-      await Bun.sleep(80);
+      await acquired.promise;
 
       const { startedAt } = await enablePolicyAndRun(server.url);
       const done = await waitForPolicyJob(server.url, startedAt);
       expect(done.job.lastOutcome?.ok).toBe(false);
       expect(done.job.lastOutcome?.error).toBe("storage_mutation_busy");
+      acquired.release();
 
       const cleanupRes = await cleanupPromise;
       expect(cleanupRes.status).toBe(200);
@@ -278,13 +290,14 @@ describe("storage mutation coordinator", () => {
 
   test("manual cleanup and restore are rejected while policy job holds the shared mutation slot", async () => {
     const home = isolatedCodexHome!.path;
-    setStorageCleanupPolicyJobTestHooks({ blockMs: 1200 });
+    const acquired = acquiredSignal();
+    setStorageCleanupPolicyJobTestHooks({ blockMs: 10, onAcquired: acquired.notify, waitForRelease: acquired.releasePromise });
     seedArchivedPair(home);
 
     const server = startServer(0);
     try {
       const { startedAt } = await enablePolicyAndRun(server.url);
-      await Bun.sleep(80);
+      await acquired.promise;
 
       const preview = await previewDigest(server.url, 50);
       const cleanupRes = await fetch(new URL("/api/storage/cleanup", server.url), {
@@ -302,6 +315,7 @@ describe("storage mutation coordinator", () => {
       });
       expect(restoreRes.status).toBe(409);
       expect((await restoreRes.json()).error).toBe("storage_mutation_busy");
+      acquired.release();
 
       // Drain the blocked policy job before stop/teardown — leaving it mid-block leaves
       // Windows holding OPENCODEX_HOME (SQLite/job handles) and afterEach rmSync fails EBUSY.
@@ -313,7 +327,7 @@ describe("storage mutation coordinator", () => {
 
   test("cleanup quarantine and permanent are rejected while restore holds slot after file moves", async () => {
     const home = isolatedCodexHome!.path;
-    const holdMs = 2500;
+    const holdMs = 100;
     setRestoreTrashJobTestHooks({
       restoreTest: { holdAfterFileMovesMs: holdMs },
     });
@@ -344,9 +358,7 @@ describe("storage mutation coordinator", () => {
 
       const restoredPath = join(home, "archived_sessions", "rollout-old.jsonl");
       const movedDeadline = Date.now() + 8000;
-      while (!existsSync(restoredPath) && Date.now() < movedDeadline) {
-        await Bun.sleep(20);
-      }
+      while (!existsSync(restoredPath) && Date.now() < movedDeadline) await Bun.sleep(1);
       expect(existsSync(restoredPath)).toBe(true);
       expect(existsSync(join(trashStage, "rollout-old.jsonl"))).toBe(false);
       expect(existsSync(join(trashStage, "restore-pending.json"))).toBe(true);
@@ -392,8 +404,8 @@ describe("storage mutation coordinator", () => {
 
   test("restore is rejected while cleanup holds the shared mutation slot", async () => {
     const home = isolatedCodexHome!.path;
-    const blockMs = 1200;
-    setArchivedCleanupJobTestHooks({ blockMs });
+    const acquired = acquiredSignal();
+    setArchivedCleanupJobTestHooks({ blockMs: 10, onAcquired: acquired.notify, waitForRelease: acquired.releasePromise });
     seedArchivedPair(home);
 
     const server = startServer(0);
@@ -405,7 +417,7 @@ describe("storage mutation coordinator", () => {
         body: JSON.stringify({ percent: 50, mode: "quarantine", digest: preview.digest }),
       });
 
-      await Bun.sleep(80);
+      await acquired.promise;
 
       const restoreAttempt = await fetch(new URL("/api/storage/trash/restore", server.url), {
         method: "POST",
@@ -414,6 +426,7 @@ describe("storage mutation coordinator", () => {
       });
       expect(restoreAttempt.status).toBe(409);
       expect((await restoreAttempt.json()).error).toBe("storage_mutation_busy");
+      acquired.release();
       expect(existsSync(join(home, "archived_sessions", "rollout-old.jsonl"))).toBe(true);
       expect(existsSync(join(home, "archived_sessions", "rollout-new.jsonl"))).toBe(true);
       expect(trashStageCount(home)).toBe(0);
@@ -433,7 +446,7 @@ describe("storage mutation coordinator", () => {
 
   test("second restore while first is in flight returns storage_mutation_busy", async () => {
     const home = isolatedCodexHome!.path;
-    setRestoreTrashJobTestHooks({ blockMs: 800, runInProcess: true });
+    const acquired = acquiredSignal();
     seedArchivedPair(home);
 
     const server = startServer(0);
@@ -447,12 +460,13 @@ describe("storage mutation coordinator", () => {
       const cleanup = await cleanupRes.json();
       const trashId = cleanup.trashDir as string;
 
+      setRestoreTrashJobTestHooks({ blockMs: 10, runInProcess: true, onAcquired: acquired.notify, waitForRelease: acquired.releasePromise });
       const first = fetch(new URL("/api/storage/trash/restore", server.url), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ id: trashId }),
       });
-      await Bun.sleep(50);
+      await acquired.promise;
       const second = await fetch(new URL("/api/storage/trash/restore", server.url), {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -460,6 +474,7 @@ describe("storage mutation coordinator", () => {
       });
       expect(second.status).toBe(409);
       expect((await second.json()).error).toBe("storage_mutation_busy");
+      acquired.release();
 
       const firstRes = await first;
       expect(firstRes.status).toBe(200);

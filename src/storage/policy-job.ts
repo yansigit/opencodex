@@ -62,6 +62,12 @@ export interface PolicyJobTestHooks {
    * policy load, so concurrent PUTs can race completion metadata writes.
    */
   blockMs?: number;
+  /** Notify race tests once the shared mutation lease is acquired. */
+  onAcquired?: () => void;
+  /** Notify after the worker has loaded its policy snapshot. */
+  onPolicyLoaded?: () => void;
+  /** Keep the policy job at the lease boundary until a competing request is issued. */
+  waitForRelease?: Promise<void>;
   /**
    * When true, run on the main thread via `queueMicrotask` + optional sleep.
    * Used only for unit tests that cannot spawn workers; responsiveness tests
@@ -292,7 +298,7 @@ function applyMutationBusy(): void {
   };
 }
 
-function runInWorker(opts: RequestPolicyRunOptions & { blockMs?: number }): Promise<PolicyRunResult> {
+function runInWorker(opts: RequestPolicyRunOptions & { blockMs?: number; notifyLoaded?: () => void }): Promise<PolicyRunResult> {
   const reservation = tryReserveStorageWorker();
   if (!reservation) return Promise.reject(new StorageWorkerAdmissionBusyError());
   return withStorageWorkerSpawnGate(() => new Promise<PolicyRunResult>((resolve, reject) => {
@@ -335,6 +341,10 @@ function runInWorker(opts: RequestPolicyRunOptions & { blockMs?: number }): Prom
       if (!data || typeof data !== "object") return;
       const msg = data as Record<string, unknown>;
       if (msg.requestId !== requestId) return;
+      if (msg.type === "loaded") {
+        opts.notifyLoaded?.();
+        return;
+      }
       if (msg.type === "done" && msg.result && typeof msg.result === "object") {
         finish(() => resolve(msg.result as PolicyRunResult));
         return;
@@ -357,6 +367,7 @@ function runInWorker(opts: RequestPolicyRunOptions & { blockMs?: number }): Prom
       ...(opts.codexHome ? { codexHome: opts.codexHome } : {}),
       ...(opts.busyTimeoutMs !== undefined ? { busyTimeoutMs: opts.busyTimeoutMs } : {}),
       ...(opts.blockMs !== undefined ? { blockMs: opts.blockMs } : {}),
+      ...(opts.notifyLoaded ? { notifyLoaded: true } : {}),
       env: {
         ...(process.env.CODEX_HOME ? { CODEX_HOME: process.env.CODEX_HOME } : {}),
         ...(process.env.OPENCODEX_HOME ? { OPENCODEX_HOME: process.env.OPENCODEX_HOME } : {}),
@@ -379,6 +390,8 @@ async function executeJob(opts: RequestPolicyRunOptions): Promise<void> {
     return;
   }
   heldMutationLease = gate.lease;
+  testHooks?.onAcquired?.();
+  await testHooks?.waitForRelease;
   try {
     const blockMs = testHooks?.blockMs;
     let result: PolicyRunResult;
@@ -392,12 +405,14 @@ async function executeJob(opts: RequestPolicyRunOptions): Promise<void> {
         codexHome,
         ...(opts.busyTimeoutMs !== undefined ? { busyTimeoutMs: opts.busyTimeoutMs } : {}),
         ...(typeof blockMs === "number" && blockMs > 0 ? { holdAfterLoadMs: blockMs } : {}),
+        ...(testHooks?.onPolicyLoaded ? { onPolicyLoaded: testHooks.onPolicyLoaded } : {}),
       });
     } else {
       result = await runInWorker({
         ...opts,
         codexHome,
         ...(typeof blockMs === "number" && blockMs > 0 ? { blockMs } : {}),
+        ...(testHooks?.onPolicyLoaded ? { notifyLoaded: testHooks.onPolicyLoaded } : {}),
       });
     }
 

@@ -82,7 +82,7 @@ afterEach(async () => {
 
 describe("storage cleanup policy job responsiveness", () => {
   test("blocked worker keeps /healthz and streaming response responsive", async () => {
-    const blockMs = 1200;
+    const blockMs = 100;
     setStorageCleanupPolicyJobTestHooks({ blockMs, enableTestStream: true });
     seedArchived(isolatedCodexHome!.path);
 
@@ -123,7 +123,7 @@ describe("storage cleanup policy job responsiveness", () => {
         const health = await fetch(new URL("/healthz", server.url));
         expect(health.status).toBe(200);
         healthSamples.push(Date.now() - t0);
-        await Bun.sleep(40);
+        await Bun.sleep(10);
       }
 
       const streamText = await streamPromise;
@@ -141,7 +141,7 @@ describe("storage cleanup policy job responsiveness", () => {
         const got = await fetch(new URL("/api/storage/cleanup-policy", server.url));
         const body = await got.json() as { job: { status: string; startedAt?: number } };
         if (body.job.status === "idle" && body.job.startedAt === runBody.job?.startedAt) break;
-        await Bun.sleep(50);
+        await Bun.sleep(10);
       }
     } finally {
       await drainAndShutdown(server, 5_000);

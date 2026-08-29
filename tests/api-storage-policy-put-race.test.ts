@@ -27,8 +27,9 @@ afterEach(async () => {
 });
 
 test("blocked worker completion preserves concurrent policy PUT edits", async () => {
-  const blockMs = 1_500;
-  setStorageCleanupPolicyJobTestHooks({ blockMs });
+  let acquired!: () => void;
+  const acquiredPromise = new Promise<void>(resolve => { acquired = resolve; });
+  setStorageCleanupPolicyJobTestHooks({ blockMs: 100, onPolicyLoaded: acquired });
   seedArchived(harness.isolatedCodexHome.path);
   const server = startServer(0);
   try {
@@ -52,19 +53,7 @@ test("blocked worker completion preserves concurrent policy PUT edits", async ()
     expect(runStart.started).toBe(true);
     expect(runStart.job?.status).toBe("running");
 
-    const editDeadline = Date.now() + 5_000;
-    let sawRunning = false;
-    while (Date.now() < editDeadline) {
-      const peek = await fetch(new URL("/api/storage/cleanup-policy", server.url));
-      const peekBody = await peek.json() as { job?: { status?: string } };
-      if (peekBody.job?.status === "running") {
-        sawRunning = true;
-        break;
-      }
-      await Bun.sleep(20);
-    }
-    expect(sawRunning).toBe(true);
-    await Bun.sleep(800);
+    await acquiredPromise;
 
     const put = await fetch(new URL("/api/storage/cleanup-policy", server.url), {
       method: "PUT",

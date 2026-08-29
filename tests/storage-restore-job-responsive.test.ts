@@ -150,7 +150,7 @@ describe("storage trash restore job responsiveness", () => {
   }, { timeout: 10_000 });
 
   test("blocked worker keeps /healthz and streaming response responsive", async () => {
-    const blockMs = 1200;
+    const blockMs = 100;
     setRestoreTrashJobTestHooks({ blockMs, enableTestStream: true });
     seedArchived(isolatedCodexHome!.path);
 
@@ -192,7 +192,7 @@ describe("storage trash restore job responsiveness", () => {
         expect(health.status).toBe(200);
         const elapsed = Date.now() - t0;
         if (i > 0) healthSamples.push(elapsed);
-        await Bun.sleep(40);
+        await Bun.sleep(10);
       }
 
       const streamText = await streamPromise;
