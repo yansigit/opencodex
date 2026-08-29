@@ -26,6 +26,8 @@ import {
   setArchivedCleanupJobTestHooks,
 } from "../src/storage/cleanup-job";
 import {
+  requestStorageCleanupPolicyRun,
+  resetStorageCleanupPolicyJobForTests,
   resetStorageCleanupPolicyJobForTestsAsync,
   setStorageCleanupPolicyJobTestHooks,
 } from "../src/storage/policy-job";
@@ -217,6 +219,41 @@ function acquiredSignal(): { promise: Promise<void>; notify: () => void; release
 }
 
 describe("storage mutation coordinator", () => {
+  test("reset while policy waits cannot release a newer mutation lease", async () => {
+    const home = join(testDir, "reset-while-waiting-home");
+    let releaseWait!: () => void;
+    const waitForRelease = new Promise<void>(resolve => { releaseWait = resolve; });
+    let policyLoaded = false;
+    setStorageCleanupPolicyJobTestHooks({
+      runInProcess: true,
+      onAcquired: () => undefined,
+      onPolicyLoaded: () => { policyLoaded = true; },
+      waitForRelease,
+    });
+
+    const started = requestStorageCleanupPolicyRun({ reason: "manual", force: true, codexHome: home });
+    expect(started.accepted).toBe(true);
+
+    // The hook runs synchronously before the await, so the policy job now owns
+    // the old lease while its continuation is parked at the test boundary.
+    await Promise.resolve();
+    expect(getActiveStorageMutation(home)?.kind).toBe("policy");
+
+    resetStorageCleanupPolicyJobForTests();
+    const newer = tryBeginStorageMutation("cleanup", home);
+    try {
+      expect(newer.acquired).toBe(true);
+
+      releaseWait();
+      await Bun.sleep(0);
+      expect(policyLoaded).toBe(false);
+      expect(getActiveStorageMutation(home)?.kind).toBe("cleanup");
+    } finally {
+      releaseWait();
+      if (newer.acquired) newer.lease.release();
+    }
+  }, { timeout: 5_000 });
+
   test("cleanup restore and policy retain their exact mutation lease through worker join", () => {
     const home = join(testDir, "exact-lease-home");
     const owner = tryBeginStorageMutation("cleanup", home);

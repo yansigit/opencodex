@@ -389,10 +389,12 @@ async function executeJob(opts: RequestPolicyRunOptions): Promise<void> {
     }
     return;
   }
-  heldMutationLease = gate.lease;
-  testHooks?.onAcquired?.();
-  await testHooks?.waitForRelease;
+  const lease = gate.lease;
+  heldMutationLease = lease;
   try {
+    testHooks?.onAcquired?.();
+    await testHooks?.waitForRelease;
+    if (generation !== runGeneration) return;
     const blockMs = testHooks?.blockMs;
     let result: PolicyRunResult;
 
@@ -423,7 +425,10 @@ async function executeJob(opts: RequestPolicyRunOptions): Promise<void> {
     if (err instanceof StorageWorkerAdmissionBusyError) applyMutationBusy();
     else applyFailed(err instanceof Error ? err.message : "worker_failed");
   } finally {
-    releaseHeldMutationSlot();
+    // A reset may let a newer run acquire the global mirror before this stale
+    // continuation resumes. Release only the lease captured by this run.
+    lease.release();
+    if (heldMutationLease === lease) heldMutationLease = undefined;
   }
 }
 
