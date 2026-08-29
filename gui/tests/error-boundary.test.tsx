@@ -69,3 +69,41 @@ test("shows the failed page and recovers when Reload resets the boundary", async
     root.unmount();
   });
 });
+
+test("delegates Reload when a lazy chunk needs a full-page retry", async () => {
+  const { createRoot } = await import("react-dom/client");
+  const container = document.createElement("div");
+  document.body.append(container);
+  let reloads = 0;
+
+  function FailedChunk() {
+    throw new Error("Importing a module script failed");
+  }
+
+  const root = createRoot(container);
+  const previousConsoleError = console.error;
+  console.error = () => undefined;
+  try {
+    await act(async () => {
+      root.render(
+        <ErrorBoundary
+          pageName="Providers"
+          title="Page failed to load"
+          message="Try again."
+          detailsLabel="Error"
+          reloadLabel="Reload"
+          onReload={() => { reloads += 1; }}
+        >
+          <FailedChunk />
+        </ErrorBoundary>,
+      );
+    });
+
+    await act(async () => { container.querySelector<HTMLButtonElement>("button")!.click(); });
+    expect(reloads).toBe(1);
+    expect(container.textContent).toContain("Importing a module script failed");
+  } finally {
+    console.error = previousConsoleError;
+    await act(async () => root.unmount());
+  }
+});

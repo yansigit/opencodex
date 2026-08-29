@@ -1465,6 +1465,25 @@ describe("sanitizeEncryptedContentInPlace", () => {
     }
   });
 
+  test("plaintext child completions normalize without encrypted-content rewrites", () => {
+    const input = [{
+      type: "agent_message",
+      id: "amsg_1",
+      author: "/root/worker",
+      recipient: "/root",
+      content: [{ type: "output_text", text: "Worker complete." }],
+    }];
+
+    expect(sanitizeEncryptedContentInPlace(input)).toBe(0);
+    expect(input[0]).toEqual({
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: "Worker complete." }],
+    });
+    expect(parseRequest({ model: "opencode-go/muse-spark-1.2-contributor", input }).context.messages)
+      .toEqual([{ role: "user", content: "Worker complete.", timestamp: expect.any(Number) }]);
+  });
+
   test("mixed slot (hook preamble + embedded Fernet task) splits into text + encrypted parts", () => {
     const fernet = fernetFixture();
     const input = [

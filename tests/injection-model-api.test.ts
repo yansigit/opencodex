@@ -12,6 +12,7 @@ import { refreshCodexModelCatalog } from "../src/codex/refresh";
 import { handleManagementAPI } from "../src/server/management-api";
 import { CODEX_REASONING_LEVELS } from "../src/reasoning-effort";
 import type { OcxConfig } from "../src/types";
+import { isolatedDiskManagementPersistence } from "./helpers/management-auth";
 
 const savedHome = process.env.OPENCODEX_HOME;
 let tempHome: string | null = null;
@@ -37,7 +38,7 @@ async function put(config: OcxConfig, body: unknown): Promise<Response> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const res = await handleManagementAPI(req, new URL(req.url), config);
+  const res = await handleManagementAPI(req, new URL(req.url), config, isolatedDiskManagementPersistence());
   expect(res).not.toBeNull();
   return res!;
 }

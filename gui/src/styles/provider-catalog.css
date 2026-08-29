@@ -28,6 +28,16 @@
   border-bottom-color: var(--accent);
 }
 
+.provider-catalog-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.provider-catalog-panel[hidden] {
+  display: none;
+}
+
 .provider-catalog-accounts-hint {
   padding: 2px 2px 0;
 }

@@ -16,11 +16,13 @@ import {
   parseObservationDto,
   parseSubjectDetail,
   parseVerdictPage,
+  subjectSuggestions,
   shortSubjectId,
   verdictQueryFromFilters,
 } from "../src/pages/compatibility-matrix-shared";
 import {
   fetchAllSubjects,
+  fetchLabPageData,
   fetchLabStatus,
   fetchVerdictDetail,
   LabDataContractError,
@@ -378,6 +380,58 @@ test("11. exact subject picker filters through the API contract", () => {
     subjectId: "subject-alpha",
     suiteId: "responses-core",
   });
+});
+
+test("initial matrix loading requests only the first subject page", async () => {
+  const requests: string[] = [];
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.endsWith("/api/lab/status")) return Response.json(STATUS_AVAILABLE);
+    if (url.includes("/api/lab/verdicts")) return Response.json({ ...VERDICTS_PAGE_1, hasMore: false });
+    if (url.includes("/api/lab/subjects")) return Response.json({ ...SUBJECTS, hasMore: true, nextCursor: "subject-2" });
+    return new Response("{}", { status: 404 });
+  }) as typeof fetch;
+
+  const page = await fetchLabPageData(API_BASE, {}, new AbortController().signal);
+  const subjectRequests = requests.filter(url => url.includes("/api/lab/subjects"));
+  expect(subjectRequests).toHaveLength(1);
+  expect(new URL(subjectRequests[0]!).searchParams.get("limit")).toBe("50");
+  expect(new URL(subjectRequests[0]!).searchParams.has("cursor")).toBe(false);
+  expect(page.subjectsTruncated).toBe(true);
+});
+
+test("subject suggestions are deduplicated and capped at 50", () => {
+  const subjects = Array.from({ length: 49 }, (_, index) => ({ subjectId: `subject-${index}`, subjectKind: "route" }));
+  const verdicts = Array.from({ length: 10 }, (_, index) => ({
+    ...parseVerdictPage(VERDICTS_PAGE_1).verdicts[0]!,
+    projectionKey: `extra-${index}`,
+    subjectId: index === 0 ? "subject-0" : `verdict-subject-${index}`,
+  }));
+  const suggestions = subjectSuggestions(subjects, verdicts);
+  expect(suggestions).toHaveLength(50);
+  expect(new Set(suggestions.map(subject => subject.subjectId)).size).toBe(50);
+  expect(suggestions.some(subject => subject.subjectId === "verdict-subject-1")).toBe(true);
+});
+
+test("subject suggestions retain verdict-only subjects when the first page is full", () => {
+  const subjects = Array.from({ length: 50 }, (_, index) => ({ subjectId: `subject-${index}`, subjectKind: "route" }));
+  const verdict = { ...parseVerdictPage(VERDICTS_PAGE_1).verdicts[0]!, subjectId: "verdict-only" };
+  const suggestions = subjectSuggestions(subjects, [verdict]);
+  expect(suggestions).toHaveLength(50);
+  expect(suggestions.some(subject => subject.subjectId === "verdict-only")).toBe(true);
+  expect(suggestions.some(subject => subject.subjectId === "subject-49")).toBe(false);
+});
+
+test("subject filter uses a labelled native datalist input", async () => {
+  installLabFetch();
+  const { root, container } = await renderMatrix();
+  await waitFor(() => container.querySelector("#lab-filter-subject") !== null);
+  const input = container.querySelector("#lab-filter-subject");
+  expect(input?.tagName).toBe("INPUT");
+  expect(input?.getAttribute("list")).toBe("lab-subject-suggestions");
+  expect(container.querySelectorAll("#lab-subject-suggestions option").length).toBeLessThanOrEqual(50);
+  await act(async () => root.unmount());
 });
 
 test("12. load more pagination appends rows", async () => {

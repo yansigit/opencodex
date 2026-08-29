@@ -50,7 +50,9 @@ bun run dev:gui
 
 ### 섹션으로 바로 가기
 
-레이아웃은 하나뿐이라 전환할 설정이 없습니다. 대신 Dashboard의 섹션마다 주소가 있습니다. `#dashboard`는 Overview, `#dashboard/providers`와 `#dashboard/models`는 나머지 두 섹션입니다. 새로고침하거나 북마크해도, 뒤로 가도 보던 섹션이 그대로 유지됩니다. **Logs**도 `#logs`와 `#logs/debug`로 똑같이 동작합니다. 예전 `#providers/workspace` 북마크는 `#providers`로 넘어갑니다.
+반응형 레이아웃은 하나뿐이라 전환할 설정이 없습니다. 데스크톱에서는 사이드바가 기본 탐색 역할을 하고, 좁은 화면에서는 **메뉴 열기**로 같은 페이지 링크를 엽니다. Dashboard의 섹션마다 주소도 있습니다. `#dashboard`는 Overview, `#dashboard/providers`와 `#dashboard/models`는 나머지 두 섹션입니다. 새로고침하거나 북마크해도, 뒤로 가도 보던 섹션이 그대로 유지됩니다. **Logs**도 `#logs`와 `#logs/debug`로 똑같이 동작합니다. 예전 `#providers/workspace` 북마크는 `#providers`로 넘어갑니다.
+
+Overview에는 30일 동안의 요청 및 token 추이를 보여 주는 **30일 활동** 패널이 있습니다. 스파크라인에서 날짜를 선택하면 그날의 합계를 확인할 수 있고, **사용량 보기**를 누르면 전체 Usage 페이지를 엽니다. Overview를 불러온 뒤 새로고침이 중단되어도 마지막으로 성공한 데이터는 계속 표시되며, 다시 연결 중이라는 알림에서 **재시도**를 선택할 수 있습니다. 최초 연결에 실패하면 `ocx start` 안내와 같은 재시도 동작이 표시됩니다.
 
 **Logs**와 **Usage**의 비용 값은 보고된 토큰으로 계산한 API 정가 환산치입니다. 결제 영수증이나
 실제 청구 증거가 아니며, 구독 사용량 또는 프로바이더 크레딧이 대신 적용될 수 있습니다.

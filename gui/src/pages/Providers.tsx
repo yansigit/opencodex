@@ -5,7 +5,7 @@ import ProviderDetails from "../components/provider-workspace/ProviderDetails";
 import type { WorkspaceProvider } from "../provider-workspace/catalog";
 import { ensureOpenAiProvider, openAiAccountProviderState, OpenAiEnableError } from "../provider-payload";
 import { oauthTosRisk } from "../oauth-tos-risk";
-import { ToastNotice, type NoticeTone } from "../ui";
+import { Notice, ToastNotice, type NoticeTone } from "../ui";
 import { IconPlus } from "../icons";
 import { useT } from "../i18n/shared";
 import { useProviderAccountPools } from "../hooks/useProviderAccountPools";
@@ -32,6 +32,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const [status, setStatus] = useState("");
   const [statusOk, setStatusOk] = useState(false);
   const [statusTone, setStatusTone] = useState<NoticeTone>("err");
+  const [configLoadFailed, setConfigLoadFailed] = useState(false);
   /** Bumped on every notify so repeated identical success toasts restart the dismiss timer. */
   const [statusRevision, setStatusRevision] = useState(0);
   const [oauthProviders, setOauthProviders] = useState<string[]>([]);
@@ -139,7 +140,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     setQuotaRefresh(previous => ({ epoch: previous.epoch + 1, force }));
   }, []);
   const { fetchConfig, fetchOauth, fetchProviderQuotas } = useProvidersFetch({
-    apiBase, t, setConfig, setOauthProviders, setOauthStatus, notify,
+    apiBase, setConfig, setOauthProviders, setOauthStatus, setConfigLoadFailed,
     invalidateProviderQuotas,
     configCacheKey,
   });
@@ -243,16 +244,19 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         <div className="page-head">
           <h2>{t("nav.providers")}</h2>
         </div>
-        {status
-          ? <ToastNotice tone={statusTone} onDismiss={clearStatus} dismissLabel={t("common.close")}>{status}</ToastNotice>
-          : (
+        {status && <ToastNotice tone={statusTone} onDismiss={clearStatus} dismissLabel={t("common.close")}>{status}</ToastNotice>}
+        {configLoadFailed ? (
+          <Notice tone="err">
+            {t("prov.loadConfigFail")} <button type="button" className="btn btn-ghost btn-sm" onClick={() => void fetchConfig()}>{t("common.retry")}</button>
+          </Notice>
+        ) : !status ? (
             <div className="providers-workspace providers-workspace--boot" aria-busy="true">
               <div className="providers-workspace-rail providers-workspace-rail--boot" aria-hidden="true" />
               <div className="providers-workspace-main">
                 <p className="muted"><span className="spin" aria-hidden="true" /> {t("prov.loadingConfig")}</p>
               </div>
             </div>
-          )}
+          ) : null}
       </>
     );
   }
@@ -314,6 +318,11 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       </div>
       {status && (
         <ToastNotice tone={statusTone} onDismiss={clearStatus} dismissLabel={t("common.close")}>{status}</ToastNotice>
+      )}
+      {configLoadFailed && (
+        <Notice tone="err">
+          {t("prov.loadConfigFail")} <button type="button" className="btn btn-ghost btn-sm" onClick={() => void fetchConfig()}>{t("common.retry")}</button>
+        </Notice>
       )}
       <ProviderWorkspaceShell
         onRemoveProvider={removeProvider}

@@ -62,12 +62,21 @@ kararıdır.
 
 ### Bir bölüme bağlantı verme
 
-Tek bir düzen vardır, bu nedenle yapılandırılacak bir düzen anahtarı yoktur.
+Tek bir duyarlı düzen vardır, bu nedenle yapılandırılacak bir düzen anahtarı yoktur. Masaüstünde ana
+navigasyon kenar çubuğundadır; dar ekranlarda aynı sayfa bağlantılarını **Menüyü aç** ile açın.
 Bunun yerine kontrol paneli bölümleri adreslenebilirdir: `#dashboard` Genel
 Bakış'ı açar, `#dashboard/providers` ve `#dashboard/models` diğer ikisini açar.
 Yeniden Yükle, yer imi ve Geri işlemlerinin tümü bulunduğunuz bölümü korur.
 **Günlükler** `#logs` ve `#logs/debug` ile aynı şekilde çalışır. Daha eski bir
 `#providers/workspace` yer imi artık `#providers` üzerine iner.
+
+Genel Bakış ayrıca 30 günlük istek ve belirteç eğilimlerini gösteren **30 günlük
+etkinlik** panelini içerir. Gün toplamlarını görmek için kıvılcım grafiklerinden
+birinde bir gün seçin veya tam Kullanım sayfasını açmak için **Kullanımı görüntüle**'yi
+seçin. Genel Bakış yüklendikten sonra yenileme kesilirse son başarılı veriler
+görünür kalır ve yeniden bağlanma bildirimi **Tekrar Dene** seçeneği sunar. İlk
+bağlantı başarısız olursa `ocx start` yönergeleri ve aynı yeniden deneme işlemi
+gösterilir.
 
 **Günlükler** ve **Kullanım**'daki maliyet değerleri bildirilen belirteçlerden
 hesaplanan API liste fiyatı eşdeğerleridir. Bunlar fatura makbuzları veya gerçek
@@ -108,6 +117,7 @@ ister; yerel `[agents]` varsayılanları yalnızca Codex senkronize edildikten
 sonra yeni bir görev oluşturduğunda geçerlidir. Kurallı v1/base/v2 davranışı
 için [Alt Ajan Arayüzü](/tr/guides/sub-agent-surface/) sayfasına bakın.
 :::
+
 
 Spawn geçersiz kılma garantisi **yerleşik** v2 rehberlik metni için geçerlidir.
 Özel bir `injectionPrompt` bu metnin yerini tamamen alır ve `{{model}}` ve
@@ -253,5 +263,3 @@ metin ve vizyon sınıflandırmasını kaydedilen sağlayıcı yapılandırması
 kopyalar, böylece [vizyon sidecar'ı](/tr/guides/sidecars/) manuel sınıflandırma
 olmadan doğru şekilde geçişlenir.
 :::
-
-

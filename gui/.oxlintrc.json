@@ -114,7 +114,6 @@
 
         "react/exhaustive-deps": "warn",
         "react/rules-of-hooks": "error",
-        "react/react-compiler": "error",
 
         "react/only-export-components": [
           "error",

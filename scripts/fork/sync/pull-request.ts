@@ -88,9 +88,8 @@ export function createDraftPullRequestClient(
       const matching = openPullRequests.find(pullRequest =>
         pullRequest.state === "open"
         && pullRequest.base.ref === "dev"
-        && pullRequest.head.ref === branch
-        && (pullRequest.title.includes(event.latestTag)
-          || (pullRequest.body ?? "").includes(event.latestTagSha)));
+        && pullRequest.head.ref === branch);
+      if (matching) return matching.number;
       const payload = {
         title,
         head: branch,
@@ -98,13 +97,6 @@ export function createDraftPullRequestClient(
         body,
         draft: true,
       };
-      if (matching) {
-        await request(`/pulls/${matching.number}`, {
-          method: "PATCH",
-          body: JSON.stringify(payload),
-        });
-        return matching.number;
-      }
       const created = await request("/pulls", {
         method: "POST",
         body: JSON.stringify(payload),

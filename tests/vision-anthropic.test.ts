@@ -320,6 +320,7 @@ describe("Anthropic vision planning and management config", () => {
         }),
         new URL("http://localhost/api/sidecar-settings"),
         config,
+        inMemoryManagementPersistence(config),
       );
       expect(put.status).toBe(200);
       expect((await put.json()).vision).toEqual({
@@ -336,6 +337,7 @@ describe("Anthropic vision planning and management config", () => {
         new Request("http://localhost/api/sidecar-settings"),
         new URL("http://localhost/api/sidecar-settings"),
         config,
+        inMemoryManagementPersistence(config),
       );
       const getBody = await get!.json() as Record<string, any>;
       expect(getBody.webSearch).toEqual({ model: "claude-haiku-4-5", backend: "anthropic", streamRoutedModelOutput: false });
@@ -359,6 +361,7 @@ describe("Anthropic vision planning and management config", () => {
         }),
         new URL("http://localhost/api/sidecar-settings"),
         config,
+        inMemoryManagementPersistence(config),
       );
       expect(clear.status).toBe(200);
       const clearBody = await clear.json() as Record<string, any>;
@@ -387,6 +390,7 @@ describe("Anthropic vision planning and management config", () => {
           }),
           new URL("http://localhost/api/sidecar-settings"),
           config,
+          inMemoryManagementPersistence(config),
         );
         expect(invalid?.status).toBe(400);
       }
@@ -398,6 +402,7 @@ describe("Anthropic vision planning and management config", () => {
         }),
         new URL("http://localhost/api/sidecar-settings"),
         config,
+        inMemoryManagementPersistence(config),
       );
       expect(invalidWebBackend?.status).toBe(400);
       expect(config.webSearchSidecar).toEqual({ reasoning: "high" });
@@ -426,6 +431,7 @@ describe("Anthropic vision planning and management config", () => {
           }),
           new URL("http://localhost/api/sidecar-settings"),
           config,
+          inMemoryManagementPersistence(config),
         );
         expect(resp?.status).toBe(400);
       }
@@ -439,4 +445,4 @@ describe("Anthropic vision planning and management config", () => {
     }
   });
 });
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";

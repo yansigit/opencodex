@@ -69,19 +69,19 @@ function buildProgressComment({
     ? checkLabel(cursor)
     : "not reported for this exact head";
   const rebaseText = mergeable === false && String(mergeableState || "").toLowerCase() === "behind"
-    ? `behind \`${baseRef}\` — waiting for the babysitter rebase`
+    ? `behind \`${baseRef}\` — branch preserved for agent or human resolution`
     : "checked by GitHub mergeability";
 
   return [
     "### Sync progress (bot-owned)",
     PROGRESS_MARKER,
     `- Head: \`${String(headSha).toLowerCase()}\``,
-    `- Rebase onto \`${baseRef}\`: ${rebaseText}`,
+    `- Base relation to \`${baseRef}\`: ${rebaseText}`,
     `- Mergeability: **${mergeableText}**${mergeableState ? ` (state: \`${mergeableState}\`)` : ""}`,
     `- CI/CD for this exact head: ${checkText}`,
     `- Cursor Bugbot: ${cursorText}`,
     "",
-    "This comment is refreshed on PR updates and completed check runs. The babysitter reports failures and performs safe rebases; it never merges the PR.",
+    "This comment is refreshed on PR updates and completed check runs. The babysitter reports status; it never updates or merges the branch.",
     `Last reconciled: ${reconciledAt}`,
   ].join("\n");
 }

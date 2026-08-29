@@ -27,6 +27,12 @@ describe("sync PR babysitter", () => {
     assert.match(workflow, /cursor-sync-progress/);
   });
 
+  it("observes agent-owned branches without updating them", () => {
+    assert.doesNotMatch(workflow, /contents:\s*write/);
+    assert.doesNotMatch(workflow, /git\s+(?:push|merge|checkout)/);
+    assert.doesNotMatch(workflow, /Auto-rebase stale/);
+  });
+
   it("uses the newest result for duplicate check names", () => {
     const checks = latestChecks([
       { id: 2, name: "ci", status: "completed", conclusion: "failure" },
@@ -69,6 +75,6 @@ describe("sync PR babysitter", () => {
     assert.match(body, /DIRTY \/ not mergeable/);
     assert.match(body, /`ci` — failure/);
     assert.match(body, /Cursor Bugbot: `Cursor Bugbot` — in_progress/);
-    assert.match(body, /never merges the PR/);
+    assert.match(body, /never updates or merges the branch/);
   });
 });
