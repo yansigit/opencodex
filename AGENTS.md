@@ -166,6 +166,10 @@ credential is equally reachable by both the browser and the agent, so no check
 inside this process can tell them apart. The real boundary is the rule above, and
 it binds you regardless of which mechanism is within reach.
 
+## Merge automation invariants
+
+Required merge checks are `ci`, `hygiene`, `enforce-target`, and `mergeable` from the trusted App. Autonomous upstream sync requires exact published-head provenance and no handoff, protected path, ownership conflict, or agent resolution. Jules controller base merges require parents `[previous Jules head, current dev]`; active editing blocks head advancement. `automation:hold` is summarized after 24 hours and never removed by automation.
+
 ## Commands
 
 ```bash

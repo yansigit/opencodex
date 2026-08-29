@@ -58,8 +58,8 @@ when a maintainer steps down.
   box and keeps the PR a draft.
   Authors with repository push permission skip the contributor-readiness
   checklist. Branch and quality failures still apply.
-- Contributor pull requests require approval from a current maintainer and successful required CI
-  checks before merge.
+- Contributor pull requests require successful required CI checks and exact controller authorization;
+  generic maintainer approval is not a merge prerequisite.
 - The fork owner may merge their own pull requests or push directly. An explicit owner request is
   sufficient authorization; no upstream or second-maintainer approval is required.
 - Authentication, credential handling, GitHub Actions, release automation, dependency installation,
@@ -76,6 +76,7 @@ when a maintainer steps down.
 - Security-sensitive and release-related changes should receive additional review when practical;
   upstream approval is not required for fork-only work.
 - Required CI and documentation checks apply to owner merges and direct pushes.
+- Required merge checks are `ci`, `hygiene`, `enforce-target`, and `mergeable`, bound to the trusted check App where supported. Autonomous sync requires exact published-head provenance and no handoff, protected path, ownership conflict, or agent resolution. Jules controller advances require recorded parents `[previous Jules head, current dev]`; active editing blocks them. Holds older than 24 hours are summarized and never removed automatically.
 - Promotion from `dev` to `main` and npm releases is controlled by the fork owner.
 
 ## The retired `dev2-go` line
