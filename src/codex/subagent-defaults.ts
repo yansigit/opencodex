@@ -442,16 +442,9 @@ export async function resolveNativeDefaultState(
   const inspected = inspectManagedSubagentDefaults(content);
   if (!inspected.ok) return "blocked";
 
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = Bun.TOML.parse(content) as Record<string, unknown>;
-  } catch {
-    return "blocked";
-  }
   const provider = resolveEffectiveProjectModelProvider(content).provider;
   if (provider && provider !== "openai" && provider !== "opencodex") return "blocked";
-  const baseUrl = parsed.openai_base_url;
-  if (typeof baseUrl === "string" && baseUrl.trim() && !hasInjectedCodexRouting(content)) return "blocked";
+  if (!hasInjectedCodexRouting(content)) return "blocked";
 
   const { values, owned } = inspected.inspection;
   for (const key of TARGET_KEYS) {

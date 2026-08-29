@@ -1,6 +1,33 @@
 import { expect, test } from "bun:test";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { API } from "typescript/unstable/async";
+import {
+  isAwaitExpression,
+  isArrowFunction,
+  isBinaryExpression,
+  isCallExpression,
+  isElementAccessExpression,
+  isExportDeclaration,
+  isFunctionExpression,
+  isIdentifier,
+  isImportDeclaration,
+  isNamedImports,
+  isNamedExports,
+  isNamespaceImport,
+  isNamespaceExport,
+  isNoSubstitutionTemplateLiteral,
+  isObjectBindingPattern,
+  isParenthesizedExpression,
+  isPropertyAccessExpression,
+  isStringLiteral,
+  isVariableDeclaration,
+  SyntaxKind,
+  type Expression,
+  type Node,
+  type SourceFile,
+} from "typescript/unstable/ast";
 
 /**
  * "Every live-config writer goes through the guarded saver" is a claim until something
@@ -13,6 +40,117 @@ import { join } from "node:path";
  */
 
 const SRC = join(import.meta.dir, "..", "src");
+
+function moduleSymbolReferences(source: SourceFile, modulePath: string, symbol: string): number[] {
+  const namespaces = new Set<string>();
+  const hits: number[] = [];
+  const moduleText = (node: Node): string | undefined => (
+    isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node) ? node.text : undefined
+  );
+  const isTargetModule = (node: Node): boolean => {
+    const text = moduleText(node);
+    return text !== undefined && resolve(dirname(source.fileName), text).replace(/\.ts$/, "") === modulePath;
+  };
+  const staticString = (node: Expression): string | undefined => {
+    while (isParenthesizedExpression(node)) node = node.expression;
+    if (isStringLiteral(node) || isNoSubstitutionTemplateLiteral(node)) return node.text;
+    if (isBinaryExpression(node) && node.operatorToken.kind === SyntaxKind.PlusToken) {
+      const left = staticString(node.left);
+      const right = staticString(node.right);
+      return left === undefined || right === undefined ? undefined : left + right;
+    }
+    return undefined;
+  };
+  const unwrap = (node: Expression): Expression => {
+    while (isParenthesizedExpression(node) || isAwaitExpression(node)) node = node.expression;
+    return node;
+  };
+  const isConfigNamespace = (node: Expression): boolean => {
+    node = unwrap(node);
+    return (isIdentifier(node) && namespaces.has(node.text))
+      || (isCallExpression(node) && node.expression.kind === SyntaxKind.ImportKeyword
+        && node.arguments.length === 1 && isTargetModule(node.arguments[0]!))
+      || (isCallExpression(node) && isIdentifier(node.expression) && node.expression.text === "require"
+        && node.arguments.length === 1 && isTargetModule(node.arguments[0]!));
+  };
+  const collectNamespaces = (node: Node): void => {
+    if (isImportDeclaration(node) && !node.importClause?.isTypeOnly && isTargetModule(node.moduleSpecifier)) {
+      const bindings = node.importClause?.namedBindings;
+      if (bindings && isNamespaceImport(bindings)) namespaces.add(bindings.name.text);
+      if (bindings && isNamedImports(bindings) && bindings.elements.some(
+        item => !item.isTypeOnly && (item.propertyName ?? item.name).text === symbol,
+      )) hits.push(node.getStart(source));
+    }
+    if (isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier && isTargetModule(node.moduleSpecifier)) {
+      const bindings = node.exportClause;
+      if (!bindings || isNamespaceExport(bindings) || (isNamedExports(bindings) && bindings.elements.some(
+        item => (item.propertyName ?? item.name).text === symbol,
+      ))) hits.push(node.getStart(source));
+    }
+    if (isVariableDeclaration(node) && node.initializer && isConfigNamespace(node.initializer)) {
+      if (isIdentifier(node.name)) namespaces.add(node.name.text);
+      if (isObjectBindingPattern(node.name) && node.name.elements.some(element => {
+        const imported = element.propertyName ?? element.name;
+        return (isIdentifier(imported) || isStringLiteral(imported))
+          && imported.text === symbol;
+      })) hits.push(node.getStart(source));
+    }
+    if (isBinaryExpression(node) && node.operatorToken.kind === SyntaxKind.EqualsToken
+      && isIdentifier(node.left) && isConfigNamespace(node.right)) {
+      namespaces.add(node.left.text);
+    }
+    if (isCallExpression(node) && isPropertyAccessExpression(node.expression)
+      && node.expression.name.text === "then" && isConfigNamespace(node.expression.expression)) {
+      const callback = node.arguments[0];
+      if (callback && (isArrowFunction(callback) || isFunctionExpression(callback))) {
+        const parameter = callback.parameters[0]?.name;
+        if (parameter && isIdentifier(parameter)) namespaces.add(parameter.text);
+        if (parameter && isObjectBindingPattern(parameter) && parameter.elements.some(element => {
+          const imported = element.propertyName ?? element.name;
+          return (isIdentifier(imported) || isStringLiteral(imported)) && imported.text === symbol;
+        })) hits.push(node.getStart(source));
+      }
+    }
+    node.forEachChild(collectNamespaces);
+  };
+  const collectAccesses = (node: Node): void => {
+    if (isPropertyAccessExpression(node)
+      && node.name.text === symbol
+      && isConfigNamespace(node.expression)) hits.push(node.getStart(source));
+    if (isElementAccessExpression(node)
+      && staticString(node.argumentExpression) === symbol
+      && isConfigNamespace(node.expression)) hits.push(node.getStart(source));
+    node.forEachChild(collectAccesses);
+  };
+  collectNamespaces(source);
+  collectAccesses(source);
+  return hits;
+}
+
+function configReplacementReferences(source: SourceFile, symbol: string): number[] {
+  return moduleSymbolReferences(source, join(SRC, "config"), symbol);
+}
+
+function localRuntimeImports(source: SourceFile): string[] {
+  const imports = new Set<string>();
+  const add = (node: Node): void => {
+    if ((!isStringLiteral(node) && !isNoSubstitutionTemplateLiteral(node)) || !node.text.startsWith(".")) return;
+    const base = resolve(dirname(source.fileName), node.text).replace(/\.(?:[cm]?[jt]s)$/, "");
+    for (const candidate of [`${base}.ts`, join(base, "index.ts")]) {
+      if (existsSync(candidate)) imports.add(candidate);
+    }
+  };
+  const visit = (node: Node): void => {
+    if (isImportDeclaration(node) && !node.importClause?.isTypeOnly) add(node.moduleSpecifier);
+    else if (isExportDeclaration(node) && !node.isTypeOnly && node.moduleSpecifier) add(node.moduleSpecifier);
+    else if (isCallExpression(node) && node.arguments.length === 1
+      && (node.expression.kind === SyntaxKind.ImportKeyword
+        || (isIdentifier(node.expression) && node.expression.text === "require"))) add(node.arguments[0]!);
+    node.forEachChild(visit);
+  };
+  visit(source);
+  return [...imports];
+}
 
 /** Modules that hold a LIVE server config and must use the wrapper. */
 const GUARDED_FILES = [
@@ -72,4 +210,160 @@ test("startServer arms the baseline before it can serve a request", () => {
   const after = text.slice(armIndex, text.indexOf("\n}\n", armIndex));
   expect(bareSaveConfigCalls(body).length).toBeGreaterThan(0);
   expect(bareSaveConfigCalls(after)).toEqual([]);
+});
+
+test("full config replacement is limited to explicit import and init", async () => {
+  const allowed = new Map([
+    ["replacePersistedConfig", new Set(["cli/config-command.ts", "cli/init.ts", "config.ts"])],
+    ["initializePersistedConfigIfMissing", new Set(["config.ts", "oauth/index.ts", "oauth/login-cli.ts"])],
+  ]);
+  const fixtureDir = mkdtempSync(join(tmpdir(), "ocx-config-policy-"));
+  const fixture = join(fixtureDir, "fixture.ts");
+  const helper = join(fixtureDir, "helper.ts");
+  const configModule = join(SRC, "config");
+  writeFileSync(helper, "export {};\n");
+  writeFileSync(fixture, [
+    `import "./helper.js";`,
+    `import { replacePersistedConfig as replace } from ${JSON.stringify(configModule)}; replace(value);`,
+    `import * as config from ${JSON.stringify(configModule)}; config.replacePersistedConfig(value);`,
+    `config["replacePersistedConfig"](value);`,
+    `config["replace" + "PersistedConfig"](value);`,
+    `(await import(${JSON.stringify(configModule)})).replacePersistedConfig(value);`,
+    `const loaded = (await import(${JSON.stringify(configModule)})); loaded.replacePersistedConfig(value);`,
+    `let assigned; assigned = (await import(${JSON.stringify(configModule)})); assigned.replacePersistedConfig(value);`,
+    `const { replacePersistedConfig: destructured } = await import(${JSON.stringify(configModule)}); destructured(value);`,
+    `import(\`${configModule}\`).then(({ replacePersistedConfig }) => replacePersistedConfig(value));`,
+    `const promised = import(${JSON.stringify(configModule)}); promised.then(config => config.replacePersistedConfig(value));`,
+    `const required = require(${JSON.stringify(configModule)}); required.replacePersistedConfig(value);`,
+    "config[`replacePersistedConfig`](value);",
+    `config[("replace" + "PersistedConfig")](value);`,
+    `(await import(${JSON.stringify(configModule)})).initializePersistedConfigIfMissing(value);`,
+    `export { replacePersistedConfig } from ${JSON.stringify(configModule)};`,
+    `export { replacePersistedConfig as replaceExport } from ${JSON.stringify(configModule)};`,
+    `export { initializePersistedConfigIfMissing } from ${JSON.stringify(configModule)};`,
+    `export { initializePersistedConfigIfMissing as initializeExport } from ${JSON.stringify(configModule)};`,
+    `export * from ${JSON.stringify(configModule)};`,
+    `export * as config from ${JSON.stringify(configModule)};`,
+  ].join("\n"));
+  const api = new API({ cwd: join(SRC, "..") });
+  try {
+    const snapshot = await api.updateSnapshot({
+      openProjects: [join(SRC, "..", "tsconfig.json")],
+      openFiles: [fixture, helper],
+    });
+    try {
+      const fixtureProject = await snapshot.getDefaultProjectForFile(fixture);
+      const fixtureSource = await fixtureProject?.program.getSourceFile(fixture);
+      expect(fixtureSource && configReplacementReferences(fixtureSource, "replacePersistedConfig")).toHaveLength(17);
+      expect(fixtureSource && configReplacementReferences(fixtureSource, "initializePersistedConfigIfMissing")).toHaveLength(5);
+      expect(fixtureSource && localRuntimeImports(fixtureSource)).toContain(helper);
+
+      const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
+      if (!project) throw new Error("TypeScript did not load the repository project");
+      const paths: string[] = [];
+      const visit = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const path = join(dir, entry.name);
+          if (entry.isDirectory()) visit(path);
+          else if (entry.name.endsWith(".ts")) paths.push(path);
+        }
+      };
+      visit(SRC);
+      const sources = await Promise.all(paths.map(path => project.program.getSourceFile(path)));
+      const offenders = sources.flatMap(source => {
+        if (!source) throw new Error("TypeScript omitted a production source file");
+        const relative = source.fileName.slice(SRC.length + 1);
+        return [...allowed].flatMap(([symbol, files]) =>
+          !files.has(relative) && configReplacementReferences(source, symbol).length > 0
+            ? [`${relative}: ${symbol}`]
+            : []);
+      });
+      expect(offenders).toEqual([]);
+    } finally {
+      await snapshot.dispose();
+    }
+  } finally {
+    await api.close();
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
+
+test("management routes cannot reach global config writers through any runtime helper", async () => {
+  const forbidden = new Map([
+    [join(SRC, "config"), ["saveConfig", "saveConfigPreservingClaudeCode", "mutatePersistedConfig"]],
+    [join(SRC, "providers", "api-keys"), [
+      "addProviderApiKey",
+      "setActiveProviderApiKey",
+      "setProviderApiKeyLabel",
+      "removeProviderApiKey",
+    ]],
+    [join(SRC, "storage", "policy"), ["writeStorageCleanupPolicyToConfig"]],
+  ]);
+  const allowed = new Set([
+    "cli/v2.ts: saveConfig",
+    "codex/account-lifecycle.ts: saveConfigPreservingClaudeCode",
+    "codex/auth-api.ts: mutatePersistedConfig",
+    "codex/auth-api.ts: saveConfigPreservingClaudeCode",
+    "codex/convergence.ts: mutatePersistedConfig",
+    "codex/desired-state.ts: mutatePersistedConfig",
+    "codex/log-guard/policy.ts: saveConfigPreservingClaudeCode",
+    "codex/plan-from-token.ts: mutatePersistedConfig",
+    "codex/routing.ts: saveConfigPreservingClaudeCode",
+    "oauth/index.ts: mutatePersistedConfig",
+    "providers/api-keys.ts: mutatePersistedConfig",
+    "providers/key-failover.ts: mutatePersistedConfig",
+    "providers/replit/setup.ts: mutatePersistedConfig",
+    "server/management-api.ts: saveConfigPreservingClaudeCode",
+    // Management reaches lifecycle for shutdown state. Lifecycle independently owns
+    // storage worker teardown, whose completion uses this locked field-scoped mutation.
+    "storage/policy.ts: mutatePersistedConfig",
+  ]);
+  const api = new API({ cwd: join(SRC, "..") });
+  try {
+    const snapshot = await api.updateSnapshot({ openProjects: [join(SRC, "..", "tsconfig.json")] });
+    try {
+      const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
+      if (!project) throw new Error("TypeScript did not load the repository project");
+      const managementDir = join(SRC, "server", "management");
+      const managementRoutes = readdirSync(managementDir)
+        .filter(name => name.endsWith(".ts") && name !== "context.ts")
+        .map(name => join(managementDir, name));
+      const directStorageImports: string[] = [];
+      for (const path of managementRoutes) {
+        const source = await project.program.getSourceFile(path);
+        if (!source) throw new Error(`TypeScript omitted ${path}`);
+        for (const imported of localRuntimeImports(source)) {
+          if (imported === join(SRC, "storage", "policy.ts")
+            || imported === join(SRC, "storage", "policy-job.ts")) {
+            directStorageImports.push(`${path.slice(SRC.length + 1)} -> ${imported.slice(SRC.length + 1)}`);
+          }
+        }
+      }
+      expect(directStorageImports).toEqual([]);
+      const pending = [...managementRoutes];
+      const visited = new Set<string>();
+      const offenders: string[] = [];
+      while (pending.length > 0) {
+        const path = pending.pop()!;
+        if (visited.has(path)) continue;
+        visited.add(path);
+        const source = await project.program.getSourceFile(path);
+        if (!source) throw new Error(`TypeScript omitted ${path}`);
+        for (const [modulePath, symbols] of forbidden) {
+          for (const symbol of symbols) {
+            if (moduleSymbolReferences(source, modulePath, symbol).length > 0) {
+              const reference = `${path.slice(SRC.length + 1)}: ${symbol}`;
+              if (!allowed.has(reference)) offenders.push(reference);
+            }
+          }
+        }
+        pending.push(...localRuntimeImports(source).filter(imported => imported.startsWith(`${SRC}/`)));
+      }
+      expect(offenders).toEqual([]);
+    } finally {
+      await snapshot.dispose();
+    }
+  } finally {
+    await api.close();
+  }
 });

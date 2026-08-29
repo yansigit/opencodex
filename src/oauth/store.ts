@@ -591,24 +591,34 @@ export async function upsertCredentialByIdentity(
   }, [provider, safe]);
 }
 
-/** Remove the ACTIVE account; remaining accounts promote the first one. */
-export async function removeCredential(provider: string): Promise<void> {
+/**
+ * Remove the ACTIVE account; remaining accounts promote the first one.
+ *
+ * Returns what actually happened, which a caller cannot otherwise know. A read-then-remove
+ * preflight is not equivalent: `mutateStore` serializes mutations, so between a caller's
+ * `getAccountSet` check and its `removeCredential` call another process can remove the same
+ * account, and both callers would then report a removal that only one of them performed.
+ * Deciding inside the mutation is the only place the answer is true when it is returned.
+ */
+export async function removeCredential(provider: string): Promise<"removed" | "not-found"> {
   let removedAccountId: string | undefined;
-  await mutateStore(store => {
+  const result = await mutateStore(store => {
     const set = store[provider];
-    if (!set) return;
+    if (!set) return "not-found" as const;
     removedAccountId = set.activeAccountId;
     set.accounts = set.accounts.filter(a => a.id !== set.activeAccountId);
     if (set.accounts.length === 0) {
       delete store[provider];
-      return;
+      return "removed" as const;
     }
     set.activeAccountId = set.accounts[0]!.id;
+    return "removed" as const;
   }, [provider]);
-  if (provider === "google-antigravity" && removedAccountId) {
+  if (result === "removed" && provider === "google-antigravity" && removedAccountId) {
     const { clearAntigravityRoutingStateForAccount } = await import("./antigravity-routing");
     clearAntigravityRoutingStateForAccount(removedAccountId);
   }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

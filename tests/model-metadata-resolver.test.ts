@@ -168,7 +168,7 @@ describe("resolveModelMetadata precedence", () => {
       { provider: "cursor", id: "claude-opus-5" },
       { liveFresh: false },
     );
-    expect(enriched.contextWindow).toBe(200_000);
+    expect(enriched.contextWindow).toBe(1_000_000);
     expect(enriched.metadataSource).toBe("registry");
     expect(enriched.metadataStale).toBe(false);
     expect(enriched.reasoningEfforts).toEqual(["low", "medium", "high", "xhigh", "max"]);

@@ -44,8 +44,8 @@ async function putSidecarSettings(
 function emptyConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
     port: 10100,
-    defaultProvider: "none",
-    providers: {},
+    defaultProvider: "test",
+    providers: { test: { adapter: "openai-chat", baseUrl: "https://example.test/v1" } },
     ...overrides,
   } as OcxConfig;
 }

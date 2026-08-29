@@ -792,6 +792,18 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
   // dynamically injected into the v1 proactive prompt, plus an optional reasoning
   // effort the prompt tells the agent to pass to spawn_agent. GET returns the current
   // picks + available models/efforts; PUT sets or clears them.
+  if (url.pathname === "/api/subagent-model-authority" && req.method === "POST") {
+    let body: unknown;
+    try { body = await readManagementJsonBody(req); } catch (error) {
+      rethrowManagementBodyTooLarge(error);
+      return jsonResponse({ error: "invalid JSON body" }, 400);
+    }
+    const { parseSubagentModelAuthorityInput, resolveOpenCodexSubagentModelAuthority } = await import("../../codex/subagent-model-authority");
+    const input = parseSubagentModelAuthorityInput(body);
+    if (!input) return jsonResponse({ error: "invalid subagent model authority input" }, 400);
+    return jsonResponse(await resolveOpenCodexSubagentModelAuthority(input, config));
+  }
+
   if (url.pathname === "/api/injection-model" && req.method === "GET") {
     const models = await fetchAllModels(config);
     const disabled = new Set(config.disabledModels ?? []);

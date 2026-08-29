@@ -4,7 +4,7 @@ import { logsFromApiBody } from "./helpers/logs-api";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveConfig } from "../src/config";
+import { replacePersistedConfig, saveConfig } from "../src/config";
 import { createAnthropicAdapter } from "../src/adapters/anthropic";
 import { clearableDeadline } from "../src/lib/abort";
 import {
@@ -965,7 +965,7 @@ test("Claude replay owns optional main enrichment while routed work survives dra
     completeNativeMainRecovery(recoveryHomeId);
     recoveryHomeId = null;
     await server.stop(true);
-    saveConfig({
+    replacePersistedConfig({
       port: 0,
       openaiProviderTierVersion: 2,
       defaultProvider: "openai",

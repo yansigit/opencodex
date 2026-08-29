@@ -9,7 +9,7 @@ import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/account-id";
 import { clearMainAccountInfoCache } from "../src/codex/main-account-cache";
 import { clearAccountQuota, updateAccountQuota } from "../src/codex/quota";
 import { clearThreadAccountMap } from "../src/codex/routing";
-import { saveConfig } from "../src/config";
+import { replacePersistedConfig } from "../src/config";
 import { handleNativeProfileAPI } from "../src/codex/native-profile-api";
 import { CODEX_MAIN_PROFILE_MAINTENANCE_MESSAGE } from "../src/codex/auth-context";
 import type { NativeProfileManager } from "../src/codex/native-profile-manager";
@@ -79,7 +79,7 @@ describe("native main profile scoped server admission", () => {
       }
       return originalFetch(input, init);
     }) as typeof fetch;
-    const saveMode = (codexAccountMode: "direct" | "pool") => saveConfig({
+    const saveMode = (codexAccountMode: "direct" | "pool") => replacePersistedConfig({
       port: 0,
       defaultProvider: "openai",
       openaiProviderTierVersion: 2,
@@ -194,7 +194,7 @@ describe("native main profile scoped server admission", () => {
       authMode: "forward" as const,
       codexAccountMode,
     });
-    const saveMode = (codexAccountMode: "direct" | "pool", activeCodexAccountId: string) => saveConfig({
+    const saveMode = (codexAccountMode: "direct" | "pool", activeCodexAccountId: string) => replacePersistedConfig({
       port: 0,
       defaultProvider: "openai",
       openaiProviderTierVersion: 2,
@@ -376,7 +376,7 @@ describe("native main profile scoped server admission", () => {
       }
     }
 
-    saveConfig({
+    replacePersistedConfig({
       port: 0,
       defaultProvider: "openai",
       openaiProviderTierVersion: 2,

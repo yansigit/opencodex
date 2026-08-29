@@ -94,7 +94,6 @@ export interface UsageProvider {
 
 export interface UsageAccount {
   accountLogLabel: string;
-  provider?: string;
   ambiguous: boolean;
   requests: number;
   attemptCount: number;
@@ -685,25 +684,22 @@ function legacyCodexAccountLabel(provider: string): string | null {
   return suffix ?? LEGACY_AMBIGUOUS_ACCOUNT_LABEL;
 }
 
-export function accountLabelForAttribution(
-  provider: string,
-  explicit: unknown,
-  fallbackAccountByProvider?: Record<string, string>,
-): string | null {
-  if (typeof explicit === "string" && explicit.trim().length > 0) return explicit.trim();
-  const legacy = legacyCodexAccountLabel(provider);
-  if (legacy) return legacy;
-  const base = baseProviderLabel(provider);
-  if (fallbackAccountByProvider && fallbackAccountByProvider[base]) {
-    return fallbackAccountByProvider[base];
-  }
-  return null;
+/**
+ * An explicitly stamped label of EITHER family is authoritative for any provider (#2699).
+ *
+ * No `o`-label branch is needed here: `isCodexUsageAccountLogLabel` now accepts both families,
+ * and adding a second predicate call would be a no-op guarded by a comment claiming otherwise.
+ *
+ * The legacy fallback stays openai-only on purpose. It infers an account from the PROVIDER
+ * string, and inferring for a non-Codex row would merge unrelated accounts under one label --
+ * so an unlabeled xai row is dropped from the account table rather than guessed at.
+ */
+function accountLabelForAttribution(provider: string, explicit: unknown): string | null {
+  if (isCodexUsageAccountLogLabel(explicit)) return explicit;
+  return legacyCodexAccountLabel(provider);
 }
 
-function buildAccounts(
-  entries: PersistedUsageEntry[],
-  fallbackAccountByProvider?: Record<string, string>,
-): UsageAccount[] {
+function buildAccounts(entries: PersistedUsageEntry[]): UsageAccount[] {
   const byLabel = new Map<string, UsageAccount>();
   const requestIds = new Map<string, Set<string>>();
 
@@ -716,13 +712,12 @@ function buildAccounts(
     totalTokens?: number;
     estimate: ReturnType<typeof estimateRequestCost>;
   }): void => {
-    const label = accountLabelForAttribution(input.provider, input.accountLogLabel, fallbackAccountByProvider);
+    const label = accountLabelForAttribution(input.provider, input.accountLogLabel);
     if (!label) return;
     let row = byLabel.get(label);
     if (!row) {
       row = {
         accountLogLabel: label,
-        provider: baseProviderLabel(input.provider),
         ambiguous: label === LEGACY_AMBIGUOUS_ACCOUNT_LABEL,
         requests: 0,
         attemptCount: 0,
@@ -823,7 +818,6 @@ export function summarizeUsage(
   range: UsageRange,
   now: number,
   surface: UsageSurface = "all",
-  fallbackAccountByProvider?: Record<string, string>,
 ): UsageSummary {
   const { since } = rangeWindow(range, now);
   const filteredEntries = entries.filter(entry => {
@@ -853,7 +847,7 @@ export function summarizeUsage(
     days: buildDayGrid(range, since, now, filteredEntries),
     models: buildModels(filteredEntries, totals.totalTokens),
     providers: buildProviders(filteredEntries, totals.totalTokens),
-    accounts: buildAccounts(filteredEntries, fallbackAccountByProvider),
+    accounts: buildAccounts(filteredEntries),
   };
 }
 
@@ -885,14 +879,12 @@ function normalizeFilterValue(input: string | null | undefined): string | null {
  */
 export function projectUsageSummary<T extends UsageSummary>(
   summary: T,
-  filter: { provider?: string | null; model?: string | null; account?: string | null },
+  filter: { provider?: string | null; model?: string | null },
   entries?: PersistedUsageEntry[],
-  fallbackAccountByProvider?: Record<string, string>,
 ): T & { filter?: UsageFilterEcho } {
   const provider = normalizeFilterValue(filter.provider);
   const model = normalizeFilterValue(filter.model);
-  const account = normalizeFilterValue(filter.account);
-  if (provider === null && model === null && account === null) return summary;
+  if (provider === null && model === null) return summary;
 
   // Re-summarise from the entries the summary was built from, rather than
   // projecting over its rows.
@@ -909,13 +901,9 @@ export function projectUsageSummary<T extends UsageSummary>(
   //
   // The entries are already in hand on every path that filters, so the honest
   // computation is also the simple one.
-  const matches = (rowProvider: string, rowModel: string, rowAccount?: string | null): boolean => {
+  const matches = (rowProvider: string, rowModel: string): boolean => {
     if (provider !== null && baseProviderLabel(rowProvider).toLowerCase() !== provider) return false;
     if (model !== null && rowModel.toLowerCase() !== model) return false;
-    if (account !== null && rowAccount !== undefined) {
-      const effectiveAccount = accountLabelForAttribution(rowProvider, rowAccount, fallbackAccountByProvider);
-      if (!effectiveAccount || effectiveAccount.toLowerCase() !== account) return false;
-    }
     return true;
   };
 
@@ -931,10 +919,10 @@ export function projectUsageSummary<T extends UsageSummary>(
   const filtered: PersistedUsageEntry[] = [];
   for (const entry of source) {
     if (!entry.attempts?.length) {
-      if (matches(entry.provider, antigravityUsageModel(entry.provider, entry.model), entry.accountLogLabel)) filtered.push(entry);
+      if (matches(entry.provider, antigravityUsageModel(entry.provider, entry.model))) filtered.push(entry);
       continue;
     }
-    const attempts = entry.attempts.filter(a => matches(a.provider, antigravityUsageModel(a.provider, a.model), a.accountLogLabel ?? entry.accountLogLabel));
+    const attempts = entry.attempts.filter(a => matches(a.provider, antigravityUsageModel(a.provider, a.model)));
     if (attempts.length === 0) continue;
     // A combo is still counted once per participating model, so a filtered
     // request count can exceed the number of distinct requests. That is the
@@ -943,7 +931,7 @@ export function projectUsageSummary<T extends UsageSummary>(
     filtered.push({ ...entry, attempts });
   }
 
-  const projected = summarizeUsage(filtered, summary.range, summary.generatedAt, summary.surface, fallbackAccountByProvider);
+  const projected = summarizeUsage(filtered, summary.range, summary.generatedAt, summary.surface);
   // matched reflects usage inside the requested WINDOW, not anywhere in the
   // log: summarizeUsage applies the range and surface predicates, and the CLI
   // uses this flag to decide between a table and "no usage recorded".

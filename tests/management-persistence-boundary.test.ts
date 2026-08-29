@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, mutatePersistedConfig } from "../src/config";
@@ -16,7 +16,12 @@ const richOnDisk = {
   providers: {
     "command-code": { adapter: "openai-chat", baseUrl: "https://command.example/v1", apiKey: "command" },
     openai: { adapter: "openai-chat", baseUrl: "https://openai.example/v1", apiKey: "openai" },
-    "google-antigravity": { adapter: "openai-chat", baseUrl: "https://antigravity.example/v1", apiKey: "antigravity" },
+    "google-antigravity": {
+      adapter: "google",
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth",
+      googleMode: "cloud-code-assist",
+    },
     "google-aistudio": { adapter: "openai-chat", baseUrl: "https://aistudio.example/v1", apiKey: "aistudio" },
     "opencode-go": { adapter: "openai-chat", baseUrl: "https://opencode.example/v1", apiKey: "opencode" },
     cursor: { adapter: "openai-chat", baseUrl: "https://cursor.example/v1", apiKey: "cursor" },
@@ -57,6 +62,22 @@ async function put(path: string, body: unknown): Promise<Response> {
   return response;
 }
 
+async function request(method: string, path: string, body?: unknown, liveConfig: OcxConfig = structuredClone(historicalFixture)): Promise<Response> {
+  const url = new URL(`http://localhost${path}`);
+  const response = await handleManagementAPI(new Request(url, {
+    method,
+    ...(body === undefined ? {} : {
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  }), url, liveConfig, {
+    mutatePersistedConfig,
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  if (!response) throw new Error("management route declined request");
+  return response;
+}
+
 function persisted(): typeof richOnDisk {
   return JSON.parse(readFileSync(getConfigPath(), "utf8"));
 }
@@ -79,6 +100,368 @@ test("sidecar web-search mutation is field-scoped", async () => {
   expect(persisted().providers).toEqual(richOnDisk.providers);
   expect(persisted().defaultProvider).toBe("openai");
   expect(persisted() as OcxConfig).toMatchObject({ webSearchSidecar: { streamRoutedModelOutput: true } });
+});
+
+test("provider POST adds one row without replacing the persisted registry", async () => {
+  const response = await request("POST", "/api/providers", {
+    name: "new-provider",
+    provider: {
+      adapter: "openai-chat",
+      baseUrl: "http://8.8.8.8/v1",
+      apiKey: "new-key",
+      liveModels: false,
+    },
+  });
+  expect(response.status).toBe(200);
+  expect(Object.keys(persisted().providers)).toEqual([...Object.keys(richOnDisk.providers), "new-provider"]);
+  expect(persisted().providers["new-provider"]).toMatchObject({ apiKey: "new-key" });
+});
+
+test("provider POST reconciles a replacement API key into the inherited pool in one transaction", async () => {
+  const config = structuredClone(richOnDisk) as OcxConfig;
+  config.providers["command-code"]!.apiKeyPool = [{ id: "old", key: "command" }];
+  let committed!: OcxConfig;
+  let calls = 0;
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "command-code",
+      provider: {
+        adapter: "openai-chat",
+        baseUrl: "http://8.8.8.8/v1",
+        apiKey: "replacement-key",
+        liveModels: false,
+      },
+    }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      calls++;
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      committed = candidate;
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(200);
+  expect(calls).toBe(1);
+  expect(committed.providers["command-code"]?.apiKey).toBe("replacement-key");
+  expect(committed.providers["command-code"]?.apiKeyPool?.map(entry => entry.key)).toEqual([
+    "command",
+    "replacement-key",
+  ]);
+});
+
+test.each([
+  ["omitted", undefined],
+  ["blank", ""],
+] as const)("provider POST preserves the active key when a redacted key is %s", async (_label, submittedKey) => {
+  const config = structuredClone(historicalFixture);
+  config.providers["command-code"] = {
+    ...config.providers["command-code"]!,
+    apiKey: "active-key",
+    apiKeyPool: [{ id: "active", key: "active-key" }, { id: "fallback", key: "fallback-key" }],
+  };
+  let committed = structuredClone(config);
+  const provider = { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", liveModels: false } as Record<string, unknown>;
+  if (submittedKey !== undefined) provider.apiKey = submittedKey;
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "command-code", provider }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      committed = candidate;
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(200);
+  expect(committed.providers["command-code"]?.apiKey).toBe("active-key");
+  expect(committed.providers["command-code"]?.apiKeyPool?.map(entry => entry.key)).toEqual(["active-key", "fallback-key"]);
+});
+
+test("provider POST rechecks account namespace collisions inside its transaction", async () => {
+  const config = structuredClone(historicalFixture);
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "late-namespace",
+      provider: { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", liveModels: false },
+    }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      candidate.codexAccountNamespaces = { "late-namespace": "account-id" };
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(409);
+  expect(config.providers["late-namespace"]).toBeUndefined();
+});
+
+test("provider POST rechecks combo public aliases inside its transaction", async () => {
+  const config = structuredClone(historicalFixture);
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "late-alias",
+      provider: { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", liveModels: false },
+    }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      candidate.combos = {
+        fallback: {
+          alias: "late-alias/model",
+          targets: [{ provider: "openai", model: "gpt" }],
+        },
+      };
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(409);
+  expect(await response?.text()).toContain("configured combo namespace");
+  expect(config.providers["late-alias"]).toBeUndefined();
+});
+
+test.each([
+  [
+    "combo",
+    { combos: { occupied: { targets: [{ provider: "openai", model: "gpt" }] } } },
+    "occupied",
+    "configured combo namespace",
+  ],
+  [
+    "routing profile",
+    { routingProfiles: { route: { alias: "occupied/model", candidates: [{ provider: "openai", model: "gpt" }] } } },
+    "occupied",
+    "configured routing profile namespace",
+  ],
+] as const)("provider POST rejects a %s namespace collision", async (_label, namespace, name, message) => {
+  const config = Object.assign(structuredClone(historicalFixture), structuredClone(namespace)) as OcxConfig;
+  const url = new URL("http://localhost/api/providers");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      name,
+      provider: { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", liveModels: false },
+    }),
+  }), url, config);
+  expect(response?.status).toBe(409);
+  expect(await response?.text()).toContain(message);
+  expect(config.providers[name]).toBeUndefined();
+});
+
+test("provider API-key POST uses only the injected mutation boundary", async () => {
+  const config = structuredClone(richOnDisk) as OcxConfig;
+  config.providers["command-code"]!.apiKeyPool = [{ id: "old", key: "command" }];
+  const beforeDisk = readFileSync(getConfigPath(), "utf8");
+  let calls = 0;
+  const url = new URL("http://localhost/api/providers/keys");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name: "command-code", key: "second-key" }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      calls++;
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+  });
+  expect(response?.status).toBe(201);
+  expect(calls).toBe(1);
+  expect(config.providers["command-code"]?.apiKey).toBe("second-key");
+  expect(config.providers["command-code"]?.apiKeyPool?.map(entry => entry.key)).toEqual(["command", "second-key"]);
+  expect(readFileSync(getConfigPath(), "utf8")).toBe(beforeDisk);
+});
+
+test("provider set-default updates only the persisted defaultProvider", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": historicalFixture.providers.openai,
+    },
+  };
+  const response = await request("PATCH", "/api/providers?name=command-code", { setDefault: true }, liveConfig);
+  expect(response.status).toBe(200);
+  expect(persisted().defaultProvider).toBe("command-code");
+  expect(persisted().providers).toEqual(richOnDisk.providers);
+});
+
+test("provider PATCH replays onto the persisted row without replacing sibling providers", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": { ...historicalFixture.providers.openai, note: "stale-live" },
+    },
+  };
+  const response = await request("PATCH", "/api/providers?name=command-code", { note: "fresh-note" }, liveConfig);
+  expect(response.status).toBe(200);
+  expect(persisted().providers["command-code"]).toMatchObject({
+    ...richOnDisk.providers["command-code"],
+    note: "fresh-note",
+  });
+  expect(persisted().providers.cursor).toEqual(richOnDisk.providers.cursor);
+});
+
+test("provider DELETE removes one row and preserves the rest of the persisted registry", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": historicalFixture.providers.openai,
+    },
+  };
+  const response = await request("DELETE", "/api/providers?name=command-code", undefined, liveConfig);
+  expect(response.status).toBe(200);
+  const saved = persisted();
+  expect(saved.providers["command-code"]).toBeUndefined();
+  expect(saved.defaultProvider).toBe("openai");
+  expect(saved.providers.cursor).toEqual(richOnDisk.providers.cursor);
+  expect(saved.providers["google-aistudio"]).toEqual(richOnDisk.providers["google-aistudio"]);
+});
+
+test.each([
+  [
+    "routing profile",
+    { routingProfiles: { balanced: { candidates: [{ provider: "command-code", model: "model-a" }] } } },
+    "provider_has_dependent_routing_profiles",
+    "routingProfiles",
+    ["balanced"],
+  ],
+  [
+    "combo",
+    { combos: { fallback: { targets: [{ provider: "command-code", model: "model-a" }] } } },
+    "provider_has_dependent_combos",
+    "combos",
+    ["fallback"],
+  ],
+] as const)("provider DELETE reports its dependent %s without mutating", async (_label, dependency, code, field, ids) => {
+  const config = Object.assign(structuredClone(richOnDisk) as OcxConfig, structuredClone(dependency));
+  const before = structuredClone(config);
+  const url = new URL("http://localhost/api/providers?name=command-code");
+  const response = await handleManagementAPI(new Request(url, { method: "DELETE" }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(409);
+  expect(await response?.json()).toMatchObject({ code, [field]: ids });
+  expect(config).toEqual(before);
+});
+
+test("provider DELETE atomically drops its dependent custom models", async () => {
+  const config = structuredClone(richOnDisk) as OcxConfig;
+  config.customModels = [
+    { id: "keep", provider: "openai", modelId: "gpt" },
+    { id: "drop", provider: "command-code", modelId: "model-a" },
+  ];
+  let committed!: OcxConfig;
+  const url = new URL("http://localhost/api/providers?name=command-code");
+  const response = await handleManagementAPI(new Request(url, { method: "DELETE" }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      committed = candidate;
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(200);
+  expect(await response?.json()).toMatchObject({ droppedCustomModels: 1 });
+  expect(committed.providers["command-code"]).toBeUndefined();
+  expect(committed.customModels).toEqual([{ id: "keep", provider: "openai", modelId: "gpt" }]);
+});
+
+test("selected-models PUT scopes its provider row mutation to the persisted config", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": { ...historicalFixture.providers.openai, selectedModels: ["stale"] },
+    },
+  };
+  const response = await request("PUT", "/api/selected-models", {
+    provider: "command-code",
+    models: ["fresh-model"],
+  }, liveConfig);
+  expect(response.status).toBe(200);
+  expect(persisted().providers["command-code"]).toMatchObject({
+    ...richOnDisk.providers["command-code"],
+    selectedModels: ["fresh-model"],
+  });
+  expect(persisted().providers.cursor).toEqual(richOnDisk.providers.cursor);
+});
+
+test("model preset refuses to commit discovery results after the provider row changes", async () => {
+  const config: OcxConfig = {
+    port: 10100,
+    defaultProvider: "openrouter",
+    providers: {
+      openrouter: {
+        adapter: "openai-chat",
+        baseUrl: "https://openrouter.ai/api/v1",
+        apiKey: "openrouter-key",
+        liveModels: false,
+        models: ["openai/gpt-5.6"],
+      },
+    },
+  };
+  const url = new URL("http://localhost/api/model-presets");
+  const response = await handleManagementAPI(new Request(url, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ provider: "openrouter", mode: "preset" }),
+  }), url, config, {
+    mutatePersistedConfig: mutate => {
+      const candidate = structuredClone(config);
+      candidate.providers.openrouter!.baseUrl = "https://concurrent.example/v1";
+      const result = mutate(candidate);
+      return { status: result.changed ? "committed" : "unchanged", value: result.value };
+    },
+    createManagementConvergeCodex: () => async () => ({ kind: "catalog-only", catalogRefresh: { status: "unchanged" } }),
+  });
+  expect(response?.status).toBe(409);
+  expect(config.providers.openrouter?.baseUrl).not.toBe("https://concurrent.example/v1");
+});
+
+test("provider alias PUT scopes its provider row mutation to the persisted config", async () => {
+  const liveConfig = {
+    ...structuredClone(historicalFixture),
+    providers: {
+      openai: historicalFixture.providers.openai,
+      "command-code": { ...historicalFixture.providers.openai, alias: "stale-alias" },
+    },
+  };
+  const response = await request("PUT", "/api/providers/command-code/alias", { alias: "fresh-alias" }, liveConfig);
+  expect(response.status).toBe(200);
+  expect(persisted().providers["command-code"]).toMatchObject({
+    ...richOnDisk.providers["command-code"],
+    alias: "fresh-alias",
+  });
+  expect(persisted().providers.cursor).toEqual(richOnDisk.providers.cursor);
 });
 
 test("sidecar retries preserve a concurrent edit to another leaf", async () => {
@@ -406,14 +789,4 @@ test("Claude Desktop PUT lets a persistence failure reach dispatcher rollback", 
   expect(response.status).toBe(500);
   expect(config).toEqual(historicalFixture);
   expect(readFileSync(getConfigPath(), "utf8")).toBe(beforeDisk);
-});
-
-test("management route modules do not import global config writers", async () => {
-  const dir = join(import.meta.dir, "..", "src/server/management");
-  const files = readdirSync(dir).filter(file => file.endsWith(".ts") && file !== "context.ts");
-  for (const file of files) {
-    const source = readFileSync(join(dir, file), "utf8");
-    expect(source).not.toMatch(/(?:saveConfigPreservingClaudeCode|mutatePersistedConfig)[\s\S]{0,120}from "\.\.\/\.\.\/config"/);
-    expect(source).not.toMatch(/await import\("\.\.\/\.\.\/config"\)[\s\S]{0,120}(?:saveConfigPreservingClaudeCode|mutatePersistedConfig)/);
-  }
 });
