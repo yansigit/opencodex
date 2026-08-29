@@ -7,6 +7,12 @@ export interface ModelRenameStartupDeps {
   save?: (config: OcxConfig) => void;
 }
 
+function adoptConfig(target: OcxConfig, source: OcxConfig): void {
+  if (target === source) return;
+  for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
+  Object.assign(target, structuredClone(source));
+}
+
 /**
  * Apply registry model renames to the saved config at startup (issue #1610).
  *
@@ -20,16 +26,21 @@ export function runModelRenameStartupMigration(
   config: OcxConfig,
   deps: ModelRenameStartupDeps = { project: projectModelRenames },
 ): OcxConfig {
-  const projection = deps.project(config);
-  for (const warning of projection.warnings) console.warn(`[model-rename-migration] ${warning}`);
+  const projection = deps.project(structuredClone(config));
   if (!projection.changed) return projection.config;
   if (deps.save) {
     deps.save(projection.config);
-    return projection.config;
+    adoptConfig(config, projection.config);
+    for (const warning of projection.warnings) console.warn(`[model-rename-migration] ${warning}`);
+    return config;
   }
   const outcome = mutatePersistedConfig(fresh => {
     const next = deps.project(fresh);
-    return { changed: next.changed, value: next.config };
+    if (next.changed) adoptConfig(fresh, next.config);
+    return { changed: next.changed, value: next };
   });
-  return outcome.status === "unavailable" ? config : outcome.value;
+  if (outcome.status === "unavailable") return config;
+  adoptConfig(config, outcome.value.config);
+  for (const warning of outcome.value.warnings) console.warn(`[model-rename-migration] ${warning}`);
+  return config;
 }

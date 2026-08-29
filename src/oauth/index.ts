@@ -1023,52 +1023,96 @@ function migrateLegacyAntigravityStaticCatalog(config: OcxConfig): boolean {
   return true;
 }
 
-export function reconcileOAuthProviders(config: OcxConfig, persist = true): boolean {
-  let changed = migrateLegacyAntigravityStaticCatalog(config);
-  for (const [name, prov] of Object.entries(config.providers)) {
+interface OAuthReconcileProjection {
+  config: OcxConfig;
+  changed: boolean;
+  touchedProviders: string[];
+  touchedAntigravityVersion: boolean;
+}
+
+function projectOAuthProviderReconciliation(config: OcxConfig): OAuthReconcileProjection {
+  const projected = structuredClone(config);
+  const touchedProviders = new Set<string>();
+  const beforeAntigravity = JSON.stringify(projected.providers[GOOGLE_ANTIGRAVITY_PROVIDER]);
+  const beforeAntigravityVersion = projected.googleAntigravityStaticCatalogVersion;
+  let changed = migrateLegacyAntigravityStaticCatalog(projected);
+  if (JSON.stringify(projected.providers[GOOGLE_ANTIGRAVITY_PROVIDER]) !== beforeAntigravity) {
+    touchedProviders.add(GOOGLE_ANTIGRAVITY_PROVIDER);
+  }
+  const touchedAntigravityVersion = projected.googleAntigravityStaticCatalogVersion !== beforeAntigravityVersion;
+
+  for (const [name, prov] of Object.entries(projected.providers)) {
+    const beforeProvider = JSON.stringify(prov);
     const def = OAUTH_PROVIDERS[name];
     if (name === "command-code" && isLegacyCommandCodeStaticCatalog(prov)) {
       // The former experimental preset was the exact three-model seed above. It was not a user
       // choice to disable discovery, so promote only that shape to the account live catalog.
       prov.liveModels = true;
-      changed = true;
     }
-    if (!def || prov.authMode !== "oauth") continue;
-    const preset = def.providerConfig;
-    for (const field of OAUTH_RECONCILE_FIELDS) {
-      if (JSON.stringify(prov[field]) === JSON.stringify(preset[field])) continue;
-      if (preset[field] !== undefined) {
-        prov[field] = cloneProviderField(preset[field]) as never;
-      } else {
-        delete prov[field];
+    if (def && prov.authMode === "oauth") {
+      const preset = def.providerConfig;
+      for (const field of OAUTH_RECONCILE_FIELDS) {
+        if (JSON.stringify(prov[field]) === JSON.stringify(preset[field])) continue;
+        if (preset[field] !== undefined) {
+          prov[field] = cloneProviderField(preset[field]) as never;
+        } else {
+          delete prov[field];
+        }
       }
-      changed = true;
+      if (prov.liveModels === undefined && preset.liveModels !== undefined) {
+        prov.liveModels = preset.liveModels;
+      }
+      // Heal a defaultModel that no longer exists in the refreshed list (e.g. a deprecated snapshot).
+      // Skip providers without a static preset `models` list: for live-discovery providers
+      // (e.g. command-code OAuth) the account-scoped catalog is not enumerable here, so any
+      // persisted defaultModel is a user selection and must not be overwritten by the seed.
+      if (prov.defaultModel && preset.defaultModel && preset.models && preset.models.length > 0 && !(prov.models ?? []).includes(prov.defaultModel)) {
+        prov.defaultModel = preset.defaultModel;
+      }
     }
-    if (prov.liveModels === undefined && preset.liveModels !== undefined) {
-      prov.liveModels = preset.liveModels;
+    if (JSON.stringify(prov) !== beforeProvider) {
       changed = true;
-    }
-    // Heal a defaultModel that no longer exists in the refreshed list (e.g. a deprecated snapshot).
-    // Skip providers without a static preset `models` list: for live-discovery providers
-    // (e.g. command-code OAuth) the account-scoped catalog is not enumerable here, so any
-    // persisted defaultModel is a user selection and must not be overwritten by the seed.
-    if (prov.defaultModel && preset.defaultModel && preset.models && preset.models.length > 0 && !(prov.models ?? []).includes(prov.defaultModel)) {
-      prov.defaultModel = preset.defaultModel;
-      changed = true;
+      touchedProviders.add(name);
     }
   }
-  if (changed && persist) {
+
+  return {
+    config: projected,
+    changed,
+    touchedProviders: [...touchedProviders],
+    touchedAntigravityVersion,
+  };
+}
+
+function adoptOAuthReconciliation(config: OcxConfig, projection: OAuthReconcileProjection): void {
+  for (const name of projection.touchedProviders) {
+    const provider = projection.config.providers[name];
+    if (provider) config.providers[name] = structuredClone(provider);
+    else delete config.providers[name];
+  }
+  if (projection.touchedAntigravityVersion) {
+    config.googleAntigravityStaticCatalogVersion = projection.config.googleAntigravityStaticCatalogVersion;
+  }
+}
+
+export function reconcileOAuthProviders(config: OcxConfig, persist = true): boolean {
+  const projection = projectOAuthProviderReconciliation(config);
+  if (!projection.changed) return false;
+  if (!persist) {
+    adoptOAuthReconciliation(config, projection);
+    return true;
+  }
+  if (persist) {
     const outcome = mutatePersistedConfig(fresh => {
-      const before = JSON.stringify(fresh);
-      reconcileOAuthProviders(fresh, false);
-      return { changed: JSON.stringify(fresh) !== before, value: structuredClone(fresh) };
+      const next = projectOAuthProviderReconciliation(fresh);
+      if (next.changed) adoptOAuthReconciliation(fresh, next);
+      return { changed: next.changed, value: next };
     });
     if (outcome.status !== "unavailable") {
-      for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
-      Object.assign(config, outcome.value);
+      adoptOAuthReconciliation(config, outcome.value);
     }
   }
-  return changed;
+  return true;
 }
 
 /** Runtime guards: provider config is intentionally passthrough, so persisted fields may be malformed. */

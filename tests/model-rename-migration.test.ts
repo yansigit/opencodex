@@ -153,4 +153,23 @@ describe("registry model rename migration (#1610)", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test("startup persistence failure leaves live model-rename input unchanged", () => {
+    const previousHome = process.env.OPENCODEX_HOME;
+    const home = mkdtempSync(join(tmpdir(), "ocx-model-rename-unavailable-"));
+    try {
+      process.env.OPENCODEX_HOME = home;
+      const live = staleConfig();
+      const before = structuredClone(live);
+
+      const returned = runModelRenameStartupMigration(live);
+
+      expect(returned).toBe(live);
+      expect(live).toEqual(before);
+    } finally {
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
