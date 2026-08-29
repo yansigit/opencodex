@@ -1,9 +1,13 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createGoogleAdapter } from "../src/adapters/google";
 import { compileGoogleWireBody } from "../src/adapters/google-wire-compiler";
 import { parseRequest } from "../src/responses/parser";
 import { googleProviderOptionsRouteError } from "../src/responses/google-provider-options";
 import { handleResponses } from "../src/server/responses";
+import { mutatePersistedConfig, saveConfig } from "../src/config";
 import type { OcxParsedRequest } from "../src/types";
 import type { OcxConfig } from "../src/types";
 
@@ -24,6 +28,21 @@ const base = {
 };
 
 describe("Google provider options", () => {
+  let previousHome: string | undefined;
+  let testHome = "";
+
+  beforeEach(() => {
+    previousHome = process.env.OPENCODEX_HOME;
+    testHome = mkdtempSync(join(tmpdir(), "ocx-google-provider-options-"));
+    process.env.OPENCODEX_HOME = testHome;
+  });
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    rmSync(testHome, { recursive: true, force: true });
+  });
+
   const requestBody = JSON.stringify(base);
   const providerConfig = (providerName: string, provider: Record<string, unknown>): OcxConfig => ({
     defaultProvider: providerName,
@@ -80,26 +99,30 @@ describe("Google provider options", () => {
     const provider = {
       adapter: "google",
       googleMode: "ai-studio",
-      googleMode: "ai-studio",
       baseUrl: "https://generativelanguage.googleapis.com",
       apiKey: "key-a",
       apiKeyPool: [{ id: "a", key: "key-a" }, { id: "b", key: "key-b" }],
-      modelAdapters: { "gemini-3.5-flash": "google" },
+      modelAdapters: {},
     } as Record<string, unknown>;
     globalThis.fetch = (async () => {
       fetches += 1;
       if (fetches === 1) {
-        (provider.modelAdapters as Record<string, string>)["gemini-3.5-flash"] = "openai-chat";
+        mutatePersistedConfig(fresh => {
+          fresh.providers.google!.modelAdapters!["gemini-3.5-flash"] = "openai-chat";
+          return { changed: true, value: undefined };
+        });
         return new Response(JSON.stringify({ error: { message: "rate limited" } }), { status: 429 });
       }
       return Response.json({ candidates: [{ content: { parts: [{ text: "bypass" }] } }] });
     }) as typeof fetch;
     try {
+      const config = providerConfig("google", provider);
+      saveConfig(config);
       const response = await handleResponses(new Request("http://localhost/v1/responses", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: requestBody,
-      }), providerConfig("google", provider), { model: "", provider: "" });
+      }), config, { model: "", provider: "" });
       expect(response.status).toBe(400);
       expect(fetches).toBe(1);
     } finally {
@@ -116,16 +139,20 @@ describe("Google provider options", () => {
       baseUrl: "https://generativelanguage.googleapis.com",
       apiKey: "key",
       apiKeyPool: [{ id: "a", key: "key" }, { id: "b", key: "key-b" }],
-      modelAdapters: { "gemini-3.5-flash": "google" },
+      modelAdapters: {},
     } as Record<string, unknown>;
     const continuationConfig = providerConfig("google", provider);
     continuationConfig.emptyCompletionRetry = true;
+    saveConfig(continuationConfig);
     globalThis.fetch = (async () => {
       fetches += 1;
       if (fetches === 1) {
         return Response.json({ candidates: [{ content: { parts: [] }, finishReason: "STOP" }] });
       }
-      ((continuationConfig.providers.google as Record<string, unknown>).modelAdapters as Record<string, string>)["gemini-3.5-flash"] = "openai-chat";
+      mutatePersistedConfig(fresh => {
+        fresh.providers.google!.modelAdapters!["gemini-3.5-flash"] = "openai-chat";
+        return { changed: true, value: undefined };
+      });
       return new Response("rate limited", { status: 429 });
     }) as typeof fetch;
     try {

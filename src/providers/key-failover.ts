@@ -10,6 +10,7 @@
  */
 import { mutatePersistedConfig } from "../config";
 import { isAzureIdentityProvider } from "../config/provider-validation";
+import { routedProviderConfig } from "../router";
 import type { OcxConfig, OcxProviderConfig, RateLimitRetryPolicy } from "../types";
 import { resolveProviderTransport, type OcxProviderTransport } from "./xai-transport";
 import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
@@ -241,13 +242,9 @@ interface RotateProviderTransportOptions {
 /**
  * Rotate a failed key and re-apply provider-specific transport metadata to the replacement.
  *
- * `routedProvider` is the request's active provider (the `routedProviderConfig` output the
- * route was built with). The result inherits it and swaps ONLY the API key: the persisted
- * config that `rotateKeyOn429` snapshots predates registry backfill, so building the retry
- * provider from that snapshot would silently drop every field the registry merged in at
- * routing time (scalar flags like `promptCacheKey`/`parallelToolCalls`, merged model
- * metadata such as `noTemperatureModels`, a pinned baseUrl). Mirrors the OAuth-401 replay
- * path in src/server/responses/core.ts, which spreads `route.provider` for the same reason.
+ * Put the authoritative committed row over request-only fields and registry backfills, then
+ * route it again so concurrent provider edits take effect without losing either kind of runtime
+ * metadata.
  */
 export function rotateProviderTransportOn429(
   config: OcxConfig,
@@ -265,7 +262,7 @@ export function rotateProviderTransportOn429(
   return rotated
     ? resolveProviderTransport(
         providerName,
-        { ...routedProvider, apiKey: rotated.apiKey },
+        routedProviderConfig(providerName, { ...routedProvider, ...rotated }),
         options.promptCacheKey,
       )
     : null;

@@ -208,10 +208,9 @@ describe("rotateProviderTransportOn429", () => {
     expect(retryBody.prompt_cache_key).toBe(promptCacheKey);
   });
 
-  test("inherits the routed provider's registry backfills; only the key changes", () => {
-    // The persisted config predates the registry scalar flags and merged metadata —
-    // routedProviderConfig backfilled them at request time. Rotation must not fall back
-    // to the bare persisted snapshot and silently drop them for the retried request.
+  test("inherits routed-only backfills while persisted fields stay authoritative", () => {
+    // Rotation must keep fields absent from the persisted snapshot while honoring fields
+    // that are present there; registered providers are canonicalized by routedProviderConfig.
     const config = makeConfig({ apiKey: "key-alpha-000111222333", apiKeyPool: pool3() });
     const routedProvider = {
       ...config.providers.p,
@@ -228,7 +227,7 @@ describe("rotateProviderTransportOn429", () => {
     });
 
     expect(rotated?.apiKey).toBe("key-beta-444555666777");
-    expect(rotated?.baseUrl).toBe("https://registry-pinned.example/v1");
+    expect(rotated?.baseUrl).toBe("https://api.example.com/v1");
     expect(rotated?.promptCacheKey).toBe(true);
     expect(rotated?.parallelToolCalls).toBe(false);
     expect(rotated?.modelContextWindows).toEqual({ "some-model": 262_144 });
