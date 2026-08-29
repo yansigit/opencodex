@@ -370,7 +370,7 @@ function readPersistedConfig(): OcxConfig {
   return JSON.parse(readFileSync(getConfigPath(), "utf8")) as OcxConfig;
 }
 
-test("discovery persistence rebases onto the complete provider registry", async () => {
+test("discovery persistence rebases fresh evidence and adopts only committed discovery state", async () => {
   writeCatalog([nativeEntry()]);
   const provider = Bun.serve({
     port: 0,
@@ -379,19 +379,26 @@ test("discovery persistence rebases onto the complete provider registry", async 
   try {
     const vendor = discoveryProvider(`http://127.0.0.1:${provider.port}/v1`);
     const stale = config(false);
-    stale.providers = { vendor };
+    stale.providers = { vendor: { ...vendor, newModelPolicy: "on", note: "live-provider-field" } };
     stale.defaultProvider = "vendor";
+    stale.disabledModels = ["live/manual-disabled"];
     stale.modelDiscovery = {
+      newModelPolicy: "on",
       knownModels: {
         vendor: { ids: ["old-model"], removed: [], updatedAt: "2026-08-01T00:00:00.000Z" },
+        local: { ids: ["live-model"], removed: [], updatedAt: "2026-08-02T00:00:00.000Z" },
+      },
+      recentArrivals: {
+        local: [{ id: "live-arrival", at: "2026-08-03T00:00:00.000Z" }],
       },
     };
+    const liveProvidersBefore = structuredClone(stale.providers);
     const persisted: OcxConfig = {
       ...structuredClone(stale),
       defaultProvider: "openai",
       providers: {
         openai: config(false).providers.openai!,
-        vendor,
+        vendor: stale.providers.vendor!,
         alpha: { ...vendor, baseUrl: "https://alpha.example.test/v1", liveModels: false },
         beta: { ...vendor, baseUrl: "https://beta.example.test/v1", liveModels: false },
         gamma: { ...vendor, baseUrl: "https://gamma.example.test/v1", liveModels: false },
@@ -404,6 +411,12 @@ test("discovery persistence rebases onto the complete provider registry", async 
       concurrentEditRan = true;
       const concurrent = readPersistedConfig();
       concurrent.providers.delta!.note = "manual-edit";
+      concurrent.providers.vendor!.newModelPolicy = "off";
+      concurrent.modelDiscovery!.knownModels!.vendor = {
+        ids: ["concurrent-model"],
+        removed: [],
+        updatedAt: "2026-08-28T00:00:00.000Z",
+      };
       writeFileSync(getConfigPath(), `${JSON.stringify(concurrent, null, 2)}\n`);
     });
 
@@ -418,8 +431,24 @@ test("discovery persistence rebases onto the complete provider registry", async 
     expect(Object.keys(disk.providers)).toEqual(["openai", "vendor", "alpha", "beta", "gamma", "delta"]);
     expect(disk.defaultProvider).toBe("openai");
     expect(disk.providers.delta?.note).toBe("manual-edit");
-    expect(disk.modelDiscovery?.knownModels?.vendor.ids).toEqual(["new-model", "old-model"]);
+    expect(disk.providers.vendor?.newModelPolicy).toBe("off");
+    expect(disk.modelDiscovery?.knownModels?.vendor.ids).toEqual(["concurrent-model", "new-model"]);
+    expect(disk.modelDiscovery?.recentArrivals?.vendor).toEqual([{ id: "new-model", at: expect.any(String) }]);
+    expect(disk.modelDiscovery?.knownModels?.vendor.updatedAt)
+      .toBe(disk.modelDiscovery?.recentArrivals?.vendor[0]?.at);
+    expect(disk.modelDiscovery?.knownModels?.vendor.updatedAt).not.toBe("2026-08-28T00:00:00.000Z");
     expect(disk.disabledModels).toContain("vendor/new-model");
+
+    expect(stale.defaultProvider).toBe("vendor");
+    expect(stale.providers).toEqual(liveProvidersBefore);
+    expect(stale.modelDiscovery?.newModelPolicy).toBe("on");
+    expect(stale.modelDiscovery?.knownModels?.local.ids).toEqual(["live-model"]);
+    expect(stale.modelDiscovery?.recentArrivals?.local).toEqual([
+      { id: "live-arrival", at: "2026-08-03T00:00:00.000Z" },
+    ]);
+    expect(stale.modelDiscovery?.knownModels?.vendor).toEqual(disk.modelDiscovery?.knownModels?.vendor);
+    expect(stale.modelDiscovery?.recentArrivals?.vendor).toEqual(disk.modelDiscovery?.recentArrivals?.vendor);
+    expect(stale.disabledModels).toEqual(["live/manual-disabled", "vendor/new-model"]);
   } finally {
     provider.stop(true);
   }
