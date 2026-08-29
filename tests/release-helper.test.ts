@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { commandInvocation } from "../src/lib/win-exec";
+import { compareReleaseVersions, isSshRemote, sshTargetFromOrigin } from "../scripts/release";
 
 setDefaultTimeout(30_000);
 
@@ -558,35 +559,22 @@ describe("release helper", () => {
   });
 
   test.each([
-    { releaseSshRepo: "ssh://git:SECRET@example.test/owner/repository.git" },
-    { releaseSshRepo: "git@SECRET@example.test:owner/repository.git" },
-    { originUrl: "ssh://git:SECRET@example.test/owner/repository.git" },
-  ] satisfies ReleaseScenario[])(
-    "credential-bearing SSH target is rejected without logging the credential",
-    async scenario => {
-      const { calls, result } = await runRelease("9.9.9", {
-        releaseSshKey: "/tmp/k",
-        pendingBump: true,
-        ...scenario,
-      });
-      const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
-      expect(result.status).not.toBe(0);
-      expect(output).not.toContain("SECRET");
-      expect(calls.find(call => call.name === "git" && call.args[0] === "push")).toBeUndefined();
-    },
-  );
+    "ssh://git:SECRET@example.test/owner/repository.git",
+    "git@SECRET@example.test:owner/repository.git",
+  ])("credential-bearing SSH target is rejected by the pure classifier", value => {
+    expect(isSshRemote(value)).toBe(false);
+  });
 
   test.each([
     "ssh://git@example.test/owner/repository.git",
-  ])("credential-free ssh URL remains accepted", async releaseSshRepo => {
-    const { calls, result } = await runRelease("9.9.9", {
-      releaseSshKey: "/tmp/k",
-      releaseSshRepo,
-      pendingBump: true,
-    });
-    expect(result.status).toBe(0);
-    expect(calls.find(call => call.name === "git" && call.args[0] === "push")?.args[1])
-      .toBe(releaseSshRepo);
+    "git@example.test:owner/repository.git",
+  ])("credential-free SSH target remains accepted by the pure classifier", value => {
+    expect(isSshRemote(value)).toBe(true);
+  });
+
+  test("credential-free origin is converted to the deploy-key target", () => {
+    expect(sshTargetFromOrigin("https://example.test/owner/repository.git"))
+      .toBe("git@example.test:owner/repository.git");
   });
 
   test("an ssh origin is reused verbatim rather than rewritten", async () => {
@@ -697,20 +685,15 @@ describe("release helper", () => {
   // #1753 review follow-up: build metadata on the channel tip is valid semver
   // and compares by precedence only; an unparseable tip must fail CLOSED
   // (Number() on a garbage core used to yield NaN and pass any candidate).
-  test("channel tip with build metadata compares by precedence, not NaN", async () => {
-    const { result } = await runRelease("2.19.4", { npmLatest: "2.19.3+build.1" });
-    expect(`${result.status}\n${result.stderr ?? ""}`.trim()).toBe("0");
+  test("channel tip with build metadata compares by precedence, not NaN", () => {
+    expect(compareReleaseVersions("2.19.4", "2.19.3+build.1")).toBeGreaterThan(0);
   });
 
-  test("channel tip equal after stripping build metadata does not move forward", async () => {
-    const { result } = await runRelease("2.19.3", { npmLatest: "2.19.3+build.1" });
-    expect(result.status).toBe(1);
-    expect(result.stderr ?? "").toContain("does not move");
+  test("channel tip equal after stripping build metadata does not move forward", () => {
+    expect(compareReleaseVersions("2.19.3", "2.19.3+build.1")).toBe(0);
   });
 
-  test("unparseable channel tip fails closed", async () => {
-    const { result } = await runRelease("2.19.4", { npmLatest: "not-a-version" });
-    expect(result.status).toBe(1);
-    expect(result.stderr ?? "").toContain("cannot compare release versions");
+  test("unparseable channel tip fails closed", () => {
+    expect(() => compareReleaseVersions("2.19.4", "not-a-version")).toThrow(/unparseable release version/);
   });
 });

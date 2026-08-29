@@ -151,7 +151,7 @@ function quoteSshArgument(value: string): string {
  * fork's release to the upstream repository. `OCX_RELEASE_SSH_REPO` still wins when a maintainer
  * needs an explicit target.
  */
-function sshTargetFromOrigin(originUrl: string): string | undefined {
+export function sshTargetFromOrigin(originUrl: string): string | undefined {
   const trimmed = originUrl.trim();
   if (!trimmed) return undefined;
   // Reject a credential-bearing remote outright rather than transplanting it. A URL like
@@ -176,7 +176,7 @@ function sshTargetFromOrigin(originUrl: string): string | undefined {
  * the failure command. Parse URL userinfo instead of treating any `ssh://` string as safe, and
  * reject the scp-like `user:password@host:path` lookalike before either sink can observe it.
  */
-function isSshRemote(value: string): boolean {
+export function isSshRemote(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return false;
 
@@ -479,6 +479,7 @@ async function remoteBranchHead(branch: string): Promise<string> {
   return sha;
 }
 
+async function main(): Promise<void> {
 if (args[0] === "watch") {
   await watchLatest();
   process.exit(0);
@@ -624,3 +625,6 @@ await watchRun(releaseRun.databaseId);
 console.log(dryRun
   ? "\n✓ Dry run complete. Re-run with --publish to publish for real."
   : `\n✓ Published. Try:  npm install -g ${packageName}`);
+}
+
+if (import.meta.main) await main();
