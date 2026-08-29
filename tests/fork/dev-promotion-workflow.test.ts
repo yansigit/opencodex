@@ -26,7 +26,7 @@ describe("dev promotion workflow contract", () => {
 
   test("fast-forwards dev after a successful identical-tree main push", () => {
     expect(workflow.jobs?.backmerge?.permissions).toEqual({
-      contents: "write",
+      contents: "read",
       actions: "read",
     });
     expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'main'");
@@ -43,6 +43,8 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("GIT_ASKPASS");
     expect(workflowSource).toContain("git-askpass.sh");
     expect(workflowSource).toContain("GIT_TERMINAL_PROMPT: 0");
+    expect(workflowSource).toContain("id: backmerge-app-token");
+    expect(workflowSource).toContain("GH_TOKEN: ${{ steps.backmerge-app-token.outputs.token }}");
     expect(workflowSource).toContain("post_main_sha");
     expect(workflowSource).toContain("post_dev_sha");
     expect(workflowSource).toContain("dev back-merge postcheck failed");
@@ -86,6 +88,42 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("persist-credentials: false");
   });
 
+  test("mints contents-only App tokens only for the two dev writers", () => {
+    const backmergeSteps = workflow.jobs?.backmerge?.steps ?? [];
+    const postReleaseSteps = workflow.jobs?.post_release?.steps ?? [];
+    const tokenUse = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1";
+
+    expect(backmergeSteps.find((step) => step.id === "backmerge-app-token")).toMatchObject({
+      if: "steps.verify-main.outputs.eligible == 'true'",
+      uses: tokenUse,
+      with: {
+        "app-id": "${{ vars.PR_AUTOMATION_APP_ID }}",
+        "private-key": "${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}",
+        owner: "${{ github.repository_owner }}",
+        repositories: "${{ github.event.repository.name }}",
+        "permission-contents": "write",
+      },
+    });
+    expect(postReleaseSteps.find((step) => step.id === "post-release-app-token")).toMatchObject({
+      if: "steps.verify-release.outputs.action == 'bump'",
+      uses: tokenUse,
+      with: {
+        "app-id": "${{ vars.PR_AUTOMATION_APP_ID }}",
+        "private-key": "${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}",
+        owner: "${{ github.repository_owner }}",
+        repositories: "${{ github.event.repository.name }}",
+        "permission-contents": "write",
+      },
+    });
+    expect(backmergeSteps.find((step) => step.name === "Fast-forward dev to verified main")).toMatchObject({
+      env: { GH_TOKEN: "${{ steps.backmerge-app-token.outputs.token }}" },
+    });
+    expect(postReleaseSteps.find((step) => step.name === "Bump and push the next stable dev version")).toMatchObject({
+      env: { GH_TOKEN: "${{ steps.post-release-app-token.outputs.token }}" },
+    });
+    expect(workflow.jobs?.promote?.steps?.some((step) => step.uses === tokenUse)).toBe(false);
+  });
+
   test("creates or updates one human-gated dev-to-main PR", () => {
     const createStep = workflowSource.split("- name: Create or update the human promotion PR")[1];
     expect(workflowSource).toContain('gh pr list --base main --head dev --state open');
@@ -109,7 +147,7 @@ describe("dev promotion workflow contract", () => {
   });
 
   test("post-release advances an exact main release to the next stable dev patch", () => {
-    expect(workflow.jobs?.post_release?.permissions).toEqual({ contents: "write" });
+    expect(workflow.jobs?.post_release?.permissions).toEqual({ contents: "read" });
     expect(workflowSource).toContain("post_release:");
     expect(workflowSource).toContain("github.event.workflow_run.name == 'Release'");
     expect(workflowSource).toContain("github.event.workflow_run.event == 'workflow_dispatch'");
@@ -122,12 +160,14 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("npm version patch --no-git-tag-version");
     expect(workflowSource).toContain("git config user.name");
     expect(workflowSource).toContain("git push origin");
+    expect(workflowSource).not.toContain('--force-with-lease="refs/heads/dev:');
+    expect(workflowSource).toContain("id: post-release-app-token");
+    expect(workflowSource).toContain("GH_TOKEN: ${{ steps.post-release-app-token.outputs.token }}");
     expect(workflowSource).toContain("refs/heads/dev");
     expect(workflowSource).toContain("tag_sha");
     expect(workflowSource).toContain("npm view");
     expect(workflowSource).toContain("gh api \"repos/$EXPECTED_REPOSITORY/releases/tags/v${release_version}\"");
     expect(workflowSource).toContain("--atomic");
-    expect(workflowSource).toContain("--force-with-lease=\"refs/heads/dev:$VERIFIED_DEV_SHA\"");
     expect(workflowSource).toContain("--force-with-lease=\"refs/tags/v${RELEASE_VERSION}:$VERIFIED_MAIN_SHA\"");
     expect(workflowSource).toContain("post-release dev version check failed");
     expect(workflowSource).toContain('git diff --name-only "$EXPECTED_RELEASE_SHA" "$live_dev_sha"');
