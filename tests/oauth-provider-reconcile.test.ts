@@ -172,6 +172,56 @@ describe("OAuth provider reconciliation", () => {
     expect(config.providers["google-antigravity"].models).toHaveLength(6);
   });
 
+  test("adopts already-reconciled persisted OAuth state into a stale live config", () => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-antigravity-unchanged-adopt-"));
+    homes.push(home);
+    process.env.OPENCODEX_HOME = home;
+    const staleLive = {
+      port: 10100,
+      defaultProvider: "google-antigravity",
+      googleAntigravityStaticCatalogVersion: 1,
+      providers: {
+        "google-antigravity": {
+          ...structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig),
+          defaultModel: "gemini-3.6-flash",
+          models: [
+            "gemini-3.6-flash",
+            "gemini-3.1-pro",
+            "gemini-3.1-flash-image",
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gpt-oss-120b-medium",
+          ],
+          liveModels: false,
+        },
+        "local-only": {
+          adapter: "openai",
+          baseUrl: "http://127.0.0.1:9999/v1",
+          allowPrivateNetwork: true,
+          models: ["local-live"],
+          note: "live-only",
+        },
+      },
+    } satisfies OcxConfig;
+    const reconciledDisk = structuredClone(staleLive);
+    reconciledDisk.googleAntigravityStaticCatalogVersion = 2;
+    reconciledDisk.providers["google-antigravity"].liveModels = true;
+    reconciledDisk.providers["disk-only"] = {
+      adapter: "openai",
+      baseUrl: "http://127.0.0.1:9998/v1",
+      allowPrivateNetwork: true,
+      models: ["disk-only"],
+    };
+    delete reconciledDisk.providers["local-only"];
+    saveConfig(reconciledDisk);
+
+    expect(reconcileOAuthProviders(staleLive)).toBe(true);
+    expect(staleLive.googleAntigravityStaticCatalogVersion).toBe(2);
+    expect(staleLive.providers["google-antigravity"].liveModels).toBe(true);
+    expect(staleLive.providers["local-only"]?.note).toBe("live-only");
+    expect(staleLive.providers["disk-only"]).toBeUndefined();
+  });
+
   test("preserves an explicit Antigravity static opt-out without the legacy migration marker", () => {
     const config = {
       port: 10100,

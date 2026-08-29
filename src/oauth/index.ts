@@ -1095,6 +1095,17 @@ function adoptOAuthReconciliation(config: OcxConfig, projection: OAuthReconcileP
   }
 }
 
+function withOAuthReconciliationTouchedKeys(
+  projection: OAuthReconcileProjection,
+  required: OAuthReconcileProjection,
+): OAuthReconcileProjection {
+  return {
+    ...projection,
+    touchedProviders: [...new Set([...projection.touchedProviders, ...required.touchedProviders])],
+    touchedAntigravityVersion: projection.touchedAntigravityVersion || required.touchedAntigravityVersion,
+  };
+}
+
 export function reconcileOAuthProviders(config: OcxConfig, persist = true): boolean {
   const projection = projectOAuthProviderReconciliation(config);
   if (!projection.changed) return false;
@@ -1109,7 +1120,7 @@ export function reconcileOAuthProviders(config: OcxConfig, persist = true): bool
       return { changed: next.changed, value: next };
     });
     if (outcome.status !== "unavailable") {
-      adoptOAuthReconciliation(config, outcome.value);
+      adoptOAuthReconciliation(config, withOAuthReconciliationTouchedKeys(outcome.value, projection));
     }
   }
   return true;
