@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig } from "../src/config";
+import { getConfigPath, loadConfig, saveConfig } from "../src/config";
 import { OAUTH_PROVIDERS, reconcileOAuthProviders, upsertOAuthProvider } from "../src/oauth";
 import { getCredential, saveCredential } from "../src/oauth/store";
 import { routeModel } from "../src/router";
@@ -204,8 +204,6 @@ describe("OAuth provider reconciliation", () => {
       },
     } satisfies OcxConfig;
     const reconciledDisk = structuredClone(staleLive);
-    reconciledDisk.googleAntigravityStaticCatalogVersion = 2;
-    reconciledDisk.providers["google-antigravity"].liveModels = true;
     reconciledDisk.providers["disk-only"] = {
       adapter: "openai",
       baseUrl: "http://127.0.0.1:9998/v1",
@@ -213,11 +211,14 @@ describe("OAuth provider reconciliation", () => {
       models: ["disk-only"],
     };
     delete reconciledDisk.providers["local-only"];
+    expect(reconcileOAuthProviders(reconciledDisk, false)).toBe(true);
     saveConfig(reconciledDisk);
+    const beforeBytes = readFileSync(getConfigPath(), "utf8");
 
     expect(reconcileOAuthProviders(staleLive)).toBe(true);
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(beforeBytes);
     expect(staleLive.googleAntigravityStaticCatalogVersion).toBe(2);
-    expect(staleLive.providers["google-antigravity"].liveModels).toBe(true);
+    expect(staleLive.providers["google-antigravity"]).toEqual(reconciledDisk.providers["google-antigravity"]);
     expect(staleLive.providers["local-only"]?.note).toBe("live-only");
     expect(staleLive.providers["disk-only"]).toBeUndefined();
   });
