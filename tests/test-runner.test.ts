@@ -29,6 +29,7 @@ describe("test runner isolation", () => {
         USERPROFILE: isolated.root,
         OPENCODEX_HOME: join(isolated.root, ".opencodex"),
         CODEX_HOME: join(isolated.root, ".codex"),
+        OCX_TEST_HOME_GUARD: "1",
       });
       expect(existsSync(isolated.env.OPENCODEX_HOME!)).toBe(true);
       expect(existsSync(isolated.env.CODEX_HOME!)).toBe(true);

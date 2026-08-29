@@ -31,6 +31,7 @@ import {
 } from "../src/server/management/usage-summary-cache";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
 import { startupHealthFixture } from "./helpers/startup-health";
+import { isolatedDiskManagementPersistence } from "./helpers/management-auth";
 
 let TEST_DIR = "";
 const previousHome = process.env.OPENCODEX_HOME;
@@ -64,6 +65,7 @@ function putSettings(
     body: JSON.stringify(body),
   });
   return handleManagementAPI(req, new URL(req.url), config, {
+    ...isolatedDiskManagementPersistence(),
     getCachedStartupHealth: readTestStartupHealth,
     ...deps,
   });
@@ -466,7 +468,7 @@ describe("PUT /api/settings", () => {
       createManagementConvergeCodex: catalogConvergenceFactory(() => { refreshed = true; }),
     });
 
-    await expect(request).rejects.toThrow("save failed");
+    expect((await request)?.status).toBe(500);
     expect(config).toEqual(before);
     expect(refreshed).toBe(false);
   });

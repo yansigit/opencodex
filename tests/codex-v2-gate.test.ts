@@ -47,6 +47,7 @@ import { resetCodexRuntimeResolveCacheForTests, setCodexRuntimeResolveCacheForTe
 import { cmdV2, codexFeaturesInvocation, v2StatusLine, multiAgentModeLine } from "../src/cli/v2";
 import { handleManagementAPI } from "../src/server/management-api";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
+import { inMemoryManagementPersistence } from "./helpers/management-auth";
 
 function template(): Record<string, unknown> {
   return {
@@ -1228,7 +1229,7 @@ describe("management API logical v1/v2 switching", () => {
       const content = readFileSync(path, "utf8");
       writeFileSync(path, content.replace(/^enabled\s*=\s*(?:true|false)$/m, `enabled = ${enabled}`));
     };
-    const deps = { toggleCodexMultiAgentV2: toggle, createManagementConvergeCodex: catalogConvergenceFactory() };
+    const deps = { ...inMemoryManagementPersistence(config), toggleCodexMultiAgentV2: toggle, createManagementConvergeCodex: catalogConvergenceFactory() };
     try {
       const toV2 = new Request("http://localhost/api/v2", {
         method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ multiAgentMode: "v2" }),

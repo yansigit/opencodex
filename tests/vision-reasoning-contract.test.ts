@@ -11,7 +11,7 @@ import {
 } from "../src/codex/model-entitlements";
 import type { OcxConfig } from "../src/types";
 import { resolveOpenAiVisionModel } from "../src/vision";
-import { ManagementRequest as Request } from "./helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 
 async function getVision(config: OcxConfig): Promise<Response> {
   const url = new URL("http://localhost/api/sidecar-settings");
@@ -30,6 +30,7 @@ async function putVision(config: OcxConfig, vision: Record<string, unknown>): Pr
     }),
     url,
     config,
+    inMemoryManagementPersistence(config),
   );
   if (!response) throw new Error("sidecar settings route did not handle request");
   return response;
