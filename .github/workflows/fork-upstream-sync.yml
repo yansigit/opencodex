@@ -22,10 +22,9 @@ jobs:
       - name: Reject untrusted manual refs
         if: >-
           github.event_name == 'workflow_dispatch' &&
-          github.ref_name != github.event.repository.default_branch &&
-          github.ref_name != 'dev'
+          github.ref_name != github.event.repository.default_branch
         run: |
-          echo "Fork sync may only run from the default branch or dev."
+          echo "Fork sync may only run from the default branch."
           exit 1
 
       - name: Checkout trusted fork scripts
@@ -78,21 +77,11 @@ jobs:
             git remote add upstream https://github.com/lidge-jun/opencodex.git
           fi
           git fetch --force upstream main dev --tags --prune
-          bootstrap_refs=()
           if GIT_ASKPASS="$askpass" git ls-remote --exit-code origin refs/heads/vendor/main >/dev/null; then
             GIT_ASKPASS="$askpass" git fetch origin refs/heads/vendor/main:refs/heads/vendor/main
-          else
-            git branch vendor/main upstream/main
-            bootstrap_refs+=(refs/heads/vendor/main:refs/heads/vendor/main)
           fi
           if GIT_ASKPASS="$askpass" git ls-remote --exit-code origin refs/heads/vendor/dev >/dev/null; then
             GIT_ASKPASS="$askpass" git fetch origin refs/heads/vendor/dev:refs/heads/vendor/dev
-          else
-            git branch vendor/dev upstream/dev
-            bootstrap_refs+=(refs/heads/vendor/dev:refs/heads/vendor/dev)
-          fi
-          if [ "${#bootstrap_refs[@]}" -gt 0 ]; then
-            git push origin "${bootstrap_refs[@]}"
           fi
 
       - name: Create dev integration worktree
@@ -137,11 +126,25 @@ jobs:
           echo "Fork sync lane: $kind" >> "$GITHUB_STEP_SUMMARY"
           printf '%s\n' "$event_file" > "$RUNNER_TEMP/fork-sync-event-path"
 
-      - name: Push updated vendor refs
-        if: steps.pin.outputs.kind == 'pin-updated' || steps.pin.outputs.kind == 'history-diverged'
+      - name: Publish vendor refs atomically
+        id: vendor
+        env:
+          PIN_KIND: ${{ steps.pin.outputs.kind }}
         run: |
           set -eu
-          git push origin refs/heads/vendor/main:refs/heads/vendor/main refs/heads/vendor/dev:refs/heads/vendor/dev
+          kind="$PIN_KIND"
+          if [ "$kind" = "pin-updated" ] || [ "$kind" = "history-diverged" ]; then
+            if ! git push --atomic origin refs/heads/vendor/main:refs/heads/vendor/main refs/heads/vendor/dev:refs/heads/vendor/dev; then
+              kind="pin-diverged"
+              event_file="$(cat "$RUNNER_TEMP/fork-sync-event-path")"
+              jq '.kind = "pin-diverged"
+                | del(.recommendedLane)
+                | .error = "atomic vendor publication was rejected; remote refs were preserved"' \
+                "$event_file" > "$event_file.tmp"
+              mv "$event_file.tmp" "$event_file"
+            fi
+          fi
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
 
       - name: Assert pin preserved checked-out branch HEAD
         env:
@@ -157,65 +160,50 @@ jobs:
 
       - name: Prepare daily merge
         id: prepare
-        if: steps.pin.outputs.kind == 'pin-updated' || steps.pin.outputs.kind == 'main-behind' || steps.pin.outputs.kind == 'history-diverged'
+        if: steps.vendor.outputs.kind == 'pin-updated' || steps.vendor.outputs.kind == 'main-behind' || steps.vendor.outputs.kind == 'history-diverged'
         env:
-          GH_TOKEN: ${{ github.token }}
           FORK_SYNC_WORKTREE: ${{ runner.temp }}/fork-sync-dev
         run: |
           set -eu
-          askpass="$RUNNER_TEMP/git-askpass.sh"
-          cat > "$askpass" <<'EOF'
-          #!/bin/sh
-          case "$1" in
-            *Username*) printf '%s\n' x-access-token ;;
-            *) printf '%s\n' "$GH_TOKEN" ;;
-          esac
-          EOF
-          chmod 700 "$askpass"
           cd "$FORK_SYNC_WORKTREE"
           event_file="$(cat "$RUNNER_TEMP/fork-sync-event-path")"
           result_file="$RUNNER_TEMP/fork-sync-prepare.json"
+          dev_sha="$(git rev-parse HEAD)"
           bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" prepare < "$event_file" > "$result_file"
           status="$(jq -r '.status' "$result_file")"
           echo "status=$status" >> "$GITHUB_OUTPUT"
-          if [ "$status" = "merged" ]; then
+          if [ "$status" = "history-diverged" ]; then
             branch="$(jq -r '.branch' "$result_file")"
-            remote_sha="$(GIT_ASKPASS="$askpass" git ls-remote origin "refs/heads/$branch" | awk 'NR == 1 { print $1 }')"
-            if [ -n "$remote_sha" ]; then
-              git push --force-with-lease=refs/heads/$branch:$remote_sha origin "refs/heads/$branch:refs/heads/$branch"
-            else
-              git push origin "refs/heads/$branch:refs/heads/$branch"
-            fi
+            git switch -C "$branch"
+          fi
+          if [ "$status" = "merged" ] || [ "$status" = "hotspot-handoff" ] || [ "$status" = "history-diverged" ]; then
+            publish_input="$RUNNER_TEMP/fork-sync-publish-input.json"
+            publish_result="$RUNNER_TEMP/fork-sync-publish.json"
             jq -n \
               --slurpfile event "$event_file" \
               --slurpfile result "$result_file" \
-              '{event: $event[0], result: $result[0]}' \
-              > "$RUNNER_TEMP/fork-sync-draft-pr.json"
-          elif [ "$status" = "hotspot-handoff" ] || [ "$status" = "history-diverged" ]; then
-            branch="$(jq -r '.branch' "$result_file")"
-            if [ "$status" = "history-diverged" ]; then
-              git switch -C "$branch"
-            fi
-            # On hotspot/history handoff the branch name is deterministic (from tag+sha), so a
-            # prior stale branch can shadow fresh work. Always ensure the remote branch tracks the
-            # current integration worktree state; create if absent, force-update if stale.
-            if GIT_ASKPASS="$askpass" git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
-              echo "Sync handoff branch exists, updating to current state: $branch"
-              remote_sha="$(GIT_ASKPASS="$askpass" git ls-remote origin "refs/heads/$branch" | awk 'NR == 1 { print $1 }')"
-              if [ -n "$remote_sha" ]; then
-                git push --force-with-lease=refs/heads/$branch:$remote_sha origin "refs/heads/$branch:refs/heads/$branch"
-              else
-                git push origin "refs/heads/$branch:refs/heads/$branch"
-              fi
-            else
-              git push origin "refs/heads/$branch:refs/heads/$branch"
+              --arg devSha "$dev_sha" \
+              '{event: $event[0], result: $result[0], devSha: $devSha}' \
+              > "$publish_input"
+            bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" publish < "$publish_input" > "$publish_result"
+            echo "publish_action=$(jq -r '.action' "$publish_result")" >> "$GITHUB_OUTPUT"
+            echo "handoff_required=$(jq -r '.handoffRequired' "$publish_result")" >> "$GITHUB_OUTPUT"
+            echo "escalation_required=$(jq -r '.escalationRequired' "$publish_result")" >> "$GITHUB_OUTPUT"
+            echo "contains_vendor_main=$(jq -r '.containsVendorMain' "$publish_result")" >> "$GITHUB_OUTPUT"
+            if [ "$status" = "merged" ] && [ "$(jq -r '.containsVendorMain' "$publish_result")" = "true" ]; then
+              echo "ready_for_pr=true" >> "$GITHUB_OUTPUT"
+              jq -n \
+                --slurpfile event "$event_file" \
+                --slurpfile result "$result_file" \
+                '{event: $event[0], result: $result[0]}' \
+                > "$RUNNER_TEMP/fork-sync-draft-pr.json"
             fi
           fi
 
       - name: Build sync handoff payload
         if: >-
           success() &&
-          steps.pin.outputs.kind != 'already-current'
+          steps.vendor.outputs.kind != 'already-current'
         env:
           FORK_SYNC_WORKTREE: ${{ runner.temp }}/fork-sync-dev
         run: |
@@ -224,6 +212,10 @@ jobs:
           prepare_result='null'
           if [ -f "$RUNNER_TEMP/fork-sync-prepare.json" ]; then
             prepare_result="$(cat "$RUNNER_TEMP/fork-sync-prepare.json")"
+          fi
+          publish_result='null'
+          if [ -f "$RUNNER_TEMP/fork-sync-publish.json" ]; then
+            publish_result="$(cat "$RUNNER_TEMP/fork-sync-publish.json")"
           fi
           handoff_status="$(jq -r '.status // empty' "$RUNNER_TEMP/fork-sync-prepare.json" 2>/dev/null || true)"
           if [ -z "$handoff_status" ]; then
@@ -235,14 +227,15 @@ jobs:
             --arg headSha "$head_sha" \
             --arg mergeBaseShas "$merge_base_shas" \
             --argjson prepareResult "$prepare_result" \
+            --argjson publishResult "$publish_result" \
             '($mergeBaseShas | split("\n") | map(select(length > 0))) as $bases
               | . + {prepareStatus: $prepareStatus, headSha: $headSha,
           mergeBaseShas: $bases, mergeBaseCount: ($bases | length),
-                prepareResult: $prepareResult}' \
+                prepareResult: $prepareResult, publishResult: $publishResult}' \
             "$event_file" > "$RUNNER_TEMP/fork-sync-handoff.json"
 
       - name: Create or update draft sync PR
-        if: steps.prepare.outputs.status == 'merged'
+        if: steps.prepare.outputs.ready_for_pr == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -253,9 +246,14 @@ jobs:
       # Conflict issue tracking is deferred until the Cursor handoff fails.
       - name: Notify GitHub issue
         if: >-
-          steps.pin.outputs.kind != 'already-current' &&
-          steps.pin.outputs.kind != 'history-diverged' &&
-          steps.prepare.outputs.status != 'hotspot-handoff'
+          steps.vendor.outputs.kind != 'already-current' &&
+          (
+            steps.prepare.outputs.escalation_required == 'true' ||
+            (
+              steps.vendor.outputs.kind != 'history-diverged' &&
+              steps.prepare.outputs.status != 'hotspot-handoff'
+            )
+          )
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -270,7 +268,7 @@ jobs:
       # Cursor handles only conflicts the Action could not resolve or
       # disconnected histories; ordinary daily merges stop at a draft PR.
       - name: Notify Cursor handoff
-        if: steps.prepare.outputs.status == 'hotspot-handoff' || steps.pin.outputs.kind == 'history-diverged'
+        if: steps.prepare.outputs.handoff_required == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}

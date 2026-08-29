@@ -52,17 +52,15 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("main-behind");
     expect(workflow).toContain("history-diverged");
     expect(workflow).toContain("Fork sync lane: $kind");
-    expect(workflow).toContain("steps.pin.outputs.kind != 'already-current'");
+    expect(workflow).toContain("steps.vendor.outputs.kind != 'already-current'");
   });
 
   test("prepares daily merges and opens draft PRs only for merged branches", () => {
     expect(workflow).toContain("/scripts/fork/sync/cli.ts\" prepare");
     expect(workflow).toContain("/scripts/fork/sync/cli.ts\" draft-pr");
-    expect(workflow).toContain("steps.prepare.outputs.status == 'merged'");
-    expect(workflow).toContain("refs/heads/$branch:refs/heads/$branch");
-    expect(workflow).toContain('git ls-remote origin "refs/heads/$branch"');
-    expect(workflow).toContain("--force-with-lease=refs/heads/$branch:$remote_sha");
-    expect(workflow).toContain("git push origin");
+    expect(workflow).toContain("steps.prepare.outputs.ready_for_pr == 'true'");
+    expect(workflow).toContain('[ "$status" = "merged" ]');
+    expect(workflow).toContain('/scripts/fork/sync/cli.ts" publish');
     expect(workflow).toContain("GH_TOKEN: ${{ github.token }}");
   });
 
@@ -73,13 +71,11 @@ describe("fork upstream sync workflow contract", () => {
 
   test("publishes a remote sync branch for every conflict handoff", () => {
     expect(workflow).toContain(
-      "if: steps.pin.outputs.kind == 'pin-updated' || steps.pin.outputs.kind == 'main-behind' || steps.pin.outputs.kind == 'history-diverged'",
+      "if: steps.vendor.outputs.kind == 'pin-updated' || steps.vendor.outputs.kind == 'main-behind' || steps.vendor.outputs.kind == 'history-diverged'",
     );
-    expect(workflow).toContain("status\" = \"hotspot-handoff\" ] || [ \"$status\" = \"history-diverged\"");
-    expect(workflow).toContain('git push origin "refs/heads/$branch:refs/heads/$branch"');
+    expect(workflow).toContain('[ "$status" = "hotspot-handoff" ] || [ "$status" = "history-diverged" ]');
     expect(workflow).toContain('git switch -C "$branch"');
-    expect(workflow).toContain("Sync handoff branch exists, updating to current state: $branch");
-    expect(workflow).toContain("--force-with-lease=refs/heads/$branch:$remote_sha");
+    expect(workflow).toContain('/scripts/fork/sync/cli.ts" publish');
   });
 
   test("prepares from dev while keeping scripts on the guarded trusted ref", () => {
@@ -99,7 +95,8 @@ describe("fork upstream sync workflow contract", () => {
   test("rejects manual dispatches from untrusted refs", () => {
     expect(workflow).toContain("github.event_name == 'workflow_dispatch'");
     expect(workflow).toContain("github.ref_name != github.event.repository.default_branch");
-    expect(workflow).toContain("github.ref_name != 'dev'");
+    expect(workflow).not.toContain("github.ref_name != 'dev'");
+    expect(workflow).toContain("Fork sync may only run from the default branch.");
   });
 
   test("keeps the upstream fetch step at the workflow step indentation", () => {
@@ -108,9 +105,8 @@ describe("fork upstream sync workflow contract", () => {
     );
   });
 
-  test("starts Cursor only for hotspot or history handoff", () => {
-    expect(workflow).toContain("steps.prepare.outputs.status == 'hotspot-handoff'");
-    expect(workflow).toContain("steps.pin.outputs.kind == 'history-diverged'");
+  test("starts Cursor only when publication created or fast-forwarded a handoff", () => {
+    expect(workflow).toContain("steps.prepare.outputs.handoff_required == 'true'");
     expect(workflow).toContain("FORK_SYNC_COORDINATORS: cursor-webhook");
   });
 
@@ -137,6 +133,7 @@ describe("fork upstream sync workflow contract", () => {
     const handoffStep = workflow.split("- name: Build sync handoff payload")[1];
     expect(handoffStep).toContain("fork-sync-prepare.json");
     expect(handoffStep).toContain("prepareResult");
+    expect(handoffStep).toContain("publishResult");
     expect(handoffStep).toContain("headSha");
     expect(handoffStep).toContain("mergeBaseCount");
     expect(handoffStep).toContain("mergeBaseShas");
@@ -156,8 +153,17 @@ describe("fork upstream sync workflow contract", () => {
 
   test("does not create a Jules issue before Cursor fallback is known to fail", () => {
     const issueStep = workflow.split("- name: Notify GitHub issue")[1];
-    expect(issueStep).toContain("steps.pin.outputs.kind != 'history-diverged'");
+    expect(issueStep).toContain("steps.vendor.outputs.kind != 'history-diverged'");
     expect(issueStep).toContain("steps.prepare.outputs.status != 'hotspot-handoff'");
+    expect(issueStep).toContain("steps.prepare.outputs.escalation_required == 'true'");
+  });
+
+  test("installs before exposing the push secret and verifies the SSH host", () => {
+    expect(workflow.indexOf("bun install --frozen-lockfile --ignore-scripts")).toBeLessThan(
+      workflow.indexOf("FORK_SYNC_SSH_KEY: ${{ secrets.FORK_SYNC_SSH_KEY }}"),
+    );
+    expect(workflow).toContain("StrictHostKeyChecking=yes");
+    expect(workflow).toContain("UserKnownHostsFile=$known_hosts");
   });
 
   test("asserts pinning did not move the checked-out branch HEAD", () => {
@@ -166,26 +172,30 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain('expected_branch="$EXPECTED_BRANCH"');
   });
 
-  test("does not merge or use an unguarded force-push from the action", () => {
+  test("does not merge or force-push from the action", () => {
     expect(workflow).toContain("concurrency:");
     expect(workflow).toContain("cancel-in-progress: false");
-    expect(workflow).not.toMatch(/gh\s+pr\s+merge|git\s+push\s+.*--force(?!-with-lease)|git\s+merge\s+-X/);
+    expect(workflow).not.toMatch(/gh\s+pr\s+merge|git\s+push\s+.*--force|git\s+merge\s+-X/);
   });
 
   test("pushes only the two vendor refs after a successful pin", () => {
     expect(workflow).toContain(
-      "git push origin refs/heads/vendor/main:refs/heads/vendor/main refs/heads/vendor/dev:refs/heads/vendor/dev",
+      "git push --atomic origin refs/heads/vendor/main:refs/heads/vendor/main refs/heads/vendor/dev:refs/heads/vendor/dev",
     );
-    expect(workflow).toContain(
-      "if: steps.pin.outputs.kind == 'pin-updated' || steps.pin.outputs.kind == 'history-diverged'",
-    );
+    expect(workflow).toContain('if [ "$kind" = "pin-updated" ] || [ "$kind" = "history-diverged" ]');
     expect(workflow).not.toMatch(/git\s+push\s+origin\s+(?:main|origin\/main)\b/);
   });
 
-  test("bootstraps missing vendor refs from upstream instead of failing the fetch", () => {
+  test("reports a rejected atomic publication as divergence", () => {
+    expect(workflow).toContain('kind="pin-diverged"');
+    expect(workflow).toContain("atomic vendor publication was rejected; remote refs were preserved");
+    expect(workflow).toContain('echo "kind=$kind" >> "$GITHUB_OUTPUT"');
+  });
+
+  test("leaves missing vendor refs for the stable-tag pinning logic", () => {
     expect(workflow).toContain("git ls-remote --exit-code origin refs/heads/vendor/main");
     expect(workflow).toContain("git ls-remote --exit-code origin refs/heads/vendor/dev");
-    expect(workflow).toContain("git branch vendor/main upstream/main");
-    expect(workflow).toContain("git branch vendor/dev upstream/dev");
+    expect(workflow).not.toContain("git branch vendor/main upstream/main");
+    expect(workflow).not.toContain("git branch vendor/dev upstream/dev");
   });
 });

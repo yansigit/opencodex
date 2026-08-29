@@ -49,18 +49,60 @@ export async function pinVendorRefs(
 ): Promise<SyncEvent> {
   if (event.kind !== "pin-updated") return event;
   try {
-    await pinVendorRef("vendor/main", event.latestTagSha, options.runner);
-    const main = await run(options.runner, ["rev-parse", "refs/heads/vendor/main"]);
+    const upstreamDevRef = options.upstreamDevRef ?? "refs/remotes/upstream/dev";
+    if (event.vendorDevSha) {
+      const devCanFastForward = await options.runner([
+        "merge-base",
+        "--is-ancestor",
+        event.vendorDevSha,
+        upstreamDevRef,
+      ]);
+      if (devCanFastForward.exitCode === 1) {
+        throw new Error("vendor/dev cannot be fast-forwarded to upstream/dev");
+      }
+      if (devCanFastForward.exitCode !== 0) {
+        throw new Error(
+          devCanFastForward.stderr.trim()
+          || `git merge-base --is-ancestor failed with exit code ${devCanFastForward.exitCode}`,
+        );
+      }
+    }
+
+    let vendorMainSha = event.vendorMainSha;
+    if (vendorMainSha && !event.vendorDevSha) {
+      const keepMain = await options.runner([
+        "merge-base",
+        "--is-ancestor",
+        event.latestTagSha,
+        vendorMainSha,
+      ]);
+      if (keepMain.exitCode === 1) vendorMainSha = "";
+      else if (keepMain.exitCode !== 0) {
+        throw new Error(
+          keepMain.stderr.trim()
+          || `git merge-base --is-ancestor failed with exit code ${keepMain.exitCode}`,
+        );
+      }
+    } else {
+      vendorMainSha = "";
+    }
+    if (!vendorMainSha) {
+      await pinVendorRef("vendor/main", event.latestTagSha, options.runner);
+      vendorMainSha = (await run(
+        options.runner,
+        ["rev-parse", "refs/heads/vendor/main"],
+      )).stdout.trim();
+    }
     await pinVendorRef(
       "vendor/dev",
-      options.upstreamDevRef ?? "refs/remotes/upstream/dev",
+      upstreamDevRef,
       options.runner,
     );
     const dev = await run(options.runner, ["rev-parse", "refs/heads/vendor/dev"]);
     return {
       ...event,
       kind: "pin-updated",
-      vendorMainSha: main.stdout.trim(),
+      vendorMainSha,
       vendorDevSha: dev.stdout.trim(),
     };
   } catch (error) {
