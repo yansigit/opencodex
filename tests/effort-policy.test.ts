@@ -53,6 +53,12 @@ const MAIN_HEADERS = new Headers({
 });
 
 describe("isThreadSpawnRequest", () => {
+  test("reuses ingress classification when downstream headers contradict it", () => {
+    const contradictoryHeaders = new Headers({ "x-openai-subagent": "review" });
+    expect(isThreadSpawnRequest(contradictoryHeaders, "subagent")).toBe(true);
+    expect(isThreadSpawnRequest(SUBAGENT_HEADERS, "internal")).toBe(false);
+  });
+
   test("x-openai-subagent: collab_spawn classifies as spawned child", () => {
     expect(isThreadSpawnRequest(SUBAGENT_HEADERS)).toBe(true);
   });

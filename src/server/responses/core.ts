@@ -1894,8 +1894,8 @@ async function applyFinalRouteRequestNormalization(args: {
   {
     const { applyEffortCap, effortCapAppliesTo, supportedLadderFor } = await import("../effort-policy");
     const surface = collabSurface(parsed);
-    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true)) {
-      const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route));
+    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true, logCtx.agentKind)) {
+      const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route), logCtx.agentKind);
       if (capped) {
         logCtx.requestedEffort = `${capped.from}->${capped.to}`;
         if (isInjectionDebugEnabled()) {
@@ -2615,7 +2615,7 @@ async function handleResponsesInner(
     && isMultiAgentV2Enabled()
     && isCanonicalOpenAiForwardProvider(route.provider)
     && collabSurface(parsed) === "v2"
-    && !isThreadSpawnRequest(req.headers)
+    && !isThreadSpawnRequest(req.headers, logCtx.agentKind)
     && !req.headers.has("x-openai-subagent")
     && !options.comboAttempt
     && parsed._compactionRequest !== true
@@ -2634,7 +2634,7 @@ async function handleResponsesInner(
   // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
   // also fail closed without polling quota upstream. Cached fallback state can still select a
   // provider with native continuation support below.
-  const threadSpawn = isThreadSpawnRequest(req.headers);
+  const threadSpawn = isThreadSpawnRequest(req.headers, logCtx.agentKind);
   const initialSubagentFallbackChain = threadSpawn && !options.comboAttempt
     ? resolveSubagentFallbackChain(parsed, config)
     : null;

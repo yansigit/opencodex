@@ -67,8 +67,8 @@ export function classifyAgentKind(headers: Headers, traffic?: "responses"): Agen
  * sources — responses_metadata.rs subagent_source). Those are maintenance turns,
  * not spawned children, and must never trip subagentEffortCap.
  */
-export function isThreadSpawnRequest(headers: Headers): boolean {
-  return classifyAgentKind(headers) === "subagent";
+export function isThreadSpawnRequest(headers: Headers, agentKind?: AgentKind): boolean {
+  return (agentKind ?? classifyAgentKind(headers)) === "subagent";
 }
 
 /** The effective ceiling for this turn, or undefined when no configured cap applies. */
@@ -102,10 +102,11 @@ export function effortCapAppliesTo(
   headers: Headers,
   config: OcxConfig,
   compaction = false,
+  agentKind?: AgentKind,
 ): boolean {
   if (compaction) return false;
   if (config.multiAgentMode === "v1") return false;
-  return surface === "v2" || isThreadSpawnRequest(headers);
+  return surface === "v2" || isThreadSpawnRequest(headers, agentKind);
 }
 
 /**
@@ -214,8 +215,9 @@ export function applyEffortCap(
   headers: Headers,
   config: OcxConfig,
   supported?: readonly string[] | undefined,
+  agentKind?: AgentKind,
 ): { from: string; to: string; subagent: boolean } | null {
-  const subagent = isThreadSpawnRequest(headers);
+  const subagent = isThreadSpawnRequest(headers, agentKind);
   const cap = effortCapFor(config, subagent);
   if (!cap) return null;
   const resolved = resolveCappedEffort(cap, supported);
