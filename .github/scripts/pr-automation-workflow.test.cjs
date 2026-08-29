@@ -47,6 +47,15 @@ describe("PR automation workflow contract", () => {
     assert.ok(source.indexOf("if: github.repository") < source.indexOf("Create PR automation App token"));
   });
 
+  it("accepts sync provenance only from exact trusted dispatch inputs", () => {
+    const source = workflow();
+    assert.match(source, /pull_number:[\s\S]*head_sha:[\s\S]*tag_sha/);
+    assert.match(source, /context\.payload\.sender\?\.type === "Bot"/);
+    assert.match(source, /context\.payload\.sender\?\.id\) === syncProducerUserId/);
+    assert.match(source, /inputs\.head_sha === pr\.head\.sha/);
+    assert.match(source, /inputs\.head_sha/);
+  });
+
   it("creates the App token only for mutating modes and keeps GITHUB_TOKEN for controller writes", () => {
     const source = workflow();
     assert.match(source, /actions\/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3\.2\.0/);
@@ -90,6 +99,13 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /promotion|base\.ref.*main|head\.ref.*dev/i);
     assert.match(source, /enforce-pr-target\.yml/);
     assert.match(source, /ci.*hygiene|hygiene.*ci/);
+  });
+
+  it("reports aged automation holds while retaining the label", () => {
+    const source = workflow();
+    assert.match(source, /summarizeAgedHolds/);
+    assert.match(source, /Holds older than 24h/);
+    assert.match(source, /labels retained/);
   });
 
   it("uses complete live evidence and immutable controller state", () => {
@@ -162,12 +178,20 @@ describe("PR automation workflow contract", () => {
     const source = workflow();
     assert.match(source, /autonomous-sync/);
     assert.match(source, /syncProvenance|syncRecord/);
-    assert.match(source, /actorId.*41898282|41898282.*actorId/);
+    assert.match(source, /actorId.*syncProducerUserId|syncProducerUserId.*actorId/);
     assert.match(source, /syncRecord.*headSha|headSha.*syncRecord/);
     assert.match(source, /context\.payload\.label\?\.name === "autonomous-sync"/);
     assert.match(source, /syncActor\?\.type === "Bot"/);
     assert.match(source, /clearSync|removeSync/);
     assert.match(source, /provenance: sync/);
+    assert.match(source, /function controllerEvidence[\s\S]*?const syncProducerUserId = Number\(process\.env\.PR_AUTOMATION_APP_USER_ID\)/);
+  });
+
+  it("keeps the mergeability check in the fixed App-bound baseline", () => {
+    const source = workflow();
+    assert.match(source, /requiredChecks: \["ci", "hygiene", "enforce-target", "mergeable"\]/);
+    assert.match(source, /expectedAppIds: \{ ci: 15368, hygiene: 15368, "enforce-target": 15368, mergeable: 15368 \}/);
+    assert.match(source, /\["ci", "hygiene", "mergeable"\]/);
   });
 
   it("isolates malformed maintenance state and refreshes status after races", () => {

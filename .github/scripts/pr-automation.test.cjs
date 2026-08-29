@@ -9,6 +9,8 @@ const {
   buildAutomationComment,
   classifyPullRequest,
   exactHeadGate,
+  REQUIRED_CHECKS,
+  summarizeAgedHolds,
 } = require("./pr-automation.cjs");
 
 const SHA = "a".repeat(40);
@@ -70,12 +72,13 @@ function passingGateInput(overrides = {}) {
     changedFiles: [{ filename: "src/feature.ts" }],
     changedFilesCount: 1,
     changedFilesComplete: true,
-    requiredChecks: ["ci", "hygiene", "enforce-target"],
-    expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368 },
+    requiredChecks: ["ci", "hygiene", "enforce-target", "mergeable"],
+    expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368, mergeable: 15368 },
     checkRuns: [
       { id: 1, name: "ci", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
       { id: 2, name: "hygiene", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
       { id: 3, name: "enforce-target", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
+      { id: 4, name: "mergeable", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
     ],
     ...overrides,
   };
@@ -86,6 +89,18 @@ function passingGate(overrides = {}) {
 }
 
 describe("exactHeadGate", () => {
+  it("treats mergeable as a required App-bound check", () => {
+    assert.deepEqual(REQUIRED_CHECKS, ["ci", "hygiene", "enforce-target", "mergeable"]);
+    const result = passingGate({
+      requiredChecks: [...REQUIRED_CHECKS],
+      expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368, mergeable: 15368 },
+      checkRuns: [
+        ...passingGateInput().checkRuns,
+        { id: 4, name: "mergeable", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
+      ],
+    });
+    assert.equal(result.ok, true);
+  });
   it("accepts complete exact-head evidence", () => {
     const result = passingGate();
     assert.equal(result.ok, true);
@@ -214,13 +229,14 @@ describe("botMergeEvidence", () => {
       baseAncestry: true,
       changedFilesComplete: true,
       changedFilesCount: 1,
-      requiredChecks: ["ci", "hygiene", "enforce-target"],
-      expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368 },
+      requiredChecks: ["ci", "hygiene", "enforce-target", "mergeable"],
+      expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368, mergeable: 15368 },
       changedFiles: [{ filename: "src/feature.ts" }],
       checkRuns: [
         { id: 1, name: "ci", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
         { id: 2, name: "hygiene", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
         { id: 3, name: "enforce-target", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
+        { id: 4, name: "mergeable", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
         { id: 8, name: "Cursor Bugbot", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 777 } },
       ],
     });
@@ -238,12 +254,13 @@ describe("botMergeEvidence", () => {
         producerIdentity: "fork-upstream-sync",
       }, expectedTrustedProducerIdentity: "fork-upstream-sync", liveHeadSha: SHA, expectedBugbotAppId: 777,
       currentBaseSha: BASE_SHA, expectedBaseSha: BASE_SHA, mergeable: true, mergeableState: "clean", baseAncestry: true,
-      changedFilesComplete: true, changedFilesCount: 1, requiredChecks: ["ci", "hygiene", "enforce-target"],
-      expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368 },
+      changedFilesComplete: true, changedFilesCount: 1, requiredChecks: ["ci", "hygiene", "enforce-target", "mergeable"],
+      expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368, mergeable: 15368 },
       checkRuns: [
         { id: 1, name: "ci", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
         { id: 2, name: "hygiene", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
         { id: 3, name: "enforce-target", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
+        { id: 4, name: "mergeable", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 15368 } },
         { id: 8, name: "Cursor Bugbot", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 777 } },
       ],
     };
@@ -350,12 +367,22 @@ describe("botMergeEvidence", () => {
       baseAncestry: true,
       changedFilesComplete: true,
       changedFilesCount: 1,
-      requiredChecks: ["ci", "hygiene", "enforce-target"],
-      expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368 },
+      requiredChecks: ["ci", "hygiene", "enforce-target", "mergeable"],
+      expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368, mergeable: 15368 },
       checkRuns: [{ id: 8, name: "Cursor Bugbot", head_sha: SHA, status: "completed", conclusion: "success", app: { id: 777 } }],
       changedFiles: [{ filename: "src/feature.ts" }],
     });
     assert.equal(result.ready, false);
+  });
+});
+
+describe("automation hold aging", () => {
+  it("summarizes holds older than 24 hours without removing them", () => {
+    const aged = summarizeAgedHolds([
+      { number: 12, title: "old", labels: ["automation:hold"], holdSince: "2026-08-26T00:00:00.000Z" },
+      { number: 13, title: "new", labels: ["automation:hold"], holdSince: "2026-08-28T00:00:00.000Z" },
+    ], "2026-08-28T12:00:00.000Z");
+    assert.deepEqual(aged, [{ number: 12, title: "old", ageHours: 60 }]);
   });
 });
 

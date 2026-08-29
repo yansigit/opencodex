@@ -14,7 +14,7 @@ const SHA_RE = /^[0-9a-f]{40}$/i;
 const SYNC_BRANCH_RE = /^sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64}$/i;
 const ACTIVE_JULES_STATES = new Set(["QUEUED", "IN_PROGRESS", "PLANNING", "AWAITING_PLAN_APPROVAL"]);
 const TERMINAL_JULES_STATES = new Set(["COMPLETED", "FAILED", "CANCELLED", "CANCELED"]);
-const REQUIRED_CHECKS = ["ci", "hygiene", "enforce-target"];
+const REQUIRED_CHECKS = ["ci", "hygiene", "enforce-target", "mergeable"];
 const KNOWN_CHECKS = new Set([
   ...REQUIRED_CHECKS,
   "react-doctor",
@@ -361,6 +361,17 @@ function printable(value, max = 240) {
   return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
+function summarizeAgedHolds(records = [], now = new Date().toISOString()) {
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(nowMs)) return [];
+  return records.flatMap(record => {
+    const labels = new Set((record.labels || []).map(label => typeof label === "string" ? label : label?.name));
+    const sinceMs = Date.parse(record.holdSince || record.updatedAt || record.createdAt || "");
+    if (!labels.has("automation:hold") || !Number.isFinite(sinceMs) || nowMs - sinceMs < 24 * 60 * 60 * 1000) return [];
+    return [{ number: Number(record.number), title: printable(record.title), ageHours: Math.floor((nowMs - sinceMs) / (60 * 60 * 1000)) }];
+  });
+}
+
 function buildAutomationComment(input = {}) {
   const classification = input.classification || classifyPullRequest(input);
   const gate = input.exactHeadGate || input.headGate || {};
@@ -395,4 +406,5 @@ module.exports = {
   buildAutomationComment,
   classifyPullRequest,
   exactHeadGate,
+  summarizeAgedHolds,
 };

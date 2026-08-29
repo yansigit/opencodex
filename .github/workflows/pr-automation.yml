@@ -11,6 +11,16 @@ on:
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
+    inputs:
+      pull_number:
+        required: false
+        type: string
+      head_sha:
+        required: false
+        type: string
+      tag_sha:
+        required: false
+        type: string
 
 permissions: {}
 
@@ -57,6 +67,7 @@ jobs:
           CURSOR_BUGBOT_APP_ID: ${{ vars.CURSOR_BUGBOT_APP_ID }}
           CURSOR_BUGBOT_USER_ID: ${{ vars.CURSOR_BUGBOT_USER_ID }}
           JULES_BOT_USER_ID: ${{ vars.JULES_BOT_USER_ID }}
+          PR_AUTOMATION_APP_USER_ID: ${{ vars.PR_AUTOMATION_APP_USER_ID }}
         with:
           github-token: ${{ github.token }}
           script: |
@@ -68,6 +79,7 @@ jobs:
               buildAutomationComment,
               classifyPullRequest,
               exactHeadGate,
+              summarizeAgedHolds,
             } = require(path.join(process.cwd(), ".github", "scripts", "pr-automation.cjs"));
             const { parseAgentMaintenanceState } = require(path.join(
               process.cwd(), ".github", "scripts", "agent-maintenance.cjs"
@@ -231,22 +243,32 @@ jobs:
               return { headSha: pr.head.sha, actor, labeledEventId: Number(latest.id) };
             }
             function syncRecordFor(pr, evidence) {
+              const syncProducerUserId = Number(process.env.PR_AUTOMATION_APP_USER_ID);
+              const inputs = context.payload.inputs || {};
+              const trustedDispatch = context.eventName === "workflow_dispatch" &&
+                context.payload.sender?.type === "Bot" && Number(context.payload.sender?.id) === syncProducerUserId &&
+                String(inputs.pull_number) === String(pr.number) && inputs.head_sha === pr.head.sha &&
+                /^[0-9a-f]{40}$/i.test(inputs.head_sha) && /^[0-9a-f]{40}$/i.test(inputs.tag_sha) &&
+                Number(pr.user?.id) === syncProducerUserId &&
+                pr.base?.ref === "dev" && String(pr.head?.ref || "").startsWith("sync/upstream-") &&
+                String(pr.body || "").includes(`\"headSha\":\"${inputs.head_sha}\"`) &&
+                String(pr.body || "").includes(`\"tagSha\":\"${inputs.tag_sha}\"`);
               const exactEvent = context.eventName === "pull_request_target" && context.payload.action === "labeled" &&
                 context.payload.label?.name === "autonomous-sync" &&
                 context.payload.pull_request?.number === pr.number &&
                 context.payload.pull_request?.head?.sha === pr.head.sha;
-              if (!exactEvent || !labelsOf(pr).includes("autonomous-sync")) return null;
+              if ((!exactEvent && !trustedDispatch) || !labelsOf(pr).includes("autonomous-sync")) return null;
+              if (trustedDispatch) return { headSha: pr.head.sha, actorId: syncProducerUserId, dispatch: true, tagSha: inputs.tag_sha };
               const latest = evidence.events.filter(event => event.label?.name === "autonomous-sync" &&
                 ["labeled", "unlabeled"].includes(String(event.event || event.action).toLowerCase()))
                 .sort((a, b) => Number(b.id) - Number(a.id))[0];
               const actor = latest?.actor || latest?.user;
-              if (!latest || latest.event !== "labeled" || actor?.login !== "github-actions[bot]" ||
-                  Number(actor?.id) !== 41898282 || actor?.type !== "Bot" ||
-                  context.payload.sender?.login !== "github-actions[bot]" ||
-                  Number(context.payload.sender?.id) !== 41898282) return null;
-              return { headSha: pr.head.sha, actorId: 41898282, labeledEventId: Number(latest.id) };
+              if (!latest || latest.event !== "labeled" || Number(actor?.id) !== syncProducerUserId || actor?.type !== "Bot" ||
+                  Number(context.payload.sender?.id) !== syncProducerUserId) return null;
+              return { headSha: pr.head.sha, actorId: syncProducerUserId, labeledEventId: Number(latest.id) };
             }
             function controllerEvidence(pr, evidence, maintenanceMap) {
+              const syncProducerUserId = Number(process.env.PR_AUTOMATION_APP_USER_ID);
               const labels = labelsOf(pr);
               const maintenance = maintenanceMap.records.get(pr.number);
               const maintenanceError = maintenanceMap.errors.get(pr.number) ||
@@ -283,25 +305,26 @@ jobs:
                 changedFilesCount: pr.changed_files,
                 changedFilesComplete: evidence.fileResult.complete,
                 checkRuns: evidence.checks,
-                requiredChecks: ["ci", "hygiene", "enforce-target"],
-                expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368 },
+                requiredChecks: ["ci", "hygiene", "enforce-target", "mergeable"],
+                expectedAppIds: { ci: 15368, hygiene: 15368, "enforce-target": 15368, mergeable: 15368 },
               };
               const gate = exactHeadGate(gateInput);
               const latestSyncLabel = evidence.events.filter(event => event.label?.name === "autonomous-sync" &&
                 ["labeled", "unlabeled"].includes(event.event)).sort((a, b) => Number(b.id) - Number(a.id))[0];
               const syncActor = latestSyncLabel?.actor || latestSyncLabel?.user;
               const trustedSyncLabel = labels.includes("autonomous-sync") && latestSyncLabel?.event === "labeled" &&
-                syncActor?.login === "github-actions[bot]" && Number(syncActor?.id) === 41898282 &&
+                syncActor?.type === "Bot" && Number(syncActor?.id) === syncProducerUserId &&
                 syncActor?.type === "Bot";
               const syncState = syncRecord(evidence.comments) || syncRecordFor(pr, evidence);
               const syncRecordMatches = syncState && syncState.headSha === pr.head.sha &&
-                Number(syncState.actorId) === 41898282 && Number(syncState.labeledEventId) === Number(latestSyncLabel?.id);
+                Number(syncState.actorId) === syncProducerUserId &&
+                (syncState.dispatch === true || Number(syncState.labeledEventId) === Number(latestSyncLabel?.id));
               const forbiddenSyncLabel = labels.some(label => /^(?:agent:|.*(?:handoff|escalat))/i.test(label));
               const sync = classification.deterministicSync && trustedSyncLabel && syncRecordMatches && !forbiddenSyncLabel &&
-                pr.user?.login === "github-actions[bot]" &&
-                Number(pr.user?.id) === 41898282 &&
+                Number(pr.user?.id) === syncProducerUserId &&
                 String(pr.body || "").includes("<!-- opencodex-fork-sync -->") &&
-                String(pr.head?.ref || "").startsWith("sync/upstream-");
+                String(pr.head?.ref || "").startsWith("sync/upstream-") &&
+                gate.ok && gate.safeForAutomation && evidence.fileResult.complete;
               const merge = botMergeEvidence({
                 ...gateInput,
                 liveHeadSha: pr.head.sha,
@@ -502,8 +525,8 @@ jobs:
                 Number(comment.user?.id) === 41898282 &&
                 comment.body?.includes("<!-- opencodex-pr-automation:v1 -->")
               ).sort((a, b) => Number(b.id) - Number(a.id))[0];
-              const priorApproval = existing && approvalRecord(existing.body);
-              const priorSync = existing && syncRecord(existing.body);
+              const priorApproval = existing && approvalRecord([existing]);
+              const priorSync = existing && syncRecord([existing]);
               const retainedApproval = newApprovalRecord || (priorApproval && priorApproval.headSha === latest.head.sha ? priorApproval : null);
               const retainedSync = newSyncRecord || (priorSync && priorSync.headSha === latest.head.sha ? priorSync : null);
               const fullBody = `${body}${retainedApproval ? `\n\n<!-- opencodex-pr-automation-approval:${JSON.stringify(retainedApproval)} -->` : ""}${retainedSync ? `\n\n<!-- opencodex-pr-automation-sync:${JSON.stringify(retainedSync)} -->` : ""}`;
@@ -520,7 +543,7 @@ jobs:
             }
             async function dispatchEnforcerIfNeeded(pr, evidence) {
               const check = context.payload.check_run;
-              if (context.eventName !== "check_run" || !["ci", "hygiene"].includes(check?.name) ||
+              if (context.eventName !== "check_run" || !["ci", "hygiene", "mergeable"].includes(check?.name) ||
                   check?.conclusion !== "success" || check?.head_sha !== pr.head.sha || Number(check?.app?.id) !== 15368) return;
               const target = evidence.checks.find(item => item.name === "enforce-target" && item.head_sha === pr.head.sha &&
                 item.status === "completed" && item.conclusion === "success" && Number(item.app?.id) === 15368);
@@ -540,6 +563,7 @@ jobs:
             // Promotion PRs targeting main are status-only and are never mutated here.
             const maintenanceMap = await loadMaintenanceMap();
             const counts = { scanned: 0, updated: 0, merged: 0, held: 0, failed: 0 };
+            const holdRecords = [];
             for (const candidate of all) {
               counts.scanned += 1;
               try {
@@ -612,6 +636,15 @@ jobs:
                   nextAction: result.merge.ready ? "merge authorized by bot evidence" : undefined,
                 }), approvalRecordFor(pr, evidence), syncRecordFor(pr, evidence));
                 counts.held += 1;
+                const holdEvent = evidence.events
+                  .filter(event => event.label?.name === "automation:hold" && event.event === "labeled")
+                  .sort((a, b) => Number(b.id) - Number(a.id))[0];
+                if (holdEvent) holdRecords.push({
+                  number: pr.number,
+                  title: pr.title,
+                  labels: labelsOf(pr),
+                  holdSince: holdEvent.created_at || holdEvent.updated_at,
+                });
               } catch (error) {
                 counts.failed += 1;
                 core.warning(`PR #${candidate.number} reconciliation failed: ${error.message}`);
@@ -626,4 +659,9 @@ jobs:
               `- Held: ${counts.held}`,
               `- Failed (isolated): ${counts.failed}`,
             ].join("\n");
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+            const agedHolds = summarizeAgedHolds(holdRecords);
+            const holdSummary = agedHolds.length === 0
+              ? "- Holds older than 24h: none"
+              : ["- Holds older than 24h (labels retained):", ...agedHolds.map(item =>
+                `  - #${item.number} (${item.ageHours}h): ${item.title}`)].join("\n");
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n${holdSummary}\n`);

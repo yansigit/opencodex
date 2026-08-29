@@ -214,6 +214,48 @@ jobs:
               }
             }
 
+            async function unresolvedReviewThreadCount(number) {
+              let cursor = null;
+              let unresolved = 0;
+              for (;;) {
+                const page = await github.graphql(
+                  `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        reviewThreads(first: 100, after: $cursor) {
+                          pageInfo { hasNextPage endCursor }
+                          nodes { isResolved }
+                        }
+                      }
+                    }
+                  }`,
+                  { owner, repo, number, cursor }
+                );
+                const threads = page?.repository?.pullRequest?.reviewThreads;
+                if (!threads || !Array.isArray(threads.nodes) ||
+                    typeof threads.pageInfo?.hasNextPage !== "boolean") {
+                  throw new Error("Malformed review thread evidence");
+                }
+                unresolved += threads.nodes.filter(thread => thread?.isResolved !== true).length;
+                if (!threads.pageInfo.hasNextPage) return unresolved;
+                if (!threads.pageInfo.endCursor) throw new Error("Review thread cursor missing");
+                cursor = threads.pageInfo.endCursor;
+              }
+            }
+
+            function hasCurrentChangesRequested(reviews) {
+              const latest = new Map();
+              for (const review of reviews) {
+                const login = review?.user?.login;
+                if (!login || typeof review.state !== "string" || !Number.isFinite(Number(review.id))) {
+                  throw new Error("Malformed review evidence");
+                }
+                const prior = latest.get(login.toLowerCase());
+                if (!prior || Number(review.id) > Number(prior.id)) latest.set(login.toLowerCase(), review);
+              }
+              return [...latest.values()].some(review => String(review.state).toUpperCase() === "CHANGES_REQUESTED");
+            }
+
             async function currentDispatchLabeler(issueNumber, label) {
               const events = await github.paginate(github.rest.issues.listEvents, {
                 owner, repo, issue_number: issueNumber, per_page: 100
@@ -555,12 +597,30 @@ jobs:
                   context.payload.pull_request?.number === pr.number
                     ? context.payload.sender?.id
                     : null;
+                let currentBaseSha = null;
+                try {
+                  currentBaseSha = (await github.rest.repos.getBranch({ owner, repo, branch: "dev" })).data.commit.sha;
+                } catch (error) {
+                  core.warning(`Could not verify current dev base: ${error.message}`);
+                }
+                const controllerEvent = context.eventName === "pull_request_target" &&
+                  context.payload.action === "synchronize" &&
+                  context.payload.pull_request?.number === pr.number &&
+                  context.payload.sender?.type === "Bot" &&
+                  Number(context.payload.sender?.id) === 41898282;
                 const expectedAdvance = isExpectedJulesHeadAdvance({
                   previousSha: state.expectedHeadSha,
                   currentSha: validated.headSha,
                   reason: state.reason,
                   expectedJulesUserId: Number(process.env.JULES_BOT_USER_ID),
                   observedPusherId: directJulesPush,
+                  currentBaseSha,
+                  controllerMerge: controllerEvent ? {
+                    recorded: true,
+                    sha: headCommit?.sha,
+                    parents: headCommit?.parents,
+                  } : null,
+                  sessionStatus: sessionState,
                   comparison,
                   headCommit
                 });
@@ -636,7 +696,7 @@ jobs:
                   core.warning(`Could not wake the PR enforcer for #${pr.number}: ${error.message}`);
                 }
               }
-              const baselineNames = ["ci", "enforce-target", "hygiene"];
+              const baselineNames = ["ci", "enforce-target", "hygiene", "mergeable"];
               const appId = Number(process.env.CURSOR_BUGBOT_APP_ID);
               const labels = (pr.labels || []).map(label => label.name || label);
               const bugbotPolicy = process.env.CURSOR_BUGBOT_POLICY || "shadow";
@@ -677,17 +737,41 @@ jobs:
                 labels
               });
               if (autonomous.ready) {
-                const merged = await github.graphql(
-                  `mutation($id: ID!) {
-                    mergePullRequest(input: { pullRequestId: $id, mergeMethod: MERGE }) {
-                      pullRequest { merged }
-                    }
-                  }`,
-                  { id: pr.node_id }
-                );
-                if (!merged.mergePullRequest.pullRequest.merged) {
-                  throw new Error("GitHub did not merge the verified autonomous fix");
+                const live = await github.rest.pulls.get({ owner, repo, pull_number: pr.number }).then(response => response.data);
+                const [liveChecks, liveFiles, liveHeadCommit, liveReviews, liveUnresolvedThreads, liveBaseSha] = await Promise.all([
+                  github.paginate(github.rest.checks.listForRef, { owner, repo, ref: live.head.sha, per_page: 100 }),
+                  github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: live.number, per_page: 100 }),
+                  github.rest.repos.getCommit({ owner, repo, ref: live.head.sha }).then(response => response.data),
+                  github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: live.number, per_page: 100 }),
+                  unresolvedReviewThreadCount(live.number),
+                  github.rest.repos.getBranch({ owner, repo, branch: "dev" }).then(response => response.data.commit.sha),
+                ]);
+                const liveComparison = await github.rest.repos.compareCommitsWithBasehead({
+                  owner, repo, basehead: `${liveBaseSha}...${live.head.sha}`
+                }).then(response => response.data);
+                const liveAutonomous = autonomousMergeEvidence({
+                  pr: live,
+                  checkRuns: liveChecks,
+                  headCommit: liveHeadCommit,
+                  expectedJulesUserId: Number(process.env.JULES_BOT_USER_ID),
+                  authorizedSessionId: state.sessionId,
+                  sessionId: session.name,
+                  expectedBugbotAppId: appId,
+                  expectedChecksAppId: 15368,
+                  requiredNames: baselineNames,
+                  labels: live.labels || [],
+                });
+                const finalBaseSha = await github.rest.repos.getBranch({ owner, repo, branch: "dev" })
+                  .then(response => response.data.commit.sha);
+                if (live.state !== "open" || live.draft || live.head.sha !== pr.head.sha ||
+                    live.base.ref !== "dev" || live.base.sha !== liveBaseSha || finalBaseSha !== liveBaseSha ||
+                    liveComparison.behind_by !== 0 || !["ahead", "identical"].includes(liveComparison.status) ||
+                    liveUnresolvedThreads !== 0 || hasCurrentChangesRequested(liveReviews) ||
+                    !changedFileListComplete(live.changed_files, liveFiles) || !liveAutonomous.ready) {
+                  throw new Error("Jules merge precondition changed");
                 }
+                const merged = await github.rest.pulls.merge({ owner, repo, pull_number: live.number, sha: live.head.sha, merge_method: "merge" });
+                if (!merged.data.merged) throw new Error("GitHub did not merge the verified autonomous fix");
                 state.status = "completed";
                 state.reason = `autonomous-merge:${pr.head.sha}`;
                 await saveRecord(issue.number, comment, state);
