@@ -21,8 +21,8 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("persist-credentials: false");
   });
 
-  test("grants vendor, issue, and draft PR write permissions", () => {
-    expect(workflow).toContain("contents: write");
+  test("keeps the token read-only for contents while allowing issue and draft PR writes", () => {
+    expect(workflow).toContain("contents: read");
     expect(workflow).toContain("issues: write");
     expect(workflow).toContain("pull-requests: write");
   });

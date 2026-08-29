@@ -47,13 +47,12 @@ describe("PR automation workflow contract", () => {
     assert.ok(source.indexOf("if: github.repository") < source.indexOf("Create PR automation App token"));
   });
 
-  it("accepts sync provenance only from exact trusted dispatch inputs", () => {
+  it("accepts sync provenance only from the exact trusted label event", () => {
     const source = workflow();
-    assert.match(source, /pull_number:[\s\S]*head_sha:[\s\S]*tag_sha/);
-    assert.match(source, /context\.payload\.sender\?\.type === "Bot"/);
-    assert.match(source, /context\.payload\.sender\?\.id\) === syncProducerUserId/);
-    assert.match(source, /inputs\.head_sha === pr\.head\.sha/);
-    assert.match(source, /inputs\.head_sha/);
+    assert.match(source, /context\.payload\.sender\?\.type !== "Bot"/);
+    assert.match(source, /context\.payload\.sender\?\.id\) !== syncProducerUserId/);
+    assert.match(source, /context\.payload\.pull_request\?\.head\?\.sha === pr\.head\.sha/);
+    assert.doesNotMatch(source, /workflow_dispatch:\s*\n\s+inputs:|inputs\.head_sha|inputs\.tag_sha|trustedDispatch/);
   });
 
   it("creates the App token only for mutating modes and keeps GITHUB_TOKEN for controller writes", () => {
