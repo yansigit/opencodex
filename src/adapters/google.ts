@@ -933,8 +933,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       applyGeminiStructuredOutput(generationConfig, parsed, routedModelId);
       if (Object.keys(generationConfig).length > 0) body.generationConfig = generationConfig;
 
-      const method = parsed.stream ? "streamGenerateContent" : "generateContent";
-      const streamParam = parsed.stream ? "?alt=sse" : "";
+      const ccaAlwaysSse = provider.googleMode === "cloud-code-assist";
+      const method = ccaAlwaysSse || parsed.stream ? "streamGenerateContent" : "generateContent";
+      const streamParam = ccaAlwaysSse || parsed.stream ? "?alt=sse" : "";
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (provider.headers) Object.assign(headers, provider.headers);
 

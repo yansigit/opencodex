@@ -44,7 +44,7 @@ describe("antigravity CCA envelope", () => {
   test("wraps the gemini body in the CCA envelope with project/userAgent/requestType/requestId/sessionId", async () => {
     const req = await createGoogleAdapter(provider).buildRequest(parsed());
     const env = JSON.parse(req.body);
-    expect(req.url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent");
+    expect(req.url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse");
     expect(env.model).toBe("gemini-3-pro");
     // The envelope BODY userAgent is the protocol constant; the versioned CLI UA rides in the header.
     expect(env.userAgent).toBe("antigravity");
