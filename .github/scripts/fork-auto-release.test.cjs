@@ -17,6 +17,7 @@ function candidate(overrides = {}) {
     liveMainSha: SHA,
     packageName: "@yansigit/opencodex",
     packageVersion: "2.32.0",
+    rawCommitMessage: "fix: ordinary release candidate",
     ...overrides,
   };
 }
@@ -25,6 +26,53 @@ describe("fork auto-release decision", () => {
   it("dispatches an unused stable package version from green main CI", () => {
     assert.deepEqual(decideForkAutoRelease(candidate()), { action: "dispatch" });
   });
+
+  it("skips when the final trailer block requests it exactly", () => {
+    assert.deepEqual(decideForkAutoRelease(candidate({
+      rawCommitMessage: "fix: ship workflow only\n\nReviewed-by: Yumi\nAuto-Release: skip\n",
+    })), {
+      action: "skip",
+      reason: "commit trailer requested skipping automatic release.",
+    });
+  });
+
+  it("accepts Git's whitespace-only separator before the skip trailer", () => {
+    assert.deepEqual(decideForkAutoRelease(candidate({
+      rawCommitMessage: "fix: ship workflow only\n \nAuto-Release: skip\n",
+    })), {
+      action: "skip",
+      reason: "commit trailer requested skipping automatic release.",
+    });
+  });
+
+  it("treats duplicate exact skip trailers as idempotent owner intent", () => {
+    assert.deepEqual(decideForkAutoRelease(candidate({
+      rawCommitMessage: "fix: ship workflow only\n\nAuto-Release: skip\nAuto-Release: skip",
+    })), {
+      action: "skip",
+      reason: "commit trailer requested skipping automatic release.",
+    });
+  });
+
+  for (const rawCommitMessage of [
+    "Auto-Release: skip\n\nfix: not a final trailer",
+    "fix: wrong case\n\nauto-release: skip",
+    "fix: wrong value\n\nAuto-Release: Skip",
+    "fix: embedded text Auto-Release: skip",
+  ]) {
+    it(`does not skip for malformed trailer text: ${JSON.stringify(rawCommitMessage)}`, () => {
+      assert.deepEqual(decideForkAutoRelease(candidate({ rawCommitMessage })), { action: "dispatch" });
+    });
+  }
+
+  for (const rawCommitMessage of [undefined, "", " \n"]) {
+    it("rejects a missing or empty raw commit message", () => {
+      assert.throws(
+        () => decideForkAutoRelease(candidate({ rawCommitMessage })),
+        /rawCommitMessage must be a non-empty string/,
+      );
+    });
+  }
 
   for (const [name, overrides, reason] of [
     ["skips non-workflow_run events", { eventName: "push" }, "workflow_run"],
@@ -80,6 +128,7 @@ describe("fork auto-release env CLI", () => {
       LIVE_MAIN_SHA: SHA,
       PACKAGE_NAME: "@yansigit/opencodex",
       PACKAGE_VERSION: "2.32.0",
+      RAW_COMMIT_MESSAGE: "fix: ordinary release candidate",
     });
     assert.equal(result.status, 0, result.stderr);
     assert.deepEqual(JSON.parse(result.stdout), { action: "dispatch" });
@@ -95,6 +144,7 @@ describe("fork auto-release env CLI", () => {
       LIVE_MAIN_SHA: SHA,
       PACKAGE_NAME: "@yansigit/opencodex",
       PACKAGE_VERSION: "2.32.0",
+      RAW_COMMIT_MESSAGE: "fix: ordinary release candidate",
       VERSION_ON_NPM: "2.32.0",
     });
     assert.equal(result.status, 0, result.stderr);

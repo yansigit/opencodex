@@ -43,6 +43,7 @@ describe("fork sync pinning", () => {
     const pinned = await pinVendorRefs(event(), {
       runner: queuedRunner([
         ok(),
+        ok(),
         ok(`${TAG_SHA}\n`),
         ok(),
         ok(`${DEV_SHA}\n`),
@@ -51,6 +52,7 @@ describe("fork sync pinning", () => {
     });
 
     expect(calls).toEqual([
+      ["merge-base", "--is-ancestor", event().vendorDevSha, "refs/remotes/upstream/dev"],
       ["fetch", ".", `${TAG_SHA}:refs/heads/vendor/main`],
       ["rev-parse", "refs/heads/vendor/main"],
       ["fetch", ".", "refs/remotes/upstream/dev:refs/heads/vendor/dev"],
@@ -59,6 +61,22 @@ describe("fork sync pinning", () => {
     expect(pinned.kind).toBe("pin-updated");
     expect(pinned.vendorMainSha).toBe(TAG_SHA);
     expect(pinned.vendorDevSha).toBe(DEV_SHA);
+  });
+
+  test("rejects a rewritten upstream dev before changing either local vendor ref", async () => {
+    const calls: string[][] = [];
+    const diverged = await pinVendorRefs(event(), {
+      runner: queuedRunner([
+        { exitCode: 1, stdout: "", stderr: "not an ancestor" },
+      ], calls),
+      upstreamDevRef: "refs/remotes/upstream/dev",
+    });
+
+    expect(diverged.kind).toBe("pin-diverged");
+    expect(diverged.error).toContain("vendor/dev");
+    expect(calls).toEqual([
+      ["merge-base", "--is-ancestor", event().vendorDevSha, "refs/remotes/upstream/dev"],
+    ]);
   });
 
   test("does not chase vendor/dev on an already-current poll", async () => {
@@ -75,6 +93,7 @@ describe("fork sync pinning", () => {
     const calls: string[][] = [];
     const diverged = await pinVendorRefs(event(), {
       runner: queuedRunner([
+        ok(),
         { exitCode: 1, stdout: "", stderr: "Not possible to fast-forward" },
       ], calls),
     });
@@ -82,7 +101,57 @@ describe("fork sync pinning", () => {
     expect(diverged.kind).toBe("pin-diverged");
     expect(diverged.error).toContain("fast-forward");
     expect(calls).toEqual([
+      ["merge-base", "--is-ancestor", event().vendorDevSha, "refs/remotes/upstream/dev"],
       ["fetch", ".", `${TAG_SHA}:refs/heads/vendor/main`],
+    ]);
+  });
+
+  test("initializes both missing vendor refs from the selected tag and upstream dev", async () => {
+    const calls: string[][] = [];
+    const pinned = await pinVendorRefs({
+      ...event(),
+      vendorMainSha: "",
+      vendorDevSha: "",
+    }, {
+      runner: queuedRunner([
+        ok(),
+        ok(`${TAG_SHA}\n`),
+        ok(),
+        ok(`${DEV_SHA}\n`),
+      ], calls),
+      upstreamDevRef: "refs/remotes/upstream/dev",
+    });
+
+    expect(pinned.kind).toBe("pin-updated");
+    expect(pinned.vendorMainSha).toBe(TAG_SHA);
+    expect(pinned.vendorDevSha).toBe(DEV_SHA);
+    expect(calls).toEqual([
+      ["fetch", ".", `${TAG_SHA}:refs/heads/vendor/main`],
+      ["rev-parse", "refs/heads/vendor/main"],
+      ["fetch", ".", "refs/remotes/upstream/dev:refs/heads/vendor/dev"],
+      ["rev-parse", "refs/heads/vendor/dev"],
+    ]);
+  });
+
+  test("keeps an existing stable pin while initializing a missing vendor dev ref", async () => {
+    const calls: string[][] = [];
+    const pinned = await pinVendorRefs({
+      ...event(),
+      vendorDevSha: "",
+    }, {
+      runner: queuedRunner([
+        ok(),
+        ok(),
+        ok(`${DEV_SHA}\n`),
+      ], calls),
+    });
+
+    expect(pinned.kind).toBe("pin-updated");
+    expect(pinned.vendorMainSha).toBe(event().vendorMainSha);
+    expect(calls).toEqual([
+      ["merge-base", "--is-ancestor", TAG_SHA, event().vendorMainSha],
+      ["fetch", ".", "refs/remotes/upstream/dev:refs/heads/vendor/dev"],
+      ["rev-parse", "refs/heads/vendor/dev"],
     ]);
   });
 
