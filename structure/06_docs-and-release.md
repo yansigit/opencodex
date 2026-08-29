@@ -118,6 +118,12 @@ exists so the repository-shape source of truth does not omit the shape of its ow
   published outcome — the fix, its regression test, the release note, the advisory once public —
   reaches the repository.
 
+After a successful real stable release from `main`, promotion automation advances `dev` to the
+next stable patch in a package.json-only commit based on that released main commit. Re-running the
+completion event is idempotent when `dev` already carries that successor; any other branch or
+version state fails closed. Upstream sync applies the package recipe without ever decreasing the
+current valid version.
+
 ## Maintenance governance
 
 `MAINTAINERS.md` is the source of truth for current project roles and the review and merge policy.

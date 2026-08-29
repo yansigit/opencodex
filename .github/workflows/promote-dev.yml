@@ -4,7 +4,7 @@ name: Promote dev to main
 # PR. This workflow never merges main; release promotion remains explicit.
 on:
   workflow_run:
-    workflows: ["Cross-platform CI"]
+    workflows: ["Cross-platform CI", "Release"]
     types: [completed]
     branches: [dev, main]
   workflow_dispatch:
@@ -19,6 +19,7 @@ jobs:
   promote:
     if: >-
       (github.event_name == 'workflow_run' &&
+      github.event.workflow_run.name == 'Cross-platform CI' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'dev') ||
@@ -135,6 +136,7 @@ jobs:
   backmerge:
     if: >-
       github.event_name == 'workflow_run' &&
+      github.event.workflow_run.name == 'Cross-platform CI' &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
@@ -142,7 +144,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
-      actions: write
+      actions: read
     steps:
       - name: Checkout trusted promotion controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -236,5 +238,221 @@ jobs:
           post_dev_sha="$(awk '$2 == "refs/heads/dev" { print $1 }' <<<"$post_refs")"
           if [ "$post_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$post_dev_sha" != "$VERIFIED_MAIN_SHA" ]; then
             echo "::error::dev back-merge postcheck failed; main or dev moved during the update"
+            exit 1
+          fi
+
+  post_release:
+    if: >-
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.name == 'Release' &&
+      github.event.workflow_run.event == 'workflow_dispatch' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout trusted release controller
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify released main and determine dev state
+        id: verify-release
+        env:
+          EXPECTED_RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path || '' }}
+          WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name || '' }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          RELEASE_RUN_STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$EXPECTED_RELEASE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::Release workflow head did not return a full commit SHA"
+            exit 1
+          fi
+          git fetch --no-tags origin \
+            refs/heads/main:refs/remotes/origin/main \
+            refs/heads/dev:refs/remotes/origin/dev
+          live_main_sha="$(git rev-parse refs/remotes/origin/main)"
+          if [ "$live_main_sha" != "$EXPECTED_RELEASE_SHA" ]; then
+            echo "::error::main moved after Release completed; refusing to advance dev"
+            exit 1
+          fi
+          release_version="$(git show "$EXPECTED_RELEASE_SHA:package.json" | node -e 'const fs = require("fs"); const pkg = JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(pkg.version || "")')"
+          if ! printf '%s\n' "$release_version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::released main package version is not stable semver: $release_version"
+            exit 1
+          fi
+          package_name="$(git show "$EXPECTED_RELEASE_SHA:package.json" | node -e 'const fs = require("fs"); const pkg = JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(pkg.name || "")')"
+          published_version="$(npm view "${package_name}@${release_version}" version 2>/dev/null)"
+          if [ "$published_version" != "$release_version" ]; then
+            echo "::error::npm does not publish ${package_name}@${release_version}"
+            exit 1
+          fi
+          release_published_at="$(gh api "repos/$EXPECTED_REPOSITORY/releases/tags/v${release_version}" --jq '.published_at // empty')"
+          if [ -z "$release_published_at" ]; then
+            echo "::error::GitHub Release v${release_version} has no publication timestamp"
+            exit 1
+          fi
+          git fetch --no-tags origin \
+            "refs/tags/v${release_version}:refs/tags/v${release_version}"
+          tag_sha="$(git rev-parse "refs/tags/v${release_version}^{}")"
+          if [ "$tag_sha" != "$EXPECTED_RELEASE_SHA" ]; then
+            echo "::error::release tag v${release_version} does not resolve to released main"
+            exit 1
+          fi
+
+          version_dir="$RUNNER_TEMP/release-version"
+          mkdir -p "$version_dir"
+          git show "$EXPECTED_RELEASE_SHA:package.json" > "$version_dir/package.json"
+          npm version patch --no-git-tag-version --ignore-scripts --prefix "$version_dir" >/dev/null
+          next_version="$(node -p 'require(process.argv[1]).version' "$version_dir/package.json")"
+          live_dev_sha="$(git rev-parse refs/remotes/origin/dev)"
+          dev_is_ancestor=false
+          trees_identical=false
+          main_is_ancestor=false
+          package_only=false
+          dev_version=
+          if [ "$live_dev_sha" != "$EXPECTED_RELEASE_SHA" ]; then
+            if git merge-base --is-ancestor "$live_dev_sha" "$EXPECTED_RELEASE_SHA" && git diff --quiet "$EXPECTED_RELEASE_SHA" "$live_dev_sha" --; then
+              dev_is_ancestor=true
+              trees_identical=true
+            elif git merge-base --is-ancestor "$EXPECTED_RELEASE_SHA" "$live_dev_sha"; then
+              main_is_ancestor=true
+              if [ "$(git diff --name-only "$EXPECTED_RELEASE_SHA" "$live_dev_sha")" = "package.json" ]; then
+                package_only=true
+                dev_version="$(git show "$live_dev_sha:package.json" | node -e 'const fs = require("fs"); const pkg = JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(pkg.version || "")')"
+              fi
+            fi
+          fi
+          action="$(WORKFLOW_NAME="$WORKFLOW_NAME" WORKFLOW_EVENT="$WORKFLOW_EVENT" WORKFLOW_BRANCH="$WORKFLOW_BRANCH" WORKFLOW_PATH="$WORKFLOW_PATH" WORKFLOW_REPOSITORY="$WORKFLOW_REPOSITORY" EXPECTED_REPOSITORY="$EXPECTED_REPOSITORY" RELEASE_VERSION="$release_version" PUBLISHED_VERSION="$published_version" RELEASE_RUN_STARTED_AT="$RELEASE_RUN_STARTED_AT" RELEASE_PUBLISHED_AT="$release_published_at" TAG_SHA="$tag_sha" EXPECTED_SHA="$EXPECTED_RELEASE_SHA" MAIN_SHA="$EXPECTED_RELEASE_SHA" DEV_SHA="$live_dev_sha" NEXT_VERSION="$next_version" DEV_IS_ANCESTOR="$dev_is_ancestor" TREES_IDENTICAL="$trees_identical" MAIN_IS_ANCESTOR="$main_is_ancestor" PACKAGE_ONLY="$package_only" DEV_VERSION="$dev_version" node -e '
+            const { decidePostRelease } = require("./.github/scripts/fork-post-release-decision.cjs");
+            const truth = value => value === "true";
+            process.stdout.write(decidePostRelease({
+              workflowName: process.env.WORKFLOW_NAME,
+              workflowEvent: process.env.WORKFLOW_EVENT,
+              workflowBranch: process.env.WORKFLOW_BRANCH,
+              workflowPath: process.env.WORKFLOW_PATH,
+              expectedWorkflowPath: ".github/workflows/release.yml",
+              repository: process.env.WORKFLOW_REPOSITORY,
+              expectedRepository: process.env.EXPECTED_REPOSITORY,
+              releaseVersion: process.env.RELEASE_VERSION,
+              publishedVersion: process.env.PUBLISHED_VERSION,
+              releaseRunStartedAt: process.env.RELEASE_RUN_STARTED_AT,
+              releasePublishedAt: process.env.RELEASE_PUBLISHED_AT,
+              tagSha: process.env.TAG_SHA,
+              expectedSha: process.env.EXPECTED_SHA,
+              mainSha: process.env.MAIN_SHA,
+              devSha: process.env.DEV_SHA,
+              nextVersion: process.env.NEXT_VERSION,
+              devIsAncestor: truth(process.env.DEV_IS_ANCESTOR),
+              treesIdentical: truth(process.env.TREES_IDENTICAL),
+              mainIsAncestor: truth(process.env.MAIN_IS_ANCESTOR),
+              packageOnly: truth(process.env.PACKAGE_ONLY),
+              devVersion: process.env.DEV_VERSION,
+            }));
+          ')"
+          if [ "$action" = noop ]; then
+            echo "dev already carries stable successor $next_version; nothing to do"
+          elif [ "$action" != bump ]; then
+            echo "::error::post-release state failed closed"
+            exit 1
+          fi
+          {
+            echo "action=$action"
+            echo "verified_main_sha=$EXPECTED_RELEASE_SHA"
+            echo "verified_dev_sha=$live_dev_sha"
+            echo "next_version=$next_version"
+            echo "release_version=$release_version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Bump and push the next stable dev version
+        if: steps.verify-release.outputs.action == 'bump'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_TERMINAL_PROMPT: 0
+          VERIFIED_MAIN_SHA: ${{ steps.verify-release.outputs.verified_main_sha }}
+          VERIFIED_DEV_SHA: ${{ steps.verify-release.outputs.verified_dev_sha }}
+          NEXT_VERSION: ${{ steps.verify-release.outputs.next_version }}
+          RELEASE_VERSION: ${{ steps.verify-release.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          live_main_sha="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+          live_dev_sha="$(git ls-remote origin refs/heads/dev | awk 'NR == 1 { print $1 }')"
+          if [ "$live_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$live_dev_sha" != "$VERIFIED_DEV_SHA" ]; then
+            echo "::error::main or dev moved before the post-release mutation"
+            exit 1
+          fi
+          git switch --detach --quiet "$VERIFIED_MAIN_SHA"
+          if [ "$(git rev-parse HEAD)" != "$VERIFIED_MAIN_SHA" ]; then
+            echo "::error::release bump commit would not be based on released main"
+            exit 1
+          fi
+          npm version patch --no-git-tag-version --ignore-scripts >/dev/null
+          actual_version="$(node -p 'require("./package.json").version')"
+          if [ "$actual_version" != "$NEXT_VERSION" ]; then
+            echo "::error::dev successor version changed unexpectedly: $actual_version"
+            exit 1
+          fi
+          changed_files="$(git diff --name-only)"
+          if [ "$changed_files" != "package.json" ]; then
+            echo "::error::post-release bump changed files other than package.json"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore: advance development version"
+          new_dev_sha="$(git rev-parse HEAD)"
+          if [ "$(git rev-parse HEAD^)" != "$VERIFIED_MAIN_SHA" ]; then
+            echo "::error::post-release dev commit parent is not released main"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$VERIFIED_DEV_SHA" "$new_dev_sha"; then
+            echo "::error::post-release dev commit is not a fast-forward descendant"
+            exit 1
+          fi
+          live_main_sha="$(git ls-remote origin refs/heads/main | awk 'NR == 1 { print $1 }')"
+          live_dev_sha="$(git ls-remote origin refs/heads/dev | awk 'NR == 1 { print $1 }')"
+          if [ "$live_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$live_dev_sha" != "$VERIFIED_DEV_SHA" ]; then
+            echo "::error::main or dev moved before the post-release push"
+            exit 1
+          fi
+          git fetch --no-tags origin \
+            "refs/tags/v${RELEASE_VERSION}:refs/tags/v${RELEASE_VERSION}"
+          tag_sha="$(git rev-parse "refs/tags/v${RELEASE_VERSION}^{}")"
+          if [ "$tag_sha" != "$VERIFIED_MAIN_SHA" ]; then
+            echo "::error::release tag moved before the post-release push"
+            exit 1
+          fi
+          askpass="$RUNNER_TEMP/git-askpass.sh"
+          cat > "$askpass" <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' x-access-token ;;
+            *) printf '%s\n' "$GH_TOKEN" ;;
+          esac
+          EOF
+          chmod 700 "$askpass"
+          GIT_ASKPASS="$askpass" git push --atomic \
+            --force-with-lease="refs/heads/dev:$VERIFIED_DEV_SHA" \
+            --force-with-lease="refs/tags/v${RELEASE_VERSION}:$VERIFIED_MAIN_SHA" \
+            origin "$new_dev_sha:refs/heads/dev" "$VERIFIED_MAIN_SHA:refs/tags/v${RELEASE_VERSION}"
+          post_refs="$(git ls-remote origin refs/heads/main refs/heads/dev)"
+          post_main_sha="$(awk '$2 == "refs/heads/main" { print $1 }' <<<"$post_refs")"
+          post_dev_sha="$(awk '$2 == "refs/heads/dev" { print $1 }' <<<"$post_refs")"
+          git fetch --no-tags origin \
+            "refs/tags/v${RELEASE_VERSION}:refs/tags/v${RELEASE_VERSION}"
+          post_tag_sha="$(git rev-parse "refs/tags/v${RELEASE_VERSION}^{}")"
+          if [ "$post_main_sha" != "$VERIFIED_MAIN_SHA" ] || [ "$post_dev_sha" != "$new_dev_sha" ] || [ "$post_tag_sha" != "$VERIFIED_MAIN_SHA" ]; then
+            echo "::error::post-release dev version check failed; main or dev moved during the update"
             exit 1
           fi

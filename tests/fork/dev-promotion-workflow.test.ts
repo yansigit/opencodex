@@ -12,7 +12,7 @@ const workflowSource = workflowText;
 describe("dev promotion workflow contract", () => {
   test("runs only after successful dev push CI or trusted manual dispatch", () => {
     expect(workflow.on?.workflow_run).toEqual({
-      workflows: ["Cross-platform CI"],
+      workflows: ["Cross-platform CI", "Release"],
       types: ["completed"],
       branches: ["dev", "main"],
     });
@@ -21,14 +21,16 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("github.event.workflow_run.event == 'push'");
     expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'dev'");
     expect(workflowSource).toContain("github.ref_name == github.event.repository.default_branch");
+    expect(workflowSource).toContain("github.event.workflow_run.name == 'Cross-platform CI'");
   });
 
   test("fast-forwards dev after a successful identical-tree main push", () => {
     expect(workflow.jobs?.backmerge?.permissions).toEqual({
       contents: "write",
-      actions: "write",
+      actions: "read",
     });
     expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'main'");
+    expect(workflowSource).toContain("github.event.workflow_run.name == 'Cross-platform CI'");
     expect(workflowSource).toContain("github.event.workflow_run.event == 'push'");
     expect(workflowSource).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(workflowSource).toContain("id: verify-main");
@@ -101,8 +103,33 @@ describe("dev promotion workflow contract", () => {
   test("never merges or force-pushes main", () => {
     expect(workflowSource).not.toContain("\\`");
     expect(workflowSource).not.toMatch(/gh\s+pr\s+merge/);
-    expect(workflowSource).not.toMatch(/--force/);
+    expect(workflowSource).not.toMatch(/--force(?!-with-lease)/);
     expect(workflowSource).toMatch(/git\s+push\s+origin\s+\"\$VERIFIED_MAIN_SHA:refs\/heads\/dev\"/);
     expect(workflowSource).not.toMatch(/git\s+push[^\n]*refs\/heads\/main/);
+  });
+
+  test("post-release advances an exact main release to the next stable dev patch", () => {
+    expect(workflow.jobs?.post_release?.permissions).toEqual({ contents: "write" });
+    expect(workflowSource).toContain("post_release:");
+    expect(workflowSource).toContain("github.event.workflow_run.name == 'Release'");
+    expect(workflowSource).toContain("github.event.workflow_run.event == 'workflow_dispatch'");
+    expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'main'");
+    expect(workflowSource).toContain("WORKFLOW_PATH: ${{ github.event.workflow_run.path || '' }}");
+    expect(workflowSource).toContain("WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name || '' }}");
+    expect(workflowSource).toContain('expectedWorkflowPath: ".github/workflows/release.yml"');
+    expect(workflowSource).toContain("EXPECTED_RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}");
+    expect(workflowSource).toContain("git merge-base --is-ancestor");
+    expect(workflowSource).toContain("npm version patch --no-git-tag-version");
+    expect(workflowSource).toContain("git config user.name");
+    expect(workflowSource).toContain("git push origin");
+    expect(workflowSource).toContain("refs/heads/dev");
+    expect(workflowSource).toContain("tag_sha");
+    expect(workflowSource).toContain("npm view");
+    expect(workflowSource).toContain("gh api \"repos/$EXPECTED_REPOSITORY/releases/tags/v${release_version}\"");
+    expect(workflowSource).toContain("--atomic");
+    expect(workflowSource).toContain("--force-with-lease=\"refs/heads/dev:$VERIFIED_DEV_SHA\"");
+    expect(workflowSource).toContain("--force-with-lease=\"refs/tags/v${RELEASE_VERSION}:$VERIFIED_MAIN_SHA\"");
+    expect(workflowSource).toContain("post-release dev version check failed");
+    expect(workflowSource).toContain('git diff --name-only "$EXPECTED_RELEASE_SHA" "$live_dev_sha"');
   });
 });
