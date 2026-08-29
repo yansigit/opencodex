@@ -30,7 +30,7 @@ scripts so local commands match CI:
 bun run typecheck                 # strict TypeScript check
 bun run test                      # complete tests/ suite
 bun run test:container            # macOS with Apple Container: isolated container suite
-bun test tests/router.test.ts     # focused test file
+bun scripts/test.ts tests/router.test.ts # focused test file
 bun run build:gui                 # Vite GUI build + package preparation
 bun run privacy:scan              # credential/privacy scan used by CI
 bun run prepare:package           # refresh package launchers/assets

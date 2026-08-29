@@ -8,6 +8,15 @@
 .claude
 .cursor
 .windsurf
+.ssh
+.gnupg
+.aws
+.docker/config.json
+**/.docker/config.json
+.config/containers/auth.json
+**/.config/containers/auth.json
+.config/gh/hosts.yml
+**/.config/gh/hosts.yml
 **/.opencodex
 .env
 **/.env

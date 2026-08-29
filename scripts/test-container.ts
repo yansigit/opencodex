@@ -30,7 +30,8 @@ if (!command(["system", "status"]).success) throw new Error("Apple Container is 
 
 const cpus = process.env.OCX_CONTAINER_CPUS ?? "8";
 const memory = process.env.OCX_CONTAINER_MEMORY ?? "8G";
-if (!/^\d+(?:\.\d+)?$/.test(cpus) || Number(cpus) <= 0 || !/^\d+(?:[KMGT](?:i?B)?)?$/i.test(memory)) {
+const memoryValue = memory.match(/^(\d+(?:\.\d+)?)(?:[KMGT](?:i?B)?)?$/i);
+if (!/^\d+(?:\.\d+)?$/.test(cpus) || Number(cpus) <= 0 || !memoryValue || Number(memoryValue[1]) <= 0) {
   throw new Error("OCX_CONTAINER_CPUS must be positive and OCX_CONTAINER_MEMORY must be a positive Container memory value");
 }
 

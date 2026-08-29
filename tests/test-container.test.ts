@@ -62,6 +62,15 @@ test("passes only resource overrides", () => {
   expect(calls[3]).toContain("3G");
 });
 
+test("rejects zero and malformed resources before build", () => {
+  for (const env of [{ OCX_CONTAINER_CPUS: "0" }, { OCX_CONTAINER_MEMORY: "0G" }, { OCX_CONTAINER_MEMORY: "wat" }]) {
+    const { result, calls } = run("running", [], "1.3.0", env);
+    expect(result.exitCode).not.toBe(0);
+    expect(output(result)).toContain("positive Container memory value");
+    expect(calls).toEqual([["--version"], ["system", "status"]]);
+  }
+});
+
 test("fails clearly for unavailable service and old CLI", () => {
   const stopped = run("stopped");
   expect(output(stopped.result)).toContain("container system start");
@@ -82,11 +91,14 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(image).toContain("git add -A");
   expect(image).toContain("test -z \"$(git remote)\"");
   expect(image).toContain("USER ocx");
+  expect(image).toContain("apt-get install -y --no-install-recommends adduser");
+  expect(image).not.toContain("OCX_REPLIT_GATEWAY_DEPS_PREINSTALLED");
   expect(entrypoint).toContain("process.getuid?.() === 0");
   expect(entrypoint).toContain("/app");
   expect(entrypoint).toContain("/tmp");
   expect(entrypoint).toContain("/home/ocx");
-  expect(entrypoint).toContain("127.0.0.1");
+  expect(entrypoint).toContain('readdirSync("/sys/class/net")');
+  expect(entrypoint).toContain('writeFileSync("/app/.ocx-write-test"');
   expect(entrypoint).toContain("[\"run\", \"test\"]");
-  for (const pattern of [".git", ".worktrees", ".tmp", ".planning", ".agents", ".claude", ".cursor", ".windsurf", "**/.opencodex", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "dist", "gui/dist", "*.log", "coverage", "*.tgz", "*.tar", "*.zip"]) expect(ignored).toContain(pattern);
+  for (const pattern of [".git", ".worktrees", ".tmp", ".planning", ".agents", ".claude", ".cursor", ".windsurf", ".ssh", ".gnupg", ".aws", ".docker/config.json", "**/.docker/config.json", ".config/containers/auth.json", "**/.config/containers/auth.json", ".config/gh/hosts.yml", "**/.config/gh/hosts.yml", "**/.opencodex", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "dist", "gui/dist", "*.log", "coverage", "*.tgz", "*.tar", "*.zip"]) expect(ignored).toContain(pattern);
 });
