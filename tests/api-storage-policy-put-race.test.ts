@@ -29,7 +29,11 @@ afterEach(async () => {
 test("blocked worker completion preserves concurrent policy PUT edits", async () => {
   let acquired!: () => void;
   const acquiredPromise = new Promise<void>(resolve => { acquired = resolve; });
-  setStorageCleanupPolicyJobTestHooks({ blockMs: 100, onPolicyLoaded: acquired });
+  const releaseBuffer = new SharedArrayBuffer(4);
+  setStorageCleanupPolicyJobTestHooks({
+    onPolicyLoaded: acquired,
+    waitAfterPolicyLoadedBuffer: releaseBuffer,
+  });
   seedArchived(harness.isolatedCodexHome.path);
   const server = startServer(0);
   try {
@@ -71,6 +75,8 @@ test("blocked worker completion preserves concurrent policy PUT edits", async ()
     expect(putBody.ok).toBe(true);
     expect(putBody.policy?.enabled).toBe(false);
 
+    Atomics.store(new Int32Array(releaseBuffer), 0, 1);
+    Atomics.notify(new Int32Array(releaseBuffer), 0);
     const done = await waitForJobIdle(server.url, runStart.job!.startedAt);
     expect(done.job.lastOutcome?.ok).toBe(true);
     expect(done.job.lastOutcome?.skipped).toBeUndefined();
@@ -98,6 +104,8 @@ test("blocked worker completion preserves concurrent policy PUT edits", async ()
     expect(typeof body.lastRun?.at).toBe("number");
     expect(typeof body.nextRun).toBe("number");
   } finally {
+    Atomics.store(new Int32Array(releaseBuffer), 0, 1);
+    Atomics.notify(new Int32Array(releaseBuffer), 0);
     await stopPolicyServer(server);
     await resetStorageCleanupPolicyJobForTestsAsync();
   }

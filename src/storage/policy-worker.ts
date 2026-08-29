@@ -14,6 +14,8 @@ interface RunMessage {
   /** Test-only: block after loading the start-of-job policy (see holdAfterLoadMs). */
   blockMs?: number;
   notifyLoaded?: boolean;
+  waitForLoadedRelease?: boolean;
+  loadedRelease?: SharedArrayBuffer;
   /** Env snapshot — Workers may not see parent mutations on all platforms. */
   env?: { CODEX_HOME?: string; OPENCODEX_HOME?: string };
 }
@@ -30,7 +32,7 @@ declare const self: Worker;
 
 self.onmessage = (event: MessageEvent<unknown>) => {
   if (!isRunMessage(event.data)) return;
-  const { requestId, reason, force, codexHome, busyTimeoutMs, blockMs, notifyLoaded, env } = event.data;
+  const { requestId, reason, force, codexHome, busyTimeoutMs, blockMs, notifyLoaded, waitForLoadedRelease, loadedRelease, env } = event.data;
   try {
     if (env?.CODEX_HOME) process.env.CODEX_HOME = env.CODEX_HOME;
     if (env?.OPENCODEX_HOME) process.env.OPENCODEX_HOME = env.OPENCODEX_HOME;
@@ -39,7 +41,10 @@ self.onmessage = (event: MessageEvent<unknown>) => {
       force: force === true,
       ...(codexHome ? { codexHome } : {}),
       ...(busyTimeoutMs !== undefined ? { busyTimeoutMs } : {}),
-      ...(notifyLoaded ? { onPolicyLoaded: () => self.postMessage({ type: "loaded", requestId }) } : {}),
+      ...(notifyLoaded ? { onPolicyLoaded: () => {
+        self.postMessage({ type: "loaded", requestId });
+        if (waitForLoadedRelease && loadedRelease) Atomics.wait(new Int32Array(loadedRelease), 0, 0);
+      } } : {}),
       ...(typeof blockMs === "number" && Number.isFinite(blockMs) && blockMs > 0
         ? { holdAfterLoadMs: Math.floor(blockMs) }
         : {}),

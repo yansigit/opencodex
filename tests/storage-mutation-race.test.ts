@@ -364,9 +364,9 @@ describe("storage mutation coordinator", () => {
 
   test("cleanup quarantine and permanent are rejected while restore holds slot after file moves", async () => {
     const home = isolatedCodexHome!.path;
-    const holdMs = 100;
+    const releaseBuffer = new SharedArrayBuffer(8);
     setRestoreTrashJobTestHooks({
-      restoreTest: { holdAfterFileMovesMs: holdMs },
+      restoreTest: { waitAfterFileMoves: releaseBuffer, notifyAfterFileMoves: true },
     });
     seedArchivedPair(home);
 
@@ -394,8 +394,7 @@ describe("storage mutation coordinator", () => {
       });
 
       const restoredPath = join(home, "archived_sessions", "rollout-old.jsonl");
-      const movedDeadline = Date.now() + 8000;
-      while (!existsSync(restoredPath) && Date.now() < movedDeadline) await Bun.sleep(1);
+      while (Atomics.load(new Int32Array(releaseBuffer), 1) === 0) await Bun.sleep(1);
       expect(existsSync(restoredPath)).toBe(true);
       expect(existsSync(join(trashStage, "rollout-old.jsonl"))).toBe(false);
       expect(existsSync(join(trashStage, "restore-pending.json"))).toBe(true);
@@ -427,6 +426,9 @@ describe("storage mutation coordinator", () => {
       expect(permanentDuring.status).toBe(409);
       expect((await permanentDuring.json()).error).toBe("storage_mutation_busy");
 
+      Atomics.store(new Int32Array(releaseBuffer), 0, 1);
+      Atomics.notify(new Int32Array(releaseBuffer), 0);
+
       const restoreRes = await restorePromise;
       expect(restoreRes.status).toBe(200);
       const restored = await restoreRes.json();
@@ -435,6 +437,8 @@ describe("storage mutation coordinator", () => {
       expect(threadCount(home)).toBe(2);
       expect(readFileSync(restoredPath, "utf8")).toBe("o".repeat(100));
     } finally {
+      Atomics.store(new Int32Array(releaseBuffer), 0, 1);
+      Atomics.notify(new Int32Array(releaseBuffer), 0);
       await stopRaceServer(server);
     }
   }, { timeout: 45_000 });
