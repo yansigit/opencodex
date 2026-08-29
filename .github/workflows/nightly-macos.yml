@@ -23,6 +23,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-tags: true
+          ref: dev
 
       - name: Setup project Bun
         uses: ./.github/actions/setup-project-bun
@@ -45,16 +46,9 @@ jobs:
           key: ocx-test-timings-dev-${{ github.sha }}
           restore-keys: ocx-test-timings-dev-
 
-      - name: Compile Swift/WebKit integration
-        run: |
-          mkdir -p .tmp/ci-aistudio
-          swiftc -framework WebKit -framework AppKit \
-            integrations/aistudio-daemon/main.swift \
-            -o .tmp/ci-aistudio/aistudio-login
+      - name: Validate restored timing data
+        if: hashFiles('.bun-timings.json') != ''
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json
 
       - name: Full macOS suite
         run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests
-
-      - name: Validate restored timing data
-        if: always() && hashFiles('.bun-timings.json') != ''
-        run: bun scripts/ci/validate-timings.ts .bun-timings.json

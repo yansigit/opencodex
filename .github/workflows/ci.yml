@@ -217,6 +217,7 @@ jobs:
               - 'scripts/ci/**'
               - 'src/oauth/**'
               - 'src/service.ts'
+              - 'integrations/aistudio-daemon/**'
               - 'tests/aistudio-native-webkit.test.ts'
               - 'tests/codex-app-server-processes.test.ts'
               - 'tests/process-state.test.ts'
@@ -322,16 +323,16 @@ jobs:
           restore-keys: |
             ocx-test-timings-dev-
 
+      - name: Validate restored timing data
+        if: hashFiles('.bun-timings.json') != ''
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json
+
       - name: Test in fresh-process timing-aware batches
         shell: bash
         env:
           TEST_SHARD: ${{ matrix.shard }}/4
         run: |
           bash scripts/ci/run-bun-test-batches.sh "$TEST_SHARD"
-
-      - name: Validate restored timing data
-        if: always() && hashFiles('.bun-timings.json') != ''
-        run: bun scripts/ci/validate-timings.ts .bun-timings.json
 
       - name: Upload trusted-dev shard timing report
         if: >-
@@ -608,18 +609,16 @@ jobs:
           restore-keys: |
             ocx-test-timings-dev-
 
-      - name: Compile Swift/WebKit integration
+      - name: Validate restored timing data
+        if: hashFiles('.bun-timings.json') != ''
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json
+
+      - name: Swift/WebKit integration
         if: >-
-          (github.event_name == 'pull_request' && needs.changes.outputs.swift == 'true') ||
-          (github.event_name == 'push' &&
-           (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview' ||
-            (github.ref == 'refs/heads/dev' && needs.changes.outputs.swift == 'true'))) ||
-          github.event_name == 'workflow_dispatch'
-        run: |
-          mkdir -p .tmp/ci-aistudio
-          swiftc -framework WebKit -framework AppKit \
-            integrations/aistudio-daemon/main.swift \
-            -o .tmp/ci-aistudio/aistudio-login
+          needs.changes.outputs.swift == 'true' &&
+          (github.event_name == 'pull_request' ||
+           (github.event_name == 'push' && github.ref == 'refs/heads/dev'))
+        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 tests/aistudio-native-webkit.test.ts
 
       - name: Focused Darwin/process lifecycle tests
         if: >-
@@ -628,7 +627,6 @@ jobs:
         run: |
           bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 \
             --timings .bun-timings.json --update-timings \
-            tests/aistudio-native-webkit.test.ts \
             tests/codex-app-server-processes.test.ts \
             tests/process-control.test.ts \
             tests/process-state.test.ts \
@@ -643,10 +641,6 @@ jobs:
           (github.event_name == 'push' &&
            (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview'))
         run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun test --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests
-
-      - name: Validate macOS timing data
-        if: always() && hashFiles('.bun-timings.json') != ''
-        run: bun scripts/ci/validate-timings.ts .bun-timings.json
 
       - name: CLI help smoke
         run: bun run src/cli/index.ts help

@@ -113,9 +113,14 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
     steps?: Array<{ uses?: string; if?: string; with?: Record<string, string>; run?: string }>;
   }> };
   const general = ci.jobs.test;
+  const generalSteps = general.steps ?? [];
   const restore = general.steps?.find(step => step.uses?.startsWith("actions/cache/restore@"));
   expect(restore?.with?.key).toContain("ocx-test-timings-dev-");
   expect(restore?.with?.["restore-keys"]?.trim()).toBe("ocx-test-timings-dev-");
+  const validateIndex = generalSteps.findIndex(step => step.run?.includes("validate-timings.ts"));
+  const testIndex = generalSteps.findIndex(step => step.run?.includes("run-bun-test-batches.sh"));
+  expect(validateIndex).toBeGreaterThan(generalSteps.indexOf(restore!));
+  expect(validateIndex).toBeLessThan(testIndex);
   const upload = general.steps?.find(step => step.uses?.startsWith("actions/upload-artifact@"));
   expect(upload?.uses).toBe("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a");
   expect(upload?.if).toContain("github.ref == 'refs/heads/dev'");
@@ -131,18 +136,28 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
     step.uses === "actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684",
   )).toBe(true);
   expect(ci.jobs["platform-macos"].steps?.some(step => step.uses?.startsWith("actions/cache/save@"))).toBe(false);
-  const swift = ci.jobs["platform-macos"].steps?.find(step => step.run?.includes("swiftc"));
+  const swift = ci.jobs["platform-macos"].steps?.find(step =>
+    step.run?.includes("tests/aistudio-native-webkit.test.ts"),
+  );
   expect(swift?.if).toContain("needs.changes.outputs.swift == 'true'");
-  expect(swift?.if).toContain("refs/heads/main");
-  expect(swift?.if).toContain("refs/heads/preview");
+  expect(swift?.if).toContain("refs/heads/dev");
+  const focused = ci.jobs["platform-macos"].steps?.find(step =>
+    step.name === "Focused Darwin/process lifecycle tests",
+  );
+  expect(focused?.run).not.toContain("tests/aistudio-native-webkit.test.ts");
 });
 
 test("nightly macOS is timed at 08:17 UTC and names its timing file", async () => {
   const text = await Bun.file(new URL("../.github/workflows/nightly-macos.yml", import.meta.url)).text();
   const workflow = Bun.YAML.parse(text) as {
     on?: { schedule?: Array<{ cron?: string }> };
+    jobs?: Record<string, { steps?: Array<{ name?: string; run?: string; with?: Record<string, string> }> }>;
   };
   expect(workflow.on?.schedule).toEqual([{ cron: "17 8 * * *" }]);
+  const steps = workflow.jobs?.["full-macos"]?.steps ?? [];
+  expect(steps.find(step => step.name === "Checkout")?.with?.ref).toBe("dev");
+  expect(steps.findIndex(step => step.run?.includes("validate-timings.ts")))
+    .toBeLessThan(steps.findIndex(step => step.name === "Full macOS suite"));
   expect(text).toContain("--timings .bun-timings.json --update-timings");
   expect(text).toContain("ocx-test-timings-dev-");
 });
