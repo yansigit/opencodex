@@ -1,7 +1,10 @@
 import { join } from "node:path";
 
-import { getConfigDir, saveConfigPreservingClaudeCode, websocketsEnabled, withExpectedConfigGenerationSync } from "../config";
-import { reconcileSuccessfulModelDiscoveries } from "../providers/new-model-policy";
+import { getConfigDir, mutatePersistedConfig, websocketsEnabled, withExpectedConfigGenerationSync } from "../config";
+import {
+  reconcileSuccessfulModelDiscoveries,
+  type KnownModelBaseline,
+} from "../providers/new-model-policy";
 import { COMBO_NAMESPACE } from "../combos";
 import { getAuthStorePath } from "../oauth/store";
 import type { OcxConfig } from "../types";
@@ -137,7 +140,21 @@ interface CandidateState {
   readonly changed: boolean;
   readonly notices: readonly CatalogNotice[];
   readonly modelEntitlements: CodexModelEntitlementSnapshot;
-  readonly discoveryConfig?: OcxConfig;
+  readonly discovery: DiscoveryEvidence;
+}
+
+interface DiscoveryEvidence {
+  readonly models: readonly { provider: string; id: string; custom?: boolean }[];
+  readonly authoritativeProviders: readonly string[];
+  readonly now: string;
+}
+
+interface DiscoveryProjection {
+  readonly providers: Readonly<Record<string, Readonly<{
+    knownModel?: KnownModelBaseline;
+    recentArrivals?: readonly { id: string; at: string }[];
+  }>>>;
+  readonly disabledModelsToAdd: readonly string[];
 }
 
 const candidateStates = new WeakMap<object, CandidateState>();
@@ -441,13 +458,15 @@ export async function gatherCodexCatalogCandidate(
           : !hasRoutedEntries(source.catalog) ? source.catalog : null)
         : null);
     const discoveryConfig = structuredClone(snapshot.config) as OcxConfig;
-    const discoveryChanged = reconcileSuccessfulModelDiscoveries({
+    const authoritativeProviders = providerModelOutcomes
+      .filter(outcome => outcome.state === "authoritative")
+      .map(outcome => outcome.provider);
+    const discoveryNow = new Date().toISOString();
+    reconcileSuccessfulModelDiscoveries({
       config: discoveryConfig,
       models: routedModels,
-      authoritativeProviders: providerModelOutcomes
-        .filter(outcome => outcome.state === "authoritative")
-        .map(outcome => outcome.provider),
-      now: new Date().toISOString(),
+      authoritativeProviders,
+      now: discoveryNow,
     });
     const preparedCatalog = prepareCatalog(
       discoveryConfig,
@@ -515,7 +534,11 @@ export async function gatherCodexCatalogCandidate(
         || Buffer.from(cacheBytes ?? []).toString("utf8") !== preparedCacheBytes,
       notices: Object.freeze([...notices]),
       modelEntitlements,
-      ...(discoveryChanged ? { discoveryConfig } : {}),
+      discovery: {
+        models: routedModels,
+        authoritativeProviders,
+        now: discoveryNow,
+      },
     });
     return { kind: "candidate", candidate };
   } catch (error) {
@@ -529,6 +552,58 @@ export async function gatherCodexCatalogCandidate(
       kind: "disposition",
       disposition: { status: "failed", reason: "provider-network", phase: "gather", retryable: true, partialWrite: false },
     };
+  }
+}
+
+function reconcilePersistedDiscovery(state: CandidateState) {
+  return mutatePersistedConfig(config => {
+    const disabledBefore = new Set(config.disabledModels ?? []);
+    const changed = reconcileSuccessfulModelDiscoveries({
+      config,
+      ...state.discovery,
+    });
+    const providers = Object.fromEntries(state.discovery.authoritativeProviders.flatMap(provider => {
+      const configured = config.providers[provider];
+      if (!configured || configured.liveModels === false) return [];
+      const knownModel = config.modelDiscovery?.knownModels?.[provider];
+      const recentArrivals = config.modelDiscovery?.recentArrivals?.[provider];
+      return [[provider, {
+        ...(knownModel ? { knownModel: structuredClone(knownModel) } : {}),
+        ...(recentArrivals ? { recentArrivals: structuredClone(recentArrivals) } : {}),
+      }]];
+    }));
+    return {
+      changed,
+      value: {
+        providers,
+        disabledModelsToAdd: (config.disabledModels ?? []).filter(slug => !disabledBefore.has(slug)),
+      } satisfies DiscoveryProjection,
+    };
+  });
+}
+
+function adoptDiscoveryProjection(config: OcxConfig, projection: DiscoveryProjection): void {
+  for (const [provider, discovered] of Object.entries(projection.providers)) {
+    if (discovered.knownModel) {
+      const discovery = config.modelDiscovery ??= {};
+      const knownModels = discovery.knownModels ??= {};
+      knownModels[provider] = structuredClone(discovered.knownModel);
+    } else if (config.modelDiscovery?.knownModels) {
+      delete config.modelDiscovery.knownModels[provider];
+    }
+    if (discovered.recentArrivals) {
+      const discovery = config.modelDiscovery ??= {};
+      const recentArrivals = discovery.recentArrivals ??= {};
+      recentArrivals[provider] = discovered.recentArrivals.map(arrival => ({ ...arrival }));
+    } else if (config.modelDiscovery?.recentArrivals) {
+      delete config.modelDiscovery.recentArrivals[provider];
+    }
+  }
+  if (projection.disabledModelsToAdd.length > 0) {
+    const disabledModels = config.disabledModels ??= [];
+    for (const slug of projection.disabledModelsToAdd) {
+      if (!disabledModels.includes(slug)) disabledModels.push(slug);
+    }
   }
 }
 
@@ -663,11 +738,11 @@ export async function convergeCodexCatalog(
   const state = candidateStates.get(gathered.candidate as object)!;
   lifecycle.onCommitBegin?.();
   const committed = await commitCodexCatalogCandidate(gathered.candidate, request.deadlineMs);
-  if (committed.kind === "committed" && state.discoveryConfig) {
-    const mutable = snapshot.config as OcxConfig;
-    mutable.modelDiscovery = state.discoveryConfig.modelDiscovery;
-    mutable.disabledModels = state.discoveryConfig.disabledModels;
-    saveConfigPreservingClaudeCode(mutable);
+  if (committed.kind === "committed") {
+    const persisted = reconcilePersistedDiscovery(state);
+    if (persisted.status === "committed" || persisted.status === "unchanged") {
+      adoptDiscoveryProjection(snapshot.config as OcxConfig, persisted.value);
+    }
   }
   return {
     changed: committed.kind === "committed" ? committed.changed : false,

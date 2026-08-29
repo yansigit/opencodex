@@ -34,7 +34,11 @@ import {
   resolveCodexCatalogSerializationDatabasePath,
   resolveEffectiveUserIdentity,
 } from "../src/codex/user-identity";
-import { getConfigPath, saveConfig } from "../src/config";
+import {
+  getConfigPath,
+  saveConfig,
+  setPersistedConfigMutationBeforeCommitForTests,
+} from "../src/config";
 import { CODEX_FORWARD_BASE_URL } from "../src/providers/openai-tiers";
 import type { OcxConfig } from "../src/types";
 import { setBundledCatalogCacheForTests } from "../src/codex/catalog/bundled";
@@ -334,6 +338,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPersistedConfigMutationBeforeCommitForTests(null);
   globalThis.fetch = previousFetch;
   const identity = resolveEffectiveUserIdentity();
   const serializationDb = resolveCodexCatalogSerializationDatabasePath(identity, codexHome);
@@ -348,6 +353,115 @@ afterEach(() => {
   else process.env.CODEX_CLI_PATH = previousCodexCliPath;
   resetCodexRuntimeResolveCacheForTests();
   rmSync(root, { recursive: true, force: true });
+});
+
+function discoveryProvider(baseUrl: string) {
+  return {
+    adapter: "openai-chat" as const,
+    baseUrl,
+    apiKey: "fixture-key",
+    allowPrivateNetwork: true,
+    liveModels: true,
+    newModelPolicy: "off" as const,
+  };
+}
+
+function readPersistedConfig(): OcxConfig {
+  return JSON.parse(readFileSync(getConfigPath(), "utf8")) as OcxConfig;
+}
+
+test("discovery persistence rebases onto the complete provider registry", async () => {
+  writeCatalog([nativeEntry()]);
+  const provider = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ data: [{ id: "new-model" }] }),
+  });
+  try {
+    const vendor = discoveryProvider(`http://127.0.0.1:${provider.port}/v1`);
+    const stale = config(false);
+    stale.providers = { vendor };
+    stale.defaultProvider = "vendor";
+    stale.modelDiscovery = {
+      knownModels: {
+        vendor: { ids: ["old-model"], removed: [], updatedAt: "2026-08-01T00:00:00.000Z" },
+      },
+    };
+    const persisted: OcxConfig = {
+      ...structuredClone(stale),
+      defaultProvider: "openai",
+      providers: {
+        openai: config(false).providers.openai!,
+        vendor,
+        alpha: { ...vendor, baseUrl: "https://alpha.example.test/v1", liveModels: false },
+        beta: { ...vendor, baseUrl: "https://beta.example.test/v1", liveModels: false },
+        gamma: { ...vendor, baseUrl: "https://gamma.example.test/v1", liveModels: false },
+        delta: { ...vendor, baseUrl: "https://delta.example.test/v1", liveModels: false },
+      },
+    };
+    saveConfig(persisted);
+    let concurrentEditRan = false;
+    setPersistedConfigMutationBeforeCommitForTests(() => {
+      concurrentEditRan = true;
+      const concurrent = readPersistedConfig();
+      concurrent.providers.delta!.note = "manual-edit";
+      writeFileSync(getConfigPath(), `${JSON.stringify(concurrent, null, 2)}\n`);
+    });
+
+    const result = await convergeCodexCatalog(
+      captureCatalogAdmissionSnapshot(stale),
+      { action: "converge", scope: "catalog", reason: "management-mutation", mode: "explicit", deadlineMs: 1_000 },
+    );
+    const disk = readPersistedConfig();
+
+    expect(result.catalogRefresh.status).toBe("committed");
+    expect(concurrentEditRan).toBe(true);
+    expect(Object.keys(disk.providers)).toEqual(["openai", "vendor", "alpha", "beta", "gamma", "delta"]);
+    expect(disk.defaultProvider).toBe("openai");
+    expect(disk.providers.delta?.note).toBe("manual-edit");
+    expect(disk.modelDiscovery?.knownModels?.vendor.ids).toEqual(["new-model", "old-model"]);
+    expect(disk.disabledModels).toContain("vendor/new-model");
+  } finally {
+    provider.stop(true);
+  }
+});
+
+test("invalid discovery persistence leaves live discovery state untouched", async () => {
+  writeCatalog([nativeEntry()]);
+  const provider = Bun.serve({
+    port: 0,
+    fetch: () => Response.json({ data: [{ id: "new-model" }] }),
+  });
+  try {
+    const live = config(false);
+    live.providers = { vendor: discoveryProvider(`http://127.0.0.1:${provider.port}/v1`) };
+    live.defaultProvider = "vendor";
+    live.modelDiscovery = {
+      knownModels: {
+        vendor: { ids: ["old-model"], removed: [], updatedAt: "2026-08-01T00:00:00.000Z" },
+      },
+    };
+    saveConfig(structuredClone(live));
+    const before = structuredClone(live);
+    const invalid = "{ invalid concurrent config";
+    let invalidationRan = false;
+    setPersistedConfigMutationBeforeCommitForTests(() => {
+      invalidationRan = true;
+      writeFileSync(getConfigPath(), invalid);
+    });
+
+    const result = await convergeCodexCatalog(
+      captureCatalogAdmissionSnapshot(live),
+      { action: "converge", scope: "catalog", reason: "management-mutation", mode: "explicit", deadlineMs: 1_000 },
+    );
+
+    expect(result.catalogRefresh.status).toBe("committed");
+    expect(invalidationRan).toBe(true);
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(invalid);
+    expect(live.modelDiscovery).toEqual(before.modelDiscovery);
+    expect(live.disabledModels).toEqual(before.disabledModels);
+  } finally {
+    provider.stop(true);
+  }
 });
 
 test("convergence renders account-qualified rows and preserves only non-generated foreign rows", async () => {
