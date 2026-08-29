@@ -18,7 +18,7 @@ COPY integrations/replit-gateway/package.json integrations/replit-gateway/bun.lo
 RUN cd integrations/replit-gateway && bun install --frozen-lockfile
 
 COPY . .
-RUN test -z "$(find /app -path '*/node_modules' -prune -o -type f \( -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' -o -name '*.jks' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \) -print -quit)"
+RUN test -z "$(find /app -path '*/node_modules' -prune -o -type f \( -name '*.pem' -o -name '*.key' -o -name '*.p12' -o -name '*.pfx' -o -name '*.jks' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '*.db' \) ! -path '/app/tests/fixtures/network-tls-test-cert.pem' ! -path '/app/tests/fixtures/network-tls-test-key.pem' -print -quit)"
 RUN cd gui && bun run build
 RUN rm -rf .git && git init -q && git add -A && test -z "$(git remote)"
 RUN addgroup --system ocx && adduser --system --ingroup ocx --home /home/ocx ocx && chown -R ocx:ocx /app && chmod -R a-w /app

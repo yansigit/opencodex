@@ -95,8 +95,10 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(image).toContain("find /app -path");
   expect(image).toContain("-name '*.pem'");
   expect(image).toContain("-name '*.db'");
+  expect(image).toContain("! -path '/app/tests/fixtures/network-tls-test-cert.pem'");
+  expect(image).toContain("! -path '/app/tests/fixtures/network-tls-test-key.pem'");
   expect(image).toContain("-path '*/node_modules' -prune -o");
-  expect(image.indexOf("-name '*.db' \\) -print -quit")).toBeGreaterThan(image.indexOf("find /app -path"));
+  expect(image.indexOf("-name '*.db' \\) ! -path")).toBeGreaterThan(image.indexOf("find /app -path"));
   expect(image).not.toContain("OCX_REPLIT_GATEWAY_DEPS_PREINSTALLED");
   expect(entrypoint).toContain("process.getuid?.() === 0");
   expect(entrypoint).toContain("/app");
@@ -114,4 +116,8 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(entrypoint).not.toContain('await run("/app", ["run", "test"])');
   expect(entrypoint).not.toContain('await run("/app/integrations/replit-gateway", ["run", "test"])');
   for (const pattern of [".git", ".worktrees", ".tmp", ".planning", ".agents", ".claude", ".cursor", ".windsurf", ".ssh", ".gnupg", ".aws", ".docker/config.json", "**/.docker/config.json", ".config/containers/auth.json", "**/.config/containers/auth.json", ".config/gh/hosts.yml", "**/.config/gh/hosts.yml", "**/.opencodex", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "dist", "gui/dist", "*.log", "coverage", "*.tgz", "*.tar", "*.zip", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/*.sqlite", "**/*.sqlite3", "**/*.db"]) expect(ignored).toContain(pattern);
+  expect(ignored).toContain("!tests/fixtures/network-tls-test-cert.pem");
+  expect(ignored).toContain("!tests/fixtures/network-tls-test-key.pem");
+  expect(ignored.indexOf("!tests/fixtures/network-tls-test-cert.pem")).toBeGreaterThan(ignored.indexOf("**/*.pem"));
+  expect(ignored.indexOf("!tests/fixtures/network-tls-test-key.pem")).toBeGreaterThan(ignored.indexOf("**/*.key"));
 });
