@@ -1750,7 +1750,8 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
           if (Object.hasOwn(desired ?? {}, key)) override[key] = desired![key];
           else delete override[key];
         }
-        latest[field] = override as never;
+        if (Object.keys(override).length > 0) latest[field] = override as never;
+        else delete latest[field];
       }
       latest.authModeMigratedAt = next.authModeMigratedAt;
       disk.claudeCode = latest;

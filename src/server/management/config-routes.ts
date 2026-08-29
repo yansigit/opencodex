@@ -838,7 +838,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (body.vision) {
         const latest = { ...disk.visionSidecar };
         for (const key of ["model", "backend", "reasoning", "maxDescriptionsPerTurn", "enabled", "timeoutMs"] as const) {
-          if (!Object.hasOwn(body.vision, key)) continue;
+          if (!Object.hasOwn(body.vision, key) && !(key === "reasoning" && visionReasoningTouched)) continue;
           if (Object.hasOwn(nextConfig.visionSidecar ?? {}, key)) latest[key] = nextConfig.visionSidecar![key] as never;
           else delete latest[key];
         }

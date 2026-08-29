@@ -109,6 +109,7 @@ import {
   atomicWriteFile,
   isMissingPathError,
   nextAtomicTempSequence,
+  resolveWriteTarget,
 } from "./config/atomic-write";
 export {
   AtomicWriteResidualTempError,
@@ -2733,6 +2734,10 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
  */
 function persistConfigUnlocked(config: OcxConfig): boolean {
   const configPath = getConfigPath();
+  // Check the resolved file target before reading it: a symlink can point from an
+  // isolated test home into the protected real home, where another write guard
+  // must not mask this refusal based on the target's current contents.
+  assertNotRealHomeUnderTest(dirname(resolveWriteTarget(configPath)));
   const raw = readRawConfigJson();
   if (raw && configNeedsProviderRepair(raw)) {
     throw new Error("refusing to overwrite a config repaired with defaults; fix the persisted config first");
