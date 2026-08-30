@@ -239,6 +239,49 @@ describe("claude inbound translation", () => {
     expect(() => parseRequest(body)).not.toThrow();
   });
 
+  test("ordinary client function tools named web_search or tool_search stay function tools", () => {
+    const body = anthropicToResponsesBody({
+      model: "gpt-5.6-luna",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "run local searches" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_ws_1", name: "web_search", input: { q: "local" } },
+            { type: "tool_use", id: "call_ts_1", name: "tool_search", input: { q: "local" } },
+          ],
+        },
+      ],
+      tools: [
+        { name: "web_search", description: "Client web search", input_schema: { type: "object", properties: { q: { type: "string" } } } },
+        { name: "tool_search", description: "Client tool search", input_schema: { type: "object", properties: { q: { type: "string" } } } },
+      ],
+      tool_choice: { type: "tool", name: "web_search" },
+    }) as Record<string, any>;
+
+    expect(body.tools).toEqual([
+      { type: "function", name: "web_search", description: "Client web search", parameters: { type: "object", properties: { q: { type: "string" } } } },
+      { type: "function", name: "tool_search", description: "Client tool search", parameters: { type: "object", properties: { q: { type: "string" } } } },
+    ]);
+    expect(body.tool_choice).toEqual({ type: "function", name: "web_search" });
+    expect(body.input).toEqual(expect.arrayContaining([
+      { type: "function_call", call_id: "call_ws_1", name: "web_search", arguments: JSON.stringify({ q: "local" }) },
+      { type: "function_call", call_id: "call_ts_1", name: "tool_search", arguments: JSON.stringify({ q: "local" }) },
+    ]));
+
+    const bodyTsChoice = anthropicToResponsesBody({
+      model: "gpt-5.6-luna",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "test" }],
+      tools: [
+        { name: "tool_search", description: "Client tool search", input_schema: { type: "object" } },
+      ],
+      tool_choice: { type: "tool", name: "tool_search" },
+    }) as Record<string, any>;
+    expect(bodyTsChoice.tool_choice).toEqual({ type: "function", name: "tool_search" });
+  });
+
   test("official tool-search call/results preserve ids, loaded definitions, failures, and forced choice", () => {
     const body = anthropicToResponsesBody({
       model: "gpt-5.6-luna",

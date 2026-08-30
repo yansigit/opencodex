@@ -458,7 +458,7 @@ function assistantMessageToItems(
         }
         // Lossless mapping for tool_search (Responses private tool_search_call) — reuse existing
         // function_call wire where direct would collapse the tool identity.
-        if (isToolSearchName(raw.name)) {
+        if (isToolSearchName(raw.name) && !definitions.has(raw.name)) {
           let args: string;
           try { args = JSON.stringify(raw.input ?? {}); } catch { args = "{}"; }
           input.push({ type: "tool_search_call", call_id: raw.id, arguments: args });
@@ -536,11 +536,6 @@ function toolsToResponses(tools: unknown): Rec[] | undefined {
       out.push({ type: "web_search" }); // hosted sidecar path
       continue;
     }
-    // Direct lossless mapping for the private tool_search declaration.
-    if (isToolSearchName(raw.name)) {
-      out.push({ type: "tool_search" });
-      continue;
-    }
     if (type === "tool_search" || type.startsWith("tool_search_tool_")) {
       out.push({ type: "tool_search" });
       continue;
@@ -555,26 +550,46 @@ function toolsToResponses(tools: unknown): Rec[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
-function toolChoiceToResponses(choice: unknown, body: Rec): void {
+function findDeclaredTool(tools: unknown, name: string): Rec | undefined {
+  if (!Array.isArray(tools)) return undefined;
+  for (const raw of tools) {
+    if (!isRec(raw)) continue;
+    if (raw.name === name) return raw;
+  }
+  for (const raw of tools) {
+    if (!isRec(raw)) continue;
+    const type = typeof raw.type === "string" ? raw.type : "";
+    if (type.startsWith("web_search") && isClaudeWebSearchToolName(name)) return raw;
+    if ((type === "tool_search" || type.startsWith("tool_search_tool_")) && isToolSearchName(name)) return raw;
+  }
+  return undefined;
+}
+
+function toolChoiceToResponses(choice: unknown, body: Rec, rawTools?: unknown): void {
   if (!isRec(choice)) return;
   if (choice.disable_parallel_tool_use === true) body.parallel_tool_calls = false;
   switch (choice.type) {
     case "auto": body.tool_choice = "auto"; break;
     case "none": body.tool_choice = "none"; break;
     case "any": body.tool_choice = "required"; break;
-    case "tool":
+    case "tool": {
       if (typeof choice.name !== "string" || choice.name.length === 0) {
         throw new AnthropicRequestError("tool_choice.tool requires a name");
       }
       // Anthropic represents hosted WebSearch as a named tool choice, while
       // Responses requires the choice type to match the hosted declaration.
       // Preserve forced-tool intent rather than weakening it to `auto`.
-      body.tool_choice = isClaudeWebSearchToolName(choice.name)
-        ? { type: "web_search" }
-        : isToolSearchName(choice.name)
-          ? { type: "tool_search" }
-          : { type: "function", name: choice.name };
+      const declared = findDeclaredTool(rawTools, choice.name);
+      const declType = declared && typeof declared.type === "string" ? declared.type : "";
+      if (declType.startsWith("web_search")) {
+        body.tool_choice = { type: "web_search" };
+      } else if (declType === "tool_search" || declType.startsWith("tool_search_tool_")) {
+        body.tool_choice = { type: "tool_search" };
+      } else {
+        body.tool_choice = { type: "function", name: choice.name };
+      }
       break;
+    }
     default: break;
   }
 }
@@ -651,7 +666,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
 
   const tools = toolsToResponses(raw.tools);
   if (tools) body.tools = tools;
-  toolChoiceToResponses(raw.tool_choice, body);
+  toolChoiceToResponses(raw.tool_choice, body, raw.tools);
 
   if (typeof raw.service_tier === "string" && raw.service_tier.length > 0) body.service_tier = raw.service_tier;
   if (typeof raw.max_tokens === "number") body.max_output_tokens = raw.max_tokens;
