@@ -530,7 +530,7 @@ describe("claude outbound SSE", () => {
     const events = await collectEvents(responsesSseToAnthropicSse(streamFrom(upstream), "m"));
     expect(events.at(-1)!.data).toEqual({
       type: "error",
-      error: { type: "overloaded_error", message: "Upstream stream terminated unexpectedly" },
+      error: { type: "overloaded_error", message: "Upstream stream terminated unexpectedly", code: "upstream_reset" },
     });
   });
 
@@ -552,7 +552,7 @@ describe("claude outbound SSE", () => {
     const events = await collectEvents(responsesSseToAnthropicSse(streamFrom(upstream), "m"));
     expect(events.at(-1)!.data).toEqual({
       type: "error",
-      error: { type: "rate_limit_error", message: "Cursor rate limit exceeded: quota exhausted" },
+      error: { type: "rate_limit_error", message: "Cursor rate limit exceeded: quota exhausted", code: "rate_limit_exceeded" },
     });
   });
 
@@ -569,7 +569,7 @@ describe("claude outbound SSE", () => {
     const events = await collectEvents(responsesSseToAnthropicSse(streamFrom(upstream), "m"));
     expect(events.at(-1)!.data).toEqual({
       type: "error",
-      error: { type: "authentication_error", message: "Cursor authentication failed: expired token" },
+      error: { type: "authentication_error", message: "Cursor authentication failed: expired token", code: "invalid_api_key" },
     });
   });
 
@@ -586,7 +586,7 @@ describe("claude outbound SSE", () => {
     const events = await collectEvents(responsesSseToAnthropicSse(streamFrom(upstream), "m"));
     expect(events.at(-1)!.data).toEqual({
       type: "error",
-      error: { type: "invalid_request_error", message: "Cursor context limit exceeded" },
+      error: { type: "invalid_request_error", message: "Cursor context limit exceeded", code: "context_length_exceeded" },
     });
   });
 
@@ -603,7 +603,7 @@ describe("claude outbound SSE", () => {
     const events = await collectEvents(responsesSseToAnthropicSse(streamFrom(upstream), "m"));
     expect(events.at(-1)!.data).toEqual({
       type: "error",
-      error: { type: "overloaded_error", message: "Cursor server overloaded: unavailable" },
+      error: { type: "overloaded_error", message: "Cursor server overloaded: unavailable", code: "server_is_overloaded" },
     });
   });
 
@@ -635,6 +635,7 @@ describe("claude outbound SSE", () => {
       error: {
         type: "overloaded_error",
         message: "upstream stream produced malformed tool call arguments",
+        code: "upstream_server_error",
       },
     });
   });
@@ -661,6 +662,37 @@ describe("claude outbound SSE", () => {
     const events = await collectEvents(responsesSseToAnthropicSse(streamFrom(upstream), "m"));
     expect(events.find(e => e.name === "message_delta")!.data.delta.stop_reason).toBe("refusal");
     expect(events.at(-1)!.name).toBe("message_stop");
+  });
+
+  test("incomplete pause_turn and model_context_window_exceeded map exactly where retained", async () => {
+    // pause_turn is a distinct Anthropic stop_reason for long-running turns; it is
+    // preserved only where Responses retains it verbatim and is not collapsed via
+    // truncated-stop-reason (which maps it to max_output_tokens). Same for the raw
+    // model_context_window_exceeded value which Responses retains as max_output_tokens
+    // in the collapsed path.
+    const pauseUpstream = [
+      sse("response.created", { response: {} }),
+      sse("response.output_text.delta", { delta: "thinking..." }),
+      sse("response.incomplete", { response: { status: "incomplete", incomplete_details: { reason: "pause_turn" }, usage: { input_tokens: 5, output_tokens: 3 } } }),
+    ].join("");
+    const pauseEvents = await collectEvents(responsesSseToAnthropicSse(streamFrom(pauseUpstream), "m"));
+    expect(pauseEvents.find(e => e.name === "message_delta")!.data.delta.stop_reason).toBe("pause_turn");
+    expect(pauseEvents.at(-1)!.name).toBe("message_stop");
+    const pauseJson = responsesJsonToAnthropicMessage({ status: "incomplete", incomplete_details: { reason: "pause_turn" }, output: [] }, "m") as any;
+    expect(pauseJson.stop_reason).toBe("pause_turn");
+
+    const ctxUpstream = [
+      sse("response.created", { response: {} }),
+      sse("response.output_text.delta", { delta: "partial" }),
+      sse("response.incomplete", { response: { status: "incomplete", incomplete_details: { reason: "model_context_window_exceeded" }, usage: { input_tokens: 5, output_tokens: 3 } } }),
+    ].join("");
+    const ctxEvents = await collectEvents(responsesSseToAnthropicSse(streamFrom(ctxUpstream), "m"));
+    expect(ctxEvents.find(e => e.name === "message_delta")!.data.delta.stop_reason).toBe("max_tokens");
+    const ctxJson = responsesJsonToAnthropicMessage({ status: "incomplete", incomplete_details: { reason: "model_context_window_exceeded" }, output: [] }, "m") as any;
+    expect(ctxJson.stop_reason).toBe("max_tokens");
+
+    // Native passthrough is not modified by this translator; the non-streaming
+    // Anthropic stop_reason passthrough remains outside outbound (no IR invented).
   });
 
   test("retryable or unknown incomplete becomes overloaded_error, never end_turn", async () => {
@@ -878,8 +910,7 @@ describe("claude outbound web_search translation", () => {
     ]);
     const usage = events[10].data.usage;
     expect(usage.server_tool_use).toEqual({ web_search_requests: 1 });
-    // stop_reason stays end_turn: server_tool_use is not a client tool call.
-    expect(events[10].data.delta.stop_reason).toBe("end_turn");
+    expect(events[10].data.delta.stop_reason).toBe("tool_use");
   });
 
   test("T2 multi-search -> two pairs, usage 2, monotonic indexes", async () => {
@@ -938,7 +969,7 @@ describe("claude outbound web_search translation", () => {
       ],
       usage: { input_tokens: 5, output_tokens: 1 },
     }, "claude-ocx-x") as Record<string, any>;
-    expect(msg.stop_reason).toBe("end_turn");
+    expect(msg.stop_reason).toBe("tool_use");
     expect(msg.content[0]).toEqual({ type: "server_tool_use", id: "ws_1", name: "web_search", input: { query: "latest bun release" } });
     expect(msg.content[1]).toMatchObject({ type: "web_search_tool_result", tool_use_id: "ws_1" });
     expect(msg.content[1].content).toHaveLength(2);

@@ -225,6 +225,13 @@ API-key providers may hold a literal key or an environment reference. OAuth prov
 credential store populated by `ocx login`; subscription-backed Claude Code launch behavior is
 configured under [`claudeCode.authMode`](/reference/configuration/server/#claude-code).
 
+Google Antigravity consumer OAuth accounts should keep the registry default
+`https://daily-cloudcode-pa.googleapis.com` endpoint. The production
+`https://cloudcode-pa.googleapis.com` endpoint is retained for enterprise/GCP accounts and may
+return `429 RESOURCE_EXHAUSTED` for consumer accounts even when quota remains. `ocx provider test
+google-antigravity` and the dashboard connection test warn about that explicit override without
+rewriting it.
+
 ## Provider diagnostic outbound safety
 
 Dashboard connection tests and live model discovery use a bounded GET-only transport. Without an

@@ -97,6 +97,7 @@ import type {
   AdapterEvent,
   OcxConfig,
   OcxParsedRequest,
+  ClaudeSourceEnvelope,
   OcxProviderConfig,
   OcxProviderContinuationOwner,
   OcxProviderContinuationState,
@@ -1376,6 +1377,34 @@ export interface ConsumedComboFailure {
 
 
 
+export type ResolvedRouteInfo = {
+  parsed: OcxParsedRequest;
+  route: RouteResult;
+  provider: OcxProviderConfig;
+  modelId: string;
+  adapterName: string;
+  headers: Headers;
+};
+
+function maybeInvokeResolvedRoute(
+  options: HandleResponsesOptions,
+  parsed: OcxParsedRequest,
+  route: RouteResult,
+  provider: OcxProviderConfig,
+  adapterName: string,
+  headers: Headers,
+) {
+  const cb = options.onResolvedRoute;
+  if (!cb) return;
+  try {
+    cb({ parsed, route, provider, modelId: route.modelId, adapterName, headers });
+  } catch (err) {
+    throw err instanceof OcxRequestValidationError
+      ? err
+      : new OcxRequestValidationError(redactSecretString(err instanceof Error ? err.message : String(err)));
+  }
+}
+
 export interface HandleResponsesOptions {
   turnAdmissionLease?: AdmissionLease;
   /**
@@ -1448,10 +1477,14 @@ export interface HandleResponsesOptions {
    * request IS the vision sidecar's own loopback describe call. The plan site
    * then STRIPS images instead of planning another describe — a depth cap of 1
    * that holds under predicate drift and combo re-resolution. The Chat surface
-   * detects the raw `x-opencodex-vision-describe` header before its bridge
-   * rebuilds headers and carries the fact through this flag.
-   */
+  * detects the raw `x-opencodex-vision-describe` header before its bridge
+  * rebuilds headers and carries the fact through this flag.
+  */
   visionDescribeTerminal?: boolean;
+  /** Request-local Anthropic source envelope; enables fidelity-preserving transport. */
+  claudeSourceEnvelope?: ClaudeSourceEnvelope;
+  /** Synchronous callback invoked after each newly resolved route; must be pure and fast. */
+  onResolvedRoute?: (info: ResolvedRouteInfo) => void;
 }
 
 
@@ -2375,6 +2408,10 @@ export async function handleResponses(
     const response = await handleResponsesInner(req, config, logCtx, { ...options, translatorBudget });
     return ownsBudget ? finalizeOwnedTranslatorBudget(response, translatorBudget) : response;
   } catch (error) {
+    if (error instanceof OcxRequestValidationError) {
+      const response = formatErrorResponse(error.status, "invalid_request_error", redactSecretString(error.message));
+      return ownsBudget ? finalizeOwnedTranslatorBudget(response, translatorBudget) : response;
+    }
     if (ownsBudget) translatorBudget.dispose();
     throw error;
   }
@@ -2462,6 +2499,7 @@ async function handleResponsesInner(
   try {
     parsed = parseRequest(body);
     parsed._promptCacheKeyIsSharedCohort = options.promptCacheKeyIsSharedCohort === true;
+    if (options.claudeSourceEnvelope) parsed._claudeSourceEnvelope = options.claudeSourceEnvelope;
     toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
     if (previousResponseInputExpanded) parsed._previousResponseInputExpanded = true;
     const providerContinuationCandidate = options.comboReplaySnapshot
@@ -2741,6 +2779,9 @@ async function handleResponsesInner(
         if (err instanceof NoEligiblePolicyCandidateError) {
           logCtx.routeDecision = err.trace;
         }
+        if (err instanceof OcxRequestValidationError) {
+          return formatErrorResponse(err.status, "invalid_request_error", redactSecretString(err.message));
+        }
         return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
       }
     }
@@ -2865,6 +2906,9 @@ async function handleResponsesInner(
               if (err instanceof NoEligiblePolicyCandidateError) {
                 logCtx.routeDecision = err.trace;
               }
+              if (err instanceof OcxRequestValidationError) {
+                return formatErrorResponse(err.status, "invalid_request_error", redactSecretString(err.message));
+              }
               return formatErrorResponse(
                 404,
                 "invalid_request_error",
@@ -2872,7 +2916,8 @@ async function handleResponsesInner(
               );
             }
           }
-        } catch {
+        } catch (err) {
+          if (err instanceof OcxRequestValidationError) throw err;
           unreadableEncryptedAgentTask = true;
         }
       }
@@ -2991,7 +3036,7 @@ async function handleResponsesInner(
     }
   }
   const isOAuth401ReplayProvider = isAntigravityOAuth
-    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro")
+    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro" || route.providerName === "cursor")
       && route.provider.authMode === "oauth");
   let sentOAuthSnapshot: OAuthAccessSnapshot | undefined;
   let replayOAuthCredentialSnapshot: Pick<OAuthAccessSnapshot, "accountId" | "generation"> | undefined;
@@ -3223,6 +3268,7 @@ async function handleResponsesInner(
     delete logCtx.accountLogLabel;
   }
   const adapter = resolveAdapter(adapterProvider, config.cacheRetention);
+  maybeInvokeResolvedRoute(options, parsed, route, adapterProvider, adapter.name, selectedForwardHeaders);
   const googleOptionsError = googleProviderOptionsRouteError(parsed, {
     providerName: route.providerName,
     provider: adapterProvider,
@@ -3283,6 +3329,7 @@ async function handleResponsesInner(
   }
   sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, adapter.name, logCtx.accountLogLabel);
   let runTurnAdapter = adapter;
+  let runTurnOAuth401ReplayAttempted = false;
   if (adapter.runTurn) {
     recordAdapterTierMetadata(logCtx, adapter.tierLogForRunTurn?.(parsed));
   }
@@ -4998,6 +5045,36 @@ async function handleResponsesInner(
       }
     };
     const runTurn = async (): Promise<void> => runTurnAttempt(queue, undefined, true);
+    const refreshRunTurnAdapterOnPreflight401 = async (
+      error: Extract<AdapterEvent, { type: "error" }>,
+    ): Promise<boolean> => {
+      const status = error.status ?? adapterFailureFromMessage(error.message).httpStatus;
+      if (status !== 401 || route.providerName !== "cursor" || route.provider.authMode !== "oauth"
+        || !sentOAuthSnapshot || runTurnOAuth401ReplayAttempted) return false;
+      runTurnOAuth401ReplayAttempted = true;
+      try {
+        const refreshed = await forceRefreshOAuthAccessSnapshot(sentOAuthSnapshot);
+        sentOAuthSnapshot = refreshed;
+        replayOAuthCredentialSnapshot = { accountId: refreshed.accountId, generation: refreshed.generation };
+        route.provider = { ...route.provider, apiKey: refreshed.accessToken };
+        const provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, inboundWire);
+        const refreshedAdapter = resolveAdapter(provider, config.cacheRetention);
+        if (!refreshedAdapter.runTurn) return false;
+        runTurnAdapter = refreshedAdapter;
+        bindRouteReasoningReplayScope({
+          parsed,
+          providerName: route.providerName,
+          provider,
+          adapterName: refreshedAdapter.name,
+          oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
+          codexAuthContext: authCtx,
+          forwardHeaders: selectedForwardHeaders,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    };
     const rotateRunTurnAdapterOnPreflight429 = async (
       error: Extract<AdapterEvent, { type: "error" }>,
     ): Promise<boolean> => {
@@ -5059,13 +5136,14 @@ async function handleResponsesInner(
       let source = firstSource;
       while (true) {
         const preflight = await preflightAdapterEvents(source);
-        if (!preflight.error || !(await rotateRunTurnAdapterOnPreflight429(preflight.error))) {
-          return preflight.stream;
-        }
+        if (!preflight.error) return preflight.stream;
+        const refreshed = await refreshRunTurnAdapterOnPreflight401(preflight.error);
+        const rotated = refreshed ? false : await rotateRunTurnAdapterOnPreflight429(preflight.error);
+        if (!refreshed && !rotated) return preflight.stream;
         const retryQueue = createAdapterEventQueue({
           onBacklogExceeded: () => runTurnAbort.abort(),
         });
-        void runTurnAttempt(retryQueue, "oauth-account-429");
+        void runTurnAttempt(retryQueue, refreshed ? "oauth-401" : "oauth-account-429");
         source = retryQueue.stream();
       }
     };
@@ -5086,7 +5164,8 @@ async function handleResponsesInner(
       let eventSource: AsyncIterable<AdapterEvent> = diagnoseAdapterEvents(
         queue.stream(), adapter.name, diagnosticRequestId, logCtx, adapterDiagnosticState,
       );
-      if (genericFailoverAccountId && isGenericOAuthFailoverEnabled(config, route.providerName)) {
+      if ((genericFailoverAccountId && isGenericOAuthFailoverEnabled(config, route.providerName))
+        || (route.providerName === "cursor" && route.provider.authMode === "oauth" && sentOAuthSnapshot)) {
         // Preflight holds only heartbeats and the first meaningful event. A first-event 429 can be
         // replayed transparently; after any output reaches the bridge, a later error stays terminal.
         eventSource = await preflightRunTurnFailover(eventSource);
@@ -5173,7 +5252,8 @@ async function handleResponsesInner(
     await runTurn();
     const firstAttemptEvents = await queue.collect();
     let runTurnEvents: AdapterEvent[] = firstAttemptEvents;
-    if (genericFailoverAccountId && isGenericOAuthFailoverEnabled(config, route.providerName)) {
+    if ((genericFailoverAccountId && isGenericOAuthFailoverEnabled(config, route.providerName))
+      || (route.providerName === "cursor" && route.provider.authMode === "oauth" && sentOAuthSnapshot)) {
       runTurnEvents = [];
       for await (const event of await preflightRunTurnFailover(
         (async function* () { yield* firstAttemptEvents; })(),
@@ -5335,6 +5415,11 @@ async function handleResponsesInner(
     cleanupUpstreamAbort();
     upstream.abort();
     if (options.abortSignal?.aborted) return clientCancelledResponse();
+    if (isTranslatorBudgetExceededError(err)) {
+      return formatErrorResponse(413, "request_too_large", "request translation buffer exceeded the safe limit", {
+        code: "translation_buffer_limit",
+      });
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return formatErrorResponse(400, "invalid_request_error", redactSecretString(msg));
   }
@@ -5453,6 +5538,9 @@ async function handleResponsesInner(
           cleanupUpstreamAbort();
           upstream.abort();
           if (options.abortSignal?.aborted) return { failed: clientCancelledResponse() };
+          if (isTranslatorBudgetExceededError(err)) {
+            return { failed: formatErrorResponse(413, "request_too_large", "request translation buffer exceeded the safe limit", { code: "translation_buffer_limit" }) };
+          }
           const msg = err instanceof Error ? err.message : String(err);
           return { failed: formatErrorResponse(400, "invalid_request_error", redactSecretString(msg)) };
         }
@@ -5559,6 +5647,7 @@ async function handleResponsesInner(
           adapterName: activeAdapter.name,
           oauthCredentialSnapshot: replayOAuthCredentialSnapshot,
         });
+        maybeInvokeResolvedRoute(options, parsed, route, refreshedProvider, activeAdapter.name, selectedForwardHeaders);
         const result = await rebuildAndRefetch("oauth-401");
         if ("failed" in result) return result.failed;
         upstreamResponse = result;
@@ -5630,6 +5719,7 @@ async function handleResponsesInner(
           provider: route.provider,
           adapterName: activeAdapter.name,
         });
+        maybeInvokeResolvedRoute(options, parsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
         const result = await rebuildAndRefetch("key-429");
         if ("failed" in result) return result.failed;
         upstreamResponse = result;
@@ -5695,6 +5785,7 @@ async function handleResponsesInner(
             config.cacheRetention,
           );
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
+          maybeInvokeResolvedRoute(options, parsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
           const result = await rebuildAndRefetch("anthropic-oauth-429");
           if ("failed" in result) return result.failed;
           upstreamResponse = result;
@@ -5747,6 +5838,7 @@ async function handleResponsesInner(
             codexAuthContext: authCtx,
             forwardHeaders: selectedForwardHeaders,
           });
+          maybeInvokeResolvedRoute(options, parsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
           logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
           logCtx.accountLogLabel = nextAccountId;
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
@@ -5793,6 +5885,7 @@ async function handleResponsesInner(
             codexAuthContext: authCtx,
             forwardHeaders: selectedForwardHeaders,
           });
+          maybeInvokeResolvedRoute(options, parsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
           logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
           logCtx.accountLogLabel = nextAccountId;
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
@@ -5839,6 +5932,7 @@ async function handleResponsesInner(
             config.cacheRetention,
           );
           sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
+          maybeInvokeResolvedRoute(options, parsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
           const result = await rebuildAndRefetch("oauth-account-429");
           if ("failed" in result) return result.failed;
           upstreamResponse = result;
@@ -6215,6 +6309,7 @@ async function handleResponsesInner(
             provider: route.provider,
             adapterName: activeAdapter.name,
           });
+          maybeInvokeResolvedRoute(options, nextParsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
           nextContinuationRecoveryKind = "key-429";
           continue;
         }
@@ -6247,6 +6342,7 @@ async function handleResponsesInner(
               config.cacheRetention,
             );
             sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
+            maybeInvokeResolvedRoute(options, nextParsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
             nextContinuationRecoveryKind = "anthropic-oauth-429";
             continue;
           } catch {
@@ -6303,6 +6399,7 @@ async function handleResponsesInner(
               provider: route.provider,
               adapterName: activeAdapter.name,
             });
+            maybeInvokeResolvedRoute(options, nextParsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
             logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
             logCtx.accountLogLabel = nextAccountId;
             sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);
@@ -6353,6 +6450,7 @@ async function handleResponsesInner(
               provider: route.provider,
               adapterName: activeAdapter.name,
             });
+            maybeInvokeResolvedRoute(options, nextParsed, route, route.provider, activeAdapter.name, selectedForwardHeaders);
             logCtx.provider = formatCursorProviderForLog("cursor", nextAccountId);
             logCtx.accountLogLabel = nextAccountId;
             sealRequestAttemptIdentity(logCtx.activeAttempt, logCtx.provider, activeAdapter.name, logCtx.accountLogLabel);

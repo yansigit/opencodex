@@ -29,6 +29,8 @@ on:
       - ".github/scripts/parse-issue-translation-response.cjs"
       - ".github/scripts/parse-issue-translation-response.test.cjs"
       - ".github/scripts/pr-automation*.cjs"
+      - ".github/scripts/closed-pr-branch-cleanup.cjs"
+      - ".github/scripts/closed-pr-branch-cleanup.test.cjs"
       - ".github/workflows/pr-automation.yml"
       - ".github/workflows/enforce-issue-quality.yml"
       - ".github/workflows/enforce-pr-target.yml"
@@ -64,6 +66,8 @@ on:
       - ".github/scripts/parse-issue-translation-response.cjs"
       - ".github/scripts/parse-issue-translation-response.test.cjs"
       - ".github/scripts/pr-automation*.cjs"
+      - ".github/scripts/closed-pr-branch-cleanup.cjs"
+      - ".github/scripts/closed-pr-branch-cleanup.test.cjs"
       - ".github/workflows/pr-automation.yml"
       - ".github/workflows/enforce-issue-quality.yml"
       - ".github/workflows/enforce-pr-target.yml"
@@ -101,6 +105,7 @@ jobs:
           node --test .github/scripts/run-copilot-inference.test.cjs
           node --test .github/scripts/parse-issue-translation-response.test.cjs
           node --test .github/scripts/pr-automation*.test.cjs
+          node --test .github/scripts/closed-pr-branch-cleanup.test.cjs
 
       - name: Validate issue-form YAML
         run: |

@@ -398,8 +398,8 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "lab",
-    usage: "ocx lab <status|verdicts|subjects|subject|observations|events|event|artifacts|artifact|catalog> [options] [--json]",
-    summary: "Read-only Compatibility Lab projection inspection (local SQLite; no daemon).",
+    usage: "ocx lab <status|verdicts|subjects|subject|observations|events|event|artifacts|artifact|catalog|run|oracle> [options] [--json]",
+    summary: "Inspect the local Compatibility Lab projection or launch an explicit probe.",
     details: [
       "status                Projection availability, schema versions, and row counts.",
       "verdicts              Paginated derived compatibility verdicts with filters.",
@@ -408,7 +408,9 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "events                Event history; event <id> returns one safe typed event.",
       "artifacts             Artifact metadata only (no content download).",
       "catalog               Packaged protocol/live scenario catalog metadata.",
-      "Reads never rebuild the projection, trigger probes, or require the proxy.",
+      "run                   Enqueue manual Lab run; --oracle-run <id> pairs stored Cursor evidence.",
+      "oracle cursor         Loopback probe to https://api2.cursor.sh with isolated working state and sanitized observation V1.",
+      "Reads never rebuild the projection, trigger probes, or require the proxy. Run and oracle are explicit opt-in probes with isolated scratch.",
     ],
   },
   {

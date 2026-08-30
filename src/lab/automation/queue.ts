@@ -100,6 +100,7 @@ export function enqueuePlannedRuns(
       updatedAt: now,
       ...(plan.providerName ? { providerName: plan.providerName } : {}),
       ...(plan.modelId ? { modelId: plan.modelId } : {}),
+      ...(plan.oracleRunId ? { oracleRunId: plan.oracleRunId } : {}),
     });
     queuedCount += 1;
     existingActiveKeys.add(plan.runKey);

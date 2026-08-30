@@ -30,8 +30,9 @@ export function decodeCursorArgValue(value: Uint8Array): unknown {
 }
 
 export function decodeCursorArgsMap(args: { [key: string]: Uint8Array } | undefined): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const [key, value] of Object.entries(args ?? {})) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
     out[key] = decodeCursorArgValue(value);
   }
   return out;

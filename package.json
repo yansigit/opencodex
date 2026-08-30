@@ -1,6 +1,6 @@
 {
   "name": "@yansigit/opencodex",
-  "version": "2.36.2",
+  "version": "2.36.3",
   "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
@@ -71,6 +71,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "0.122.0",
     "@types/bun": "1.4.0",
     "typescript": "7.0.2"
   },

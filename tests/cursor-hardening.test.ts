@@ -18,6 +18,7 @@ import {
 } from "../src/adapters/cursor/gen/agent_pb";
 import { CONNECT_FLAG_END_STREAM, encodeConnectFrame } from "../src/adapters/cursor/framing";
 import { fetchCursorUsableModels } from "../src/adapters/cursor/live-models";
+import { CURSOR_VERIFIED_CLIENT_VERSION } from "../src/adapters/cursor/protocol-profile";
 import { armTimeoutDestroyFallback, createLiveCursorTransport, createTerminalSettler } from "../src/adapters/cursor/live-transport";
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
 import { gatherRoutedModels } from "../src/codex/catalog";
@@ -138,6 +139,54 @@ describe("Cursor live-model discovery hardening", () => {
     expect(seenInit?.redirect).toBe("manual");
     expect((seenInit as RequestInit & { protocol?: string }).protocol).toBe("http1.1");
     expect(new Headers(seenInit?.headers).get("authorization")).toBe("Bearer test-token");
+  });
+
+  test("discovery and Run share the verified client-version owner", async () => {
+    const body = toBinary(GetUsableModelsResponseSchema, create(GetUsableModelsResponseSchema, {
+      models: [create(ModelDetailsSchema, { modelId: "claude-opus-5" })],
+    }));
+    let seenInit: RequestInit | undefined;
+    const fetchImpl = (async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      seenInit = init;
+      return new Response(body, { status: 200, headers: { "content-type": "application/proto" } });
+    }) as typeof fetch;
+
+    await fetchCursorUsableModels({
+      apiKey: "test-token",
+      baseUrl: "https://api2.cursor.sh",
+      upstreamHttpVersion: "http1.1",
+      fetch: fetchImpl,
+    });
+
+    expect(new Headers(seenInit?.headers).get("x-cursor-client-version")).toBe(CURSOR_VERIFIED_CLIENT_VERSION);
+
+    let runHeaders: http2.OutgoingHttpHeaders | undefined;
+    await withDiscoveryServer((stream, headers) => {
+      runHeaders = headers;
+      stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+      stream.end();
+    }, async baseUrl => {
+      const transport = createLiveCursorTransport({
+        provider: { adapter: "cursor", baseUrl, apiKey: "test-token" },
+        translatorBudget: createTestTranslatorBudget(),
+        headers: new Headers(),
+      });
+      try {
+        for await (const _ of transport.run({
+          modelId: "claude-opus-5",
+          conversationId: "cursor-version-parity",
+          system: ["system prompt"],
+          messages: [{ role: "user", content: "hi" }],
+          rawMessages: [{ role: "user", content: "hi", timestamp: 1 }],
+        })) { /* drain */ }
+      } catch { /* fixture closes immediately */ }
+      finally {
+        await transport.close?.();
+      }
+    });
+
+    const raw = runHeaders?.["x-cursor-client-version"];
+    expect(Array.isArray(raw) ? raw[0] : raw).toBe(CURSOR_VERIFIED_CLIENT_VERSION);
   });
 
   test("HTTP/1.1 discovery rejects announced and streamed 4 MiB overflow before decode", async () => {

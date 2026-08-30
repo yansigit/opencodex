@@ -39,6 +39,7 @@ import {
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { ProviderOutboundPolicyError, providerOutboundGet, providerOutboundPost, providerRedirectError } from "../../lib/provider-outbound";
 import { fetchCursorUsableModels } from "../../adapters/cursor/live-models";
+import { DAILY_ANTIGRAVITY_HOST, PROD_ANTIGRAVITY_HOST } from "../../adapters/google-antigravity-hosts";
 import { parseAntigravityAvailableModels } from "../../providers/antigravity-models";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets, providerConfigSeed } from "../../providers/derive";
@@ -1179,11 +1180,15 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         });
       }
       const models = ccaModels?.length ?? ("items" in extracted! ? extracted!.items.length : extracted!.rows.length);
+      const antigravityProdWarning = antigravity
+        && prov.baseUrl.replace(/\/+$/, "") === PROD_ANTIGRAVITY_HOST
+        ? ` Warning: consumer Google Antigravity accounts may receive 429 RESOURCE_EXHAUSTED on ${PROD_ANTIGRAVITY_HOST}; use ${DAILY_ANTIGRAVITY_HOST}. Keep the production endpoint only for enterprise/GCP accounts.`
+        : "";
       return jsonResponse({
         ok: true,
         latencyMs,
         models,
-        message: `Connected — ${models} model${models === 1 ? "" : "s"} available.`,
+        message: `Connected — ${models} model${models === 1 ? "" : "s"} available.${antigravityProdWarning}`,
       });
     } catch (err) {
       return jsonResponse({

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "frozenAt": "2026-08-29",
+  "claudeCode": {
+    "latestStable": "2.1.251",
+    "previousStable": "2.1.250",
+    "implementationBaseline": ["2.1.248", "2.1.247"],
+    "compatibilityFloor": "2.1.201"
+  },
+  "references": [
+    {
+      "repository": "diegosouzapw/OmniRoute",
+      "sha": "4febee9415e7f07709a08f3029bfcedab639a570"
+    },
+    {
+      "repository": "router-for-me/CLIProxyAPI",
+      "sha": "f0de1d008fe8881dcb7431cf97b147295874c2b2"
+    },
+    {
+      "repository": "musistudio/claude-code-router",
+      "sha": "aec22a00cc9f934b8ab793522731cf1c71864d39"
+    },
+    {
+      "repository": "BerriAI/litellm",
+      "sha": "e55dbaf34710783ce263a2d1a3039953c4a05148",
+      "stableRelease": "v1.98.0"
+    },
+    {
+      "repository": "Portkey-AI/gateway",
+      "sha": "669825cbe89ee51569918b8f78a9db486fd69dd4",
+      "stableRelease": "v1.15.2"
+    }
+  ]
+}

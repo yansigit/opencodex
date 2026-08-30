@@ -413,9 +413,9 @@ describe("GitHub Actions hardening", () => {
       }
     }
 
-    // The push trigger stays pinned to the release-relevant lines: release.yml
-    // gates on main and preview, so widening this one would pull an unrelated
-    // branch into that path.
+    // Every integration head needs exact push-CI evidence. In particular, a
+    // tree-preserving main backmerge changes no path but promotion still gates
+    // on a successful Cross-platform CI push run for that exact dev SHA.
     const ci = Bun.YAML.parse(await readText(".github/workflows/ci.yml")) as {
       on?: {
         push?: { branches?: string[]; paths?: string[] };
@@ -425,6 +425,7 @@ describe("GitHub Actions hardening", () => {
     };
     expect([...(ci.on?.push?.branches ?? [])].sort())
       .toEqual(["dev", "main", "preview"]);
+    expect(ci.on?.push?.paths).toBeUndefined();
 
     // The PR trigger must carry NO base-branch filter, and the two triggers
     // differ on purpose. GitHub matches `branches:` against the BASE ref, so
@@ -443,9 +444,9 @@ describe("GitHub Actions hardening", () => {
     expect(ci.on?.pull_request?.branches).toBeUndefined();
     expect(ci.on?.pull_request?.paths).toBeUndefined();
 
-    // The push trigger and pull-request `changes` job share one expensive-CI
-    // allowlist. PRs always create the workflow and aggregate check; this list
-    // decides whether the costly jobs run. Pin the entire list on both paths.
+    // The `changes` job owns the one expensive-CI allowlist for both events.
+    // Every head gets the workflow and aggregate check; this list decides
+    // whether the costly jobs run.
     const ciPaths = [
       ".gitattributes",
       ".github/workflows/**",
@@ -463,8 +464,6 @@ describe("GitHub Actions hardening", () => {
       "tests/**",
       "tsconfig.json",
     ];
-    expect([...(ci.on?.push?.paths ?? [])].sort()).toEqual(ciPaths);
-
     const filterStep = (ci.jobs?.changes as {
       steps?: { with?: Record<string, string> }[];
     })?.steps?.find(step => step.with?.filters);
@@ -762,40 +761,33 @@ describe("GitHub Actions hardening", () => {
     }
 
     // The service gate must cover the post-restructure service surface and stay
-    // in sync with every service-lifecycle.yml push trigger path.
+    // in sync with service-lifecycle.yml PR trigger paths. Every integration push
+    // to main/preview/dev runs without path filter to guarantee exact-head evidence.
     const gateMatch = workflow.match(/grep -Eq '(\^\([^']+\)\$)'/);
     expect(gateMatch).not.toBeNull();
     const gate = new RegExp(gateMatch![1]!);
-    const lifecycle = await readText(".github/workflows/service-lifecycle.yml");
-    const pushPaths = lifecycle
-      .split("push:")[1]!
-      .split("workflow_dispatch:")[0]!
-      .split("\n")
-      .map(line => line.trim())
-      .filter(line => line.startsWith('- "'))
-      .map(line => line.slice(3, -1));
-    expect(pushPaths.length).toBeGreaterThanOrEqual(6);
-    for (const path of pushPaths) {
+    const lifecycle = Bun.YAML.parse(await readText(".github/workflows/service-lifecycle.yml")) as {
+      on?: {
+        push?: { branches?: string[]; paths?: string[] };
+        pull_request?: { branches?: string[]; paths?: string[] };
+      };
+    };
+    expect([...(lifecycle.on?.push?.branches ?? [])].sort()).toEqual([
+      "dev",
+      "main",
+      "preview",
+    ]);
+    expect(lifecycle.on?.push?.paths).toBeUndefined();
+
+    const prPaths = (lifecycle.on?.pull_request?.paths ?? []) as string[];
+    expect(prPaths.length).toBeGreaterThanOrEqual(6);
+    for (const path of prPaths) {
       expect(gate.test(path)).toBe(true);
     }
     expect(gate.test("src/cli/index.ts")).toBe(true);
     expect(gate.test("src/lib/bun-runtime.ts")).toBe(true);
     expect(gate.test("src/cli.ts")).toBe(true);
-
-    // PR and push triggers must stay path-set identical, and both must cover the
-    // pre-restructure compat stub src/cli.ts that the release gate regex checks
-    // (devlog 260716_passthrough_followups/020 — a release whose only service change
-    // is src/cli.ts must auto-trigger service-lifecycle instead of dead-ending the gate).
-    const prPaths = lifecycle
-      .split("pull_request:")[1]!
-      .split("push:")[0]!
-      .split("\n")
-      .map(line => line.trim())
-      .filter(line => line.startsWith('- "'))
-      .map(line => line.slice(3, -1));
-    expect([...prPaths].sort()).toEqual([...pushPaths].sort());
     expect(prPaths).toContain("src/cli.ts");
-    expect(pushPaths).toContain("src/cli.ts");
     expect(gate.test("src/router.ts")).toBe(false);
     expect(gate.test("docs-site/src/pages/index.astro")).toBe(false);
 
