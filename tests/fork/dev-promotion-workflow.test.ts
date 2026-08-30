@@ -50,6 +50,7 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("dev back-merge postcheck failed");
     expect(workflowSource).toContain("back-merge push remained uncertain after 3 attempts");
     expect(workflowSource).toContain("back-merge refs moved during retry");
+    expect(workflowSource).toContain("main CI is not green yet; its workflow_run will retry reconciliation");
     expect(workflowSource).not.toContain("gh api --method PATCH");
     expect(workflowSource).toContain("main moved before the dev back-merge");
     expect(workflowSource).toContain("dev moved before the dev back-merge");
@@ -178,6 +179,10 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("post-release refs moved during retry");
     expect(workflowSource).toContain("--force-with-lease=\"refs/tags/v${RELEASE_VERSION}:$VERIFIED_MAIN_SHA\"");
     expect(workflowSource).toContain("post-release dev version check failed");
-    expect(workflowSource).toContain('git diff --name-only "$EXPECTED_RELEASE_SHA" "$live_dev_sha"');
+    expect(workflowSource).toContain('bump_base_sha="$EXPECTED_RELEASE_SHA"');
+    expect(workflowSource).toContain('[ "$main_is_ancestor" = true ] && bump_base_sha="$live_dev_sha"');
+    expect(workflowSource).toContain('VERIFIED_BASE_SHA: ${{ steps.verify-release.outputs.bump_base_sha }}');
+    expect(workflowSource).toContain('git switch --detach --quiet "$VERIFIED_BASE_SHA"');
+    expect(workflowSource).toContain('git rev-parse HEAD^)" != "$VERIFIED_BASE_SHA"');
   });
 });
