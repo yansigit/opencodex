@@ -93,9 +93,9 @@ import type { CursorClientMessage, CursorRunRequest, CursorServerMessage } from 
 import type { CursorTransport, CursorTransportFactoryInput } from "./transport";
 import { CursorHttp1BidiConnection } from "./http1-bidi";
 import { isPinnedHttp1 } from "../../lib/upstream-http-version";
+import { CURSOR_VERIFIED_CLIENT_VERSION } from "./protocol-profile";
 
 const CURSOR_RUN_PATH = "/agent.v1.AgentService/Run";
-const CURSOR_CLIENT_VERSION = "cli-2026.07.08-0c04a8a";
 const HEARTBEAT_MS = 5_000;
 const CURSOR_FIRST_FRAME_TIMEOUT_MS = 30_000;
 /**
@@ -661,6 +661,7 @@ class LiveCursorTransport implements CursorTransport {
     this.execContext = {
       ...this.execContext,
       clientToolDefs,
+      cursorSystem: activeRequest.system,
       codeMode: cursorRequestUsesCodeMode(request.tools, request.toolChoice),
       rejectNativeFileMutations: cursorRequestAdvertisesApplyPatch(request.tools, request.toolChoice),
       structuredEditAvailable: syntheticStructuredEditToolNames.size > 0,
@@ -1068,7 +1069,7 @@ class LiveCursorTransport implements CursorTransport {
         te: "trailers",
         authorization: `Bearer ${this.token}`,
         "x-ghost-mode": "true",
-        "x-cursor-client-version": CURSOR_CLIENT_VERSION,
+        "x-cursor-client-version": CURSOR_VERIFIED_CLIENT_VERSION,
         "x-cursor-client-type": "cli",
         "x-request-id": requestId,
         "x-session-id": this.sessionId,
@@ -1389,7 +1390,7 @@ class LiveCursorTransport implements CursorTransport {
       this.http1Connection = new CursorHttp1BidiConnection({
         baseUrl,
         token: this.token,
-        clientVersion: CURSOR_CLIENT_VERSION,
+        clientVersion: CURSOR_VERIFIED_CLIENT_VERSION,
         sessionId: this.sessionId,
         requestId,
         translatorBudget: this.translatorBudget,

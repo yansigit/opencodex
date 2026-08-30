@@ -513,6 +513,37 @@ export const CAPABILITIES: readonly Capability[] = [
     mutates: true,
     json: "none",
   },
+  {
+    command: ["lab", "run"],
+    summary: "Enqueue a manual Lab run and optionally pair a stored Cursor oracle observation.",
+    routes: [],
+    flags: [
+      { name: "--layer", value: "string", required: true, summary: "protocol_conformance | live_route_compatibility | task_effectiveness" },
+      { name: "--scenario", value: "string", required: true, summary: "Scenario id" },
+      { name: "--provider", value: "string", summary: "Optional provider filter" },
+      { name: "--model", value: "string", summary: "Model id" },
+      { name: "--oracle-run", value: "string", summary: "Stored oracle run id; scenario and model must match" },
+      { name: "--json", value: "boolean", summary: "Emit {run, oracle?, comparison?} envelope as JSON" },
+    ],
+    mutates: true,
+    json: "envelope",
+    details: ["Reads local projection, validates an immutable sanitized oracle sidecar when supplied, then enqueues the manual run."],
+  },
+  {
+    command: ["lab", "oracle", "cursor"],
+    summary: "Cursor oracle probe: isolated working state and loopback-only sanitized observation V1.",
+    routes: [],
+    flags: [
+      { name: "--scenario", value: "string", required: true, summary: "Lab scenario id" },
+      { name: "--model", value: "string", required: true, summary: "Model id for oracle prompt" },
+      { name: "--agent-bin", value: "string", summary: "Path to cursor-agent binary" },
+      { name: "--keep-raw", value: "boolean", summary: "Persist raw bytes 0600 under lab scratch 24h TTL; without it only names + byte lengths are kept" },
+      { name: "--json", value: "boolean", summary: "Emit sanitized observation V1 as JSON" },
+    ],
+    mutates: true,
+    json: "envelope",
+    details: ["Config/data/workspace use OS tmp 0700 while the authenticated child retains normal home/keychain access; loopback 127.0.0.1:0 forwards only to https://api2.cursor.sh; auth bodies are opaque; sanitized observations contain protocol cases, counts, byte lengths, hashes, and diagnostics."],
+  },
 ];
 
 /** Capabilities that drive `route`, for `ocx capabilities --route`. */

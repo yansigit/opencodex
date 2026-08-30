@@ -22,6 +22,7 @@ import {
   commitCursorCheckpoint,
   CURSOR_CHECKPOINT_TTL_MS,
   cursorCheckpointStoreMetricsForTests,
+  getCursorCheckpointForPrefix,
   installCursorCheckpointClockForTests,
   invalidateCursorCheckpoint,
 } from "../src/adapters/cursor/checkpoint-store";
@@ -1765,6 +1766,30 @@ describe("Cursor blob ID key channel bounds", () => {
 });
 
 describe("Cursor checkpoint request construction", () => {
+  test("duplicate prefix identities select the newest checkpoint", () => {
+    clearCursorCheckpointsForTests();
+    let clock = 1_000;
+    installCursorCheckpointClockForTests({ now: () => clock });
+    const checkpointBytes = toBinary(ConversationStateStructureSchema, create(ConversationStateStructureSchema, { selfSummaryCount: 1 }));
+    const common = {
+      conversationId: "cursor_duplicate",
+      identityScope: "acct",
+      modelId: "grok-4.6",
+      checkpointBytes,
+      coveredMessageCount: 2,
+      prefixDigest: "prefix",
+      systemDigest: "system",
+    };
+    const first = commitCursorCheckpoint(common);
+    clock += 1;
+    const second = commitCursorCheckpoint(common);
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
+    expect(getCursorCheckpointForPrefix(common)?.ref).toBe(second);
+    clearCursorCheckpointsForTests();
+  });
+
   test("uses decoded ConversationStateStructure and skips historical root replay", () => {
     const checkpoint = create(ConversationStateStructureSchema, {
       rootPromptMessagesJson: [new Uint8Array(32).fill(7)],

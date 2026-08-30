@@ -504,7 +504,7 @@ export async function getValidAccessTokenSnapshotForAccount(
 }
 
 /** Providers whose upstream-401 replay path may force a snapshot refresh. */
-const FORCE_REFRESH_PROVIDERS = new Set(["xai", "github-copilot", "kiro", "google-antigravity"]);
+const FORCE_REFRESH_PROVIDERS = new Set(["xai", "github-copilot", "kiro", "google-antigravity", "cursor"]);
 
 export async function forceRefreshOAuthAccessSnapshot(
   rejected: OAuthAccessSnapshot,

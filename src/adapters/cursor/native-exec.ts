@@ -10,7 +10,6 @@ import {
   McpErrorSchema,
   McpResultSchema,
   RequestContextResultSchema,
-  RequestContextSchema,
   RequestContextSuccessSchema,
   SetBlobResultSchema,
   type ExecServerMessage,
@@ -54,6 +53,7 @@ import { clientBytes, execBytes, execStreamCloseBytes, execThrowBytes } from "./
 import { type CursorNativeExecPolicyContext } from "./native-exec-policy";
 import type { McpToolDefinition } from "./gen/agent_pb";
 import { OCX_RESPONSES_TOOL_PROVIDER } from "./tool-definitions";
+import { buildCursorRequestContext } from "./request-context";
 
 export type CursorNativeExecDeps = CursorNativeNetworkDeps & CursorNativeToolDeps;
 
@@ -67,6 +67,7 @@ export interface CursorNativeExecContext extends CursorNativeExecDeps {
   sessionId?: string;
   mcpToolDefs?: McpToolDefinition[];
   clientToolDefs?: McpToolDefinition[];
+  cursorSystem?: readonly string[];
   /** Unsafe opt-in escape hatch for Cursor server-driven local fs/shell/fetch execution. */
   unsafeAllowNativeLocalExec?: boolean;
   /** apply_patch is visible for this request; Cursor-native write/delete must not bypass Codex. */
@@ -572,7 +573,7 @@ export async function handleCursorNativeExec(execMsg: ExecServerMessage, deps: C
   if (execCase === "requestContextArgs") {
     const tools = [...(deps.mcpToolDefs ?? []), ...(deps.clientToolDefs ?? [])];
     return [execBytes(execMsg, "requestContextResult", create(RequestContextResultSchema, {
-      result: { case: "success", value: create(RequestContextSuccessSchema, { requestContext: create(RequestContextSchema, { tools }) }) },
+      result: { case: "success", value: create(RequestContextSuccessSchema, { requestContext: buildCursorRequestContext({ system: deps.cursorSystem, tools }) }) },
     }))];
   }
   if (!cursorUnsafeNativeLocalExecEnabled(deps)) {

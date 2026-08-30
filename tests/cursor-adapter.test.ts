@@ -1019,6 +1019,36 @@ describe("Cursor overflow conversation remint", () => {
     expect(attempts).toBe(1);
   });
 
+  test("does not overflow-remint compaction turns", async () => {
+    clearCursorOverflowRemintForTests();
+    let attempts = 0;
+    const seen: string[] = [];
+    const adapter = createCursorAdapter({
+      ...provider,
+      apiKey: "cursor-token",
+    }, {
+      createTransport: () => ({
+        async *run(request) {
+          attempts += 1;
+          seen.push(request.conversationId);
+          throw bareOverflowError();
+        },
+        writeClient() {},
+      }),
+    });
+
+    const body = overflowTurnBody("overflow-compaction");
+    await adapter.runTurn?.(body, { headers: new Headers() }, () => {});
+    attempts = 0;
+    seen.length = 0;
+    body._compactionRequest = true;
+    body._cursorIsolateConversation = true;
+    await adapter.runTurn?.(body, { headers: new Headers() }, () => {});
+
+    expect(attempts).toBe(1);
+    expect(seen).toHaveLength(1);
+  });
+
   test("does not overflow-remint after non-heartbeat output was emitted", async () => {
     clearCursorOverflowRemintForTests();
     let attempts = 0;

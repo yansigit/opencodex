@@ -20,6 +20,7 @@ import {
   encodeCursorBidiAppendRequest,
 } from "../src/adapters/cursor/http1-bidi";
 import { createLiveCursorTransport } from "../src/adapters/cursor/live-transport";
+import { CURSOR_VERIFIED_CLIENT_VERSION } from "../src/adapters/cursor/protocol-profile";
 import type { CursorRunRequest, CursorServerMessage } from "../src/adapters/cursor/types";
 import type { OcxProviderConfig } from "../src/types";
 import { createTestTranslatorBudget } from "./helpers/translator-budget";
@@ -204,7 +205,9 @@ describe("Cursor HTTP/1.1 compatibility transport", () => {
       const url = new URL(String(input));
       paths.push(url.pathname);
       protocols.push((init as RequestInit & { protocol?: string } | undefined)?.protocol);
-      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer test-token");
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer test-token");
+      expect(headers.get("x-cursor-client-version")).toBe(CURSOR_VERIFIED_CLIENT_VERSION);
 
       if (url.pathname === "/agent.v1.AgentService/RunSSE") {
         const frame = decodeConnectFrame(bodyBytes(init?.body)).frame;

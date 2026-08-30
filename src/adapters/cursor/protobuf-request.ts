@@ -42,8 +42,6 @@ import {
   RequestedModelSchema,
   RequestedModel_ModelParameterbytesSchema,
   ResumeActionSchema,
-  RequestContextSchema,
-  RequestContextEnvSchema,
   ThinkingMessageSchema,
   ToolCallSchema,
   UserMessageActionSchema,
@@ -58,6 +56,7 @@ import {
   CURSOR_SHELL_ALIAS_SYSTEM_NOTE,
   OCX_RESPONSES_TOOL_PROVIDER,
 } from "./tool-definitions";
+import { buildCursorRequestContext } from "./request-context";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -93,24 +92,6 @@ export function externalToolContinuationText(rawMessages?: readonly OcxMessage[]
     }
   }
   return CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT;
-}
-
-/** Runtime timezone for protobuf RequestContextEnv (dynamic, never hardcoded). */
-function runtimeTimeZone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
-  } catch {
-    return "UTC";
-  }
-}
-
-/** Builds a RequestContext with env.timeZone populated dynamically. */
-function buildRequestContext() {
-  return create(RequestContextSchema, {
-    env: create(RequestContextEnvSchema, {
-      timeZone: runtimeTimeZone(),
-    }),
-  });
 }
 
 function jsonBlob(value: unknown): { data: Uint8Array; serialized: string } {
@@ -877,6 +858,9 @@ function buildPreparedCursorRunRequest(
   options?: { estimateInputTokens?: boolean },
 ): PreparedCursorRunRequest {
   const rawText = activePromptText(request);
+  const visibleTools = cursorToolsForActivePrompt(request.tools, rawText, request.toolChoice);
+  const mcpToolDefs = buildCursorToolDefinitions(visibleTools, request.toolChoice);
+  const requestContext = buildCursorRequestContext({ system: request.system, tools: mcpToolDefs });
   const lastRole = request.messages.at(-1)?.role;
   const text = lastRole === "user" || lastRole === "developer"
     ? appendCursorGenericToolUseHint(request.tools, rawText)
@@ -914,13 +898,13 @@ function buildPreparedCursorRunRequest(
               // OmniRoute / cursor-agent always send mode=1 on UserMessage.
               mode: 1,
             }),
-            requestContext: buildRequestContext(),
+            requestContext,
           }),
         }
       : {
           case: "resumeAction",
           value: create(ResumeActionSchema, {
-            requestContext: buildRequestContext(),
+            requestContext,
           }),
         },
   });
@@ -990,8 +974,6 @@ function buildPreparedCursorRunRequest(
   }
   // Hoisted out of the mcp_tools spread below so the estimate can read the same
   // filtered definitions the wire carries. Both helpers are pure.
-  const visibleTools = cursorToolsForActivePrompt(request.tools, rawText, request.toolChoice);
-  const mcpToolDefs = buildCursorToolDefinitions(visibleTools, request.toolChoice);
   debugProviderDiagnostic("cursor", "run-request", {
     wireModel: request.modelId,
     action: actionCase,
