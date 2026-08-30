@@ -14,9 +14,15 @@ import { AnthropicRequestError, anthropicToResponsesTranslation, extractOcxEffor
 import { resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
-import { captureClaudeInbound } from "../claude/inbound-debug";
+import { annotateClaudeInboundDecision, captureClaudeInbound } from "../claude/inbound-debug";
 import { isTransientUpstreamStatus } from "../lib/upstream-retry";
 import { resolveClientRetryAfter } from "../lib/retry-after";
+import { createHash } from "node:crypto";
+import {
+  analyzeClaudeCompatibility,
+  collectClaudeFeatureCodes,
+  resolveClaudeCompatibilityMode,
+} from "../claude/compatibility";
 import {
   anthropicErrorBody,
   anthropicErrorResponse,
@@ -26,10 +32,7 @@ import {
 } from "../claude/outbound";
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { estimateTokens } from "../lib/token-estimate";
-import { NoEligiblePolicyCandidateError, routeModel } from "../router";
-import { evidenceFromBody } from "../routing/request-evidence";
-import { resolveWireProtocolOverride } from "./adapter-resolve";
-import type { OcxConfig } from "../types";
+import type { ClaudeSourceEnvelope, OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, recordFirstOutput, type RequestLogContext, type RequestLogEntry } from "./request-log";
 import { conversationIdFromClaudeMetadata } from "./request-log-conversation";
@@ -78,6 +81,131 @@ function claudeInboundDisabled(config: OcxConfig): Response | null {
   }
   return null;
 }
+
+// ── Claude source envelope & session precedence (ingress slice) ────────────────
+
+/**
+ * Capture sanitized immutable envelope before destructive translation.
+ * Charges the same TranslatorBudget for the retained copy + header bytes.
+ */
+export function captureClaudeSourceEnvelope(
+  req: Request,
+  rawBody: unknown,
+  budget: TranslatorBudget,
+): ClaudeSourceEnvelope {
+  const beta = req.headers.get("anthropic-beta")?.trim() || undefined;
+  const rawVersion = req.headers.get("anthropic-version");
+  const version = rawVersion === null ? undefined : rawVersion.trim();
+  if (!isRec(rawBody)) throw new AnthropicRequestError("Anthropic request body must be an object");
+  const bodyClone = structuredClone(rawBody);
+  const bodyBytes = new TextEncoder().encode(JSON.stringify(bodyClone)).byteLength;
+  let headerBytes = 0;
+  if (beta) headerBytes += new TextEncoder().encode(beta).byteLength;
+  if (version) headerBytes += new TextEncoder().encode(version).byteLength;
+  budget.chargeRetained(bodyBytes + headerBytes, { kind: "request_copies" });
+  return {
+    body: bodyClone,
+    headers: {
+      ...(beta ? { "anthropic-beta": beta } : {}),
+      ...(version !== undefined ? { "anthropic-version": version } : {}),
+    },
+  };
+}
+
+/**
+ * Session precedence: x-claude-code-session-id header > metadata.user_id > system cohort.
+ * Returns the canonical session id string or null when none is determinable before translation.
+ * Agent/parent IDs are NOT session ids — they are only HMAC8 debug tags (see inbound-debug).
+ */
+export function claudeSessionIdFromRequest(req: Request, body: unknown): string | null {
+  const headerSid = req.headers.get("x-claude-code-session-id")?.trim();
+  if (headerSid) return headerSid;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const rec = body as Record<string, unknown>;
+    const metadata = rec.metadata;
+    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+      const uid = (metadata as Record<string, unknown>).user_id;
+      if (typeof uid === "string" && uid.trim().length > 0) return uid.trim();
+    }
+  }
+  return null;
+}
+
+function claudeAgentIdsFromRequest(req: Request): { agentId?: string; parentAgentId?: string } {
+  const out: { agentId?: string; parentAgentId?: string } = {};
+  const headerAgent = req.headers.get("x-claude-code-agent-id")?.trim();
+  const headerParent = req.headers.get("x-claude-code-parent-agent-id")?.trim();
+  if (headerAgent) out.agentId = headerAgent;
+  if (headerParent) out.parentAgentId = headerParent;
+  return out;
+}
+
+/**
+ * Compute prompt_cache_key from a session id (header precedence path).
+ * Uses same sha256 hex slice as inbound.ts (32 hex chars) for per-session keys.
+ * Returns null when sessionId is null (caller should keep translation's system cohort key).
+ */
+export function promptCacheKeyForSession(sessionId: string | null): string | null {
+  if (!sessionId) return null;
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+}
+
+/** Idempotent, synchronous work for every effective Responses route resolution. */
+export function claudeFinalRouteHandler(
+  parsed: { options: Record<string, unknown>; modelId: string; _rawBody?: unknown; _promptCacheKeyIsSharedCohort?: boolean },
+  route: { provider: { adapter: string }; providerName: string; modelId: string },
+  ctx: {
+    sourceEnvelope: ClaudeSourceEnvelope;
+    cacheKeySource: ClaudeCacheKeySource;
+    config: OcxConfig;
+    logCtx: RequestLogContext;
+  },
+): { adapter: string; decision: ReturnType<typeof analyzeClaudeCompatibility>["decision"]; featureCodes: string[] } {
+  const adapter = route.provider.adapter;
+  // Idempotent sampling strip for openai-responses forward (native ChatGPT pierce)
+  if (adapter === "openai-responses") {
+    const raw = parsed._rawBody as Record<string, unknown> | undefined;
+    if (raw) {
+      // _rawBody is snake_case Responses JSON; be idempotent for both snake and camel keys
+      delete raw.max_output_tokens;
+      delete (raw as Record<string, unknown>).maxOutputTokens;
+      delete raw.temperature;
+      delete raw.top_p;
+      delete (raw as Record<string, unknown>).topP;
+      delete raw.stop;
+      delete (raw as Record<string, unknown>).stopSequences;
+      delete raw.user;
+    }
+    // OcxRequestOptions is camelCase; _rawBody snake is already handled above. Strip both forms idempotently.
+    delete (parsed.options as Record<string, unknown>).max_output_tokens;
+    delete (parsed.options as Record<string, unknown>).maxOutputTokens;
+    delete (parsed.options as Record<string, unknown>).temperature;
+    delete (parsed.options as Record<string, unknown>).top_p;
+    delete (parsed.options as Record<string, unknown>).topP;
+    delete (parsed.options as Record<string, unknown>).stop;
+    delete (parsed.options as Record<string, unknown>).stopSequences;
+    delete (parsed.options as Record<string, unknown>).user;
+  }
+  // Usage estimate only for cursor/kiro (estimated-usage adapters)
+  if (adapter === "cursor" || adapter === "kiro") {
+    try {
+      const bodyRec = ctx.sourceEnvelope.body as Record<string, unknown>;
+      const model = typeof bodyRec.model === "string" ? bodyRec.model : ctx.config.claudeCode?.model;
+      ctx.logCtx.usageLogInputTokens = estimateClaudeRequestTokens(bodyRec as { system?: unknown; messages?: unknown; tools?: unknown }, model);
+    } catch {
+      // ignore estimation failures
+    }
+  }
+  // Compatibility evaluation before network (enforce mode may reject)
+  const mode = resolveClaudeCompatibilityMode(ctx.config.claudeCode);
+  const anthropicBeta = ctx.sourceEnvelope.headers["anthropic-beta"];
+  const result = analyzeClaudeCompatibility(ctx.sourceEnvelope.body, { mode, adapter, anthropicBeta });
+  if (result.decision === "reject") {
+    throw new AnthropicRequestError(result.reason ?? "incompatible features for routed adapter");
+  }
+  return { adapter, decision: result.decision, featureCodes: result.featureCodes };
+}
+
 
 async function readAnthropicBody(req: Request, budget: TranslatorBudget): Promise<unknown> {
   try {
@@ -601,6 +729,11 @@ async function handleClaudeMessagesWithBudget(
   let internalBody: Rec;
   let cacheKeySource: ClaudeCacheKeySource = null;
   let effortOverride: ReturnType<typeof extractOcxEffortDirective> = null;
+  let sourceEnvelope: ClaudeSourceEnvelope | null = null;
+  let headerSessionId: string | null = null;
+  let featureCodesEarly: string[] = [];
+  let agentIds: { agentId?: string; parentAgentId?: string } = {};
+  let debugCaptureId: number | undefined;
   try {
     anthropicBody = await readAnthropicBody(req, translatorBudget);
     // Defensive [1m] strip (devlog 138): clients normally remove the context-variant
@@ -620,15 +753,25 @@ async function handleClaudeMessagesWithBudget(
         effortOverride = extractOcxEffortDirective(anthropicBody);
       }
     }
+    headerSessionId = claudeSessionIdFromRequest(req, anthropicBody);
+    agentIds = claudeAgentIdsFromRequest(req);
+    featureCodesEarly = collectClaudeFeatureCodes(anthropicBody, req.headers.get("anthropic-beta") ?? undefined);
     // Debug capture (opt-in allowlist scalars) BEFORE the passthrough branch so
     // native, routed, and disabled-alias paths are all observable (devlog 130 B1).
-    captureClaudeInbound(
+    // Extended ring carries featureCodes/adapter/decision + HMAC8 session/agent tags.
+    debugCaptureId = captureClaudeInbound(
       "messages",
       anthropicBody,
       isRec(anthropicBody) && typeof anthropicBody.model === "string"
         ? resolveInboundModel(anthropicBody.model, config.claudeCode)
         : undefined,
       req.headers.get("anthropic-beta") ?? undefined,
+      {
+        ...(headerSessionId ? { sessionId: headerSessionId } : {}),
+        ...(agentIds.agentId ? { agentId: agentIds.agentId } : {}),
+        ...(agentIds.parentAgentId ? { parentAgentId: agentIds.parentAgentId } : {}),
+        ...(featureCodesEarly.length > 0 ? { featureCodes: featureCodesEarly } : {}),
+      },
     );
     // Client surface discrimination: Desktop 3P aliases resolve through the
     // desktop registry; Code uses readable aliases or direct model names.
@@ -644,6 +787,7 @@ async function handleClaudeMessagesWithBudget(
       if (claudeConversationId) logCtx.conversationId = claudeConversationId;
     }
     if (isRec(anthropicBody) && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model)) {
+      annotateClaudeInboundDecision(debugCaptureId, "anthropic", "native", featureCodesEarly);
       return await anthropicNativePassthrough(req, config, logCtx, logIds, anthropicBody, "/v1/messages");
     }
     if (isRec(anthropicBody) && effortOverride) {
@@ -653,10 +797,28 @@ async function handleClaudeMessagesWithBudget(
       };
       delete anthropicBody.thinking;
     }
+    // Routed requests retain the post-directive source body. Native passthrough never
+    // pays for or observes this clone, preserving its existing byte-for-byte path.
+    sourceEnvelope = captureClaudeSourceEnvelope(req, anthropicBody, translatorBudget);
     const translation = anthropicToResponsesTranslation(anthropicBody, config.claudeCode);
     internalBody = translation.body;
     translatorBudget.chargeRetained(new TextEncoder().encode(JSON.stringify(internalBody)).byteLength, { kind: "request_copies" });
-    cacheKeySource = translation.cacheKeySource;
+    // Session header precedence feeds prompt_cache_key (header > metadata > system cohort).
+    // When the x-claude-code-session-id header is present, it replaces the
+    // translation's per-session/system key with a stable per-header sha256 key
+    // and promotes cacheKeySource to "metadata" so downstream affinity/session_id
+    // logic treats it as a real per-session key (not the shared system cohort).
+    if (headerSessionId) {
+      const sessionCacheKey = promptCacheKeyForSession(headerSessionId);
+      if (sessionCacheKey) {
+        internalBody.prompt_cache_key = sessionCacheKey;
+        cacheKeySource = "metadata";
+      } else {
+        cacheKeySource = translation.cacheKeySource;
+      }
+    } else {
+      cacheKeySource = translation.cacheKeySource;
+    }
   } catch (err) {
     const overflow = isTranslatorBudgetExceededError(err);
     const status = overflow ? 413 : err instanceof AnthropicRequestError ? 400 : 500;
@@ -675,49 +837,33 @@ async function handleClaudeMessagesWithBudget(
   // the translated Anthropic SSE into a message JSON for non-streaming clients.
   internalBody.stream = true;
 
-  // Native ChatGPT passthrough (openai-responses forward) accepts only Codex-shaped
-  // bodies: it 400s on sampling params ("Unsupported parameter: max_output_tokens",
-  // verified live 2026-07-11). Strip them for that route; routed providers keep them.
-  let nativeRoute = false;
-  try {
-    const route = routeModel(config, internalBody.model as string, evidenceFromBody(internalBody));
-    // Settle the wire once so the sampling decision below reads the effective
-    // adapter rather than the provider-wide default (#404).
-    route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, "anthropic");
-    logCtx.routeDecision = route.routeDecision;
-    if (route.provider.adapter === "openai-responses") {
-      nativeRoute = true;
-      delete internalBody.max_output_tokens;
-      delete internalBody.temperature;
-      delete internalBody.top_p;
-      delete internalBody.stop;
-      delete internalBody.user;
+  // ── Final-route callback (post-route, pre-network) ───────────────────────────────────────
+  // Adapter-specific work runs only after Responses core owns the final route.
+  const claudeOnResolvedRoute = (info: import("./responses/core").ResolvedRouteInfo): void => {
+    if (!sourceEnvelope) return;
+    const result = claudeFinalRouteHandler(
+      info.parsed as unknown as Parameters<typeof claudeFinalRouteHandler>[0],
+      { provider: { ...info.provider, adapter: info.adapterName }, providerName: info.route.providerName, modelId: info.modelId } as Parameters<typeof claudeFinalRouteHandler>[1],
+      {
+        sourceEnvelope,
+        cacheKeySource,
+        config,
+        logCtx,
+      },
+    );
+    // Session_id header synthesis: only for openai-responses and only for a
+    // real per-session prompt_cache_key (metadata), never the system-hash
+    // cohort. Idempotent: check headers.has before set.
+    {
+      const pck = (info.parsed.options as Rec).promptCacheKey ?? (info.parsed.options as Rec).prompt_cache_key ?? ((info.parsed as unknown as Rec)._rawBody as Rec | undefined)?.prompt_cache_key;
+      if (info.adapterName === "openai-responses" && cacheKeySource === "metadata" && typeof pck === "string" && !info.headers.has("session_id")) {
+        info.headers.set("session_id", uuidFromHex(pck as string));
+      } else if (info.adapterName !== "openai-responses") {
+        info.headers.delete("session_id");
+      }
     }
-    // Estimated-usage adapters (cursor/kiro) report no per-turn input tokens; stash a
-    // request-side estimate so the log's in:0 rows get a floor. NEVER set this for
-    // accurate-usage adapters — the request-log merge is max(reported, estimate) and
-    // would overwrite real usage (audit 133 R1#7).
-    if (route.provider.adapter === "cursor" || route.provider.adapter === "kiro") {
-      logCtx.usageLogInputTokens = estimateClaudeRequestTokens(anthropicBody as Rec, requestedModel);
-    }
-    // Effort safety valve (devlog 136 B6, audit 139 R2#2): opus-shaped aliases make
-    // every routed model look like a reasoning model to Claude clients, so a forced
-    // effort (CLAUDE_CODE_ALWAYS_ENABLE_EFFORT) would leak reasoning params to routes
-    // that affirmatively expose NO effort control. Strip only on a definitive [] from
-    // supportedLadderFor; unknown (undefined) passes through untouched.
-    if (internalBody.reasoning !== undefined) {
-      const { supportedLadderFor } = await import("./effort-policy");
-      const ladder = supportedLadderFor({ provider: route.provider, modelId: route.modelId });
-      if (ladder !== undefined && ladder.length === 0) delete internalBody.reasoning;
-    }
-  } catch (err) {
-    if (err instanceof NoEligiblePolicyCandidateError) {
-      logCtx.routeDecision = err.trace;
-      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
-      return anthropicErrorResponse(404, err.message, "invalid_request_error");
-    }
-    /* unknown model: let handleResponses shape the 404 */
-  }
+    annotateClaudeInboundDecision(debugCaptureId, result.adapter, result.decision, result.featureCodes);
+  };
 
   const headers = new Headers({ "content-type": "application/json" });
   for (const name of FORWARD_HEADERS) {
@@ -737,18 +883,6 @@ async function handleClaudeMessagesWithBudget(
     if (token) {
       headers.set("authorization", `Bearer ${token.accessToken}`);
       headers.set("chatgpt-account-id", token.chatgptAccountId);
-    }
-  }
-  if (nativeRoute) {
-    // ChatGPT-backend prompt-cache affinity rides the session_id HEADER (codex
-    // clients always send their session uuid; devlog 090 follow-up: body-level
-    // prompt_cache_key alone still yielded cached_tokens:0). Claude Code never sends
-    // the header, so synthesize a stable per-session uuid from the same cache key —
-    // but ONLY for a real per-session key (metadata.user_id). The system-hash fallback
-    // key is shared across Desktop conversations, and a shared session_id's backend
-    // semantics are unproven (audit 133 R2#3): body prompt_cache_key only there.
-    if (cacheKeySource === "metadata" && !headers.has("session_id") && typeof internalBody.prompt_cache_key === "string") {
-      headers.set("session_id", uuidFromHex(internalBody.prompt_cache_key));
     }
   }
   const internalBodyJson = JSON.stringify(internalBody);
@@ -779,6 +913,14 @@ async function handleClaudeMessagesWithBudget(
     inboundWire: "anthropic",
     stripClaudeMainAuthForNoncanonicalForward: true,
     translatorBudget,
+    // Forward the sanitized immutable source envelope (charged to the same budget)
+    // so core can perform fidelity-preserving work. The envelope is the
+    // pre-translation clone (body + anthropic-beta/version headers only).
+    ...(sourceEnvelope ? { claudeSourceEnvelope: sourceEnvelope } : {}),
+    // Adapter-aware final-route gate: idempotent strip / session_id synthesis /
+    // usage estimate / compatibility enforce. Core should invoke this after
+    // each routeModel+resolveWireProtocolOverride (see note above).
+    onResolvedRoute: claudeOnResolvedRoute,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
     onNativePassthroughCancel: () => finalizeNativeLog(499, { closeReason: "client_cancel" }),
@@ -996,6 +1138,9 @@ export async function handleClaudeCountTokens(
     body = await readAnthropicBody(req, translatorBudget);
   } catch (err) {
     if (err instanceof AnthropicRequestError) return anthropicErrorResponse(400, err.message);
+    if (isTranslatorBudgetExceededError(err)) {
+      return anthropicErrorResponse(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
+    }
     return anthropicErrorResponse(500, err instanceof Error ? err.message : String(err));
   } finally { translatorBudget.dispose(); }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -1018,7 +1163,16 @@ export async function handleClaudeCountTokens(
     model = stripOneMillionMarker(countRoute);
     raw.model = model;
   }
-  captureClaudeInbound("count_tokens", raw, resolveInboundModel(model, config.claudeCode), req.headers.get("anthropic-beta") ?? undefined);
+  const ctHeaderSessionId = claudeSessionIdFromRequest(req, raw);
+  const ctAgentIds = claudeAgentIdsFromRequest(req);
+  const ctAnthropicBeta = req.headers.get("anthropic-beta") ?? undefined;
+  const ctFeatureCodes = collectClaudeFeatureCodes(raw, ctAnthropicBeta);
+  captureClaudeInbound("count_tokens", raw, resolveInboundModel(model, config.claudeCode), ctAnthropicBeta, {
+    ...(ctHeaderSessionId ? { sessionId: ctHeaderSessionId } : {}),
+    ...(ctAgentIds.agentId ? { agentId: ctAgentIds.agentId } : {}),
+    ...(ctAgentIds.parentAgentId ? { parentAgentId: ctAgentIds.parentAgentId } : {}),
+    ...(ctFeatureCodes.length > 0 ? { featureCodes: ctFeatureCodes } : {}),
+  });
   if (wantsNativePassthrough(req, config, requestPolicy, model)) {
     return await anthropicNativePassthrough(req, config, { model, provider: "anthropic-native", surface: "claude" }, undefined, raw, "/v1/messages/count_tokens");
   }

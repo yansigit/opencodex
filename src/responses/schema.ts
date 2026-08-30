@@ -118,7 +118,7 @@ const builtinToolSchema = z.object({ type: z.string() }).loose();
 
 const hostedToolType = z.enum([
   "web_search", "web_search_preview", "file_search", "computer_use_preview",
-  "code_interpreter", "image_generation", "mcp",
+  "code_interpreter", "image_generation", "mcp", "tool_search",
 ]);
 
 const allowedToolEntrySchema = z.object({ type: z.string(), name: z.string().optional() });

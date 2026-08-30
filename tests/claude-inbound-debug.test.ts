@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { captureClaudeInbound, claudeInboundDebugMetrics, clearClaudeInboundDebug, evictOldestClaudeInboundForBudget, getClaudeInboundDebugEntries } from "../src/claude/inbound-debug";
+import { annotateClaudeInboundDecision, captureClaudeInbound, claudeInboundDebugMetrics, clearClaudeInboundDebug, evictOldestClaudeInboundForBudget, getClaudeInboundDebugEntries } from "../src/claude/inbound-debug";
 import { resetDebugSettingsForTests, setDebugSettings } from "../src/lib/debug-settings";
 
 afterEach(() => {
@@ -19,6 +19,16 @@ const body = {
 };
 
 describe("claude inbound debug capture (devlog 130 B1)", () => {
+  test("final route annotations update the original row without duplicating retries", () => {
+    setDebugSettings({ claude: true });
+    const id = captureClaudeInbound("messages", body);
+    annotateClaudeInboundDecision(id, "openai-responses", "shadow", ["documents"]);
+    annotateClaudeInboundDecision(id, "anthropic", "allow", ["thinking_block"]);
+    const entries = getClaudeInboundDebugEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ adapter: "anthropic", decision: "allow", featureCodes: ["thinking_block"] });
+  });
+
   test("Claude inbound metadata key 65 and aggregate row overflow are visibly capped and wp5 hooks account exact bytes", () => {
     setDebugSettings({ claude: true });
     const metadata = Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`${index}-${"한".repeat(3000)}`, true]));

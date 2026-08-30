@@ -1,11 +1,13 @@
 /**
  * Claude Code inbound: Anthropic Messages API request -> internal /v1/responses body.
  *
- * Design (devlog/260711_claude_inbound/010, 003_evidence.md):
+ * Design (devlog/260711_claude_inbound/010, 003_evidence.md + hardening slice):
  *  - translate-and-replay: the produced body MUST pass the real responsesRequestSchema
  *    parse so routing/OAuth/pool/failover are inherited unchanged.
- *  - thinking/redacted_thinking blocks on replay are DROPPED (v1 policy) — routed
- *    providers carry reasoning in Responses items/ocxr1 envelopes instead.
+ *  - thinking/redacted_thinking blocks are preserved as Responses reasoning items via
+ *    the existing ocxr1 envelope (src/responses/reasoning-envelope.ts), keeping
+ *    multiple-block order and interleaving with tool_use; malformed ocxr1 signatures
+ *    (value starting with ocxr1: but failing decode) return 400.
  *  - thinking.budget_tokens is NEVER forwarded raw; it maps to an effort tier.
  *  - top_k is accepted and silently dropped (no Responses equivalent, CCR parity).
  */
@@ -15,6 +17,7 @@ import { resolveAlias } from "./alias";
 import { stripOneMillionMarker } from "./context-windows";
 import { resolveDesktop3pAlias } from "./desktop-3p";
 import { isClaudeWebSearchToolName } from "./outbound";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
 import { createHash } from "node:crypto";
 
 export class AnthropicRequestError extends Error {}
@@ -23,6 +26,10 @@ type Rec = Record<string, unknown>;
 
 function isRec(v: unknown): v is Rec {
   return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
+function uuid(): string {
+  return crypto.randomUUID().replace(/-/g, "");
 }
 
 function isClaudeClassifierModel(model: string): boolean {
@@ -175,6 +182,53 @@ function pushUserMessage(input: Rec[], blocks: Rec[]): void {
   input.push({ type: "message", role: "user", content: blocks });
 }
 
+function isToolSearchName(value: unknown): value is string {
+  return value === "tool_search"
+    || (typeof value === "string" && value.startsWith("tool_search_tool_"));
+}
+
+function functionToolToResponses(raw: Rec): Rec | null {
+  if (typeof raw.name !== "string" || raw.name.length === 0 || !isRec(raw.input_schema)) return null;
+  return {
+    type: "function",
+    name: raw.name,
+    ...(typeof raw.description === "string" ? { description: raw.description } : {}),
+    parameters: raw.input_schema,
+    ...(raw.defer_loading === true ? { defer_loading: true } : {}),
+    ...(typeof raw.strict === "boolean" ? { strict: raw.strict } : {}),
+  };
+}
+
+function toolDefinitionsByName(tools: unknown): ReadonlyMap<string, Rec> {
+  const definitions = new Map<string, Rec>();
+  if (!Array.isArray(tools)) return definitions;
+  for (const raw of tools) {
+    if (!isRec(raw)) continue;
+    const mapped = functionToolToResponses(raw);
+    if (mapped && typeof mapped.name === "string") definitions.set(mapped.name, mapped);
+  }
+  return definitions;
+}
+
+function toolSearchOutputItem(raw: Rec, definitions: ReadonlyMap<string, Rec>): Rec | null {
+  if (typeof raw.tool_use_id !== "string" || raw.tool_use_id.length === 0) {
+    throw new AnthropicRequestError("tool_search_tool_result requires tool_use_id");
+  }
+  const content = isRec(raw.content) ? raw.content : {};
+  const failed = content.type === "tool_search_tool_result_error";
+  const names = Array.isArray(content.tool_references)
+    ? content.tool_references.flatMap(ref =>
+      isRec(ref) && typeof ref.tool_name === "string" ? [ref.tool_name] : [])
+    : [];
+  return {
+    type: "tool_search_output",
+    call_id: raw.tool_use_id,
+    status: failed ? "failed" : "completed",
+    execution: "client",
+    tools: names.flatMap(name => definitions.get(name) ?? []),
+  };
+}
+
 /**
  * Bundled-skill elision for routed models (devlog 060). Claude Code loads a skill
  * by calling the `Skill` tool; the ~136k-token document bundle then rides the
@@ -310,7 +364,12 @@ function systemMessageText(content: unknown): string {
   return parts.join("\n\n");
 }
 
-function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionContext = NO_ELISION): void {
+function userMessageToItems(
+  content: unknown,
+  input: Rec[],
+  elide: SkillElisionContext = NO_ELISION,
+  definitions: ReadonlyMap<string, Rec> = new Map(),
+): void {
   if (typeof content === "string") {
     if (content.length > 0) pushUserMessage(input, [{ type: "input_text", text: content }]);
     return;
@@ -344,6 +403,13 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
         });
         break;
       }
+      case "tool_search_tool_result": {
+        pushUserMessage(input, pending);
+        pending = [];
+        const item = toolSearchOutputItem(raw, definitions);
+        if (item) input.push(item);
+        break;
+      }
       case "document":
         // No Responses equivalent for raw document blocks; surface the title so the
         // model at least sees the attachment happened.
@@ -356,7 +422,11 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
   pushUserMessage(input, pending);
 }
 
-function assistantMessageToItems(content: unknown, input: Rec[]): void {
+function assistantMessageToItems(
+  content: unknown,
+  input: Rec[],
+  definitions: ReadonlyMap<string, Rec> = new Map(),
+): void {
   if (typeof content === "string") {
     if (content.length > 0) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: content }] });
     return;
@@ -378,12 +448,69 @@ function assistantMessageToItems(content: unknown, input: Rec[]): void {
         if (typeof raw.id !== "string" || raw.id.length === 0 || typeof raw.name !== "string" || raw.name.length === 0) {
           throw new AnthropicRequestError("tool_use requires id and name");
         }
+        // Lossless mapping for tool_search (Responses private tool_search_call) — reuse existing
+        // function_call wire where direct would collapse the tool identity.
+        if (isToolSearchName(raw.name)) {
+          let args: string;
+          try { args = JSON.stringify(raw.input ?? {}); } catch { args = "{}"; }
+          input.push({ type: "tool_search_call", call_id: raw.id, arguments: args });
+          break;
+        }
         input.push({ type: "function_call", call_id: raw.id, name: raw.name, arguments: JSON.stringify(raw.input ?? {}) });
         break;
       }
-      case "thinking":
-      case "redacted_thinking":
-        break; // v1 policy: dropped on replay (003 evidence — safe for routed providers)
+      case "server_tool_use": {
+        if (!isToolSearchName(raw.name)) break;
+        flush();
+        if (typeof raw.id !== "string" || raw.id.length === 0) {
+          throw new AnthropicRequestError("server_tool_use requires id");
+        }
+        let args: string;
+        try { args = JSON.stringify(raw.input ?? {}); } catch { args = "{}"; }
+        input.push({ type: "tool_search_call", call_id: raw.id, arguments: args });
+        break;
+      }
+      case "tool_search_tool_result": {
+        flush();
+        const item = toolSearchOutputItem(raw, definitions);
+        if (item) input.push(item);
+        break;
+      }
+      case "thinking": {
+        flush();
+        const thinking = typeof raw.thinking === "string" ? raw.thinking : "";
+        const signature = typeof raw.signature === "string" ? raw.signature : "";
+        if (signature.startsWith(OCX_REASONING_PREFIX)) {
+          const owned = decodeReasoningEnvelope(signature);
+          if (!owned) throw new AnthropicRequestError("malformed ocxr1 reasoning signature");
+          if (owned.sig) throw new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature");
+        }
+        // Preserve order with interleaved tool_use: each thinking block becomes its own reasoning item.
+        const encrypted = signature.length === 0
+          ? undefined
+          : signature.startsWith(OCX_REASONING_PREFIX)
+            ? signature
+            : encodeReasoningEnvelope({ sig: signature });
+        const summary = thinking.length > 0 ? [{ type: "summary_text", text: thinking }] : [];
+        // Always emit a reasoning item to preserve block order; empty thinking with a
+        // signature still carries replay continuity. Skip only fully empty blocks.
+        if (summary.length === 0 && !encrypted) break;
+        input.push({
+          type: "reasoning",
+          id: `rs_${uuid()}`,
+          ...(summary.length > 0 ? { summary } : { summary: [] }),
+          ...(encrypted ? { encrypted_content: encrypted } : {}),
+        });
+        break;
+      }
+      case "redacted_thinking": {
+        flush();
+        const data = typeof raw.data === "string" ? raw.data : "";
+        if (data.length === 0) break;
+        const encrypted = encodeReasoningEnvelope({ red: [data] } as any);
+        input.push({ type: "reasoning", id: `rs_${uuid()}`, summary: [], encrypted_content: encrypted });
+        break;
+      }
       default:
         break;
     }
@@ -401,13 +528,18 @@ function toolsToResponses(tools: unknown): Rec[] | undefined {
       out.push({ type: "web_search" }); // hosted sidecar path
       continue;
     }
-    if (typeof raw.name === "string" && raw.name.length > 0 && isRec(raw.input_schema)) {
-      out.push({
-        type: "function",
-        name: raw.name,
-        ...(typeof raw.description === "string" ? { description: raw.description } : {}),
-        parameters: raw.input_schema as Record<string, unknown>,
-      });
+    // Direct lossless mapping for the private tool_search declaration.
+    if (isToolSearchName(raw.name)) {
+      out.push({ type: "tool_search" });
+      continue;
+    }
+    if (type === "tool_search" || type.startsWith("tool_search_tool_")) {
+      out.push({ type: "tool_search" });
+      continue;
+    }
+    const mapped = functionToolToResponses(raw);
+    if (mapped) {
+      out.push(mapped);
       continue;
     }
     // Other server tools (bash_*, text_editor_*, ...) have no routed equivalent: drop.
@@ -431,7 +563,9 @@ function toolChoiceToResponses(choice: unknown, body: Rec): void {
       // Preserve forced-tool intent rather than weakening it to `auto`.
       body.tool_choice = isClaudeWebSearchToolName(choice.name)
         ? { type: "web_search" }
-        : { type: "function", name: choice.name };
+        : isToolSearchName(choice.name)
+          ? { type: "tool_search" }
+          : { type: "function", name: choice.name };
       break;
     default: break;
   }
@@ -486,10 +620,11 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
     callIds: blockedSkillCallIds(raw.messages, blockedNames),
     names: blockedNames,
   };
+  const definitions = toolDefinitionsByName(raw.tools);
   for (const msg of raw.messages) {
     if (!isRec(msg)) throw new AnthropicRequestError("each message must be an object");
-    if (msg.role === "user") userMessageToItems(msg.content, input, elide);
-    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input);
+    if (msg.role === "user") userMessageToItems(msg.content, input, elide, definitions);
+    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, definitions);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
       if (text.length > 0) systemParts.push(text);
@@ -510,6 +645,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   if (tools) body.tools = tools;
   toolChoiceToResponses(raw.tool_choice, body);
 
+  if (typeof raw.service_tier === "string" && raw.service_tier.length > 0) body.service_tier = raw.service_tier;
   if (typeof raw.max_tokens === "number") body.max_output_tokens = raw.max_tokens;
   if (typeof raw.temperature === "number") body.temperature = raw.temperature;
   if (typeof raw.top_p === "number") body.top_p = raw.top_p;
