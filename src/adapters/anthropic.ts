@@ -1090,8 +1090,11 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
           let releaseBodyObservation: (() => void) | undefined;
           if (budget) {
             budget.chargeRetained(bodyBytes, { kind: "request_copies" });
+            let released = false;
             releaseBodyObservation = () => {
-              try { budget.releaseRetained(bodyBytes, { kind: "request_copies" }); } catch {}
+              if (released) return;
+              released = true;
+              budget.releaseRetained(bodyBytes, { kind: "request_copies" });
             };
           }
           return { url, method: "POST", headers, body: bodyStr, ...(releaseBodyObservation ? { releaseBodyObservation } : {}) };

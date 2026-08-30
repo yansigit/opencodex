@@ -82,6 +82,23 @@ describe("claude source envelope – anthropic adapter", () => {
     req.releaseBodyObservation?.();
   });
 
+  test("releases the serialized request budget exactly once", async () => {
+    const adapter = createAnthropicAdapter({ adapter: "anthropic", baseUrl: "https://api.anthropic.com", apiKey: "sk-test" });
+    const body = { model: "x", stream: false, messages: [{ role: "user", content: "hi" }] };
+    const b = budget();
+    const req = await adapter.buildRequest(
+      makeParsed({ _claudeSourceEnvelope: { body, headers: {} } }),
+      { headers: new Headers(), translatorBudget: b } as any,
+    );
+    expect(b.snapshot().currentBytes).toBeGreaterThan(0);
+    req.releaseBodyObservation?.();
+    expect(b.snapshot().currentBytes).toBe(0);
+    b.chargeRetained(7, { kind: "request_copies" });
+    req.releaseBodyObservation?.();
+    expect(b.snapshot().currentBytes).toBe(7);
+    b.releaseRetained(7, { kind: "request_copies" });
+  });
+
   test("OAuth identity block appears first exactly once", async () => {
     const provider = { adapter: "anthropic" as const, baseUrl: "https://api.anthropic.com", apiKey: "oauth-token", authMode: "oauth" as const };
     const adapter = createAnthropicAdapter(provider);
