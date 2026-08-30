@@ -184,6 +184,20 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     expect(analyzeClaudeCompatibility(serverToolset, { mode: "enforce", adapter: "cursor" }).decision).toBe("reject");
   });
 
+  test("analyze: client-executed function tools containing code_execution stay routable, server code execution does not", () => {
+    const clientTool = {
+      tools: [{ type: "function", name: "run_code_execution", input_schema: { type: "object" } }],
+    };
+    expect(collectClaudeFeatureCodes(clientTool, undefined)).not.toContain("code_execution");
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      expect(analyzeClaudeCompatibility(clientTool, { mode: "enforce", adapter }).decision).toBe("allow");
+    }
+
+    const serverCodeExec = { tools: [{ type: "code_execution_20250501", name: "code_execution" }] };
+    expect(collectClaudeFeatureCodes(serverCodeExec, undefined)).toContain("code_execution");
+    expect(analyzeClaudeCompatibility(serverCodeExec, { mode: "enforce", adapter: "cursor" }).decision).toBe("reject");
+  });
+
   test("analyze: beta tokens alone never trigger rejection", () => {
     const r = analyzeClaudeCompatibility({}, { mode: "enforce", anthropicBeta: "deferred-tools-2025-01-01" });
     expect(r.decision).toBe("allow");

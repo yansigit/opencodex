@@ -168,7 +168,6 @@ function hasCodeExecution(body: Rec): boolean {
       if (!isRec(t)) continue;
       const type = typeof t.type === "string" ? t.type : "";
       if (type.includes("code_execution")) return true;
-      if (typeof t.name === "string" && t.name.includes("code_execution")) return true;
     }
   }
   const msgs = body.messages;
