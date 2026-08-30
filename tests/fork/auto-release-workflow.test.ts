@@ -24,9 +24,11 @@ const workflow = Bun.YAML.parse(workflowText) as {
     permissions?: Record<string, string>;
     "timeout-minutes"?: number;
     steps?: Array<{
+      id?: string;
       uses?: string;
       run?: string;
       env?: Record<string, string>;
+      with?: Record<string, string>;
     }>;
   }>;
 };
@@ -45,7 +47,7 @@ describe("fork auto-release workflow contract", () => {
     expect(workflow.permissions).toEqual({});
     expect(workflow.jobs?.["auto-release"]?.permissions).toEqual({
       contents: "read",
-      actions: "write",
+      actions: "read",
     });
     expect(workflow.jobs?.["auto-release"]?.["timeout-minutes"]).toBeGreaterThan(0);
     expect(workflow.concurrency).toEqual({
@@ -62,7 +64,20 @@ describe("fork auto-release workflow contract", () => {
   });
 
   test("dispatches only release.yml with the audited SHA", () => {
+    const steps = workflow.jobs?.["auto-release"]?.steps ?? [];
+    expect(steps.find(step => step.uses?.startsWith("actions/create-github-app-token@"))).toMatchObject({
+      id: "release-dispatch-app-token",
+      uses: "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1",
+      with: {
+        "client-id": "${{ vars.PR_AUTOMATION_APP_ID }}",
+        "private-key": "${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}",
+        owner: "${{ github.repository_owner }}",
+        repositories: "${{ github.event.repository.name }}",
+        "permission-actions": "write",
+      },
+    });
     expect(workflowText).toContain("gh workflow run release.yml --ref main");
+    expect(workflowText).toContain("GH_TOKEN: ${{ steps.release-dispatch-app-token.outputs.token }}");
     expect(workflowText).toContain('-f "expected-sha=$HEAD_SHA"');
     expect(workflowText).toContain('-f "dry-run=false"');
     expect(workflowText).not.toMatch(/gh workflow run (?!release\.yml\b)/);
