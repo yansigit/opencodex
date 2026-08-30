@@ -87,7 +87,7 @@ export async function runCursorOracle(
   const cliVersion = readAgentVersion(agentBin);
   const startedAt = Date.now();
 
-  try { purgeExpiredRaw(opts.configDir); } catch {}
+  purgeExpiredRaw(opts.configDir);
 
   const isolated = createIsolatedOracleEnv({ configDir: opts.configDir });
   let loopback: Awaited<ReturnType<typeof createLoopbackProxy>> | null = null;
@@ -181,8 +181,10 @@ export async function runCursorOracle(
         if (terminationCode !== undefined) return;
         terminationCode = code;
         diagnostics.push({ code: diagnostic });
-        try { child.kill("SIGTERM"); } catch {}
-        forceKillTimer = setTimeout(() => { try { child.kill("SIGKILL"); } catch {} }, 1_000);
+        try { child.kill("SIGTERM"); } catch { diagnostics.push({ code: "agent_terminate_failed" }); }
+        forceKillTimer = setTimeout(() => {
+          try { child.kill("SIGKILL"); } catch { diagnostics.push({ code: "agent_force_kill_failed" }); }
+        }, 1_000);
         forceKillTimer.unref?.();
         settleTimer = setTimeout(() => finish(code), 2_000);
         settleTimer.unref?.();
@@ -260,7 +262,7 @@ export async function runCursorOracle(
     writeOracleObservation(observation.oracleRunId, `${JSON.stringify(observation)}\n`, opts.configDir);
     return { observation, rawPaths, exitCode, ...(rawDir ? { rawDir, rawTtlMs: CURSOR_ORACLE_RAW_TTL_MS } : {}) };
   } finally {
-    try { if (loopback) await loopback.close(); } catch {}
-    try { isolated.cleanup(); } catch {}
+    if (loopback) await loopback.close();
+    isolated.cleanup();
   }
 }

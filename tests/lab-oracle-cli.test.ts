@@ -6,7 +6,7 @@ import { handleLabCommand } from "../src/cli/lab";
 import { CURSOR_ORACLE_UPSTREAM } from "../src/lab/oracle/constants";
 const ROOTS: string[] = [];
 function tempConfigDir(){ const d=mkdtempSync(join(tmpdir(),"ocx-test-oracle-cli-")); ROOTS.push(d); return d; }
-afterEach(()=>{ for(const d of ROOTS.splice(0)) try{rmSync(d,{recursive:true,force:true})}catch{} });
+afterEach(()=>{ for(const d of ROOTS.splice(0)) rmSync(d,{recursive:true,force:true}); });
 // silence console.log from printData while testing
 let origLog: typeof console.log;
 beforeEach(()=>{ origLog=console.log; console.log=()=>{}; });

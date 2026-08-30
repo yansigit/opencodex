@@ -144,7 +144,7 @@ function normalizedPartBlob(bytes: Uint8Array): { bytes: Uint8Array; fields: Ret
   const candidates = [bytes];
   const text = new TextDecoder().decode(bytes);
   if (text.length > 0 && text.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(text)) {
-    try { candidates.push(new Uint8Array(Buffer.from(text, "base64"))); } catch {}
+    candidates.push(new Uint8Array(Buffer.from(text, "base64")));
   }
   let fallback: { bytes: Uint8Array; fields: ReturnType<typeof protobufFields> } | undefined;
   for (const candidate of candidates) {
@@ -153,7 +153,7 @@ function normalizedPartBlob(bytes: Uint8Array): { bytes: Uint8Array; fields: Ret
       const parsed = { bytes: candidate, fields };
       if (fields.some(field => field.no === 1 && field.wireType === 2)) return parsed;
       fallback ??= parsed;
-    } catch {}
+    } catch { continue; }
   }
   if (fallback) return fallback;
   throw new Error("invalid request-context part blob");

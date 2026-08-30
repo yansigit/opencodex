@@ -24,6 +24,7 @@ function randomSuffix(): string {
  * Never writes to real HOME or real OPENCODEX_HOME.
  */
 export function createIsolatedOracleEnv(opts: { configDir?: string } = {}): IsolatedOracleEnv {
+  ensureLabDirs(opts.configDir);
   const sysTmp = tmpdir();
   const base = mkdtempSync(join(sysTmp, "ocx-cursor-oracle-"));
   if (process.platform !== "win32") chmodSync(base, 0o700);
@@ -36,12 +37,8 @@ export function createIsolatedOracleEnv(opts: { configDir?: string } = {}): Isol
     mkdirSync(d, { recursive: true, mode: 0o700 });
     if (process.platform !== "win32") chmodSync(d, 0o700);
   }
-  try {
-    ensureLabDirs(opts.configDir);
-  } catch { /* best-effort */ }
-
   const cleanup = () => {
-    try { rmSync(base, { recursive: true, force: true, maxRetries: 3 }); } catch {}
+    rmSync(base, { recursive: true, force: true, maxRetries: 3 });
   };
   return { root: base, configDir, dataDir, workspaceDir, homeDir, cleanup };
 }
@@ -112,7 +109,7 @@ export function purgeExpiredRaw(configDir?: string, now = Date.now()): number {
     if (!st.isFile() || st.isSymbolicLink()) continue;
     const age = now - st.mtimeMs;
     if (age > CURSOR_ORACLE_RAW_TTL_MS) {
-      try { unlinkSync(full); removed++; } catch {}
+      try { unlinkSync(full); removed++; } catch { continue; }
     }
   }
   return removed;
