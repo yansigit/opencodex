@@ -3,7 +3,7 @@ import { getCredential } from "../oauth/store";
 import type { OAuthCredentials } from "../oauth/types";
 import type { OcxProviderConfig } from "../types";
 import { computeProviderSourceFingerprint, loadSmokeCache, recordSmokeResult, shouldRunSmokeForProvider } from "./fingerprint-cache";
-import { buildClaudeMcpSmokeRequest, buildSmokeScenarioRequest, CLAUDE_MCP_SMOKE_TOOL_NAME } from "./live-scenarios";
+import { buildClaudeMcpSmokeRequest, buildSmokeScenarioRequest, CLAUDE_MCP_SMOKE_TOOL_NAME, parseClaudeMessageResponse } from "./live-scenarios";
 
 export interface ProviderSmokeResult {
   provider: string;
@@ -140,7 +140,7 @@ export async function runProviderSmoke(options: { provider: string; modelId?: st
       }
       throw new Error(`Claude MCP HTTP ${firstResponse.status}: ${firstText.slice(0, 200)}`);
     }
-    const firstMessage = JSON.parse(firstText) as Record<string, unknown>;
+    const firstMessage = parseClaudeMessageResponse(firstText);
     const assistantContent = Array.isArray(firstMessage.content) ? firstMessage.content : [];
     const toolUse = assistantContent.find(item => item && typeof item === "object" && (item as Record<string, unknown>).type === "tool_use" && (item as Record<string, unknown>).name === CLAUDE_MCP_SMOKE_TOOL_NAME) as Record<string, unknown> | undefined;
     if (!toolUse || typeof toolUse.id !== "string" || !toolUse.id) throw new Error("Claude MCP tool call assertion failed");
@@ -161,7 +161,7 @@ export async function runProviderSmoke(options: { provider: string; modelId?: st
       }
       throw new Error(`Claude MCP continuation HTTP ${secondResponse.status}: ${secondText.slice(0, 200)}`);
     }
-    const secondMessage = JSON.parse(secondText) as Record<string, unknown>;
+    const secondMessage = parseClaudeMessageResponse(secondText);
     claudeMcpPassed = secondMessage.type === "message"
       && secondMessage.stop_reason !== "tool_use"
       && Array.isArray(secondMessage.content)

@@ -119,7 +119,7 @@ function hasGenuineSignedThinking(body: Rec): boolean {
 const KNOWN_CONTENT_TYPES = new Set([
   "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking",
   "document", "server_tool_use", "web_search_tool_result", "code_execution_tool_result",
-  "tool_search_tool_result",
+  "tool_search_tool_result", "mcp_tool_use", "mcp_tool_result",
 ]);
 
 function hasDocuments(body: Rec): boolean {
@@ -132,6 +132,11 @@ function hasDocuments(body: Rec): boolean {
     for (const b of content) {
       if (!isRec(b)) continue;
       if (b.type === "document") return true;
+      if (b.type === "tool_result" && Array.isArray(b.content)) {
+        for (const nested of b.content) {
+          if (isRec(nested) && nested.type === "document") return true;
+        }
+      }
     }
   }
   return false;
@@ -168,7 +173,6 @@ function hasCodeExecution(body: Rec): boolean {
       if (!isRec(t)) continue;
       const type = typeof t.type === "string" ? t.type : "";
       if (type.includes("code_execution")) return true;
-      if (typeof t.name === "string" && t.name.includes("code_execution")) return true;
     }
   }
   const msgs = body.messages;
@@ -216,7 +220,15 @@ function hasMcpTool(body: Rec): boolean {
     for (const t of tools) {
       if (!isRec(t)) continue;
       const type = typeof t.type === "string" ? t.type : "";
-      if (type.startsWith("mcp")) return true;
+      if (type === "mcp_toolset") return true;
+    }
+  }
+  const msgs = body.messages;
+  if (!Array.isArray(msgs)) return false;
+  for (const m of msgs) {
+    if (!isRec(m) || !Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (isRec(b) && (b.type === "mcp_tool_use" || b.type === "mcp_tool_result")) return true;
     }
   }
   return false;
@@ -271,11 +283,9 @@ function hasGenericServerTool(body: Rec): boolean {
     if (!isRec(t)) continue;
     // Exclude known function tools, tool_search, and already-classified server tools
     const type = typeof t.type === "string" ? t.type : "";
-    const name = typeof t.name === "string" ? t.name : "";
-    if (name === "tool_search" || name.startsWith("tool_search_tool_")) continue;
     if (type === "tool_search" || type.startsWith("tool_search_tool_")) continue;
-    if (type.includes("web_search") || type.includes("code_execution") || type.includes("computer") || type.startsWith("mcp")) continue;
-    if (type && type !== "function") return true;
+    if (type.includes("web_search") || type.includes("code_execution") || type.includes("computer") || type === "mcp_toolset") continue;
+    if (type && type !== "function" && type !== "custom") return true;
     if (type && typeof t.name !== "string") return true;
   }
   const msgs2 = body.messages;
@@ -303,7 +313,6 @@ function hasToolSearch(body: Rec): boolean {
     for (const t of tools) {
       if (!isRec(t)) continue;
       if (typeof t.type === "string" && (t.type === "tool_search" || t.type.startsWith("tool_search_tool_"))) return true;
-      if (typeof t.name === "string" && (t.name === "tool_search" || t.name.startsWith("tool_search_tool_"))) return true;
     }
   }
   const msgs = body.messages;
@@ -315,7 +324,7 @@ function hasToolSearch(body: Rec): boolean {
       for (const b of content) {
         if (!isRec(b)) continue;
         if (b.type === "tool_search_tool_result") return true;
-        if ((b.type === "tool_use" || b.type === "server_tool_use")
+        if (b.type === "server_tool_use"
           && typeof b.name === "string"
           && (b.name === "tool_search" || b.name.startsWith("tool_search_tool_"))) return true;
       }
@@ -351,10 +360,11 @@ function hasInputExamples(body: Rec): boolean {
 }
 
 function hasStructuredOutput(body: Rec): boolean {
-  const oc = body.output_config;
-  if (!isRec(oc)) return false;
-  const fmt = (oc as Rec).format ?? (oc as Rec).output_format;
-  if (!isRec(fmt as unknown)) return false;
+  const oc = isRec(body.output_config) ? (body.output_config as Rec) : null;
+  const nestedFormat = isRec(oc?.format) ? (oc!.format as Rec) : null;
+  const topFormat = isRec(body.output_format) ? (body.output_format as Rec) : null;
+  const fmt = nestedFormat ?? topFormat;
+  if (!fmt) return false;
   const f = fmt as Rec;
   if (f.type === "json_schema") return true;
   return false;
@@ -374,22 +384,32 @@ function isNoopContextManagement(body: unknown): boolean {
   const contextManagement = body.context_management;
   if (Object.keys(contextManagement).some(key => key !== "edits")) return false;
   const edits = contextManagement.edits;
-  if (!Array.isArray(edits) || edits.length !== 1 || !isRec(edits[0])) return false;
-  const edit = edits[0];
-  return edit.type === "clear_thinking_20251015"
-    && edit.keep === "all"
-    && Object.keys(edit).every(key => key === "type" || key === "keep");
+  if (edits === undefined) return true;
+  if (Array.isArray(edits)) {
+    if (edits.length === 0) return true;
+    if (edits.length === 1 && isRec(edits[0])) {
+      const edit = edits[0];
+      return edit.type === "clear_thinking_20251015"
+        && edit.keep === "all"
+        && Object.keys(edit).every(key => key === "type" || key === "keep");
+    }
+  }
+  return false;
 }
 
 const KNOWN_BODY_FIELDS = new Set([
   "model", "max_tokens", "messages", "system", "tools", "tool_choice", "thinking",
-  "output_config", "metadata", "service_tier", "stop_sequences", "stream",
+  "output_config", "output_format", "metadata", "service_tier", "stop_sequences", "stream",
   "temperature", "top_p", "top_k", "cache_control", "context_management",
   "container", "inference_geo", "user_profile_id", "defer_tools", "deferred_tools",
 ]);
 
+const KNOWN_OUTPUT_CONFIG_FIELDS = new Set(["effort", "format"]);
+
 function hasUnknownBodyField(body: Rec): boolean {
-  return Object.keys(body).some(field => !KNOWN_BODY_FIELDS.has(field));
+  if (Object.keys(body).some(field => !KNOWN_BODY_FIELDS.has(field))) return true;
+  if (isRec(body.output_config) && Object.keys(body.output_config).some(field => !KNOWN_OUTPUT_CONFIG_FIELDS.has(field))) return true;
+  return false;
 }
 
 /**
