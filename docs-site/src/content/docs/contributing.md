@@ -42,8 +42,11 @@ existing tests for the subsystem you change; run the full suite for shared routi
 or server behavior.
 
 For a non-trivial pre-PR check on a Mac with Apple Container available, also run `bun run test:container`.
-Start the service with `container system start` first if needed. Ordinary `bun run prepush` remains
-host-native and does not include this suite; it is not a GitHub-hosted CI job.
+Start the service with `container system start` first if needed. The test uses an ephemeral image and
+builder so repeated runs do not grow Apple Container's global cache. If a builder already exists, the
+command stops before modifying it; delete that builder explicitly, or set
+`OCX_CONTAINER_USE_SHARED_BUILDER=1` when retaining and managing its cache is intentional. Ordinary
+`bun run prepush` remains host-native and does not include this suite; it is not a GitHub-hosted CI job.
 
 The docs site you're reading lives in `docs-site/` (Astro + Starlight):
 
