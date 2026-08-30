@@ -106,7 +106,6 @@ describe("dev promotion workflow contract", () => {
         owner: "${{ github.repository_owner }}",
         repositories: "${{ github.event.repository.name }}",
         "permission-contents": "write",
-        "permission-workflows": "write",
       },
     });
     expect(postReleaseSteps.find((step) => step.id === "post-release-app-token")).toMatchObject({
@@ -118,9 +117,9 @@ describe("dev promotion workflow contract", () => {
         owner: "${{ github.repository_owner }}",
         repositories: "${{ github.event.repository.name }}",
         "permission-contents": "write",
-        "permission-workflows": "write",
       },
     });
+    expect(workflowSource).not.toContain("permission-workflows");
     expect(backmergeSteps.find((step) => step.name === "Reconcile verified main ancestry into dev")).toMatchObject({
       env: { GH_TOKEN: "${{ steps.backmerge-app-token.outputs.token }}" },
     });

@@ -223,7 +223,6 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
-          permission-workflows: write
 
       - name: Reconcile verified main ancestry into dev
         if: steps.verify-main.outputs.eligible == 'true'
@@ -427,7 +426,6 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
-          permission-workflows: write
 
       - name: Bump and push the next stable dev version
         if: steps.verify-release.outputs.action == 'bump'
