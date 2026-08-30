@@ -115,9 +115,17 @@ export function effortFromOutputConfig(outputConfig: unknown): string | undefine
   return typeof effort === "string" && OUTPUT_CONFIG_EFFORTS.has(effort) ? effort : undefined;
 }
 
-function formatFromOutputConfig(outputConfig: unknown): Rec | undefined {
-  if (!isRec(outputConfig) || !isRec(outputConfig.format)) return undefined;
-  const format = outputConfig.format;
+function formatFromOutputConfig(outputConfig: unknown, outputFormat?: unknown): Rec | undefined {
+  const hasNested = isRec(outputConfig) && isRec(outputConfig.format);
+  const hasTop = isRec(outputFormat);
+  if (hasNested && hasTop) {
+    throw new AnthropicRequestError(
+      "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated).",
+    );
+  }
+  const rawFormat = hasNested ? (outputConfig as Rec).format : hasTop ? outputFormat : undefined;
+  if (!isRec(rawFormat)) return undefined;
+  const format = rawFormat as Rec;
   if (
     format.type !== "json_schema"
     || !isRec(format.schema)
@@ -653,7 +661,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   if (Array.isArray(raw.stop_sequences) && raw.stop_sequences.length > 0) {
     body.stop = raw.stop_sequences.filter((s): s is string => typeof s === "string");
   }
-  const outputConfigFormat = formatFromOutputConfig(raw.output_config);
+  const outputConfigFormat = formatFromOutputConfig(raw.output_config, raw.output_format);
   if (outputConfigFormat) body.text = { format: outputConfigFormat };
   let cacheKeySource: ClaudeCacheKeySource = null;
   if (isRec(raw.metadata) && typeof raw.metadata.user_id === "string") {

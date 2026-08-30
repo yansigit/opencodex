@@ -355,10 +355,11 @@ function hasInputExamples(body: Rec): boolean {
 }
 
 function hasStructuredOutput(body: Rec): boolean {
-  const oc = body.output_config;
-  if (!isRec(oc)) return false;
-  const fmt = (oc as Rec).format ?? (oc as Rec).output_format;
-  if (!isRec(fmt as unknown)) return false;
+  const oc = isRec(body.output_config) ? (body.output_config as Rec) : null;
+  const nestedFormat = isRec(oc?.format) ? (oc!.format as Rec) : null;
+  const topFormat = isRec(body.output_format) ? (body.output_format as Rec) : null;
+  const fmt = nestedFormat ?? topFormat;
+  if (!fmt) return false;
   const f = fmt as Rec;
   if (f.type === "json_schema") return true;
   return false;
@@ -387,13 +388,17 @@ function isNoopContextManagement(body: unknown): boolean {
 
 const KNOWN_BODY_FIELDS = new Set([
   "model", "max_tokens", "messages", "system", "tools", "tool_choice", "thinking",
-  "output_config", "metadata", "service_tier", "stop_sequences", "stream",
+  "output_config", "output_format", "metadata", "service_tier", "stop_sequences", "stream",
   "temperature", "top_p", "top_k", "cache_control", "context_management",
   "container", "inference_geo", "user_profile_id", "defer_tools", "deferred_tools",
 ]);
 
+const KNOWN_OUTPUT_CONFIG_FIELDS = new Set(["effort", "format"]);
+
 function hasUnknownBodyField(body: Rec): boolean {
-  return Object.keys(body).some(field => !KNOWN_BODY_FIELDS.has(field));
+  if (Object.keys(body).some(field => !KNOWN_BODY_FIELDS.has(field))) return true;
+  if (isRec(body.output_config) && Object.keys(body.output_config).some(field => !KNOWN_OUTPUT_CONFIG_FIELDS.has(field))) return true;
+  return false;
 }
 
 /**

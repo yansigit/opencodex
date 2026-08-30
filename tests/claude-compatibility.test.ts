@@ -62,6 +62,21 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
   test("collect: structured_output via output_config.format json_schema", () => {
     const body = { output_config: { format: { type: "json_schema", schema: { type: "object" } } } };
     expect(collectClaudeFeatureCodes(body, undefined)).toContain("structured_output");
+
+    const topLevelBody = { output_format: { type: "json_schema", schema: { type: "object" } } };
+    expect(collectClaudeFeatureCodes(topLevelBody, undefined)).toContain("structured_output");
+    expect(collectClaudeFeatureCodes(topLevelBody, undefined)).not.toContain("unknown_body_field");
+
+    const invalidNestedBody = { output_config: { output_format: { type: "json_schema", schema: { type: "object" } } } };
+    expect(collectClaudeFeatureCodes(invalidNestedBody, undefined)).not.toContain("structured_output");
+    expect(collectClaudeFeatureCodes(invalidNestedBody, undefined)).toContain("unknown_body_field");
+    const routed = analyzeClaudeCompatibility(invalidNestedBody, { mode: "enforce", adapter: "openai-responses" });
+    expect(routed.decision).toBe("reject");
+    expect(routed.compatible).toBe(false);
+    expect(routed.reason).toContain("unknown_body_field");
+    const anthropic = analyzeClaudeCompatibility(invalidNestedBody, { mode: "enforce", adapter: "anthropic" });
+    expect(anthropic.decision).toBe("allow");
+    expect(anthropic.compatible).toBe(true);
   });
 
   test("collect: structured_output via output_config.format json_object is not advertised (only json_schema is official)", () => {
@@ -251,6 +266,8 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     expect(analyzeClaudeCompatibility(webSearch, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
     const structured = { output_config: { format: { type: "json_schema", schema: { type: "object" } } } } as unknown as Record<string, unknown>;
     expect(analyzeClaudeCompatibility(structured, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
+    const structuredTop = { output_format: { type: "json_schema", schema: { type: "object" } } } as unknown as Record<string, unknown>;
+    expect(analyzeClaudeCompatibility(structuredTop, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
     const tier = { service_tier: "standard" } as unknown as Record<string, unknown>;
     expect(analyzeClaudeCompatibility(tier, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
     const ts = { tools: [{ name: "tool_search_tool_bm25", type: "tool_search_tool_bm25_20251119" }] } as unknown as Record<string, unknown>;

@@ -158,6 +158,33 @@ describe("claude inbound translation", () => {
 
     expect(body.text).toEqual({ format: { type: "json_schema", name: "response", schema } });
     expect(parseRequest(body).options.textFormat).toEqual({ type: "json_schema", name: "response", schema });
+
+    // deprecated top-level output_format
+    const topBody = anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_format: { type: "json_schema", schema },
+    });
+    expect(topBody.text).toEqual({ format: { type: "json_schema", name: "response", schema } });
+
+    // fail clearly when both official shapes are provided (Anthropic SDK parity)
+    expect(() => anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_config: { format: { type: "json_schema", schema } },
+      output_format: { type: "json_schema", schema },
+    })).toThrow("Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated).");
+
+    // invalid nested output_config.output_format is ignored
+    const invalidNested = anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_config: { output_format: { type: "json_schema", schema } },
+    });
+    expect(invalidNested.text).toBeUndefined();
   });
 
   test("structured output rejects unsupported schemas and preserves root references", () => {
