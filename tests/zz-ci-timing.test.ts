@@ -144,7 +144,7 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
     step.run?.includes("scripts/ci/merge-timings.ts"),
   )).toBe(true);
   expect(ci.jobs["publish-test-timings"].steps?.some(step =>
-    step.uses === "actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684",
+    step.uses === "actions/cache/save@caa296126883cff596d87d8935842f9db880ef25",
   )).toBe(true);
   expect(ci.jobs["platform-macos"].steps?.some(step => step.uses?.startsWith("actions/cache/save@"))).toBe(false);
   const swift = ci.jobs["platform-macos"].steps?.find(step =>
