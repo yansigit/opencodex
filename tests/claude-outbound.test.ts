@@ -664,6 +664,37 @@ describe("claude outbound SSE", () => {
     expect(events.at(-1)!.name).toBe("message_stop");
   });
 
+  test("incomplete pause_turn and model_context_window_exceeded map exactly where retained", async () => {
+    // pause_turn is a distinct Anthropic stop_reason for long-running turns; it is
+    // preserved only where Responses retains it verbatim and is not collapsed via
+    // truncated-stop-reason (which maps it to max_output_tokens). Same for the raw
+    // model_context_window_exceeded value which Responses retains as max_output_tokens
+    // in the collapsed path.
+    const pauseUpstream = [
+      sse("response.created", { response: {} }),
+      sse("response.output_text.delta", { delta: "thinking..." }),
+      sse("response.incomplete", { response: { status: "incomplete", incomplete_details: { reason: "pause_turn" }, usage: { input_tokens: 5, output_tokens: 3 } } }),
+    ].join("");
+    const pauseEvents = await collectEvents(responsesSseToAnthropicSse(streamFrom(pauseUpstream), "m"));
+    expect(pauseEvents.find(e => e.name === "message_delta")!.data.delta.stop_reason).toBe("pause_turn");
+    expect(pauseEvents.at(-1)!.name).toBe("message_stop");
+    const pauseJson = responsesJsonToAnthropicMessage({ status: "incomplete", incomplete_details: { reason: "pause_turn" }, output: [] }, "m") as any;
+    expect(pauseJson.stop_reason).toBe("pause_turn");
+
+    const ctxUpstream = [
+      sse("response.created", { response: {} }),
+      sse("response.output_text.delta", { delta: "partial" }),
+      sse("response.incomplete", { response: { status: "incomplete", incomplete_details: { reason: "model_context_window_exceeded" }, usage: { input_tokens: 5, output_tokens: 3 } } }),
+    ].join("");
+    const ctxEvents = await collectEvents(responsesSseToAnthropicSse(streamFrom(ctxUpstream), "m"));
+    expect(ctxEvents.find(e => e.name === "message_delta")!.data.delta.stop_reason).toBe("max_tokens");
+    const ctxJson = responsesJsonToAnthropicMessage({ status: "incomplete", incomplete_details: { reason: "model_context_window_exceeded" }, output: [] }, "m") as any;
+    expect(ctxJson.stop_reason).toBe("max_tokens");
+
+    // Native passthrough is not modified by this translator; the non-streaming
+    // Anthropic stop_reason passthrough remains outside outbound (no IR invented).
+  });
+
   test("retryable or unknown incomplete becomes overloaded_error, never end_turn", async () => {
     const upstream = [
       sse("response.created", { response: {} }),

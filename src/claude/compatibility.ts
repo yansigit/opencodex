@@ -8,7 +8,8 @@
  *
  * Feature codes (Milestone 2 precise set):
  * - cache_control: any block with a cache_control field (positional prompt caching)
- * - thinking_block: thinking param or thinking/redacted_thinking blocks (genuine signed thinking)
+ * - thinking_block: thinking param or thinking/redacted_thinking blocks (unsigned/ocxr1 continuity)
+ * - signed_thinking: genuine Anthropic signed thinking (thinking.signature non-empty not ocxr1: or redacted_thinking with non-empty data) — incompatible on routed adapters, fail-closed even in shadow
  * - documents: document content blocks in messages
  * - unknown_content_block: content block type not in known Anthropic vocabulary
  * - web_search_tool: hosted web_search tool/block (has lossless Responses mapping)
@@ -18,7 +19,7 @@
  * - server_tool: generic fallback for other hosted/server tool types
  * - tool_search: tool_search declaration/call (lossless via tool_search)
  * - deferred_tools: tools with defer/defer_loading or deferred beta markers
- * - structured_output: output_config.format json_schema/json_object (lossless via text.format)
+ * - structured_output: output_config.format json_schema (lossless via text.format)
  * - service_tier: top-level service_tier (lossless via Responses option)
  * - context_management: top-level context_management field (no lossless routed mapping)
  * - input_examples: tool input_examples (Anthropic-only, preserved via source envelope)
@@ -86,6 +87,35 @@ function hasThinkingBlock(body: Rec): boolean {
   return false;
 }
 
+function hasGenuineSignedThinking(body: Rec): boolean {
+  const msgs = body.messages;
+  if (!Array.isArray(msgs)) return false;
+  for (const m of msgs) {
+    if (!isRec(m)) continue;
+    const content = (m as Rec).content;
+    if (!Array.isArray(content)) continue;
+    for (const b of content) {
+      if (!isRec(b)) continue;
+      if (b.type === "thinking") {
+        const signature = b.signature;
+        if (typeof signature === "string") {
+          if (signature.length > 0 && !signature.startsWith("ocxr1:")) return true;
+        } else if (signature != null) {
+          return true;
+        }
+      } else if (b.type === "redacted_thinking") {
+        const data = (b as Rec).data;
+        if (typeof data === "string") {
+          if (data.length > 0) return true;
+        } else if (data != null && String(data).length > 0) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 const KNOWN_CONTENT_TYPES = new Set([
   "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking",
   "document", "server_tool_use", "web_search_tool_result", "code_execution_tool_result",
@@ -108,6 +138,14 @@ function hasDocuments(body: Rec): boolean {
 }
 
 function hasUnknownContentBlock(body: Rec): boolean {
+  const sys = body.system;
+  if (Array.isArray(sys)) {
+    for (const b of sys) {
+      if (!isRec(b)) continue;
+      const t = typeof b.type === "string" ? b.type : "";
+      if (t && t !== "text") return true;
+    }
+  }
   const msgs = body.messages;
   if (!Array.isArray(msgs)) return false;
   for (const m of msgs) {
@@ -319,8 +357,7 @@ function hasStructuredOutput(body: Rec): boolean {
   const fmt = (oc as Rec).format ?? (oc as Rec).output_format;
   if (!isRec(fmt as unknown)) return false;
   const f = fmt as Rec;
-  if (f.type === "json_schema" || f.type === "json_object") return true;
-  if (isRec(f.schema)) return true;
+  if (f.type === "json_schema") return true;
   return false;
 }
 
@@ -330,6 +367,19 @@ function hasServiceTier(body: Rec): boolean {
 
 function hasContextManagement(body: Rec): boolean {
   return Object.prototype.hasOwnProperty.call(body, "context_management");
+}
+
+/** Claude Code 2.1.201 sends this cache-preserving no-op on ordinary routed turns. */
+function isNoopContextManagement(body: unknown): boolean {
+  if (!isRec(body) || !isRec(body.context_management)) return false;
+  const contextManagement = body.context_management;
+  if (Object.keys(contextManagement).some(key => key !== "edits")) return false;
+  const edits = contextManagement.edits;
+  if (!Array.isArray(edits) || edits.length !== 1 || !isRec(edits[0])) return false;
+  const edit = edits[0];
+  return edit.type === "clear_thinking_20251015"
+    && edit.keep === "all"
+    && Object.keys(edit).every(key => key === "type" || key === "keep");
 }
 
 const KNOWN_BODY_FIELDS = new Set([
@@ -361,6 +411,7 @@ export function collectClaudeFeatureCodes(
     if (Object.hasOwn(rec, "user_profile_id")) codes.push("user_profile");
     if (hasUnknownBodyField(rec)) codes.push("unknown_body_field");
     if (hasThinkingBlock(rec)) codes.push("thinking_block");
+    if (hasGenuineSignedThinking(rec)) codes.push("signed_thinking");
     if (hasDocuments(rec)) codes.push("documents");
     if (hasUnknownContentBlock(rec)) codes.push("unknown_content_block");
     if (hasWebSearchTool(rec)) codes.push("web_search_tool");
@@ -403,7 +454,6 @@ export function analyzeClaudeCompatibility(
   // Incompatible: features without lossless Responses mapping — they require Anthropic
   // source preservation and must be rejected on routed targets.
   const INCOMPATIBLE = new Set([
-    "cache_control",
     "context_management",
     "container",
     "inference_geo",
@@ -416,9 +466,22 @@ export function analyzeClaudeCompatibility(
     "mcp_tool",
     "server_tool",
     "input_examples",
+    "signed_thinking",
   ]);
   if (opts.adapter !== "openai-responses") INCOMPATIBLE.add("deferred_tools");
-  const incompatible = featureCodes.filter(c => INCOMPATIBLE.has(c));
+  const incompatible = featureCodes.filter(c =>
+    INCOMPATIBLE.has(c) && (c !== "context_management" || !isNoopContextManagement(body))
+  );
+  // Safety invariant: genuine signed thinking is incompatible on every non-Anthropic adapter and fails closed even in shadow.
+  // Anthropic adapter already returned allow above.
+  if (incompatible.includes("signed_thinking")) {
+    return {
+      featureCodes,
+      compatible: false,
+      decision: "reject",
+      reason: `unsupported features for routed adapter ${opts.adapter ?? "unknown"}: ${incompatible.join(", ")}. Select an Anthropic route, remove the feature, or begin a fresh reasoning turn`,
+    };
+  }
   if (opts.mode === "shadow") {
     return {
       featureCodes,
