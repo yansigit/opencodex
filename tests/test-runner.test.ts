@@ -84,12 +84,16 @@ describe("test runner isolation", () => {
         PATH: "/test/bin",
         HOME: isolated.root,
         USERPROFILE: isolated.root,
+        TMPDIR: join(isolated.root, "tmp"),
+        TMP: join(isolated.root, "tmp"),
+        TEMP: join(isolated.root, "tmp"),
         OPENCODEX_HOME: join(isolated.root, ".opencodex"),
         CODEX_HOME: join(isolated.root, ".codex"),
         OCX_TEST_HOME_GUARD: "1",
       });
       expect(existsSync(isolated.env.OPENCODEX_HOME!)).toBe(true);
       expect(existsSync(isolated.env.CODEX_HOME!)).toBe(true);
+      expect(existsSync(isolated.env.TMPDIR!)).toBe(true);
     } finally {
       isolated.cleanup();
     }
