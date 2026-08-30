@@ -331,7 +331,7 @@ Routed Claude requests are evaluated for feature compatibility before the proxy 
 | Mode | Value | Behavior |
 | --- | --- | --- |
 | `enforce` | default | Pre-network check: requests carrying incompatible features are rejected with `400 invalid_request_error` and a reason naming the feature codes. Compatible requests pass through unchanged. |
-| `shadow` | opt-in escape | Same feature-code detection, but never rejects; the decision is recorded for diagnostics only. |
+| `shadow` | opt-in escape | Records ordinary incompatibilities without rejecting. Safety invariants such as genuine Anthropic signed-thinking ownership still reject before upstream activity. |
 
 Invalid values are ignored on load and therefore use the `enforce` default.
 
@@ -339,16 +339,17 @@ Feature codes (stable, also visible in the bounded debug ring):
 
 | Code | Meaning | Enforce result |
 | --- | --- | --- |
-| `cache_control` | Positional Anthropic prompt-cache marker | reject on translated targets; preserved on Anthropic targets |
-| `context_management` | Top-level `context_management` field | reject |
+| `cache_control` | Positional Anthropic prompt-cache marker | informational on translated targets; preserved and validated on Anthropic targets |
+| `context_management` | Top-level `context_management` field | the exact Claude Code `clear_thinking_20251015` + `keep: "all"` no-op is allowed; mutating forms reject |
 | `thinking_block` | `thinking` param or `thinking`/`redacted_thinking` content blocks | allowed (informational) |
+| `signed_thinking` | Genuine Anthropic signature or redacted-thinking payload | reject on every non-Anthropic target, including in `shadow`; preserve on Anthropic targets |
 | `tool_search` | Claude tool-search declaration, call, or result | translate through Responses tool search |
 | `web_search_tool` | Claude web-search declaration, call, or result | translate through the existing web-search path |
 | `deferred_tools` | Tools with `defer_loading: true` or a top-level deferred flag | translate only on the native Responses adapter; reject elsewhere |
 | `input_examples` | Anthropic-native tool input examples | preserve on Anthropic targets; reject on translated targets |
 | `documents`, `code_execution`, `computer_use`, `mcp_tool`, `server_tool` | Anthropic-native content or server tools without a lossless Responses lowering | reject on translated targets; preserve on Anthropic targets |
 | `container`, `inference_geo`, `user_profile`, `unknown_body_field`, `unknown_content_block` | Anthropic-only or unrecognized semantic request fields | reject on translated targets; preserve on Anthropic targets |
-| `structured_output` | `output_config.format` `json_schema`/`json_object` | translate |
+| `structured_output` | `output_config.format` `json_schema` | translate |
 | `service_tier` | Anthropic service tier | translate through provider capability sanitation |
 | `beta_*` | Each `anthropic-beta` token, sanitized to `beta_<name>` (sorted, de-duplicated) | allowed (informational) |
 
@@ -434,7 +435,7 @@ The proxy translates every Anthropic Messages API request into the Codex Respons
 | Assistant text | `output_text` |
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringified `arguments`) |
 | User `tool_result` | `function_call_output` (`is_error` → `[tool error]` prefix) |
-| `thinking` / `redacted_thinking` replay | Dropped |
+| `thinking` / `redacted_thinking` replay | Ordered Responses reasoning items using the `ocxr1` continuity envelope |
 | Function tools | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, named function→`{type:"function",name}`, hosted WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
@@ -451,13 +452,14 @@ name.
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | Text deltas | `content_block_start` → `content_block_delta` (text) → `content_block_stop` |
-| Reasoning summary/text | `thinking` block with synthetic signature |
+| Reasoning summary/text | `thinking` block with a verified Anthropic signature when ownership matches, otherwise an OpenCodex `ocxr1` continuity signature |
 | Function-call frames | `tool_use` block with `input_json_delta` |
 | Terminal event | `message_delta` → `message_stop` |
 | EOF before terminal | 502-style `api_error` |
 
 **Stop reason mapping:** `completed` → `tool_use` (if any tool call) or `end_turn`;
-`incomplete/max_output_tokens` → `max_tokens`; `incomplete/content_filter` → `refusal`.
+`incomplete/max_output_tokens` or retained `model_context_window_exceeded` → `max_tokens`;
+`incomplete/content_filter` → `refusal`; retained `pause_turn` → `pause_turn`.
 
 **Error taxonomy:** 400 `invalid_request_error`, 401 `authentication_error`,
 402 `billing_error`, 403 `permission_error`, 404 `not_found_error`, 409 `conflict_error`,
@@ -466,13 +468,15 @@ other 5xx `api_error`. `Retry-After` is preserved.
 
 ## Prompt caching and token usage
 
-**Anthropic-routed requests:** the adapter manages cache breakpoints for tools, system content,
-and the penultimate user message, plus top-level automatic `cache_control`. Stable turns normally
-produce about a 99.9% cache hit rate.
+**Anthropic-routed requests:** explicit client breakpoints are preserved in Anthropic wire order
+(`tools` → `system` → `messages`) and validated before the request is sent: at most four markers,
+with 1-hour markers before 5-minute/default markers. Requests translated to another protocol do not
+promise equivalent positional caching; their `cache_control` markers are diagnostic only.
 
-**Native OpenAI/ChatGPT routing:** derives a session-scoped `prompt_cache_key` (from
-`metadata.user_id` when present, falling back to a system-content hash) and `session_id` header
-for cache affinity. The cache key includes model and full tool schemas.
+**Native OpenAI/ChatGPT routing:** derives a session-scoped `prompt_cache_key` from
+`x-claude-code-session-id` or `metadata.user_id`, and emits a `session_id` header only for that real client session.
+A system-content cohort hash remains a shared prompt-cache hint, never a continuation identity or session header.
+The cache key includes model and full tool schemas.
 
 **Token math:** Anthropic output subtracts `cached_tokens` and `cache_write_tokens` from
 `input_tokens`, exposing them as `cache_read_input_tokens` and `cache_creation_input_tokens`.

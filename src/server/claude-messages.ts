@@ -32,6 +32,7 @@ import {
 } from "../claude/outbound";
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { estimateTokens } from "../lib/token-estimate";
+import { modelInList } from "../types/tools";
 import type { ClaudeSourceEnvelope, OcxConfig } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, recordFirstOutput, type RequestLogContext, type RequestLogEntry } from "./request-log";
@@ -153,7 +154,7 @@ export function promptCacheKeyForSession(sessionId: string | null): string | nul
 /** Idempotent, synchronous work for every effective Responses route resolution. */
 export function claudeFinalRouteHandler(
   parsed: { options: Record<string, unknown>; modelId: string; _rawBody?: unknown; _promptCacheKeyIsSharedCohort?: boolean },
-  route: { provider: { adapter: string }; providerName: string; modelId: string },
+  route: { provider: { adapter: string; autoToolChoiceOnlyModels?: string[] }; providerName: string; modelId: string },
   ctx: {
     sourceEnvelope: ClaudeSourceEnvelope;
     cacheKeySource: ClaudeCacheKeySource;
@@ -162,6 +163,18 @@ export function claudeFinalRouteHandler(
   },
 ): { adapter: string; decision: ReturnType<typeof analyzeClaudeCompatibility>["decision"]; featureCodes: string[] } {
   const adapter = route.provider.adapter;
+  // Route-aware fail-closed gate for auto-only models (e.g. muse-spark-1.2-contributor on opencode-go).
+  // Must run before any upstream; uses the routed modelId + provider list so a forced/named
+  // tool_choice never silently downgrades to auto (Responses core would do that for openai-chat).
+  {
+    const tc = (ctx.sourceEnvelope.body as Record<string, unknown>).tool_choice as unknown;
+    const tcType = tc && typeof tc === "object" && !Array.isArray(tc) && typeof (tc as Record<string, unknown>).type === "string" ? (tc as Record<string, unknown>).type as string : undefined;
+    if ((tcType === "any" || tcType === "tool") && modelInList((route.provider as { autoToolChoiceOnlyModels?: string[] }).autoToolChoiceOnlyModels, route.modelId)) {
+      throw new AnthropicRequestError(
+        `tool_choice type '${tcType}' is not supported for model "${route.modelId}" (provider ${route.providerName}): this model supports only tool_choice auto or none. Remove tool_choice, use {"type":"auto"} or {"type":"none"}, or choose a different model.`,
+      );
+    }
+  }
   // Idempotent sampling strip for openai-responses forward (native ChatGPT pierce)
   if (adapter === "openai-responses") {
     const raw = parsed._rawBody as Record<string, unknown> | undefined;

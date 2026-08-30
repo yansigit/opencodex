@@ -170,21 +170,25 @@ function applyPromptCaching(
 // Breakpoint cap enforcement — strip excess beyond the 4-breakpoint limit
 // ---------------------------------------------------------------------------
 
-function countBreakpoints(body: Record<string, unknown>): number {
-  let total = 0;
-  const count = (blocks: Array<Record<string, unknown>> | undefined) => {
+function cacheControlledBlocks(body: Record<string, unknown>): Array<Record<string, unknown>> {
+  const found: Array<Record<string, unknown>> = [];
+  const collect = (blocks: Array<Record<string, unknown>> | undefined) => {
     if (!blocks) return;
-    for (const b of blocks) if (b.cache_control) total++;
+    for (const b of blocks) if (b.cache_control) found.push(b);
   };
-  count(body.tools as Array<Record<string, unknown>> | undefined);
-  count(body.system as Array<Record<string, unknown>> | undefined);
+  collect(body.tools as Array<Record<string, unknown>> | undefined);
+  collect(body.system as Array<Record<string, unknown>> | undefined);
   const messages = body.messages as Array<Record<string, unknown>> | undefined;
   if (messages) {
     for (const msg of messages) {
-      if (Array.isArray(msg.content)) count(msg.content as Array<Record<string, unknown>>);
+      if (Array.isArray(msg.content)) collect(msg.content as Array<Record<string, unknown>>);
     }
   }
-  return total;
+  return found;
+}
+
+function countBreakpoints(body: Record<string, unknown>): number {
+  return cacheControlledBlocks(body).length;
 }
 
 function enforceCacheControlLimit(body: Record<string, unknown>, limit = MAX_CACHE_BREAKPOINTS): void {
@@ -219,22 +223,9 @@ function enforceCacheControlLimit(body: Record<string, unknown>, limit = MAX_CAC
 // ---------------------------------------------------------------------------
 
 function normalizeTtlOrdering(body: Record<string, unknown>): void {
-  const allBlocks: Array<Record<string, unknown>> = [];
-  const collect = (blocks: Array<Record<string, unknown>> | undefined) => {
-    if (!blocks) return;
-    for (const b of blocks) if (b.cache_control) allBlocks.push(b);
-  };
-  collect(body.tools as Array<Record<string, unknown>> | undefined);
-  collect(body.system as Array<Record<string, unknown>> | undefined);
-  const messages = body.messages as Array<Record<string, unknown>> | undefined;
-  if (messages) {
-    for (const msg of messages) {
-      if (Array.isArray(msg.content)) collect(msg.content as Array<Record<string, unknown>>);
-    }
-  }
   // Walk forward: once we see a 5-min (no ttl / ttl:"5m"), any subsequent 1h must be demoted.
   let seenShort = false;
-  for (const b of allBlocks) {
+  for (const b of cacheControlledBlocks(body)) {
     const cc = b.cache_control as CacheControl;
     if (cc.ttl !== "1h") {
       seenShort = true;
@@ -1052,8 +1043,18 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
           if (isAgentRouterEndpoint(provider.baseUrl) && Array.isArray(cloned.messages)) {
             applyAgentRouterLanguageFraming(cloned.messages as unknown[]);
           }
-          enforceCacheControlLimit(cloned);
-          normalizeTtlOrdering(cloned);
+          const totalBreakpoints = countBreakpoints(cloned);
+          if (totalBreakpoints > MAX_CACHE_BREAKPOINTS) {
+            throw new OcxRequestValidationError(`too many cache_control breakpoints: ${totalBreakpoints} > ${MAX_CACHE_BREAKPOINTS}`);
+          }
+          let seenShort = false;
+          for (const block of cacheControlledBlocks(cloned)) {
+            const isLong = (block.cache_control as CacheControl).ttl === "1h";
+            if (!isLong) seenShort = true;
+            else if (seenShort) {
+              throw new OcxRequestValidationError("invalid cache_control ttl ordering: 1h breakpoints must precede 5m breakpoints");
+            }
+          }
           const sourceBetaRaw = (envelope.headers as Record<string, string>)["anthropic-beta"] ?? (envelope.headers as Record<string, string>)["Anthropic-Beta"] ?? (envelope.headers as Record<string, string>)["anthropic-Beta"];
           const sourceVersionRaw = (envelope.headers as Record<string, string>)["anthropic-version"] ?? (envelope.headers as Record<string, string>)["Anthropic-Version"] ?? (envelope.headers as Record<string, string>)["anthropic-Version"];
           const mergedBetaParts = parseAnthropicBetaHeader(sourceBetaRaw);

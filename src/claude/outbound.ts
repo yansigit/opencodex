@@ -647,6 +647,13 @@ export function responsesSseToAnthropicSse(
               finish("max_tokens", response.usage);
             } else if (details.reason === "content_filter") {
               finish("refusal", response.usage);
+            } else if (details.reason === "pause_turn") {
+              // Anthropic pause_turn preserved only where Responses retains it verbatim;
+              // collapsed form via truncated-stop-reason stays max_output_tokens -> max_tokens.
+              finish("pause_turn", response.usage);
+            } else if (details.reason === "model_context_window_exceeded") {
+              // Token-limit truncation; retain verbatim value as max_tokens when present.
+              finish("max_tokens", response.usage);
             } else {
               const message = typeof details.message === "string" && details.message.trim()
                 ? details.message
@@ -930,9 +937,13 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
   }
 
   const details = isRec(body.incomplete_details) ? body.incomplete_details : {};
+  const isIncompleteTokenLimit = body.status === "incomplete" && (details.reason === "max_output_tokens" || details.reason === "model_context_window_exceeded");
+  const isIncompletePause = body.status === "incomplete" && details.reason === "pause_turn";
   if (body.status === "incomplete"
     && details.reason !== "max_output_tokens"
-    && details.reason !== "content_filter") {
+    && details.reason !== "content_filter"
+    && details.reason !== "pause_turn"
+    && details.reason !== "model_context_window_exceeded") {
     const message = typeof details.message === "string" && details.message.trim()
       ? details.message
       : `upstream response was incomplete${typeof details.reason === "string" ? ` (${details.reason})` : ""}`;
@@ -941,10 +952,11 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
   if (body.status === "completed" && body.end_turn === false && !sawToolUse) {
     return anthropicErrorBody(529, "upstream turn ended without a final answer", "overloaded_error");
   }
-  const stopReason = body.status === "incomplete" && details.reason === "max_output_tokens"
+  const stopReason = isIncompleteTokenLimit
     ? "max_tokens"
     : body.status === "incomplete" && details.reason === "content_filter"
       ? "refusal"
+    : isIncompletePause ? "pause_turn"
     : sawToolUse ? "tool_use" : "end_turn";
 
   return {

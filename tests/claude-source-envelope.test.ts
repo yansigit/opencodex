@@ -63,6 +63,39 @@ describe("claude source envelope – anthropic adapter", () => {
     expect((body.messages as any)[1].content[0].signature).toBe("AbCdEf1234567890sig==");
   });
 
+  test("validates explicit cache breakpoints without moving or deleting them", async () => {
+    const adapter = createAnthropicAdapter({ adapter: "anthropic", baseUrl: "https://api.anthropic.com", apiKey: "sk-test" });
+    const cache = (ttl?: "1h" | "5m") => ({ type: "ephemeral", ...(ttl ? { ttl } : {}) });
+    const build = (body: Record<string, unknown>) => adapter.buildRequest(
+      makeParsed({ _claudeSourceEnvelope: { body, headers: {} } }),
+      { headers: new Headers(), translatorBudget: budget() } as any,
+    );
+
+    await expect(build({
+      model: "x",
+      tools: Array.from({ length: 5 }, (_, i) => ({ name: `t${i}`, input_schema: {}, cache_control: cache() })),
+      messages: [{ role: "user", content: "hi" }],
+    })).rejects.toThrow(/too many cache_control breakpoints/);
+
+    await expect(build({
+      model: "x",
+      tools: [{ name: "short", input_schema: {}, cache_control: cache("5m") }],
+      messages: [{ role: "user", content: [{ type: "text", text: "long", cache_control: cache("1h") }] }],
+    })).rejects.toThrow(/invalid cache_control ttl ordering/);
+
+    const valid = {
+      model: "x",
+      tools: [{ name: "long", input_schema: {}, cache_control: cache("1h") }],
+      system: [{ type: "text", text: "short", cache_control: cache("5m") }],
+      messages: [{ role: "user", content: [{ type: "text", text: "default", cache_control: cache() }] }],
+    };
+    const request = await build(valid);
+    const output = JSON.parse(request.body);
+    expect(output.tools[0].cache_control).toEqual(cache("1h"));
+    expect(output.system[0].cache_control).toEqual(cache("5m"));
+    expect(output.messages[0].content[0].cache_control).toEqual(cache());
+  });
+
   test("does not mutate source envelope on per-attempt clone", async () => {
     const provider = { adapter: "anthropic" as const, baseUrl: "https://api.anthropic.com", apiKey: "sk-test" };
     const adapter = createAnthropicAdapter(provider);

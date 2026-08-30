@@ -262,4 +262,47 @@ describe("claude session precedence and prompt_cache_key", () => {
     // (validated by handleResponses promptCacheKeyIsSharedCohort: cacheKeySource === "system")
     expect(headerKey.length).toBe(32);
   });
+  test("claudeFinalRouteHandler: auto-only gate rejects any/tool for muse-spark-1.2-contributor, allows auto/none/absent and non-list models", async () => {
+    const { AnthropicRequestError } = await import("../src/claude/inbound");
+    const cfgShadow = cfg({ claudeCode: { model: "claude", compatibility: "shadow" } } as unknown as Partial<OcxConfig>);
+    const parsed: { options: Record<string, unknown>; modelId: string; _rawBody?: unknown } = { modelId: "m", options: {}, _rawBody: {} };
+    const logCtx = {} as unknown as import("../src/server/request-log").RequestLogContext;
+    const anyEnv = captureClaudeSourceEnvelope(new Request("http://localhost/v1/messages"), { model: "claude", tool_choice: { type: "any" } } as unknown as Record<string, unknown>, createTranslatorBudget());
+    const toolEnv = captureClaudeSourceEnvelope(new Request("http://localhost/v1/messages"), { model: "claude", tool_choice: { type: "tool", name: "x" } } as unknown as Record<string, unknown>, createTranslatorBudget());
+    const autoEnv = captureClaudeSourceEnvelope(new Request("http://localhost/v1/messages"), { model: "claude", tool_choice: { type: "auto" } } as unknown as Record<string, unknown>, createTranslatorBudget());
+    const noneEnv = captureClaudeSourceEnvelope(new Request("http://localhost/v1/messages"), { model: "claude", tool_choice: { type: "none" } } as unknown as Record<string, unknown>, createTranslatorBudget());
+    const noTcEnv = captureClaudeSourceEnvelope(new Request("http://localhost/v1/messages"), { model: "claude" }, createTranslatorBudget());
+    const opencodeGoList = ["kimi-k2.7-code", "kimi-k2.7-code-highspeed", "muse-spark-1.2-contributor"];
+    // reject any / tool for listed model
+    expect(() => claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: opencodeGoList }, providerName: "opencode-go", modelId: "muse-spark-1.2-contributor" }, { sourceEnvelope: anyEnv, cacheKeySource: null, config: cfgShadow, logCtx }))
+      .toThrow(AnthropicRequestError);
+    expect(() => claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: opencodeGoList }, providerName: "opencode-go", modelId: "muse-spark-1.2-contributor" }, { sourceEnvelope: toolEnv, cacheKeySource: null, config: cfgShadow, logCtx }))
+      .toThrow(AnthropicRequestError);
+    // colon suffix variant matches via modelInList
+    expect(() => claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: opencodeGoList }, providerName: "opencode-go", modelId: "muse-spark-1.2-contributor:high" }, { sourceEnvelope: anyEnv, cacheKeySource: null, config: cfgShadow, logCtx }))
+      .toThrow(AnthropicRequestError);
+    // allow auto / none / absent
+    expect(() => claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: opencodeGoList }, providerName: "opencode-go", modelId: "muse-spark-1.2-contributor" }, { sourceEnvelope: autoEnv, cacheKeySource: null, config: cfgShadow, logCtx }))
+      .not.toThrow();
+    expect(() => claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: opencodeGoList }, providerName: "opencode-go", modelId: "muse-spark-1.2-contributor" }, { sourceEnvelope: noneEnv, cacheKeySource: null, config: cfgShadow, logCtx }))
+      .not.toThrow();
+    expect(() => claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: opencodeGoList }, providerName: "opencode-go", modelId: "muse-spark-1.2-contributor" }, { sourceEnvelope: noTcEnv, cacheKeySource: null, config: cfgShadow, logCtx }))
+      .not.toThrow();
+    // non-list model passes even with any/tool
+    expect(() => claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: opencodeGoList }, providerName: "opencode-go", modelId: "other-model" }, { sourceEnvelope: anyEnv, cacheKeySource: null, config: cfgShadow, logCtx }))
+      .not.toThrow();
+    // different provider without the model also passes
+    expect(() => claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: ["kimi-k2.7-code"] }, providerName: "other", modelId: "muse-spark-1.2-contributor" }, { sourceEnvelope: anyEnv, cacheKeySource: null, config: cfgShadow, logCtx }))
+      .not.toThrow();
+    // error message contains remedy and route ids
+    try {
+      claudeFinalRouteHandler(parsed, { provider: { adapter: "openai-responses", autoToolChoiceOnlyModels: opencodeGoList }, providerName: "opencode-go", modelId: "muse-spark-1.2-contributor" }, { sourceEnvelope: anyEnv, cacheKeySource: null, config: cfgShadow, logCtx });
+      throw new Error("expected to throw");
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain("muse-spark-1.2-contributor");
+      expect(msg).toContain("opencode-go");
+      expect(msg).toContain("auto");
+    }
+  });
 });
