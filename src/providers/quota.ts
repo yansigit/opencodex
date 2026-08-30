@@ -1851,6 +1851,94 @@ async function fetchKimiQuota(provider: string, config: OcxProviderConfig): Prom
   return quota ? report(provider, "kimi:usages", quota) : null;
 }
 
+function parseCommandCodeWindow(value: unknown): { percent: number; resetAt?: number } | null {
+  const row = asRecord(value);
+  if (!row) return null;
+  const cap = toFiniteNumber(row.cap);
+  const used = toFiniteNumber(row.used);
+  const percent = cap !== undefined && used !== undefined && cap > 0 && used >= 0
+    ? normalizePercent((used / cap) * 100)
+    : normalizePercent(row.percent);
+  if (percent === undefined) return null;
+  const resetAt = quotaResetAt(row);
+  return { percent, ...(resetAt !== undefined ? { resetAt } : {}) };
+}
+
+async function fetchCommandCodeJson(url: string, bearer: string): Promise<Record<string, unknown> | null> {
+  try {
+    const response = await fetch(url, {
+      headers: { Accept: "application/json", Authorization: `Bearer ${bearer}` },
+      redirect: "error",
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    return asRecord(await readQuotaJson(response));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Soft-fail period spend (used) against the remaining credit pools → creditsUsd.
+ * Period scoping: `since=<currentPeriodStart>` keeps spend aligned with the
+ * pools' billing cycle, and `currentPeriodEnd` becomes expiresAt.
+ */
+async function fetchCommandCodeSpend(
+  bearer: string,
+  credits: Record<string, unknown> | null,
+  orgQuery: string,
+): Promise<ProviderQuotaCreditsUsd | undefined> {
+  if (!credits) return undefined;
+  const subscriptionBody = await fetchCommandCodeJson(`${COMMAND_CODE_SUBSCRIPTIONS_URL}${orgQuery}`, bearer);
+  const subscription = asRecord(subscriptionBody?.data) ?? subscriptionBody;
+  const periodStart = typeof subscription?.currentPeriodStart === "string" ? subscription.currentPeriodStart.trim() : "";
+  // Unscoped /usage/summary is lifetime spend; mixing it with current-cycle
+  // remaining pools produces a wrong percent. Omit creditsUsd until a period exists.
+  if (!periodStart) return undefined;
+  const sinceQuery = `${orgQuery ? "&" : "?"}since=${encodeURIComponent(periodStart)}`;
+  const expiresAt = normalizeResetAt(subscription?.currentPeriodEnd);
+  const summaryBody = await fetchCommandCodeJson(`${COMMAND_CODE_USAGE_URL}${orgQuery}${sinceQuery}`, bearer);
+  const summary = asRecord(summaryBody?.data) ?? summaryBody;
+  const used = toFiniteNumber(summary?.totalCost) ?? toFiniteNumber(summary?.totalMonthlyCredits);
+  if (used === undefined || used < 0) return undefined;
+  const pools = [credits.monthlyCredits, credits.purchasedCredits, credits.freeCredits]
+    .map(value => toFiniteNumber(value))
+    .filter((value): value is number => value !== undefined);
+  // Field presence is what separates a real balance from absent data: an exhausted
+  // all-zero account still reports remaining=0, while no remaining-credit field at
+  // all means there is nothing to meter.
+  if (pools.length === 0) return undefined;
+  const remaining = pools.reduce((sum, value) => sum + Math.max(0, value ?? 0), 0);
+  const limit = used + remaining;
+  const percent = normalizePercent(limit > 0 ? (used / limit) * 100 : 0);
+  // Purchased credits roll over past the subscription period end, so an expiry is
+  // only truthful when the aggregate contains no non-expiring purchased pool.
+  const purchased = toFiniteNumber(credits.purchasedCredits) ?? 0;
+  return percent === undefined
+    ? undefined
+    : {
+        used,
+        limit,
+        remaining,
+        percent,
+        ...(expiresAt !== undefined && purchased <= 0 ? { expiresAt } : {}),
+      };
+}
+
+/** OAuth access token or ACTIVE Provider-API key for the Command Code quota probe. */
+async function resolveCommandCodeQuotaBearer(config: OcxProviderConfig): Promise<string | null> {
+  if (config.authMode === "oauth") {
+    try {
+      return await getValidAccessToken("command-code");
+    } catch {
+      return null;
+    }
+  }
+  // ACTIVE key only: a quota bar for a different account than the one routing
+  // requests is a wrong meter, not a helpful one.
+  return resolveEnvValue(config.apiKey)?.trim() || null;
+}
+
 async function fetchCommandCodeUsageQuota(bearer: string): Promise<ProviderQuota | null | typeof TERMINAL_QUOTA_FAILURE> {
   const whoamiBody = await fetchCommandCodeJson(COMMAND_CODE_WHOAMI_URL, bearer);
   const whoami = asRecord(whoamiBody?.data) ?? whoamiBody;
@@ -2119,7 +2207,7 @@ function antigravityUsedPercent(quotaInfo: Record<string, unknown>): number | un
   const remaining = normalizePercent(toFiniteNumber(quotaInfo.remainingFraction) !== undefined
     ? toFiniteNumber(quotaInfo.remainingFraction)! * 100
     : toFiniteNumber(quotaInfo.remainingPercentage) !== undefined
-      ? toFiniteNumber(quotaInfo.remainingPercentage)! * 100
+      ? toFiniteNumber(quotaInfo.remainingPercentage)!
       : undefined);
   if (remaining === undefined) return undefined;
   return normalizePercent(100 - remaining);

@@ -210,6 +210,7 @@ import {
 import { codexAuthContextLogLabel } from "../../codex/account-label";
 import {
   applyUpstreamRecoveryInit,
+  fetchWithResetRetry,
   fetchWithTransientRetry,
   prepareSameTarget429Wait,
   sleepWithAbort,
@@ -2914,6 +2915,7 @@ async function handleResponsesInner(
   logCtx.configuredSpeedLabel = requestLogSpeedLabel(logCtx.configuredServiceTier);
 
   let route: RouteResult;
+  let shadowIntercepted = false;
   try {
     const resolveRoute = (modelId: string) => options.comboAttempt
       ? routeConcreteModel(config, modelId)
@@ -2945,6 +2947,7 @@ async function handleResponsesInner(
         // Helpers must not resume/append into the parent thread's Cursor conversation.
         parsed._cursorIsolateConversation = true;
         shadowRoute = targetRoute;
+        shadowIntercepted = true;
       }
     }
     if (parsed._compactionRequest === true) parsed._cursorIsolateConversation = true;
@@ -4252,7 +4255,7 @@ async function handleResponsesInner(
               return res;
             });
         },
-        { abortSignal: upstream.signal, label: safeHostLabel(request.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
+        { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
       );
     } catch (err) {
       return transportFailureResponse(err);
@@ -4328,7 +4331,7 @@ async function handleResponsesInner(
                 return response;
               });
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
         );
       } catch (err) {
         return { failed: transportFailureResponse(err) };
@@ -4542,7 +4545,7 @@ async function handleResponsesInner(
                 return res;
               });
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
         );
       } catch (err) {
         return transportFailureResponse(err);
@@ -4604,7 +4607,7 @@ async function handleResponsesInner(
                 return res;
               });
           },
-          { abortSignal: upstream.signal, label: safeHostLabel(request.url), replayTransientFailures: route.provider.replayTransientFailures, replayBudget },
+          { abortSignal: upstream.signal, label: safeHostLabel(request.url) },
         );
       } catch (err) {
         return transportFailureResponse(err);
@@ -6056,9 +6059,7 @@ async function handleResponsesInner(
           label: safeHostLabel(builtInitialRequest.url),
           ...(transientPolicy
             ? { attempts: transientPolicy.attempts, onSendsConsumed: noteTransientSends }
-            : route.provider.replayTransientFailures
-              ? { replayTransientFailures: route.provider.replayTransientFailures, replayBudget }
-              : {}),
+            : {}),
         },
       );
     }
@@ -6796,14 +6797,12 @@ async function handleResponsesInner(
             // Same request-scoped budget as the initial send and the 429/rotation refetches:
             // a terminal-guard continuation is another leg of ONE request, so handing it a
             // fresh `attempts` would let one request exceed the configured total-send ceiling.
-            ...(continuationTransientPolicy
+              ...(continuationTransientPolicy
               ? {
                 attempts: remainingTransientSendBudget(continuationTransientPolicy.attempts),
                 onSendsConsumed: noteTransientSends,
               }
-              : route.provider.replayTransientFailures
-                ? { replayTransientFailures: route.provider.replayTransientFailures, replayBudget }
-                : {}),
+              : {}),
           },
           );
       } finally {
