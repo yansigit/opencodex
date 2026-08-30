@@ -180,9 +180,9 @@ jobs:
           private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
-          permission-actions: write
+          permission-contents: write
 
-      - name: Dispatch Release workflow
+      - name: Dispatch Release event
         if: steps.decide.outputs.dispatch == 'true' && steps.live-main.outputs.dispatch == 'true'
         env:
           GH_TOKEN: ${{ steps.release-dispatch-app-token.outputs.token }}
@@ -190,8 +190,8 @@ jobs:
           VERSION: ${{ steps.decide.outputs.version }}
         run: |
           set -euo pipefail
-          gh workflow run release.yml --ref main \
-            -f "version=$VERSION" \
-            -f "tag=latest" \
-            -f "expected-sha=$HEAD_SHA" \
-            -f "dry-run=false"
+          jq -n \
+            --arg version "$VERSION" \
+            --arg expected_sha "$HEAD_SHA" \
+            '{event_type:"fork-auto-release",client_payload:{version:$version,tag:"latest",expected_sha:$expected_sha}}' |
+            gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" --input -
