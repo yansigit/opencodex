@@ -706,7 +706,7 @@ export function buildCursorToolGuidanceSystemNote(
     hasBareExec
       ? `NEVER attempt Cursor-native Shell, Read, Grep, List, or any tool not in the catalog above — they are not executed locally in this environment and every attempt wastes a turn and can stall the session. ${shellBridgeLabel} is the ONLY shell surface; go to it directly on the FIRST attempt, never as a fallback after probing a native tool. Do not narrate switching surfaces ("native is blocked, using the bridge instead") — there is exactly one surface.`
       : undefined,
-    hasBareExec
+    (hasBareExec || codeMode)
       ? "Tool-selection commentary is forbidden: for any shell, read, grep, list, or file operation, your FIRST visible action is the bridge call itself — never a sentence about which tool you will use, which tool was redirected, or switching surfaces. Words like 차단/전환/blocked/switching must not appear in your output for tool-routing reasons."
       : undefined,
     hasBareExec
