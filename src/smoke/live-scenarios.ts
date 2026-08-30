@@ -117,7 +117,9 @@ export function parseClaudeMessageResponse(body: string): ParsedClaudeMessage {
       } else if (data.type === "message_delta" && data.delta && typeof data.delta === "object" && typeof data.delta.stop_reason === "string") {
         stopReason = data.delta.stop_reason;
       }
-    } catch {}
+    } catch {
+      continue;
+    }
   }
   closeBlock();
   return { type: "message", role: "assistant", content, stop_reason: stopReason };
