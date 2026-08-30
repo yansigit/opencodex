@@ -639,7 +639,7 @@ jobs:
           github.event_name == 'workflow_dispatch' ||
           (github.event_name == 'push' &&
            (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview'))
-        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests
+        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --timeout 60000
 
       - name: CLI help smoke
         run: bun run src/cli/index.ts help

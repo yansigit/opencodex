@@ -218,7 +218,7 @@ jobs:
         if: steps.verify-main.outputs.eligible == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.PR_AUTOMATION_APP_ID }}
+          client-id: ${{ vars.PR_AUTOMATION_APP_ID }}
           private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
@@ -421,7 +421,7 @@ jobs:
         if: steps.verify-release.outputs.action == 'bump'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ vars.PR_AUTOMATION_APP_ID }}
+          client-id: ${{ vars.PR_AUTOMATION_APP_ID }}
           private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}

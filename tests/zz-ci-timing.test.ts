@@ -158,6 +158,9 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
   expect(focused?.run).not.toContain("tests/aistudio-native-webkit.test.ts");
   expect(focused?.run).toContain("tests/test-runner.test.ts");
   expect(focused?.run).toContain("tests/cursor-native-exec-shell.test.ts");
+  const full = ci.jobs["platform-macos"].steps?.find(step => step.name === "Full macOS suite");
+  expect(full?.run).toContain("bun scripts/test.ts --timeout 60000");
+  expect(full?.run).not.toContain("--update-timings");
 });
 
 test("nightly macOS is timed at 08:17 UTC and names its timing file", async () => {
