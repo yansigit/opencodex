@@ -287,7 +287,8 @@ jobs:
     if: >-
       github.event_name == 'workflow_run' &&
       github.event.workflow_run.name == 'Release' &&
-      github.event.workflow_run.event == 'workflow_dispatch' &&
+      (github.event.workflow_run.event == 'workflow_dispatch' ||
+       github.event.workflow_run.event == 'repository_dispatch') &&
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-latest

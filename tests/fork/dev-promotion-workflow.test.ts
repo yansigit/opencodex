@@ -156,6 +156,7 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("post_release:");
     expect(workflowSource).toContain("github.event.workflow_run.name == 'Release'");
     expect(workflowSource).toContain("github.event.workflow_run.event == 'workflow_dispatch'");
+    expect(workflowSource).toContain("github.event.workflow_run.event == 'repository_dispatch'");
     expect(workflowSource).toContain("github.event.workflow_run.head_branch == 'main'");
     expect(workflowSource).toContain("WORKFLOW_PATH: ${{ github.event.workflow_run.path || '' }}");
     expect(workflowSource).toContain("WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name || '' }}");

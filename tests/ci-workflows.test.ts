@@ -675,6 +675,8 @@ describe("GitHub Actions hardening", () => {
     // Keep the workflow unprivileged by default. Dispatch validation gets only
     // read access; write + OIDC permissions exist only on the gated publish job.
     expect(release.permissions).toEqual({});
+    expect(workflow).toContain("repository_dispatch:\n    types: [fork-auto-release]");
+    expect(workflow).toContain("github.event.client_payload.expected_sha");
     
     expect(release.jobs?.["validate-dispatch"]?.["runs-on"]).toBe("ubuntu-latest");
     expect(release.jobs?.["validate-dispatch"]?.permissions).toEqual({

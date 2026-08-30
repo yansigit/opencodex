@@ -63,7 +63,7 @@ describe("fork auto-release workflow contract", () => {
     expect(workflowText).toContain("ref: ${{ github.event.workflow_run.head_sha }}");
   });
 
-  test("dispatches only release.yml with the audited SHA", () => {
+  test("dispatches only the audited stable release event", () => {
     const steps = workflow.jobs?.["auto-release"]?.steps ?? [];
     expect(steps.find(step => step.uses?.startsWith("actions/create-github-app-token@"))).toMatchObject({
       id: "release-dispatch-app-token",
@@ -73,14 +73,14 @@ describe("fork auto-release workflow contract", () => {
         "private-key": "${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}",
         owner: "${{ github.repository_owner }}",
         repositories: "${{ github.event.repository.name }}",
-        "permission-actions": "write",
+        "permission-contents": "write",
       },
     });
-    expect(workflowText).toContain("gh workflow run release.yml --ref main");
+    expect(workflowText).toContain('event_type:"fork-auto-release"');
+    expect(workflowText).toContain('gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" --input -');
     expect(workflowText).toContain("GH_TOKEN: ${{ steps.release-dispatch-app-token.outputs.token }}");
-    expect(workflowText).toContain('-f "expected-sha=$HEAD_SHA"');
-    expect(workflowText).toContain('-f "dry-run=false"');
-    expect(workflowText).not.toMatch(/gh workflow run (?!release\.yml\b)/);
+    expect(workflowText).toContain("expected_sha:$expected_sha");
+    expect(workflowText).not.toContain("gh workflow run");
     expect(workflowText).not.toMatch(/^\s*npm publish\b/m);
   });
 
