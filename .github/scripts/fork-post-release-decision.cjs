@@ -23,7 +23,8 @@ function decidePostRelease(state) {
 
   if (state.devSha === state.mainSha) return "bump";
   if (state.devIsAncestor && state.treesIdentical) return "bump";
-  if (state.mainIsAncestor && state.packageOnly && state.devVersion === state.nextVersion) return "noop";
+  if (state.mainIsAncestor && state.devVersion === state.releaseVersion) return "bump";
+  if (state.mainIsAncestor && state.devVersion === state.nextVersion) return "noop";
   return "skip";
 }
 

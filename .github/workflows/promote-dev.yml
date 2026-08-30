@@ -193,6 +193,11 @@ jobs:
           if ! jq -e --arg sha "$verified_main_sha" \
             'any(.[]; .headSha == $sha and .headBranch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")' \
             <<<"$ci_runs" >/dev/null; then
+            if [ "$EVENT_BRANCH" = dev ]; then
+              echo "::notice::main CI is not green yet; its workflow_run will retry reconciliation"
+              echo "eligible=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "::error::no successful Cross-platform CI push run exists for verified main"
             exit 1
           fi
@@ -362,7 +367,6 @@ jobs:
           dev_is_ancestor=false
           trees_identical=false
           main_is_ancestor=false
-          package_only=false
           dev_version=
           if [ "$live_dev_sha" != "$EXPECTED_RELEASE_SHA" ]; then
             if git merge-base --is-ancestor "$live_dev_sha" "$EXPECTED_RELEASE_SHA" && git diff --quiet "$EXPECTED_RELEASE_SHA" "$live_dev_sha" --; then
@@ -370,13 +374,10 @@ jobs:
               trees_identical=true
             elif git merge-base --is-ancestor "$EXPECTED_RELEASE_SHA" "$live_dev_sha"; then
               main_is_ancestor=true
-              if [ "$(git diff --name-only "$EXPECTED_RELEASE_SHA" "$live_dev_sha")" = "package.json" ]; then
-                package_only=true
-                dev_version="$(git show "$live_dev_sha:package.json" | node -e 'const fs = require("fs"); const pkg = JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(pkg.version || "")')"
-              fi
+              dev_version="$(git show "$live_dev_sha:package.json" | node -e 'const fs = require("fs"); const pkg = JSON.parse(fs.readFileSync(0, "utf8")); process.stdout.write(pkg.version || "")')"
             fi
           fi
-          action="$(WORKFLOW_NAME="$WORKFLOW_NAME" WORKFLOW_EVENT="$WORKFLOW_EVENT" WORKFLOW_BRANCH="$WORKFLOW_BRANCH" WORKFLOW_PATH="$WORKFLOW_PATH" WORKFLOW_REPOSITORY="$WORKFLOW_REPOSITORY" EXPECTED_REPOSITORY="$EXPECTED_REPOSITORY" RELEASE_VERSION="$release_version" PUBLISHED_VERSION="$published_version" RELEASE_RUN_STARTED_AT="$RELEASE_RUN_STARTED_AT" RELEASE_PUBLISHED_AT="$release_published_at" TAG_SHA="$tag_sha" EXPECTED_SHA="$EXPECTED_RELEASE_SHA" MAIN_SHA="$EXPECTED_RELEASE_SHA" DEV_SHA="$live_dev_sha" NEXT_VERSION="$next_version" DEV_IS_ANCESTOR="$dev_is_ancestor" TREES_IDENTICAL="$trees_identical" MAIN_IS_ANCESTOR="$main_is_ancestor" PACKAGE_ONLY="$package_only" DEV_VERSION="$dev_version" node -e '
+          action="$(WORKFLOW_NAME="$WORKFLOW_NAME" WORKFLOW_EVENT="$WORKFLOW_EVENT" WORKFLOW_BRANCH="$WORKFLOW_BRANCH" WORKFLOW_PATH="$WORKFLOW_PATH" WORKFLOW_REPOSITORY="$WORKFLOW_REPOSITORY" EXPECTED_REPOSITORY="$EXPECTED_REPOSITORY" RELEASE_VERSION="$release_version" PUBLISHED_VERSION="$published_version" RELEASE_RUN_STARTED_AT="$RELEASE_RUN_STARTED_AT" RELEASE_PUBLISHED_AT="$release_published_at" TAG_SHA="$tag_sha" EXPECTED_SHA="$EXPECTED_RELEASE_SHA" MAIN_SHA="$EXPECTED_RELEASE_SHA" DEV_SHA="$live_dev_sha" NEXT_VERSION="$next_version" DEV_IS_ANCESTOR="$dev_is_ancestor" TREES_IDENTICAL="$trees_identical" MAIN_IS_ANCESTOR="$main_is_ancestor" DEV_VERSION="$dev_version" node -e '
             const { decidePostRelease } = require("./.github/scripts/fork-post-release-decision.cjs");
             const truth = value => value === "true";
             process.stdout.write(decidePostRelease({
@@ -399,7 +400,6 @@ jobs:
               devIsAncestor: truth(process.env.DEV_IS_ANCESTOR),
               treesIdentical: truth(process.env.TREES_IDENTICAL),
               mainIsAncestor: truth(process.env.MAIN_IS_ANCESTOR),
-              packageOnly: truth(process.env.PACKAGE_ONLY),
               devVersion: process.env.DEV_VERSION,
             }));
           ')"
@@ -409,8 +409,11 @@ jobs:
             echo "::error::post-release state failed closed"
             exit 1
           fi
+          bump_base_sha="$EXPECTED_RELEASE_SHA"
+          [ "$main_is_ancestor" = true ] && bump_base_sha="$live_dev_sha"
           {
             echo "action=$action"
+            echo "bump_base_sha=$bump_base_sha"
             echo "verified_main_sha=$EXPECTED_RELEASE_SHA"
             echo "verified_dev_sha=$live_dev_sha"
             echo "next_version=$next_version"
@@ -435,6 +438,7 @@ jobs:
           GIT_TERMINAL_PROMPT: 0
           VERIFIED_MAIN_SHA: ${{ steps.verify-release.outputs.verified_main_sha }}
           VERIFIED_DEV_SHA: ${{ steps.verify-release.outputs.verified_dev_sha }}
+          VERIFIED_BASE_SHA: ${{ steps.verify-release.outputs.bump_base_sha }}
           NEXT_VERSION: ${{ steps.verify-release.outputs.next_version }}
           RELEASE_VERSION: ${{ steps.verify-release.outputs.release_version }}
         run: |
@@ -445,9 +449,9 @@ jobs:
             echo "::error::main or dev moved before the post-release mutation"
             exit 1
           fi
-          git switch --detach --quiet "$VERIFIED_MAIN_SHA"
-          if [ "$(git rev-parse HEAD)" != "$VERIFIED_MAIN_SHA" ]; then
-            echo "::error::release bump commit would not be based on released main"
+          git switch --detach --quiet "$VERIFIED_BASE_SHA"
+          if [ "$(git rev-parse HEAD)" != "$VERIFIED_BASE_SHA" ]; then
+            echo "::error::release bump commit would not use the verified base"
             exit 1
           fi
           npm version patch --no-git-tag-version --ignore-scripts >/dev/null
@@ -466,8 +470,8 @@ jobs:
           git add package.json
           git commit -m "chore: advance development version"
           new_dev_sha="$(git rev-parse HEAD)"
-          if [ "$(git rev-parse HEAD^)" != "$VERIFIED_MAIN_SHA" ]; then
-            echo "::error::post-release dev commit parent is not released main"
+          if [ "$(git rev-parse HEAD^)" != "$VERIFIED_BASE_SHA" ]; then
+            echo "::error::post-release dev commit parent is not the verified base"
             exit 1
           fi
           if ! git merge-base --is-ancestor "$VERIFIED_DEV_SHA" "$new_dev_sha"; then

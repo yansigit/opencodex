@@ -35,8 +35,12 @@ test("dev ancestor of identical-tree main requests a bump", () => {
   assert.equal(decidePostRelease({ ...base, mainSha: "main-sha", devSha: "dev-sha", devIsAncestor: true, treesIdentical: true }), "bump");
 });
 
-test("main ancestor of package-only exact successor is idempotent", () => {
-  assert.equal(decidePostRelease({ ...base, devSha: "dev-sha", mainSha: "main-sha", mainIsAncestor: true, packageOnly: true, devVersion: "2.36.1" }), "noop");
+test("main ancestor already carrying the exact successor is idempotent", () => {
+  assert.equal(decidePostRelease({ ...base, devSha: "dev-sha", mainSha: "main-sha", mainIsAncestor: true, devVersion: "2.36.1" }), "noop");
+});
+
+test("main ancestor with newer dev work still carrying the released version requests a bump", () => {
+  assert.equal(decidePostRelease({ ...base, devSha: "dev-sha", mainSha: "main-sha", mainIsAncestor: true, devVersion: "2.36.0" }), "bump");
 });
 
 test("missing or mismatched publication and tag fail closed", () => {
@@ -58,6 +62,6 @@ test("wrong workflow identity and unexpected dev state fail closed", () => {
     { repository: "other/repo" },
     { workflowPath: ".github/workflows/other.yml" },
     { devSha: "other-sha" },
-    { mainIsAncestor: true, packageOnly: true, devVersion: "2.35.9", devSha: "dev-sha" },
+    { mainIsAncestor: true, devVersion: "2.35.9", devSha: "dev-sha" },
   ]) assert.equal(decidePostRelease({ ...base, ...change }), "skip");
 });

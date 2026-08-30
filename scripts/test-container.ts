@@ -1,5 +1,5 @@
 const MINIMUM_CONTAINER_VERSION = [1, 3, 0];
-const image = "opencodex-test";
+const image = `opencodex-test-${process.pid}`;
 
 function output(result: ReturnType<typeof Bun.spawnSync>): string {
   return new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr);
@@ -7,6 +7,11 @@ function output(result: ReturnType<typeof Bun.spawnSync>): string {
 
 function command(args: string[]): ReturnType<typeof Bun.spawnSync> {
   return Bun.spawnSync(["container", ...args], { stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+}
+
+function builderExists(): boolean {
+  const result = Bun.spawnSync(["container", "builder", "status", "--quiet"], { stdout: "pipe", stderr: "ignore" });
+  return result.success && new TextDecoder().decode(result.stdout).trim() === "buildkit";
 }
 
 function versionAtLeast(version: string): boolean {
@@ -35,10 +40,30 @@ if (!/^\d+(?:\.\d+)?$/.test(cpus) || Number(cpus) <= 0 || !memoryValue || Number
   throw new Error("OCX_CONTAINER_CPUS must be positive and OCX_CONTAINER_MEMORY must be a positive Container memory value");
 }
 
-requireSuccess(["build", "--tag", image, "--file", "Containerfile.test", "."], "Container image build failed");
-requireSuccess([
-  "run", "--rm", "--init", "--read-only", "--cap-drop", "ALL", "--network", "none", "--no-dns",
-  "--cpus", cpus, "--memory", memory, "--tmpfs", "/tmp", "--tmpfs", "/home/ocx", "--user", "ocx",
-  "--env", "HOME=/home/ocx", "--env", "TMPDIR=/tmp", "--env", "XDG_CACHE_HOME=/home/ocx/.cache",
-  image, "bun", "scripts/test-container-entrypoint.ts",
-], "Container test run failed");
+const sharedBuilder = builderExists();
+if (sharedBuilder && process.env.OCX_CONTAINER_USE_SHARED_BUILDER !== "1") {
+  throw new Error(
+    "Apple Container builder already exists; delete it with `container builder delete --force` or explicitly set OCX_CONTAINER_USE_SHARED_BUILDER=1 to retain its global cache",
+  );
+}
+
+let failure: unknown;
+try {
+  requireSuccess(["build", "--tag", image, "--file", "Containerfile.test", "."], "Container image build failed");
+  requireSuccess([
+    "run", "--rm", "--init", "--read-only", "--cap-drop", "ALL", "--network", "none", "--no-dns",
+    "--cpus", cpus, "--memory", memory, "--tmpfs", "/tmp", "--tmpfs", "/home/ocx", "--user", "ocx",
+    "--env", "HOME=/home/ocx", "--env", "TMPDIR=/tmp", "--env", "XDG_CACHE_HOME=/home/ocx/.cache",
+    image, "bun", "scripts/test-container-entrypoint.ts",
+  ], "Container test run failed");
+} catch (error) {
+  failure = error;
+} finally {
+  if (!command(["image", "delete", "--force", image]).success && !failure) {
+    failure = new Error(`Failed to delete test image ${image}`);
+  }
+  if (!sharedBuilder && !command(["builder", "delete", "--force"]).success && !failure) {
+    failure = new Error("Failed to delete the test-owned Apple Container builder");
+  }
+}
+if (failure) throw failure;

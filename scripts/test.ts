@@ -17,8 +17,10 @@ export function createIsolatedTestEnvironment(
   const root = mkdtempSync(join(tmpdir(), "opencodex-test-"));
   const opencodexHome = join(root, ".opencodex");
   const codexHome = join(root, ".codex");
+  const temp = join(root, "tmp");
   mkdirSync(opencodexHome, { recursive: true });
   mkdirSync(codexHome, { recursive: true });
+  mkdirSync(temp, { recursive: true });
   if (process.platform === "win32") {
     // A Windows sandbox has to look like a real profile, because the known-folder APIs
     // resolve relative to USERPROFILE and .NET returns an EMPTY STRING — not an error —
@@ -54,6 +56,9 @@ export function createIsolatedTestEnvironment(
       GIT_CONFIG_GLOBAL: baseEnv.GIT_CONFIG_GLOBAL ?? join(homedir(), ".gitconfig"),
       HOME: root,
       USERPROFILE: root,
+      TMPDIR: temp,
+      TMP: temp,
+      TEMP: temp,
       OPENCODEX_HOME: opencodexHome,
       CODEX_HOME: codexHome,
     },

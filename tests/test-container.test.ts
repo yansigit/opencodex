@@ -19,6 +19,11 @@ const args = process.argv.slice(2);
 appendFileSync(process.env.OCX_CONTAINER_RECORD!, JSON.stringify(args) + "\\n");
 if (args[0] === "--version") { console.log("container version ${version}"); process.exit(0); }
 if (args[0] === "system" && args[1] === "status") process.exit(${system === "running" ? 0 : 1});
+if (args[0] === "builder" && args[1] === "status") {
+  if (process.env.OCX_FAKE_BUILDER_EXISTS === "1") console.log("buildkit");
+  process.exit(0);
+}
+if (args[0] === process.env.OCX_FAKE_FAIL) process.exit(1);
 process.exit(0);
 `);
   chmodSync(executable, 0o755);
@@ -38,14 +43,21 @@ function output(result: ReturnType<typeof Bun.spawnSync>) { return new TextDecod
 test("build precedes the locked-down run with exact flags", () => {
   const { result, calls } = run();
   expect(result.exitCode).toBe(0);
-  expect(calls[2]).toEqual(["build", "--tag", "opencodex-test", "--file", "Containerfile.test", "."]);
-  expect(calls[3]).toEqual([
+  expect(calls[2]).toEqual(["builder", "status", "--quiet"]);
+  const image = calls[3]?.[2];
+  expect(image).toMatch(/^opencodex-test-\d+$/);
+  expect(calls[3]).toEqual(["build", "--tag", image, "--file", "Containerfile.test", "."]);
+  expect(calls[4]).toEqual([
     "run", "--rm", "--init", "--read-only", "--cap-drop", "ALL", "--network", "none", "--no-dns",
     "--cpus", "8", "--memory", "8G", "--tmpfs", "/tmp", "--tmpfs", "/home/ocx", "--user", "ocx",
     "--env", "HOME=/home/ocx", "--env", "TMPDIR=/tmp", "--env", "XDG_CACHE_HOME=/home/ocx/.cache",
-    "opencodex-test", "bun", "scripts/test-container-entrypoint.ts",
+    image, "bun", "scripts/test-container-entrypoint.ts",
   ]);
-  expect(calls[3].some(arg => ["--mount", "--volume", "--publish", "-p", "--env-file", "--ssh"].includes(arg))).toBe(false);
+  expect(calls[4].some(arg => ["--mount", "--volume", "--publish", "-p", "--env-file", "--ssh"].includes(arg))).toBe(false);
+  expect(calls.slice(5)).toEqual([
+    ["image", "delete", "--force", image],
+    ["builder", "delete", "--force"],
+  ]);
 });
 
 test("rejects positional arguments before touching Container", () => {
@@ -58,8 +70,34 @@ test("rejects positional arguments before touching Container", () => {
 test("passes only resource overrides", () => {
   const { result, calls } = run("running", [], "1.3.0", { OCX_CONTAINER_CPUS: "2", OCX_CONTAINER_MEMORY: "3G" });
   expect(result.exitCode).toBe(0);
-  expect(calls[3]).toContain("2");
-  expect(calls[3]).toContain("3G");
+  expect(calls[4]).toContain("2");
+  expect(calls[4]).toContain("3G");
+});
+
+test("refuses to grow a pre-existing global builder unless explicitly allowed", () => {
+  const refused = run("running", [], "1.3.0", { OCX_FAKE_BUILDER_EXISTS: "1" });
+  expect(refused.result.exitCode).not.toBe(0);
+  expect(output(refused.result)).toContain("OCX_CONTAINER_USE_SHARED_BUILDER=1");
+  expect(refused.calls).toEqual([["--version"], ["system", "status"], ["builder", "status", "--quiet"]]);
+
+  const allowed = run("running", [], "1.3.0", {
+    OCX_FAKE_BUILDER_EXISTS: "1",
+    OCX_CONTAINER_USE_SHARED_BUILDER: "1",
+  });
+  expect(allowed.result.exitCode).toBe(0);
+  expect(allowed.calls.at(-1)?.slice(0, 3)).toEqual(["image", "delete", "--force"]);
+  expect(allowed.calls.some(call => call[0] === "builder" && call[1] === "delete")).toBe(false);
+});
+
+test("cleans its image and builder when the container test fails", () => {
+  const { result, calls } = run("running", [], "1.3.0", { OCX_FAKE_FAIL: "run" });
+  expect(result.exitCode).not.toBe(0);
+  expect(output(result)).toContain("Container test run failed");
+  const image = calls.find(call => call[0] === "build")?.[2];
+  expect(calls.slice(-2)).toEqual([
+    ["image", "delete", "--force", image],
+    ["builder", "delete", "--force"],
+  ]);
 });
 
 test("rejects zero and malformed resources before build", () => {

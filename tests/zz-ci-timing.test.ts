@@ -25,6 +25,8 @@ describe("CI lane manifest", () => {
     expect(new Set(lanes.general).intersection(new Set(lanes.dedicated)).size).toBe(0);
     expect(new Set(lanes.serial).intersection(new Set(lanes.dedicated)).size).toBe(0);
     expect(lanes.serial).toEqual(SERIAL_TEST_FILES);
+    expect(lanes.serial).toContain("tests/server-auth.test.ts");
+    expect(lanes.serial).toContain("tests/shutdown-launcher.test.ts");
     expect(lanes.dedicated).toEqual(DEDICATED_TEST_FILES);
     expect(laneFiles("general", process.cwd())).toEqual(lanes.general);
   });
