@@ -190,7 +190,7 @@ describe("claude session precedence and prompt_cache_key", () => {
 
   test("claudeFinalRouteHandler: compatibility enforce rejects before network (throws AnthropicRequestError)", async () => {
     const { AnthropicRequestError } = await import("../src/claude/inbound");
-    const raw = { model: "claude", context_management: { edits: [] } };
+    const raw = { model: "claude", context_management: { edits: [{ type: "clear_tool_uses_20250919" }] } };
     const env = captureClaudeSourceEnvelope(new Request("http://localhost/v1/messages"), raw, createTranslatorBudget());
     const parsed: { options: Record<string, unknown>; modelId: string; _rawBody?: unknown } = { modelId: "m", options: {}, _rawBody: {} };
     const logCtx = {} as unknown as import("../src/server/request-log").RequestLogContext;
