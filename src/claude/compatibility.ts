@@ -132,6 +132,11 @@ function hasDocuments(body: Rec): boolean {
     for (const b of content) {
       if (!isRec(b)) continue;
       if (b.type === "document") return true;
+      if (b.type === "tool_result" && Array.isArray(b.content)) {
+        for (const nested of b.content) {
+          if (isRec(nested) && nested.type === "document") return true;
+        }
+      }
     }
   }
   return false;

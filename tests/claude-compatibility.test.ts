@@ -198,6 +198,34 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     expect(analyzeClaudeCompatibility(serverCodeExec, { mode: "enforce", adapter: "cursor" }).decision).toBe("reject");
   });
 
+  test("analyze: documents nested in tool_result.content reject routed adapters and allow on Anthropic", () => {
+    const nestedDocBody = {
+      messages: [{
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "toolu_123",
+          content: [
+            { type: "text", text: "report output:" },
+            { type: "document", source: { type: "text", media_type: "text/plain", data: "data" } },
+          ],
+        }],
+      }],
+    };
+    expect(collectClaudeFeatureCodes(nestedDocBody, undefined)).toContain("documents");
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      const routed = analyzeClaudeCompatibility(nestedDocBody, { mode: "enforce", adapter });
+      expect(routed.decision).toBe("reject");
+      expect(routed.compatible).toBe(false);
+      expect(routed.reason).toContain("documents");
+    }
+
+    const anthropic = analyzeClaudeCompatibility(nestedDocBody, { mode: "enforce", adapter: "anthropic" });
+    expect(anthropic.decision).toBe("allow");
+    expect(anthropic.compatible).toBe(true);
+    expect(anthropic.featureCodes).toContain("documents");
+  });
+
   test("analyze: beta tokens alone never trigger rejection", () => {
     const r = analyzeClaudeCompatibility({}, { mode: "enforce", anthropicBeta: "deferred-tools-2025-01-01" });
     expect(r.decision).toBe("allow");
