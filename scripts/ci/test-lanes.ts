@@ -7,6 +7,8 @@ export const SERIAL_TEST_FILES = [
   "tests/issue-452-empty-503.test.ts",
   "tests/openai-provider-option-e2e.test.ts",
   "tests/release-helper.test.ts",
+  "tests/server-auth.test.ts",
+  "tests/shutdown-launcher.test.ts",
   "tests/update-stop-first.test.ts",
 ] as const;
 
