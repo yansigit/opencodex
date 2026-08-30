@@ -201,6 +201,36 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     expect(analyzeClaudeCompatibility(serverToolset, { mode: "enforce", adapter: "cursor" }).decision).toBe("reject");
   });
 
+  test("analyze: official custom tools and tool-search-like client names stay routable", () => {
+    const body = {
+      tools: [
+        { type: "custom", name: "calculator", input_schema: { type: "object" } },
+        { type: "custom", name: "tool_search_tool_local", input_schema: { type: "object" } },
+      ],
+      messages: [{
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_1", name: "tool_search_tool_local", input: {} }],
+      }],
+    };
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter });
+      expect(result.decision).toBe("allow");
+      expect(result.featureCodes).not.toContain("server_tool");
+      expect(result.featureCodes).not.toContain("tool_search");
+    }
+  });
+
+  test("analyze: server MCP history is classified as mcp_tool and fails closed", () => {
+    for (const type of ["mcp_tool_use", "mcp_tool_result"]) {
+      const result = analyzeClaudeCompatibility({
+        messages: [{ role: "assistant", content: [{ type }] }],
+      }, { mode: "enforce", adapter: "openai-responses" });
+      expect(result.decision).toBe("reject");
+      expect(result.featureCodes).toContain("mcp_tool");
+      expect(result.featureCodes).not.toContain("unknown_content_block");
+    }
+  });
+
   test("analyze: client-executed function tools containing code_execution stay routable, server code execution does not", () => {
     const clientTool = {
       tools: [{ type: "function", name: "run_code_execution", input_schema: { type: "object" } }],

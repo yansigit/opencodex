@@ -119,7 +119,7 @@ function hasGenuineSignedThinking(body: Rec): boolean {
 const KNOWN_CONTENT_TYPES = new Set([
   "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking",
   "document", "server_tool_use", "web_search_tool_result", "code_execution_tool_result",
-  "tool_search_tool_result",
+  "tool_search_tool_result", "mcp_tool_use", "mcp_tool_result",
 ]);
 
 function hasDocuments(body: Rec): boolean {
@@ -220,7 +220,15 @@ function hasMcpTool(body: Rec): boolean {
     for (const t of tools) {
       if (!isRec(t)) continue;
       const type = typeof t.type === "string" ? t.type : "";
-      if (type.startsWith("mcp")) return true;
+      if (type === "mcp_toolset") return true;
+    }
+  }
+  const msgs = body.messages;
+  if (!Array.isArray(msgs)) return false;
+  for (const m of msgs) {
+    if (!isRec(m) || !Array.isArray(m.content)) continue;
+    for (const b of m.content) {
+      if (isRec(b) && (b.type === "mcp_tool_use" || b.type === "mcp_tool_result")) return true;
     }
   }
   return false;
@@ -275,11 +283,9 @@ function hasGenericServerTool(body: Rec): boolean {
     if (!isRec(t)) continue;
     // Exclude known function tools, tool_search, and already-classified server tools
     const type = typeof t.type === "string" ? t.type : "";
-    const name = typeof t.name === "string" ? t.name : "";
-    if (name === "tool_search" || name.startsWith("tool_search_tool_")) continue;
     if (type === "tool_search" || type.startsWith("tool_search_tool_")) continue;
-    if (type.includes("web_search") || type.includes("code_execution") || type.includes("computer") || type.startsWith("mcp")) continue;
-    if (type && type !== "function") return true;
+    if (type.includes("web_search") || type.includes("code_execution") || type.includes("computer") || type === "mcp_toolset") continue;
+    if (type && type !== "function" && type !== "custom") return true;
     if (type && typeof t.name !== "string") return true;
   }
   const msgs2 = body.messages;
@@ -307,7 +313,6 @@ function hasToolSearch(body: Rec): boolean {
     for (const t of tools) {
       if (!isRec(t)) continue;
       if (typeof t.type === "string" && (t.type === "tool_search" || t.type.startsWith("tool_search_tool_"))) return true;
-      if (typeof t.name === "string" && (t.name === "tool_search" || t.name.startsWith("tool_search_tool_"))) return true;
     }
   }
   const msgs = body.messages;
@@ -319,7 +324,7 @@ function hasToolSearch(body: Rec): boolean {
       for (const b of content) {
         if (!isRec(b)) continue;
         if (b.type === "tool_search_tool_result") return true;
-        if ((b.type === "tool_use" || b.type === "server_tool_use")
+        if (b.type === "server_tool_use"
           && typeof b.name === "string"
           && (b.name === "tool_search" || b.name.startsWith("tool_search_tool_"))) return true;
       }
