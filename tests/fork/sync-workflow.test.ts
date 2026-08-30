@@ -27,6 +27,11 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("pull-requests: write");
   });
 
+  test("uses the supported GitHub App token input", () => {
+    expect(workflow).toContain("client-id: ${{ vars.PR_AUTOMATION_APP_ID }}");
+    expect(workflow).not.toContain("app-id:");
+  });
+
   test("uses the deploy key for every push that may carry workflow files", () => {
     const pushLines = workflow.match(/^\s+.*git push .*$/gm) ?? [];
 

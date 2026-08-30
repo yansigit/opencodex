@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 25
     permissions:
       contents: read
-      actions: write
+      actions: read
     steps:
       - name: Checkout CI head
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -171,10 +171,21 @@ jobs:
           fi
           echo "dispatch=true" >> "$GITHUB_OUTPUT"
 
+      - name: Create release dispatch App token
+        id: release-dispatch-app-token
+        if: steps.decide.outputs.dispatch == 'true' && steps.live-main.outputs.dispatch == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.PR_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-actions: write
+
       - name: Dispatch Release workflow
         if: steps.decide.outputs.dispatch == 'true' && steps.live-main.outputs.dispatch == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.release-dispatch-app-token.outputs.token }}
           HEAD_SHA: ${{ steps.decide.outputs.head-sha }}
           VERSION: ${{ steps.decide.outputs.version }}
         run: |

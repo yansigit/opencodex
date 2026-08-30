@@ -61,6 +61,8 @@ describe("PR automation workflow contract", () => {
   it("creates the App token only for mutating modes and keeps GITHUB_TOKEN for controller writes", () => {
     const source = workflow();
     assert.match(source, /actions\/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3\.2\.0/);
+    assert.match(source, /client-id:\s*\$\{\{ vars\.PR_AUTOMATION_APP_ID \}\}/);
+    assert.doesNotMatch(source, /app-id:/);
     assert.match(source, /PR_AUTOMATION_APP_ID/);
     assert.match(source, /PR_AUTOMATION_PRIVATE_KEY/);
     assert.match(source, /PR_AUTOMATION_MODE/);

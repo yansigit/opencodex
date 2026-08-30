@@ -101,7 +101,7 @@ describe("dev promotion workflow contract", () => {
       if: "steps.verify-main.outputs.eligible == 'true'",
       uses: tokenUse,
       with: {
-        "app-id": "${{ vars.PR_AUTOMATION_APP_ID }}",
+        "client-id": "${{ vars.PR_AUTOMATION_APP_ID }}",
         "private-key": "${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}",
         owner: "${{ github.repository_owner }}",
         repositories: "${{ github.event.repository.name }}",
@@ -112,7 +112,7 @@ describe("dev promotion workflow contract", () => {
       if: "steps.verify-release.outputs.action == 'bump'",
       uses: tokenUse,
       with: {
-        "app-id": "${{ vars.PR_AUTOMATION_APP_ID }}",
+        "client-id": "${{ vars.PR_AUTOMATION_APP_ID }}",
         "private-key": "${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}",
         owner: "${{ github.repository_owner }}",
         repositories: "${{ github.event.repository.name }}",
