@@ -21,26 +21,10 @@ on:
     # because this workflow is `pull_request` (not `pull_request_target`),
     # declares `contents: read`, and reads no secrets.
     #
-    # `push:` stays pinned to the integration lines: it gates the release path,
-    # and this trigger already covers review.
+    # Every integration push needs an exact-head aggregate check for promotion
+    # and release evidence. The `changes` job below keeps expensive work scoped.
   push:
     branches: [main, preview, dev]
-    paths:
-      - "src/**"
-      - "bin/**"
-      - "tests/**"
-      - "scripts/**"
-      - "gui/**"
-      - "integrations/replit-gateway/**"
-      - "assets/**"
-      - ".gitattributes"
-      - ".npmignore"
-      - "package.json"
-      - "bun.lock"
-      - "tsconfig.json"
-      - "README.md"
-      - "LICENSE"
-      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:

@@ -413,9 +413,9 @@ describe("GitHub Actions hardening", () => {
       }
     }
 
-    // The push trigger stays pinned to the release-relevant lines: release.yml
-    // gates on main and preview, so widening this one would pull an unrelated
-    // branch into that path.
+    // Every integration head needs exact push-CI evidence. In particular, a
+    // tree-preserving main backmerge changes no path but promotion still gates
+    // on a successful Cross-platform CI push run for that exact dev SHA.
     const ci = Bun.YAML.parse(await readText(".github/workflows/ci.yml")) as {
       on?: {
         push?: { branches?: string[]; paths?: string[] };
@@ -425,6 +425,7 @@ describe("GitHub Actions hardening", () => {
     };
     expect([...(ci.on?.push?.branches ?? [])].sort())
       .toEqual(["dev", "main", "preview"]);
+    expect(ci.on?.push?.paths).toBeUndefined();
 
     // The PR trigger must carry NO base-branch filter, and the two triggers
     // differ on purpose. GitHub matches `branches:` against the BASE ref, so
@@ -443,9 +444,9 @@ describe("GitHub Actions hardening", () => {
     expect(ci.on?.pull_request?.branches).toBeUndefined();
     expect(ci.on?.pull_request?.paths).toBeUndefined();
 
-    // The push trigger and pull-request `changes` job share one expensive-CI
-    // allowlist. PRs always create the workflow and aggregate check; this list
-    // decides whether the costly jobs run. Pin the entire list on both paths.
+    // The `changes` job owns the one expensive-CI allowlist for both events.
+    // Every head gets the workflow and aggregate check; this list decides
+    // whether the costly jobs run.
     const ciPaths = [
       ".gitattributes",
       ".github/workflows/**",
@@ -463,8 +464,6 @@ describe("GitHub Actions hardening", () => {
       "tests/**",
       "tsconfig.json",
     ];
-    expect([...(ci.on?.push?.paths ?? [])].sort()).toEqual(ciPaths);
-
     const filterStep = (ci.jobs?.changes as {
       steps?: { with?: Record<string, string> }[];
     })?.steps?.find(step => step.with?.filters);
