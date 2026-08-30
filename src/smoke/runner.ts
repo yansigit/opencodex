@@ -3,7 +3,7 @@ import { getCredential } from "../oauth/store";
 import type { OAuthCredentials } from "../oauth/types";
 import type { OcxProviderConfig } from "../types";
 import { computeProviderSourceFingerprint, loadSmokeCache, recordSmokeResult, shouldRunSmokeForProvider } from "./fingerprint-cache";
-import { buildSmokeScenarioRequest } from "./live-scenarios";
+import { buildClaudeMcpSmokeRequest, buildSmokeScenarioRequest, CLAUDE_MCP_SMOKE_TOOL_NAME } from "./live-scenarios";
 
 export interface ProviderSmokeResult {
   provider: string;
@@ -13,12 +13,13 @@ export interface ProviderSmokeResult {
   level1Passed: boolean;
   level2Passed: boolean;
   level3Passed: boolean;
+  claudeMcpPassed: boolean;
   durationMs: number;
   error?: string;
 }
 
 function result(provider: string, modelId: string, started: number, extra: Partial<ProviderSmokeResult>): ProviderSmokeResult {
-  return { provider, modelId, status: "failed", level1Passed: false, level2Passed: false, level3Passed: false, durationMs: Date.now() - started, ...extra };
+  return { provider, modelId, status: "failed", level1Passed: false, level2Passed: false, level3Passed: false, claudeMcpPassed: false, durationMs: Date.now() - started, ...extra };
 }
 
 export function providerHasSmokeCredential(
@@ -33,11 +34,22 @@ export function providerHasSmokeCredential(
 
 function classifyHttp(status: number, body: string): "not_authenticated" | "quota_exhausted" | undefined {
   if (status === 401 || status === 403) return "not_authenticated";
-  if (status === 429 || /credit|quota|insufficient.?balance|billing/i.test(body)) return "quota_exhausted";
+  if (status === 429 || /credit|quota|insufficient.?balance|billing|rate.?limit/i.test(body)) return "quota_exhausted";
   return undefined;
 }
 
-export async function runProviderSmoke(options: { provider: string; modelId?: string; proxyUrl?: string; force?: boolean; cachePath?: string }): Promise<ProviderSmokeResult> {
+function smokeEndpoints(proxyUrl?: string): { responses: string; messages: string } {
+  const responses = new URL(proxyUrl ?? "http://127.0.0.1:10100/v1/responses");
+  if (responses.pathname === "/" || responses.pathname === "") responses.pathname = "/v1/responses";
+  const messages = new URL(responses);
+  messages.pathname = /\/v1\/responses\/?$/.test(messages.pathname)
+    ? messages.pathname.replace(/\/v1\/responses\/?$/, "/v1/messages")
+    : "/v1/messages";
+  messages.search = "";
+  return { responses: responses.toString(), messages: messages.toString() };
+}
+
+export async function runProviderSmoke(options: { provider: string; modelId?: string; proxyUrl?: string; force?: boolean; cachePath?: string; claudeMcpOnly?: boolean }): Promise<ProviderSmokeResult> {
   const started = Date.now();
   const config = loadConfig();
   const providerConfig = config.providers[options.provider];
@@ -47,20 +59,21 @@ export async function runProviderSmoke(options: { provider: string; modelId?: st
   if (!providerHasSmokeCredential(providerConfig, credential)) return result(options.provider, modelId, started, { status: "skipped", reason: "not_authenticated" });
   const fingerprint = await computeProviderSourceFingerprint(options.provider);
   const cache = await loadSmokeCache(options.cachePath);
-  if (!shouldRunSmokeForProvider(options.provider, fingerprint, { force: options.force, cache })) return result(options.provider, modelId, started, { status: "skipped", reason: "cached_pass" });
+  const cacheKey = options.claudeMcpOnly ? `${options.provider}:claude-mcp` : options.provider;
+  if (!shouldRunSmokeForProvider(cacheKey, fingerprint, { force: options.force, cache })) return result(options.provider, modelId, started, { status: "skipped", reason: "cached_pass" });
 
-  const baseUrl = options.proxyUrl ?? "http://127.0.0.1:10100/v1/responses";
-  let level1Passed = false, level2Passed = false, level3Passed = false;
+  const endpoints = smokeEndpoints(options.proxyUrl);
+  let level1Passed = false, level2Passed = false, level3Passed = false, claudeMcpPassed = false;
   let previousResponseId: string | undefined;
   let emittedToolCallId: string | undefined;
   try {
-    for (const level of [1, 2, 3] as const) {
+    for (const level of options.claudeMcpOnly ? [] : [1, 2, 3] as const) {
       const reqBody = buildSmokeScenarioRequest(level, modelId, {
         previousResponseId,
         toolCallId: emittedToolCallId,
         toolResult: "smoke_test_123",
       });
-      const response = await fetch(baseUrl, {
+      const response = await fetch(endpoints.responses, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(reqBody),
@@ -70,8 +83,8 @@ export async function runProviderSmoke(options: { provider: string; modelId?: st
       if (!response.ok) {
         const reason = classifyHttp(response.status, body);
         if (reason) {
-          const skipped = result(options.provider, modelId, started, { status: "skipped", reason, level1Passed, level2Passed, level3Passed });
-          await recordSmokeResult(options.provider, { fingerprint, timestamp: Date.now(), status: "skipped", reason, modelsTested: [modelId] }, options.cachePath);
+          const skipped = result(options.provider, modelId, started, { status: "skipped", reason, level1Passed, level2Passed, level3Passed, claudeMcpPassed });
+          await recordSmokeResult(cacheKey, { fingerprint, timestamp: Date.now(), status: "skipped", reason, modelsTested: [modelId] }, options.cachePath);
           return skipped;
         }
         throw new Error(`HTTP ${response.status}: ${body.slice(0, 200)}`);
@@ -109,11 +122,60 @@ export async function runProviderSmoke(options: { provider: string; modelId?: st
       if (responseData?.id) previousResponseId = String(responseData.id);
       if (![level1Passed, level2Passed, level3Passed][level - 1]) throw new Error(`level ${level} assertion failed`);
     }
-    await recordSmokeResult(options.provider, { fingerprint, timestamp: Date.now(), status: "passed", modelsTested: [modelId] }, options.cachePath);
-    return result(options.provider, modelId, started, { status: "passed", level1Passed, level2Passed, level3Passed });
+
+    const headers = { "content-type": "application/json", "anthropic-version": "2023-06-01" };
+    const firstResponse = await fetch(endpoints.messages, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildClaudeMcpSmokeRequest(modelId)),
+      signal: AbortSignal.timeout(30000),
+    });
+    const firstText = await firstResponse.text();
+    if (!firstResponse.ok) {
+      const reason = classifyHttp(firstResponse.status, firstText);
+      if (reason) {
+        const skipped = result(options.provider, modelId, started, { status: "skipped", reason, level1Passed, level2Passed, level3Passed, claudeMcpPassed });
+        await recordSmokeResult(cacheKey, { fingerprint, timestamp: Date.now(), status: "skipped", reason, modelsTested: [modelId] }, options.cachePath);
+        return skipped;
+      }
+      throw new Error(`Claude MCP HTTP ${firstResponse.status}: ${firstText.slice(0, 200)}`);
+    }
+    const firstMessage = JSON.parse(firstText) as Record<string, unknown>;
+    const assistantContent = Array.isArray(firstMessage.content) ? firstMessage.content : [];
+    const toolUse = assistantContent.find(item => item && typeof item === "object" && (item as Record<string, unknown>).type === "tool_use" && (item as Record<string, unknown>).name === CLAUDE_MCP_SMOKE_TOOL_NAME) as Record<string, unknown> | undefined;
+    if (!toolUse || typeof toolUse.id !== "string" || !toolUse.id) throw new Error("Claude MCP tool call assertion failed");
+
+    const secondResponse = await fetch(endpoints.messages, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildClaudeMcpSmokeRequest(modelId, { assistantContent, toolUseId: toolUse.id })),
+      signal: AbortSignal.timeout(30000),
+    });
+    const secondText = await secondResponse.text();
+    if (!secondResponse.ok) {
+      const reason = classifyHttp(secondResponse.status, secondText);
+      if (reason) {
+        const skipped = result(options.provider, modelId, started, { status: "skipped", reason, level1Passed, level2Passed, level3Passed, claudeMcpPassed });
+        await recordSmokeResult(cacheKey, { fingerprint, timestamp: Date.now(), status: "skipped", reason, modelsTested: [modelId] }, options.cachePath);
+        return skipped;
+      }
+      throw new Error(`Claude MCP continuation HTTP ${secondResponse.status}: ${secondText.slice(0, 200)}`);
+    }
+    const secondMessage = JSON.parse(secondText) as Record<string, unknown>;
+    claudeMcpPassed = secondMessage.type === "message"
+      && secondMessage.stop_reason !== "tool_use"
+      && Array.isArray(secondMessage.content)
+      && secondMessage.content.some(item => item && typeof item === "object" && (item as Record<string, unknown>).type === "text");
+    if (!claudeMcpPassed) throw new Error("Claude MCP tool-result continuation assertion failed");
+
+    await recordSmokeResult(cacheKey, { fingerprint, timestamp: Date.now(), status: "passed", modelsTested: [modelId] }, options.cachePath);
+    if (!options.claudeMcpOnly) {
+      await recordSmokeResult(`${options.provider}:claude-mcp`, { fingerprint, timestamp: Date.now(), status: "passed", modelsTested: [modelId] }, options.cachePath);
+    }
+    return result(options.provider, modelId, started, { status: "passed", level1Passed, level2Passed, level3Passed, claudeMcpPassed });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    await recordSmokeResult(options.provider, { fingerprint, timestamp: Date.now(), status: "failed", reason: message, modelsTested: [modelId] }, options.cachePath);
-    return result(options.provider, modelId, started, { status: "failed", level1Passed, level2Passed, level3Passed, error: message });
+    await recordSmokeResult(cacheKey, { fingerprint, timestamp: Date.now(), status: "failed", reason: message, modelsTested: [modelId] }, options.cachePath);
+    return result(options.provider, modelId, started, { status: "failed", level1Passed, level2Passed, level3Passed, claudeMcpPassed, error: message });
   }
 }

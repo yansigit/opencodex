@@ -170,6 +170,20 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     }
   });
 
+  test("analyze: client-executed MCP function names stay routable, server MCP toolsets do not", () => {
+    const clientTool = {
+      tools: [{ type: "function", name: "mcp__codex_app__automation_update", input_schema: { type: "object" } }],
+    };
+    expect(collectClaudeFeatureCodes(clientTool, undefined)).not.toContain("mcp_tool");
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      expect(analyzeClaudeCompatibility(clientTool, { mode: "enforce", adapter }).decision).toBe("allow");
+    }
+
+    const serverToolset = { tools: [{ type: "mcp_toolset", mcp_server_name: "remote" }] };
+    expect(collectClaudeFeatureCodes(serverToolset, undefined)).toContain("mcp_tool");
+    expect(analyzeClaudeCompatibility(serverToolset, { mode: "enforce", adapter: "cursor" }).decision).toBe("reject");
+  });
+
   test("analyze: beta tokens alone never trigger rejection", () => {
     const r = analyzeClaudeCompatibility({}, { mode: "enforce", anthropicBeta: "deferred-tools-2025-01-01" });
     expect(r.decision).toBe("allow");
