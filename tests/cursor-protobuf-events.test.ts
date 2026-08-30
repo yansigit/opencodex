@@ -36,7 +36,7 @@ function interaction(message: Parameters<typeof create<typeof InteractionUpdateS
   });
 }
 
-function mcpToolCall(toolName: string, args: Record<string, string>) {
+function mcpToolCall(toolName: string, args: Record<string, unknown>) {
   const encoded: Record<string, Uint8Array> = {};
   for (const [key, value] of Object.entries(args)) encoded[key] = encoder.encode(JSON.stringify(value));
   return create(ToolCallSchema, {
@@ -75,6 +75,78 @@ function turnEndedFrame() {
 }
 
 describe("Cursor protobuf tool-call events", () => {
+  test("retains announcement-only arguments on terminal flush", () => {
+    const state = createCursorProtobufEventState();
+    const toolCall = mcpToolCall("mcp__fs__read_file", { path: "announced.txt" });
+    expect(mapCursorProtobufServerMessage(interaction({
+      case: "toolCallStarted",
+      value: create(ToolCallStartedUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall }),
+    }), state)).toEqual([]);
+    const events = finalizeTurnEvents(state);
+    expect(events.slice(0, 3)).toEqual([
+      { type: "tool_call_start", id: "call_1", name: "mcp__fs__read_file" },
+      { type: "tool_call_delta", arguments: "{\"path\":\"announced.txt\"}" },
+      { type: "tool_call_end", id: "call_1" },
+    ]);
+    expect(events.at(-1)?.type).toBe("done");
+  });
+
+  test("preserves a large announced key omitted from the completion map", () => {
+    const state = createCursorProtobufEventState();
+    const tasks = ["x".repeat(256 * 1024)];
+    const announced = mcpToolCall("mcp__fs__read_file", { path: "a.txt", tasks });
+    const completed = mcpToolCall("mcp__fs__read_file", { path: "b.txt" });
+    mapCursorProtobufServerMessage(interaction({
+      case: "toolCallStarted",
+      value: create(ToolCallStartedUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall: announced }),
+    }), state);
+    const events = mapCursorProtobufServerMessage(interaction({
+      case: "toolCallCompleted",
+      value: create(ToolCallCompletedUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall: completed }),
+    }), state);
+    const delta = events.find(event => event.type === "tool_call_delta");
+    const args = JSON.parse(delta?.type === "tool_call_delta" ? delta.arguments : "{}");
+    expect(args.path).toBe("b.txt");
+    expect(args.tasks).toEqual(tasks);
+  });
+
+  test("serializes a ten-call parallel fan-out without losing an id or argument", () => {
+    const state = createCursorProtobufEventState();
+    const calls = Array.from({ length: 10 }, (_, index) => ({
+      id: `call_${index}`,
+      toolCall: mcpToolCall("mcp__fs__read_file", { path: `${index}.txt` }),
+    }));
+    for (const call of calls) {
+      expect(mapCursorProtobufServerMessage(interaction({
+        case: "toolCallStarted",
+        value: create(ToolCallStartedUpdateSchema, { callId: call.id, modelCallId: call.id, toolCall: call.toolCall }),
+      }), state)).toEqual([]);
+    }
+    const events = calls.flatMap(call => mapCursorProtobufServerMessage(interaction({
+      case: "toolCallCompleted",
+      value: create(ToolCallCompletedUpdateSchema, { callId: call.id, modelCallId: call.id, toolCall: call.toolCall }),
+    }), state));
+    expect(events.filter(event => event.type === "tool_call_start").map(event => event.type === "tool_call_start" ? event.id : "")).toEqual(calls.map(call => call.id));
+    expect(events.filter(event => event.type === "tool_call_delta")).toHaveLength(10);
+    expect(events.filter(event => event.type === "tool_call_end")).toHaveLength(10);
+  });
+
+  test("accepts incremental fragments and ignores shorter stale cumulative snapshots", () => {
+    const state = createCursorProtobufEventState();
+    const empty = mcpToolCall("mcp__fs__read_file", {});
+    for (const fragment of ["{\"path\":", "\"a.txt\"}", "{\"path\":" ]) {
+      mapCursorProtobufServerMessage(interaction({
+        case: "partialToolCall",
+        value: create(PartialToolCallUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall: empty, argsTextDelta: fragment }),
+      }), state);
+    }
+    const events = mapCursorProtobufServerMessage(interaction({
+      case: "toolCallCompleted",
+      value: create(ToolCallCompletedUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall: empty }),
+    }), state);
+    expect(events).toContainEqual({ type: "tool_call_delta", arguments: "{\"path\":\"a.txt\"}" });
+  });
+
   test("maps MCP tool-call updates to Cursor tool call messages", () => {
     const state = createCursorProtobufEventState();
     const toolCall = mcpToolCall("mcp__fs__read_file", { path: "a.txt" });

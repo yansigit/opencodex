@@ -155,7 +155,7 @@ export interface CursorProtobufEventState {
    */
   contextCarryForwardTokens?: number;
   recordContextTokens?: (tokens: number) => void;
-  openToolCalls: Map<string, { name: string; args: string; awaitingNativeArgs?: boolean }>;
+  openToolCalls: Map<string, { name: string; args: string; announcementArgs?: Record<string, unknown>; awaitingNativeArgs?: boolean }>;
   completedToolCalls: Set<string>;
   /** Set once a terminal `done`/truncation has been emitted, so post-terminal frames stay inert. */
   terminated?: boolean;
@@ -328,6 +328,33 @@ function isCompleteJson(text: string): boolean {
   }
 }
 
+const BLOCKED_ARG_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function safeArgObject(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const out = Object.create(null) as Record<string, unknown>;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!BLOCKED_ARG_KEYS.has(key)) out[key] = entry;
+  }
+  return out;
+}
+
+function parsedArgObject(text: string): Record<string, unknown> | undefined {
+  try { return safeArgObject(JSON.parse(text)); } catch { return undefined; }
+}
+
+function announcementArgs(toolCall: ToolCall | undefined): Record<string, unknown> | undefined {
+  const args = mcpArgsFromToolCall(toolCall);
+  return hasMcpArgBytes(args) ? safeArgObject(decodeCursorArgsMap(args?.args)) : undefined;
+}
+
+function wouldDowngradeStructured(previous: unknown, next: unknown): boolean {
+  const structured = Array.isArray(previous) || (!!previous && typeof previous === "object");
+  if (!structured) return false;
+  if (!next || typeof next !== "object") return true;
+  return Object.keys(next as object).length === 0 && Object.keys(previous as object).length > 0;
+}
+
 /** Schema-normalize a JSON-text argument blob for a named tool, if a schema is known. */
 function normalizeJsonText(text: string, toolName: string | undefined, state: CursorProtobufEventState): string {
   const schema = toolSchemaForWireName(state, toolName) ?? (toolName ? defaultShellBridgeArgNormalizeSchema(toolName) : undefined);
@@ -353,10 +380,27 @@ function normalizeJsonText(text: string, toolName: string | undefined, state: Cu
  * preserved verbatim so the bridge can reject malformed or truncated JSON instead of silently
  * converting it to `{}`. A genuinely empty buffer remains the no-argument case.
  */
-function resolveCompletedArgs(buffered: string, args: McpArgs | undefined, state: CursorProtobufEventState): string {
-  if (hasMcpArgBytes(args)) return decodeMcpArgsNormalized(args, state);
-  const name = mcpWireNameFromArgs(args);
-  if (isCompleteJson(buffered)) return normalizeJsonText(buffered, name, state);
+function resolveCompletedArgs(
+  buffered: string,
+  args: McpArgs | undefined,
+  state: CursorProtobufEventState,
+  announced?: Record<string, unknown>,
+  fallbackName?: string,
+): string {
+  const streamed = parsedArgObject(buffered);
+  const completed = hasMcpArgBytes(args) ? safeArgObject(decodeCursorArgsMap(args?.args)) : undefined;
+  if (announced || streamed || completed) {
+    const merged = Object.create(null) as Record<string, unknown>;
+    for (const source of [announced, streamed]) {
+      for (const [key, value] of Object.entries(source ?? {})) merged[key] = value;
+    }
+    for (const [key, value] of Object.entries(completed ?? {})) {
+      if (!wouldDowngradeStructured(merged[key], value)) merged[key] = value;
+    }
+    const name = mcpWireNameFromArgs(args) ?? fallbackName;
+    return normalizeJsonText(JSON.stringify(merged), name, state);
+  }
+  if (isCompleteJson(buffered)) return normalizeJsonText(buffered, mcpWireNameFromArgs(args) ?? fallbackName, state);
   return buffered;
 }
 
@@ -1060,7 +1104,7 @@ export function mapSyntheticMcpExecToToolEvents(
     const out: CursorServerMessage[] = [...recordToolCall(options.state, callId, cursorWireName)];
     if (out.some(event => event.type === "error")) return out;
     const open = options.state.openToolCalls.get(callId);
-    const finalArgs = resolveCompletedArgs(open?.args ?? "", args, options.state);
+    const finalArgs = resolveCompletedArgs(open?.args ?? "", args, options.state, open?.announcementArgs, open?.name);
     out.push(...commitToolCall(options.state, callId, finalArgs));
     return out;
   }
@@ -1099,7 +1143,7 @@ export function mapSyntheticMcpExecToToolEvents(
  * call bridge until a call completes, and completed calls are emitted whole, one after another.
  * Returns an error only for a genuinely unknown (un-advertised) tool name.
  */
-function recordToolCall(state: CursorProtobufEventState, callId: string, cursorWireName: string): CursorServerMessage[] {
+function recordToolCall(state: CursorProtobufEventState, callId: string, cursorWireName: string, toolCall?: ToolCall): CursorServerMessage[] {
   if (state.completedToolCalls.has(callId)) return [];
   if (state.openToolCalls.has(callId)) return [];
   const advertisedName = resolveAdvertisedClientToolName(state, cursorWireName);
@@ -1112,7 +1156,12 @@ function recordToolCall(state: CursorProtobufEventState, callId: string, cursorW
   // Prefer the advertised catalog name for Responses mapping so shell_command/exec_command aliases
   // land on the tool Codex actually exposed this turn (#399).
   const mapKey = advertisedName ?? normalizeCursorWireName(cursorWireName);
-  state.openToolCalls.set(callId, { name: responsesToolNameFromCursorWire(mapKey, state.cursorToolNameMap), args: "" });
+  const announced = announcementArgs(toolCall);
+  state.openToolCalls.set(callId, {
+    name: responsesToolNameFromCursorWire(mapKey, state.cursorToolNameMap),
+    args: "",
+    ...(announced ? { announcementArgs: announced } : {}),
+  });
   state.translatorBudget?.openCall(callId);
   state.startedClientToolCalls++;
   return [];
@@ -1228,17 +1277,21 @@ function commitToolCall(state: CursorProtobufEventState, callId: string, finalAr
  * non-canonical streamed blob can still be repaired before Codex sees it. `argsTextDelta` is
  * cumulative; keep the longest value seen.
  */
-function bufferToolArgs(state: CursorProtobufEventState, callId: string, cumulative: string): void {
+function bufferToolArgs(state: CursorProtobufEventState, callId: string, incoming: string): void {
   const open = state.openToolCalls.get(callId);
-  if (!open) return;
-  if (cumulative.length >= open.args.length) {
+  if (!open || incoming.length === 0 || incoming === open.args) return;
+  let next: string;
+  if (incoming.startsWith(open.args)) next = incoming;
+  else if (open.args.startsWith(incoming)) return;
+  else next = open.args + incoming;
+  if (next !== open.args) {
     const encoder = new TextEncoder();
     const previousBytes = encoder.encode(open.args).byteLength;
     const reservation = state.translatorBudget?.reserveTransient(
-      encoder.encode(cumulative).byteLength,
+      encoder.encode(next).byteLength,
       { kind: "tool_args", callId },
     );
-    open.args = cumulative;
+    open.args = next;
     reservation?.commitRetained();
     state.translatorBudget?.releaseRetained(previousBytes, { kind: "tool_args", callId });
   }
@@ -1425,12 +1478,12 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
     case "toolCallStarted": {
       const name = mcpCursorWireName(update.value.toolCall);
       // Record the open call but defer the outward tool_call_start to completion (atomic emission).
-      return name ? recordToolCall(state, update.value.callId, name) : [];
+      return name ? recordToolCall(state, update.value.callId, name, update.value.toolCall) : [];
     }
     case "partialToolCall": {
       const out: CursorServerMessage[] = [];
       const name = mcpCursorWireName(update.value.toolCall);
-      if (name) out.push(...recordToolCall(state, update.value.callId, name));
+      if (name) out.push(...recordToolCall(state, update.value.callId, name, update.value.toolCall));
       if (out.some(event => event.type === "error")) return out;
       // Buffer cumulative args; do not emit a delta. Args are emitted once, normalized, at completion.
       if (state.openToolCalls.has(update.value.callId)) {
@@ -1477,7 +1530,7 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
       }
       // Ensure the call is recorded (covers a completion with no prior started/partial event), then
       // emit it as one atomic start -> delta -> end unit so parallel Cursor calls serialize cleanly.
-      if (name) out.push(...recordToolCall(state, update.value.callId, name));
+      if (name) out.push(...recordToolCall(state, update.value.callId, name, update.value.toolCall));
       if (out.some(event => event.type === "error")) return out;
       const open = state.openToolCalls.get(update.value.callId);
       // A request-declared freeform call may first appear only in its completion frame. Record it so
@@ -1492,7 +1545,7 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
         return [];
       }
       if (open) {
-        const finalArgs = resolveCompletedArgs(open.args, args, state);
+        const finalArgs = resolveCompletedArgs(open.args, args, state, open.announcementArgs, open.name);
         out.push(...commitToolCall(state, update.value.callId, finalArgs));
       }
       return out;
@@ -1543,6 +1596,29 @@ export function finalizeTurnEvents(state: CursorProtobufEventState): CursorServe
   }
   if (state.openToolCalls.size > 0) {
     const openCallIds = [...state.openToolCalls.keys()];
+    const retainable = openCallIds.filter(callId => {
+      const open = state.openToolCalls.get(callId);
+      return open && !open.awaitingNativeArgs && (open.announcementArgs !== undefined || isCompleteJson(open.args));
+    });
+    if (retainable.length > 0) {
+      const out = [...prefixEvents];
+      for (const callId of retainable) {
+        const open = state.openToolCalls.get(callId);
+        if (!open) continue;
+        out.push(...commitToolCall(state, callId, resolveCompletedArgs(
+          open.args,
+          undefined,
+          state,
+          open.announcementArgs,
+          open.name,
+        )));
+      }
+      if (state.openToolCalls.size === 0) return [...out, { type: "done", usage: resolvedTurnUsage(state) }];
+      const incomplete = [...state.openToolCalls.keys()];
+      for (const callId of incomplete) state.translatorBudget?.closeCall(callId);
+      state.openToolCalls.clear();
+      return [...out, { type: "error", message: `Cursor stream ended with incomplete tool call(s): ${incomplete.join(", ")}. Arguments may be truncated; the call was not committed.` }];
+    }
     const openIds = openCallIds.join(", ");
     // Clear so a second turnEnded (should not happen, but defensive) doesn't re-emit.
     for (const callId of openCallIds) state.translatorBudget?.closeCall(callId);

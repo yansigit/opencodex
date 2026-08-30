@@ -272,6 +272,7 @@ export interface ManualLabRunInput {
   modelId?: string;
   config?: OcxConfig;
   configDir?: string;
+  oracleRunId?: string;
 }
 
 /** Build a single manual run plan — independent of automation enablement. */
@@ -313,6 +314,7 @@ export function planManualLabRun(input: ManualLabRunInput): PlannedLabRunV1 {
       reason: "missing",
       priority: 0,
       eligibleAt: now,
+      ...(input.oracleRunId ? { oracleRunId: input.oracleRunId } : {}),
     };
   }
   if (!input.config || !input.providerName || !input.modelId) {
@@ -367,5 +369,6 @@ export function planManualLabRun(input: ManualLabRunInput): PlannedLabRunV1 {
     eligibleAt: now,
     providerName: input.providerName,
     modelId: input.modelId,
+    ...(input.oracleRunId ? { oracleRunId: input.oracleRunId } : {}),
   };
 }

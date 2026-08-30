@@ -1,9 +1,11 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { create, fromBinary } from "@bufbuild/protobuf";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { afterEach, describe, expect, test } from "bun:test";
 import { handleCursorNativeExec } from "../src/adapters/cursor/native-exec";
+import { encodeCursorRunRequest } from "../src/adapters/cursor/protobuf-request";
+import { buildCursorToolDefinitions, cursorToolsForActivePrompt } from "../src/adapters/cursor/tool-definitions";
 import {
   backgroundShellAdmissionMetrics,
   resetBackgroundShellStateForTests,
@@ -30,6 +32,7 @@ import {
   ReadMcpResourceExecArgsSchema,
   RecordScreenArgsSchema,
   RequestContextArgsSchema,
+  RequestContextSchema,
   ShellArgsSchema,
   WriteShellStdinArgsSchema,
   WriteArgsSchema,
@@ -47,6 +50,13 @@ function decode(bytes: Uint8Array) {
   const message = fromBinary(AgentClientMessageSchema, bytes);
   expect(message.message.case).toBe("execClientMessage");
   return message.message.value;
+}
+
+function runRequestContext(bytes: Uint8Array) {
+  const msg = fromBinary(AgentClientMessageSchema, bytes);
+  const run = msg.message.case === "runRequest" ? msg.message.value : undefined;
+  const action = run?.action?.action;
+  return action?.case === "userMessageAction" ? action.value.requestContext : undefined;
 }
 
 afterEach(async () => {
@@ -99,6 +109,47 @@ describe("Cursor native exec bridge", () => {
     if (context.message.value.result.case === "success") {
       expect(context.message.value.result.value.requestContext?.tools.map(tool => tool.toolName)).toEqual(["mcp__fs__read_file"]);
     }
+  });
+
+  test("Run inline requestContext matches native requestContextArgs for the same system and tools", async () => {
+    const system = ["rule-a", "rule-b"];
+    const prompt = "read a file";
+    const tools = [
+      {
+        name: "read_file",
+        namespace: "mcp__fs",
+        description: "Read a file",
+        parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+      },
+    ];
+    const mcpToolDefs = buildCursorToolDefinitions(cursorToolsForActivePrompt(tools, prompt, undefined), undefined);
+
+    const runBytes = encodeCursorRunRequest({
+      modelId: "grok-4.6",
+      conversationId: "dual-parity",
+      system,
+      messages: [{ role: "user", content: prompt }],
+      tools,
+    });
+    const runContext = runRequestContext(runBytes);
+    expect(runContext).toBeDefined();
+
+    const native = decode((await handleCursorNativeExec(execMessage({
+      case: "requestContextArgs",
+      value: create(RequestContextArgsSchema, {}),
+    }), {
+      cursorSystem: system,
+      mcpToolDefs,
+      clientToolDefs: [],
+    }))[0]);
+    expect(native.message.case).toBe("requestContextResult");
+    expect(native.message.value.result.case).toBe("success");
+    const nativeContext = native.message.value.result.case === "success"
+      ? native.message.value.result.value.requestContext
+      : undefined;
+    expect(nativeContext).toBeDefined();
+
+    expect(toBinary(RequestContextSchema, runContext!)).toEqual(toBinary(RequestContextSchema, nativeContext!));
   });
 
 

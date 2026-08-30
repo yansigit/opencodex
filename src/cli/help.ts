@@ -78,7 +78,7 @@ Usage:
   ocx grok <sub>              Grok Build model selection and apply
   ocx system <sub>            Runtime settings, startup, sync, and updates
   ocx config <sub>            Validated configuration show/get/set/import/export
-  ocx lab <sub>               Read-only Compatibility Lab projection inspection
+  ocx lab <sub>               Compatibility Lab (status, run, oracle cursor)
   ocx claude [args...]        Launch Claude Code wired to the proxy (model discovery on)
   ocx claude desktop [sub]    Manage and apply Claude Desktop's four-family profile
   ocx opencode [args...]      Launch opencode wired to the proxy (runtime provider config)

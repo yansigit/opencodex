@@ -94,7 +94,8 @@ const USAGE = `Usage:
   ocx lab automation enable [--protocol] [--live] [--json]
   ocx lab automation disable [--json]
   ocx lab automation runs [--limit <n>] [--cursor <c>] [--json]
-  ocx lab run --layer <layer> --scenario <id> [--provider <name>] [--model <id>] [--json]`;
+  ocx lab run --layer <layer> --scenario <id> [--provider <name>] [--model <id>] [--oracle-run <oracleRunId>] [--json]
+  ocx lab oracle cursor --scenario <id> --model <id> [--agent-bin <path>] [--keep-raw] [--json]`;
 
 const ARTIFACT_STATUSES = ["present", "corrupt", "purged_unavailable"] as const;
 type ArtifactStatus = (typeof ARTIFACT_STATUSES)[number];
@@ -567,8 +568,16 @@ export async function handleLabCommand(argv: string[], deps: LabCliDeps = {}): P
           const scenarioId = takeOption(rest, "--scenario");
           const providerName = takeOption(rest, "--provider");
           const modelId = takeOption(rest, "--model");
+          const oracleRunId = takeOption(rest, "--oracle-run");
           rejectArgs(rest, USAGE);
           if (!layer || !scenarioId) throw new CliUsageError("--layer and --scenario are required", USAGE);
+          let oracle: import("../lab/oracle/types").CursorOracleObservationV1 | undefined;
+          if (oracleRunId) {
+            const { readStoredCursorOracle } = await import("../lab/oracle/runner");
+            oracle = readStoredCursorOracle(oracleRunId, configDir);
+            if (oracle.scenario !== scenarioId) throw new CliUsageError("--oracle-run scenario does not match --scenario", USAGE);
+            if (oracle.model !== (modelId ?? null)) throw new CliUsageError("--oracle-run model does not match --model", USAGE);
+          }
           const configSnapshot = readConfigDiagnostics().config;
           if (layer === "live_route_compatibility") {
             const loadConfig = () => configSnapshot;
@@ -585,10 +594,68 @@ export async function handleLabCommand(argv: string[], deps: LabCliDeps = {}): P
             modelId,
             config: configSnapshot,
             configDir,
+            oracleRunId,
           });
           const record = await enqueueManualLabRun(planned, configDir);
           if (!record) throw new CliUsageError("manual run enqueue failed", USAGE);
-          printData({ run: record }, wantsJson, [`Manual run ${record.runId} -> ${record.state}`]);
+          if (!oracle) {
+            printData({ run: record }, wantsJson, [`Manual run ${record.runId} -> ${record.state}`]);
+            return;
+          }
+          const comparison = {
+            schemaVersion: 1,
+            status: "INSUFFICIENT_BEHAVIORAL_EQUIVALENCE" as const,
+            scenarioMatch: oracle.scenario === record.scenarioId,
+            modelMatch: oracle.model === (modelId ?? null),
+            official: {
+              instructionCanaryObserved: oracle.behavior?.instructionCanaryObserved ?? null,
+              toolCalls: oracle.protocolProfile.messages.toolCalls,
+              checkpoints: oracle.protocolProfile.messages.checkpoints,
+              terminalEvents: oracle.protocolProfile.messages.terminalEvents,
+              outcome: oracle.outcome,
+            },
+            opencodex: { state: record.state, terminalCode: record.terminalCode ?? null },
+            unavailable: [
+              "instruction_adherence_equivalence",
+              "argument_fidelity_equivalence",
+              "subagent_isolation_equivalence",
+              "context_needle_equivalence",
+            ],
+          };
+          const payload = { run: record, oracle, comparison };
+          const lines = [
+            `Manual run ${record.runId} -> ${record.state}`,
+            `Oracle reference ${oracle.oracleRunId} ${oracle.scenario} -> ${oracle.outcome}`,
+            "Behavioral comparison is advisory: equivalent model tasks were not observed.",
+          ];
+          printData(payload, wantsJson, lines);
+          return;
+        }
+        case "oracle": {
+          const [oracleSub, ...oracleRest] = rest;
+          if (oracleSub !== "cursor") throw new CliUsageError("unknown oracle subcommand: expected cursor", USAGE);
+          const scenario = takeOption(oracleRest, "--scenario");
+          const model = takeOption(oracleRest, "--model");
+          const agentBin = takeOption(oracleRest, "--agent-bin");
+          const keepRaw = takeFlag(oracleRest, "--keep-raw");
+          rejectArgs(oracleRest, USAGE);
+          if (!scenario) throw new CliUsageError("--scenario is required", USAGE);
+          if (!model) throw new CliUsageError("--model is required", USAGE);
+          const { runCursorOracle } = await import("../lab/oracle/runner");
+          const result = await runCursorOracle({ scenario, model, agentBin, keepRaw, json: wantsJson }, { configDir });
+          const lines = [
+            `Oracle ${result.observation.oracle} ${result.observation.scenario} model=${model} -> ${result.observation.outcome}`,
+            `Oracle run ${result.observation.oracleRunId}`,
+            `Protocol ${result.observation.protocolProfile.requestContextMode}; RunSSE=${result.observation.protocolProfile.runSseRequests} BidiAppend=${result.observation.protocolProfile.bidiAppendRequests}`,
+            ...(result.exitCode !== 0 ? ["Ensure the Cursor CLI is installed and authenticated, or pass --agent-bin."] : []),
+            ...(result.rawDir ? [
+              `Privacy warning: raw protocol frames are retained locally for 24 hours at ${result.rawDir}`,
+            ] : []),
+          ];
+          printData({
+            observation: result.observation,
+            ...(result.rawDir ? { rawDir: result.rawDir, rawTtlMs: result.rawTtlMs } : {}),
+          }, wantsJson, lines);
           return;
         }
         default:

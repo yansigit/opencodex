@@ -40,6 +40,7 @@ mock.module("../src/server/adapter-resolve", () => ({
 
 const { handleResponses } = await import("../src/server/responses");
 const originalHome = process.env.OPENCODEX_HOME;
+const originalFetch = globalThis.fetch;
 let home = "";
 
 /**
@@ -94,10 +95,28 @@ afterEach(() => {
   clearGenericFailoverHealth();
   if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = originalHome;
+  globalThis.fetch = originalFetch;
   rmSync(home, { recursive: true, force: true });
 });
 
 describe("#2568 adapter-event OAuth failover", () => {
+  test("single-account preflight 401 refreshes once before replay", async () => {
+    await seedAccounts(1);
+    attempts = [
+      [{ type: "error", message: "Cursor authentication failed: expired token" }],
+      [{ type: "text_delta", text: "refreshed answer" }, { type: "done" }],
+    ];
+    let refreshes = 0;
+    globalThis.fetch = (async () => {
+      refreshes += 1;
+      return new Response(JSON.stringify({ accessToken: "cursor-access-refreshed" }), { status: 200 });
+    }) as typeof fetch;
+    const response = await handleResponses(request(false), config(), { model: "", provider: "" });
+    expect(await response.text()).toContain("refreshed answer");
+    expect(refreshes).toBe(1);
+    expect(attemptKeys).toEqual(["cursor-access-0", "cursor-access-refreshed"]);
+  });
+
   for (const stream of [true, false]) {
     test(`${stream ? "streaming" : "non-streaming"} first-event 429 rotates and replays`, async () => {
       await seedAccounts(2);

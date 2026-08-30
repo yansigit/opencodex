@@ -468,6 +468,7 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
               !lastRawIsToolResult
               && !emittedOutput
               && !replayUnsafe
+              && request.contextUsageStoreCheckpoints !== false
               && !incoming.abortSignal?.aborted;
             const overflowScopeKey = cursorOverflowRemintScopeKey(
               _parsed,

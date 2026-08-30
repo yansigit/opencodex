@@ -26,6 +26,36 @@ opencodex state.
 - [Agents, routing, and integrations](/reference/cli/agents/) — multi-agent controls, combos,
   observability, admission keys, client integrations, runtime settings, and validated configuration.
 
+### Cursor Compatibility Lab oracle
+
+`ocx lab oracle cursor --scenario tools-core.protocol.parallel-correlation --model <model>` runs the installed official Cursor
+CLI in an isolated temporary workspace through a loopback-only observer. The observer forwards only
+to Cursor's fixed upstream, excludes authentication bodies, and stores an immutable sanitized
+observation. Raw frames are retained for 24 hours under restricted Lab scratch only when
+`--keep-raw` is explicit.
+
+The CLI child has a 120-second deadline. Reaching it records `agent_timeout` and a blocked oracle
+run; it is not a protocol-conformance failure. Retry the same scenario before treating it as a
+model regression.
+
+The oracle reuses the installed CLI's existing local authentication, so the child retains its normal
+home/keychain access. Config, data, workspace, observations, and optional raw frames remain isolated;
+the oracle does not automate login or copy credentials.
+
+Use an ID from `ocx lab catalog` when the observation will be paired. The returned `oracleRunId` can
+then be attached to a matching Lab scenario and model using `ocx lab run ... --oracle-run
+<oracleRunId>`. An unrecognized protocol profile is reported as
+`DEGRADED_PROTOCOL_PROFILE`; the command does not infer or reproduce Cursor's private server-side
+prompt.
+
+The reviewed `cursor-agent` 2026.08.25 profile uses legacy inline request context. OpenCodex keeps
+that verified mode as the fallback and reports newer or structurally different profiles as degraded;
+it does not send guessed `requestContextParts` fields.
+
+Deterministic CI covers framing, argument fidelity, parallel calls, continuation, refresh, cleanup,
+and protocol decoding. Long-context retrieval and model/subagent quality remain opt-in behavioral
+checks; an oracle smoke pass does not claim those capacities or Cursor's private server tuning.
+
 ## Headless behavior
 
 Management commands round-trip the live proxy's management API, using the recorded runtime port and
