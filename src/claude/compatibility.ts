@@ -379,11 +379,17 @@ function isNoopContextManagement(body: unknown): boolean {
   const contextManagement = body.context_management;
   if (Object.keys(contextManagement).some(key => key !== "edits")) return false;
   const edits = contextManagement.edits;
-  if (!Array.isArray(edits) || edits.length !== 1 || !isRec(edits[0])) return false;
-  const edit = edits[0];
-  return edit.type === "clear_thinking_20251015"
-    && edit.keep === "all"
-    && Object.keys(edit).every(key => key === "type" || key === "keep");
+  if (edits === undefined) return true;
+  if (Array.isArray(edits)) {
+    if (edits.length === 0) return true;
+    if (edits.length === 1 && isRec(edits[0])) {
+      const edit = edits[0];
+      return edit.type === "clear_thinking_20251015"
+        && edit.keep === "all"
+        && Object.keys(edit).every(key => key === "type" || key === "keep");
+    }
+  }
+  return false;
 }
 
 const KNOWN_BODY_FIELDS = new Set([

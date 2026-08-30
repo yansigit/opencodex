@@ -137,35 +137,37 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     expect(r.featureCodes).toEqual(expect.arrayContaining(["cache_control", "thinking_block"]));
   });
 
-  test("analyze: Claude Code keep-all context management is a routed no-op", () => {
-    const body = {
-      context_management: {
-        edits: [{ type: "clear_thinking_20251015", keep: "all" }],
-      },
-    };
-    const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
-    expect(result.decision).toBe("allow");
-    expect(result.compatible).toBe(true);
-    expect(result.featureCodes).toContain("context_management");
+  test("analyze: context management no-ops ({}, {edits:[]}, keep-all) are routed no-ops", () => {
+    for (const cm of [
+      {},
+      { edits: [] },
+      { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },
+    ]) {
+      const body = { context_management: cm };
+      const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
+      expect(result.decision).toBe("allow");
+      expect(result.compatible).toBe(true);
+      expect(result.featureCodes).toContain("context_management");
+    }
   });
 
-  test("analyze: context management that can remove content still fails closed", () => {
-    const body = {
-      context_management: {
-        edits: [{
-          type: "clear_thinking_20251015",
-          keep: { type: "thinking_turns", value: 1 },
-        }],
-      },
-    };
-    const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
-    expect(result.decision).toBe("reject");
-    expect(result.reason).toContain("context_management");
+  test("analyze: context management with unknown keys or removing edits still fails closed", () => {
+    for (const cm of [
+      { edits: [{ type: "clear_thinking_20251015", keep: { type: "thinking_turns", value: 1 } }] },
+      { edits: [], extra_key: true },
+      { edits: [{ type: "clear_thinking_20251015", keep: "all", extra: 1 }] },
+      { edits: [{ type: "unknown_edit_type", keep: "all" }] },
+    ]) {
+      const body = { context_management: cm };
+      const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
+      expect(result.decision).toBe("reject");
+      expect(result.reason).toContain("context_management");
+    }
   });
 
   test("analyze: incompatible features reject in enforce, shadow only records", () => {
     const cases: Array<{ body: Record<string, unknown>; code: string }> = [
-      { body: { context_management: { edits: [] } }, code: "context_management" },
+      { body: { context_management: { edits: [{ type: "clear_thinking_20251015", keep: { type: "thinking_turns", value: 1 } }] } }, code: "context_management" },
       { body: { tools: [{ type: "code_execution_20250501", name: "code_execution" }] } as unknown as Record<string, unknown>, code: "code_execution" },
       { body: { messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "hi" } }] }] } as unknown as Record<string, unknown>, code: "documents" },
       { body: { tools: [{ name: "foo", input_examples: [{ input: "x" }] }] } as unknown as Record<string, unknown>, code: "input_examples" },
@@ -250,7 +252,7 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
 
   test("analyze: multiple incompatibles listed together in reason", () => {
     const body = {
-      context_management: {},
+      context_management: { edits: [{ type: "clear_thinking_20251015", keep: { type: "thinking_turns", value: 1 } }] },
       tools: [{ type: "code_execution_20250501", name: "code_execution" }],
       messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "hi" } }] }],
     };
