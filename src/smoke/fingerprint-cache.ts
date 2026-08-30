@@ -48,7 +48,7 @@ function walkTs(root: string, relDir: string): string[] {
 }
 
 function collectProviderSourcePaths(provider: string, root: string): string[] {
-  const smokePaths = ["src/smoke/runner.ts", "src/smoke/live-scenarios.ts"];
+  const smokePaths = ["src/smoke/runner.ts", "src/smoke/live-scenarios.ts", "src/claude/compatibility.ts", "src/claude/inbound.ts", "src/claude/outbound.ts", "src/server/claude-messages.ts"];
   let paths: string[];
   switch (provider) {
     case "google":

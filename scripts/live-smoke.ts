@@ -7,6 +7,7 @@ import { defaultSmokeCachePath, loadSmokeCache } from "../src/smoke/fingerprint-
 const args = process.argv.slice(2);
 const force = args.includes("--force") || args.includes("-f");
 const jsonOutput = args.includes("--json");
+const claudeMcpOnly = args.includes("--claude-mcp-only");
 const providerArgIndex = args.indexOf("--provider");
 const targetProvider = providerArgIndex !== -1 ? args[providerArgIndex + 1] : undefined;
 const proxyUrlArgIndex = args.indexOf("--url");
@@ -15,9 +16,9 @@ const proxyUrl = proxyUrlArgIndex !== -1 ? args[proxyUrlArgIndex + 1] : "http://
 const DEFAULT_MODELS: Record<string, string> = {
   "google-antigravity": "google-antigravity/gemini-3.7-flash",
   "google-aistudio": "google-aistudio/gemini-3.7-flash",
-  "cursor": "cursor/composer-2.5",
+  "cursor": "cursor/grok-4.6",
   "command-code": "command-code/deepseek/deepseek-v4-flash",
-  "openai": "gpt-5.6-luna",
+  "openai": "openai/gpt-5.6-sol",
 };
 
 export function smokeExitCode(results: Array<Pick<ProviderSmokeResult, "status">>): number {
@@ -57,12 +58,15 @@ async function main() {
         modelId: defaultModel,
         proxyUrl,
         force,
+        claudeMcpOnly,
       });
       results.push(res);
 
       if (!jsonOutput) {
         if (res.status === "passed") {
-          console.log(`✅ PASSED (${res.durationMs}ms) [L1: ✓, L2: ✓, L3: ✓]`);
+          console.log(claudeMcpOnly
+            ? `✅ PASSED (${res.durationMs}ms) [Claude MCP: ✓]`
+            : `✅ PASSED (${res.durationMs}ms) [L1: ✓, L2: ✓, L3: ✓, Claude MCP: ✓]`);
         } else if (res.status === "skipped") {
           console.log(`⏭️  SKIPPED (${res.reason ?? "no reason given"})`);
         } else {
@@ -77,6 +81,7 @@ async function main() {
         level1Passed: false,
         level2Passed: false,
         level3Passed: false,
+        claudeMcpPassed: false,
         durationMs: 0,
         error: String(err),
       };

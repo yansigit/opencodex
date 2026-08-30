@@ -1,5 +1,46 @@
 export type SmokeLevel = 1 | 2 | 3;
 
+export const CLAUDE_MCP_SMOKE_TOOL_NAME = "mcp__codex_app__automation_update";
+
+const CLAUDE_MCP_SMOKE_PROMPT = `Call ${CLAUDE_MCP_SMOKE_TOOL_NAME} exactly once with marker "smoke_test_123". After its result, reply with MCP_SMOKE_OK.`;
+
+export function buildClaudeMcpSmokeRequest(
+  modelId: string,
+  continuation?: { assistantContent: unknown[]; toolUseId: string },
+): Record<string, unknown> {
+  const tools = [{
+    name: CLAUDE_MCP_SMOKE_TOOL_NAME,
+    description: "Smoke-only client function that echoes a marker without changing state.",
+    input_schema: {
+      type: "object",
+      properties: { marker: { type: "string" } },
+      required: ["marker"],
+      additionalProperties: false,
+    },
+  }];
+  const user = { role: "user", content: CLAUDE_MCP_SMOKE_PROMPT };
+  if (!continuation) {
+    return {
+      model: modelId,
+      max_tokens: 1024,
+      stream: false,
+      messages: [user],
+      tools,
+    };
+  }
+  return {
+    model: modelId,
+    max_tokens: 1024,
+    stream: false,
+    messages: [
+      user,
+      { role: "assistant", content: continuation.assistantContent },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: continuation.toolUseId, content: "smoke_test_123" }] },
+    ],
+    tools,
+  };
+}
+
 export interface SmokeScenario {
   level: SmokeLevel;
   name: string;

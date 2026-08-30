@@ -217,7 +217,6 @@ function hasMcpTool(body: Rec): boolean {
       if (!isRec(t)) continue;
       const type = typeof t.type === "string" ? t.type : "";
       if (type.startsWith("mcp")) return true;
-      if (typeof t.name === "string" && t.name.startsWith("mcp")) return true;
     }
   }
   return false;
