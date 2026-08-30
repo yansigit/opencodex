@@ -109,4 +109,39 @@ describe("Cursor external model continuation context", () => {
     expect(serialized).not.toContain("[Tool Result]");
     expect(serialized).not.toContain("[tool_result]");
   });
+
+  test("external model conversationTurns omits commentary assistant messages", () => {
+    const bytes = encodeCursorRunRequest({
+      modelId: "grok-4.6-high",
+      conversationId: "c_grok_commentary",
+      system: ["You are a helpful assistant."],
+      messages: [{ role: "user", content: "Continue" }],
+      rawMessages: [
+        { role: "user", content: "search logs", timestamp: 1 },
+        {
+          role: "assistant",
+          phase: "commentary",
+          timestamp: 2,
+          content: [{ type: "text", text: "I'll trace the logs..." }],
+        } as OcxMessage,
+        {
+          role: "assistant",
+          timestamp: 3,
+          content: [{ type: "toolCall", id: "call_exec_commentary", name: "exec", arguments: { cmd: "ls" } }],
+        },
+        {
+          role: "toolResult",
+          toolCallId: "call_exec_commentary",
+          toolName: "exec",
+          content: "file1.txt",
+          isError: false,
+          timestamp: 4,
+        },
+      ],
+    });
+
+    const serialized = JSON.stringify(decodeTurns(bytes));
+    expect(serialized).not.toContain("I'll trace the logs...");
+    expect(serialized).toContain("Tool output for exec");
+  });
 });

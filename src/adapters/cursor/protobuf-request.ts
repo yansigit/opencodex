@@ -270,6 +270,9 @@ function rootPromptMessages(request: CursorRunRequest, requestScope: CursorBlobR
         }, "user", { messageIndex: i }));
       }
     } else if (message.role === "assistant") {
+      // External models: omit intermediate commentary preambles from flattened replay so
+      // alternating commentary/result turns do not few-shot prime preamble generation.
+      if (externalModel && message.phase === "commentary") continue;
       // External Cursor clients do not replay hidden reasoning as assistant-visible prompt text.
       // Native Composer state can preserve it through ThinkingMessage/history structures.
       const text = assistantRootText(message, !externalModel).trim();
@@ -735,6 +738,7 @@ function conversationTurns(
   for (const message of messages.slice(start, historyEnd)) {
     if (message.role === "assistant") {
       if (!current) continue;
+      if (externalModel && message.phase === "commentary") continue;
       for (const part of message.content) {
         if (externalModel) {
           // Working external-model clients replay only assistant text. Native mcpToolCall and
