@@ -10,6 +10,7 @@ const OTHER_SHA = "89abcdef0123456789abcdef0123456789abcdef";
 function validate(overrides = {}) {
   return validateReleaseDispatch({
     eventName: "workflow_dispatch",
+    eventAction: "",
     ref: "refs/heads/main",
     expectedSha: SHA,
     actualSha: SHA,
@@ -36,10 +37,25 @@ describe("release dispatch guard", () => {
     );
   });
 
-  it("rejects non-workflow_dispatch events", () => {
+  it("accepts the audited repository dispatch on main", () => {
+    assert.equal(validate({
+      eventName: "repository_dispatch",
+      eventAction: "fork-auto-release",
+    }), null);
+  });
+
+  it("rejects other events and repository dispatch actions", () => {
     assert.match(
       validate({ eventName: "push" }),
-      /must be triggered by workflow_dispatch/,
+      /must be triggered by workflow_dispatch or the audited repository_dispatch/,
+    );
+    assert.match(
+      validate({ eventName: "repository_dispatch", eventAction: "other" }),
+      /Unsupported release repository_dispatch action/,
+    );
+    assert.match(
+      validate({ eventName: "repository_dispatch", eventAction: "fork-auto-release", ref: "refs/heads/dev" }),
+      /Automatic stable releases must run from main/,
     );
   });
 

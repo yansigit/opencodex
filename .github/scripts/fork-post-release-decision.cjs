@@ -8,7 +8,7 @@ function validTimestamp(value) {
 function decidePostRelease(state) {
   if (
     state.workflowName !== "Release" ||
-    state.workflowEvent !== "workflow_dispatch" ||
+    !["workflow_dispatch", "repository_dispatch"].includes(state.workflowEvent) ||
     state.workflowBranch !== "main" ||
     state.repository !== state.expectedRepository ||
     state.workflowPath !== state.expectedWorkflowPath ||

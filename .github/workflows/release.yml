@@ -1,9 +1,9 @@
 name: Release
 
-# Publish opencodex to npm — jawcode-style: triggered from the Actions tab with an explicit
-# version, dist-tag, and a dry-run-first default. Bump package.json on main BEFORE dispatching
-# (or use `bun run release <version>`, which does the bump+commit+push+dispatch for you); the
-# workflow verifies the version matches before publishing.
+# Publish opencodex to npm — triggered from the Actions tab with explicit inputs, or by the
+# fork's audited stable-release dispatcher. Bump package.json on main BEFORE dispatching (or
+# use `bun run release <version>`, which does the bump+commit+push+dispatch for you); the workflow
+# verifies the version and exact commit before publishing.
 on:
   workflow_dispatch:
     inputs:
@@ -29,8 +29,16 @@ on:
         description: "Immutable release commit this dispatch must publish (fail if the branch moved)"
         required: true
         type: string
+  repository_dispatch:
+    types: [fork-auto-release]
 
 permissions: {}
+
+env:
+  DISPATCH_VERSION: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.version || inputs.version }}
+  DISPATCH_TAG: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag }}
+  DISPATCH_EXPECTED_SHA: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.expected_sha || inputs.expected-sha }}
+  DISPATCH_DRY_RUN: ${{ github.event_name == 'repository_dispatch' && 'false' || inputs.dry-run }}
 
 concurrency:
   group: release
@@ -51,7 +59,8 @@ jobs:
 
       - name: Validate release dispatch
         env:
-          EXPECTED_SHA: ${{ inputs.expected-sha }}
+          EXPECTED_SHA: ${{ env.DISPATCH_EXPECTED_SHA }}
+          EVENT_ACTION: ${{ github.event.action || '' }}
         run: |
           node - <<'NODE'
           const { validateReleaseDispatch } = require(
@@ -60,6 +69,7 @@ jobs:
 
           const failure = validateReleaseDispatch({
             eventName: process.env.GITHUB_EVENT_NAME,
+            eventAction: process.env.EVENT_ACTION,
             ref: process.env.GITHUB_REF,
             expectedSha: process.env.EXPECTED_SHA,
             actualSha: process.env.GITHUB_SHA,
@@ -87,7 +97,7 @@ jobs:
 
       - name: Verify dispatched SHA
         env:
-          EXPECTED_SHA: ${{ inputs.expected-sha }}
+          EXPECTED_SHA: ${{ env.DISPATCH_EXPECTED_SHA }}
         run: |
           if [ -z "$EXPECTED_SHA" ]; then
             echo "::error::expected-sha is required; refusing to publish without an audited commit"
@@ -132,7 +142,7 @@ jobs:
 
       - name: Verify version matches package.json
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
         run: |
           PKG=$(node -p "require('./package.json').version")
           echo "package.json=$PKG  input=${RELEASE_VERSION}"
@@ -153,8 +163,8 @@ jobs:
       - name: Require successful Cross-platform CI for this commit
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-          NPM_DIST_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
+          NPM_DIST_TAG: ${{ env.DISPATCH_TAG }}
         run: |
           set -euo pipefail
 
@@ -263,8 +273,8 @@ jobs:
       - name: Preflight release metadata
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-          DRY_RUN: ${{ inputs.dry-run }}
+          RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
+          DRY_RUN: ${{ env.DISPATCH_DRY_RUN }}
         run: |
           set -euo pipefail
 
@@ -310,8 +320,8 @@ jobs:
       - name: Build and validate release changelog
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
-          NPM_DIST_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
+          NPM_DIST_TAG: ${{ env.DISPATCH_TAG }}
         run: |
           set -euo pipefail
           notes_file="$GITHUB_WORKSPACE/.release-notes.md"
@@ -328,8 +338,8 @@ jobs:
 
       - name: Publish (or dry-run)
         env:
-          DRY_RUN: ${{ inputs.dry-run }}
-          NPM_DIST_TAG: ${{ inputs.tag }}
+          DRY_RUN: ${{ env.DISPATCH_DRY_RUN }}
+          NPM_DIST_TAG: ${{ env.DISPATCH_TAG }}
         run: |
           if [ "$DRY_RUN" = "true" ]; then
             echo "::notice::DRY RUN — building + packing, not publishing"
@@ -341,9 +351,9 @@ jobs:
 
       # Confirm the registry actually has the new version (real publishes only).
       - name: Post-publish registry smoke
-        if: ${{ inputs.dry-run != true }}
+        if: ${{ env.DISPATCH_DRY_RUN != 'true' }}
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
         run: |
           pkg_name="$(node -p "require('./package.json').name")"
           for attempt in $(seq 1 30); do
@@ -361,10 +371,10 @@ jobs:
           exit 1
 
       - name: Create GitHub release
-        if: ${{ inputs.dry-run != true }}
+        if: ${{ env.DISPATCH_DRY_RUN != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
         run: |
           set -euo pipefail
 

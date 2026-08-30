@@ -8,12 +8,20 @@ const ALLOWED_RELEASE_REFS = new Set([
 
 function validateReleaseDispatch({
   eventName,
+  eventAction,
   ref,
   expectedSha,
   actualSha,
 }) {
-  if (eventName !== "workflow_dispatch") {
-    return `Release must be triggered by workflow_dispatch; got ${eventName || "(empty)"}.`;
+  if (eventName === "repository_dispatch") {
+    if (eventAction !== "fork-auto-release") {
+      return `Unsupported release repository_dispatch action: ${eventAction || "(empty)"}.`;
+    }
+    if (ref !== "refs/heads/main") {
+      return `Automatic stable releases must run from main; got ${ref || "(empty)"}.`;
+    }
+  } else if (eventName !== "workflow_dispatch") {
+    return `Release must be triggered by workflow_dispatch or the audited repository_dispatch; got ${eventName || "(empty)"}.`;
   }
 
   if (!ALLOWED_RELEASE_REFS.has(ref)) {

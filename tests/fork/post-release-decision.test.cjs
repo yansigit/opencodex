@@ -23,6 +23,7 @@ const base = {
 
 test("published and tagged release with dev at main requests a bump", () => {
   assert.equal(decidePostRelease(base), "bump");
+  assert.equal(decidePostRelease({ ...base, workflowEvent: "repository_dispatch" }), "bump");
 });
 
 test("requires the exact expected workflow path and a publication during the run", () => {
