@@ -18,7 +18,7 @@ import {
   isCodexAccountSoftAvoided,
   recordCodexUpstreamOutcome,
 } from "../src/codex/routing";
-import { loadConfig, replacePersistedConfig, saveConfig } from "../src/config";
+import { loadConfig, saveConfig } from "../src/config";
 import { clearUpstreamHostHealth, getUpstreamHostHealth, recordUpstreamHostFailure, upstreamHostHealthKey } from "../src/codex/upstream-host-health";
 import { deriveProviderPresets } from "../src/providers/derive";
 import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
@@ -35,6 +35,7 @@ import {
   startServer,
 } from "../src/server";
 import { clearRequestLogsForTests, getRequestLogEntries } from "../src/server/request-log";
+import { readUsageEntries } from "../src/usage/log";
 import { handleManagementAPI } from "../src/server/management-api";
 import { handleResponses } from "../src/server/responses";
 import type { OcxConfig } from "../src/types";
@@ -167,6 +168,7 @@ type PoolRetryHarness = {
     model?: string;
     path?: "/v1/responses" | "/v1/responses/compact";
     callerBearer?: boolean;
+    headers?: Record<string, string>;
     extraBody?: Record<string, unknown>;
   }) => Promise<Response>;
   restoreFetch: () => void;
@@ -314,12 +316,14 @@ async function startPoolRetryHarness(
       model = POOL_RETRY_MODEL,
       path = "/v1/responses",
       callerBearer = true,
+      headers = {},
       extraBody = {},
     } = {}) => originalGlobalFetch(new URL(path, server.url), {
       method: "POST",
       headers: {
         "content-type": "application/json",
         ...(callerBearer ? { authorization: "Bearer inbound-token" } : {}),
+        ...headers,
       },
       body: JSON.stringify({ model, input: path.endsWith("/compact") ? [] : "hello", stream, ...extraBody }),
       signal,
@@ -346,6 +350,172 @@ async function expectOriginal400(response: Response, body: string): Promise<void
   expect(response.headers.get("x-pool-retry-test")).toBe("original");
   expect(await response.text()).toBe(body);
 }
+
+describe("Responses request identity handoff", () => {
+  test("returns the generated request id and overwrites an upstream value", async () => {
+    const harness = await startPoolRetryHarness(() => Response.json({
+      id: "resp_request_identity",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    }, {
+      headers: { "x-opencodex-request-id": "upstream-spoofed-value" },
+    }), { secondAccount: false });
+    try {
+      const response = await harness.request({
+        headers: { "x-opencodex-request-id": "caller-injected-value" },
+      });
+      const requestId = response.headers.get("x-opencodex-request-id");
+      expect(requestId).toMatch(/^ocx-[a-f0-9]{32}$/);
+      expect(requestId).not.toBe("upstream-spoofed-value");
+      expect(requestId).not.toBe("caller-injected-value");
+      await response.text();
+      expect(getRequestLogEntries().filter(entry => entry.requestId === requestId)).toHaveLength(1);
+      expect(readUsageEntries().filter(entry => entry.requestId === requestId)).toHaveLength(1);
+    } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  }, { timeout: SERVER_BUDGET_MS });
+
+  test("names the request id in Access-Control-Expose-Headers so browser JS can read it", async () => {
+    const harness = await startPoolRetryHarness(() => Response.json({
+      id: "resp_request_identity_expose",
+      object: "response",
+      status: "completed",
+      output: [],
+      usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    }), { secondAccount: false });
+    try {
+      const response = await harness.request();
+      const requestId = response.headers.get("x-opencodex-request-id");
+      expect(requestId).toMatch(/^ocx-[a-f0-9]{32}$/);
+
+      // The header being present above is not enough: cross-origin JavaScript may read only
+      // the CORS-safelisted response headers plus whatever the expose-list names, so without
+      // this the id ships on every response and no browser caller can ever see it.
+      const exposed = (response.headers.get("Access-Control-Expose-Headers") ?? "")
+        .split(",")
+        .map(name => name.trim().toLowerCase());
+      expect(exposed).toContain("x-opencodex-request-id");
+      await response.text();
+    } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  }, { timeout: SERVER_BUDGET_MS });
+
+  test("binds the same generated request id on a streaming terminal", async () => {
+    let releaseTerminal!: () => void;
+    let terminalReleased = false;
+    const terminalGate = new Promise<void>(resolve => {
+      releaseTerminal = () => {
+        terminalReleased = true;
+        resolve();
+      };
+    });
+    const createdPayload = JSON.stringify({
+      type: "response.created",
+      response: { id: "resp_request_identity_sse", object: "response", status: "in_progress", output: [] },
+    });
+    const completedPayload = JSON.stringify({
+      type: "response.completed",
+      response: {
+        id: "resp_request_identity_sse",
+        object: "response",
+        status: "completed",
+        output: [],
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+      },
+    });
+    const encoder = new TextEncoder();
+    const harness = await startPoolRetryHarness(() => new Response(
+      new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(encoder.encode(`event: response.created\ndata: ${createdPayload}\n\n`));
+          await terminalGate;
+          controller.enqueue(encoder.encode(`event: response.completed\ndata: ${completedPayload}\n\n`));
+          controller.close();
+        },
+      }),
+      { headers: { "content-type": "text/event-stream", "x-opencodex-request-id": "upstream-spoofed-value" } },
+    ), { secondAccount: false });
+    try {
+      const response = await harness.request({ stream: true });
+      const requestId = response.headers.get("x-opencodex-request-id");
+      expect(requestId).toMatch(/^ocx-[a-f0-9]{32}$/);
+      expect(requestId).not.toBe("upstream-spoofed-value");
+      const reader = response.body!.getReader();
+      const first = await reader.read();
+      expect(new TextDecoder().decode(first.value)).toContain("response.created");
+      expect(terminalReleased).toBe(false);
+      releaseTerminal();
+      while (!(await reader.read()).done) { /* drain */ }
+      expect(getRequestLogEntries().filter(entry => entry.requestId === requestId)).toHaveLength(1);
+      expect(readUsageEntries().filter(entry => entry.requestId === requestId)).toHaveLength(1);
+    } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  }, { timeout: SERVER_BUDGET_MS });
+
+  test("binds the same generated request id on an upstream error", async () => {
+    const harness = await startPoolRetryHarness(() => Response.json(
+      { error: { type: "upstream_error", message: "bounded test error" } },
+      {
+        status: 503,
+        headers: { "x-opencodex-request-id": "upstream-spoofed-value" },
+      },
+    ), { secondAccount: false });
+    try {
+      const response = await harness.request();
+      const requestId = response.headers.get("x-opencodex-request-id");
+      expect(requestId).toMatch(/^ocx-[a-f0-9]{32}$/);
+      expect(requestId).not.toBe("upstream-spoofed-value");
+      await response.text();
+      expect(getRequestLogEntries().filter(entry => entry.requestId === requestId)).toHaveLength(1);
+      expect(readUsageEntries().filter(entry => entry.requestId === requestId)).toHaveLength(1);
+    } finally {
+      await stopPoolRetryHarness(harness);
+    }
+  }, { timeout: SERVER_BUDGET_MS });
+
+  test("does not issue a request id before authentication and origin admission", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
+    clearRequestLogsForTests();
+    saveConfig({ ...config("0.0.0.0"), port: 0 });
+
+    const server = startServer(0);
+    const url = `http://127.0.0.1:${server.port}/v1/responses`;
+    const body = JSON.stringify({ model: "gpt-test", input: "hello" });
+    try {
+      const missingAuth = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      expect(missingAuth.status).toBe(401);
+      expect(missingAuth.headers.get("x-opencodex-request-id")).toBeNull();
+
+      const rejectedOrigin = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-opencodex-api-key": "local-secret",
+          origin: "https://attacker.test",
+        },
+        body,
+      });
+      expect(rejectedOrigin.status).toBe(403);
+      expect(rejectedOrigin.headers.get("x-opencodex-request-id")).toBeNull();
+      expect(getRequestLogEntries()).toHaveLength(0);
+      expect(readUsageEntries()).toHaveLength(0);
+    } finally {
+      await server.stop(true);
+    }
+  }, { timeout: SERVER_BUDGET_MS });
+});
 
 describe("server local API auth", () => {
   test("responses timeout helper disables Bun request timeout when available", () => {
@@ -508,37 +678,13 @@ describe("server local API auth", () => {
     expect(isApiAuthRequired(config("127.0.0.1"))).toBe(false);
   });
 
-  test("non-loopback binding requires both an env token and native TLS before startup", () => {
+  test("non-loopback binding requires env token before startup", () => {
     delete process.env.OPENCODEX_API_AUTH_TOKEN;
     expect(isApiAuthRequired(config("0.0.0.0"))).toBe(true);
     expect(() => assertServerAuthConfig(config("0.0.0.0"))).toThrow("OPENCODEX_API_AUTH_TOKEN");
 
     process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
-    expect(() => assertServerAuthConfig(config("0.0.0.0"))).toThrow("Native TLS is required");
-  });
-
-  test("the test home guard cannot bypass native TLS for a remote start", () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
-    saveConfig({ ...config("0.0.0.0"), port: 0 });
-
-    const seam = Symbol.for("opencodex.test.plaintext-remote");
-    const globalTestState = globalThis as Record<PropertyKey, unknown>;
-    const hadSeam = Object.prototype.hasOwnProperty.call(globalTestState, seam);
-    const previousSeam = globalTestState[seam];
-    delete globalTestState[seam];
-    let server: ReturnType<typeof startServer> | undefined;
-    try {
-      expect(() => {
-        server = startServer(0);
-      }).toThrow("Native TLS is required");
-    } finally {
-      server?.stop(true);
-      if (hadSeam) globalTestState[seam] = previousSeam;
-      else delete globalTestState[seam];
-    }
+    expect(() => assertServerAuthConfig(config("0.0.0.0"))).not.toThrow();
   });
 
   test("auth header must match env token when non-loopback auth is required", () => {
@@ -624,7 +770,6 @@ describe("server local API auth", () => {
       modelMaxInputTokens: { "gpt-test": 1000 },
       codexAccountMode: "pool",
       reasoningWireFormat: "gateway-object",
-      replayTransientFailures: true,
       virtualModels: { "gpt-test-pro": { wireModelId: "gpt-test", reasoningMode: "pro" } },
       codexAuthContext: { accessToken: "runtime-token" },
       selectedForwardHeaders: { authorization: "Bearer runtime-token" },
@@ -652,7 +797,6 @@ describe("server local API auth", () => {
       hasHeaders: true,
       codexAccountMode: "pool",
       reasoningWireFormat: "gateway-object",
-      replayTransientFailures: true,
     });
     expect(dto.providers.openai).not.toHaveProperty("apiKey");
     expect(dto.providers.openai).not.toHaveProperty("headers");
@@ -855,21 +999,6 @@ describe("server local API auth", () => {
     } as OcxConfig) as { providers: Record<string, { freeTier?: boolean }> };
     expect(dto.providers.nvidia.freeTier).toBe(true);
     expect(dto.providers.venice.freeTier).toBeUndefined();
-  });
-
-  test("safeConfigDTO preserves non-secret Google transport mode for the provider UI", () => {
-    const dto = safeConfigDTO({
-      ...config("127.0.0.1"),
-      providers: {
-        "google-aistudio": {
-          adapter: "google",
-          baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
-          authMode: "local",
-          googleMode: "ai-studio-web",
-        },
-      },
-    } as OcxConfig) as { providers: Record<string, { googleMode?: string }> };
-    expect(dto.providers["google-aistudio"].googleMode).toBe("ai-studio-web");
   });
   test("management GET rejects non-local Origin even with a valid API key", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
@@ -1177,38 +1306,6 @@ describe("server local API auth", () => {
     }
   });
 
-  test("AI Studio relay endpoints return 410 Gone and session sync requires API auth", async () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
-    saveConfig({ ...config("0.0.0.0"), port: 0 });
-
-    const server = startServer(0);
-    try {
-      const gone = await fetch(new URL("/v1/ws/aistudio", server.url), {
-        headers: { connection: "Upgrade", upgrade: "websocket" },
-      });
-      expect(gone.status).toBe(410);
-
-      const missing = await fetch(new URL("/api/aistudio/session", server.url), {
-        method: "POST",
-      });
-      expect(missing.status).toBe(401);
-
-      const hostile = await fetch(new URL("/api/aistudio/session", server.url), {
-        method: "POST",
-        headers: {
-          "x-opencodex-api-key": "local-secret",
-          origin: "https://attacker.test",
-        },
-      });
-      expect(hostile.status).toBe(403);
-    } finally {
-      await server.stop(true);
-    }
-  });
-
   test("websocket upgrade returns 426 when the WS transport is disabled", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
@@ -1426,12 +1523,35 @@ describe("server local API auth", () => {
     const upstream = Bun.serve({
       port: 0,
       fetch(req) {
-        seen.push({
+        const observed = {
           host: req.headers.get("x-test-original-host") ?? "",
           authorization: req.headers.get("authorization"),
           chatgptAccountId: req.headers.get("chatgpt-account-id"),
-        });
-        return Response.json({ id: "resp_tier", object: "response", status: "completed", output: [] });
+        };
+        seen.push(observed);
+        const status = observed.authorization === "Bearer caller-invalid-401"
+          ? 401
+          : observed.authorization === "Bearer caller-invalid-403"
+            ? 403
+            : observed.authorization === "Bearer caller-quota-429"
+              ? 429
+              : observed.authorization === "Bearer caller-transient-500"
+                ? 500
+                : 200;
+        const quotaHeaders = observed.authorization === "Bearer caller-quota-headers"
+          || observed.authorization === "Bearer caller-quota-429"
+          ? {
+              "x-codex-primary-used-percent": "100",
+              "x-codex-primary-window-minutes": "300",
+              "x-codex-primary-reset-at": "1900000000",
+            }
+          : observed.authorization === "Bearer caller-transient-500"
+            ? { "retry-after": "0" }
+            : undefined;
+        return Response.json(
+          { id: "resp_tier", object: "response", status: "completed", output: [] },
+          { status, headers: quotaHeaders },
+        );
       },
     });
     let whamRequests = 0;
@@ -1511,7 +1631,7 @@ describe("server local API auth", () => {
       updateAccountQuota("direct-unusable", 99);
       markAccountNeedsReauth("direct-unusable");
       recordCodexUpstreamOutcome(directConfig, "direct-unusable", 429, { retryAfter: "60" });
-      replacePersistedConfig(directConfig);
+      saveConfig(directConfig);
       const direct = startServer(0, { inspectNativeCodexOwnership });
       const directBaseline = {
         config: readFileSync(join(TEST_DIR, "config.json"), "utf8"),
@@ -1566,7 +1686,7 @@ describe("server local API auth", () => {
         clearCodexUpstreamHealth();
         const cfg = mainOnlyConfig();
         writeMainToken(state === "expired" ? `header.${expiredPayload}.signature` : "opaque-live-main-token");
-        replacePersistedConfig(cfg);
+        saveConfig(cfg);
         const before = seen.length;
         const unusableMain = startServer(0, { inspectNativeCodexOwnership });
         try {
@@ -1583,9 +1703,85 @@ describe("server local API auth", () => {
       }
       clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
       clearCodexUpstreamHealth();
+      clearAccountQuota();
       rmSync(join(isolatedCodexHome!.path, "auth.json"), { force: true });
 
-      replacePersistedConfig({
+      const nativeCallerConfig = {
+        ...mainOnlyConfig(),
+        hostname: "0.0.0.0",
+      } as OcxConfig;
+      saveConfig(nativeCallerConfig);
+      const beforeNativeCaller = seen.length;
+      const nativeCaller = startServer(0, { inspectNativeCodexOwnership });
+      try {
+        await waitForNativeMainStartupGate();
+
+        expect((await request(nativeCaller, {
+          authorization: "Bearer local-secret",
+          "chatgpt-account-id": "must-not-forward",
+        })).status).toBe(401);
+        expect(seen).toHaveLength(beforeNativeCaller);
+        writeMainToken("opaque-file-main-token");
+
+        const fileMainBaseline = {
+          reauth: isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID),
+          quota: structuredClone(getAccountQuota(MAIN_CODEX_ACCOUNT_ID)),
+          health: structuredClone(getCodexUpstreamHealth(MAIN_CODEX_ACCOUNT_ID)),
+          active: loadConfig().activeCodexAccountId,
+        };
+        const expectFileMainUnchanged = () => {
+          expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(fileMainBaseline.reauth);
+          expect(getAccountQuota(MAIN_CODEX_ACCOUNT_ID)).toEqual(fileMainBaseline.quota);
+          expect(getCodexUpstreamHealth(MAIN_CODEX_ACCOUNT_ID)).toEqual(fileMainBaseline.health);
+          expect(loadConfig().activeCodexAccountId).toBe(fileMainBaseline.active);
+        };
+        const isolatedCallerFailures = [
+          ["caller-invalid-401", 401],
+          ["caller-invalid-403", 403],
+          ["caller-quota-429", 429],
+          ["caller-transient-500", 500],
+        ] as const;
+        for (const [token, status] of isolatedCallerFailures) {
+          const headers = {
+            authorization: `Bearer ${token}`,
+            "chatgpt-account-id": `${token}-account`,
+          };
+          expect((await request(nativeCaller, headers)).status).toBe(status);
+          expect((await compact(nativeCaller, headers)).status).toBe(status);
+          expect(await wsTurn(nativeCaller, headers)).toContain(String(status));
+          expectFileMainUnchanged();
+        }
+        const quotaOnlyHeaders = {
+          authorization: "Bearer caller-quota-headers",
+          "chatgpt-account-id": "caller-quota-headers-account",
+        };
+        expect((await request(nativeCaller, quotaOnlyHeaders)).status).toBe(200);
+        expect((await compact(nativeCaller, quotaOnlyHeaders)).status).toBe(200);
+        expect(await wsTurn(nativeCaller, quotaOnlyHeaders)).toContain("resp_tier");
+        expectFileMainUnchanged();
+
+        markAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+
+        const nativeHeaders = {
+          authorization: "Bearer caller-keyring-token",
+          "chatgpt-account-id": "caller-keyring-account",
+        };
+        const beforeHealthyNativeCaller = seen.length;
+        expect((await request(nativeCaller, nativeHeaders)).status).toBe(200);
+        expect((await compact(nativeCaller, nativeHeaders)).status).toBe(200);
+        expect(seen.slice(beforeHealthyNativeCaller)).toEqual(Array.from({ length: 2 }, () => ({
+          host: "chatgpt.com",
+          authorization: "Bearer caller-keyring-token",
+          chatgptAccountId: "caller-keyring-account",
+        })));
+        expect(isAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID)).toBe(true);
+      } finally {
+        await nativeCaller.stop(true);
+        clearAccountNeedsReauth(MAIN_CODEX_ACCOUNT_ID);
+        rmSync(join(isolatedCodexHome!.path, "auth.json"), { force: true });
+      }
+
+      saveConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,
@@ -1644,7 +1840,7 @@ describe("server local API auth", () => {
         await multi.stop(true);
       }
 
-      replacePersistedConfig({
+      saveConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,
@@ -1675,7 +1871,7 @@ describe("server local API auth", () => {
         expiresAt: Date.now() + 300_000,
         chatgptAccountId: "acct-pool-b",
       });
-      replacePersistedConfig({
+      saveConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,
@@ -3360,7 +3556,7 @@ describe("server local API auth", () => {
     }
   });
 
-  test("passthrough pool send refuses a 307 without exposing Location (#914)", async () => {
+  test("passthrough pool send relays a 307 with Location and records no health evidence (#914)", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -3369,8 +3565,8 @@ describe("server local API auth", () => {
     clearAccountNeedsReauth("pool-a");
     clearUpstreamHostHealth();
 
-    // The upstream answers 307 -> dead.invalid. Manual redirects must reject it
-    // without following or exposing the destination.
+    // The upstream answers 307 -> dead.invalid. Manual redirects must relay it
+    // (with Location) instead of following into a dead-host rejection.
     const redirectTarget = "https://dead.invalid/x";
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -3405,7 +3601,8 @@ describe("server local API auth", () => {
     });
     updateAccountQuota("pool-a", 10, 5);
 
-    // Seed a pre-connection streak: redirect refusal must not clear it.
+    // Seed a pre-connection streak: the 307 is also a real HTTP response and
+    // must clear it.
     const hostKey = upstreamHostHealthKey("openai", "https://chatgpt.com");
     recordUpstreamHostFailure(hostKey, { code: "ECONNREFUSED" });
 
@@ -3421,19 +3618,13 @@ describe("server local API auth", () => {
         redirect: "manual",
       });
 
-      expect(response.status).toBe(502);
-      const body = await response.json() as { error?: { message?: string } };
-      expect(body.error?.message).toContain("upstream returned 307 redirect");
-      expect(response.headers.get("location")).toBeNull();
-      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
-        consecutiveFailures: 1,
-        lastFailureStatus: 0,
-      });
+      expect(response.status).toBe(307);
+      expect(response.headers.get("location")).toBe(redirectTarget);
+      // Neutral class: no account streak, no soft-avoid, no rotation, and the
+      // real response cleared the seeded host streak.
+      expect(getCodexUpstreamHealth("pool-a")).toBeNull();
       expect(isCodexAccountSoftAvoided("pool-a")).toBe(false);
-      expect(getUpstreamHostHealth(hostKey)).toMatchObject({
-        consecutiveFailures: 1,
-        lastFailureCode: "ECONNREFUSED",
-      });
+      expect(getUpstreamHostHealth(hostKey)).toBeNull();
     } finally {
       await server.stop(true);
     }
@@ -3493,25 +3684,11 @@ describe("server local API auth", () => {
 
       expect(response.status).toBe(200);
       await response.text();
-      // The passthrough response has a client-facing tee branch and an async
-      // inspection branch. Wait for the latter to record its outcome before
-      // asserting the health/log contract.
-      const deadline = Date.now() + 1_000;
-      let health = getCodexUpstreamHealth("pool-a");
-      let logs: ReturnType<typeof logsFromApiBody> = [];
-      while (Date.now() < deadline) {
-        health = getCodexUpstreamHealth("pool-a");
-        logs = logsFromApiBody(await fetch(new URL("/api/logs?tail=1", server.url), { headers: managementHeaders() }).then(r => r.json()));
-        if (health?.consecutiveFailures === 3 && logs.at(-1)?.terminalStatus === "failed") break;
-        await Bun.sleep(10);
-      }
-      if (health?.consecutiveFailures !== 3 || logs.at(-1)?.terminalStatus !== "failed") {
-        throw new Error(`timed out waiting for passthrough terminal inspection (health=${JSON.stringify(health)}, lastLog=${JSON.stringify(logs.at(-1))})`);
-      }
-      expect(health).toMatchObject({
+      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
         consecutiveFailures: 3,
         lastFailureStatus: 502,
       });
+      const logs = logsFromApiBody(await fetch(new URL("/api/logs?tail=1", server.url), { headers: managementHeaders() }).then(r => r.json()));
       expect(logs.at(-1)).toMatchObject({
         status: 502,
         errorCode: "upstream_server_error",

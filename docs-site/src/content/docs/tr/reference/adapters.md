@@ -30,8 +30,7 @@ olayları Responses SSE'ye dönüştürür.
 
 **Hedefler:** OpenAI **Chat Completions** (`POST {baseUrl}/chat/completions`;
 `baseUrl` üzerindeki sondaki `/chat/completions` veya `/` önce kaldırılır) ve
-her uyumlu sağlayıcı — xAI, Kimi, DeepSeek, GLM, Groq, OpenRouter, Ollama (yerel
-ve bulut) ve daha fazlası.
+her uyumlu sağlayıcı — xAI, Kimi, DeepSeek, GLM, Groq, OpenRouter, Ollama (yerel) ve daha fazlası.
 **Kimlik Doğrulama:** `key` (Bearer).
 
 - Dahili mesajları OpenAI rollerine dönüştürür; araçları `{type:"function",
@@ -55,6 +54,46 @@ ve bulut) ve daha fazlası.
   korur, `delta.reasoning_content` veya `delta.reasoning`'den gelen akıl
   yürütme farklarını kabul eder, `stream_options.include_usage` ile akışlı
   kullanım ister ve akışsız yanıt zarflarından kullanımı okur.
+
+## `ollama-native`
+
+**Hedefler:** OpenAI uyumlu yüzey yerine Ollama'nın kendi **Chat API'si** (`POST /api/chat`).
+Yerleşik `ollama-cloud` sağlayıcısı kayıt defteri tarafından bu adaptöre seçilir; ayrıca ayrı adlı
+özel veya kendi kendine barındırılan bir Ollama sağlayıcısında `adapter: "ollama-native"` ile
+yapılandırılabilir.
+**Kimlik Doğrulama:** bulut/özel hedefler için `key` (Bearer). Loopback veya `authMode: "local"`
+hedeflerine kimlik bilgisi gönderilmez.
+
+- **Kayıt defteri seçimi belirleyicidir.** Yerleşik `ollama-cloud` satırı, `/v1/models` canlı
+  keşfi için `https://ollama.com/v1` temel URL'sini korurken çıkarım
+  `POST https://ollama.com/api/chat` üzerine normalleştirilir. Sağlayıcı satırındaki yapılandırılmış
+  `adapter` değeri atılır. Sıradan yerleşik yerel Ollama `openai-chat` üzerinde kalır; yerel veya
+  self-hosted bir hedef için `ollama-native` seçmek açık bir sağlayıcı yapılandırma kararıdır ve
+  ana bilgisayara göre belirlenir, böylece Ollama olmayan bir hedef hiçbir zaman sessizce
+  yeniden yazılmaz.
+- **Model meta verileri:** `/v1/models` model başına meta veri taşımaz; bu yüzden kanonik Ollama
+  Cloud için sağlayıcı, keşfedilen her kimliği *sınırlı* bir `POST /api/show` ile zenginleştirir
+  (yanıt başına 256 KiB, istek başına 8 sn, eşzamanlılık 4, 48 istek, tüm aşama için 12 sn süre) ve
+  gerçek bağlam penceresi ile vision yeteneğini doldurur. show isteği aynı kaynaktadır ve asla bir
+  yönlendirmeyi izlemez; hata yalnızca o modeli düşürür, keşfi asla bozmaz.
+- **Akış:** Ollama'nın yerel NDJSON'u. Metin ve `message.thinking` delta'ları geldikçe iletilir;
+  bir tur yalnızca `done: true` terminal kaydında tamamlanır ve tamponlanmış `done: false` ya da
+  eksik terminal, kısmi metni ve araç çağrılarını tamamen bastırır.
+- **Reasoning:** Ollama'nın yerel `think` alanına (`low`/`medium`/`high`/`max` ve booleans)
+  eşlenir, modelin duyurulan merdivenine kırpılır ve üst katmanda yapılandırılan `__omit__`
+  sentinel semantiğine uyar.
+- **Görseller:** model vision destekliyorsa mesajın `images` dizisinde yerel olarak gönderilir;
+  video yanlış gönderilmek yerine reddedilir ve uzak görsel URL'leri alınmaz.
+- **Araçlar:** Ollama'nın yerel biçiminde bildirilir; akış halindeki araç çağrıları `arguments`
+  alanı nesne olan bütün çağrı kayıtlarıdır ve araç sonucu yeniden oynatma, çağrı kimliği ve araç
+  adına göre sıkı şekilde eşleştirilir. `tool_choice: "none"` ve `auto` normal çalışır;
+  **`required` veya tam adlandırılmış seçim fail closed** olur, çünkü Ollama'nın `/api/chat`
+  arabiriminde bunu dayatacak bir `tool_choice` alanı yoktur.
+- **Yapılandırılmış çıktı kanonik Ollama Cloud'da reddedilir.** Ollama şu anda yapılandırılmış
+  çıktıyı Cloud'da desteklemediğini belgeliyor ve Cloud `format` alanını zorunlu kılmıyor; bu
+  yüzden OpenCodex, şema tanımlı bir isteğe karşılık serbest metin döndürmek yerine isteği kapatarak
+  başarısız kılar. Yerel ve özel `ollama-native` uç noktaları Ollama'nın yerel `format` eşlemesini
+  korur (`json_object` → `"json"`, `json_schema` → şema nesnesinin kendisi).
 
 ## `openai-responses`
 
@@ -209,6 +248,11 @@ sidecar'ı etkinken serbest bırakılan yorum terminal olayından önce yine de 
 yalnızca modelin sentetik bir arama talep edip etmediğine karar vermek için
 gereken olaylar arabelleğe alınmış olarak kalır.
 
+Yalnızca kullanıcının verebileceği bir karar, bilgi ya da açıklama olmadan devam
+edilemiyorsa, sözleşme bu soruyu tamamlama aracıyla gönderip durmayı söyler. Böyle
+bir tur da yorum ya da istemci araç çağrısı değil, turu bitiren `final_answer`
+olarak ulaşır.
+
 Kiro tamamlama aracını çağırmadan durursa adaptör bir devam işlemi yapar.
 Yalnızca akıl yürütme yeniden denemeleri boş bir asistan mesajı üretmek yerine
 orijinal geçerli kullanıcı/araç sonucu turunu korur; görünür ilerleme boş
@@ -241,7 +285,6 @@ Cursor'ın `agent.v1.AgentService/Run` servisi.
 **Kimlik Doğrulama:** `provider.apiKey`'den veya iletilen yetkilendirme
 başlığından Cursor OAuth/erişim belirteci.
 
-- Yapılandırılmış çıktı taşımadan önce reddedilir: Cursor'ın protobuf çıktı şeması alanı yoktur, bu yüzden `text.format` / `response_format` JSON object veya schema (ve dahili structured-output bayrağı) `400 invalid_request_error` döndürür. Araçlar bu denetimi atlatamaz.
 - Sıradan getirme/ayrıştırma yolu yerine `runTurn` kullanır. İstekler, sunucu
   olayları, araç argümanları, kullanım denetim noktaları ve istemci yanıtları
   `cursor/gen/agent_pb.ts` içindeki `@bufbuild/protobuf` şemalarıyla kodlanır ve
@@ -263,38 +306,18 @@ başlığından Cursor OAuth/erişim belirteci.
   vardır; `nativeLocalExec: "on"` daha geniş yerleşik yürütücüyü etkinleştirir
   ve Codex onay/sanal alan anlambilimini atlar ve eski
   `unsafeAllowNativeLocalExec: true` yalnızca `nativeLocalExec` ayarlanmadığında
-  eşdeğer kalır. Varsayılan `off` ile, katalogda köprü aracı varken yerel
-  Shell/Read/Ls/Grep/Fetch Codex `shell_command`/`exec_command` çağrılarına
-  eşlenir; write/delete reddedilmeye devam eder.
-
-## `command-code`
-
-**Hedefler:** Command Code **OAuth** abonelik agent API'si (`POST {baseUrl}/alpha/generate`).
-**Kimlik doğrulama:** `ocx login command-code` OAuth Bearer.
-
-- API anahtarı `commandcode` önayından (`openai-chat` → `POST {baseUrl}/provider/v1/chat/completions`) ayrıdır. API anahtarı yolu `projectContext` okumaz ve generate zarfını diskten doldurmaz.
-- `providers.command-code` üzerindeki isteğe bağlı `projectContext: "on"`, istek anında `process.cwd()` içindeki sınırlı dosyaları `memory`, `taste` ve `skills` alanlarına kopyalar. Eksik veya `"off"` iken depoda dosyalar olsa bile `memory: ""`, `taste: null`, `skills: null` gönderilir — yalnızca opt-in, otomatik yükleme yok.
-- Çalışma dizini Codex'in düzenlediği depoyla eşleşsin diye proxy'yi güvenilir Codex proje dizininden başlatın.
-- **Memory:** yalnızca cwd'deki `AGENTS.md` UTF-8 (`CLAUDE.md`, `CODEX.md` veya ev yolları değil). Üst sınır 32.768 bayt; aşımda `<!-- truncated -->` ile önek kesilir.
-- **Taste:** `.commandcode/taste/taste.md` UTF-8 veya yoksa `null`. Üst sınır 8.192 bayt, aynı kesme işareti. Var ama boş dosya `""` gönderir. `x-taste-learning` `"false"` kalır; taste yüklemek Command Code taste learning değildir.
-- **Skills:** proje skill köklerinden sırayla XML: `.commandcode/skills`, `.agents/skills`, `.pi/skills`. `SKILL.md` içeren her alt dizin bir `<skill name="…">…</skill>` olur (ad YAML frontmatter `name:` veya dizin adından). `.` ile başlayan adlar ve dizin olmayanlar atlanır; çözümlenen ada göre first-wins; en fazla 16 skill; toplam XML üst sınırı 32.768 bayt. `~/.commandcode/skills` veya diğer ev skill ağaçlarını okumaz.
-- Yol sınırlandırması cwd altında realpath ile yapılır; symlink kaçışları düşürülür. Her dosya işlemi 2 saniye zaman aşımı. Sonuçlar cwd başına 30 saniye önbelleğe alınır (en fazla 128 giriş). Herhangi bir hata fail-soft olarak yalnızca o parçayı düşürür.
-- `commandCodeVersion`, `x-command-code-version` sabitler (varsayılan `0.52.1`). `permissionMode` `"standard"`, `mode` `"agent"` kalır.
+  eşdeğer kalır.
 
 ## `azure-openai` (takma ad: `azure`)
 
 **Hedefler:** **Azure OpenAI**. `openai-responses`'ı sarar (bu nedenle
 `passthrough: true`).
-**Kimlik Doğrulama:** `api-key` başlığı üzerinden API anahtarı veya
-`DefaultAzureCredential` üzerinden Azure kimliği (Bearer; `api-key` değil). Modlar birbirini dışlar.
+**Kimlik Doğrulama:** `api-key` başlığı aracılığıyla `key` (Bearer değil).
 
 - İstek oluşturmayı Responses doğrudan geçişine devreder, `baseUrl`'in
   çözümlenmemiş şablon yer tutucusu içermediğini doğrular ve `Authorization`'ı
   `api-key` ile değiştirir. Yapılandırılan URL doğrudan Azure'un v1 Responses
   API'sini hedefler, bu nedenle adaptör `api-version` eklemez.
-- Kimlik modunda tam scope `https://cognitiveservices.azure.com/.default` kullanılır ve
-  yapılandırılmış modeller statiktir (`liveModels: false`); genel `/models` keşfi yapılmaz.
-  Tam `DefaultAzureCredential` zinciri ve yapılandırma için İngilizce sayfaya bakın.
 
 ## Görsel yardımcıları (`image.ts`)
 
@@ -305,4 +328,4 @@ Vizyon duyarlı adaptörler tarafından kullanılan paylaşılan yardımcılar:
 - `contentPartsToText(content)` — salt metin araç mesajları için içerik
   parçalarını metne düzleştirir (açıklanmayan bir görsel kısa bir `[image]`
   işaretçisi haline gelir, asla belirteç patlatan bir base64 bloğu olmaz).
-AI Studio uzantı origin'i tam bir `chrome-extension://` origin olmalı; eşitleme isteği data-plane API key gerektirir.
+

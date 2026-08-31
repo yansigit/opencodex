@@ -8,10 +8,8 @@
  *
  * Modelled after src/codex/routing.ts cooldown logic but scoped to plain API-key pools.
  */
-import { mutatePersistedConfig } from "../config";
-import { isAzureIdentityProvider } from "../config/provider-validation";
-import { routedProviderConfig } from "../router";
-import type { OcxConfig, OcxProviderConfig, RateLimitRetryPolicy } from "../types";
+import { saveConfigPreservingClaudeCode } from "../config";
+import type { OcxConfig, OcxProviderConfig, RateLimitRetryPolicy, TransientRetryPolicy } from "../types";
 import { resolveProviderTransport, type OcxProviderTransport } from "./xai-transport";
 import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
 
@@ -35,6 +33,15 @@ const DEFAULT_RATE_LIMIT_RETRY = {
   maxIntervalMs: 60_000,
   respectRetryAfter: true,
 } as const satisfies Required<RateLimitRetryPolicy>;
+
+/**
+ * Default transient-5xx retry used when a provider opts in with a bare
+ * `transientRetryOn5xx: {}`. `attempts` is a TOTAL send budget, not extra retries.
+ */
+const DEFAULT_TRANSIENT_RETRY = {
+  enabled: true,
+  attempts: 3,
+} as const satisfies Required<TransientRetryPolicy>;
 
 /** Map<`${providerName}\0${keyId}`, KeyCooldown> */
 const keyCooldowns = new Map<string, KeyCooldown>();
@@ -86,7 +93,6 @@ function isKeyInCooldown(providerName: string, keyId: string, now = Date.now()):
  * Returns true only for key-auth providers with 2+ pool entries.
  */
 export function hasKeyPoolFailover(provider: OcxProviderConfig): boolean {
-  if (isAzureIdentityProvider(provider)) return false;
   if (provider.authMode === "oauth" || provider.authMode === "forward") return false;
   return (provider.apiKeyPool?.length ?? 0) >= 2;
 }
@@ -99,7 +105,7 @@ export function hasKeyPoolFailover(provider: OcxProviderConfig): boolean {
  * callers never re-check fields.
  */
 export function rateLimitRetryPolicyFor(
-  provider: Pick<OcxProviderConfig, "retryOn429" | "authMode" | "adapter" | "azureCredential">,
+  provider: Pick<OcxProviderConfig, "retryOn429" | "authMode">,
 ): Required<RateLimitRetryPolicy> | null {
   const policy = provider.retryOn429;
   if (!policy || policy.enabled === false) return null;
@@ -108,13 +114,35 @@ export function rateLimitRetryPolicyFor(
   // same token, local runtimes have no remote key to preserve, and unknown/custom values are
   // rejected rather than guessed at.
   if (provider.authMode !== undefined && provider.authMode !== "key") return null;
-  if (isAzureIdentityProvider(provider)) return null;
   return {
     enabled: policy.enabled ?? DEFAULT_RATE_LIMIT_RETRY.enabled,
     attempts: policy.attempts ?? DEFAULT_RATE_LIMIT_RETRY.attempts,
     intervalMs: policy.intervalMs ?? DEFAULT_RATE_LIMIT_RETRY.intervalMs,
     maxIntervalMs: policy.maxIntervalMs ?? DEFAULT_RATE_LIMIT_RETRY.maxIntervalMs,
     respectRetryAfter: policy.respectRetryAfter ?? DEFAULT_RATE_LIMIT_RETRY.respectRetryAfter,
+  };
+}
+
+/**
+ * Normalize a provider's `transientRetryOn5xx` policy, or return null when it is absent,
+ * explicitly disabled, not key-auth, or not the `openai-chat` adapter.
+ *
+ * The adapter gate is part of the accepted scope, not incidental: this first version covers
+ * key-auth `openai-chat` only, and without an explicit check any generic key-auth adapter
+ * could opt in. Auth mode follows the same fail-closed rule as `rateLimitRetryPolicyFor` —
+ * explicit `key` or the documented omitted default, never OAuth, forward, local, or an
+ * unknown value.
+ */
+export function transientRetryPolicyFor(
+  provider: Pick<OcxProviderConfig, "transientRetryOn5xx" | "authMode" | "adapter">,
+): Required<TransientRetryPolicy> | null {
+  const policy = provider.transientRetryOn5xx;
+  if (!policy || policy.enabled === false) return null;
+  if (provider.adapter !== "openai-chat") return null;
+  if (provider.authMode !== undefined && provider.authMode !== "key") return null;
+  return {
+    enabled: policy.enabled ?? DEFAULT_TRANSIENT_RETRY.enabled,
+    attempts: policy.attempts ?? DEFAULT_TRANSIENT_RETRY.attempts,
   };
 }
 
@@ -157,69 +185,52 @@ export function rotateKeyOn429(
 ): OcxProviderConfig | null {
   const provider = config.providers[providerName];
   if (!provider) return null;
-  if (isAzureIdentityProvider(provider)) return null;
   if (provider.authMode === "oauth" || provider.authMode === "forward") return null;
 
+  const pool = provider.apiKeyPool;
+  if (!pool || pool.length < 2) return null;
+
+  // Cool the key that ACTUALLY failed. Under concurrent 429s another request may already have
+  // rotated provider.apiKey — cooling the live key would punish an innocent replacement and can
+  // exhaust a 2-key pool from a single bad key. CAS semantics: callers pass the key they used.
   const failedKey = attemptedKey ?? provider.apiKey;
-  type Rotation =
-    | { provider: OcxProviderConfig; failedId?: string; candidateId?: string }
-    | { exhaustedCount: number };
-  const outcome = mutatePersistedConfig<Rotation | null>(fresh => {
-    const freshProvider = fresh.providers[providerName];
-    if (!freshProvider || isAzureIdentityProvider(freshProvider)
-      || freshProvider.authMode === "oauth" || freshProvider.authMode === "forward") {
-      return { changed: false, value: null };
-    }
-    const pool = freshProvider.apiKeyPool;
-    if (!pool || pool.length < 2) return { changed: false, value: null };
-
-    // Cool the key that actually failed. The callback is rerun after rebasing,
-    // so both the id and the active-key comparison come from the commit preimage.
-    const failedEntry = pool.find(entry => entry.key === failedKey);
-    if (failedEntry) {
-      const cooldownMs = parseRetryAfterMs(retryAfterHeader, now) ?? DEFAULT_COOLDOWN_MS;
-      keyCooldowns.set(cooldownKey(providerName, failedEntry.id), { cooldownUntil: now + cooldownMs });
-      sweepExpiredOnWrite(now);
-    }
-
-    if (freshProvider.apiKey !== failedKey) {
-      const activeEntry = pool.find(entry => entry.key === freshProvider.apiKey);
-      if (activeEntry && !isKeyInCooldown(providerName, activeEntry.id, now)) {
-        return {
-          changed: false,
-          value: { provider: structuredClone(freshProvider), failedId: failedEntry?.id, candidateId: undefined },
-        };
-      }
-    }
-
-    const currentIndex = failedEntry ? pool.indexOf(failedEntry) : -1;
-    const candidateCount = failedEntry ? pool.length - 1 : pool.length;
-    for (let offset = 1; offset <= candidateCount; offset += 1) {
-      const candidate = pool[(currentIndex + offset) % pool.length]!;
-      if (isKeyInCooldown(providerName, candidate.id, now)) continue;
-      freshProvider.apiKey = candidate.key;
-      return {
-        changed: true,
-        value: { provider: structuredClone(freshProvider), failedId: failedEntry?.id, candidateId: candidate.id },
-      };
-    }
-    return { changed: false, value: { exhaustedCount: pool.length } };
-  });
-  if (outcome.status === "unavailable" || outcome.value === null) return null;
-  if ("exhaustedCount" in outcome.value) {
-    console.warn(`[key-failover] ${providerName}: all ${outcome.value.exhaustedCount} keys in cooldown; returning 429 to client`);
-    return null;
+  const currentEntry = pool.find(e => e.key === failedKey);
+  if (currentEntry) {
+    const cooldownMs = parseRetryAfterMs(retryAfterHeader, now) ?? DEFAULT_COOLDOWN_MS;
+    keyCooldowns.set(cooldownKey(providerName, currentEntry.id), {
+      cooldownUntil: now + cooldownMs,
+    });
+    sweepExpiredOnWrite(now);
   }
 
-  const committed = structuredClone(outcome.value.provider);
-  config.providers[providerName] = committed;
-  if (outcome.value.candidateId) {
-    console.warn(
-      // Log ids only — labels are user-supplied free text and could carry secret material.
-      `[key-failover] ${providerName}: 429 on key ${outcome.value.failedId ?? "?"}; rotating to key ${outcome.value.candidateId}`,
-    );
+  // Lost the race: someone already rotated away from the failed key. If the live key is healthy,
+  // retry with it as-is instead of rotating a second time.
+  if (attemptedKey !== undefined && provider.apiKey !== attemptedKey) {
+    const liveEntry = pool.find(e => e.key === provider.apiKey);
+    if (liveEntry && !isKeyInCooldown(providerName, liveEntry.id, now)) {
+      return { ...provider };
+    }
   }
-  return structuredClone(committed);
+
+  // Pick the next key that is NOT in cooldown
+  const currentIndex = currentEntry ? pool.indexOf(currentEntry) : -1;
+  for (let i = 1; i < pool.length; i++) {
+    const candidate = pool[(currentIndex + i) % pool.length]!;
+    if (!isKeyInCooldown(providerName, candidate.id, now)) {
+      // Swap active key
+      provider.apiKey = candidate.key;
+      saveConfigPreservingClaudeCode(config);
+      console.warn(
+        // Log ids only — labels are user-supplied free text and could carry secret material.
+        `[key-failover] ${providerName}: 429 on key ${currentEntry?.id ?? "?"}; rotating to key ${candidate.id}`,
+      );
+      return { ...provider };
+    }
+  }
+
+  // All keys in cooldown
+  console.warn(`[key-failover] ${providerName}: all ${pool.length} keys in cooldown; returning 429 to client`);
+  return null;
 }
 
 export function sweepExpiredApiKeyCooldowns(now = Date.now()): number {
@@ -242,9 +253,13 @@ interface RotateProviderTransportOptions {
 /**
  * Rotate a failed key and re-apply provider-specific transport metadata to the replacement.
  *
- * Put the authoritative committed row over request-only fields and registry backfills, then
- * route it again so concurrent provider edits take effect without losing either kind of runtime
- * metadata.
+ * `routedProvider` is the request's active provider (the `routedProviderConfig` output the
+ * route was built with). The result inherits it and swaps ONLY the API key: the persisted
+ * config that `rotateKeyOn429` snapshots predates registry backfill, so building the retry
+ * provider from that snapshot would silently drop every field the registry merged in at
+ * routing time (scalar flags like `promptCacheKey`/`parallelToolCalls`, merged model
+ * metadata such as `noTemperatureModels`, a pinned baseUrl). Mirrors the OAuth-401 replay
+ * path in src/server/responses/core.ts, which spreads `route.provider` for the same reason.
  */
 export function rotateProviderTransportOn429(
   config: OcxConfig,
@@ -262,7 +277,7 @@ export function rotateProviderTransportOn429(
   return rotated
     ? resolveProviderTransport(
         providerName,
-        routedProviderConfig(providerName, { ...routedProvider, ...rotated }),
+        { ...routedProvider, apiKey: rotated.apiKey },
         options.promptCacheKey,
       )
     : null;

@@ -47,6 +47,17 @@ const TEST_ENV = {} as NodeJS.ProcessEnv;
  */
 function installClient(clientId: IntegrationClientId): string {
   const spec = INTEGRATION_CLIENTS[clientId];
+  /*
+   * Aside resolves its config path THROUGH its account manifest, so unlike
+   * every other client the path does not exist as a pure function of home. It
+   * throws rather than guessing an account, which is the point of that design,
+   * so the fixture has to establish which account is current before any
+   * resolver runs.
+   */
+  if (clientId === "aside") {
+    mkdirSync(join(home, ".aside"), { recursive: true });
+    writeFileSync(join(home, ".aside", "accounts.json"), JSON.stringify({ currentAccountId: 0 }));
+  }
   mkdirSync(spec.detectDir(TEST_ENV, home), { recursive: true });
   const configPath = spec.configPath(TEST_ENV, home);
   mkdirSync(dirname(configPath), { recursive: true });
@@ -66,9 +77,9 @@ afterEach(() => {
 });
 
 describe("the client registries cannot drift apart", () => {
-  test("every list of clients holds exactly the same eleven ids", async () => {
+  test("every list of clients holds exactly the same twelve ids", async () => {
     /*
-     * Five lists name the same eleven clients, and two of them are maintained by
+     * Five lists name the same twelve clients, and two of them are maintained by
      * hand: the GUI cannot import the backend registry, because that would
      * pull node:os and node:path into the browser bundle. A client added
      * server-side renders no row until someone remembers the tuple, and the
@@ -79,7 +90,7 @@ describe("the client registries cannot drift apart", () => {
     const guiRouting = await import("../gui/src/app-routing");
 
     const expected = [...EXPORT_CLIENT_IDS].sort();
-    expect(expected).toHaveLength(11);
+    expect(expected).toHaveLength(12);
 
     expect([...INTEGRATION_CLIENT_IDS].sort()).toEqual(expected);
     expect([...gui.CLIENTS].sort()).toEqual(expected);
@@ -156,6 +167,8 @@ describe("every client survives a full lifecycle", () => {
     zcode: '{\n  "provider": {\n    "builtin:zai-start-plan": { "name": "Keep Me", "kind": "anthropic" }\n  }\n}\n',
     // Prime reads Pi's models.json contract, so it seeds the same shape.
     prime: '{\n  "providers": {\n    "mine": { "api": "http://keep-me" }\n  }\n}\n',
+    // Aside reads the same models.json contract as Pi and Prime.
+    aside: '{\n  "providers": {\n    "mine": { "api": "http://keep-me" }\n  }\n}\n',
   };
 
   for (const clientId of INTEGRATION_CLIENT_IDS) {
@@ -250,30 +263,37 @@ describe("a container we would have to replace is refused, not overwritten", () 
    * our fragment path expects an object lost it to an apply that reported
    * success. Per client, because each one's path shape differs.
    */
-  const NON_OBJECT: Partial<Record<IntegrationClientId, string>> = {
-    pi: '{\n  "providers": ["user-value"]\n}\n',
-    opencode: '{\n  "provider": ["user-value"]\n}\n',
-    hermes: "providers:\n  - user-value\n",
-    kimi: 'models = ["user-value"]\n',
+  const NON_OBJECT: Partial<Record<IntegrationClientId, string[]>> = {
+    pi: ['{\n  "providers": ["user-value"]\n}\n'],
+    // Two containers to check: opencode owns both blocks, so a user value under either
+    // one has to be refused rather than replaced on the way to our leaf.
+    opencode: [
+      '{\n  "provider": ["user-value"]\n}\n',
+      '{\n  "providers": ["user-value"]\n}\n',
+    ],
+    hermes: ["providers:\n  - user-value\n"],
+    kimi: ['models = ["user-value"]\n'],
   };
 
-  for (const [clientId, seed] of Object.entries(NON_OBJECT) as [IntegrationClientId, string][]) {
-    test(`${clientId}: apply refuses and leaves the user's value untouched`, () => {
-      const configPath = installClient(clientId);
-      writeFileSync(configPath, seed);
+  for (const [clientId, seeds] of Object.entries(NON_OBJECT) as [IntegrationClientId, string[]][]) {
+    for (const [index, seed] of seeds.entries()) {
+      test(`${clientId}: apply refuses and leaves the user's value untouched (${index + 1})`, () => {
+        const configPath = installClient(clientId);
+        writeFileSync(configPath, seed);
 
-      const result = applyIntegration({
-        clientId, models: MODELS, config: CONFIG, port: 10100,
-        env: TEST_ENV, home, store,
+        const result = applyIntegration({
+          clientId, models: MODELS, config: CONFIG, port: 10100,
+          env: TEST_ENV, home, store,
+        });
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.reason).toBe("unsafe");
+        // The bytes are exactly as the user left them — not restored from a
+        // snapshot afterwards, never written in the first place.
+        expect(readFileSync(configPath, "utf8")).toBe(seed);
+        expect(store.listOperations()).toHaveLength(0);
       });
-
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.reason).toBe("unsafe");
-      // The bytes are exactly as the user left them — not restored from a
-      // snapshot afterwards, never written in the first place.
-      expect(readFileSync(configPath, "utf8")).toBe(seed);
-      expect(store.listOperations()).toHaveLength(0);
-    });
+    }
   }
 
   test("openclaw: a collision in the NESTED container is refused too", () => {

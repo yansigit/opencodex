@@ -10,18 +10,16 @@
  */
 import type { OcxProviderConfig } from "../types";
 import { getValidAccessTokenSnapshot, publicOAuthAuthenticationErrorMessage } from "../oauth";
-import { fetchWithResetRetry } from "../lib/upstream-retry";
+import { applyUpstreamRecoveryInit, fetchWithResetRetry } from "../lib/upstream-retry";
 import { cancelBodyOnAbort, signalWithTimeout } from "../lib/abort";
 import { readBoundedResponseBytes } from "../lib/bounded-body";
 import { sidecarEnter } from "../lib/sidecar-tracker";
-import { redactErrorMessage, redactSecretString } from "../lib/redact";
+import { redactSecretString } from "../lib/redact";
 import { ANTIGRAVITY_REQUEST_UA } from "../adapters/google-antigravity-wire";
 import { resolveAntigravityEffortWireModel } from "../providers/antigravity-models";
 import { getProviderRegistryEntry } from "../providers/registry";
 import { MAX_SIDECAR_RESPONSE_BYTES, type WebSearchSource } from "./parse";
-import { appendSafeWebSearchSource } from "./sources";
 import { BASE_INSTRUCTION, IMAGE_INSTRUCTION, type SidecarOutcome, type SidecarSettings } from "./executor";
-import { providerFetch } from "../server/responses/fetch-helpers";
 
 const CCA_FALLBACK_BASE = "https://daily-cloudcode-pa.googleapis.com";
 
@@ -32,7 +30,7 @@ function isRec(v: unknown): v is Record<string, unknown> {
 export async function runGeminiWebSearch(
   query: string,
   providerName: string,
-  provider: OcxProviderConfig,
+  _provider: OcxProviderConfig,
   settings: SidecarSettings,
   abortSignal?: AbortSignal,
 ): Promise<SidecarOutcome> {
@@ -69,10 +67,9 @@ export async function runGeminiWebSearch(
   const linkedSignal = signalWithTimeout(settings.timeoutMs, abortSignal);
   const sidecarExit = sidecarEnter("web-search");
   const t0 = Date.now();
-  const executor = providerFetch(provider, undefined, { providerName, modelId: settings.model });
   try {
     const res = await fetchWithResetRetry(
-      () => executor(`${base}/v1internal:generateContent`, {
+      recovery => fetch(`${base}/v1internal:generateContent`, applyUpstreamRecoveryInit({
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -82,7 +79,7 @@ export async function runGeminiWebSearch(
         body: JSON.stringify(envelope),
         signal: linkedSignal.signal,
         redirect: "manual",
-      }),
+      }, recovery)),
       { abortSignal: linkedSignal.signal, label: "gemini-web-search-sidecar" },
     );
     const detachBodyGuard = cancelBodyOnAbort(res.body, linkedSignal.signal);
@@ -112,7 +109,7 @@ export async function runGeminiWebSearch(
   } catch (e) {
     const kind = e instanceof Error && e.name === "TimeoutError" ? "timeout" : "connect_error";
     console.warn(`[web-search] gemini sidecar ${kind} (${Date.now() - t0}ms)`);
-    return { text: "", sources: [], error: redactErrorMessage(e instanceof Error ? e.message : String(e)) };
+    return { text: "", sources: [], error: redactSecretString(e instanceof Error ? e.message : String(e)) };
   } finally {
     sidecarExit();
     linkedSignal.cleanup();
@@ -120,46 +117,25 @@ export async function runGeminiWebSearch(
 }
 
 /** Map a CCA generateContent payload (possibly wrapped in {response}) to text + grounding sources. */
-export function extractCcaGroundingSources(groundingMetadata: unknown): WebSearchSource[] {
-  const sources: WebSearchSource[] = [];
-  const gm = isRec(groundingMetadata) ? groundingMetadata : undefined;
-  if (!gm || !Array.isArray(gm.groundingChunks)) return sources;
-  for (const chunk of gm.groundingChunks) {
-    const web = isRec(chunk) && isRec(chunk.web) ? chunk.web : undefined;
-    if (!web) continue;
-    // Route through the shared safe-source validator: enforces http(s) scheme,
-    // control-character filtering, dedup, and per-message count/byte budgets.
-    appendSafeWebSearchSource(sources, { url: web.uri, title: web.title });
-  }
-  return sources;
-}
-
-/** Skip search-suggestion HTML widgets Google may attach alongside grounded answers. */
-export function isCcaSearchSuggestionHtml(text: string): boolean {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("<")) return false;
-  return /<style[\s>]/i.test(trimmed) || /search[_-]?suggest/i.test(trimmed) || /grounding-widget/i.test(trimmed);
-}
-
-export function formatCcaGroundingSourcesAppendix(sources: readonly WebSearchSource[]): string {
-  if (sources.length === 0) return "";
-  const lines = ["", "Sources:"];
-  sources.slice(0, 8).forEach((s, i) => {
-    lines.push(`[${i + 1}] ${s.title ? `${s.title} — ` : ""}${s.url}`);
-  });
-  return lines.join("\n");
-}
-
 export function mapCcaGroundedResponse(payload: unknown): SidecarOutcome {
   const root = isRec(payload) && isRec(payload.response) ? payload.response : payload;
   if (!isRec(root)) return { text: "", sources: [], error: "gemini sidecar returned a non-JSON or empty body" };
   const candidate = Array.isArray(root.candidates) && isRec(root.candidates[0]) ? root.candidates[0] : undefined;
   if (!candidate) return { text: "", sources: [], error: "gemini sidecar returned no candidates" };
   const parts = isRec(candidate.content) && Array.isArray(candidate.content.parts) ? candidate.content.parts : [];
-  const text = parts
-    .map(p => (isRec(p) && typeof p.text === "string" && !isCcaSearchSuggestionHtml(p.text) ? p.text : ""))
-    .join("");
-  const sources = extractCcaGroundingSources(candidate.groundingMetadata);
+  const text = parts.map(p => (isRec(p) && typeof p.text === "string" ? p.text : "")).join("");
+  const sources: WebSearchSource[] = [];
+  const seen = new Set<string>();
+  const gm = isRec(candidate.groundingMetadata) ? candidate.groundingMetadata : undefined;
+  if (gm && Array.isArray(gm.groundingChunks)) {
+    for (const chunk of gm.groundingChunks) {
+      const web = isRec(chunk) && isRec(chunk.web) ? chunk.web : undefined;
+      const uri = web && typeof web.uri === "string" ? web.uri : undefined;
+      if (!uri || seen.has(uri)) continue;
+      seen.add(uri);
+      sources.push({ url: uri, ...(typeof web?.title === "string" && web.title.length > 0 ? { title: web.title } : {}) });
+    }
+  }
   if (text.length === 0) return { text: "", sources, error: "gemini sidecar returned no text" };
   return { text, sources };
 }

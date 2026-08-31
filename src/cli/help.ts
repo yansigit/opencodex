@@ -26,7 +26,7 @@ export function printUsage(): void {
   console.log(`opencodex (ocx) — Universal provider proxy for Codex
 
 Usage:
-  ocx setup [--yes]           Interactive setup (alias: init)
+  ocx setup                   Interactive setup (alias: init)
   ocx start [--port <port>]   Start the proxy server (auto-syncs models to Codex)
   ocx stop                    Stop the proxy AND restore native Codex (plain codex works again)
   ocx restore                 Restore native Codex without stopping (alias: eject)
@@ -61,8 +61,8 @@ Usage:
   ocx account <sub>           Accounts, login/reauth, key pools, and quota controls
   ocx models <sub>            Live/custom models, visibility, context, and shadow calls
   ocx alias <sub>             Short names for providers and models (list, set, rm, defaults)
-  ocx combo <sub>             Combo failover/round-robin routing
-  ocx agent <sub>             Subagents, roles, injection, effort caps, and sidecars
+  ocx combo <sub>             Combo routing strategies and failover
+  ocx agent <sub>             Subagents, injection, effort caps, and sidecars
   ocx observe <sub>           Logs, usage, storage, memory, and debug data
   ocx inspect <sub>           Effective config, catalog, analytics, pacing, client-config
   ocx route <sub>             Routing features (combo, policy)
@@ -73,12 +73,12 @@ Usage:
   ocx memory [--json]         Alias of ocx observe memory
   ocx api-key <sub>           Alias of ocx access key
   ocx access <sub>            External API keys and endpoint information
-  ocx export --client <id>    Print a client config wired to the running proxy (11 clients)
+  ocx export --client <id>    Print a client config wired to the running proxy (12 clients)
   ocx integration client <sub> Enable, disable, inspect or roll back a client integration
   ocx grok <sub>              Grok Build model selection and apply
-  ocx system <sub>            Runtime settings, startup, sync, and updates
+  ocx system <sub>            Runtime settings, startup, sync, OpenCodex updates, and Codex CLI inspection
   ocx config <sub>            Validated configuration show/get/set/import/export
-  ocx lab <sub>               Compatibility Lab (status, run, oracle cursor)
+  ocx lab <sub>               Read-only Compatibility Lab projection inspection
   ocx claude [args...]        Launch Claude Code wired to the proxy (model discovery on)
   ocx claude desktop [sub]    Manage and apply Claude Desktop's four-family profile
   ocx opencode [args...]      Launch opencode wired to the proxy (runtime provider config)
@@ -89,7 +89,7 @@ Usage:
   ocx --version | -v          Print version
 
 Examples:
-  ocx init [--yes]            Set up provider and inject into Codex (replace existing config only with --yes)
+  ocx init                    Set up provider and inject into Codex
   ocx start                   Start on default port (10100)
   ocx start --port 8080       Start on custom port
   ocx help service            Show service command help

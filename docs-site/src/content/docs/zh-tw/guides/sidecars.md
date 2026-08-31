@@ -110,7 +110,6 @@ wire 模型為 Gemini 3.x 時，opencodex 會在**同一**主請求上附加 CCA
 {
   "providers": {
     "ollama-cloud": {
-      "adapter": "openai-chat",
       "baseUrl": "https://ollama.com/v1",
       "noVisionModels": ["glm-5.2", "gpt-oss", "qwen3-coder", "deepseek-v4-pro"]
     }

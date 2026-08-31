@@ -19,7 +19,12 @@ import {
   semanticProtectedContributionFingerprint,
   validRefreshablePaths,
 } from "./ownership-policy";
-import { INTEGRATION_CLIENTS, type IntegrationClientId } from "./registry";
+import {
+  INTEGRATION_CLIENTS,
+  resolveIntegrationPaths,
+  unresolvedPathHintFor,
+  type IntegrationClientId,
+} from "./registry";
 import { createIntegrationStateStore, type IntegrationStateStore } from "./store";
 
 export type IntegrationState = "absent" | "current" | "stale" | "conflict" | "unsafe";
@@ -238,6 +243,42 @@ export function classifyIntegration(input: {
     return { state: "unsafe", reason: "blocked-container" };
   }
   if (!hasOurFragments(input.parsed, input.contribution)) return { state: "absent" };
+
+  /*
+   * Fragments the desired contribution carries beyond the paths this record names. Both
+   * states appear whenever a client gains a second owned block:
+   *
+   *   - occupied by a value we did not write -> refuse. A refresh merges the WHOLE
+   *     contribution, so without this check applying would replace a block the user wrote
+   *     themselves and report success.
+   *   - empty -> our own block is missing, because the record predates it. Report drift so
+   *     a refresh adds it. Without this the file reads `current` forever and the second
+   *     block never arrives, which is exactly what an older installation hits on upgrade.
+   *
+   * A byte-identical value is ours in substance: adopt it instead of dead-ending a
+   * hand-merged config on a conflict the user can only resolve by deleting our own block.
+   */
+  const recordedPaths = new Set((input.record?.fragmentPaths ?? []).map(path => path.join("\u0000")));
+  let addedPathMissing = false;
+  for (const fragment of input.contribution.fragments) {
+    if (recordedPaths.has(fragment.path.join("\u0000"))) continue;
+    const observed = readPath(input.parsed, fragment.path);
+    if (observed === undefined) {
+      addedPathMissing = true;
+      continue;
+    }
+    const one = (value: unknown): string => fingerprint(canonicalContribution({
+      clientId: (input.clientId ?? input.record?.clientId) as IntegrationClientId,
+      fragments: [{ path: fragment.path, value }],
+    }));
+    if (one(observed) !== one(fragment.value)) return { state: "conflict", reason: "unowned-key" };
+  }
+  /*
+   * No record: whatever occupies our paths is not ours to touch. A byte-identical value
+   * would be ours in substance, but `stale` without a record is not actionable — the writer
+   * reads `createdContainers` off the record to decide what it may prune, so adopting a
+   * hand-merged block needs an apply path that creates one first. Refuse, exactly as before.
+   */
   if (!input.record) return { state: "conflict", reason: "unowned-key" };
   /*
    * A record proves ownership of ONE file. Change HOME, XDG_CONFIG_HOME,
@@ -286,6 +327,12 @@ export function classifyIntegration(input: {
     }
     return { state: "stale" };
   }
+  /*
+   * Checked after everything else that could refuse: an owned fragment that no longer
+   * matches, or a sibling edit in a format that cannot be rewritten safely, still wins.
+   * What is left is a block we own on paper and are merely missing on disk.
+   */
+  if (addedPathMissing) return { state: "stale" };
   const desiredFingerprint = typeof input.record.semanticBlockFingerprint === "string"
     ? fingerprint(semanticContribution(input.contribution))
     : fingerprint(canonicalContribution(input.contribution));
@@ -382,15 +429,30 @@ export function readIntegrationState(input: IntegrationStateInput): IntegrationS
   let configPath: string;
   let installed: boolean;
   try {
-    configPath = spec.configPath(input.env, input.home);
-    installed = io.statKind(spec.detectDir(input.env, input.home)) === "dir";
+    // One resolution for both, so a client whose paths come from mutable state
+    // cannot report one account's install beside another account's config path.
+    const paths = resolveIntegrationPaths(input.clientId, input.env, input.home);
+    configPath = paths.configPath;
+    installed = io.statKind(paths.detectDir) === "dir";
   } catch (error) {
     if (!(error instanceof ClientPathError)) throw error;
+    /*
+     * Two different situations reach here and they are not the same answer.
+     *
+     * A relative `OPENCLAW_CONFIG_PATH` is a misconfiguration: there is nothing
+     * to name, and "cannot verify" is correct. Aside's absent account manifest
+     * is the ORDINARY state of an Aside that has been installed and never
+     * signed into, and answering that with a red danger badge and an empty path
+     * told the user their config was suspect when in fact there is no account
+     * yet. A client that can name where its config would go gets `installed:
+     * false` and that location, which reads as "not installed" in the UI.
+     */
+    const hint = unresolvedPathHintFor(input.clientId, input.env, input.home);
     return {
       clientId: input.clientId,
-      state: "unsafe",
+      state: hint ? "absent" : "unsafe",
       installed: false,
-      configPath: "",
+      configPath: hint,
       reason: "unresolvable-path",
       ...retention,
     };
