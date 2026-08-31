@@ -353,80 +353,57 @@ describe("Anthropic account pool strategy management API", () => {
     }
   });
 
-  test("GET returns quotaWindow five-hour by default", async () => {
+  test("POST /api/oauth/accounts/clear-cooldown supports anthropic, google-antigravity, cursor, and command-code", async () => {
     const server = startServer(0);
     try {
-      const res = await fetch(new URL("/api/oauth/accounts/pool?provider=anthropic", server.url));
-      expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ quotaWindow: "five-hour" });
-    } finally {
-      await server.stop(true);
-    }
-  });
+      // Seed cooldowns
+      const { recordAntigravityCooldown, isAntigravityAccountInCooldown } = await import("../src/oauth/antigravity-routing");
+      const { recordPoolAccountCooldown, isAccountInCooldown } = await import("../src/routing/account-pool");
+      
+      recordAntigravityCooldown("g-acct-1", null, Date.now(), "rate-limit");
+      expect(isAntigravityAccountInCooldown("g-acct-1")).toBe(true);
 
-  test("PUT persists each valid quotaWindow value", async () => {
-    const server = startServer(0);
-    try {
-      for (const quotaWindow of ["weekly", "max-utilization", "five-hour"]) {
-        const put = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider: "anthropic", enabled: true, quotaWindow }),
-        });
-        expect(put.status).toBe(200);
-        expect(await put.json()).toMatchObject({ ok: true, quotaWindow });
+      recordPoolAccountCooldown("cursor", "cur-acct-1", "rate_limit", null);
+      expect(isAccountInCooldown("cursor", "cur-acct-1")).not.toBeNull();
 
-        const get = await fetch(new URL("/api/oauth/accounts/pool?provider=anthropic", server.url));
-        expect(await get.json()).toMatchObject({ quotaWindow });
-      }
-    } finally {
-      await server.stop(true);
-    }
-  });
+      recordPoolAccountCooldown("command-code", "cc-acct-1", "rate_limit", null);
+      expect(isAccountInCooldown("command-code", "cc-acct-1")).not.toBeNull();
 
-  test("PUT rejects invalid quotaWindow with 400", async () => {
-    const server = startServer(0);
-    try {
-      for (const bad of ["monthly", "", "Weekly", 1, null]) {
-        const res = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider: "anthropic", enabled: true, quotaWindow: bad }),
-        });
-        expect(res.status).toBe(400);
-        expect(await res.json()).toMatchObject({
-          error: "quotaWindow must be one of: five-hour, weekly, max-utilization",
-        });
-      }
-    } finally {
-      await server.stop(true);
-    }
-  });
-
-  test("PUT without quotaWindow preserves the existing value", async () => {
-    const server = startServer(0);
-    try {
-      const first = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
-        method: "PUT",
+      // Clear via API
+      const resG = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "anthropic", enabled: true, quotaWindow: "weekly" }),
+        body: JSON.stringify({ provider: "google-antigravity", accountId: "g-acct-1" }),
       });
-      expect(first.status).toBe(200);
+      expect(resG.status).toBe(200);
+      expect(await resG.json()).toMatchObject({ ok: true });
+      expect(isAntigravityAccountInCooldown("g-acct-1")).toBe(false);
 
-      const second = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
-        method: "PUT",
+      const resCur = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "anthropic", enabled: false, autoSwitchThreshold: 55 }),
+        body: JSON.stringify({ provider: "cursor", accountId: "cur-acct-1" }),
       });
-      expect(second.status).toBe(200);
-      expect(await second.json()).toMatchObject({ quotaWindow: "weekly" });
+      expect(resCur.status).toBe(200);
+      expect(await resCur.json()).toMatchObject({ ok: true });
+      expect(isAccountInCooldown("cursor", "cur-acct-1")).toBeNull();
 
-      const get = await fetch(new URL("/api/oauth/accounts/pool?provider=anthropic", server.url));
-      expect(await get.json()).toMatchObject({
-        enabled: false,
-        autoSwitchThreshold: 55,
-        quotaWindow: "weekly",
+      const resCc = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "command-code", accountId: "cc-acct-1" }),
       });
+      expect(resCc.status).toBe(200);
+      expect(await resCc.json()).toMatchObject({ ok: true });
+      expect(isAccountInCooldown("command-code", "cc-acct-1")).toBeNull();
+
+      // Unsupported provider
+      const resBad = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "unknown", accountId: "x" }),
+      });
+      expect(resBad.status).toBe(400);
     } finally {
       await server.stop(true);
     }

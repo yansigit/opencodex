@@ -15,9 +15,7 @@ bun install
 bun run dev:proxy    # proxy API in dev mode
 bun run dev:gui      # dashboard dev server (another terminal)
 bun run typecheck    # bun x tsc --noEmit
-bun run test:changed              # routine import-graph test selection
-bun test tests/router.test.ts     # routine focused test
-bun run test                      # complete suite (PR-ready / explicit ask)
+bun run test         # tests/ suite
 ```
 
 `bun run dev` reste un alias pour `bun run dev:proxy`. Le serveur de développement du tableau de bord est `bun run dev:gui` ;
@@ -30,9 +28,8 @@ distincte. Utilisez les scripts enregistrés afin que les commandes locales corr
 
 ```bash
 bun run typecheck                 # strict TypeScript check
-bun run test:changed              # import-graph tests against the resolved dev merge base
-bun run test                      # complete tests/ suite (PR-ready / explicit ask)
-bun test tests/router.test.ts     # focused test file
+bun run test                      # complete tests/ suite
+bun scripts/test.ts tests/router.test.ts     # focused test file
 bun run build:gui                 # Vite GUI build + package preparation
 bun run privacy:scan              # credential/privacy scan used by CI
 bun run prepare:package           # refresh package launchers/assets
@@ -211,5 +208,5 @@ la fabrique depuis `src/index.ts` lorsqu’elle appartient à l’API publique d
 ## Vérifiez avant de déclarer que c'est fait
 
 Exécutez la commande la plus étroite qui prouve votre changement — `bun run typecheck` pour les types, un
-`bun test tests/<name>.test.ts` ou une sonde d'exécution pour le comportement, puis les portes plus larges appropriées à
+`bun scripts/test.ts tests/<name>.test.ts` ou une sonde d'exécution pour le comportement, puis les portes plus larges appropriées à
 la surface affectée. opencodex privilégie les petits commits vérifiables plutôt que les gros lots.

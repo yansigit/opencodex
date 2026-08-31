@@ -12,9 +12,7 @@ bun install
 bun run dev:proxy    # 개발 모드 프록시 API
 bun run dev:gui      # 대시보드 dev 서버(다른 터미널)
 bun run typecheck    # bun x tsc --noEmit
-bun run test:changed              # routine import-graph test selection
-bun test tests/router.test.ts     # routine focused test
-bun run test                      # complete suite (PR-ready / explicit ask)
+bun run test         # tests/ suite
 ```
 
 `bun run dev`는 계속 `bun run dev:proxy`의 별칭으로 동작합니다. 대시보드 dev 서버는
@@ -29,7 +27,7 @@ bun run test                      # complete suite (PR-ready / explicit ask)
 ```bash
 bun run typecheck                 # 엄격한 TypeScript 검사
 bun run test                      # tests/ 전체 스위트
-bun test tests/router.test.ts     # 특정 테스트 파일
+bun scripts/test.ts tests/router.test.ts     # 특정 테스트 파일
 bun run build:gui                 # Vite GUI 빌드 + 패키지 준비
 bun run privacy:scan              # CI에서 쓰는 자격 증명/개인정보 검사
 bun run prepare:package           # 패키지 런처/asset 갱신
@@ -156,5 +154,5 @@ catalog를 import하거나 Compatibility Lab을 활성화해서는 안 됩니다
 ## 완료를 주장하기 전에 검증하기
 
 변경을 증명하는 가장 좁은 명령부터 실행하세요. 타입은 `bun run typecheck`, 동작은 집중된
-`bun test tests/<name>.test.ts` 또는 런타임 probe로 확인한 뒤 영향 범위에 맞는 넓은 gate를
+`bun scripts/test.ts tests/<name>.test.ts` 또는 런타임 probe로 확인한 뒤 영향 범위에 맞는 넓은 gate를
 실행합니다. opencodex는 큰 batch보다 작고 검증 가능한 commit을 선호합니다.

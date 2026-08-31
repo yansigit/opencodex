@@ -2578,11 +2578,10 @@ export interface RestoreTestHooks {
    * reconcile, so cleanup can race an in-flight restore.
    */
   holdAfterFileMovesMs?: number;
-  /**
-   * Test-only: publish a ready file after rollout moves, then wait until the
-   * release file exists. This makes cross-thread race tests phase-driven.
-   */
-  pauseAfterFileMoves?: { readyPath: string; releasePath: string };
+  /** Internal test seam: pause after moves until the owner releases it. */
+  waitAfterFileMoves?: SharedArrayBuffer;
+  /** Internal worker-only notification after rollout moves complete. */
+  notifyAfterFileMoves?: boolean;
 }
 
 /**
@@ -2922,17 +2921,19 @@ export function restoreTrashEntry(
     return { ok: false, trashDir: id, ...partialCounts, error };
   };
 
-  if (hooks?.pauseAfterFileMoves) {
-    writeFileSync(hooks.pauseAfterFileMoves.readyPath, "ready\n");
-    while (!existsSync(hooks.pauseAfterFileMoves.releasePath)) Bun.sleepSync(10);
-  }
-
   if (hooks?.holdAfterFileMovesMs !== undefined) {
     const holdMs = Math.max(0, Math.floor(hooks.holdAfterFileMovesMs));
     if (holdMs > 0) {
       const deadline = Date.now() + holdMs;
       while (Date.now() < deadline) { /* test-only spin wait */ }
     }
+  }
+  if (hooks?.waitAfterFileMoves) {
+    if (hooks.notifyAfterFileMoves) {
+      Atomics.store(new Int32Array(hooks.waitAfterFileMoves), 1, 1);
+      Atomics.notify(new Int32Array(hooks.waitAfterFileMoves), 1);
+    }
+    Atomics.wait(new Int32Array(hooks.waitAfterFileMoves), 0, 0);
   }
 
   if (hooks?.failAfterFileMoves) {

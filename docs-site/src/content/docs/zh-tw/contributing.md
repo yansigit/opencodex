@@ -12,9 +12,7 @@ bun install
 bun run dev:proxy    # 開發模式代理 API
 bun run dev:gui      # 儀表板 dev 伺服器（另一個終端）
 bun run typecheck    # bun x tsc --noEmit
-bun run test:changed              # routine import-graph test selection
-bun test tests/router.test.ts     # routine focused test
-bun run test                      # complete suite (PR-ready / explicit ask)
+bun run test         # tests/ suite
 ```
 
 `bun run dev` 繼續作為 `bun run dev:proxy` 的別名。儀表板 dev 伺服器使用 `bun run dev:gui`；
@@ -28,7 +26,7 @@ bun run test                      # complete suite (PR-ready / explicit ask)
 ```bash
 bun run typecheck                 # 嚴格 TypeScript 檢查
 bun run test                      # 完整 tests/ suite
-bun test tests/router.test.ts     # 聚焦單個測試檔案
+bun scripts/test.ts tests/router.test.ts     # 聚焦單個測試檔案
 bun run build:gui                 # Vite GUI 建置 + package 準備
 bun run privacy:scan              # CI 使用的 credential/privacy 掃描
 bun run prepare:package           # 重新整理 package launcher/asset
@@ -179,5 +177,5 @@ package API，還要從 `src/index.ts` export。
 ## 在聲稱完成前先驗證
 
 先執行能證明改動的最小命令：型別檢查用 `bun run typecheck`，行為檢查用聚焦的
-`bun test tests/<name>.test.ts` 或 runtime probe，然後再執行適合影響範圍的更寬 gate。
+`bun scripts/test.ts tests/<name>.test.ts` 或 runtime probe，然後再執行適合影響範圍的更寬 gate。
 opencodex 傾向於小而可驗證的 commit，而不是大批次改動。

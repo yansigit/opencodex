@@ -28,7 +28,8 @@ import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { decodeServerSentEvents } from "../lib/sse-decoder";
 import { isTranslatorBudgetExceededError, retainTranslatedEventBatch, type TranslatorBudget } from "../lib/translator-budget";
 import { isReasoningEffortOmitted, modelRecordValue } from "../reasoning-effort";
-import { applyAgentRouterLanguageFraming, isAgentRouterEndpoint } from "./agentrouter";
+import { OcxRequestValidationError } from "../lib/errors";
+import { reasoningReplayServingIdentityChanged } from "../responses/reasoning-replay-cache";
 
 /** Map a user content part to an Anthropic content block (text or image source). */
 function toAnthropicContentPart(p: OcxContentPart): unknown {
@@ -169,21 +170,25 @@ function applyPromptCaching(
 // Breakpoint cap enforcement — strip excess beyond the 4-breakpoint limit
 // ---------------------------------------------------------------------------
 
-function countBreakpoints(body: Record<string, unknown>): number {
-  let total = 0;
-  const count = (blocks: Array<Record<string, unknown>> | undefined) => {
+function cacheControlledBlocks(body: Record<string, unknown>): Array<Record<string, unknown>> {
+  const found: Array<Record<string, unknown>> = [];
+  const collect = (blocks: Array<Record<string, unknown>> | undefined) => {
     if (!blocks) return;
-    for (const b of blocks) if (b.cache_control) total++;
+    for (const b of blocks) if (b.cache_control) found.push(b);
   };
-  count(body.tools as Array<Record<string, unknown>> | undefined);
-  count(body.system as Array<Record<string, unknown>> | undefined);
+  collect(body.tools as Array<Record<string, unknown>> | undefined);
+  collect(body.system as Array<Record<string, unknown>> | undefined);
   const messages = body.messages as Array<Record<string, unknown>> | undefined;
   if (messages) {
     for (const msg of messages) {
-      if (Array.isArray(msg.content)) count(msg.content as Array<Record<string, unknown>>);
+      if (Array.isArray(msg.content)) collect(msg.content as Array<Record<string, unknown>>);
     }
   }
-  return total;
+  return found;
+}
+
+function countBreakpoints(body: Record<string, unknown>): number {
+  return cacheControlledBlocks(body).length;
 }
 
 function enforceCacheControlLimit(body: Record<string, unknown>, limit = MAX_CACHE_BREAKPOINTS): void {
@@ -218,22 +223,9 @@ function enforceCacheControlLimit(body: Record<string, unknown>, limit = MAX_CAC
 // ---------------------------------------------------------------------------
 
 function normalizeTtlOrdering(body: Record<string, unknown>): void {
-  const allBlocks: Array<Record<string, unknown>> = [];
-  const collect = (blocks: Array<Record<string, unknown>> | undefined) => {
-    if (!blocks) return;
-    for (const b of blocks) if (b.cache_control) allBlocks.push(b);
-  };
-  collect(body.tools as Array<Record<string, unknown>> | undefined);
-  collect(body.system as Array<Record<string, unknown>> | undefined);
-  const messages = body.messages as Array<Record<string, unknown>> | undefined;
-  if (messages) {
-    for (const msg of messages) {
-      if (Array.isArray(msg.content)) collect(msg.content as Array<Record<string, unknown>>);
-    }
-  }
   // Walk forward: once we see a 5-min (no ttl / ttl:"5m"), any subsequent 1h must be demoted.
   let seenShort = false;
-  for (const b of allBlocks) {
+  for (const b of cacheControlledBlocks(body)) {
     const cc = b.cache_control as CacheControl;
     if (cc.ttl !== "1h") {
       seenShort = true;
@@ -248,6 +240,29 @@ function isLikelyRealAnthropicThinkingSignature(signature: string | undefined): 
   if (typeof signature !== "string" || signature.length < 16) return false;
   if (/^(fc|call|msg|rs|resp|reasoning|item|ws|tool|func|function)[-_]/i.test(signature)) return false;
   return /^[A-Za-z0-9+/_=-]+$/.test(signature);
+}
+
+/** Source-envelope header helpers (M1 protocol fidelity). */
+function parseAnthropicBetaHeader(value: string | undefined): string[] {
+  if (typeof value !== "string" || value.trim() === "") return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of value.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+function validateAnthropicVersionHeader(value: string | undefined): string {
+  if (value === undefined) return "2023-06-01";
+  const trimmed = value.trim();
+  if (!trimmed) throw new OcxRequestValidationError("anthropic-version header must be a non-empty YYYY-MM-DD value");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) throw new OcxRequestValidationError("anthropic-version header must be YYYY-MM-DD");
+  return trimmed;
 }
 
 /**
@@ -648,6 +663,57 @@ function orphanToolResultText(msg: OcxToolResultMessage): string {
  * user content, so an Anthropic `system` string cannot reach it — the framing has to sit in the
  * first user turn.
  */
+const AGENTROUTER_LANGUAGE_PREAMBLE =
+  "[Instruction: Process the user request below and respond in the appropriate language.]";
+
+/**
+ * Exact host match, not a substring.
+ *
+ * A `hostname.includes("agentrouter")` test also matches `notagentrouter.example` and
+ * `agentrouter.org.attacker.example`, which would let an unrelated destination silently
+ * receive an injected instruction block. A prompt mutation keyed on a provider's identity
+ * must be keyed on that identity exactly.
+ */
+function isAgentRouterEndpoint(baseUrl: string): boolean {
+  try {
+    const { hostname } = new URL(baseUrl);
+    return hostname === "agentrouter.org" || hostname.endsWith(".agentrouter.org");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Prepend the framing as its OWN text block instead of splicing it into the user's string.
+ *
+ * The distinction matters: rewriting `content` to `${marker}\n\n${original}` edits what the
+ * user wrote, and every downstream consumer — logs, retries, an upstream that echoes the turn —
+ * then sees a sentence the user never typed as if they had. A separate leading block carries the
+ * same signal to the filter while the original text survives byte-for-byte.
+ *
+ * Only the first user turn is framed, because only the first is what the gateway rejects.
+ */
+function applyAgentRouterLanguageFraming(messages: unknown[]): void {
+  const firstUser = messages.find(
+    (m): m is { role: string; content: unknown } =>
+      typeof m === "object" && m !== null && (m as { role?: unknown }).role === "user",
+  );
+  if (!firstUser) return;
+  const preamble = { type: "text", text: AGENTROUTER_LANGUAGE_PREAMBLE };
+  if (typeof firstUser.content === "string") {
+    firstUser.content = firstUser.content === ""
+      ? [preamble]
+      : [preamble, { type: "text", text: firstUser.content }];
+    return;
+  }
+  if (!Array.isArray(firstUser.content)) return;
+  // Idempotence is keyed on the LEADING block being exactly the marker. A substring test would
+  // let a user who quotes the marker later in their own prompt suppress the framing entirely.
+  const [head] = firstUser.content as { type?: unknown; text?: unknown }[];
+  if (head?.type === "text" && head.text === AGENTROUTER_LANGUAGE_PREAMBLE) return;
+  (firstUser.content as unknown[]).unshift(preamble);
+}
+
 function messagesToAnthropicFormat(
   parsed: OcxParsedRequest,
   toolNames: { toWire: (name: string) => string },
@@ -705,6 +771,10 @@ function messagesToAnthropicFormat(
             if (text) preface.push({ type: "text", text });
           } else if (part.type === "thinking") {
             const t = part as OcxThinkingContent;
+            const hasSignedThinking = isLikelyRealAnthropicThinkingSignature(t.signature) || ((t.redacted ?? []).length > 0);
+            if (hasSignedThinking && (parsed._stripReasoningEncryptedContent || reasoningReplayServingIdentityChanged(parsed._reasoningReplayScope))) {
+              throw new OcxRequestValidationError("reasoning history belongs to a different provider or credential; begin a fresh reasoning turn");
+            }
             // Redacted blocks replay verbatim FIRST (they preceded the visible thinking block
             // in the original stream order preserved by the bridge envelope).
             for (const data of t.redacted ?? []) {
@@ -881,6 +951,157 @@ export function createAnthropicAdapter(provider: OcxProviderConfig, cacheRetenti
           throw new Error("anthropic oauth token missing — run ocx login anthropic");
         }
         throw new Error("anthropic provider requires a non-empty apiKey (authMode: key)");
+      }
+
+      // Source-preserving branch: when a Claude ingress envelope is present and the final
+      // adapter is Anthropic, preserve unknown fields/block order/cache markers verbatim.
+      // Per-attempt budget handling: reserve transient for clone, serialize retained copy.
+      if (parsed._claudeSourceEnvelope) {
+        const envelope = parsed._claudeSourceEnvelope;
+        let hasOwnedReasoning = false;
+        let hasSignedHistory = false;
+        if (Array.isArray(envelope.body.messages)) {
+          for (const message of envelope.body.messages) {
+            if (!message || typeof message !== "object" || Array.isArray(message)) continue;
+            const content = (message as { content?: unknown }).content;
+            if (!Array.isArray(content)) continue;
+            for (const block of content) {
+              if (!block || typeof block !== "object" || Array.isArray(block)) continue;
+              const rec = block as { type?: unknown; signature?: unknown };
+              if (rec.type === "redacted_thinking") hasSignedHistory = true;
+              if (rec.type !== "thinking" || typeof rec.signature !== "string") continue;
+              if (rec.signature.startsWith("ocxr1:")) hasOwnedReasoning = true;
+              else if (isLikelyRealAnthropicThinkingSignature(rec.signature)) hasSignedHistory = true;
+            }
+          }
+        }
+        if (hasOwnedReasoning) {
+          throw new OcxRequestValidationError("OpenCodex-owned reasoning continuity cannot be sent as an Anthropic signature; begin a fresh reasoning turn");
+        }
+        if (parsed._stripReasoningEncryptedContent || reasoningReplayServingIdentityChanged(parsed._reasoningReplayScope)) {
+          if (hasSignedHistory) {
+            throw new OcxRequestValidationError("reasoning history belongs to a different provider or credential; begin a fresh reasoning turn");
+          }
+        }
+        const budget = incoming?.translatorBudget;
+        const cloneBytes = Buffer.byteLength(JSON.stringify(envelope.body));
+        let transient: ReturnType<NonNullable<typeof budget>["reserveTransient"]> | undefined;
+        if (budget) transient = budget.reserveTransient(cloneBytes, { kind: "request_copies" });
+        try {
+          const cloned = structuredClone(envelope.body) as Record<string, unknown>;
+          cloned.model = parsed.modelId;
+          cloned.stream = parsed.stream;
+          if (isOAuth) {
+            let sysBlocks: Array<Record<string, unknown>> = [];
+            const existing = cloned.system;
+            if (Array.isArray(existing)) sysBlocks = existing as Array<Record<string, unknown>>;
+            else if (typeof existing === "string") sysBlocks = [{ type: "text", text: existing }];
+            const hasIdentity = sysBlocks.length > 0 && sysBlocks[0]?.type === "text" && sysBlocks[0]?.text === CLAUDE_CODE_SYSTEM_INSTRUCTION;
+            if (!hasIdentity) {
+              sysBlocks = sysBlocks.filter((b) => !(b.type === "text" && b.text === CLAUDE_CODE_SYSTEM_INSTRUCTION));
+              sysBlocks.unshift({ type: "text", text: CLAUDE_CODE_SYSTEM_INSTRUCTION });
+            }
+            cloned.system = sysBlocks;
+          }
+          if (Array.isArray(cloned.tools)) {
+            for (const t of cloned.tools as Array<Record<string, unknown>>) {
+              if (typeof t.name === "string") t.name = toolNames.toWire(t.name);
+            }
+          }
+          if (Array.isArray(cloned.messages)) {
+            for (const msg of cloned.messages as Array<Record<string, unknown>>) {
+              const content = (msg as { content?: unknown }).content;
+              if (Array.isArray(content)) {
+                for (const block of content as Array<Record<string, unknown>>) {
+                  if (block.type === "tool_use" && typeof block.name === "string") block.name = toolNames.toWire(block.name);
+                  const references = block.type === "tool_search_tool_result"
+                    && block.content && typeof block.content === "object" && !Array.isArray(block.content)
+                    && Array.isArray((block.content as Record<string, unknown>).tool_references)
+                    ? (block.content as { tool_references: unknown[] }).tool_references
+                    : Array.isArray(block.content) ? block.content : [];
+                  for (const reference of references) {
+                    if (!reference || typeof reference !== "object" || Array.isArray(reference)) continue;
+                    const rec = reference as Record<string, unknown>;
+                    if (rec.type === "tool_reference" && typeof rec.tool_name === "string") {
+                      rec.tool_name = toolNames.toWire(rec.tool_name);
+                    }
+                  }
+                }
+              }
+            }
+          }
+          if (cloned.tool_choice && typeof cloned.tool_choice === "object" && !Array.isArray(cloned.tool_choice)) {
+            const tc = cloned.tool_choice as Record<string, unknown>;
+            if (tc.type === "tool" && typeof tc.name === "string") tc.name = toolNames.toWire(tc.name);
+          }
+          const messagesForImages = Array.isArray(cloned.messages) ? (cloned.messages as unknown[]) : [];
+          if (messagesForImages.length > 0) {
+            await normalizeAnthropicImages(messagesForImages as any, { tierBias: incoming?.imageTierBias ?? 0 });
+            enforceAnthropicImageLimits(messagesForImages as any);
+            cloned.messages = messagesForImages as unknown;
+          }
+          if (isAgentRouterEndpoint(provider.baseUrl) && Array.isArray(cloned.messages)) {
+            applyAgentRouterLanguageFraming(cloned.messages as unknown[]);
+          }
+          const totalBreakpoints = countBreakpoints(cloned);
+          if (totalBreakpoints > MAX_CACHE_BREAKPOINTS) {
+            throw new OcxRequestValidationError(`too many cache_control breakpoints: ${totalBreakpoints} > ${MAX_CACHE_BREAKPOINTS}`);
+          }
+          let seenShort = false;
+          for (const block of cacheControlledBlocks(cloned)) {
+            const isLong = (block.cache_control as CacheControl).ttl === "1h";
+            if (!isLong) seenShort = true;
+            else if (seenShort) {
+              throw new OcxRequestValidationError("invalid cache_control ttl ordering: 1h breakpoints must precede 5m breakpoints");
+            }
+          }
+          const sourceBetaRaw = (envelope.headers as Record<string, string>)["anthropic-beta"] ?? (envelope.headers as Record<string, string>)["Anthropic-Beta"] ?? (envelope.headers as Record<string, string>)["anthropic-Beta"];
+          const sourceVersionRaw = (envelope.headers as Record<string, string>)["anthropic-version"] ?? (envelope.headers as Record<string, string>)["Anthropic-Version"] ?? (envelope.headers as Record<string, string>)["anthropic-Version"];
+          const mergedBetaParts = parseAnthropicBetaHeader(sourceBetaRaw);
+          if (isOAuth) {
+            for (const required of parseAnthropicBetaHeader(ANTHROPIC_OAUTH_BETA)) if (!mergedBetaParts.includes(required)) mergedBetaParts.push(required);
+          }
+          const version = validateAnthropicVersionHeader(sourceVersionRaw);
+          const url = anthropicMessagesUrl(provider.baseUrl);
+          const unresolvedPlaceholder2 = url.match(/\{[^}]*\}/)?.[0];
+          if (unresolvedPlaceholder2) throw new Error("anthropic baseUrl contains unresolved " + unresolvedPlaceholder2);
+          const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+            "anthropic-version": version,
+            "Accept": (cloned.stream as boolean) ? "text/event-stream" : "application/json",
+            "User-Agent": "@anthropic-ai/sdk/0.74.0",
+          };
+          if (mergedBetaParts.length > 0) headers["anthropic-beta"] = mergedBetaParts.join(",");
+          if (isOAuth) {
+            headers["Authorization"] = "Bearer " + provider.apiKey;
+            const existingBeta = headers["anthropic-beta"] ? parseAnthropicBetaHeader(headers["anthropic-beta"]) : [];
+            let betaList = [...existingBeta];
+            for (const tok of parseAnthropicBetaHeader(ANTHROPIC_OAUTH_BETA)) if (!betaList.includes(tok)) betaList.push(tok);
+            if (betaList.length > 0) headers["anthropic-beta"] = betaList.join(",");
+            Object.assign(headers, CLAUDE_CODE_HEADERS);
+            headers["X-Claude-Code-Session-Id"] = claudeCodeSessionId(provider.apiKey);
+            headers["x-client-request-id"] = crypto.randomUUID();
+          } else {
+            if (anthropicKeyUsesBearer(provider)) headers["Authorization"] = "Bearer " + provider.apiKey;
+            else headers["x-api-key"] = provider.apiKey;
+          }
+          if (provider.headers) Object.assign(headers, provider.headers);
+          const bodyStr = JSON.stringify(cloned);
+          const bodyBytes = Buffer.byteLength(bodyStr);
+          let releaseBodyObservation: (() => void) | undefined;
+          if (budget) {
+            budget.chargeRetained(bodyBytes, { kind: "request_copies" });
+            let released = false;
+            releaseBodyObservation = () => {
+              if (released) return;
+              released = true;
+              budget.releaseRetained(bodyBytes, { kind: "request_copies" });
+            };
+          }
+          return { url, method: "POST", headers, body: bodyStr, ...(releaseBodyObservation ? { releaseBodyObservation } : {}) };
+        } finally {
+          transient?.release();
+        }
       }
 
       const { system, messages } = messagesToAnthropicFormat(parsed, toolNames);

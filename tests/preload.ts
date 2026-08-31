@@ -12,43 +12,15 @@
  * module load, and that must happen BEFORE this file replaces HOME.
  */
 import { isTestHomeGuardArmed, protectedHomeForTests } from "../src/lib/test-home-guard";
+
+(globalThis as Record<PropertyKey, unknown>)[Symbol.for("opencodex.test.provider-fetch")] = true;
+(globalThis as Record<PropertyKey, unknown>)[Symbol.for("opencodex.test.plaintext-remote")] = true;
 import { createIsolatedTestEnvironment } from "../scripts/test";
-import {
-  acquireTestRunLock,
-  resolveBareTestRunIdentity,
-  resolveInheritedTestRunLock,
-  TEST_RUN_ID_ENV,
-} from "../scripts/test-run-lock";
 import { rmSync } from "node:fs";
 
-// `scripts/test.ts` owns the lock for wrapped runs. A bare `bun test` has no wrapper,
-// so a single-process runner uses its own PID while true parallel workers rendezvous
-// on their short-lived controller PID. The first worker acquires the lock and siblings
-// join it. The bare-run lock is deliberately left for the next invocation to reclaim
-// after every registered worker exits — releasing it from an early-finishing worker
-// would let another suite overlap the remaining workers.
-const wrappedRunId = process.env[TEST_RUN_ID_ENV]?.trim();
-const bareIdentity = resolveBareTestRunIdentity({
-  pid: process.pid,
-  ppid: process.ppid,
-  workerId: process.env.BUN_TEST_WORKER_ID,
-});
-const runId = wrappedRunId || bareIdentity.runId;
-const inheritedLock = resolveInheritedTestRunLock({
-  wrappedRunId,
-  env: process.env,
-});
-process.env[TEST_RUN_ID_ENV] = runId;
-await acquireTestRunLock({
-  runId,
-  ownerPid: bareIdentity.ownerPid,
-  lockPath: inheritedLock?.lockPath,
-  validatedRuntimePath: inheritedLock !== undefined,
-  joinExistingOwnerToken: inheritedLock?.ownerToken,
-  onWait: owner => console.warn(
-    `[test] bare Bun worker ${process.pid} is waiting for test run${owner ? ` pid ${owner.pid}` : ""} to release the user lock.`,
-  ),
-});
+// The wrapper owns the machine lock for full-suite runs. Bun does not preserve the
+// original `bun test` argv in a preload (it exposes the test file instead), so bare
+// focused invocations remain independent and never queue behind a full suite.
 
 // Under `bun run test` the wrapper already handed us a sandbox (and OCX_REAL_HOME so the
 // guard could still see the true home). Isolating again is harmless and deliberate: the

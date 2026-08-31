@@ -1,6 +1,7 @@
 import { OAuthCallbackFlow } from "./callback-server";
 import type { OAuthController, OAuthCredentials } from "./types";
 import { generatePKCE } from "./pkce";
+import { oauthFetch } from "./transport";
 
 const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTH_URL = "https://auth.openai.com/oauth/authorize";
@@ -107,7 +108,7 @@ export class ChatGPTOAuthFlow extends OAuthCallbackFlow {
 
   async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
     if (!this.#verifier) throw new Error("ChatGPT PKCE verifier not initialized");
-    const resp = await fetch(TOKEN_URL, {
+    const resp = await oauthFetch(TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -130,7 +131,10 @@ function safeErrorDescription(resp: Response): Promise<string> {
   return resp.text().catch(() => "").then(text => {
     try {
       const parsed = JSON.parse(text) as { error?: string; error_description?: string };
-      return [parsed.error, parsed.error_description].filter(Boolean).join(": ") || `HTTP ${resp.status}`;
+      const code = typeof parsed.error === "string" && /^(?:access_denied|expired_token|invalid_client|invalid_grant|invalid_request|temporarily_unavailable|unauthorized_client|unsupported_grant_type)$/.test(parsed.error)
+        ? parsed.error
+        : undefined;
+      return code ?? `HTTP ${resp.status}`;
     } catch { return `HTTP ${resp.status}`; }
   });
 }
@@ -147,7 +151,7 @@ export async function refreshChatGPTToken(
   refreshToken: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<OAuthCredentials> {
-  const resp = await fetch(TOKEN_URL, {
+  const resp = await oauthFetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({

@@ -20,7 +20,6 @@ import { resolveClientRetryAfter } from "../lib/retry-after";
 import { isModelTextOnly } from "../vision";
 import {
   applyUpstreamRecoveryInit,
-  fetchWithResetRetry,
   fetchWithTransientRetry,
   prepareSameTarget429Wait,
   type UpstreamSendRecovery,
@@ -34,7 +33,6 @@ import {
   rateLimitRetryDelayMs,
   rateLimitRetryPolicyFor,
   rotateProviderTransportOn429,
-  transientRetryPolicyFor,
 } from "../providers/key-failover";
 import { fastPolicyForModel } from "../providers/service-tier";
 import type { RouteResult } from "../router";
@@ -204,13 +202,10 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     return fail(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
   }
 
+  const replayBudget = activeProvider.replayTransientFailures ? { remaining: 2 } : undefined;
   const send = async (request: AdapterRequest, recovery?: "rate-limit-429" | "key-429"): Promise<Response> => {
     try {
-      // #2643: opted-in key-auth openai-chat providers retry pre-stream transient statuses on
-      // the native chat lane too; everyone else keeps reset-only semantics.
-      const transientPolicy = transientRetryPolicyFor(activeProvider);
-      const fetchWithPolicy = transientPolicy ? fetchWithTransientRetry : fetchWithResetRetry;
-      return await fetchWithPolicy(
+      return await fetchWithTransientRetry(
         (transportRecovery?: UpstreamSendRecovery) => {
           noteAttemptSend(attempt, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
           return fetchWithHeaderTimeout(
@@ -232,7 +227,8 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
         {
           abortSignal: upstream.signal,
           label: safeHostLabel(request.url),
-          ...(transientPolicy ? { attempts: transientPolicy.attempts } : {}),
+          replayTransientFailures: activeProvider.replayTransientFailures,
+          replayBudget,
         },
       );
     } finally {

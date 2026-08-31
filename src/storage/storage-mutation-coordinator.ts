@@ -16,12 +16,10 @@ export type StorageMutationBusyError = "storage_mutation_busy";
 export interface StorageMutationCoordinatorTestHooks {
   /** Block after acquiring the slot, before mutation work (race tests). */
   blockMs?: number;
-  /** Test-only cross-thread handshake after one mutation kind acquires its slot. */
-  pauseAfterAcquire?: {
-    kind: StorageMutationKind;
-    readyPath: string;
-    releasePath: string;
-  };
+  /** Notify race tests as soon as the per-home lease is owned. */
+  onAcquired?: () => void;
+  /** Keep the lease held until a race test has issued its competing operation. */
+  waitForRelease?: Promise<void>;
 }
 
 interface ActiveSlot {
@@ -85,6 +83,7 @@ export function tryBeginStorageMutation(
     },
   };
   slots.set(key, { kind, startedAt: Date.now(), lease: ownerLease });
+  testHooks?.onAcquired?.();
   return { acquired: true, lease: ownerLease };
 }
 
@@ -99,12 +98,8 @@ export function endStorageMutation(codexHome?: string): void {
   slot.lease.release();
 }
 
-async function applyCoordinatorBlock(kind: StorageMutationKind): Promise<void> {
-  const pause = testHooks?.pauseAfterAcquire;
-  if (pause?.kind === kind) {
-    await Bun.write(pause.readyPath, "ready\n");
-    while (!Bun.file(pause.releasePath).size) await Bun.sleep(10);
-  }
+async function applyCoordinatorBlock(): Promise<void> {
+  await testHooks?.waitForRelease;
   const blockMs = testHooks?.blockMs;
   if (typeof blockMs === "number" && Number.isFinite(blockMs) && blockMs > 0) {
     await Bun.sleep(Math.floor(blockMs));
@@ -125,7 +120,7 @@ export async function runPolicyStorageMutation<T>(
     return { ok: false, error: "storage_mutation_busy" };
   }
   try {
-    await applyCoordinatorBlock("policy");
+    await applyCoordinatorBlock();
     return await work();
   } finally {
     gate.lease.release();
@@ -142,7 +137,7 @@ export async function withStorageMutationSlot<T>(
     return { ok: false, error: "storage_mutation_busy" };
   }
   try {
-    await applyCoordinatorBlock(kind);
+    await applyCoordinatorBlock();
     return await work();
   } finally {
     gate.lease.release();
