@@ -3,7 +3,7 @@ import type { AdapterEvent, OcxMessage, OcxParsedRequest, OcxProviderConfig, Ocx
 import { namespacedToolName, toolChoiceToolPredicate } from "../types";
 import { cloneProviderOpaqueToolCallMetadata } from "../responses/provider-opaque-metadata";
 import type { AttemptRecoveryKind } from "../usage/log";
-import { bridgeToResponsesSSE } from "../bridge";
+import { bridgeToResponsesSSE, diagnoseAdapterEvent, type BridgeDiagnosticContext } from "../bridge";
 import { runWebSearch, type SidecarOutcome, type SidecarOutcomeRecorder, type SidecarSettings } from "./executor";
 import { runAnthropicWebSearch } from "./anthropic-executor";
 import { runXaiWebSearch, type XaiSearchOptions } from "./xai-executor";
@@ -13,7 +13,7 @@ import type { WebSearchBackendId } from "./index";
 import { clearableDeadline } from "../lib/abort";
 import { redactSecretString } from "../lib/redact";
 import { readBoundedResponseBody } from "../lib/bounded-body";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-retry";
+import { fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-retry";
 import { rateLimitRetryDelayMs } from "../providers/key-failover";
 import {
   isTranslatorBudgetExceededError,
@@ -23,6 +23,7 @@ import {
 import { formatWebSearchResults } from "./format-result";
 import { parseStreamWithProgress, RoutedModelInactivityError, WebSearchStreamProtocolError } from "./progress-stream";
 import { WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
+import { OcxRequestValidationError } from "../lib/errors";
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -230,8 +231,14 @@ function forcedAnswerNudge(): OcxMessage {
   };
 }
 
-function jsonError(status: number, message: string): Response {
-  return new Response(JSON.stringify({ error: { message, type: "upstream_error", code: null } }), {
+function jsonError(status: number, message: string, errorType = "upstream_error", code: string | null = null): Response {
+  return new Response(JSON.stringify({
+    error: {
+      message,
+      type: errorType,
+      code,
+    },
+  }), {
     status,
     headers: { "Content-Type": "application/json" },
   });
@@ -240,7 +247,12 @@ function jsonError(status: number, message: string): Response {
 /** Hard provider/parse failure inside an iteration. The eager first iteration converts it to a
  *  non-200 jsonError; later (already-streaming) iterations surface it as an in-stream error event. */
 class LoopError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly errorType?: string,
+    readonly code?: string,
+  ) {
     super(message);
     this.name = "LoopError";
   }
@@ -301,6 +313,8 @@ export interface WebSearchLoopDeps {
   onUsage?: (usage: OcxUsage | undefined) => void;
   /** Observe the exact adapter request selected for each routed-model iteration. */
   onRequestBuilt?: (request: AdapterRequest) => void;
+  /** Validate the final adapter before every cached replay or request build. */
+  validateAdapter?: (parsed: OcxParsedRequest, adapter: ProviderAdapter) => void;
   /** Called before each routed-model dispatch in the loop, for attempt telemetry. Same-target 429 replays pass the `rate-limit-429` recovery kind. */
   onAttemptSend?: (recovery?: AttemptRecoveryKind) => void;
   /**
@@ -313,6 +327,10 @@ export interface WebSearchLoopDeps {
   retryOn429Policy?: Required<RateLimitRetryPolicy> | null;
   /** Called only when the final bridged Responses stream reaches completed or incomplete. */
   onCompletedResponse?: (response: Record<string, unknown>) => void;
+  /** OAuth account identity forwarded to AdapterFetchContext for provider-local cooldown bookkeeping. */
+  accountId?: string;
+  /** Internal, opt-in structural stream diagnostics shared with the final bridge. */
+  diagnostic?: BridgeDiagnosticContext;
 }
 
 /**
@@ -323,7 +341,6 @@ export interface WebSearchLoopDeps {
  */
 export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Response> {
   const translatorBudget = deps.incomingMeta.translatorBudget;
-  const routedProviderFetch = deps.incomingMeta.providerFetch ?? globalThis.fetch;
   const { parsed, selectedForwardHeaders, forwardProvider, hostedTool, settings, maxSearches, abortSignal, recordSidecarOutcome } = deps;
   const backend = deps.backend ?? "openai";
   const anthropicSidecar = deps.anthropicSidecar;
@@ -422,12 +439,12 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
        * header deadline. The caller owns same-target 429 replays and key rotation around it.
        */
       const fetchOnce = async (requestAdapter: ProviderAdapter, recovery?: AttemptRecoveryKind): Promise<IterationResponse> => {
+        deps.validateAdapter?.(iterParsed, requestAdapter);
         let request: AdapterRequest;
         if (cachedRequest !== undefined && cachedAdapter === requestAdapter) {
           request = cachedRequest;
         } else {
           request = await requestAdapter.buildRequest(iterParsed, {
-            ...deps.incomingMeta,
             headers: selectedForwardHeaders,
             abortSignal: headerDeadline.signal,
             translatorBudget,
@@ -449,7 +466,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               timeoutMs: connectTimeoutMs,
               returnRawErrors: true,
               stream: true,
-              executor: routedProviderFetch,
+              ...(deps.accountId ? { accountId: deps.accountId } : {}),
             });
           } else {
             response = await fetchWithResetRetry(
@@ -460,17 +477,12 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
                 deps.onAttemptSend?.(retryRecovery ?? recovery);
                 const h = new Headers(request.headers);
                 if (!h.has("accept-encoding")) h.set("accept-encoding", "identity");
-                // A connection-reset replay must leave the half-closed pooled socket, not just
-                // ask politely: Bun has ignored a bare `Connection: close` (oven-sh/bun#20492),
-                // so the transport-level `keepalive: false` this helper adds is what actually
-                // opens a new connection. Spending `retryRecovery` on telemetry alone left every
-                // replay on this leg eligible for the same dead socket the reset came from.
-                return routedProviderFetch(request.url, applyUpstreamRecoveryInit({
+                return fetch(request.url, {
                   method: request.method,
                   headers: h,
                   body: request.body,
                   signal: headerDeadline.signal,
-                }, retryRecovery));
+                });
               },
               { abortSignal: headerDeadline.signal, label: "web-search-loop" },
             );
@@ -559,6 +571,9 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       return prepared;
     } catch (error) {
       if (isTranslatorBudgetExceededError(error)) throw error;
+      if (error instanceof OcxRequestValidationError) {
+        throw new LoopError(error.status, error.message, "invalid_request_error", "invalid_request_error");
+      }
       if (headerDeadline.didExpire()) {
         throw new LoopError(504, `Provider response-header timeout after ${connectTimeoutMs}ms during web-search`);
       }
@@ -601,6 +616,10 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
         inactivityTimeoutMs: routedModelStallTimeoutMs,
         translatorBudget,
       })) {
+        if (deps.diagnostic) {
+          deps.diagnostic.adapterName = prepared.responseAdapter.name;
+          diagnoseAdapterEvent(deps.diagnostic, event);
+        }
         if (event.type === "heartbeat") yield event;
         // Kiro's explicit-completion protocol marks ordinary assistant text as commentary while
         // it performs a bounded final-answer retry. That text is safe to surface immediately and
@@ -785,7 +804,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
     firstPrepared = await prepareIterationDrained(false);
   } catch (e) {
     if (abortSignal) abortSignal.removeEventListener("abort", linkAbort);
-    if (e instanceof LoopError) return jsonError(e.status, e.message);
+    if (e instanceof LoopError) return jsonError(e.status, e.message, e.errorType, e.code ?? null);
     throw e;
   }
 
@@ -869,7 +888,18 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               message: "upstream translation buffer exceeded the safe limit",
             };
           } else {
-            yield { type: "error", message: e instanceof LoopError ? e.message : (e instanceof Error ? e.message : String(e)) };
+            const message = e instanceof LoopError ? e.message : (e instanceof Error ? e.message : String(e));
+            yield {
+              type: "error",
+              ...(e instanceof LoopError ? {
+                status: e.status,
+                ...(e.errorType !== undefined || e.status === 400
+                  ? { errorType: e.errorType ?? "upstream_error" }
+                  : {}),
+                ...(e.code !== undefined ? { code: e.code } : {}),
+              } : {}),
+              message,
+            };
           }
           return;
         }
@@ -896,6 +926,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
       ...(deps.onFirstOutput ? { onFirstOutput: deps.onFirstOutput } : {}),
       ...(deps.onUsage ? { onUsage: deps.onUsage } : {}),
       ...(deps.onCompletedResponse ? { onCompletedResponse: deps.onCompletedResponse } : {}),
+      ...(deps.diagnostic ? { diagnostic: deps.diagnostic } : {}),
     },
   );
   return new Response(sse, { headers: SSE_HEADERS });

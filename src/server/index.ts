@@ -605,7 +605,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
-  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: allowPlaintextRemoteForTests() });
+  assertServerAuthConfig(config);
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   let userCostOverlayReconciler: { stop(): void } | null = null;
   // Arm synchronously before listen. A pending journal therefore makes __main__ unusable
