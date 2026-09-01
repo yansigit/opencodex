@@ -1,4 +1,5 @@
 import { readFileSync, readdirSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 export const SERIAL_TEST_FILES = [
@@ -27,11 +28,30 @@ export const API_TEST_FILES = ["tests/api-usage.test.ts"] as const;
 const laneNames = ["general", "serial", "dedicated", "dedicated-storage", "dedicated-api"] as const;
 export type TestLane = (typeof laneNames)[number];
 
-export function discoverTestFiles(root = process.cwd()): string[] {
+type DirectoryReader = (directory: string) => Dirent[];
+
+function isMissingDirectory(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+export function discoverTestFiles(
+  root = process.cwd(),
+  readDirectory: DirectoryReader = directory => readdirSync(directory, { withFileTypes: true }),
+): string[] {
   const testsRoot = resolve(root, "tests");
   const files: string[] = [];
-  const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+  const visit = (directory: string, required = false): void => {
+    let entries: Dirent[];
+    try {
+      entries = readDirectory(directory);
+    } catch (error) {
+      // Tests may create and remove scratch directories beneath tests/ while
+      // another shard inventories the suite. A vanished descendant is not a
+      // test file; the required tests root itself must still fail loudly.
+      if (!required && isMissingDirectory(error)) return;
+      throw error;
+    }
+    for (const entry of entries) {
       const path = join(directory, entry.name);
       if (entry.isDirectory()) visit(path);
       else if (/[._](?:test|spec)\.(?:c|m)?(?:js|jsx|ts|tsx)$/.test(entry.name)) {
@@ -39,7 +59,7 @@ export function discoverTestFiles(root = process.cwd()): string[] {
       }
     }
   };
-  visit(testsRoot);
+  visit(testsRoot, true);
   return files.sort();
 }
 
