@@ -30,8 +30,7 @@ on:
       - ".github/workflows/live-inference.yml"
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: live-inference-${{ github.ref }}
@@ -42,6 +41,8 @@ jobs:
     name: Select changed providers
     if: github.event_name == 'push' || github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       has_work: ${{ steps.matrix.outputs.has_work }}
@@ -100,11 +101,11 @@ jobs:
         run: |
           matrix="$(bun -e '
             const all = [
-              { provider: "google-antigravity", model: "google-antigravity/gemini-3.7-flash", secret_name: "OCX_LIVE_SMOKE_GOOGLE_ANTIGRAVITY_B64" },
-              { provider: "google-aistudio", model: "google-aistudio/gemini-3.7-flash", secret_name: "OCX_LIVE_SMOKE_GOOGLE_AISTUDIO_B64" },
-              { provider: "cursor", model: "cursor/composer-2.5", secret_name: "OCX_LIVE_SMOKE_CURSOR_B64" },
-              { provider: "command-code", model: "command-code/deepseek/deepseek-v4-flash", secret_name: "OCX_LIVE_SMOKE_COMMAND_CODE_B64" },
-              { provider: "openai", model: "gpt-5.6-luna", secret_name: "OCX_LIVE_SMOKE_OPENAI_B64" },
+              { provider: "google-antigravity", secret_name: "OCX_LIVE_SMOKE_GOOGLE_ANTIGRAVITY_B64" },
+              { provider: "google-aistudio", secret_name: "OCX_LIVE_SMOKE_GOOGLE_AISTUDIO_B64" },
+              { provider: "cursor", secret_name: "OCX_LIVE_SMOKE_CURSOR_B64" },
+              { provider: "command-code", secret_name: "OCX_LIVE_SMOKE_COMMAND_CODE_B64" },
+              { provider: "openai", secret_name: "OCX_LIVE_SMOKE_OPENAI_B64" },
             ];
             const selected = process.env.EVENT_NAME === "workflow_dispatch" || process.env.SHARED === "true"
               ? all
@@ -128,6 +129,9 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
     environment: live-inference
+    permissions:
+      contents: read
+      issues: write
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -179,22 +183,37 @@ jobs:
           exit 1
 
       - name: Run real inference smoke
+        id: smoke
         if: steps.prepare.outputs.configured == 'true'
         env:
           OPENCODEX_HOME: ${{ steps.prepare.outputs.home }}
         run: |
-          result_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.json"
-          bun scripts/live-smoke.ts --provider "${{ matrix.provider }}" --json >"$result_file"
-          # shellcheck disable=SC2016
-          RESULT_FILE="$result_file" bun -e '
-            const results = JSON.parse(await Bun.file(process.env.RESULT_FILE).text());
-            let failed = false;
-            for (const result of results) {
-              console.log(`${result.provider}: ${result.status}`);
-              if (result.status === "failed") failed = true;
-            }
-            if (failed) process.exit(1);
-          '
+          run_attempt() {
+            attempt="$1"
+            result_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}-attempt-${attempt}.json"
+            if bun scripts/live-smoke.ts --provider "${{ matrix.provider }}" --json >"$result_file"; then
+              smoke_status=0
+            else
+              smoke_status=$?
+            fi
+            if bun scripts/live-smoke-report.ts --result "$result_file" --attempt "$attempt"; then
+              report_status=0
+            else
+              report_status=$?
+            fi
+            rm -f -- "$result_file"
+            if [ "$report_status" -ne 0 ]; then
+              return "$report_status"
+            fi
+            return "$smoke_status"
+          }
+
+          if run_attempt 1; then
+            exit 0
+          fi
+          echo "First live inference attempt failed; retrying once after a five-second backoff."
+          sleep 5
+          run_attempt 2
 
       - name: Stop proxy and remove credentials
         if: always() && steps.prepare.outputs.home != ''
@@ -208,3 +227,85 @@ jobs:
           if [ -n "${OPENCODEX_HOME:-}" ]; then
             rm -rf -- "$OPENCODEX_HOME"
           fi
+
+      - name: Reconcile Jules live-inference supervision
+        if: always() && steps.prepare.outputs.home != ''
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          LIVE_JOB_STATUS: ${{ job.status }}
+          LIVE_PROVIDER: ${{ matrix.provider }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const provider = process.env.LIVE_PROVIDER;
+            if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(provider || "")) {
+              throw new Error("invalid live inference provider identity");
+            }
+            const marker = `<!-- opencodex-live-inference-failure:${provider} -->`;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100
+            });
+            const existing = issues.find(issue =>
+              !issue.pull_request && String(issue.body || "").includes(marker));
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            const status = process.env.LIVE_JOB_STATUS;
+            if (status === "success") {
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: existing.number,
+                  body: `Recovered on exact head ${context.sha} in trusted workflow run ${runUrl}.`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number, state: "closed", state_reason: "completed"
+                });
+              }
+              return;
+            }
+            if (status !== "failure") {
+              core.warning(`Live inference ended as ${status}; no Jules issue was mutated.`);
+              return;
+            }
+            const body = [
+              marker,
+              `Provider: ${provider}`,
+              `Exact dev head: ${context.sha}`,
+              `Trusted run: ${runUrl}`,
+              "",
+              "The isolated live-provider job failed after its bounded retry. Inspect only the privacy-safe gate summary in the failed job; raw provider responses and credential material are intentionally unavailable.",
+              "",
+              "Action: determine whether this is an external provider incident or a repository regression. For a regression, make the smallest tested fix on a PR targeting dev. Do not weaken credentials, workflow permissions, live assertions, privacy policy, or required checks. If the provider recovered without a code change, document that evidence and close this incident.",
+            ].join("\n");
+            const labelDefinitions = {
+              "agent:generated": ["0969da", "Trusted generated maintenance issue"],
+              "agent:jules": ["8250df", "Trusted Jules implementation request"],
+              "agent:queued": ["d4c5f9", "Maintenance task queued"],
+            };
+            const currentLabels = new Set((await github.paginate(
+              github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 }
+            )).map(label => label.name));
+            for (const [name, [color, description]] of Object.entries(labelDefinitions)) {
+              if (currentLabels.has(name)) continue;
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+            }
+            const labels = Object.keys(labelDefinitions);
+            if (existing) {
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number,
+                title: `[agent:live-inference] ${provider} smoke failure`, body,
+                labels: [...new Set([...(existing.labels || []).map(label => label.name || label), ...labels])],
+              });
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Failure recurred on exact head ${context.sha}: ${runUrl}`,
+              });
+            } else {
+              const created = await github.rest.issues.create({
+                owner, repo, title: `[agent:live-inference] ${provider} smoke failure`, body, labels
+              });
+              core.notice(`Queued Jules live-inference incident #${created.data.number}.`);
+            }
