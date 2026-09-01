@@ -270,7 +270,7 @@ jobs:
 
     steps:
       - name: Checkout trusted PR-quality scripts
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           # Source trusted scripts from an integration branch, never from the
           # PR's own base commit. A stacked child PR's base is another open
