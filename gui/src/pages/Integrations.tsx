@@ -1,63 +1,17 @@
 import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { navigateHash, normalizeHashPath } from "../hash-routing";
-import { useT, type TKey } from "../i18n/shared";
+import { useT } from "../i18n/shared";
 import ErrorBoundary from "../components/ErrorBoundary";
 import ClientMark from "../components/ClientMark";
 import { INTEGRATION_MARKS } from "../components/integration-marks";
 import type { FileIntegrationClientId } from "./integrations/FileIntegrationPage";
+import { FILE_CLIENTS, TABS, type IntegrationTab } from "./integrations/integration-tabs";
 
 const ApiKeys = lazy(() => import("./ApiKeys"));
 const Claude = lazy(() => import("./Claude"));
 const Grok = lazy(() => import("./Grok"));
 const IntegrationsOverview = lazy(() => import("./integrations/IntegrationsOverview"));
 const FileIntegrationPage = lazy(() => import("./integrations/FileIntegrationPage"));
-
-type IntegrationTab =
-  | "overview"
-  | "keys"
-  | "codex"
-  | "claude"
-  | "grok"
-  | FileIntegrationClientId;
-
-interface TabDefinition {
-  id: IntegrationTab;
-  hash: string;
-  labelKey: TKey;
-}
-
-const TABS: readonly TabDefinition[] = [
-  { id: "overview", hash: "integrations", labelKey: "integrations.tab.overview" },
-  { id: "keys", hash: "integrations/keys", labelKey: "integrations.tab.keys" },
-  { id: "codex", hash: "integrations/codex", labelKey: "integrations.tab.codex" },
-  { id: "claude", hash: "integrations/claude", labelKey: "integrations.tab.claude" },
-  { id: "grok", hash: "integrations/grok", labelKey: "integrations.tab.grok" },
-  { id: "opencode", hash: "integrations/opencode", labelKey: "integrations.tab.opencode" },
-  { id: "pi", hash: "integrations/pi", labelKey: "integrations.tab.pi" },
-  { id: "omp", hash: "integrations/omp", labelKey: "integrations.tab.omp" },
-  { id: "hermes", hash: "integrations/hermes", labelKey: "integrations.tab.hermes" },
-  { id: "openclaw", hash: "integrations/openclaw", labelKey: "integrations.tab.openclaw" },
-  { id: "kimi", hash: "integrations/kimi", labelKey: "integrations.tab.kimi" },
-  { id: "gajae", hash: "integrations/gajae", labelKey: "integrations.tab.gajae" },
-  { id: "dsh", hash: "integrations/dsh", labelKey: "integrations.tab.dsh" },
-  { id: "mcode", hash: "integrations/mcode", labelKey: "integrations.tab.mcode" },
-  { id: "zcode", hash: "integrations/zcode", labelKey: "integrations.tab.zcode" },
-  { id: "prime", hash: "integrations/prime", labelKey: "integrations.tab.prime" },
-] as const;
-
-const FILE_CLIENTS = new Set<FileIntegrationClientId>([
-  "opencode",
-  "pi",
-  "omp",
-  "hermes",
-  "openclaw",
-  "kimi",
-  "gajae",
-  "dsh",
-  "mcode",
-  "zcode",
-  "prime",
-]);
 
 function readIntegrationTab(hash = window.location.hash): IntegrationTab {
   const raw = normalizeHashPath(hash);
@@ -74,6 +28,13 @@ function panelDomId(tab: IntegrationTab): string {
   return `integrations-panel-${tab}`;
 }
 
+/*
+ * The strip carries 17 tabs on one row, which is precisely where a mark earns
+ * its place: the eye finds a logo faster than it reads the tenth label. Two
+ * tabs have no client behind them -- `overview` is the page itself and `keys`
+ * is a credential surface, not an integration -- so they stay text-only rather
+ * than borrowing a mark that would imply a client.
+ */
 function tabMark(tab: IntegrationTab): string | null {
   if (tab === "overview" || tab === "keys") return null;
   return INTEGRATION_MARKS[tab] ?? null;

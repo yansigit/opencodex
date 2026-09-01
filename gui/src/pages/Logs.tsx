@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useI18n, LOCALES, type TFn } from "../i18n/shared";
 import { formatProviderDisplayName } from "../provider-icons";
 import { formatTokens } from "../format-tokens";
-import { hashLogConversationQuery } from "../log-conversation-id";
+import { hashLogConversationQuery, matchesLogConversationId } from "../log-conversation-id";
 import { statusCodeInfo } from "../status-codes";
 import { IconX } from "../icons";
 import { modelLabel } from "../model-display";
@@ -12,16 +12,6 @@ import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import { EmptyState, Notice } from "../ui";
 import Debug from "./Debug";
-import { LogsFilterBar } from "./logs-filter-bar";
-import {
-  DEFAULT_LOG_FILTER_STATE,
-  extractLogFilterOptions,
-  filterLogs,
-  hasActiveFilters,
-  normalizedAgentKind,
-  type PersistedAgentKind,
-  type LogFilterState,
-} from "./logs-filter";
 
 import type { LogsTab } from "./logs-tab-keydown";
 import { logsTabKeyDown, readTabFromHash, selectLogsTab } from "./logs-tab-keydown";
@@ -29,7 +19,10 @@ import { modelTitle } from "./logs-model-title";
 import { speedLabel } from "./logs-speed-label";
 import { formatEstimatedUsd, formatEstimatedUsdValue, summarizeEstimatedCosts } from "./logs-cost-format";
 import { cacheSplit, isCursorUsageProvider, tokensTitle } from "./logs-token-title";
-import type { LogSurface } from "./logs-surface-filter";
+import type { LogSurface, LogSurfaceFilter } from "./logs-surface-filter";
+import { logMatchesSurface } from "./logs-surface-filter";
+import { logMatchesModelQuery } from "./logs-model-filter";
+import { normalizedAgentKind, type PersistedAgentKind } from "./logs-filter";
 import {
   sanitizeLogEntryRouteDecision,
   validCachedRouteDecision,
@@ -38,8 +31,6 @@ import {
 function logsCacheKey(apiBase: string): string {
   return `ocx.logs.list.v1:${apiBase}`;
 }
-
-const EMPTY_LOGS: LogEntry[] = [];
 
 interface UsageBreakdown {
   inputTokens: number;
@@ -391,8 +382,15 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const resourceKey = logsCacheKey(apiBase);
   const cachedLogs = validCachedLogs(readSessionListCache<LogEntry[]>(resourceKey));
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [failureStreak, setFailureStreak] = useState<{ error: unknown; count: number }>(
+    { error: null, count: 0 },
+  );
   const [detail, setDetail] = useState<LogEntry | null>(null);
-  const [filters, setFilters] = useState<LogFilterState>(DEFAULT_LOG_FILTER_STATE);
+  const [surfaceFilter, setSurfaceFilter] = useState<LogSurfaceFilter>("all");
+  const [interceptedHelpersOnly, setInterceptedHelpersOnly] = useState(false);
+  const [conversationFilter, setConversationFilter] = useState("");
+  const [modelFilter, setModelFilter] = useState("");
+  const [conversationQueryHash, setConversationQueryHash] = useState<string | undefined>();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const logRetryRef = useRef<{ key: string; failures: number; nextAttemptAt: number; error: unknown }>(
     { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null },
@@ -468,19 +466,13 @@ export default function Logs({ apiBase }: { apiBase: string }) {
         failures,
         LOGS_POLL_BACKOFF_MAX_EXPONENT,
       ));
-      logRetryRef.current = {
-        key: resourceKey,
-        failures,
-        nextAttemptAt: Date.now() + backoffMs,
-        error: normalized,
-      };
+      logRetryRef.current = { key: resourceKey, failures, nextAttemptAt: Date.now() + backoffMs, error: normalized };
       throw normalized;
     }
   }, [apiBase, resourceKey]);
 
-  // The resource layer owns the request and the 2s poll. It keeps held rows through a quiet
-  // poll on its own, which is what the old silent/non-silent split was hand-rolling — and an
-  // empty successful response is now a real empty result rather than a cold load.
+  // The resource layer owns the request and the 2s base poll. loadLogs backs off actual network
+  // attempts after failures while preserving those shared scheduler ticks and held rows.
   const logsResource = useDataSurface<LogEntry[]>(
     resourceKey,
     [apiBase],
@@ -493,7 +485,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
     },
   );
   const logsState = logsResource.state;
-  const logs = logsState.data ?? cachedLogs ?? EMPTY_LOGS;
+  const logs = logsState.data ?? cachedLogs ?? [];
   const fetchLogs = logsResource.refresh;
   const retryLogs = useCallback(() => {
     logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
@@ -509,9 +501,6 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   // in sync and no frame painted with a stale banner. `streak` counts CONSECUTIVE failed
   // settlements: it is stored keyed by the error identity that produced it, so repeated
   // renders of the same failure do not inflate the count and a success clears it.
-  const [failureStreak, setFailureStreak] = useState<{ error: unknown; count: number }>(
-    { error: null, count: 0 },
-  );
   if (settledSuccess && failureStreak.count !== 0) {
     setFailureStreak({ error: null, count: 0 });
   } else if (settledFailure && failureStreak.error !== logsState.error) {
@@ -523,25 +512,26 @@ export default function Logs({ apiBase }: { apiBase: string }) {
     || (!autoRefresh && settledFailure);
 
   const detailInfo = detail ? statusCodeInfo(detail.status, locale) : null;
-  const conversationQuery = filters.conversationId.trim();
+  const conversationQuery = conversationFilter.trim();
 
   useEffect(() => {
     let cancelled = false;
     if (!conversationQuery) {
-      setFilters(prev => (prev.conversationQueryHash === undefined ? prev : { ...prev, conversationQueryHash: undefined }));
+      setConversationQueryHash(undefined);
       return;
     }
     void hashLogConversationQuery(conversationQuery).then(hash => {
-      if (!cancelled) {
-        setFilters(prev => (prev.conversationQueryHash === hash ? prev : { ...prev, conversationQueryHash: hash }));
-      }
+      if (!cancelled) setConversationQueryHash(hash);
     });
     return () => { cancelled = true; };
   }, [conversationQuery]);
 
-  const filterOptions = useMemo(() => extractLogFilterOptions(logs), [logs]);
-  const activeFilters = hasActiveFilters(filters);
-  const filteredLogs = useMemo(() => filterLogs(logs, filters), [logs, filters]);
+  const filteredLogs = logs.filter(log => (
+    logMatchesSurface(log, surfaceFilter)
+    && (!interceptedHelpersOnly || Boolean(log.shadowCallRewrittenFrom))
+    && logMatchesModelQuery(log, modelFilter)
+    && (!conversationQuery || matchesLogConversationId(log.conversationId, conversationQuery, conversationQueryHash))
+  ));
   const conversationTotals = conversationQuery ? summarizeFilteredLogs(filteredLogs) : null;
 
   // TanStack Virtual returns unstable function identities; React Compiler skips this call.
@@ -617,16 +607,65 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       >
       <p className="page-sub">{t("logs.subtitle")}</p>
 
-      <LogsFilterBar
-        filters={filters}
-        options={filterOptions}
-        hasActiveFilters={activeFilters}
-        filteredCount={filteredLogs.length}
-        totalCount={logs.length}
-        t={t}
-        onFilterChange={setFilters}
-        onResetFilters={() => setFilters(DEFAULT_LOG_FILTER_STATE)}
-      />
+      <div className="logs-toolbar">
+        <span className="muted text-control">{t("logs.filter.surface.label")}</span>
+        <div className="segmented logs-segmented" role="radiogroup" aria-label={t("logs.filter.surface.label")}>
+          {(["all", "claude", "codex", "grok"] as const).map(surface => (
+            <button
+              key={surface}
+              type="button"
+              role="radio"
+              aria-checked={surfaceFilter === surface}
+              className={`btn btn-sm${surfaceFilter === surface ? " btn-primary" : " btn-ghost"}`}
+              style={{ background: surfaceFilter === surface ? undefined : "transparent", color: surfaceFilter === surface ? undefined : "var(--muted)" }}
+              onClick={() => setSurfaceFilter(surface)}
+            >
+              {t(`logs.filter.surface.${surface}`)}
+            </button>
+          ))}
+        </div>
+        {/*
+          "Intercepted", not "helper". The marker only exists when Shadow Call Intercept
+          rewrote the request, so a helper request that was not intercepted looks exactly like
+          ordinary traffic here. A broader label would promise a classification this data
+          cannot support.
+        */}
+        <label className="muted text-control logs-filter-field">
+          <input
+            type="checkbox"
+            checked={interceptedHelpersOnly}
+            onChange={event => setInterceptedHelpersOnly(event.target.checked)}
+          />
+          {t("logs.filter.interceptedHelpersOnly")}
+        </label>
+        <label className="muted text-control logs-filter-field">
+          {t("logs.filter.conversation.label")}
+          <input
+            type="search"
+            className="input mono"
+            value={conversationFilter}
+            onChange={e => setConversationFilter(e.target.value)}
+            placeholder={t("logs.filter.conversation.placeholder")}
+            aria-label={t("logs.filter.conversation.label")}
+          />
+        </label>
+        <label className="muted text-control logs-filter-field">
+          {t("logs.filter.model.label")}
+          <input
+            type="search"
+            className="input mono"
+            value={modelFilter}
+            onChange={e => setModelFilter(e.target.value)}
+            placeholder={t("logs.filter.model.placeholder")}
+            aria-label={t("logs.filter.model.label")}
+          />
+        </label>
+        {conversationQuery && (
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setConversationFilter("")}>
+            {t("logs.filter.conversation.clear")}
+          </button>
+        )}
+      </div>
 
       {conversationTotals && (
         <div className="logs-conversation-totals">
@@ -761,7 +800,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                     {formatEstimatedUsd(log.displayMetrics?.cost, t, localeTag)}
                   </td>
                  <td className="mono log-col-model" title={modelTitle(log, t)}>
-                   <span className="logs-model-cell">
+                  <span className="logs-model-cell">
                    <span>{modelLabel(log.resolvedModel ?? log.model)}</span>
                       <AgentKindBadge kind={log.agentKind} t={t} />
                       {log.shadowCallRewrittenFrom && (
@@ -826,7 +865,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
           t={t}
           onClose={() => setDetail(null)}
           onFilterConversation={id => {
-            setFilters(prev => ({ ...prev, conversationId: id }));
+            setConversationFilter(id);
             setDetail(null);
           }}
         />

@@ -102,6 +102,10 @@ describe("state-store sweeper", () => {
       "anthropic-routing-health",
       "antigravity-routing-health",
       "xai-refresh-verdicts",
+      // #3019: the WHAM 401 recovery budget. Registered here deliberately — the inventory
+      // is hand-maintained so a new store cannot be added without someone deciding it has
+      // an owner and a sweep policy.
+      "codex-quota-401-recovery",
       "responses-continuation",
       "antigravity-replay",
       "config-warning-memos",

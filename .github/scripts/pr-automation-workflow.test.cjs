@@ -226,6 +226,12 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /syncFreshnessDisposition/);
     assert.match(source, /syncFreshness\.action === "dispatch"/);
     assert.match(source, /syncCiRepairDisposition/);
+    assert.match(source, /syncRepairIssueDisposition/);
+    assert.match(source, /parseSyncRepairMarker/);
+    assert.match(source, /reconcileStaleSyncRepairIssues/);
+    assert.match(source, /state_reason:\s*"not_planned"/);
+    assert.match(source, /Shadow mode would retire stale sync repair issue/);
+    assert.match(source, /Stale sync repair reconciliation failed closed/);
     assert.match(source, /newestSyncPrNumber/);
     assert.match(source, /trustedProducerIds.*41898282/s);
     assert.match(source, /agent:jules/);

@@ -404,12 +404,6 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 
 .main { min-width: 0; }
 .main-inner { max-width: 980px; margin: 0 auto; padding: 32px 36px 64px; container-type: inline-size; }
-.route-loading { display: flex; align-items: center; gap: 8px; min-height: 80px; color: var(--muted); }
-.route-enter { animation: route-enter 160ms ease-out both; }
-@keyframes route-enter {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
 .main-inner.main-inner--combos {
   max-width: none;
   margin: 0;
@@ -470,7 +464,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 /* Page-level underline tabs (Logs & Debug / Dashboard). Distinct from pill .segmented filters. */
 /* Let the row take the height it needs — no horizontal scrollbar on a short tab strip. */
 .page-tabs { display: flex; flex-wrap: wrap; gap: 2px; border-bottom: 1px solid var(--border); margin: 2px 0 14px; overflow: visible; }
-.page-tab { flex: 0 0 auto; white-space: nowrap; appearance: none; background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 8px 12px; color: var(--muted); cursor: pointer; font: inherit; font-size: var(--text-control); text-decoration: none; }
+.page-tab { flex: 0 0 auto; white-space: nowrap; appearance: none; background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 8px 12px; color: var(--muted); cursor: pointer; font: inherit; font-size: var(--text-control); }
 .page-tab:hover { color: var(--text); }
 .page-tab--active { color: var(--text); border-bottom-color: var(--accent); font-weight: var(--weight-semibold); }
 .page-tab:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: -2px; }
@@ -643,7 +637,6 @@ a.btn, a.btn:hover { text-decoration: none; }
 .btn-danger { background: transparent; color: var(--red); border-color: rgba(248, 113, 113, 0.3); }
 .btn-danger:hover:not(:disabled) { background: var(--red-soft); }
 .btn-sm { padding: 4px 12px; font-size: var(--text-label); border-radius: var(--radius-pill); }
-button:active:not(:disabled) { translate: 0 1px; }
 .btn-icon {
   appearance: none;
   border: none;
@@ -1185,6 +1178,14 @@ select.input { appearance: none; }
 .switch.on { background: var(--toggle-on-bg); border-color: var(--toggle-on-bg); }
 .switch.mixed { background: var(--amber-soft); border-color: var(--amber); }
 .switch:disabled { opacity: 0.6; cursor: default; }
+/* A labeled switch is ONE atomic flex item, which is what the bare 34px button was
+   before the label existed. Without flex: 0 0 auto the knob and its text become
+   separate shrinkable items in .models-provider-actions and the text collapses to a
+   min-content column.
+
+   The label lives INSIDE the button so the visible words are clickable, which means
+   the button can no longer be the 34x20 pill: that geometry moves to the ::before
+   track and the button becomes a transparent, borderless row wrapping track + text. */
 .switch.switch-labeled {
   width: auto;
   height: auto;
@@ -1195,7 +1196,6 @@ select.input { appearance: none; }
   gap: var(--space-1);
   flex: 0 0 auto;
   line-height: normal;
-  position: relative;
 }
 .switch.switch-labeled::before {
   content: "";
@@ -1210,6 +1210,9 @@ select.input { appearance: none; }
 }
 .switch.switch-labeled.on::before { background: var(--toggle-on-bg); border-color: var(--toggle-on-bg); }
 .switch.switch-labeled.mixed::before { background: var(--amber-soft); border-color: var(--amber); }
+/* The knob is absolutely positioned over the ::before track rather than laid out in
+   the button's flow, because the flow now also carries the label text. */
+.switch.switch-labeled { position: relative; }
 .switch.switch-labeled .knob { position: absolute; left: 3px; }
 .switch.switch-labeled.on .knob { transform: translateX(14px); }
 .switch.switch-labeled.mixed .knob { transform: translateX(7px); }
@@ -2015,18 +2018,6 @@ table.logs-table {
   margin-bottom: var(--space-3);
 }
 
-.logs-toolbar-secondary {
-  margin-top: calc(-1 * var(--space-1));
-  margin-bottom: var(--space-3);
-}
-
-.logs-filter-status {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  margin-left: auto;
-}
-
 .logs-segmented {
   display: inline-flex;
   border-radius: var(--radius-pill);
@@ -2162,6 +2153,35 @@ table.logs-table {
 .prov-title { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; flex-wrap: wrap; min-width: 0; }
 .provider-icon { width: 31px; height: 31px; border-radius: var(--radius-xs); flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; background: var(--raised); border: 1px solid var(--border-soft); color: var(--text); }
 .provider-icon img { width: 19px; height: 19px; object-fit: contain; display: block; }
+
+/* A single-ink mark painted with the surrounding text colour, so it follows the
+   theme instead of vanishing into one of the two tiles. The tile already sets
+   `color: var(--text)`, so this needs no property of its own. */
+.provider-icon-mask {
+  width: 19px;
+  height: 19px;
+  display: block;
+  background: currentColor;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+}
+.provider-icon-sm .provider-icon-mask { width: 15px; height: 15px; }
+
+/* Artwork that carries real colour but is dominantly near-black: measured between
+   1.04:1 and 1.59:1 against the dark tile, which is invisible. Masking would
+   flatten the palette, so the vendor's own colours are kept and given the light
+   plate every favicon already assumes it will sit on. */
+.provider-icon--plate { background: #f4f4f4; border-color: rgba(0, 0, 0, 0.12); }
+
+/* The mirror case: artwork drawn in near-white for a dark header, which is
+   invisible on the light tile at roughly 1.0:1. It gets the dark surface its own
+   designers assumed. A theme-following plate would not work -- it would put
+   light-ink art back on a light tile in light mode. */
+.provider-icon--plate-dark { background: #1c1c1c; border-color: rgba(255, 255, 255, 0.14); }
 .prov-meta { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; min-width: 0; }
 .prov-meta > span { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .provider-quota { padding-left: 58px; }
@@ -2256,13 +2276,6 @@ button.prov-account-row.active { cursor: default; }
   .mobile-topbar-actions .sidebar-orb { width: 44px; height: 44px; flex: 0 0 44px; min-width: 44px; min-height: 44px; }
   .mobile-topbar-actions .sidebar-orb svg { width: 18px; height: 18px; }
   .menu-toggle { display: inline-flex; }
-  .startup-health-bar { padding-block: var(--space-2); }
-  .startup-health-bar__summary {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    white-space: normal;
-  }
   /* drawer: the desktop sidebar kept intact (nav groups + foot + GitHub link), off-canvas */
   .sidebar {
     position: fixed; top: 0; left: 0; bottom: 0; z-index: var(--z-popover);
@@ -2360,9 +2373,6 @@ button.prov-account-row.active { cursor: default; }
 .heatmap-grid { display: grid; gap: var(--hm-gap); }
 .heatmap-week { display: grid; grid-template-rows: repeat(7, var(--hm-cell)); gap: var(--hm-gap); }
 .heatmap-cell { width: var(--hm-cell); height: var(--hm-cell); border-radius: var(--radius-2xs); background: var(--border); }
-.heatmap-grid button.heatmap-cell { appearance: none; padding: 0; border: 0; }
-.heatmap-grid .heatmap-cell[tabindex] { cursor: pointer; }
-.heatmap-grid .heatmap-cell[tabindex]:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; }
 .heatmap-cell-0 { background: var(--border); }
 .heatmap-cell-1 { background: color-mix(in oklch, var(--green) 25%, var(--surface)); }
 .heatmap-cell-2 { background: color-mix(in oklch, var(--green) 50%, var(--surface)); }
@@ -2370,10 +2380,9 @@ button.prov-account-row.active { cursor: default; }
 .heatmap-cell-4 { background: var(--green); }
 .heatmap-legend { display: inline-flex; align-items: center; gap: 4px; font-size: var(--text-label); align-self: flex-end; position: sticky; right: 0; }
 .heatmap-legend .heatmap-cell { width: 10px; height: 10px; }
-.heatmap-tip { position: fixed; z-index: var(--z-popover); pointer-events: none;
+.heatmap-tip { position: fixed; z-index: 10; transform: translate(-50%, -100%) translateY(-8px); pointer-events: none;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 6px 10px;
-  white-space: nowrap; font-size: var(--text-label); }
-.chart-overlay { box-shadow: var(--shadow); }
+  box-shadow: var(--shadow-sm); white-space: nowrap; font-size: var(--text-label); }
 .heatmap-tip-date { font-weight: var(--weight-semibold); color: var(--text); margin-bottom: 2px; }
 .heatmap-tip-val { color: var(--text); font-variant-numeric: tabular-nums; }
 .heatmap-tip-req { font-size: var(--text-caption); }
@@ -2382,8 +2391,7 @@ button.prov-account-row.active { cursor: default; }
 
 /* 7d view: per-day request bar chart (replaces the year heatmap on the 7d toggle). */
 .daybars { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; align-items: end; height: 180px; padding-top: 8px; }
-.daybar { appearance: none; position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
-.daybar:focus-visible { outline: 2px solid var(--accent-ring); outline-offset: 2px; border-radius: var(--radius-xs); }
+.daybar { position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px; height: 100%; justify-content: flex-end; }
 .daybar-track { width: 100%; max-width: 48px; flex: 1; display: flex; align-items: flex-end; background: var(--border); border-radius: var(--radius-xs); overflow: hidden; }
 /* Full-height stack scaled on Y — avoids layout thrash from animating height. */
 .daybar-stack {
@@ -2396,14 +2404,15 @@ button.prov-account-row.active { cursor: default; }
   min-height: 2px;
   transform: scaleY(var(--daybar-scale, 0));
   transform-origin: bottom center;
+  transition: transform var(--motion-normal) ease;
 }
 .daybar-seg { width: 100%; min-height: 1px; }
 .daybar-count { font-size: var(--text-label); font-weight: var(--weight-semibold); color: var(--text); }
 .daybar-label { font-size: var(--text-caption); white-space: nowrap; }
 .daybar:hover .daybar-track { outline: 1px solid var(--border); }
-.daybar-tip { position: fixed; z-index: var(--z-popover);
+.daybar-tip { position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); z-index: 5;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px;
-  min-width: min(160px, calc(100vw - 16px)); overflow-y: auto; pointer-events: auto; }
+  min-width: 160px; box-shadow: var(--shadow-sm); pointer-events: none; }
 .daybar-tip-date { font-size: var(--text-label); font-weight: var(--weight-semibold); color: var(--text); margin-bottom: 6px; white-space: nowrap; }
 .daybar-tip-row { display: flex; align-items: center; gap: 8px; font-size: var(--text-label); line-height: var(--leading-relaxed); }
 .daybar-tip-swatch { width: 10px; height: 10px; border-radius: var(--radius-2xs); flex-shrink: 0; }
@@ -2450,7 +2459,7 @@ button.prov-account-row.active { cursor: default; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 12px 16px;
-  min-width: 0;
+  min-width: 320px;
   max-width: 480px;
   max-height: 360px;
   overflow-y: auto;
@@ -2458,13 +2467,15 @@ button.prov-account-row.active { cursor: default; }
   pointer-events: none;
   font-size: var(--text-control);
   line-height: var(--leading-relaxed);
-  white-space: normal;
+  white-space: nowrap;
 }
+.model-tip.has-actions { pointer-events: auto; }
 .model-tip-id { font-family: var(--mono); font-size: var(--text-body); font-weight: var(--weight-semibold); color: var(--text); margin-bottom: 2px; white-space: normal; word-break: break-all; }
 .model-tip-display { color: var(--muted); margin-bottom: 6px; }
 .model-tip-grid { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin-bottom: 6px; }
 .model-tip-key { color: var(--muted); }
-.model-tip-val { color: var(--text); font-family: var(--mono); font-size: var(--text-label); overflow-wrap: anywhere; }
+.model-tip-val { color: var(--text); font-family: var(--mono); font-size: var(--text-label); }
+.model-tip-actions { display: flex; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-soft); }
 
 /* ---- hover tooltip (styled replacement for native title) ---- */
 .ocx-tooltip { position: relative; display: inline-flex; align-items: center; }

@@ -39,37 +39,29 @@ the browser or password manager's decision.
 | Area | What it does |
 | --- | --- |
 | **Dashboard summary** | Multi-agent mode, online state, version, uptime, provider count, 30-day token total, active providers, and available native/routed models. |
-| **Server listener** | View and edit the configured hostname, port, native TLS certificate/origin, and AI Studio extension origin. Listener and certificate changes require a proxy restart. |
 | **Sub-agent delegation** | Choose a native or routed model and optional reasoning effort shared by OpenCodex delegation guidance and the separate native-default opt-in. This is not a proxy-side per-spawn router; see below. |
 | **Sidecars** | Choose the web-search model and effort plus the vision-description model. Changes apply on the next request. |
 | **Maintenance** | Resync the Codex model catalog, inspect project-local config bypass warnings, check the latest or preview release, and run an update with optional proxy restart. |
 | **Startup safety** | Show whether injected Codex routing survives a restart, with separate service and launcher-shim health plus exact repair commands. |
 | **Windows tray** | Install a per-user login tray for one-click proxy start, stop, restart, dashboard access, and status. The tray is a controller, not a proxy restart service. |
 | **Codex autostart** | Allow an already-installed Codex launcher shim to run `ocx ensure`. This toggle does not install a shim or background service. |
-| **Providers** | Add, edit, set the default (enabled providers only), enable/disable, and remove providers; manage OAuth account pools and API-key pools where supported. Removing the current default switches to the first remaining enabled provider when one exists; otherwise deletion is refused and the current default is kept. Provider Settings can disable live model discovery or opt in to replaying pre-stream transient failures for endpoints with missing, slow, oversized, or unreliable upstream responses. For Claude (Anthropic) OAuth pools, each logged-in account shows its own 5-hour and weekly rate-limit bars (usage is per credential); a failed probe keeps the last-known bars and marks them unavailable until the next successful refresh. |
+| **Providers** | Add, edit, set the default (enabled providers only), enable/disable, and remove providers; manage OAuth account pools and API-key pools where supported. Removing the current default switches to the first remaining enabled provider when one exists; otherwise deletion is refused and the current default is kept. Provider Settings can disable live model discovery for endpoints with missing, slow, or oversized `/models` catalogs. For Claude (Anthropic) OAuth pools, each logged-in account shows its own 5-hour and weekly rate-limit bars (usage is per credential); a failed probe keeps the last-known bars and marks them unavailable until the next successful refresh. |
 | **Add provider** | Search registry-backed presets for account login, API-key services, local servers, or a custom endpoint. |
 | **Codex Auth** | Add ChatGPT/Codex pool accounts, select the next-session account, refresh 5h / weekly / 30d quotas, enable or disable quota auto-switch, set its 1–100% threshold, and configure transient-failure failover. |
-| **Subagents** | Feature up to five bare native or namespaced routed models, edit up to eight named roles, toggle Codex agent-file sync, edit custom parent guidance plus global child instructions, optionally route eligible V2 native parents to one routed model, and arm the routed delegation bridge. |
+| **Subagents** | Feature up to five bare native or namespaced routed models in the `spawn_agent` override list. |
 | **Models** | Toggle native GPT and routed models, set provider allowlists and context caps, choose v1/base/v2, and configure the v2 thread limit. Configured providers stay visible as zero-model groups when discovery is off or returns no rows. |
 | **Logs** | Auto-refresh recent requests with tokens, requested effort and (when available) effective outbound effort, resolved model, provider, status, request id, duration, and error details. The detail view includes the exact reasoning wire field when the adapter emits one. Filter by opaque conversation/session id (when the client sends one) to total tokens and estimated list-price cost for the currently loaded Logs ring. |
 | **Usage / Debug** | Inspect token-usage coverage and trends, or enable opt-in provider transport and usage-extraction diagnostics. |
 | **Storage** | Read-only CODEX_HOME disk breakdown (sessions, archives, DBs, attachments). Optional archived cleanup: preview the oldest N%, then quarantine to `CODEX_HOME/.trash` (default) or permanently delete behind an explicit checkbox. **Auto-cleanup policy** is opt-in and **default OFF** (`storageCleanupPolicy.enabled`); configure threshold/target/schedule/mode on the Storage page, or trigger **Run now**. Quarantined entries can be restored from the Storage page (JSONL + threads). Active sessions stay read-only. Cleanup and restore are refused while Codex holds the newest/active `state_*.sqlite` locked. |
-| **Stop** | Gracefully stop the proxy and installed background service, restore native Codex, and exit (`POST /api/stop`). |
+| **Stop** | Gracefully stop the proxy and installed background service, restore native Codex, and exit (`POST /api/stop`). On Windows with the Task Scheduler backend the dashboard refuses and asks you to run `ocx stop` instead: that wrapper can respawn the proxy after the task ends, and only a stop running outside this process can verify the restart window before restoring your client config. Nothing is changed when it refuses. |
 
 ### Linking to a section
 
-There is a single responsive layout, so there is no layout switch to configure. On desktop, the
-sidebar is the primary navigation; on narrow screens, use **Open menu** to reveal the same page
-links. Dashboard sections are addressable instead: `#dashboard` opens Overview, and `#dashboard/providers` and
+There is a single layout, so there is no layout switch to configure. Dashboard sections are
+addressable instead: `#dashboard` opens Overview, and `#dashboard/providers` and
 `#dashboard/models` open the other two. Reload, bookmark, and Back all keep the section you were
 on. **Logs** works the same way with `#logs` and `#logs/debug`. An older `#providers/workspace`
 bookmark now lands on `#providers`.
-
-Overview includes a **30-day activity** panel with request and token trends. Select a day on either
-sparkline to read its totals, or choose **View usage** for the full Usage page. If a refresh is
-interrupted after Overview has loaded, the last good data stays visible and a reconnecting notice
-offers **Retry**; a cold connection failure instead shows the `ocx start` guidance and the same
-retry action.
 
 Cost values in **Logs** and **Usage** are API list-price equivalents calculated from reported tokens.
 They are not billing receipts or evidence of an actual charge; subscription usage or provider credits
@@ -87,18 +79,11 @@ instructions that use those values. On eligible v2 turns, that guidance tells th
 agent which exact model and reasoning effort to pass to `spawn_agent`; clearing the model also clears
 the stored effort.
 
-The default-off **Use for omitted-model subagents** switch applies the same selection to Codex's
+The default-off **Use as native Codex subagent defaults** switch applies the same selection to Codex's
 native `[agents]` defaults on the next sync/restart when OpenCodex manages the active Codex routing.
 External user-managed provider configs remain untouched. Those defaults affect newly created Codex tasks
 and do not themselves cause delegation. Existing user-owned `[agents]` defaults are preserved rather
 than overwritten, so they may continue to override the requested defaults.
-
-The Subagents page calls the five-entry `subagentModels` list **Advertised overrides**. Its order only
-controls which models `spawn_agent` displays; it is not a default or fallback order. The separate
-**Preferred subagent model** may be outside those five rows and is never inserted automatically. The
-page reports both the catalog state and the native-default authority state: only `active` means an
-omitted-model subagent will use the preference. Stale catalog state exposes the user-confirmed Codex
-restart action; the dashboard never restarts automatically.
 
 :::caution
 Neither control is a proxy-side cross-model spawn router. OpenCodex guidance asks Codex to pass
@@ -116,44 +101,6 @@ The picker offers enabled native and routed models plus the global Codex effort 
 validates the selected effort globally; Codex still validates a spawn effort against the target
 catalog entry.
 
-### V2 native parent override
-
-In **Subagents → Sub-agent delegation**, **Route native V2 parents** is an experimental,
-default-off control. Choose a routed target from the existing delegation model catalog, then turn
-on the switch. Canonical ChatGPT rows are excluded. Activation requires the upstream V2 flag,
-explicit **v2** mode, and **Keep ChatGPT on v1** turned off; the target can be chosen while the
-switch is off. The dashboard reads `/api/v2` again after every save, so server state wins.
-
-The Codex UI may still show the originally selected native model while OpenCodex executes the root
-on the selected routed target. Prompts, repository context, conversation history, and tool results
-go to that provider, whose availability, context window, behavior, latency, cost, and privacy
-characteristics may differ. The target is looked up per request, not pinned per thread. If an
-eligible target is missing, disabled, unavailable, or canonical ChatGPT, the request fails closed;
-there is no automatic fallback to ChatGPT.
-
-If the mode, upstream V2 flag, or Keep ChatGPT on v1 changes, `active` becomes false and subsequent
-parent requests skip the override; the selected target and enabled setting remain persisted.
-
-This setting is separate from **Keep ChatGPT on v1** (which preserves the native parent on v1) and
-`agentTaskRecovery` (which preserves the native V2 parent but consumes an additional ChatGPT
-request to recover encrypted child content). Native children remain native; a native child that
-creates a routed grandchild can still hit the encrypted-task limitation. The control has no CLI
-equivalent and does not decrypt or alter Codex's protocol.
-
-### Routed V2 delegation bridge
-
-**Routed V2 delegation bridge** is an accessible experimental switch, default off. It saves only
-`{ "v2RoutedDelegationBridge": true|false }`, then reloads `/api/v2`; a failed write leaves the last
-server value visible. It may be armed outside explicit V2, where the dashboard says it activates only
-for eligible native V2 roots.
-
-It adds no model picker. The model decides which collaboration tools to call. The native Codex UI may
-still show the original model, while routed prompts, repository context, tool results, availability,
-context, behavior, billing, and privacy follow the selected provider. This is separate from native
-GPT-to-GPT collaboration, **Route native V2 parents**, and encrypted-task recovery. It is root-only:
-a native child that delegates to a routed grandchild can still receive an encrypted task. Turning it
-off applies immediately to subsequent requests.
-
 ## Codex Auth and account pools
 
 The **Codex Auth** page manages the native ChatGPT/Codex route:
@@ -164,22 +111,14 @@ may clear affinity and rotate to another eligible Pool account. This is separate
 and other providers.
 
 :::caution[Provider-policy responsibility]
-Account pools are technical account-management, routing, and resilience features. They do not
+The account pool is a technical account-management, routing, and resilience feature. It does not
 claim that having multiple accounts is itself prohibited; compliance depends on the account setup and
 use pattern. OpenCodex does not endorse using additional accounts to circumvent rate limits, quotas,
 plan limits, or other provider restrictions, or sharing account credentials between people. You are
-responsible for complying with each provider's current terms for every connected account and use
+responsible for complying with the provider's current terms for every connected account and use
 pattern. Provider restrictions, suspension, or termination are outside OpenCodex's control;
 maintainers do not provide policy advice and cannot resolve provider enforcement. Review
-[OpenAI's current Terms of Use](https://openai.com/policies/terms-of-use/) and the terms for every
-other OAuth provider you pool (Anthropic, Google Antigravity, Cursor, and others).
-
-The same caution applies to experimental Claude and Cursor account pools in
-[Provider Configuration](/reference/configuration/providers/#shared-oauth-account-pool-kernel).
-Those pools are off by default. Antigravity multi-account routing is failover-only — it does not
-spread new sessions across accounts. Command Code does not support account pooling; one account per
-person is required by Command Code terms. Billing and payment failures are not rate-limit 429s and do
-not trigger the short account-hop carousel.
+[OpenAI's current Terms of Use](https://openai.com/policies/terms-of-use/).
 :::
 
 - Manually choosing an account applies immediately: an already-bound thread moves to it on its next
@@ -255,11 +194,9 @@ allowed to answer for you:
 
 The GUI is a thin client over the proxy's JSON management API. Useful endpoints include:
 
-![Server listener settings in the dashboard](/screenshots/server-listener-settings.jpg)
-
 | Endpoint | Purpose |
 | --- | --- |
-| `GET` / `PUT /api/settings` | Read or update Codex autostart, stream/memory settings, account-targeting picker visibility, and the dashboard's server listener settings. Listener and certificate changes require a proxy restart. |
+| `GET` / `PUT /api/settings` | Read settings or update Codex autostart, stream/memory settings, and account-targeting picker visibility. |
 | `GET` / `POST /api/github/star` | Read the `gh`-derived star state, or star the repository. The POST is refused with `403` `agent_consent_required` for agent-driven callers without a dashboard session. |
 | `GET /api/startup-health` | Read secret-free routing, service, shim, and restart-safety diagnostics. |
 | `POST /api/startup-action` | Install the background service or Codex launcher shim through fixed, allowlisted actions. |
@@ -268,7 +205,7 @@ The GUI is a thin client over the proxy's JSON management API. Useful endpoints 
 | `GET /api/update/check` · `POST /api/update/run` · `GET /api/update/status` | Check, run, and monitor self-update jobs. Worker PIDs are persisted so a crashed job recovers automatically; legacy no-PID jobs recover after ten minutes. |
 | `GET` / `PUT /api/sidecar-settings` | Read or set search/vision sidecar model settings. |
 | `GET` / `PUT /api/injection-model` | Read or set the shared sub-agent model/effort selection and the independent guidance/native-default switches. |
-| `GET` / `PUT /api/v2` | Read or set the surface mode, Codex feature flag, v2 thread limit, `v2NativeParentOverride` object, and `v2RoutedDelegationBridge` boolean. |
+| `GET` / `PUT /api/v2` | Read or set the surface mode, Codex feature flag, and v2 thread limit. |
 | `GET /api/providers` · `POST /api/providers` · `PATCH /api/providers?name=...` · `DELETE /api/providers?name=...` | List, add/replace, enable/disable, set the default, or remove providers. `PATCH` uses standalone `{ "setDefault": true }` on an enabled provider; `POST` may include `setDefault` when creating/replacing (also enabled-only). Deleting the current default reassigns to the first remaining enabled provider when one exists; otherwise the API returns `409` with `code: "last_provider"` and keeps the current default. |
 | `GET /api/models` · `PUT /api/disabled-models` | List native/routed model rows and update the shared disabled-model set. |
 | `GET /api/selected-models` · `PUT /api/model-visibility` | Read provider allowlists and atomically change the final visibility of one model or provider group. |
@@ -278,19 +215,12 @@ The GUI is a thin client over the proxy's JSON management API. Useful endpoints 
 | `PUT /api/codex-auth/active` · `PUT /api/codex-auth/auto-switch` · `PUT /api/codex-auth/failover` | Select the account for the next request and configure pool routing. |
 | `GET /api/codex-auth/active` · `PUT /api/codex-auth/accounts/priority` | Read the effective account (including `pinned` and which account is `pinnedAccountId`) and set one account's selection order. |
 | `POST /api/codex-auth/login` · `GET /api/codex-auth/login-status` | Add a pool account through browser login. |
-| `GET /api/logs?tail=50&limit=20&offset=0&provider=...&status=5xx` | Read recent request metadata with optional tail, provider, and exact/class status filters. With `limit`/`offset`, paging walks backward from the newest row (`offset=0` returns the latest page). Response shape: `{ timeZone, total, logs }` where `total` is the filtered row count before pagination. Each row may include `agentKind`: `main`, `subagent`, or `internal`. |
-| `GET` / `PUT /api/subagent-models` | Read or set the five advertised `spawn_agent` override models; `GET` also reports `catalogState`. |
-| `POST /api/stop` | Stop the proxy/service, restore native Codex, and exit. |
+| `GET /api/logs?tail=50&limit=20&offset=0&provider=...&status=5xx` | Read recent request metadata with optional tail, provider, and exact/class status filters. With `limit`/`offset`, paging walks backward from the newest row (`offset=0` returns the latest page). Response shape: `{ timeZone, total, logs }` where `total` is the filtered row count before pagination. |
+| `GET` / `PUT /api/subagent-models` | Read or set the five featured `spawn_agent` override models. |
+| `POST /api/stop` | Stop the proxy/service, restore native Codex, and exit. Refused with `respawnable_service` on the Windows Task Scheduler backend, and with `service_state_unknown` when that state cannot be read; nothing is changed either way. |
 
 :::tip
 Adding **Ollama Cloud** or another catalog provider from the dashboard copies its text-versus-vision
 classification into the saved provider config, so the [vision sidecar](/guides/sidecars/)
 is gated correctly without manual classification.
 :::
-
-## Logs agent filter
-
-The Logs page filters the bounded 2,000-row result locally by request origin: **All**, **Main**,
-**Subagent**, **Internal**, or **Unknown**. Unknown matches only rows whose `agentKind` is missing or
-invalid, which keeps historical rows readable without guessing their origin. The same localized badge
-appears in each row and in its detail view; raw protocol headers are never persisted.
