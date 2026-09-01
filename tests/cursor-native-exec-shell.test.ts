@@ -48,6 +48,10 @@ class FakeChild extends EventEmitter {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly pid = 1234;
+
+  kill(): boolean {
+    return true;
+  }
 }
 
 class FakeClock {
@@ -279,6 +283,20 @@ function spawnErrorText(bytes: Uint8Array): string {
   return message.value.result.value.error;
 }
 
+function fakeShellSpawn(options: { code?: number; stdout?: string; emitClose?: boolean; emitExit?: boolean } = {}): typeof import("node:child_process").spawn {
+  return (() => {
+    const child = new FakeChild();
+    queueMicrotask(() => {
+      if (options.stdout) child.stdout.write(options.stdout);
+      child.stdout.end();
+      child.stderr.end();
+      if (options.emitExit !== false) child.emit("exit", options.code ?? 0, null);
+      if (options.emitClose !== false) child.emit("close", options.code ?? 0, null);
+    });
+    return child as unknown as ChildProcessWithoutNullStreams;
+  }) as typeof import("node:child_process").spawn;
+}
+
 afterEach(async () => {
   await resetBackgroundShellStateForTests();
 });
@@ -291,7 +309,11 @@ describe("shellStreamExec completion acknowledgement", () => {
       message: { case: "shellStreamArgs", value: create(ShellArgsSchema, { command: "echo OCX_STREAM_OK" }) },
     });
 
-    const replies = (await shellStreamExec(execMsg)).map(decodeClient);
+    // This is a protocol-framing assertion. Keep the child event sequence deterministic:
+    // Bun 1.4.0's Darwin --isolate multi-file runner can lose a real subprocess pipe event
+    // under descriptor pressure, which made this otherwise unrelated test wait for 60s.
+    // Exit plus both pipe ends must complete the result even when close is withheld.
+    const replies = (await shellStreamExec(execMsg, fakeShellSpawn({ stdout: "OCX_STREAM_OK\n", emitClose: false }))).map(decodeClient);
     const execMessages = replies.filter(r => r.message.case === "execClientMessage");
     const cases = execMessages.map(r => (r.message.case === "execClientMessage" ? r.message.value.message.case : undefined));
 
@@ -328,7 +350,7 @@ describe("shellStreamExec completion acknowledgement", () => {
       execId: "3",
       message: { case: "shellStreamArgs", value: create(ShellArgsSchema, { command: "exit 3" }) },
     });
-    const replies = (await shellStreamExec(execMsg)).map(decodeClient);
+    const replies = (await shellStreamExec(execMsg, fakeShellSpawn({ code: 3, emitExit: false }))).map(decodeClient);
     const shellResult = replies.filter(r => r.message.case === "execClientMessage").at(-1);
     if (shellResult?.message.case !== "execClientMessage" || shellResult.message.value.message.case !== "shellResult") {
       throw new Error("missing shellResult");
