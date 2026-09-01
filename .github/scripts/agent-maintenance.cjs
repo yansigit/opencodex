@@ -6,7 +6,7 @@ const STATUSES = new Set(["queued", "planning", "running", "reviewing", "needs-h
 const MAX_REPAIR_ATTEMPTS = 2;
 const MAX_FINDINGS = 10;
 const MAX_FINDING_BYTES = 12 * 1024;
-const MAX_JULES_CREDENTIALS = 3;
+const MAX_JULES_CREDENTIALS = 4;
 const JULES_BASE_URL = "https://jules.googleapis.com/v1alpha";
 const DEFAULT_JULES_CREDENTIAL_ID = "default";
 const LEGACY_JULES_ACCOUNT_ID = "legacy";
@@ -451,7 +451,9 @@ function parseJulesCredentialPool(input, { registerSecret } = {}) {
   }
   if (!Array.isArray(value)) throw invalidCredentialPool("expected an array of credential entries");
   if (value.length === 0) throw invalidCredentialPool("credential pool is empty");
-  if (value.length > MAX_JULES_CREDENTIALS) throw invalidCredentialPool("credential pool exceeds the maximum of 3 entries");
+  if (value.length > MAX_JULES_CREDENTIALS) {
+    throw invalidCredentialPool(`credential pool exceeds the maximum of ${MAX_JULES_CREDENTIALS} entries`);
+  }
 
   const ids = new Set();
   const accounts = new Set();
