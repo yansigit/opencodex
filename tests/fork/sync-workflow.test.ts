@@ -15,7 +15,7 @@ describe("fork upstream sync workflow contract", () => {
 
   test("checks out the guarded trusted ref with the immutable action", () => {
     expect(workflow).toContain(
-      "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2",
+      "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7",
     );
     expect(workflow).toContain("ref: ${{ github.ref }}");
     expect(workflow).toContain("persist-credentials: false");

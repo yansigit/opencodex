@@ -1171,7 +1171,7 @@ describe("GitHub Actions hardening", () => {
     const [checkout, scriptStep] = steps as [WorkflowStep, WorkflowStep];
     expect(Object.keys(checkout).sort()).toEqual(["name", "uses", "with"]);
     expect(checkout.uses).toBe(
-      "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+      "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
     );
     expect(Object.keys(checkout.with ?? {}).sort()).toEqual([
       "persist-credentials",

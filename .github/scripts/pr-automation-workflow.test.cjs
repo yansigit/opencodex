@@ -35,7 +35,7 @@ describe("PR automation workflow contract", () => {
     const source = workflow();
     assert.match(source, /permissions:\s*\{\}/);
     assert.match(source, /concurrency:[\s\S]*cancel-in-progress:\s*false/);
-    assert.match(source, /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4\.2\.2/);
+    assert.match(source, /actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7/);
     assert.match(source, /ref:\s*\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/dev' && github\.sha \|\| github\.event\.repository\.default_branch \}\}/);
     assert.match(source, /persist-credentials:\s*false/);
     assert.doesNotMatch(source, /github\.event\.pull_request\.head/);
