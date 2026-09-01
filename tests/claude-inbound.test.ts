@@ -158,6 +158,33 @@ describe("claude inbound translation", () => {
 
     expect(body.text).toEqual({ format: { type: "json_schema", name: "response", schema } });
     expect(parseRequest(body).options.textFormat).toEqual({ type: "json_schema", name: "response", schema });
+
+    // deprecated top-level output_format
+    const topBody = anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_format: { type: "json_schema", schema },
+    });
+    expect(topBody.text).toEqual({ format: { type: "json_schema", name: "response", schema } });
+
+    // fail clearly when both official shapes are provided (Anthropic SDK parity)
+    expect(() => anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_config: { format: { type: "json_schema", schema } },
+      output_format: { type: "json_schema", schema },
+    })).toThrow("Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated).");
+
+    // invalid nested output_config.output_format is ignored
+    const invalidNested = anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_config: { output_format: { type: "json_schema", schema } },
+    });
+    expect(invalidNested.text).toBeUndefined();
   });
 
   test("structured output rejects unsupported schemas and preserves root references", () => {
@@ -210,6 +237,49 @@ describe("claude inbound translation", () => {
     expect(body.reasoning).toEqual({ effort: "none" });
     expect(() => responsesRequestSchema.parse(body)).not.toThrow();
     expect(() => parseRequest(body)).not.toThrow();
+  });
+
+  test("ordinary client function tools named web_search or tool_search stay function tools", () => {
+    const body = anthropicToResponsesBody({
+      model: "gpt-5.6-luna",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "run local searches" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_ws_1", name: "web_search", input: { q: "local" } },
+            { type: "tool_use", id: "call_ts_1", name: "tool_search", input: { q: "local" } },
+          ],
+        },
+      ],
+      tools: [
+        { name: "web_search", description: "Client web search", input_schema: { type: "object", properties: { q: { type: "string" } } } },
+        { name: "tool_search", description: "Client tool search", input_schema: { type: "object", properties: { q: { type: "string" } } } },
+      ],
+      tool_choice: { type: "tool", name: "web_search" },
+    }) as Record<string, any>;
+
+    expect(body.tools).toEqual([
+      { type: "function", name: "web_search", description: "Client web search", parameters: { type: "object", properties: { q: { type: "string" } } } },
+      { type: "function", name: "tool_search", description: "Client tool search", parameters: { type: "object", properties: { q: { type: "string" } } } },
+    ]);
+    expect(body.tool_choice).toEqual({ type: "function", name: "web_search" });
+    expect(body.input).toEqual(expect.arrayContaining([
+      { type: "function_call", call_id: "call_ws_1", name: "web_search", arguments: JSON.stringify({ q: "local" }) },
+      { type: "function_call", call_id: "call_ts_1", name: "tool_search", arguments: JSON.stringify({ q: "local" }) },
+    ]));
+
+    const bodyTsChoice = anthropicToResponsesBody({
+      model: "gpt-5.6-luna",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "test" }],
+      tools: [
+        { name: "tool_search", description: "Client tool search", input_schema: { type: "object" } },
+      ],
+      tool_choice: { type: "tool", name: "tool_search" },
+    }) as Record<string, any>;
+    expect(bodyTsChoice.tool_choice).toEqual({ type: "function", name: "tool_search" });
   });
 
   test("official tool-search call/results preserve ids, loaded definitions, failures, and forced choice", () => {

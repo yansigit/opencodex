@@ -316,3 +316,81 @@ jobs:
           else
             echo "Cursor handoff succeeded." >&2
           fi
+
+      - name: Reconcile sync failure notification
+        if: always()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          FORK_SYNC_JOB_STATUS: ${{ job.status }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const marker = "<!-- opencodex-fork-sync-workflow-failure -->";
+            const status = process.env.FORK_SYNC_JOB_STATUS;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100
+            });
+            const existing = issues.find(issue =>
+              !issue.pull_request && String(issue.body || "").includes(marker));
+            if (status === "success") {
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body: `Recovered in trusted workflow run ${context.runId}.`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: existing.number, state: "closed", state_reason: "completed"
+                });
+              }
+              return;
+            }
+            if (status !== "failure") {
+              core.warning(`Fork sync ended as ${status}; no failure issue was mutated.`);
+              return;
+            }
+            const labels = {
+              "fork-sync": ["5319e7", "Upstream fork synchronization"],
+              "agent:needs-human": ["d93f0b", "Maintenance task needs a maintainer"],
+            };
+            const currentLabels = new Set((await github.paginate(
+              github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 }
+            )).map(label => label.name));
+            for (const [name, [color, description]] of Object.entries(labels)) {
+              if (currentLabels.has(name)) continue;
+              try {
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              } catch (error) {
+                if (error.status !== 422) throw error;
+              }
+            }
+            const body = [
+              marker,
+              "The trusted upstream sync workflow failed before it could complete its normal PR or handoff path.",
+              `Run: https://github.com/${owner}/${repo}/actions/runs/${context.runId}`,
+              `Controller ref: ${context.ref}`,
+              `Controller SHA: ${context.sha}`,
+              "",
+              "Action: inspect the failed step and restore the workflow without weakening required checks, credentials, provenance, or protected-path policy. The freshness supervisor will retry after its cooldown.",
+            ].join("\n");
+            if (existing) {
+              const names = new Set((existing.labels || []).map(label => label.name || label));
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: existing.number,
+                title: "[fork-sync] Automation failure",
+                body,
+                labels: [...new Set([...names, ...Object.keys(labels)])],
+              });
+            } else {
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title: "[fork-sync] Automation failure",
+                body,
+                labels: Object.keys(labels),
+              });
+            }

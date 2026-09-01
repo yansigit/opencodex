@@ -210,6 +210,7 @@ describe("update stops the running proxy before replacing files", () => {
           "src/update/npm-cache-preflight.mjs",
           "src/update/tray-update-plan.mjs",
           "src/update/transactional-install.mjs",
+          "src/update/codex-cli-update-launch-policy.mjs",
         ]) {
           const fixturePath = join(packageRoot, relative);
           mkdirSync(dirname(fixturePath), { recursive: true });

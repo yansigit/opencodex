@@ -62,6 +62,21 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
   test("collect: structured_output via output_config.format json_schema", () => {
     const body = { output_config: { format: { type: "json_schema", schema: { type: "object" } } } };
     expect(collectClaudeFeatureCodes(body, undefined)).toContain("structured_output");
+
+    const topLevelBody = { output_format: { type: "json_schema", schema: { type: "object" } } };
+    expect(collectClaudeFeatureCodes(topLevelBody, undefined)).toContain("structured_output");
+    expect(collectClaudeFeatureCodes(topLevelBody, undefined)).not.toContain("unknown_body_field");
+
+    const invalidNestedBody = { output_config: { output_format: { type: "json_schema", schema: { type: "object" } } } };
+    expect(collectClaudeFeatureCodes(invalidNestedBody, undefined)).not.toContain("structured_output");
+    expect(collectClaudeFeatureCodes(invalidNestedBody, undefined)).toContain("unknown_body_field");
+    const routed = analyzeClaudeCompatibility(invalidNestedBody, { mode: "enforce", adapter: "openai-responses" });
+    expect(routed.decision).toBe("reject");
+    expect(routed.compatible).toBe(false);
+    expect(routed.reason).toContain("unknown_body_field");
+    const anthropic = analyzeClaudeCompatibility(invalidNestedBody, { mode: "enforce", adapter: "anthropic" });
+    expect(anthropic.decision).toBe("allow");
+    expect(anthropic.compatible).toBe(true);
   });
 
   test("collect: structured_output via output_config.format json_object is not advertised (only json_schema is official)", () => {
@@ -122,35 +137,37 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     expect(r.featureCodes).toEqual(expect.arrayContaining(["cache_control", "thinking_block"]));
   });
 
-  test("analyze: Claude Code keep-all context management is a routed no-op", () => {
-    const body = {
-      context_management: {
-        edits: [{ type: "clear_thinking_20251015", keep: "all" }],
-      },
-    };
-    const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
-    expect(result.decision).toBe("allow");
-    expect(result.compatible).toBe(true);
-    expect(result.featureCodes).toContain("context_management");
+  test("analyze: context management no-ops ({}, {edits:[]}, keep-all) are routed no-ops", () => {
+    for (const cm of [
+      {},
+      { edits: [] },
+      { edits: [{ type: "clear_thinking_20251015", keep: "all" }] },
+    ]) {
+      const body = { context_management: cm };
+      const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
+      expect(result.decision).toBe("allow");
+      expect(result.compatible).toBe(true);
+      expect(result.featureCodes).toContain("context_management");
+    }
   });
 
-  test("analyze: context management that can remove content still fails closed", () => {
-    const body = {
-      context_management: {
-        edits: [{
-          type: "clear_thinking_20251015",
-          keep: { type: "thinking_turns", value: 1 },
-        }],
-      },
-    };
-    const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
-    expect(result.decision).toBe("reject");
-    expect(result.reason).toContain("context_management");
+  test("analyze: context management with unknown keys or removing edits still fails closed", () => {
+    for (const cm of [
+      { edits: [{ type: "clear_thinking_20251015", keep: { type: "thinking_turns", value: 1 } }] },
+      { edits: [], extra_key: true },
+      { edits: [{ type: "clear_thinking_20251015", keep: "all", extra: 1 }] },
+      { edits: [{ type: "unknown_edit_type", keep: "all" }] },
+    ]) {
+      const body = { context_management: cm };
+      const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter: "google" });
+      expect(result.decision).toBe("reject");
+      expect(result.reason).toContain("context_management");
+    }
   });
 
   test("analyze: incompatible features reject in enforce, shadow only records", () => {
     const cases: Array<{ body: Record<string, unknown>; code: string }> = [
-      { body: { context_management: { edits: [] } }, code: "context_management" },
+      { body: { context_management: { edits: [{ type: "clear_thinking_20251015", keep: { type: "thinking_turns", value: 1 } }] } }, code: "context_management" },
       { body: { tools: [{ type: "code_execution_20250501", name: "code_execution" }] } as unknown as Record<string, unknown>, code: "code_execution" },
       { body: { messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "hi" } }] }] } as unknown as Record<string, unknown>, code: "documents" },
       { body: { tools: [{ name: "foo", input_examples: [{ input: "x" }] }] } as unknown as Record<string, unknown>, code: "input_examples" },
@@ -170,6 +187,92 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     }
   });
 
+  test("analyze: client-executed MCP function names stay routable, server MCP toolsets do not", () => {
+    const clientTool = {
+      tools: [{ type: "function", name: "mcp__codex_app__automation_update", input_schema: { type: "object" } }],
+    };
+    expect(collectClaudeFeatureCodes(clientTool, undefined)).not.toContain("mcp_tool");
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      expect(analyzeClaudeCompatibility(clientTool, { mode: "enforce", adapter }).decision).toBe("allow");
+    }
+
+    const serverToolset = { tools: [{ type: "mcp_toolset", mcp_server_name: "remote" }] };
+    expect(collectClaudeFeatureCodes(serverToolset, undefined)).toContain("mcp_tool");
+    expect(analyzeClaudeCompatibility(serverToolset, { mode: "enforce", adapter: "cursor" }).decision).toBe("reject");
+  });
+
+  test("analyze: official custom tools and tool-search-like client names stay routable", () => {
+    const body = {
+      tools: [
+        { type: "custom", name: "calculator", input_schema: { type: "object" } },
+        { type: "custom", name: "tool_search_tool_local", input_schema: { type: "object" } },
+      ],
+      messages: [{
+        role: "assistant",
+        content: [{ type: "tool_use", id: "call_1", name: "tool_search_tool_local", input: {} }],
+      }],
+    };
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      const result = analyzeClaudeCompatibility(body, { mode: "enforce", adapter });
+      expect(result.decision).toBe("allow");
+      expect(result.featureCodes).not.toContain("server_tool");
+      expect(result.featureCodes).not.toContain("tool_search");
+    }
+  });
+
+  test("analyze: server MCP history is classified as mcp_tool and fails closed", () => {
+    for (const type of ["mcp_tool_use", "mcp_tool_result"]) {
+      const result = analyzeClaudeCompatibility({
+        messages: [{ role: "assistant", content: [{ type }] }],
+      }, { mode: "enforce", adapter: "openai-responses" });
+      expect(result.decision).toBe("reject");
+      expect(result.featureCodes).toContain("mcp_tool");
+      expect(result.featureCodes).not.toContain("unknown_content_block");
+    }
+  });
+
+  test("analyze: client-executed function tools containing code_execution stay routable, server code execution does not", () => {
+    const clientTool = {
+      tools: [{ type: "function", name: "run_code_execution", input_schema: { type: "object" } }],
+    };
+    expect(collectClaudeFeatureCodes(clientTool, undefined)).not.toContain("code_execution");
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      expect(analyzeClaudeCompatibility(clientTool, { mode: "enforce", adapter }).decision).toBe("allow");
+    }
+
+    const serverCodeExec = { tools: [{ type: "code_execution_20250501", name: "code_execution" }] };
+    expect(collectClaudeFeatureCodes(serverCodeExec, undefined)).toContain("code_execution");
+    expect(analyzeClaudeCompatibility(serverCodeExec, { mode: "enforce", adapter: "cursor" }).decision).toBe("reject");
+  });
+
+  test("analyze: documents nested in tool_result.content reject routed adapters and allow on Anthropic", () => {
+    const nestedDocBody = {
+      messages: [{
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: "toolu_123",
+          content: [
+            { type: "text", text: "report output:" },
+            { type: "document", source: { type: "text", media_type: "text/plain", data: "data" } },
+          ],
+        }],
+      }],
+    };
+    expect(collectClaudeFeatureCodes(nestedDocBody, undefined)).toContain("documents");
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      const routed = analyzeClaudeCompatibility(nestedDocBody, { mode: "enforce", adapter });
+      expect(routed.decision).toBe("reject");
+      expect(routed.compatible).toBe(false);
+      expect(routed.reason).toContain("documents");
+    }
+
+    const anthropic = analyzeClaudeCompatibility(nestedDocBody, { mode: "enforce", adapter: "anthropic" });
+    expect(anthropic.decision).toBe("allow");
+    expect(anthropic.compatible).toBe(true);
+    expect(anthropic.featureCodes).toContain("documents");
+  });
+
   test("analyze: beta tokens alone never trigger rejection", () => {
     const r = analyzeClaudeCompatibility({}, { mode: "enforce", anthropicBeta: "deferred-tools-2025-01-01" });
     expect(r.decision).toBe("allow");
@@ -179,7 +282,7 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
 
   test("analyze: multiple incompatibles listed together in reason", () => {
     const body = {
-      context_management: {},
+      context_management: { edits: [{ type: "clear_thinking_20251015", keep: { type: "thinking_turns", value: 1 } }] },
       tools: [{ type: "code_execution_20250501", name: "code_execution" }],
       messages: [{ role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "hi" } }] }],
     };
@@ -195,6 +298,8 @@ describe("claude compatibility analyzer (pure, no Lab)", () => {
     expect(analyzeClaudeCompatibility(webSearch, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
     const structured = { output_config: { format: { type: "json_schema", schema: { type: "object" } } } } as unknown as Record<string, unknown>;
     expect(analyzeClaudeCompatibility(structured, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
+    const structuredTop = { output_format: { type: "json_schema", schema: { type: "object" } } } as unknown as Record<string, unknown>;
+    expect(analyzeClaudeCompatibility(structuredTop, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
     const tier = { service_tier: "standard" } as unknown as Record<string, unknown>;
     expect(analyzeClaudeCompatibility(tier, { mode: "enforce", adapter: "openai-responses" }).decision).toBe("allow");
     const ts = { tools: [{ name: "tool_search_tool_bm25", type: "tool_search_tool_bm25_20251119" }] } as unknown as Record<string, unknown>;

@@ -3,7 +3,7 @@ import type { AdapterEvent, OcxParsedRequest, OcxProviderConfig } from "../types
 import type { ProviderAdapter } from "./base";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
 import { cursorExecDeniedMessage, cursorRequestDeclaresFullAccess } from "./cursor/exec-policy";
-import { isCursorBenignCancelError, isCursorInvalidArgumentError, isCursorOverflowRemintCandidate, safeCursorErrorMessage, type CursorSizeContext } from "./cursor/cursor-errors";
+import { isCursorBenignCancelError, isCursorInvalidArgumentError, isCursorOverflowRemintCandidate, isCursorRootEnvelopeError, safeCursorErrorMessage, type CursorSizeContext } from "./cursor/cursor-errors";
 import { cursorCheckpointModelAffinityId, inferCursorContextWindow, isCursorExternalWireModel } from "./cursor/discovery";
 import { createCursorKvStore, type CursorKvStore } from "./cursor/kv-store";
 import { mapCursorServerMessage } from "./cursor/message-mapper";
@@ -76,6 +76,9 @@ function safeCursorTransportError(err: unknown, sizeContext?: CursorSizeContext)
   if (err instanceof CursorTransportDisabledError) return CURSOR_TRANSPORT_DISABLED_MESSAGE;
   if (err instanceof CursorMissingCredentialError) {
     return "Cursor live transport is enabled, but no Cursor access token is configured. Set provider.apiKey or OPENCODEX_CURSOR_TEST_TOKEN.";
+  }
+  if (isCursorRootEnvelopeError(err)) {
+    return err instanceof Error ? `Cursor invalid request: ${err.message}` : "Cursor invalid request";
   }
   const message = err instanceof Error ? err.message : typeof err === "string" ? err : undefined;
   if (message) return safeCursorErrorMessage(message, sizeContext);
@@ -545,6 +548,9 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
             : safeCursorTransportError(err, requestSizeContext),
           ...(isTranslatorBudgetExceededError(err)
             ? { status: 502, errorType: "upstream_error", code: "translation_buffer_limit" }
+            : {}),
+          ...(isCursorRootEnvelopeError(err)
+            ? { status: 400, errorType: "invalid_request_error", code: "cursor_root_envelope_limit", retryable: false }
             : {}),
           ...(partialUsage ? { usage: partialUsage } : {}),
         });

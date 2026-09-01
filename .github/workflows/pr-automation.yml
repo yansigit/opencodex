@@ -34,7 +34,10 @@ jobs:
       - name: Checkout trusted controller
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          # A trusted push to dev may introduce a controller helper that is not
+          # on main yet. Use that exact pushed commit; every other event keeps
+          # the immutable default-branch controller boundary.
+          ref: ${{ github.event_name == 'push' && github.ref == 'refs/heads/dev' && github.sha || github.event.repository.default_branch }}
           persist-credentials: false
           sparse-checkout: |
             .github/scripts
@@ -71,6 +74,14 @@ jobs:
               exactHeadGate,
               summarizeAgedHolds,
             } = require(path.join(process.cwd(), ".github", "scripts", "pr-automation.cjs"));
+            const {
+              SYNC_BRANCH_RE,
+              buildSyncRepairIssue,
+              syncCiRepairDisposition,
+              syncFreshnessDisposition,
+            } = require(path.join(
+              process.cwd(), ".github", "scripts", "pr-automation-sync-supervisor.cjs"
+            ));
             const { parseAgentMaintenanceState } = require(path.join(
               process.cwd(), ".github", "scripts", "agent-maintenance.cjs"
             ));
@@ -537,12 +548,130 @@ jobs:
               });
             }
 
+            async function resolveStableRelease() {
+              const upstream = { owner: "lidge-jun", repo: "opencodex" };
+              const release = (await github.rest.repos.getLatestRelease(upstream)).data;
+              if (!release?.tag_name || release.draft || release.prerelease) {
+                throw new Error("latest upstream stable release is unavailable");
+              }
+              let object = (await github.rest.git.getRef({
+                ...upstream, ref: `tags/${release.tag_name}`
+              })).data.object;
+              for (let depth = 0; depth < 5 && object?.type === "tag"; depth += 1) {
+                object = (await github.rest.git.getTag({ ...upstream, tag_sha: object.sha })).data.object;
+              }
+              if (object?.type !== "commit") throw new Error("upstream release tag did not resolve to a commit");
+              return { tag: release.tag_name, sha: object.sha };
+            }
+
+            async function superviseSyncFreshness() {
+              if (!["schedule", "workflow_dispatch"].includes(context.eventName)) {
+                return { action: "skip", reason: "event-not-scheduled" };
+              }
+              const release = await resolveStableRelease();
+              let vendorMainSha = null;
+              try {
+                vendorMainSha = (await github.rest.git.getRef({
+                  owner, repo, ref: "heads/vendor/main"
+                })).data.object.sha;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+              const workflowRuns = (await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: "fork-upstream-sync.yml", per_page: 20
+              })).data.workflow_runs;
+              const disposition = syncFreshnessDisposition({
+                latestReleaseSha: release.sha,
+                vendorMainSha,
+                workflowRuns,
+              });
+              if (disposition.action === "error") throw new Error(disposition.reason);
+              if (disposition.action === "dispatch") {
+                await github.rest.actions.createWorkflowDispatch({
+                  owner,
+                  repo,
+                  workflow_id: "fork-upstream-sync.yml",
+                  ref: context.payload.repository?.default_branch || "main",
+                });
+                core.notice(`Dispatched fork sync for upstream ${release.tag} (${release.sha}).`);
+              }
+              return { ...disposition, release };
+            }
+
+            async function ensureSyncRepairIssue(pr, evidence, newestSyncPrNumber, syncDispatchPending) {
+              if (syncDispatchPending) return { action: "wait", reason: "newer-sync-dispatched" };
+              if (pr.number !== newestSyncPrNumber) return { action: "ignore", reason: "superseded-sync" };
+              const disposition = syncCiRepairDisposition({
+                pr,
+                checkRuns: evidence.checks,
+                repository: `${owner}/${repo}`,
+                trustedProducerIds: [41898282, Number(process.env.PR_AUTOMATION_APP_USER_ID)],
+              });
+              if (disposition.action !== "repair") return disposition;
+              const issueText = buildSyncRepairIssue({ pr, disposition });
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                owner, repo, state: "all", per_page: 100
+              });
+              const existing = issues.find(issue =>
+                !issue.pull_request && String(issue.body || "").includes(issueText.marker));
+              if (existing) {
+                return { ...disposition, issueNumber: existing.number, issueState: existing.state };
+              }
+              if (!["update", "merge"].includes(mode)) {
+                core.info(`Shadow mode would queue Jules for sync PR #${pr.number} at ${pr.head.sha}.`);
+                return { ...disposition, issueState: "shadow" };
+              }
+              const labels = {
+                "fork-sync": ["5319e7", "Upstream fork synchronization"],
+                "agent:jules": ["8250df", "Trusted Jules implementation request"],
+                "agent:generated": ["0969da", "Trusted generated maintenance issue"],
+                "agent:queued": ["d4c5f9", "Maintenance task queued"],
+              };
+              const currentLabels = new Set((await github.paginate(
+                github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 }
+              )).map(label => label.name));
+              for (const [name, [color, description]] of Object.entries(labels)) {
+                if (currentLabels.has(name)) continue;
+                try {
+                  await github.rest.issues.createLabel({ owner, repo, name, color, description });
+                } catch (error) {
+                  if (error.status !== 422) throw error;
+                }
+              }
+              const created = (await github.rest.issues.create({
+                owner,
+                repo,
+                title: issueText.title,
+                body: issueText.body,
+                labels: Object.keys(labels),
+              })).data;
+              core.notice(`Queued Jules sync repair issue #${created.number} for PR #${pr.number}.`);
+              return { ...disposition, issueNumber: created.number, issueState: created.state };
+            }
+
             const all = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: "open", base: "dev", per_page: 100
             });
+            const trustedProducerIds = new Set([41898282, Number(process.env.PR_AUTOMATION_APP_USER_ID)]
+              .filter(id => Number.isSafeInteger(id) && id > 0));
+            const newestSyncPrNumber = all
+              .filter(pr =>
+                pr.head?.repo?.full_name === `${owner}/${repo}` &&
+                SYNC_BRANCH_RE.test(String(pr.head?.ref || "")) &&
+                String(pr.body || "").includes("<!-- opencodex-fork-sync -->") &&
+                pr.user?.type === "Bot" &&
+                trustedProducerIds.has(Number(pr.user?.id)))
+              .sort((a, b) => Number(b.number) - Number(a.number))[0]?.number || null;
             // Promotion PRs targeting main are status-only and are never mutated here.
             const maintenanceMap = await loadMaintenanceMap();
-            const counts = { scanned: 0, updated: 0, merged: 0, held: 0, failed: 0 };
+            let syncFreshness = { action: "skip", reason: "not-run" };
+            try {
+              syncFreshness = await superviseSyncFreshness();
+            } catch (error) {
+              core.warning(`Fork sync freshness supervision failed closed: ${error.message}`);
+              syncFreshness = { action: "error", reason: error.message };
+            }
+            const counts = { scanned: 0, updated: 0, merged: 0, repairs: 0, held: 0, failed: 0 };
             const holdRecords = [];
             for (const candidate of all) {
               counts.scanned += 1;
@@ -578,6 +707,13 @@ jobs:
                   }
                 }
                 await dispatchEnforcerIfNeeded(pr, evidence);
+                const repair = await ensureSyncRepairIssue(
+                  pr,
+                  evidence,
+                  newestSyncPrNumber,
+                  syncFreshness.action === "dispatch",
+                );
+                if (repair.action === "repair" && repair.issueNumber) counts.repairs += 1;
                 if (mode === "merge") {
                   pr = await getPr(pr.number);
                   evidence = await rawEvidence(pr);
@@ -636,6 +772,8 @@ jobs:
               `- Scanned: ${counts.scanned}`,
               `- Updated: ${counts.updated}`,
               `- Merged: ${counts.merged}`,
+              `- Sync repairs supervised: ${counts.repairs}`,
+              `- Upstream freshness: ${syncFreshness.action} (${syncFreshness.reason})`,
               `- Held: ${counts.held}`,
               `- Failed (isolated): ${counts.failed}`,
             ].join("\n");

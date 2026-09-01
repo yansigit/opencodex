@@ -190,7 +190,7 @@ describe("claude session precedence and prompt_cache_key", () => {
 
   test("claudeFinalRouteHandler: compatibility enforce rejects before network (throws AnthropicRequestError)", async () => {
     const { AnthropicRequestError } = await import("../src/claude/inbound");
-    const raw = { model: "claude", context_management: { edits: [] } };
+    const raw = { model: "claude", context_management: { edits: [{ type: "clear_tool_uses_20250919" }] } };
     const env = captureClaudeSourceEnvelope(new Request("http://localhost/v1/messages"), raw, createTranslatorBudget());
     const parsed: { options: Record<string, unknown>; modelId: string; _rawBody?: unknown } = { modelId: "m", options: {}, _rawBody: {} };
     const logCtx = {} as unknown as import("../src/server/request-log").RequestLogContext;
@@ -213,6 +213,30 @@ describe("claude session precedence and prompt_cache_key", () => {
         logCtx,
       }),
     ).not.toThrow();
+  });
+
+  test("claudeFinalRouteHandler: client MCP function tools pass every routed adapter gate", () => {
+    const raw = {
+      model: "claude",
+      messages: [{ role: "user", content: "hello" }],
+      tools: [{ name: "mcp__codex_app__automation_update", input_schema: { type: "object" } }],
+    };
+    const env = captureClaudeSourceEnvelope(new Request("http://localhost/v1/messages"), raw, createTranslatorBudget());
+    const configEnforce = cfg({ claudeCode: { model: "claude", compatibility: "enforce" } } as unknown as Partial<OcxConfig>);
+
+    for (const adapter of ["cursor", "google", "openai-responses", "kiro", "openai-chat"]) {
+      const parsed = { modelId: "m", options: {}, _rawBody: {} };
+      expect(() => claudeFinalRouteHandler(
+        parsed,
+        { provider: { adapter }, providerName: "fixture", modelId: "m" },
+        {
+          sourceEnvelope: env,
+          cacheKeySource: null,
+          config: configEnforce,
+          logCtx: {} as unknown as import("../src/server/request-log").RequestLogContext,
+        },
+      )).not.toThrow();
+    }
   });
 
   test("inbound-debug: agent/parent ids only as HMAC8 tags, bounded feature codes/adapter/decision", () => {

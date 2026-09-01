@@ -1,7 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimOwnedServiceHome } from "./helpers/owned-service-home";
@@ -43,18 +42,6 @@ afterAll(() => {
   }
 });
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer();
-    srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      const port = typeof addr === "object" && addr ? addr.port : 0;
-      srv.close(() => (port ? resolve(port) : reject(new Error("no port"))));
-    });
-  });
-}
-
 async function healthy(port: number): Promise<boolean> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/healthz`, {
@@ -67,12 +54,31 @@ async function healthy(port: number): Promise<boolean> {
 }
 
 async function waitUntil(fn: () => Promise<boolean>, deadlineMs: number): Promise<boolean> {
-  const end = Date.now() + deadlineMs;
-  while (Date.now() < end) {
+  const end = performance.now() + deadlineMs;
+  while (performance.now() < end) {
     if (await fn()) return true;
     await Bun.sleep(250);
   }
   return false;
+}
+
+function publishedPort(home: string): number | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(home, "runtime-port.json"), "utf8")) as { port?: unknown };
+    return Number.isInteger(parsed.port) && Number(parsed.port) > 0 ? Number(parsed.port) : null;
+  } catch {
+    return null;
+  }
+}
+
+function captureOutput(child: ChildProcess): () => string {
+  let output = "";
+  const append = (chunk: Buffer | string) => {
+    output = (output + chunk.toString()).slice(-16_384);
+  };
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
+  return () => output.trim();
 }
 
 describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
@@ -82,16 +88,20 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
       async () => {
         const home = mkdtempSync(join(tmpdir(), "ocx-shutdown-"));
         tmpHomes.push(home);
-        const port = await freePort();
         const identity = claimTempHome(home);
+
+        // Let the runtime ask the OS for an ephemeral port and publish the concrete
+        // selection. Reserving and releasing a port in the test creates a check-then-bind
+        // race with both the runtime and the readiness probes on loaded CI hosts.
+        writeFileSync(join(home, "config.json"), JSON.stringify({ port: 0, codexAutoStart: false }));
 
         // Seed a native Codex config so the proxy actually injects on start (injectCodexConfig
         // no-ops when no config.toml exists) — this lets us prove the config is RESTORED.
         const codexConfig = join(home, "config.toml");
         writeFileSync(codexConfig, 'model = "gpt-5.1"\n');
 
-        const child = spawn("node", [BIN_OCX, "start", "--port", String(port)], {
-          stdio: "ignore",
+        const child = spawn("node", [BIN_OCX, "start"], {
+          stdio: ["ignore", "pipe", "pipe"],
           env: {
             ...process.env,
             OPENCODEX_BUN_PATH: process.env.OPENCODEX_BUN_PATH ?? process.execPath,
@@ -103,13 +113,27 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
           },
         });
         spawned.push(child);
+        const childOutput = captureOutput(child);
 
         let exited = false;
-        child.on("exit", () => { exited = true; });
+        let exitDetail = "still running";
+        child.on("exit", (code, signal) => {
+          exited = true;
+          exitDetail = signal ? `signal ${signal}` : `exit ${code ?? "unknown"}`;
+        });
 
         // 1. Proxy comes up + injected the Codex config (Design B root override on loopback).
-        const up = await waitUntil(() => healthy(port), 30_000);
-        expect(up).toBe(true);
+        let port: number | null = null;
+        const up = await waitUntil(async () => {
+          port = publishedPort(home);
+          return port !== null && await healthy(port);
+        }, 30_000);
+        if (!up || port === null) {
+          throw new Error(
+            `launcher did not publish a healthy runtime within 30s (${exitDetail})`
+            + (childOutput() ? `\n${childOutput()}` : ""),
+          );
+        }
         expect(existsSync(join(home, "ocx.pid"))).toBe(true);
         const injected = readFileSync(codexConfig, "utf8");
         expect(injected).toContain("# Auto-injected by opencodex");

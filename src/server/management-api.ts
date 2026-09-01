@@ -199,7 +199,7 @@ export async function handleManagementAPI(
     try {
       const { injectClaudeAgentDefs } = await import("../claude/agents-inject");
       if (config.claudeCode?.enabled === false || config.claudeCode?.injectAgents === false) {
-        injectClaudeAgentDefs(config, {});
+        injectClaudeAgentDefs(config, {}, deps.claudeAgentConfigDir);
         return;
       }
       try {
@@ -208,11 +208,15 @@ export async function handleManagementAPI(
           import("../claude/context-windows"),
           import("../codex/catalog"),
         ]);
-        injectClaudeAgentDefs(config, buildClaudeContextWindows([...visibleNativeSlugs(config)], models, nativeContextLimits(config)));
+        injectClaudeAgentDefs(
+          config,
+          buildClaudeContextWindows([...visibleNativeSlugs(config)], models, nativeContextLimits(config)),
+          deps.claudeAgentConfigDir,
+        );
       } catch {
         // Keep routes available through a provider-discovery blip. A later
         // launch-time sync restores any context markers missing from this pass.
-        injectClaudeAgentDefs(config, {});
+        injectClaudeAgentDefs(config, {}, deps.claudeAgentConfigDir);
       }
     } catch { /* best-effort */ }
   }
@@ -286,8 +290,13 @@ export async function handleManagementAPI(
     const { stripGrokConfig } = await import("../grok/inject");
     const grok = stripGrokConfig();
     setTimeout(async () => {
-      await drainAndShutdown(undefined, config.shutdownTimeoutMs ?? 5000);
-      process.exit(0);
+      let shutdownSucceeded = false;
+      try {
+        shutdownSucceeded = await drainAndShutdown(undefined, config.shutdownTimeoutMs ?? 5000);
+      } catch {
+        console.warn("[opencodex] shutdown drain failed");
+      }
+      process.exit(shutdownSucceeded ? 0 : 1);
     }, 200);
     const grokNote = grok.ok ? "" : ` Grok config cleanup failed: ${grok.message}`;
     return jsonResponse(restore.success

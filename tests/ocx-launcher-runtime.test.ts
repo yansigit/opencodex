@@ -14,6 +14,16 @@ const nodeAvailable = spawnSync("node", ["--version"], {
 }).status === 0;
 const runnable = process.platform === "win32" && nodeAvailable;
 
+// /healthz is the launcher's first trustworthy end-to-end startup signal: a
+// live Node parent or Bun child does not prove that the proxy is serving. The
+// old 25s budget expired on a loaded Windows runner, and equivalent real-proxy
+// starts elsewhere in this suite have taken 46-47s. 90s is more than twice the
+// measured high-water mark while still turning a hung launch into a bounded
+// failure. Keep the case budget derived so process inspection and cleanup have
+// their own headroom after readiness settles.
+const PROXY_HEALTH_TIMEOUT_MS = 90_000;
+const EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS = PROXY_HEALTH_TIMEOUT_MS + 30_000;
+
 type Health = {
   status: string;
   service: string;
@@ -196,7 +206,7 @@ async function effectiveRuntime(override: string): Promise<string> {
     launcherPid = launcher.pid;
     ownedLauncher = captureWindowsProcessIdentity(launcherPid);
 
-    const health = await waitForHealth(port, 25_000, launcher);
+    const health = await waitForHealth(port, PROXY_HEALTH_TIMEOUT_MS, launcher);
     if (!health) throw new Error("proxy did not become healthy");
     const identity = windowsProcessIdentity(health.pid);
     if (!identity || identity.parentPid !== launcher.pid) {
@@ -311,9 +321,20 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   });
 }
 
+async function terminateChildProcess(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  if (await waitForExit(child, 5000)) return;
+  child.kill("SIGKILL");
+  if (!await waitForExit(child, 5000)) {
+    throw new Error(`process ${child.pid ?? "unknown"} did not exit`);
+  }
+}
+
 type FirstStartupCleanupDeps = {
   probe: typeof healthAt;
   kill: (pid: number) => void;
+  killLauncher?: (child: ChildProcess) => Promise<void>;
   remove: (path: string) => void;
 };
 
@@ -322,7 +343,12 @@ async function cleanupFirstStartup(
   configDir: string,
   launcher: ChildProcess | null,
   health: Health | null,
-  deps: FirstStartupCleanupDeps = { probe: healthAt, kill: killProxy, remove: removeTree },
+  deps: FirstStartupCleanupDeps = {
+    probe: healthAt,
+    kill: killProxy,
+    killLauncher: terminateChildProcess,
+    remove: removeTree,
+  },
 ): Promise<void> {
   const errors: string[] = [];
   if (health) {
@@ -340,7 +366,12 @@ async function cleanupFirstStartup(
     }
   }
   if (launcher?.pid && launcher.exitCode === null && launcher.signalCode === null) {
-    try { deps.kill(launcher.pid); } catch (error) { errors.push(`launcher cleanup: ${String(error)}`); }
+    try {
+      if (deps.killLauncher) await deps.killLauncher(launcher);
+      else deps.kill(launcher.pid);
+    } catch (error) {
+      errors.push(`launcher cleanup: ${String(error)}`);
+    }
   }
   try { deps.remove(root); } catch (error) { errors.push(`root cleanup: ${String(error)}`); }
   if (errors.length > 0) throw new Error(errors.join("; "));
@@ -366,6 +397,16 @@ test("first-start cleanup attempts every owned resource when one cleanup step fa
   expect(error?.message).toContain("22 kill failed");
   expect(error?.message).toContain("remove failed");
   removeTree(root);
+});
+
+test("first-start cleanup reaps its spawned launcher without PID polling", async () => {
+  const launcher = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  expect(launcher.pid).toBeNumber();
+  await terminateChildProcess(launcher);
+  expect(launcher.exitCode !== null || launcher.signalCode !== null).toBe(true);
 });
 
 test("first-start cleanup never hard-kills a health PID without matching isolated runtime state", async () => {
@@ -530,7 +571,7 @@ describe.skipIf(!runnable)("ocx npm launcher effective Bun runtime", () => {
     } finally {
       removeTree(root);
     }
-  }, 120_000);
+  }, EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS);
 
   test("falls back to bundled Bun for a sub-1MB override stub", async () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-launcher-runtime-stub-"));
@@ -543,5 +584,5 @@ describe.skipIf(!runnable)("ocx npm launcher effective Bun runtime", () => {
     } finally {
       removeTree(root);
     }
-  }, 120_000);
+  }, EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS);
 });

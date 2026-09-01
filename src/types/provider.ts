@@ -19,6 +19,15 @@ export interface OpenRouterProviderRouting {
   allowFallbacks?: boolean;
 }
 
+export interface VercelGatewayRouting {
+  /** Vercel AI Gateway provider slugs to try first, in priority order. */
+  order?: string[];
+  /** Restrict routing to these Vercel AI Gateway provider slugs. */
+  only?: string[];
+  /** Sort providers by "cost", "ttft", or "tps". */
+  sort?: "cost" | "ttft" | "tps";
+}
+
 export interface ResponsesItemIdRepairConfig {
   /** Exact `message` item ids that the proxy should rewrite to request-local canonical ids. */
   message?: string[];
@@ -32,6 +41,25 @@ export interface ResponsesItemIdRepairConfig {
    * function_call ids and call_id pairing are never rewritten.
    */
   repairInvalidIds?: boolean;
+}
+
+/**
+ * Opt-in retry for pre-stream transient upstream statuses (500/502/503/504/520/521/522) on
+ * `providers.<name>.transientRetryOn5xx`.
+ *
+ * Disabled unless the object is present; a bare `{}` opts in with defaults. Separate from
+ * `retryOn429`, which handles rate limiting with its own waits.
+ */
+export interface TransientRetryPolicy {
+  /** Master switch. Presence of the object also enables the policy (default true). */
+  enabled?: boolean;
+  /**
+   * TOTAL upstream sends allowed for one request, including the first (1..10, default 3).
+   *
+   * Not a per-layer retry count: the connection-reset and transient-status recovery layers
+   * share this single budget, so `3` means at most three real requests reach the provider.
+   */
+  attempts?: number;
 }
 
 /**
@@ -211,6 +239,16 @@ export interface OcxProviderConfig {
    */
   requiresAdjacentResponsesToolResults?: boolean;
   /**
+   * When enabled, a tool result that is present but empty (no usable text or content
+   * part) is rewritten to an explicit annotation before it reaches the upstream wire,
+   * so models do not silently accept an empty result or re-issue the same call.
+   * Non-empty results and missing-result placeholders stay byte-identical.
+   * Seeded true for DeepSeek; absent keeps legacy behavior for every other provider.
+   * Only the OpenAI-family adapters (openai-chat / openai-responses) read this option;
+   * other adapters ignore it.
+   */
+  annotateEmptyToolOutputs?: boolean;
+  /**
    * Provider fallback for canonical Fast capability over an OpenAI `service_tier` wire.
    * This pure tri-state feeds catalog publication, routing eligibility, compatibility
    * fingerprints, and proxy-owned canonical Fast injection on both Responses and Chat routes.
@@ -373,6 +411,10 @@ export interface OcxProviderConfig {
   openRouterRouting?: OpenRouterProviderRouting;
   /** Exact model-id overrides for `openRouterRouting`. Each matching entry replaces the default. */
   modelOpenRouterRouting?: Record<string, OpenRouterProviderRouting>;
+  /** Default provider-routing preferences for models sent through Vercel AI Gateway (issue #1406). */
+  vercelGatewayRouting?: VercelGatewayRouting;
+  /** Exact model-id overrides for `vercelGatewayRouting`. Each matching entry replaces the default. */
+  modelVercelGatewayRouting?: Record<string, VercelGatewayRouting>;
   /**
    * "key" (default): authenticate upstream with `apiKey`.
    * "forward": relay the caller's incoming auth headers verbatim (OAuth passthrough; gpt only).
@@ -452,6 +494,12 @@ export interface OcxProviderConfig {
    * passthrough compatibility for OpenAI and unclassified gateways.
    */
   supportsOpenAiWebSearchToolFields?: boolean;
+  /**
+   * Opt xAI Responses destinations into the provider-hosted `x_search` declaration when a live
+   * `web_search` tool survives final request normalization. Disabled by default. This is separate
+   * from the web-search sidecar's `search.xSearch` options and never widens caller tool selectors.
+   */
+  xaiResponsesXSearch?: boolean;
   /**
    * Whether the Responses upstream accepts native custom tools and custom_tool_call items.
    * Set false only for a provider whose native contract rejects them; absence preserves
@@ -570,6 +618,12 @@ export interface OcxProviderConfig {
   retryOn429?: RateLimitRetryPolicy;
   /** Opt in to replaying transient upstream 5xx responses (at most three total sends). */
   replayTransientFailures?: boolean;
+  /**
+   * Opt-in retry for pre-stream transient upstream statuses
+   * (`providers.<name>.transientRetryOn5xx`). Disabled unless present; a bare `{}` opts in
+   * with defaults. Key-auth `openai-chat` only.
+   */
+  transientRetryOn5xx?: TransientRetryPolicy;
   /**
    * Model ids whose OpenAI-compatible chat endpoint accepts `reasoning_split: true` and returns
    * thinking separately in `reasoning_content` / `reasoning_details` instead of visible content.

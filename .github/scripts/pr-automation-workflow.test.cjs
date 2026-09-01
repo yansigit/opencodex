@@ -36,7 +36,7 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /permissions:\s*\{\}/);
     assert.match(source, /concurrency:[\s\S]*cancel-in-progress:\s*false/);
     assert.match(source, /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4\.2\.2/);
-    assert.match(source, /ref:\s*\$\{\{ github\.event\.repository\.default_branch \}\}/);
+    assert.match(source, /ref:\s*\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/dev' && github\.sha \|\| github\.event\.repository\.default_branch \}\}/);
     assert.match(source, /persist-credentials:\s*false/);
     assert.doesNotMatch(source, /github\.event\.pull_request\.head/);
     assert.doesNotMatch(source, /git\s+(?:merge|push|checkout)/);
@@ -217,5 +217,20 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /updated\.base\.sha !== intendedBaseSha/);
     assert.match(source, /updatedResult\.classification\.eligibleForUpdate/);
     assert.match(source, /verify\.data\.behind_by === 0/);
+  });
+
+  it("supervises upstream freshness and queues only trusted exact-head sync CI repairs", () => {
+    const source = workflow();
+    assert.match(source, /getLatestRelease/);
+    assert.match(source, /fork-upstream-sync\.yml/);
+    assert.match(source, /syncFreshnessDisposition/);
+    assert.match(source, /syncFreshness\.action === "dispatch"/);
+    assert.match(source, /syncCiRepairDisposition/);
+    assert.match(source, /newestSyncPrNumber/);
+    assert.match(source, /trustedProducerIds.*41898282/s);
+    assert.match(source, /agent:jules/);
+    assert.match(source, /agent:generated/);
+    assert.match(source, /pr-automation-sync-supervisor\.cjs/);
+    assert.doesNotMatch(source, /maintainer-sponsored/);
   });
 });

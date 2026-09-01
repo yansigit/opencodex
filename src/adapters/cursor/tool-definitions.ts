@@ -12,6 +12,7 @@ export const CODEX_SHELL_COMMAND_TOOL = "shell_command";
 export const CODEX_UNIFIED_EXEC_TOOL = "exec";
 export const CODEX_WAIT_TOOL = "wait";
 export const CODEX_APPLY_PATCH_TOOL = "apply_patch";
+export const CODEX_TOOL_SEARCH_TOOL = "tool_search";
 export const CURSOR_EDIT_FILE_TOOL = "edit_file";
 export const CURSOR_MULTI_EDIT_TOOL = "multi_edit";
 export const CURSOR_STRUCTURED_EDIT_TOOLS = [CURSOR_EDIT_FILE_TOOL, CURSOR_MULTI_EDIT_TOOL] as const;
@@ -198,8 +199,10 @@ function cursorToolChoiceMatches(
     }
     return tool.name === choiceName || cursorToolWireName(tool) === choiceName;
   }
-  if (tool.name === choiceName || cursorToolWireName(tool) === choiceName) return true;
-  return cursorToolChoiceAliases(tool).includes(choiceName);
+  if (tool.name === choiceName) return true;
+  if (cursorToolChoiceAliases(tool).includes(choiceName)) return true;
+  return cursorToolWireName(tool) === choiceName
+    && !catalog.some(candidate => candidate.name === choiceName);
 }
 
 export function isBareCodexShellBridgeTool(tool: Pick<OcxTool, "namespace" | "name">): boolean {
@@ -349,8 +352,37 @@ export function cursorRequestAdvertisesStructuredEdits(
   return cursorStructuredEditTools(tools, toolChoice).length > 0;
 }
 
+const CURSOR_CLIENT_TOOL_WIRE_PREFIX = "ocx_client_";
+const CURSOR_PROXY_OWNED_BARE_TOOL_NAMES = new Set([
+  CODEX_UNIFIED_EXEC_TOOL,
+  CODEX_WAIT_TOOL,
+  CODEX_EXEC_COMMAND_TOOL,
+  CODEX_SHELL_COMMAND_TOOL,
+  CODEX_APPLY_PATCH_TOOL,
+  CURSOR_EDIT_FILE_TOOL,
+  CURSOR_MULTI_EDIT_TOOL,
+  CODEX_TOOL_SEARCH_TOOL,
+]);
+
+/** Avoid collisions with Cursor's private bare-tool namespace. */
+function isCursorBareClientToolWireAliased(
+  tool: Pick<OcxTool, "namespace" | "name">,
+): boolean {
+  return !tool.namespace
+    && !CURSOR_PROXY_OWNED_BARE_TOOL_NAMES.has(tool.name);
+}
+
 export function cursorToolWireName(tool: Pick<OcxTool, "namespace" | "name">): string {
+  if (isCursorBareClientToolWireAliased(tool)) {
+    return `${CURSOR_CLIENT_TOOL_WIRE_PREFIX}${tool.name}`;
+  }
   return namespacedToolName(tool.namespace, tool.name);
+}
+
+function clientSemanticToolNameFromCursorWire(name: string): string {
+  return name.startsWith(CURSOR_CLIENT_TOOL_WIRE_PREFIX)
+    ? name.slice(CURSOR_CLIENT_TOOL_WIRE_PREFIX.length)
+    : name;
 }
 
 /**
@@ -622,7 +654,7 @@ function quotedNames(names: readonly string[]): string {
 }
 
 function advertisedCoversNeighbor(wireNames: readonly string[], neighbor: (typeof NEIGHBOR_AGENT_TOOL_NAMES)[number]): boolean {
-  const advertised = new Set(wireNames.map(name => name.toLowerCase()));
+  const advertised = new Set(wireNames.map(name => clientSemanticToolNameFromCursorWire(name).toLowerCase()));
   if (advertised.has(neighbor.toLowerCase())) return true;
   return NEIGHBOR_AGENT_TOOL_ALIASES[neighbor].some(alias => advertised.has(alias.toLowerCase()));
 }
@@ -633,7 +665,7 @@ function unavailableNeighborAgentToolNames(wireNames: readonly string[]): string
 
 function discoveryToolLabel(wireNames: readonly string[]): string | undefined {
   const labels: string[] = [];
-  if (wireNames.includes("tool_search")) labels.push("`tool_search`");
+  if (wireNames.includes(CODEX_TOOL_SEARCH_TOOL)) labels.push(`\`${CODEX_TOOL_SEARCH_TOOL}\``);
   if (wireNames.some(name => name.startsWith("mcp__"))) labels.push("MCP");
   if (wireNames.some(name => /resource/i.test(name))) labels.push("resource discovery");
   return labels.length > 0 ? labels.join(", ") : undefined;
@@ -706,7 +738,7 @@ export function buildCursorToolGuidanceSystemNote(
     hasBareExec
       ? `NEVER attempt Cursor-native Shell, Read, Grep, List, or any tool not in the catalog above — they are not executed locally in this environment and every attempt wastes a turn and can stall the session. ${shellBridgeLabel} is the ONLY shell surface; go to it directly on the FIRST attempt, never as a fallback after probing a native tool. Do not narrate switching surfaces ("native is blocked, using the bridge instead") — there is exactly one surface.`
       : undefined,
-    hasBareExec
+    (hasBareExec || codeMode)
       ? "Tool-selection commentary is forbidden: for any shell, read, grep, list, or file operation, your FIRST visible action is the bridge call itself — never a sentence about which tool you will use, which tool was redirected, or switching surfaces. Words like 차단/전환/blocked/switching must not appear in your output for tool-routing reasons."
       : undefined,
     hasBareExec

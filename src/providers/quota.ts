@@ -37,6 +37,13 @@ import {
 } from "./antigravity-quota";
 import { antigravityHostCandidates, isAntigravityHttpsHost } from "../adapters/google-antigravity-hosts";
 import { providerTlsFetch } from "../lib/provider-tls-profile";
+import {
+  clearKiroAccountUsageState,
+  commitKiroAccountUsageState,
+  fetchKiroUsageSnapshot,
+  type KiroUsageSnapshot,
+  kiroUsageContextForAccount,
+} from "./kiro-usage";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
@@ -80,7 +87,13 @@ export function setProviderQuotaBeforePublishForTests(
   providerQuotaBeforePublishForTests = hook;
 }
 const TERMINAL_QUOTA_FAILURE = Symbol("terminal-quota-failure");
-type ProviderQuotaProbeResult = ProviderQuotaReport | null | typeof TERMINAL_QUOTA_FAILURE;
+/** The provider successfully reported that no model-quota windows remain in this payload. */
+const AUTHORITATIVE_EMPTY_QUOTA = Symbol("authoritative-empty-quota");
+type ProviderQuotaProbeResult =
+  | ProviderQuotaReport
+  | null
+  | typeof TERMINAL_QUOTA_FAILURE
+  | typeof AUTHORITATIVE_EMPTY_QUOTA;
 
 export interface ProviderQuotaWindow {
   label: string;
@@ -286,7 +299,8 @@ function normalizeResetAt(value: unknown): number | undefined {
 /** Unix 0 / negative values are sentinels, not reset clocks (Command Code fiveHour.resetAt: 0). */
 function epochMillis(value: number): number | undefined {
   if (!Number.isFinite(value) || value <= 0) return undefined;
-  return value > 10_000_000_000 ? value : value * 1000;
+  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
+  return Number.isFinite(new Date(milliseconds).getTime()) ? milliseconds : undefined;
 }
 
 function toFiniteNumber(value: unknown): number | undefined {
@@ -709,8 +723,9 @@ async function fetchClineQuota(provider: string, config: OcxProviderConfig): Pro
  * same rows `CREDIT_LIMIT`) and `TIME_LIMIT` rows. `TOKENS_LIMIT`/`CREDIT_LIMIT`
  * rows carry the window length as `unit`/`number`: unit 3 is hours (number 5 →
  * the rolling five-hour window), unit 6 is weeks (number 1 → the weekly
- * window). `TIME_LIMIT` rows are the monthly MCP tool budget (Web Search / Web
- * Reader / Zread). Every row's `percentage` is the consumed share (falling
+ * window). `TIME_LIMIT` rows are a separate MCP tool budget and are ignored so
+ * they cannot distort model-capacity routing. Every model row's `percentage`
+ * is the consumed share (falling
  * back to `currentValue`/`usage` when absent) and `nextResetTime` (unix ms)
  * the window reset.
  */
@@ -722,6 +737,7 @@ export function parseZaiQuotaLimits(data: Record<string, unknown> | null): Provi
   for (const raw of limits) {
     const row = asRecord(raw);
     if (!row) continue;
+    if (row.type !== "TOKENS_LIMIT" && row.type !== "CREDIT_LIMIT") continue;
     const resetAt = normalizeResetAt(row.nextResetTime);
     let percent = normalizePercent(row.percentage);
     if (percent === undefined) {
@@ -732,21 +748,15 @@ export function parseZaiQuotaLimits(data: Record<string, unknown> | null): Provi
       }
     }
     if (percent === undefined) continue;
-    if (row.type === "TOKENS_LIMIT" || row.type === "CREDIT_LIMIT") {
-      const unit = toFiniteNumber(row.unit);
-      const number = toFiniteNumber(row.number);
-      if (unit === 3 && number === 5) {
-        quota.fiveHourPercent = percent;
-        if (resetAt !== undefined) quota.fiveHourResetAt = resetAt;
-        windows += 1;
-      } else if (unit === 6 && number === 1) {
-        quota.weeklyPercent = percent;
-        if (resetAt !== undefined) quota.weeklyResetAt = resetAt;
-        windows += 1;
-      }
-    } else if (row.type === "TIME_LIMIT") {
-      quota.monthlyPercent = percent;
-      if (resetAt !== undefined) quota.monthlyResetAt = resetAt;
+    const unit = toFiniteNumber(row.unit);
+    const number = toFiniteNumber(row.number);
+    if (unit === 3 && number === 5) {
+      quota.fiveHourPercent = percent;
+      if (resetAt !== undefined) quota.fiveHourResetAt = resetAt;
+      windows += 1;
+    } else if (unit === 6 && number === 1) {
+      quota.weeklyPercent = percent;
+      if (resetAt !== undefined) quota.weeklyResetAt = resetAt;
       windows += 1;
     }
   }
@@ -800,8 +810,9 @@ async function fetchZaiQuota(provider: string, config: OcxProviderConfig): Promi
   const monitorHost = normalized === ZAI_BASE_URL || normalized === `${ZAI_BASE_URL}/api/coding/paas/v4`
     ? ZAI_BASE_URL
     : ZAI_CN_BASE_URL;
+  const authorization = monitorHost === ZAI_CN_BASE_URL ? apiKey : `Bearer ${apiKey}`;
   const response = await fetch(`${monitorHost}/api/monitor/usage/quota/limit`, {
-    headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
+    headers: { Accept: "application/json", Authorization: authorization },
     redirect: "error",
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
@@ -813,9 +824,11 @@ async function fetchZaiQuota(provider: string, config: OcxProviderConfig): Promi
   const body = asRecord(await readQuotaJson(response));
   if (!body || body.success === false) return null;
   const data = asRecord(body.data) ?? body;
-  const quota = Array.isArray(data?.limits)
-    ? parseZaiQuotaLimits(data)
-    : parseZaiQuotaLegacyFields(data);
+  if (Array.isArray(data?.limits)) {
+    const quota = parseZaiQuotaLimits(data);
+    return quota ? report(provider, "zai:quota-limit", quota) : AUTHORITATIVE_EMPTY_QUOTA;
+  }
+  const quota = parseZaiQuotaLegacyFields(data);
   return quota ? report(provider, "zai:quota-limit", quota) : null;
 }
 
@@ -1231,14 +1244,14 @@ export function parseXaiCreditsResponse(value: unknown): { percent: number; rese
   if (!config) return null;
   const period = asRecord(config.currentPeriod);
   if (!period || period.type !== "USAGE_PERIOD_TYPE_WEEKLY") return null;
-  const resetAt = normalizeResetAt(period.end);
-  if (resetAt === undefined) return null;
+  let percent = 0;
   if (config.creditUsagePercent !== undefined) {
-    const percent = normalizePercent(config.creditUsagePercent);
-    if (percent === undefined) return null;
-    return { percent, resetAt };
+    const normalized = normalizePercent(config.creditUsagePercent);
+    if (normalized === undefined) return null;
+    percent = normalized;
   }
-  return { percent: 0, resetAt };
+  const resetAt = normalizeResetAt(period.end);
+  return { percent, ...(resetAt !== undefined ? { resetAt } : {}) };
 }
 
 async function fetchXaiWeeklyCredits(accessToken: string, userId: string): Promise<ProviderQuota | null> {
@@ -1466,6 +1479,7 @@ export interface ProviderAccountQuota {
 export function supportsPerAccountQuota(provider: string): boolean {
   return (
     provider === "anthropic" ||
+    provider === "kiro" ||
     provider === "google-antigravity" ||
     provider === "command-code" ||
     provider === "cursor"
@@ -1540,6 +1554,7 @@ export function clearAccountQuotaCache(provider?: string): void {
   if (!provider) {
     accountQuotaCache.clear();
     accountQuotaInflight.clear();
+    clearKiroAccountUsageState();
     return;
   }
   const prefix = `${provider}\u0000`;
@@ -1550,6 +1565,7 @@ export function clearAccountQuotaCache(provider?: string): void {
   for (const key of [...accountQuotaInflight.keys()]) {
     if (key.startsWith(prefix)) accountQuotaInflight.delete(key);
   }
+  if (provider === "kiro") clearKiroAccountUsageState(prefix);
 }
 
 /**
@@ -1589,7 +1605,11 @@ async function fetchAccountQuota(
   const probe = (async (): Promise<AccountQuotaCacheEntry> => {
     try {
       let quota: ProviderQuota | null = null;
-      if (provider === "anthropic") {
+      let kiroSnapshot: KiroUsageSnapshot | null = null;
+      if (provider === "kiro") {
+        kiroSnapshot = await fetchKiroUsageSnapshot(await kiroUsageContextForAccount(accountId));
+        quota = kiroSnapshot?.quota ?? null;
+      } else if (provider === "anthropic") {
         const token = await getTokenForAccountQuotaProbe(provider, accountId);
         quota = await fetchAnthropicUsageQuota(token);
       } else if (provider === "google-antigravity") {
@@ -1613,6 +1633,7 @@ async function fetchAccountQuota(
         };
         if (mayCommitAccountQuotaKey(key, writerGeneration)) {
           accountQuotaCache.set(key, entry);
+          if (provider === "kiro") commitKiroAccountUsageState(key, null);
           sweepExpiredOnWrite(entry.ts);
         }
         return entry;
@@ -1620,6 +1641,7 @@ async function fetchAccountQuota(
       const entry: AccountQuotaCacheEntry = { ts: Date.now(), quota };
       if (mayCommitAccountQuotaKey(key, writerGeneration)) {
         accountQuotaCache.set(key, entry);
+        if (provider === "kiro") commitKiroAccountUsageState(key, kiroSnapshot);
         sweepExpiredOnWrite(entry.ts);
       }
       return entry;
@@ -1631,6 +1653,7 @@ async function fetchAccountQuota(
       };
       if (mayCommitAccountQuotaKey(key, writerGeneration)) {
         accountQuotaCache.set(key, entry);
+        if (provider === "kiro") commitKiroAccountUsageState(key, null);
         sweepExpiredOnWrite(entry.ts);
       }
       return entry;
@@ -2440,9 +2463,14 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
         maybeFetchProviderQuota(name, provider, config, forceRefresh, prefetchedCodexSnapshot)
       )),
     );
-    const fresh = probeResults.filter((item): item is ProviderQuotaReport => item !== null && item !== TERMINAL_QUOTA_FAILURE);
+    const fresh = probeResults.filter((item): item is ProviderQuotaReport => (
+      item !== null && item !== TERMINAL_QUOTA_FAILURE && item !== AUTHORITATIVE_EMPTY_QUOTA
+    ));
     const terminalFailures = new Set(
-      Object.keys(config.providers).filter((_, index) => probeResults[index] === TERMINAL_QUOTA_FAILURE),
+      Object.keys(config.providers).filter((_, index) => (
+        probeResults[index] === TERMINAL_QUOTA_FAILURE
+        || probeResults[index] === AUTHORITATIVE_EMPTY_QUOTA
+      )),
     );
     await providerQuotaBeforePublishForTests?.();
     let commitKey: string | null = null;

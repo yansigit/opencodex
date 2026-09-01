@@ -7,6 +7,34 @@
     "implementationBaseline": ["2.1.248", "2.1.247"],
     "compatibilityFloor": "2.1.201"
   },
+  "stableRequestCaptures": [
+    {
+      "version": "2.1.251",
+      "userAgent": "claude-cli/2.1.251 (external, sdk-cli)"
+    },
+    {
+      "version": "2.1.250",
+      "userAgent": "claude-cli/2.1.250 (external, sdk-cli)"
+    }
+  ],
+  "sanitizedStableRequest": {
+    "headers": {
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,effort-2025-11-24"
+    },
+    "body": {
+      "model": "claude-capture",
+      "messages": [{ "role": "user", "content": [{ "type": "text", "text": "[sanitized]" }] }],
+      "system": [{ "type": "text", "text": "[sanitized]", "cache_control": { "type": "ephemeral" } }],
+      "tools": [{ "name": "Read", "description": "[sanitized]", "input_schema": { "type": "object" } }],
+      "metadata": { "user_id": "[sanitized]" },
+      "max_tokens": 32000,
+      "thinking": { "type": "adaptive", "display": "omitted" },
+      "context_management": { "edits": [{ "type": "clear_thinking_20251015", "keep": "all" }] },
+      "output_config": { "effort": "high" },
+      "stream": true
+    }
+  },
   "references": [
     {
       "repository": "diegosouzapw/OmniRoute",

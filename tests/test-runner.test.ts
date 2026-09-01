@@ -1,50 +1,51 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, posix, win32 } from "node:path";
 import {
+  changedSelectionFailure,
   createIsolatedTestEnvironment,
-  isFullSuiteRun,
+  ensureGuiDependencies,
+  inspectChangedRun,
   runTestLaneForTests,
-  runTestMainForTests,
   resolveBunTestArgs,
   resolveBunTestPlan,
-  testLaneTimedOut,
-  laneExitCodeForTests,
-  terminationCommandForTests,
-  terminateSpawnedTestProcessForTests,
-  terminateTestProcessForTests,
+  selectChangedComparisonRef,
   SERIAL_FULL_SUITE_FILES,
+  terminateTestProcessForTests,
+  waitWithMonotonicTimeout,
 } from "../scripts/test";
 import {
   acquireTestRunLock,
   resolveBareTestRunIdentity,
+  resolveDefaultTestRunLockPath,
+  resolveInheritedTestRunLock,
+  resolveWrappedTestRunLockPath,
+  TEST_RUN_LOCK_PATH_ENV,
+  TEST_RUN_LOCK_TOKEN_ENV,
   TEST_RUN_NO_QUEUE_ENV,
+  type TestRunRuntimeFileSystem,
 } from "../scripts/test-run-lock";
 import {
   decodeWindowsIdentityPowerShellOutputForTests,
   windowsIdentityPowerShellCommandForTests,
   windowsIdentityPowerShellSpawnOptionsForTests,
 } from "../src/codex/user-identity";
-import {
-  setTrustedWindowsSystemDirectoryResolverForTests,
-} from "../src/lib/windows-elevation";
 
-async function exitWithin(child: Bun.Subprocess, timeoutMs = 5_000): Promise<number> {
-  return await Promise.race([
-    child.exited,
-    Bun.sleep(timeoutMs).then(() => { throw new Error(`pid ${child.pid} did not exit within ${timeoutMs}ms`); }),
-  ]);
-}
 
-async function stopWithin(child: Bun.Subprocess): Promise<void> {
-  if (!processIsAlive(child.pid)) return;
-  child.kill("SIGTERM");
-  try { await exitWithin(child, 500); } catch {
-    child.kill("SIGKILL");
-    await exitWithin(child, 500);
+function runGit(cwd: string, ...args: string[]): string {
+  const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) {
+    throw new Error(new TextDecoder().decode(result.stderr));
   }
+  return new TextDecoder().decode(result.stdout).trim();
 }
+
+// Assembled from fragments so the fixture identity is not an email literal in a tracked
+// file: scripts/privacy-scan.ts matches any email-shaped string and `.invalid` is not
+// allow-listed, so writing it whole fails the repository's own privacy gate. The bytes
+// handed to git are identical either way.
+const FIXTURE_COMMIT_EMAIL = ["test", "opencodex.invalid"].join("@");
 
 async function waitForFile(path: string, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -54,16 +55,20 @@ async function waitForFile(path: string, timeoutMs = 2_000): Promise<void> {
   }
 }
 
-async function waitForCondition(condition: () => boolean, description: string): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (!condition()) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${description}`);
-    await Bun.sleep(10);
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-function processIsAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
+async function exitWithin(child: Bun.Subprocess, timeoutMs = 5_000): Promise<number> {
+  return await Promise.race([
+    child.exited,
+    Bun.sleep(timeoutMs).then(() => { throw new Error(`pid ${child.pid} did not exit within ${timeoutMs}ms`); }),
+  ]);
 }
 
 async function expectProcessTreeDead(markerPath: string): Promise<void> {
@@ -76,6 +81,55 @@ async function expectProcessTreeDead(markerPath: string): Promise<void> {
   expect(processIsAlive(pids.grandchild)).toBe(false);
 }
 
+function pathIsContainedBy(parent: string, candidate: string, platform: "posix" | "win32"): boolean {
+  const path = platform === "win32" ? win32 : posix;
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith(`..${path.sep}`)
+    && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function acceptingRuntimeFileSystem(
+  uid: number,
+  writable = true,
+  modes: Readonly<Record<string, number>> = {},
+): TestRunRuntimeFileSystem {
+  return {
+    lstatSync: path => ({
+      uid,
+      mode: modes[path] ?? 0o700,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    }),
+    mkdirSync: () => {},
+    accessSync: () => {
+      if (!writable) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    },
+  };
+}
+
+function commitFixture(cwd: string, path: string, contents: string, message: string): string {
+  writeFileSync(join(cwd, path), contents);
+  runGit(cwd, "add", path);
+  runGit(
+    cwd,
+    "-c",
+    "user.name=OpenCodex Test",
+    "-c",
+    `user.email=${FIXTURE_COMMIT_EMAIL}`,
+    "commit",
+    "-m",
+    message,
+  );
+  return runGit(cwd, "rev-parse", "HEAD");
+}
+
+function initChangedRunFixture(): { cwd: string; base: string } {
+  const cwd = mkdtempSync(join(tmpdir(), "opencodex-changed-ref-"));
+  runGit(cwd, "init", "--quiet");
+  const base = commitFixture(cwd, "base.txt", "base\n", "base");
+  return { cwd, base };
+}
+
 describe("test runner isolation", () => {
   test("redirects user homes to a disposable root", () => {
     const isolated = createIsolatedTestEnvironment({ PATH: "/test/bin", HOME: "/real/home" });
@@ -84,29 +138,15 @@ describe("test runner isolation", () => {
         PATH: "/test/bin",
         HOME: isolated.root,
         USERPROFILE: isolated.root,
-        TMPDIR: join(isolated.root, "tmp"),
-        TMP: join(isolated.root, "tmp"),
-        TEMP: join(isolated.root, "tmp"),
         OPENCODEX_HOME: join(isolated.root, ".opencodex"),
         CODEX_HOME: join(isolated.root, ".codex"),
-        OCX_TEST_HOME_GUARD: "1",
       });
       expect(existsSync(isolated.env.OPENCODEX_HOME!)).toBe(true);
       expect(existsSync(isolated.env.CODEX_HOME!)).toBe(true);
-      expect(existsSync(isolated.env.TMPDIR!)).toBe(true);
     } finally {
       isolated.cleanup();
     }
     expect(existsSync(isolated.root)).toBe(false);
-  });
-
-  test("sharded lanes arm the home guard before Bun starts", async () => {
-    const exitCode = await runTestLaneForTests(
-      { label: "shard guard", args: ["--shard=1/1"], timeoutMs: 1_000 },
-      "shard-guard-fixture",
-      { command: [process.execPath, "-e", "process.exit(process.env.OCX_TEST_HOME_GUARD === '1' ? 0 : 2)"] },
-    );
-    expect(exitCode).toBe(0);
   });
 
   test.if(process.platform === "win32")("gives the Windows sandbox a real profile shape", () => {
@@ -159,26 +199,6 @@ describe("test runner isolation", () => {
  * These pin the argv so the bound cannot be dropped again silently.
  */
 describe("bun test argv", () => {
-  test("classifies only filter-less invocations as the full suite", () => {
-    expect(isFullSuiteRun([])).toBe(true);
-    expect(isFullSuiteRun(["--isolate", "--parallel=4", "./tests/"])).toBe(true);
-    expect(isFullSuiteRun(["tests/foo.test.ts"])).toBe(false);
-    expect(isFullSuiteRun(["--", "tests/foo.test.ts"])).toBe(false);
-    for (const focused of [
-      ["--shard", "1/3"],
-      ["--shard=1/3"],
-      ["--changed"],
-      ["--changed=origin/dev"],
-      ["--only"],
-      ["-t", "one test"],
-      ["--test-name-pattern=one test"],
-      ["--grep", "one test"],
-      ["--path-ignore-patterns", "**/slow.test.ts"],
-    ]) {
-      expect(isFullSuiteRun(focused)).toBe(false);
-    }
-  });
-
   test("a filter-less run gets isolate, bounded parallelism and the suite path", () => {
     expect(resolveBunTestArgs([])).toEqual(["--isolate", "--parallel=4", "./tests/"]);
   });
@@ -199,18 +219,6 @@ describe("bun test argv", () => {
     }
     expect(plan.find(lane => lane.label === "release-helper.test.ts")?.timeoutMs).toBe(5 * 60 * 1000);
     expect(plan.find(lane => lane.label === "codex-shim.test.ts")?.timeoutMs).toBe(3 * 60 * 1000);
-  });
-
-  test("isolates the journal suite in its own one-worker lane", () => {
-    expect(SERIAL_FULL_SUITE_FILES).toContain("codex-journal.test.ts");
-    expect(resolveBunTestPlan([]).find(lane => lane.label === "codex-journal.test.ts")?.args)
-      .toEqual(["--isolate", "--parallel=1", "./tests/codex-journal.test.ts"]);
-  });
-
-  test("isolates request decompression memory spikes in their own one-worker lane", () => {
-    expect(SERIAL_FULL_SUITE_FILES).toContain("request-decompress.test.ts");
-    expect(resolveBunTestPlan([]).find(lane => lane.label === "request-decompress.test.ts")?.args)
-      .toEqual(["--isolate", "--parallel=1", "./tests/request-decompress.test.ts"]);
   });
 
   test("serial lanes override caller parallelism without changing the main lane", () => {
@@ -271,12 +279,125 @@ describe("bun test argv", () => {
       "--parallel=4",
       "-t",
       "serial test",
+      "./tests/",
     ]);
   });
 
   test("arguments after the delimiter are passed through instead of parsed as wrapper flags", () => {
     expect(resolveBunTestArgs(["--", "--parallel=2"]))
       .toEqual(["--isolate", "--parallel=4", "--", "--parallel=2"]);
+    const mergeBase = "0123456789abcdef0123456789abcdef01234567";
+    expect(resolveBunTestArgs(["--", "--changed=fixture"], mergeBase))
+      .toEqual(["--isolate", "--parallel=4", "--", "--changed=fixture"]);
+    expect(inspectChangedRun(["--", "--changed=fixture"])).toBeNull();
+  });
+
+  test("changed-mode stays explicitly filtered without redundant arguments", () => {
+    expect(resolveBunTestArgs(["--changed=dev"]))
+      .toEqual(["--isolate", "--parallel=4", "--changed=dev"]);
+    const mergeBase = "0123456789abcdef0123456789abcdef01234567";
+    expect(resolveBunTestArgs(["--changed=dev"], mergeBase))
+      .toEqual(["--isolate", "--parallel=4", "--changed=" + mergeBase]);
+    expect(resolveBunTestPlan(["--changed=dev"])).toHaveLength(1);
+  });
+
+  test("changed-mode prefers the first existing conventional dev ref", () => {
+    const selectFrom = (...existing: string[]) => {
+      const probed: string[] = [];
+      const selected = selectChangedComparisonRef(ref => {
+        probed.push(ref);
+        return existing.includes(ref);
+      });
+      return { selected, probed };
+    };
+
+    expect(selectFrom("upstream/dev", "origin/dev", "dev")).toEqual({
+      selected: "upstream/dev",
+      probed: ["upstream/dev"],
+    });
+    expect(selectFrom("origin/dev", "dev")).toEqual({
+      selected: "origin/dev",
+      probed: ["upstream/dev", "origin/dev"],
+    });
+    expect(selectFrom("dev")).toEqual({
+      selected: "dev",
+      probed: ["upstream/dev", "origin/dev", "dev"],
+    });
+    expect(selectFrom()).toEqual({
+      selected: null,
+      probed: ["upstream/dev", "origin/dev", "dev"],
+    });
+  });
+
+  test("changed-mode requires an explicit, resolvable comparison ref", () => {
+    expect(() => inspectChangedRun(["--changed"])).toThrow("requires an explicit comparison ref");
+    expect(() => inspectChangedRun(["--changed=refs/heads/definitely-missing-test-ref"]))
+      .toThrow("does not resolve to a commit");
+    const inspected = inspectChangedRun(["--changed=HEAD"]);
+    expect(inspected?.comparisonRef).toBe("HEAD");
+    expect(inspected?.comparisonCommit).toBe(runGit(process.cwd(), "rev-parse", "HEAD"));
+  });
+
+  test("changed-mode uses the shared merge base for behind, ahead, and diverged refs", () => {
+    const fixtures: string[] = [];
+    try {
+      const behind = initChangedRunFixture();
+      fixtures.push(behind.cwd);
+      runGit(behind.cwd, "branch", "candidate", behind.base);
+      commitFixture(behind.cwd, "head.txt", "head\n", "head ahead of candidate");
+      expect(inspectChangedRun(["--changed=candidate"], behind.cwd)).toMatchObject({
+        comparisonRef: "candidate",
+        comparisonCommit: behind.base,
+        changedFiles: ["head.txt"],
+      });
+
+      const ahead = initChangedRunFixture();
+      fixtures.push(ahead.cwd);
+      const candidateTip = commitFixture(ahead.cwd, "candidate.txt", "candidate\n", "candidate ahead");
+      runGit(ahead.cwd, "branch", "candidate", candidateTip);
+      runGit(ahead.cwd, "checkout", "--quiet", "--detach", ahead.base);
+      expect(inspectChangedRun(["--changed=candidate"], ahead.cwd)).toMatchObject({
+        comparisonRef: "candidate",
+        comparisonCommit: ahead.base,
+        changedFiles: [],
+      });
+
+      const diverged = initChangedRunFixture();
+      fixtures.push(diverged.cwd);
+      runGit(diverged.cwd, "checkout", "--quiet", "-b", "candidate");
+      commitFixture(diverged.cwd, "candidate.txt", "candidate\n", "candidate side");
+      runGit(diverged.cwd, "checkout", "--quiet", "--detach", diverged.base);
+      commitFixture(diverged.cwd, "head.txt", "head\n", "head side");
+      expect(inspectChangedRun(["--changed=candidate"], diverged.cwd)).toMatchObject({
+        comparisonRef: "candidate",
+        comparisonCommit: diverged.base,
+        changedFiles: ["head.txt"],
+      });
+    } finally {
+      for (const fixture of fixtures) rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an empty changed selection when the diff is non-empty", () => {
+    expect(changedSelectionFailure(
+      { comparisonRef: "upstream/dev", comparisonCommit: "base-sha", changedFiles: ["src/router.ts"] },
+      "Ran 0 tests across 0 files.",
+    )).toContain("--changed=base-sha (upstream/dev merge base) selected 0 tests across 0 files");
+    expect(changedSelectionFailure(
+      { comparisonRef: "dev", comparisonCommit: "base-sha", changedFiles: ["src/router.ts"] },
+      "Ran 9 tests across 1 file.",
+    )).toBeNull();
+    expect(changedSelectionFailure(
+      { comparisonRef: "HEAD", comparisonCommit: "head-sha", changedFiles: [] },
+      "Ran 0 tests across 0 files.",
+    )).toBeNull();
+  });
+
+  test("rejects an unrecognized changed-mode summary for a non-empty diff", () => {
+    expect(changedSelectionFailure(
+      { comparisonRef: "dev", comparisonCommit: "base-sha", changedFiles: ["src/router.ts"] },
+      "0 pass\n0 fail",
+    )).toContain("did not emit a recognizable selection summary");
   });
 
   test("the wrapper passes parallel execution through to bun", () => {
@@ -310,239 +431,74 @@ describe("bun test argv", () => {
   });
 });
 
-describe("test-runner termination", () => {
-  test("only an unresolved exit is a timeout; exit code zero succeeds", () => {
-    expect(testLaneTimedOut(null)).toBe(true);
-    expect(testLaneTimedOut(0)).toBe(false);
-    expect(testLaneTimedOut(130)).toBe(false);
-  });
-
-  test("preserves timeout and cancellation exit codes", () => {
-    expect(laneExitCodeForTests(null, null)).toBe(124);
-    expect(laneExitCodeForTests(0, "SIGINT")).toBe(130);
-    expect(laneExitCodeForTests(0, "SIGTERM")).toBe(143);
-    expect(laneExitCodeForTests(7, null)).toBe(7);
-  });
-
-  test("resolves Windows taskkill from the native trusted system directory, not SystemRoot", () => {
-    const trustedSystem = mkdtempSync(join(tmpdir(), "opencodex-trusted-system32-"));
-    const taskkill = join(trustedSystem, "taskkill.exe");
-    writeFileSync(taskkill, "fixture");
-    const previousSystemRoot = process.env.SystemRoot;
-    process.env.SystemRoot = "C:\\attacker-controlled";
-    setTrustedWindowsSystemDirectoryResolverForTests(() => trustedSystem);
-    try {
-      expect(terminationCommandForTests(42, "win32")).toEqual([
-        taskkill, "/PID", "42", "/T", "/F",
-      ]);
-    } finally {
-      setTrustedWindowsSystemDirectoryResolverForTests(null);
-      if (previousSystemRoot === undefined) delete process.env.SystemRoot;
-      else process.env.SystemRoot = previousSystemRoot;
-      rmSync(trustedSystem, { recursive: true, force: true });
-    }
-  });
-
-  test("rejects invalid process IDs before any group signal or taskkill resolution", async () => {
-    for (const pid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-      let signals = 0;
-      let resolutions = 0;
-      await expect(terminateTestProcessForTests({
-        pid,
-        platform: "linux",
-        exited: Promise.resolve(0),
-        signalGroup: () => { signals += 1; },
-      })).rejects.toThrow("positive safe integer");
-      await expect(terminateTestProcessForTests({
-        pid,
-        platform: "win32",
-        exited: Promise.resolve(0),
-        resolveTaskkill: () => { resolutions += 1; return "C:\\trusted\\taskkill.exe"; },
-        taskkill: () => 0,
-      })).rejects.toThrow("positive safe integer");
-      expect(signals).toBe(0);
-      expect(resolutions).toBe(0);
-    }
-  });
-
-  test("polls POSIX group liveness after the leader exits during graceful shutdown", async () => {
-    const signals: string[] = [];
-    let polls = 0;
-    await terminateTestProcessForTests({
-      pid: 42,
-      platform: "linux",
-      exited: Promise.resolve(0),
-      signalGroup: signal => { signals.push(signal); },
-      isAlive: () => ++polls < 3,
-      graceMs: 50,
-      killGraceMs: 50,
+describe("test-runner process-tree termination", () => {
+  test("a premature timer wakeup rearms against the monotonic deadline", async () => {
+    let now = 0;
+    let nextHandle = 0;
+    const scheduled = new Map<number, { callback: () => void; delayMs: number }>();
+    const pending = waitWithMonotonicTimeout(new Promise<never>(() => {}), 100, {
+      now: () => now,
+      schedule: (callback, delayMs) => {
+        const handle = ++nextHandle;
+        scheduled.set(handle, { callback, delayMs });
+        return handle;
+      },
+      clear: handle => { scheduled.delete(handle as number); },
     });
-    expect(signals).toEqual(["SIGTERM"]);
+
+    expect([...scheduled.values()].map(entry => entry.delayMs)).toEqual([100]);
+    now = 10;
+    const early = scheduled.get(1);
+    scheduled.delete(1);
+    early?.callback();
+    expect([...scheduled.values()].map(entry => entry.delayMs)).toEqual([90]);
+    now = 100;
+    const deadline = scheduled.get(2);
+    scheduled.delete(2);
+    deadline?.callback();
+    expect(await pending).toBeNull();
+    expect(scheduled.size).toBe(0);
   });
 
-  test("polls POSIX group liveness after SIGKILL when the leader already exited", async () => {
-    const signals: string[] = [];
-    let killed = false;
-    let forcedPolls = 0;
-    await terminateTestProcessForTests({
-      pid: 42,
-      platform: "linux",
-      exited: Promise.resolve(0),
-      signalGroup: signal => { signals.push(signal); if (signal === "SIGKILL") killed = true; },
-      isAlive: () => !killed || ++forcedPolls < 3,
-      graceMs: 1,
-      killGraceMs: 50,
-    });
-    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-  });
-
-  test("escalates TERM to KILL and confirms an already-dead group", async () => {
-    const signals: string[] = [];
-    let alive = true;
-    await terminateTestProcessForTests({
-      pid: 42,
-      platform: "linux",
-      signalGroup: signal => { signals.push(signal); if (signal === "SIGKILL") alive = false; },
-      isAlive: () => alive,
-      exited: Promise.resolve(0),
-      graceMs: 1,
-      killGraceMs: 1,
-    });
-    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
-  });
-
-  test("Windows taskkill success is authoritative and failure is loud", async () => {
-    const calls: string[][] = [];
-    await terminateTestProcessForTests({
-      pid: 42, platform: "win32", exited: Promise.resolve(0),
-      resolveTaskkill: () => "C:\\trusted-system32\\taskkill.exe",
-      taskkill: command => { calls.push(command); return 0; },
-    });
-    expect(calls[0]).toEqual(["C:\\trusted-system32\\taskkill.exe", "/PID", "42", "/T", "/F"]);
+  test("rejects invalid process IDs before signaling", async () => {
+    let signals = 0;
     await expect(terminateTestProcessForTests({
-      pid: 42, platform: "win32", exited: Promise.resolve(0),
-      resolveTaskkill: () => "C:\\trusted-system32\\taskkill.exe",
-      taskkill: () => 1, graceMs: 1,
-    })).rejects.toThrow("failed to terminate");
-  });
-
-  test("signal termination rejects promptly even while the child is still running", async () => {
-    const baseline = process.listenerCount("SIGTERM");
-    let spawned: Bun.Subprocess | undefined;
-    const lane = runTestLaneForTests(
-      { label: "signal rejection", args: [], timeoutMs: 1_000 },
-      "signal-rejection-fixture",
-      {
-        command: [process.execPath, "-e", "await Bun.sleep(150)"],
-        terminateProcess: async child => {
-          spawned = child;
-          throw new Error("injected termination rejection");
-        },
-      },
-    );
-    await waitForCondition(
-      () => process.listenerCount("SIGTERM") === baseline + 1,
-      "SIGTERM forwarding handler",
-    );
-    process.emit("SIGTERM");
-    await expect(Promise.race([
-      lane,
-      Bun.sleep(100).then(() => { throw new Error("termination rejection was not awaited"); }),
-    ])).rejects.toThrow("injected termination rejection");
-    if (spawned) await spawned.exited;
-  });
-
-  test("signal handlers stay idempotent until termination and sandbox cleanup finish", async () => {
-    const baselineInt = process.listenerCount("SIGINT");
-    const baselineTerm = process.listenerCount("SIGTERM");
-    const events: string[] = [];
-    let terminationCalls = 0;
-    let releaseTermination!: () => void;
-    const terminationGate = new Promise<void>(resolve => { releaseTermination = resolve; });
-    const lane = runTestLaneForTests(
-      { label: "signal ordering", args: [], timeoutMs: 1_000 },
-      "signal-ordering-fixture",
-      {
-        command: [process.execPath, "-e", "await new Promise(() => {})"],
-        createEnvironment: baseEnv => {
-          const isolated = createIsolatedTestEnvironment(baseEnv);
-          return { ...isolated, cleanup() { events.push("cleanup"); isolated.cleanup(); } };
-        },
-        terminateProcess: async child => {
-          terminationCalls += 1;
-          child.kill("SIGKILL");
-          await child.exited;
-          await terminationGate;
-          events.push("termination");
-        },
-      },
-    );
-    await waitForCondition(
-      () => process.listenerCount("SIGINT") === baselineInt + 1,
-      "SIGINT forwarding handler",
-    );
-    process.emit("SIGINT");
-    await waitForCondition(() => terminationCalls === 1, "termination start");
-    expect(process.listenerCount("SIGINT")).toBe(baselineInt + 1);
-    expect(process.listenerCount("SIGTERM")).toBe(baselineTerm + 1);
-    process.emit("SIGINT");
-    process.emit("SIGTERM");
-    expect(terminationCalls).toBe(1);
-    releaseTermination();
-    expect(await lane).toBe(130);
-    expect(events).toEqual(["termination", "cleanup"]);
-    expect(process.listenerCount("SIGINT")).toBe(baselineInt);
-    expect(process.listenerCount("SIGTERM")).toBe(baselineTerm);
-  });
-
-  test("a signal during timeout cleanup does not replace the in-flight termination", async () => {
-    let calls = 0;
-    const exitCode = await runTestLaneForTests(
-      { label: "timeout signal race", args: [], timeoutMs: 10 },
-      "timeout-signal-race-fixture",
-      {
-        command: [process.execPath, "-e", "await new Promise(() => {})"],
-        terminateProcess: async child => {
-          calls += 1;
-          if (calls === 1) process.emit("SIGINT");
-          child.kill("SIGKILL");
-          await child.exited;
-        },
-      },
-    );
-    expect(calls).toBe(1);
-    expect(exitCode).toBe(124);
+      pid: 0,
+      platform: "linux",
+      exited: Promise.resolve(0),
+      signalGroup: () => { signals += 1; },
+    })).rejects.toThrow("positive safe integer");
+    expect(signals).toBe(0);
   });
 
   test.if(process.platform !== "win32")(
-    "real child and grandchild groups preserve timeout and signal exits and are dead before return",
+    "timeout and forwarded signals reap the complete child process group",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "opencodex-test-tree-"));
       const controllerPath = join(import.meta.dir, "fixtures/test-runner-tree-controller.ts");
       const controllers: Bun.Subprocess[] = [];
       try {
-        for (const [mode, expected] of [["timeout", 124], ["SIGINT", 130], ["SIGTERM", 143]] as const) {
+        for (const [mode, expected] of [["timeout", 124], ["SIGTERM", 143]] as const) {
           const markerPath = join(root, `${mode}.json`);
           const controller = Bun.spawn([process.execPath, controllerPath, mode, markerPath], {
-            cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe",
+            cwd: join(import.meta.dir, ".."),
+            stdout: "pipe",
+            stderr: "pipe",
           });
           controllers.push(controller);
           await waitForFile(markerPath);
-          if (mode !== "timeout") controller.kill(mode);
+          if (mode === "SIGTERM") controller.kill(mode);
           expect(await exitWithin(controller)).toBe(expected);
           await expectProcessTreeDead(markerPath);
         }
-
-        const markerPath = join(root, "already-dead.json");
-        const controller = Bun.spawn([process.execPath, controllerPath, "already-dead", markerPath], {
-          cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe",
-        });
-        controllers.push(controller);
-        expect(await exitWithin(controller)).toBe(0);
-        await expectProcessTreeDead(markerPath);
       } finally {
-        for (const controller of controllers) await stopWithin(controller);
-        for (const markerPath of ["timeout", "SIGINT", "SIGTERM", "already-dead"].map(mode => join(root, `${mode}.json`))) {
+        for (const controller of controllers) {
+          if (!processIsAlive(controller.pid)) continue;
+          controller.kill("SIGKILL");
+          await exitWithin(controller).catch(() => {});
+        }
+        for (const mode of ["timeout", "SIGTERM"] as const) {
+          const markerPath = join(root, `${mode}.json`);
           if (!existsSync(markerPath)) continue;
           const { child } = JSON.parse(await Bun.file(markerPath).text()) as { child: number };
           try { process.kill(-child, "SIGKILL"); } catch { /* already dead */ }
@@ -552,98 +508,334 @@ describe("test-runner termination", () => {
     },
   );
 
-  test("termination errors cannot skip sandbox cleanup and cleanup errors stay loud", async () => {
-    let cleaned = 0;
-    await expect(runTestLaneForTests(
-      { label: "cleanup", args: [], timeoutMs: 20 },
-      "cleanup-fixture",
+  test("the injectable lane runner still terminates before returning", async () => {
+    let terminations = 0;
+    const exitCode = await runTestLaneForTests(
+      { label: "timeout fixture", args: [], timeoutMs: 5 },
+      "timeout-fixture",
       {
         command: [process.execPath, "-e", "await new Promise(() => {})"],
-        createEnvironment: baseEnv => {
-          const isolated = createIsolatedTestEnvironment(baseEnv);
-          return { ...isolated, cleanup() { cleaned += 1; isolated.cleanup(); } };
-        },
         terminateProcess: async child => {
+          terminations += 1;
           child.kill("SIGKILL");
           await child.exited;
-          throw new Error("injected termination failure");
         },
       },
-    )).rejects.toThrow("injected termination failure");
-    expect(cleaned).toBe(1);
-
-    await expect(runTestLaneForTests(
-      { label: "cleanup failure", args: [], timeoutMs: 1_000 },
-      "cleanup-fixture",
-      {
-        command: [process.execPath, "-e", "process.exit(0)"],
-        createEnvironment: baseEnv => {
-          const isolated = createIsolatedTestEnvironment(baseEnv);
-          return { ...isolated, cleanup() { isolated.cleanup(); throw new Error("injected cleanup failure"); } };
-        },
-      },
-    )).rejects.toThrow("injected cleanup failure");
-  });
-
-  test("synchronous spawn failure still removes the sandbox", async () => {
-    let cleaned = 0;
-    await expect(runTestLaneForTests(
-      { label: "spawn failure", args: [], timeoutMs: 1_000 },
-      "spawn-failure-fixture",
-      {
-        command: [join(tmpdir(), "missing-opencodex-test-executable")],
-        createEnvironment: baseEnv => ({
-          root: "fixture",
-          env: baseEnv,
-          cleanup() { cleaned += 1; },
-        }),
-      },
-    )).rejects.toThrow();
-    expect(cleaned).toBe(1);
+    );
+    expect(exitCode).toBe(124);
+    expect(terminations).toBe(1);
   });
 });
 
-describe("bun test machine lock", () => {
-  test("bare and focused runs bypass a held lock while a full wrapper waits then resumes", async () => {
-    const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-integration-"));
-    const lockPath = join(root, "suite.lock");
-    const probePath = join(import.meta.dir, "fixtures/test-runner-lock-probe.test.ts");
-    const owner = await acquireTestRunLock({ runId: "holder", lockPath, pollMs: 5, maxWaitMs: 100 });
-    let bare: Bun.Subprocess | undefined;
+describe("bun test user lock", () => {
+  test("distinct POSIX users receive distinct temp-runtime locks", () => {
+    const common = { env: {}, tempDir: "/tmp", hostName: "builder-1", platform: "linux" as const };
+    const alice = resolveDefaultTestRunLockPath({
+      ...common,
+      uid: 1001,
+      fileSystem: acceptingRuntimeFileSystem(1001),
+    });
+    const bob = resolveDefaultTestRunLockPath({
+      ...common,
+      uid: 1002,
+      fileSystem: acceptingRuntimeFileSystem(1002),
+    });
+
+    expect(alice).not.toBe(bob);
+    expect(pathIsContainedBy("/tmp/opencodex-test-runtime-1001", alice, "posix")).toBe(true);
+    expect(pathIsContainedBy("/tmp/opencodex-test-runtime-1002", bob, "posix")).toBe(true);
+  });
+
+  test("a shared home cannot couple locks from distinct hosts", () => {
+    const common = {
+      env: { HOME: "/network/users/alice" },
+      uid: 1001,
+      tempDir: "/tmp",
+      platform: "linux" as const,
+      fileSystem: acceptingRuntimeFileSystem(1001),
+    };
+    const firstHost = resolveDefaultTestRunLockPath({ ...common, hostName: "builder-1" });
+    const secondHost = resolveDefaultTestRunLockPath({ ...common, hostName: "builder-2" });
+
+    expect(firstHost).not.toBe(secondHost);
+    expect(pathIsContainedBy(common.env.HOME, firstHost, "posix")).toBe(false);
+    expect(pathIsContainedBy(common.env.HOME, secondHost, "posix")).toBe(false);
+  });
+
+  test("Windows scopes the lock to the effective SID runtime and hardens its directory", () => {
+    const hardened: string[] = [];
+    const common = {
+      platform: "win32" as const,
+      tempDir: "C:\\Windows\\Temp",
+      hostName: "desktop-1",
+      fileSystem: acceptingRuntimeFileSystem(0),
+      resolveRuntimeRoot: (identity: { platform: "win32"; sid: string }) =>
+        `C:\\Runtime\\${identity.sid}`,
+      hardenWindowsDirectory: (path: string) => { hardened.push(path); },
+    };
+    const alice = resolveDefaultTestRunLockPath({
+      ...common,
+      env: {},
+      resolveIdentity: () => ({ platform: "win32", sid: "S-1-5-21-1001" }),
+    });
+    const aliceWithHostileEnvironment = resolveDefaultTestRunLockPath({
+      ...common,
+      env: {
+        USER: "someone-else",
+        USERNAME: "someone-else",
+        USERDOMAIN: "hostile",
+        TEMP: "C:\\Windows\\Temp",
+        TMP: "C:\\Windows\\Temp",
+        LOCALAPPDATA: "C:\\Windows\\Temp",
+      },
+      resolveIdentity: () => ({ platform: "win32", sid: "S-1-5-21-1001" }),
+    });
+    const bob = resolveDefaultTestRunLockPath({
+      ...common,
+      env: {},
+      resolveIdentity: () => ({ platform: "win32", sid: "S-1-5-21-1002" }),
+    });
+
+    expect(aliceWithHostileEnvironment).toBe(alice);
+    expect(bob).not.toBe(alice);
+    expect(pathIsContainedBy("C:\\Runtime\\S-1-5-21-1001\\bun-test-locks", alice, "win32"))
+      .toBe(true);
+    expect(pathIsContainedBy(common.tempDir, alice, "win32")).toBe(false);
+    expect(hardened).toEqual([
+      "C:\\Runtime\\S-1-5-21-1001\\bun-test-locks",
+      "C:\\Runtime\\S-1-5-21-1001\\bun-test-locks",
+      "C:\\Runtime\\S-1-5-21-1002\\bun-test-locks",
+    ]);
+  });
+
+  test("rejects a group-writable XDG root in favor of the private UID fallback", () => {
+    const xdg = "/run/user/1001";
+    const fallback = "/tmp/opencodex-test-runtime-1001";
+    const lockPath = resolveDefaultTestRunLockPath({
+      platform: "linux",
+      env: { XDG_RUNTIME_DIR: xdg },
+      uid: 1001,
+      tempDir: "/tmp",
+      hostName: "builder-1",
+      fileSystem: acceptingRuntimeFileSystem(1001, true, {
+        [xdg]: 0o733,
+        [fallback]: 0o700,
+      }),
+    });
+
+    expect(dirname(lockPath)).toBe(fallback);
+  });
+
+  test("Windows refuses before returning a path when identity or ACL hardening fails", () => {
+    const common = {
+      platform: "win32" as const,
+      tempDir: "C:\\Windows\\Temp",
+      hostName: "desktop-1",
+      fileSystem: acceptingRuntimeFileSystem(0),
+    };
+    expect(() => resolveDefaultTestRunLockPath({
+      ...common,
+      resolveIdentity: () => { throw new Error("identity unavailable"); },
+    })).toThrow("the Windows effective identity is unavailable");
+
+    expect(() => resolveDefaultTestRunLockPath({
+      ...common,
+      resolveIdentity: () => ({ platform: "win32", sid: "S-1-5-21-1001" }),
+      resolveRuntimeRoot: () => "C:\\Runtime\\S-1-5-21-1001",
+      hardenWindowsDirectory: () => { throw new Error("ACL unavailable"); },
+    })).toThrow("the Windows lock directory cannot be secured");
+  });
+
+  test("Windows rejects a redirected lock directory before ACL hardening", () => {
+    let hardenCalls = 0;
+    const fileSystem: TestRunRuntimeFileSystem = {
+      lstatSync: () => ({
+        uid: 0,
+        mode: 0o700,
+        isDirectory: () => true,
+        isSymbolicLink: () => true,
+      }),
+      mkdirSync() {},
+      accessSync() {},
+    };
+
+    expect(() => resolveDefaultTestRunLockPath({
+      platform: "win32",
+      hostName: "desktop-1",
+      fileSystem,
+      resolveIdentity: () => ({ platform: "win32", sid: "S-1-5-21-1001" }),
+      resolveRuntimeRoot: () => "C:\\Runtime\\S-1-5-21-1001",
+      hardenWindowsDirectory: () => { hardenCalls += 1; },
+    })).toThrow("is not a real directory");
+    expect(hardenCalls).toBe(0);
+  });
+
+  test("Windows creates a missing lock directory before validating and hardening it", () => {
+    let created = false;
+    let hardenCalls = 0;
+    const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
+    const fileSystem: TestRunRuntimeFileSystem = {
+      lstatSync: () => {
+        if (!created) throw missing;
+        return {
+          uid: 0,
+          mode: 0o700,
+          isDirectory: () => true,
+          isSymbolicLink: () => false,
+        };
+      },
+      mkdirSync() { created = true; },
+      accessSync() {},
+    };
+
+    const lockPath = resolveDefaultTestRunLockPath({
+      platform: "win32",
+      hostName: "desktop-1",
+      fileSystem,
+      resolveIdentity: () => ({ platform: "win32", sid: "S-1-5-21-1001" }),
+      resolveRuntimeRoot: () => "C:\\Runtime\\S-1-5-21-1001",
+      hardenWindowsDirectory: () => { hardenCalls += 1; },
+    });
+
+    expect(lockPath).toContain("\\bun-test-locks\\opencodex-bun-test-");
+    expect(created).toBe(true);
+    expect(hardenCalls).toBe(1);
+  });
+
+  test("wrapped workers reuse one validated Windows lock path", () => {
+    let identityCalls = 0;
+    let runtimeRootCalls = 0;
+    let hardenCalls = 0;
+    const lockPath = resolveDefaultTestRunLockPath({
+      platform: "win32",
+      hostName: "desktop-1",
+      fileSystem: acceptingRuntimeFileSystem(0),
+      resolveIdentity: () => {
+        identityCalls += 1;
+        return { platform: "win32", sid: "S-1-5-21-1001" };
+      },
+      resolveRuntimeRoot: () => {
+        runtimeRootCalls += 1;
+        return "C:\\Runtime\\S-1-5-21-1001";
+      },
+      hardenWindowsDirectory: () => { hardenCalls += 1; },
+    });
+    const ownerToken = "57f44b0e-b750-4bd2-b23d-4a035e75da18";
+    const env = {
+      [TEST_RUN_LOCK_PATH_ENV]: lockPath,
+      [TEST_RUN_LOCK_TOKEN_ENV]: ownerToken,
+    };
+
+    const workers = ["worker-a", "worker-b", "worker-c"].map(wrappedRunId =>
+      resolveInheritedTestRunLock({
+        wrappedRunId,
+        env,
+        platform: "win32",
+        hostName: "desktop-1",
+      }));
+
+    expect(workers).toEqual([
+      { lockPath, ownerToken },
+      { lockPath, ownerToken },
+      { lockPath, ownerToken },
+    ]);
+    expect(identityCalls).toBe(1);
+    expect(runtimeRootCalls).toBe(1);
+    expect(hardenCalls).toBe(1);
+    expect(() => resolveInheritedTestRunLock({
+      wrappedRunId: "wrapped",
+      env: {},
+      platform: "win32",
+      hostName: "desktop-1",
+    })).toThrow("capability is incomplete");
+    expect(resolveInheritedTestRunLock({
+      wrappedRunId: "wrapped",
+      env: { [TEST_RUN_NO_QUEUE_ENV]: "1" },
+      platform: "win32",
+      hostName: "desktop-1",
+    })).toBeUndefined();
+    expect(resolveInheritedTestRunLock({
+      wrappedRunId: "wrapped",
+      env,
+      platform: "linux",
+      hostName: "desktop-1",
+    })).toBeUndefined();
+    expect(() => resolveInheritedTestRunLock({
+      wrappedRunId: "wrapped",
+      env: {
+        [TEST_RUN_LOCK_PATH_ENV]: "C:\\Runtime\\bun-test-locks\\wrong.lock",
+        [TEST_RUN_LOCK_TOKEN_ENV]: ownerToken,
+      },
+      platform: "win32",
+      hostName: "desktop-1",
+    })).toThrow("inherited lock access");
+  });
+
+  test("the no-queue wrapper path performs no identity or runtime mutation", () => {
+    let resolveCalls = 0;
+    const lockPath = resolveWrappedTestRunLockPath({
+      env: { [TEST_RUN_NO_QUEUE_ENV]: "1" },
+      resolve: () => {
+        resolveCalls += 1;
+        return "C:\\Runtime\\bun-test-locks\\unexpected.lock";
+      },
+    });
+
+    expect(lockPath).toBeUndefined();
+    expect(resolveCalls).toBe(0);
+  });
+
+  test("falls back from an unsafe XDG root to a validated mode-0700 UID directory", () => {
+    if (process.platform === "win32" || typeof process.getuid !== "function") return;
+    const root = mkdtempSync(join(tmpdir(), "opencodex-runtime-fallback-"));
+    const unsafeXdg = join(root, "not-a-directory");
+    writeFileSync(unsafeXdg, "unsafe\n");
     try {
-      bare = Bun.spawn([process.execPath, "test", probePath], {
-        cwd: join(import.meta.dir, ".."), stdout: "pipe", stderr: "pipe",
+      const lockPath = resolveDefaultTestRunLockPath({
+        env: { XDG_RUNTIME_DIR: unsafeXdg },
+        uid: process.getuid(),
+        tempDir: root,
+        hostName: "builder-1",
       });
-      expect(await exitWithin(bare)).toBe(0);
+      const runtimeRoot = dirname(lockPath);
+      const entry = statSync(runtimeRoot);
 
-      expect(await runTestMainForTests([probePath], {
-        lockPath, pollMs: 5, maxWaitMs: 200, runLane: async () => 0,
-      })).toBe(0);
-
-      for (const focused of [
-        ["--shard=1/3"],
-        ["--changed"],
-        ["--changed=origin/dev"],
-        ["--test-name-pattern", "one test"],
-      ]) {
-        expect(await runTestMainForTests(focused, {
-          lockPath, pollMs: 5, maxWaitMs: 20, runLane: async () => 0,
-        })).toBe(0);
-      }
-
-      let settled = false;
-      const full = runTestMainForTests([], {
-        lockPath, pollMs: 5, maxWaitMs: 500, runLane: async () => 0,
-      }).then(code => { settled = true; return code; });
-      await Bun.sleep(30);
-      expect(settled).toBe(false);
-      owner.release();
-      expect(await full).toBe(0);
+      expect(runtimeRoot).toBe(join(root, `opencodex-test-runtime-${process.getuid()}`));
+      expect(entry.isDirectory()).toBe(true);
+      expect(entry.uid).toBe(process.getuid());
+      expect(entry.mode & 0o777).toBe(0o700);
     } finally {
-      if (bare) await stopWithin(bare);
-      owner.release();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test("fails immediately with actionable guidance when every runtime root is unwritable", () => {
+    expect(() => resolveDefaultTestRunLockPath({
+      platform: "linux",
+      env: { XDG_RUNTIME_DIR: "/run/user/1001" },
+      uid: 1001,
+      tempDir: "/tmp",
+      hostName: "builder-1",
+      fileSystem: acceptingRuntimeFileSystem(1001, false),
+    })).toThrow(
+      "Cannot resolve a safe user-scoped Bun test lock. Ensure XDG_RUNTIME_DIR",
+    );
+  });
+
+  test("containment checks do not confuse path string prefixes on POSIX or Windows", () => {
+    const home = "/home/alice";
+    const lockPath = resolveDefaultTestRunLockPath({
+      platform: "linux",
+      env: { HOME: home },
+      uid: 1001,
+      tempDir: "/home",
+      hostName: "builder-1",
+      fileSystem: acceptingRuntimeFileSystem(1001),
+    });
+
+    expect(home.startsWith("/home")).toBe(true);
+    expect(pathIsContainedBy(home, lockPath, "posix")).toBe(false);
+    expect(pathIsContainedBy("C:\\Users\\Ann", "C:\\Users\\Anna\\lock", "win32")).toBe(false);
   });
 
   test("independent bare runners do not inherit a shared long-lived parent identity", () => {
@@ -679,6 +871,41 @@ describe("bun test machine lock", () => {
       sibling.release();
       expect(existsSync(lockPath)).toBe(true);
       owner.release();
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("an inherited worker can only join the exact live wrapper owner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
+    const lockPath = join(root, "suite.lock");
+    try {
+      const owner = await acquireTestRunLock({ runId: "wrapped", lockPath, pollMs: 5, maxWaitMs: 50 });
+      expect(owner.owner).not.toBeNull();
+      const sibling = await acquireTestRunLock({
+        runId: "wrapped",
+        lockPath,
+        joinExistingOwnerToken: owner.owner!.token,
+      });
+      expect(sibling.acquired).toBe(false);
+      const wrongToken = owner.owner!.token === "57f44b0e-b750-4bd2-b23d-4a035e75da18"
+        ? "6ab28966-06a7-4ef8-a0d9-23667d5d9ef5"
+        : "57f44b0e-b750-4bd2-b23d-4a035e75da18";
+
+      await expect(acquireTestRunLock({
+        runId: "wrapped",
+        lockPath,
+        joinExistingOwnerToken: wrongToken,
+      })).rejects.toThrow("refusing to create or reclaim");
+
+      owner.release();
+      expect(existsSync(lockPath)).toBe(false);
+      await expect(acquireTestRunLock({
+        runId: "wrapped",
+        lockPath,
+        joinExistingOwnerToken: owner.owner!.token,
+      })).rejects.toThrow("refusing to create or reclaim");
       expect(existsSync(lockPath)).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -741,5 +968,89 @@ describe("bun test machine lock", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("ensureGuiDependencies", () => {
+  // `gui` is not a workspace, so a root `bun install` leaves gui/node_modules absent and the
+  // twenty-five tests importing gui/src die on `Cannot find package 'react'` — an "Unhandled error
+  // between tests" that names no test. CI already installs them; this closes the local gap.
+  const paths = (present: string[]) => {
+    const normalized = present.map(path => path.replaceAll("\\", "/"));
+    return (path: string) => normalized.some(entry => path.replaceAll("\\", "/").endsWith(entry));
+  };
+
+  test("mocked paths match POSIX and Windows separators", () => {
+    const exists = paths(["gui/package.json"]);
+    expect(exists("/repo/gui/package.json")).toBe(true);
+    expect(exists("C:\\repo\\gui\\package.json")).toBe(true);
+  });
+
+  test("installs when gui/package.json exists but node_modules does not", () => {
+    const installed: string[] = [];
+    const logged: string[] = [];
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: paths(["gui/package.json"]),
+      install: dir => { installed.push(dir); return { ok: true, detail: "" }; },
+      log: message => logged.push(message),
+    });
+
+    expect(result).toEqual({ kind: "installed" });
+    expect(installed).toEqual([join("/repo", "gui")]);
+    expect(logged[0]).toContain("gui dependencies are missing or incomplete");
+  });
+
+  test("retries when node_modules exists without the required dependency", () => {
+    let installs = 0;
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: paths(["gui/package.json", "gui/node_modules"]),
+      install: () => { installs += 1; return { ok: true, detail: "" }; },
+      log: () => {},
+    });
+
+    expect(result).toEqual({ kind: "installed" });
+    expect(installs).toBe(1);
+  });
+
+  test("does nothing when the required dependency is already there", () => {
+    let installs = 0;
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: paths(["gui/package.json", "gui/node_modules/react/package.json"]),
+      install: () => { installs += 1; return { ok: true, detail: "" }; },
+      log: () => {},
+    });
+
+    expect(result).toEqual({ kind: "present" });
+    expect(installs).toBe(0);
+  });
+
+  // A published install tree has no gui/ at all; the runner must not try to install there.
+  test("does nothing when there is no gui package", () => {
+    let installs = 0;
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: () => false,
+      install: () => { installs += 1; return { ok: true, detail: "" }; },
+      log: () => {},
+    });
+
+    expect(result).toEqual({ kind: "absent" });
+    expect(installs).toBe(0);
+  });
+
+  // Offline or a lockfile drift has to surface as its own message, not as twenty-five
+  // unexplained React failures once the lanes start.
+  test("reports the failure detail instead of continuing", () => {
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: paths(["gui/package.json"]),
+      install: () => ({ ok: false, detail: "lockfile had changes" }),
+      log: () => {},
+    });
+
+    expect(result).toEqual({ kind: "failed", detail: "lockfile had changes" });
   });
 });

@@ -155,6 +155,15 @@ describe("fork upstream sync workflow contract", () => {
     expect(cursorStep).toContain("Jules fallback issue ensured for hotspot handoff.");
   });
 
+  test("reports workflow failures and closes the notification after recovery", () => {
+    expect(workflow).toContain("Reconcile sync failure notification");
+    expect(workflow).toContain("if: always()");
+    expect(workflow).toContain("opencodex-fork-sync-workflow-failure");
+    expect(workflow).toContain("agent:needs-human");
+    expect(workflow).toContain('state: "closed"');
+    expect(workflow).toContain("The freshness supervisor will retry after its cooldown");
+  });
+
   test("does not create a Jules issue before Cursor fallback is known to fail", () => {
     const issueStep = workflow.split("- name: Notify GitHub issue")[1];
     expect(issueStep).toContain("steps.vendor.outputs.kind != 'history-diverged'");

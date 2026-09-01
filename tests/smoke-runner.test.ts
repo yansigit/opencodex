@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildSmokeScenarioRequest } from "../src/smoke/live-scenarios";
+import { buildClaudeMcpSmokeRequest, buildSmokeScenarioRequest, CLAUDE_MCP_SMOKE_TOOL_NAME, parseClaudeMessageResponse } from "../src/smoke/live-scenarios";
 import { providerHasSmokeCredential, runProviderSmoke } from "../src/smoke/runner";
 
 describe("live smoke scenarios", () => {
@@ -11,6 +11,58 @@ describe("live smoke scenarios", () => {
     expect(buildSmokeScenarioRequest(3, "test-model", { previousResponseId: "resp_1", toolResult: "smoke_test_123" })).toMatchObject({
       previous_response_id: "resp_1",
       input: expect.arrayContaining([expect.objectContaining({ type: "function_call_output", output: "smoke_test_123" })]),
+    });
+  });
+
+  test("builds a Claude Messages MCP tool loop without server-hosted MCP fields", () => {
+    const first = buildClaudeMcpSmokeRequest("test-model");
+    expect(first.tools).toEqual([expect.objectContaining({ name: CLAUDE_MCP_SMOKE_TOOL_NAME })]);
+    expect(first.tool_choice).toBeUndefined();
+    expect(first.stream).toBe(true);
+
+    const second = buildClaudeMcpSmokeRequest("test-model", {
+      assistantContent: [{ type: "tool_use", id: "tool_1", name: CLAUDE_MCP_SMOKE_TOOL_NAME, input: { marker: "smoke_test_123" } }],
+      toolUseId: "tool_1",
+    });
+    expect(second.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: "user", content: [expect.objectContaining({ type: "tool_result", tool_use_id: "tool_1" })] }),
+    ]));
+    expect(second.stream).toBe(true);
+
+    const nonStreaming = buildClaudeMcpSmokeRequest("test-model", undefined, { stream: false });
+    expect(nonStreaming.stream).toBe(false);
+  });
+
+  test("parses streaming SSE Claude Messages payloads with thinking and tool calls", () => {
+    const sse = [
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[]}}',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me call "}}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"the MCP tool."}}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"ocxr1:test_sig"}}',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_mcp_1","name":"mcp__codex_app__automation_update","input":{}}}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"marker\\": \\""}}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"smoke_test_123\\"}"}}',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+      'event: message_stop\ndata: {"type":"message_stop"}',
+    ].join("\n\n");
+
+    const parsed = parseClaudeMessageResponse(sse);
+    expect(parsed.type).toBe("message");
+    expect(parsed.stop_reason).toBe("tool_use");
+    expect(parsed.content).toHaveLength(2);
+    expect(parsed.content[0]).toMatchObject({
+      type: "thinking",
+      thinking: "Let me call the MCP tool.",
+      signature: "ocxr1:test_sig",
+    });
+    expect(parsed.content[1]).toMatchObject({
+      type: "tool_use",
+      id: "call_mcp_1",
+      name: "mcp__codex_app__automation_update",
+      input: { marker: "smoke_test_123" },
     });
   });
 });
@@ -28,8 +80,16 @@ describe("provider smoke runner", () => {
     const cachePath = `/tmp/ocx-smoke-runner-${Date.now()}.json`;
     process.env.OPENCODEX_HOME = `/tmp/ocx-smoke-home-${Date.now()}`;
     const bodies: unknown[] = [];
-    globalThis.fetch = async (_input, init) => {
+    globalThis.fetch = async (input, init) => {
       bodies.push(JSON.parse(String(init?.body)));
+      if (new URL(String(input)).pathname === "/v1/messages") {
+        const parsed = bodies.at(-1) as Record<string, unknown>;
+        const messages = parsed.messages as Array<Record<string, unknown>>;
+        const continuation = messages.some(message => Array.isArray(message.content) && message.content.some(item => (item as Record<string, unknown>).type === "tool_result"));
+        return Response.json(continuation
+          ? { id: "msg_2", type: "message", role: "assistant", content: [{ type: "text", text: "MCP_SMOKE_OK" }], stop_reason: "end_turn" }
+          : { id: "msg_1", type: "message", role: "assistant", content: [{ type: "tool_use", id: "tool_1", name: CLAUDE_MCP_SMOKE_TOOL_NAME, input: { marker: "smoke_test_123" } }], stop_reason: "tool_use" });
+      }
       const n = bodies.length;
       const payload = n === 2
         ? { type: "response.completed", response: { id: "resp_tool", output: [{ type: "function_call", name: "exec_command", arguments: '{"cmd":"echo \\"smoke_test_123\\""}' }] } }
@@ -41,7 +101,8 @@ describe("provider smoke runner", () => {
       const result = await runProviderSmoke({ provider: "openai", modelId: "test-model", force: true, cachePath });
       expect(result.status).toBe("passed");
       expect(result.level1Passed && result.level2Passed && result.level3Passed).toBe(true);
-      expect(bodies).toHaveLength(3);
+      expect(result.claudeMcpPassed).toBe(true);
+      expect(bodies).toHaveLength(5);
     } finally {
       globalThis.fetch = originalFetch;
       if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -52,8 +113,15 @@ describe("provider smoke runner", () => {
   test("accepts a direct non-streaming JSON completion response", async () => {
     const originalFetch = globalThis.fetch;
     const cachePath = "/tmp/ocx-smoke-json-" + Date.now() + ".json";
-    globalThis.fetch = async (_input, init) => {
+    globalThis.fetch = async (input, init) => {
       const parsed = JSON.parse(String(init?.body));
+      if (new URL(String(input)).pathname === "/v1/messages") {
+        const messages = parsed.messages as Array<Record<string, unknown>>;
+        const continuation = messages.some(message => Array.isArray(message.content) && message.content.some(item => (item as Record<string, unknown>).type === "tool_result"));
+        return Response.json(continuation
+          ? { id: "msg_2", type: "message", role: "assistant", content: [{ type: "text", text: "MCP_SMOKE_OK" }], stop_reason: "end_turn" }
+          : { id: "msg_1", type: "message", role: "assistant", content: [{ type: "tool_use", id: "tool_1", name: CLAUDE_MCP_SMOKE_TOOL_NAME, input: { marker: "smoke_test_123" } }], stop_reason: "tool_use" });
+      }
       const hasTools = Array.isArray(parsed.tools);
       const isL3 = Array.isArray(parsed.input) && parsed.input.some((i: { type: string }) => i.type === "function_call_output");
       if (isL3) {
@@ -72,6 +140,110 @@ describe("provider smoke runner", () => {
       const result = await runProviderSmoke({ provider: "openai", modelId: "test-model", force: true, cachePath });
       expect(result.status).toBe("passed");
       expect(result.level1Passed && result.level2Passed && result.level3Passed).toBe(true);
+      expect(result.claudeMcpPassed).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("runs the Claude MCP loop independently of Responses levels", async () => {
+    const originalFetch = globalThis.fetch;
+    const seen: Record<string, unknown>[] = [];
+    globalThis.fetch = async (_input, init) => {
+      const parsed = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      seen.push(parsed);
+      const messages = parsed.messages as Array<Record<string, unknown>>;
+      const continuation = messages.some(message => Array.isArray(message.content) && message.content.some(item => (item as Record<string, unknown>).type === "tool_result"));
+      return Response.json(continuation
+        ? { id: "msg_2", type: "message", role: "assistant", content: [{ type: "text", text: "MCP_SMOKE_OK" }], stop_reason: "end_turn" }
+        : { id: "msg_1", type: "message", role: "assistant", content: [{ type: "tool_use", id: "tool_1", name: CLAUDE_MCP_SMOKE_TOOL_NAME, input: { marker: "smoke_test_123" } }], stop_reason: "tool_use" });
+    };
+    try {
+      const result = await runProviderSmoke({ provider: "openai", modelId: "test-model", force: true, claudeMcpOnly: true, cachePath: `/tmp/ocx-smoke-claude-mcp-${Date.now()}.json` });
+      expect(result.status).toBe("passed");
+      expect(result.claudeMcpPassed).toBe(true);
+      expect(result.level1Passed || result.level2Passed || result.level3Passed).toBe(false);
+      expect(seen).toHaveLength(2);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("preserves a proxy path prefix for both smoke endpoints", async () => {
+    const originalFetch = globalThis.fetch;
+    const urls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      urls.push(String(input));
+      const parsed = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (String(input).endsWith("/prefix/v1/messages")) {
+        const messages = parsed.messages as Array<Record<string, unknown>>;
+        const continuation = messages.some(message => Array.isArray(message.content) && message.content.some(item => (item as Record<string, unknown>).type === "tool_result"));
+        return Response.json(continuation
+          ? { id: "msg_2", type: "message", role: "assistant", content: [{ type: "text", text: "MCP_SMOKE_OK" }], stop_reason: "end_turn" }
+          : { id: "msg_1", type: "message", role: "assistant", content: [{ type: "tool_use", id: "tool_1", name: CLAUDE_MCP_SMOKE_TOOL_NAME, input: {} }], stop_reason: "tool_use" });
+      }
+      return Response.json({ id: "resp", status: "completed", output: [] });
+    };
+    try {
+      const result = await runProviderSmoke({ provider: "openai", modelId: "test-model", proxyUrl: "https://proxy.test/prefix/v1/responses", force: true, claudeMcpOnly: true, cachePath: `/tmp/ocx-smoke-prefix-${Date.now()}.json` });
+      expect(result.status).toBe("passed");
+      expect(urls).toEqual(["https://proxy.test/prefix/v1/messages", "https://proxy.test/prefix/v1/messages"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("runs the streaming Claude MCP loop with thinking continuity", async () => {
+    const originalFetch = globalThis.fetch;
+    const bodies: unknown[] = [];
+    globalThis.fetch = async (input, init) => {
+      const parsed = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      bodies.push(parsed);
+      const messages = parsed.messages as Array<Record<string, unknown>>;
+      const continuation = messages.some(message => Array.isArray(message.content) && message.content.some(item => (item as Record<string, unknown>).type === "tool_result"));
+
+      if (!continuation) {
+        const sse = [
+          'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[]}}',
+          'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Preparing to call tool..."}}',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"ocxr1:thought_sig"}}',
+          'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+          'event: content_block_start\ndata: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_mcp_thought","name":"mcp__codex_app__automation_update","input":{}}}',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"marker\":\"smoke_test_123\"}"}}',
+          'event: content_block_stop\ndata: {"type":"content_block_stop","index":1}',
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+          'event: message_stop\ndata: {"type":"message_stop"}',
+        ].join("\n\n");
+        return new Response(sse, { headers: { "content-type": "text/event-stream" } });
+      }
+
+      const sseContinuation = [
+        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","content":[]}}',
+        'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"MCP_SMOKE_OK"}}',
+        'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}',
+        'event: message_stop\ndata: {"type":"message_stop"}',
+      ].join("\n\n");
+      return new Response(sseContinuation, { headers: { "content-type": "text/event-stream" } });
+    };
+
+    try {
+      const result = await runProviderSmoke({ provider: "openai", modelId: "test-model", force: true, claudeMcpOnly: true, cachePath: `/tmp/ocx-smoke-stream-${Date.now()}.json` });
+      expect(result.status).toBe("passed");
+      expect(result.claudeMcpPassed).toBe(true);
+      expect(bodies).toHaveLength(2);
+
+      // Check continuation received the preserved thinking block
+      const secondReq = bodies[1] as Record<string, unknown>;
+      const messages = secondReq.messages as Array<Record<string, unknown>>;
+      const assistantMsg = messages.find(m => m.role === "assistant");
+      expect(assistantMsg).toBeDefined();
+      expect(assistantMsg?.content).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: "thinking", signature: "ocxr1:thought_sig" }),
+        expect.objectContaining({ type: "tool_use", id: "call_mcp_thought" }),
+      ]));
     } finally {
       globalThis.fetch = originalFetch;
     }

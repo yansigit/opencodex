@@ -95,4 +95,16 @@ describe("cursor external-replay repetition breaker (devlog 260826 gap-9)", () =
     const texts = rootTexts(encode(messages));
     expect(texts.filter(text => text === REPEAT)).toHaveLength(2);
   });
+
+  test("external model replay omits assistant commentary preambles from flattened roots", () => {
+    const messages: OcxMessage[] = [
+      { role: "user", content: "search logs", timestamp: 1 },
+      { role: "assistant", content: "I'll keep tracing the files...", phase: "commentary", timestamp: 2 } as OcxMessage,
+      { role: "assistant", content: "Found the relevant logs.", phase: "final_answer", timestamp: 3 } as OcxMessage,
+      { role: "user", content: "summarize", timestamp: 4 },
+    ];
+    const texts = rootTexts(encode(messages));
+    expect(texts).not.toContain("I'll keep tracing the files...");
+    expect(texts).toContain("Found the relevant logs.");
+  });
 });
