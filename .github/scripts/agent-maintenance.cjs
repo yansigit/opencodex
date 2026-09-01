@@ -6,7 +6,11 @@ const STATUSES = new Set(["queued", "planning", "running", "reviewing", "needs-h
 const MAX_REPAIR_ATTEMPTS = 2;
 const MAX_FINDINGS = 10;
 const MAX_FINDING_BYTES = 12 * 1024;
+const MAX_JULES_CREDENTIALS = 3;
 const JULES_BASE_URL = "https://jules.googleapis.com/v1alpha";
+const DEFAULT_JULES_CREDENTIAL_ID = "default";
+const LEGACY_JULES_ACCOUNT_ID = "legacy";
+const CREDENTIAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 function defaultAgentMaintenanceState({ taskId, taskKind, issueNumber, now = new Date().toISOString() }) {
   return {
@@ -16,6 +20,7 @@ function defaultAgentMaintenanceState({ taskId, taskKind, issueNumber, now = new
     issueNumber,
     sessionId: null,
     sessionUrl: null,
+    selectedCredentialId: null,
     pullRequestNumber: null,
     expectedHeadSha: null,
     reviewCycle: 0,
@@ -28,7 +33,7 @@ function defaultAgentMaintenanceState({ taskId, taskKind, issueNumber, now = new
 }
 
 function validateState(input) {
-  const state = { lastBugbotCheckRunId: null, reason: null, ...input };
+  const state = { lastBugbotCheckRunId: null, reason: null, selectedCredentialId: null, ...input };
   const nullableString = (value) => value === null || typeof value === "string";
   const nullableInteger = (value) => value === null || Number.isInteger(value);
   if (state.version !== 1) throw new Error("unsupported maintenance state version");
@@ -36,6 +41,7 @@ function validateState(input) {
   if (!TASK_KINDS.has(state.taskKind)) throw new Error("invalid taskKind");
   if (!Number.isInteger(state.issueNumber) || state.issueNumber <= 0) throw new Error("invalid issueNumber");
   if (!nullableString(state.sessionId) || (state.sessionId !== null && !/^[^/]+$/.test(state.sessionId)) || !nullableString(state.sessionUrl)) throw new Error("invalid session fields");
+  if (!nullableString(state.selectedCredentialId) || (state.selectedCredentialId !== null && !CREDENTIAL_ID_PATTERN.test(state.selectedCredentialId))) throw new Error("invalid selectedCredentialId");
   if (!nullableInteger(state.pullRequestNumber) || !nullableInteger(state.lastBugbotCheckRunId)) throw new Error("invalid numeric fields");
   if (state.expectedHeadSha !== null && !/^[0-9a-f]{40}$/i.test(state.expectedHeadSha)) throw new Error("invalid expectedHeadSha");
   if (!Number.isInteger(state.reviewCycle) || state.reviewCycle < 0 || state.reviewCycle > 3) throw new Error("invalid reviewCycle");
@@ -333,6 +339,9 @@ function validateSessionPullRequest({ session, pr, owner, repo, expectedAuthorId
   if (pr.base?.ref !== "dev") throw new Error("Jules pull request must base dev");
   if (!allowClosed && pr.state !== "open") throw new Error("Jules pull request must remain open");
   if (!pr.head?.repo?.full_name) throw new Error("Jules pull request head branch was deleted");
+  if (pr.head.repo.full_name.toLowerCase() !== `${owner}/${repo}`.toLowerCase()) {
+    throw new Error("Jules pull request head must belong to this repository");
+  }
   if (!Number.isSafeInteger(Number(expectedAuthorId)) || Number(pr.user?.id) !== Number(expectedAuthorId)) throw new Error("Jules pull request author mismatch");
   if (!/^[0-9a-f]{40}$/i.test(pr.head?.sha ?? "")) throw new Error("Jules pull request has invalid head");
   return { number, headSha: pr.head.sha };
@@ -360,11 +369,122 @@ function findGithubSource(sources, owner, repo) {
   return source.name;
 }
 
+function repoCreateArguments(payload, repository) {
+  const owner = repository?.owner;
+  const repo = repository?.repo;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("invalid Jules session request");
+  if (!owner || typeof owner !== "string" || !repo || typeof repo !== "string") throw new Error("invalid Jules repository identity");
+  return { payload, owner, repo };
+}
+
+function requestWithSource(payload, source) {
+  const sourceContext = payload.sourceContext && typeof payload.sourceContext === "object"
+    ? payload.sourceContext
+    : {};
+  const githubRepoContext = sourceContext.githubRepoContext && typeof sourceContext.githubRepoContext === "object"
+    ? sourceContext.githubRepoContext
+    : {};
+  return {
+    ...payload,
+    sourceContext: {
+      ...sourceContext,
+      source,
+      githubRepoContext: { ...githubRepoContext },
+    },
+  };
+}
+
 function assertSession(value) {
   if (!value || typeof value !== "object" || !/^sessions\/[^/]+$/.test(value.name ?? "") || typeof value.id !== "string" || typeof value.title !== "string") {
     throw new Error("Jules session schema changed");
   }
   return value;
+}
+
+function invalidCredentialPool(reason) {
+  return new Error(`invalid Jules credential pool: ${reason}`);
+}
+
+function registerJulesSecrets(entries, registerSecret) {
+  if (registerSecret === undefined) return;
+  if (typeof registerSecret !== "function") throw invalidCredentialPool("registerSecret must be a function");
+  for (const entry of entries) {
+    try {
+      registerSecret(entry.apiKey);
+    } catch {
+      throw new Error("Jules secret registration failed");
+    }
+  }
+}
+
+function parseJulesCredentialPool(input, { registerSecret } = {}) {
+  let value = input;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) throw invalidCredentialPool("credential input is empty");
+    if (text.startsWith("[") || text.startsWith("{")) {
+      try {
+        value = JSON.parse(text);
+      } catch {
+        throw invalidCredentialPool("credential JSON is malformed");
+      }
+    } else {
+      value = { apiKey: value };
+    }
+  }
+
+  // The old controller accepted one JULES_API_KEY. Keep that shape valid while
+  // assigning it a stable, non-secret identity for state and audit output.
+  if (!Array.isArray(value) && value && typeof value === "object") {
+    if (Object.prototype.hasOwnProperty.call(value, "apiKey")) {
+      value = [{
+        id: value.id ?? DEFAULT_JULES_CREDENTIAL_ID,
+        apiKey: value.apiKey,
+        accountId: value.accountId ?? LEGACY_JULES_ACCOUNT_ID,
+        priority: value.priority ?? 0,
+      }];
+    } else if (Array.isArray(value.entries)) {
+      value = value.entries;
+    } else if (Array.isArray(value.credentials)) {
+      value = value.credentials;
+    }
+  }
+  if (!Array.isArray(value)) throw invalidCredentialPool("expected an array of credential entries");
+  if (value.length === 0) throw invalidCredentialPool("credential pool is empty");
+  if (value.length > MAX_JULES_CREDENTIALS) throw invalidCredentialPool("credential pool exceeds the maximum of 3 entries");
+
+  const ids = new Set();
+  const accounts = new Set();
+  const entries = value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw invalidCredentialPool("malformed credential entry");
+    }
+    const { id, apiKey, accountId, priority } = entry;
+    if (typeof id !== "string" || !CREDENTIAL_ID_PATTERN.test(id)) {
+      throw invalidCredentialPool("malformed credential id");
+    }
+    if (typeof apiKey !== "string" || !apiKey.trim()) {
+      throw invalidCredentialPool("malformed credential entry");
+    }
+    if (typeof accountId !== "string" || !accountId.trim()) {
+      throw invalidCredentialPool("malformed credential accountId");
+    }
+    if (!Number.isSafeInteger(priority) || priority < 0) {
+      throw invalidCredentialPool("malformed credential priority");
+    }
+    if (ids.has(id)) throw invalidCredentialPool("duplicate credential id");
+    if (accounts.has(accountId)) throw invalidCredentialPool("duplicate credential accountId");
+    ids.add(id);
+    accounts.add(accountId);
+    return { id, apiKey, accountId, priority };
+  });
+
+  const sorted = entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((a, b) => a.entry.priority - b.entry.priority || a.index - b.index)
+    .map(({ entry }) => entry);
+  registerJulesSecrets(sorted, registerSecret);
+  return sorted;
 }
 
 function retryDelay(response, attempt) {
@@ -375,20 +495,54 @@ function retryDelay(response, attempt) {
   return Math.min(500 * (2 ** attempt), 5_000);
 }
 
-function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
-  if (!apiKey) throw new Error("JULES_API_KEY is required");
+function redactJulesError(error, apiKey) {
+  const secret = String(apiKey);
+  const message = String(error?.message || "Jules API request failed").split(secret).join("[REDACTED]");
+  const safe = new Error(message);
+  if (error?.name) safe.name = error.name;
+  if (Number.isInteger(error?.status)) safe.status = error.status;
+  if (error?.operation) safe.operation = error.operation;
+  if (error?.uncertain) safe.uncertain = true;
+  return safe;
+}
+
+function createJulesClient(options = {}) {
+  const apiKeyIsPool = Array.isArray(options.apiKey) ||
+    (options.apiKey && typeof options.apiKey === "object") ||
+    (typeof options.apiKey === "string" && /^[\s]*[\[{]/.test(options.apiKey));
+  if (options.credentialPool !== undefined || options.pool !== undefined || options.credentials !== undefined || options.apiKeys !== undefined || apiKeyIsPool) {
+    return createJulesCredentialPoolClient(options);
+  }
+  const {
+    apiKey,
+    fetchImpl = fetch,
+    registerSecret,
+    sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  } = options;
+  if (!apiKey || typeof apiKey !== "string") throw new Error("JULES_API_KEY is required");
+  registerJulesSecrets([{ apiKey }], registerSecret);
 
   async function request(path, { method = "GET", body, retryReads = true } = {}) {
+    const operation = method === "POST" && path === "/sessions"
+      ? "session-create"
+      : method === "GET" ? "read" : "mutation";
     for (let attempt = 0; ; attempt += 1) {
-      const response = await fetchImpl(`${JULES_BASE_URL}${path}`, {
-        method,
-        signal: AbortSignal.timeout(30_000),
-        headers: {
-          "content-type": "application/json",
-          "x-goog-api-key": apiKey,
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-      });
+      let response;
+      try {
+        response = await fetchImpl(`${JULES_BASE_URL}${path}`, {
+          method,
+          signal: AbortSignal.timeout(30_000),
+          headers: {
+            "content-type": "application/json",
+            "x-goog-api-key": apiKey,
+          },
+          ...(body ? { body: JSON.stringify(body) } : {}),
+        });
+      } catch (error) {
+        const safe = redactJulesError(error, apiKey);
+        safe.operation = operation;
+        throw safe;
+      }
       if (response.ok) return response.json();
       if (method === "GET" && retryReads && attempt < 3 && (response.status === 429 || response.status >= 500)) {
         await sleep(retryDelay(response, attempt));
@@ -396,6 +550,7 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
       }
       const error = new Error(`Jules API HTTP ${response.status}`);
       error.status = response.status;
+      error.operation = operation;
       throw error;
     }
   }
@@ -461,6 +616,7 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
         error instanceof SyntaxError ||
         ["AbortError", "TimeoutError"].includes(error?.name) ||
         error?.status === 409 ||
+        error?.status === 429 ||
         error?.status >= 500;
       if (!ambiguous) throw error;
       try {
@@ -468,6 +624,7 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
         if (matches.length !== 1) throw new Error(`found ${matches.length} matching sessions`);
         const candidate = await getSession(matches[0].name.slice("sessions/".length));
         if (
+          candidate.title !== payload.title ||
           candidate.sourceContext?.source !== payload.sourceContext?.source ||
           candidate.sourceContext?.githubRepoContext?.startingBranch !== payload.sourceContext?.githubRepoContext?.startingBranch
         ) {
@@ -482,7 +639,14 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
     }
   }
 
+  async function createRepoSessionIdempotently(payload, repository) {
+    const args = repoCreateArguments(payload, repository);
+    const source = findGithubSource(await listSources(), args.owner, args.repo);
+    return createSessionIdempotently(requestWithSource(args.payload, source));
+  }
+
   return {
+    createRepoSessionIdempotently,
     createSession,
     createSessionIdempotently,
     getSession,
@@ -493,16 +657,111 @@ function createJulesClient({ apiKey, fetchImpl = fetch, sleep = (ms) => new Prom
   };
 }
 
+function poolError(error, entries, credentialId) {
+  let message = String(error?.message || "Jules API request failed");
+  for (const entry of entries) message = message.split(entry.apiKey).join("[REDACTED]");
+  const safe = new Error(message);
+  if (Number.isInteger(error?.status)) safe.status = error.status;
+  if (error?.uncertain) safe.uncertain = true;
+  if (error?.operation) safe.operation = error.operation;
+  safe.credentialId = credentialId;
+  return safe;
+}
+
+function withCredentialId(value, credentialId) {
+  return value && typeof value === "object" ? { ...value, credentialId } : value;
+}
+
+function createJulesCredentialPoolClient(options = {}) {
+  const input = options.credentialPool ?? options.pool ?? options.credentials ?? options.apiKeys ?? options.apiKey;
+  const entries = parseJulesCredentialPool(input, { registerSecret: options.registerSecret });
+  const clients = entries.map((entry) => createJulesClient({
+    apiKey: entry.apiKey,
+    fetchImpl: options.fetchImpl,
+    sleep: options.sleep,
+  }));
+  const indexById = new Map(entries.map((entry, index) => [entry.id, index]));
+  let selectedIndex = 0;
+
+  const selectedEntry = () => entries[selectedIndex];
+  const getState = () => ({
+    selectedCredentialId: selectedEntry()?.id ?? null,
+    credentialCount: entries.length,
+  });
+  const safeError = (error) => poolError(error, entries, selectedEntry()?.id ?? null);
+  const selectCredential = (id) => {
+    if (typeof id !== "string" || !indexById.has(id)) throw new Error("unknown Jules credential id");
+    selectedIndex = indexById.get(id);
+    return getState();
+  };
+  const invokeSelected = async (method, ...args) => {
+    try {
+      const result = await clients[selectedIndex][method](...args);
+      if (method === "getSession" || method === "createSession" || method === "createSessionIdempotently") {
+        return withCredentialId(result, selectedEntry().id);
+      }
+      if (method === "listSessions") return result.map((session) => withCredentialId(session, selectedEntry().id));
+      return result;
+    } catch (error) {
+      throw safeError(error);
+    }
+  };
+
+  async function createSelected(method, ...args) {
+    const index = selectedIndex;
+    try {
+      const session = await clients[index][method](...args);
+      return withCredentialId(session, entries[index].id);
+    } catch (error) {
+      throw poolError(error, entries, entries[index].id);
+    }
+  }
+
+  function createRepoSessionIdempotently(payload, repository) {
+    const args = repoCreateArguments(payload, repository);
+    return createSelected("createRepoSessionIdempotently", args.payload, {
+      owner: args.owner,
+      repo: args.repo,
+    });
+  }
+
+  const client = {
+    createRepoSessionIdempotently,
+    createSession: (payload) => createSelected("createSession", payload),
+    createSessionIdempotently: (payload) => createSelected("createSessionIdempotently", payload),
+    getSession: (id) => invokeSelected("getSession", id),
+    listSessionActivities: (id) => invokeSelected("listSessionActivities", id),
+    sendMessage: (id, prompt) => invokeSelected("sendMessage", id, prompt),
+    listSessions: () => invokeSelected("listSessions"),
+    listSources: () => invokeSelected("listSources"),
+    selectCredential,
+    getState,
+    getCredentialState: getState,
+  };
+  Object.defineProperty(client, "selectedCredentialId", {
+    enumerable: true,
+    get: () => selectedEntry()?.id ?? null,
+  });
+  Object.defineProperty(client, "state", {
+    enumerable: true,
+    get: getState,
+  });
+  return client;
+}
+
 module.exports = {
   JULES_BASE_URL,
   MAX_FINDINGS,
   MAX_FINDING_BYTES,
+  MAX_JULES_CREDENTIALS,
   MAX_REPAIR_ATTEMPTS,
   STATE_PATTERN,
+  CREDENTIAL_ID_PATTERN,
   buildJulesSessionRequest,
   buildJulesRepairComment,
   changedFileListComplete,
   createJulesClient,
+  createJulesCredentialPoolClient,
   defaultAgentMaintenanceState,
   exactHeadBugbotEvidence,
   generatedSyncBaselineDisposition,
@@ -514,6 +773,7 @@ module.exports = {
   julesSessionDisposition,
   latestActiveLabelActor,
   parseAgentMaintenanceState,
+  parseJulesCredentialPool,
   quotaExhaustionExpired,
   requiredChecksDisposition,
   requiredChecksSuccessful,

@@ -87,17 +87,29 @@ describe("dev promotion workflow contract", () => {
     expect(workflow.jobs?.promote?.permissions).toEqual({
       contents: "read",
       actions: "read",
-      "pull-requests": "write",
     });
     expect(workflowSource).toMatch(/actions\/checkout@[0-9a-f]{40} # v\d/);
     expect(workflowSource).toContain("persist-credentials: false");
   });
 
-  test("mints least-privilege App tokens only for the two dev writers", () => {
+  test("mints least-privilege App tokens for promotion and the two dev writers", () => {
+    const promoteSteps = workflow.jobs?.promote?.steps ?? [];
     const backmergeSteps = workflow.jobs?.backmerge?.steps ?? [];
     const postReleaseSteps = workflow.jobs?.post_release?.steps ?? [];
     const tokenUse = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1";
 
+    expect(promoteSteps.find((step) => step.id === "promotion-app-token")).toMatchObject({
+      if: "steps.verify.outputs.trees_differ == 'true' && steps.verify.outputs.main_ancestor == 'true'",
+      uses: tokenUse,
+      with: {
+        "client-id": "${{ vars.PR_AUTOMATION_APP_ID }}",
+        "private-key": "${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}",
+        owner: "${{ github.repository_owner }}",
+        repositories: "${{ github.event.repository.name }}",
+        "permission-pull-requests": "write",
+        "permission-issues": "write",
+      },
+    });
     expect(backmergeSteps.find((step) => step.id === "backmerge-app-token")).toMatchObject({
       if: "steps.verify-main.outputs.eligible == 'true'",
       uses: tokenUse,
@@ -127,7 +139,9 @@ describe("dev promotion workflow contract", () => {
     expect(postReleaseSteps.find((step) => step.name === "Bump and push the next stable dev version")).toMatchObject({
       env: { GH_TOKEN: "${{ steps.post-release-app-token.outputs.token }}" },
     });
-    expect(workflow.jobs?.promote?.steps?.some((step) => step.uses === tokenUse)).toBe(false);
+    expect(promoteSteps.find((step) => step.name === "Create or update the human promotion PR")).toMatchObject({
+      env: { GH_TOKEN: "${{ steps.promotion-app-token.outputs.token }}" },
+    });
   });
 
   test("creates or updates one human-gated dev-to-main PR", () => {

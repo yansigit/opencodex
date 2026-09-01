@@ -16,7 +16,13 @@ for (const path of ["/tmp", "/home/ocx"]) {
 }
 if (readdirSync("/sys/class/net").sort().join("\n") !== "lo") throw new Error("container networking must expose only lo");
 const run = async (cwd: string, args: string[]) => {
-  const result = await Bun.spawn(["bun", ...args], { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit" }).exited;
+  const result = await Bun.spawn(["bun", ...args], {
+    cwd,
+    env: { ...process.env, OCX_TEST_NETWORK_ISOLATED: "1" },
+    stdin: "inherit",
+    stdout: "inherit",
+    stderr: "inherit",
+  }).exited;
   if (result !== 0) process.exit(result);
 };
 const workspace = "/tmp/ocx-test-workspace";

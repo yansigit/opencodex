@@ -1,0 +1,39 @@
+name: Automation health
+
+on:
+  schedule:
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: automation-health-${{ github.repository }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # workflow_dispatch can select a branch; only the repository's trusted
+    # default branch may provide the checker and workflow definition.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted default branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Evaluate read-only automation health
+        env:
+          GITHUB_API_URL: ${{ github.api_url }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          FORK_SYNC_UPSTREAM_REPOSITORY: lidge-jun/opencodex
+        run: node .github/scripts/automation-health.cjs

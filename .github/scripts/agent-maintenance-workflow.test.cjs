@@ -47,8 +47,11 @@ describe("agent maintenance workflow", () => {
     assert.match(workflow, /\["write", "maintain", "admin"\]/);
     assert.match(workflow, /trustedActiveMaintenanceCount/);
     assert.doesNotMatch(workflow, /filter\(issue =>\s*\n\s*\(issue\.labels[^\n]+agent:running/);
-    assert.match(workflow, /createSessionIdempotently/);
+    assert.match(workflow, /createRepoSessionIdempotently/);
     assert.match(workflow, /state\.sessionId = session\.name\.slice\("sessions\/"\.length\)/);
+    assert.match(workflow, /state\.selectedCredentialId = session\.credentialId/);
+    assert.match(workflow, /client\.selectCredential\(state\.selectedCredentialId\)/);
+    assert.match(workflow, /Jules credential:/);
     assert.match(workflow, /requirePlanApproval/);
     assert.match(workflow, /issue\.title\.startsWith\("\[agent:docs\]"\)/);
     assert.match(workflow, /issue\.title\.startsWith\("\[agent:tests\]"\)/);
@@ -57,13 +60,18 @@ describe("agent maintenance workflow", () => {
     assert.match(workflow, /AGENT_MAINTENANCE_SCHEDULES/);
     assert.match(workflow, /Schedule dispatch is disabled/);
     assert.match(workflow, /JULES_API_KEY/);
+    assert.match(workflow, /JULES_API_KEY_POOL_JSON/);
+    assert.match(workflow, /registerSecret: value => core\.setSecret\(value\)/);
     assert.match(workflow, /context\.eventName === "check_run"/);
     assert.match(workflow, /context\.payload\.check_run\?\.name !== "Cursor Bugbot"/);
     assert.match(workflow, /Number\(context\.payload\.check_run\?\.app\?\.id\) !== configuredBugbotAppId/);
     assert.ok(
-      workflow.indexOf('if (mode === "shadow")') < workflow.indexOf("const client = createJulesClient"),
+      workflow.indexOf('if (mode === "shadow")') < workflow.indexOf("const createIssueClient = () => createJulesCredentialPoolClient"),
       "off and shadow modes must return before Jules client construction",
     );
+    assert.match(workflow, /const client = createIssueClient\(\);/);
+    assert.match(workflow, /state\?\.sessionId && !state\.selectedCredentialId && client\.getState\(\)\.credentialCount > 1/);
+    assert.match(workflow, /Legacy Jules session has no credential affinity/);
   });
 
   it("reconciles exact-head reviews and enforces the repair ceiling", () => {
