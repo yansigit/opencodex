@@ -311,9 +311,20 @@ function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
   });
 }
 
+async function terminateChildProcess(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  if (await waitForExit(child, 5000)) return;
+  child.kill("SIGKILL");
+  if (!await waitForExit(child, 5000)) {
+    throw new Error(`process ${child.pid ?? "unknown"} did not exit`);
+  }
+}
+
 type FirstStartupCleanupDeps = {
   probe: typeof healthAt;
   kill: (pid: number) => void;
+  killLauncher?: (child: ChildProcess) => Promise<void>;
   remove: (path: string) => void;
 };
 
@@ -322,7 +333,12 @@ async function cleanupFirstStartup(
   configDir: string,
   launcher: ChildProcess | null,
   health: Health | null,
-  deps: FirstStartupCleanupDeps = { probe: healthAt, kill: killProxy, remove: removeTree },
+  deps: FirstStartupCleanupDeps = {
+    probe: healthAt,
+    kill: killProxy,
+    killLauncher: terminateChildProcess,
+    remove: removeTree,
+  },
 ): Promise<void> {
   const errors: string[] = [];
   if (health) {
@@ -340,7 +356,12 @@ async function cleanupFirstStartup(
     }
   }
   if (launcher?.pid && launcher.exitCode === null && launcher.signalCode === null) {
-    try { deps.kill(launcher.pid); } catch (error) { errors.push(`launcher cleanup: ${String(error)}`); }
+    try {
+      if (deps.killLauncher) await deps.killLauncher(launcher);
+      else deps.kill(launcher.pid);
+    } catch (error) {
+      errors.push(`launcher cleanup: ${String(error)}`);
+    }
   }
   try { deps.remove(root); } catch (error) { errors.push(`root cleanup: ${String(error)}`); }
   if (errors.length > 0) throw new Error(errors.join("; "));
@@ -366,6 +387,16 @@ test("first-start cleanup attempts every owned resource when one cleanup step fa
   expect(error?.message).toContain("22 kill failed");
   expect(error?.message).toContain("remove failed");
   removeTree(root);
+});
+
+test("first-start cleanup reaps its spawned launcher without PID polling", async () => {
+  const launcher = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  expect(launcher.pid).toBeNumber();
+  await terminateChildProcess(launcher);
+  expect(launcher.exitCode !== null || launcher.signalCode !== null).toBe(true);
 });
 
 test("first-start cleanup never hard-kills a health PID without matching isolated runtime state", async () => {
