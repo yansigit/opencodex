@@ -211,6 +211,7 @@ Claude Desktop profile commands are:
 ```text
 ocx claude desktop [apply]                         Save and apply the four-family profile
 ocx claude desktop show [--json]                   Show routes, families, and defaults
+ocx claude desktop status [--json]                 Show applied state, drift, and health
 ocx claude desktop move <route> <family> [--default]
 ocx claude desktop default <family> <route|none>
 ocx claude desktop export <path|->                 Export versioned JSON (`-` = stdout)
@@ -223,11 +224,13 @@ remain supported. Use `ocx claude config <status|set> ...` for Claude Code setti
 
 ### `ocx opencode [opencode args...]`
 
-Ensure the proxy is running, then launch opencode with a generated `provider.opencodex` block in
-OpenCode's inline runtime layer (`OPENCODE_CONFIG_CONTENT`). Existing inline config is preserved and
-only `provider.opencodex` is replaced for this launch. Global or project `opencode.json` files may be
-read to warn about an existing override, but on-disk files are never modified. Routed models appear
-as `opencodex/<provider>/<model>`. Launching plain `opencode` later behaves exactly as before.
+Ensure the proxy is running, then launch opencode with the generated `provider.opencodex` and
+`providers.opencodex` blocks in OpenCode's inline runtime layer (`OPENCODE_CONFIG_CONTENT`). The
+legacy block keeps V1 clients working; the V2 block is the one carrying the selectable
+reasoning-effort variants. Existing inline config is preserved and only those two keys are replaced
+for this launch. Global or project `opencode.json` files may be read to warn about an existing
+override, but on-disk files are never modified. Routed models appear as
+`opencodex/<provider>/<model>`. Launching plain `opencode` later behaves exactly as before.
 
 ### `ocx grok <status|exclude|include|set|clear|apply> ...`
 
@@ -235,7 +238,7 @@ Manage and apply the Grok Build model fence.
 
 ## Client config export
 
-### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime>`
+### `ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside>`
 
 Print a client config wired to the running proxy. The command serializes the
 `opencodex` provider block — base URL, model list, and the client's credential
@@ -246,7 +249,7 @@ models Codex can currently see.
 
 | Flag | Action |
 | --- | --- |
-| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime>` | Required. Selects the client config dialect. |
+| `--client <opencode\|pi\|omp\|hermes\|openclaw\|kimi\|gajae\|dsh\|mcode\|zcode\|prime\|aside>` | Required. Selects the client config dialect. |
 | `--json` | Print the generated document as JSON on stdout for scripts. This is JSON even when the selected client's native format is YAML, TOML, or JSON5. |
 | `--out <path>` | Write the client's native config format to `<path>`. Refuses to replace an existing file. |
 | `--force` | Allow `--out` to replace an existing file. |
@@ -275,6 +278,7 @@ client applies its own defaults for those).
 | `mcode` | `~/.minimax/config.yaml` (`MINIMAX_DATA_DIR`, then the legacy `MAVIS_DATA_DIR`, win when set; a relative value is refused) | `mcode-config.yaml` | none — loopback placeholder |
 | `zcode` | `~/.zcode/v2/config.json` (`ZCODE_DATA_DIR` wins when set; a relative value is refused) | `config.json` | none — loopback placeholder |
 | `prime` | `~/.prime/agent/models.json` (`PRIME_AGENT_CODING_AGENT_DIR` wins when set; a relative value is refused) | `prime-models.json` | none — loopback placeholder |
+| `aside` | `~/.aside/u/<account>/models.json` for the account Aside's own `accounts.json` names as current; an unreadable manifest is refused rather than defaulting to an account | `aside-models.json` | none — loopback placeholder |
 
 The managed DSH export requires DSH 0.1.0-rc.6 or newer and owns only
 `llm-pi-ai.providers.opencodex`. DSH hot reloads that provider; the user's default model and
@@ -326,13 +330,33 @@ the CLI, the API, and the GUI use the same bytes.
 
 ## Runtime and configuration
 
-### `ocx system <status|settings|startup|diagnostics|sync|update> ...`
+### `ocx system <status|settings|startup|diagnostics|sync|codex-app-server|codex-restart|update|codex-cli-update> ...`
 
 Manage headless runtime settings, startup, sync, diagnostics, and updates.
 
 ```bash
 ocx system settings --stream-mode eager-relay
 ```
+
+`ocx system update` updates OpenCodex itself. The separate Codex CLI inspection surface is:
+
+```bash
+ocx system codex-cli-update check --json
+```
+
+`check` makes no package-registry request and inspects bounded configured-candidate provenance evidence,
+including a redacted executable location and ownership evidence. Trusted published-launcher context authenticates
+the candidate snapshot, not successful Codex execution. Because this one-shot command never executes Codex,
+environment and persisted candidates remain report-only (`managed: false`, normally `selection_unattested`);
+`selectionAttested` remains `false`. The JSON report exposes `candidateAvailable`, `candidateVersion`, `candidateSource`,
+and `selectionAttested`. Inspecting the configured candidate requires a trusted published-launcher context;
+a direct Bun/source launch has no such proof, ignores ambient and persisted candidate state, and may report
+`candidate_unavailable`. On Windows this first slice performs no candidate or configuration filesystem I/O:
+only a proof-captured absolute environment candidate can receive lexical app-bundle or version-manager labels;
+every other Windows candidate fails closed. The command does not execute Codex or a package manager, repair a shim,
+write configuration or cache state, stop a process, or install anything. App-bundled, recognized
+version-manager, unverified standalone, and ambiguous shim states are reported as unmanaged or unknown
+and are never classified as managed.
 
 ### `ocx config <show|get|set|unset|validate|export|import> ...`
 

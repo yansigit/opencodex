@@ -70,7 +70,7 @@ function readDefaultReasoningEffort(raw: unknown, efforts: string[] | undefined)
   return { value: raw };
 }
 import type { CatalogModel } from "../../codex/catalog";
-import { accountBoundNativeOpenAiSlugsBySelector, catalogModelSlug, configuredNativeAliasSlugs, disabledNativeSlugs, invalidateCodexModelsCache, nativeModelRows, shouldIncludeAccountBoundNativeOpenAi, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
+import { accountBoundNativeOpenAiSlugsBySelector, catalogModelSlug, configuredNativeAliasSlugs, disabledNativeSlugs, invalidateCodexModelsCache, nativeModelRows, NATIVE_OPENAI_MODELS, shouldIncludeAccountBoundNativeOpenAi, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
 import { CatalogGatherBusyError } from "../../codex/catalog/provider-fetch";
 import { getProviderLiveModelCount } from "../../codex/model-cache";
 import {
@@ -209,6 +209,7 @@ function applyModelVisibility(
   const supportedNative = new Set([
     ...nativeModelRows(config).map(row => row.slug),
     ...accountNativeQualified,
+    ...NATIVE_OPENAI_MODELS,
   ]);
   const targets: Array<{ id: string; native: boolean }> = [];
   const seen = new Set<string>();

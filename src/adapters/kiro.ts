@@ -469,14 +469,25 @@ function kiroCompletionTool(): Record<string, unknown> {
   return {
     toolSpecification: {
       name: KIRO_COMPLETION_TOOL_NAME,
-      description: "Finish the task and return the complete user-facing final answer. Call only when no more work or tool calls are needed.",
+      // The shared tool-catalog nudge enumerates this name next to ordinary tools and tells every
+      // listed name to count a call only after its tool result returns. Nothing returns a result
+      // here: a valid call becomes the turn's terminal. Left undescribed, the model reads one more
+      // deferrable work tool and keeps calling tools with a finished answer already written as
+      // commentary. So the description states the distinction, the obligation, and the terminality
+      // where the model is actually choosing between tools.
+      //
+      // It also has to name the blocked-on-user state, for the same reason the prose contract does.
+      // This is the surface the model reads while CHOOSING; if it admits only "fully complete", a
+      // model holding a question that blocks progress reads this tool as unavailable and keeps
+      // working instead, which is the measured defect. The two surfaces must not disagree.
+      description: "Terminal completion channel, not an ordinary work tool. When the task is fully complete and no more work or tool calls are needed, you must call this tool exactly once instead of providing the final answer as ordinary assistant text. Call it the same way when you cannot continue until the user supplies a decision, information, or a clarification that only they can give: the question itself is the answer. Put the complete user-facing final answer in `answer`. The call is complete when issued: it ends the turn, returns no tool result, and no text or tool call may follow it.",
       inputSchema: {
         json: {
           type: "object",
           properties: {
             answer: {
               type: "string",
-              description: "The complete final answer to show the user.",
+              description: "The complete final answer to show the user, or the blocking question you need the user to answer before you can continue.",
             },
           },
           required: ["answer"],
@@ -1062,6 +1073,27 @@ async function* parseKiroAttemptEvents(
       try { yield event; } finally { retention.releaseEvent(event); }
     }
   };
+  // A valid private completion answer supersedes the progress prose staged during the SAME
+  // inference: Kiro emits answer-like text and then calls the completion tool, so releasing both
+  // makes the bridge close the commentary message and open a second one with near-identical text
+  // (#2819 follow-up). Consume the collection instead — drop the redundant text, keep every
+  // non-text event, and release retention either way.
+  //
+  // This is deliberately the ONLY suppression site. The outer drain in `parseKiroAttempt` is also
+  // the leftover flush for early terminal returns (stream, protocol, and provider failures), so
+  // teaching it to discard text would hide the only commentary a failed turn ever produced.
+  // Splicing here leaves that drain empty on the completion path and untouched everywhere else.
+  const consumeSupersededByCompletion = async function* (
+    events: AdapterEvent[],
+  ): AsyncGenerator<AdapterEvent> {
+    for (const event of events.splice(0)) {
+      try {
+        if (event.type !== "text_delta") yield event;
+      } finally {
+        retention.releaseEvent(event);
+      }
+    }
+  };
 
   const providerState = (): { kiro: { conversationId: string } } | undefined =>
     returnedConversationId ? { kiro: { conversationId: returnedConversationId } } : undefined;
@@ -1466,12 +1498,15 @@ async function* parseKiroAttemptEvents(
     });
 
     if (mode === "required") {
-      yield* emitRetained(deferred.splice(0));
+      // A valid completion answer makes this inference's staged prose redundant; anything else
+      // still flushes exactly as before (bounded fallback, explicit stops, real tool calls).
+      if (completionAnswer !== undefined) yield* consumeSupersededByCompletion(deferred);
+      else yield* emitRetained(deferred.splice(0));
     }
 
     if (mode === "text_fallback") {
       if (completionAnswer !== undefined) {
-        yield* emitRetained(fallbackEvents);
+        yield* consumeSupersededByCompletion(fallbackEvents);
         yield { type: "text_delta", text: completionAnswer, phase: "final_answer" };
         return {
           assistantText,

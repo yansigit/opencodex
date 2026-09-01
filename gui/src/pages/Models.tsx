@@ -362,8 +362,12 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   );
   const shadowCallOptions = useMemo(() => {
     const activeNamespaced = new Set(shadowModelOptions.map(option => option.value));
-    return shadowCallModelOptions(models.filter(model => activeNamespaced.has(model.namespaced)), shadowCall?.model);
-  }, [models, shadowCall?.model, shadowModelOptions]);
+    return shadowCallModelOptions(
+      models.filter(model => activeNamespaced.has(model.namespaced)),
+      shadowCall?.model,
+      shadowCall?.sourceModels,
+    );
+  }, [models, shadowCall?.model, shadowCall?.sourceModels, shadowModelOptions]);
 
   const loadShadowCall = useCallback(async () => {
     const bounded = createBoundedFetch(15_000);
@@ -1206,7 +1210,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
             className="row models-provider-toggle"
             onClick={() => toggleCollapse(provider)}
             aria-expanded={!isCollapsed}
-            style={{ flex: 1, border: 0, background: "transparent", padding: 0, color: "inherit", cursor: "pointer", textAlign: "left" }}
+            style={{ flex: "1 1 auto", border: 0, background: "transparent", padding: 0, color: "inherit", cursor: "pointer", textAlign: "left" }}
           >
           <IconChevron style={{ width: 14, height: 14, color: "var(--muted)", transform: isCollapsed ? "none" : "rotate(90deg)", transition: "transform .12s" }} />
           <span className="text-body font-semibold" style={{ whiteSpace: "nowrap" }}>{providerDisplaySlug(provider)}</span>
@@ -1230,17 +1234,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                on={aliases.defaults.providers[provider] ?? aliases.defaults.global}
                onClick={() => void setDefaultAliases(!(aliases.defaults.providers[provider] ?? aliases.defaults.global), provider)}
                label={t("models.useDefaultAliases")}
+               showLabel
              />
-             {/* Available on every card, including the native one: the canonical `openai` seed
-                 check now admits contextWindow/modelContextWindows as user-owned overlays, and
-                 the native accessors only ever narrow the measured window with them. The cap
-                 next to it is the coarser sibling — one value for the whole provider. */}
-             <button
-               type="button"
-               className="btn btn-ghost btn-sm text-caption"
-               onClick={event => openContextSettings(group, event.currentTarget)}
-               aria-haspopup="dialog"
-             >{t("models.contextSettings")}</button>
              {
               <button
                 type="button"
@@ -1262,9 +1257,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                    setCustomError("");
                    setCustomModalOpen(true);
                  }}
-                aria-label={t("models.customAdd")}
                 aria-haspopup="dialog"
-              >+</button>
+              ><span aria-hidden="true">+</span> {t("models.customAdd")}</button>
              }
              {(() => {
                // #2465: Preset / All / Custom. Only providers with a shipped preset get the
@@ -1332,15 +1326,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
              })()}
              <button type="button" className="btn btn-ghost btn-sm text-caption" disabled={busy || allOn} onClick={() => bulkToggle(true)}>{t("models.allOn")}</button>
              <button type="button" className="btn btn-ghost btn-sm text-caption" disabled={busy || allOff} onClick={() => bulkToggle(false)}>{t("models.allOff")}</button>
-             <>
-               <Switch on={capOn} onClick={() => toggleProviderCap(provider, nativeProviderGroup)} disabled={busy} label={t("models.capValue", { value: fmtK(capDisplayValue) })} />
-               {/* The native group keeps the value visible with the cap off: its rows always
-                   advertise SOME window, so hiding the number leaves the card saying nothing
-                   about the context Codex will actually see. Routed providers keep the old
-                   behaviour, where an off cap genuinely means "no opinion". */}
-               {(capOn || nativeProviderGroup) && (
-                 <>
-                   <Select
+             <div className="models-cap-cluster">
+               <Switch on={capOn} onClick={() => toggleProviderCap(provider, nativeProviderGroup)} disabled={busy} label={t("models.contextCapLabel")} showLabel />
+               <>
+               <Select
                      // A saved cap outside CAP_OPTIONS is still a real selectable option
                      // (inserted below), so select it instead of falling back to "Custom";
                      // otherwise the trigger hides the persisted 128k value behind the
@@ -1355,8 +1344,9 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                      onChange={v => onSelectProviderCap(provider, v)}
                      disabled={busy || !capOn}
                      label={t("models.capValue", { value: fmtK(capDisplayValue) })}
-                   />
-                   {providerCapCustomOpen[provider] && (
+                     title={t("models.contextCapLabel")}
+               />
+               {capOn && providerCapCustomOpen[provider] && (
                      <>
                        <input
                          className="input"
@@ -1371,10 +1361,17 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                        />
                        <button type="button" onClick={() => applyProviderCustomCap(provider)} disabled={busy} className="btn btn-ghost btn-sm">{t("models.customApply")}</button>
                      </>
-                   )}
-                 </>
                )}
-             </>
+               </>
+               {/* This remains a separate per-model action, visually grouped beside the
+                   provider-wide cap controls while preserving its own tab stop and scope. */}
+               <button
+                 type="button"
+                 className="btn btn-ghost btn-sm text-caption"
+                 onClick={event => openContextSettings(group, event.currentTarget)}
+                 aria-haspopup="dialog"
+               >{t("models.contextSettings")}</button>
+             </div>
            </div>
         </div>
         {!isCollapsed && (

@@ -40,6 +40,16 @@ test("a provider with no native rows is not a native group", () => {
   expect(groups[0]!.nativeProviderGroup).toBe(false);
 });
 
+test("the native provider group carries the additive entitlement diagnostic", () => {
+  const entitlement = { status: "failed", reason: "timeout" } as const;
+  const groups = buildProviderModelGroups(
+    [nativeRow("gpt-5.6-sol")],
+    [{ name: "openai", entitlement }],
+  );
+
+  expect(groups[0]!.entitlement).toEqual(entitlement);
+});
+
 test("the native card keeps sorting first once a custom row joins it", () => {
   const groups = buildProviderModelGroups(
     [{ provider: "anthropic", id: "opus", native: false }, nativeRow("gpt-5.6-sol"), customRow("gpt-5.4")],
@@ -70,11 +80,11 @@ test("fmtK renders past a million as M, not as four-digit k", () => {
   expect(fmtK(350_000)).toBe("350k");
 });
 
-test("the native group keeps its window readable with the cap switched off", async () => {
+test("every provider keeps its window readable with the cap switched off", async () => {
   const src = await Bun.file(new URL("../src/pages/Models.tsx", import.meta.url)).text();
-  // Routed providers hide the value when the cap is off (off = "no opinion"), but a native
-  // row always advertises some window, so the number stays on screen for that group.
-  expect(src).toContain("{(capOn || nativeProviderGroup) && (");
+  // Every provider keeps the value visible while the disabled select communicates that an
+  // off cap has no effect. This also keeps provider-card control rows aligned.
+  expect(src).not.toContain("{(capOn || nativeProviderGroup) && (");
   // With the cap off the stored value is only what a future toggle would apply — the 350k
   // default — so the display falls back to the widest window the rows actually advertise.
   // Matched as separate fragments because the expression is wrapped across lines now, and

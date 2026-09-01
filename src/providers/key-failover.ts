@@ -11,7 +11,7 @@
 import { mutatePersistedConfig } from "../config";
 import { isAzureIdentityProvider } from "../config/provider-validation";
 import { routedProviderConfig } from "../router";
-import type { OcxConfig, OcxProviderConfig, RateLimitRetryPolicy } from "../types";
+import type { OcxConfig, OcxProviderConfig, RateLimitRetryPolicy, TransientRetryPolicy } from "../types";
 import { resolveProviderTransport, type OcxProviderTransport } from "./xai-transport";
 import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
 
@@ -35,6 +35,12 @@ const DEFAULT_RATE_LIMIT_RETRY = {
   maxIntervalMs: 60_000,
   respectRetryAfter: true,
 } as const satisfies Required<RateLimitRetryPolicy>;
+
+/** Total-send budget used by a bare transient-5xx retry opt-in. */
+const DEFAULT_TRANSIENT_RETRY = {
+  enabled: true,
+  attempts: 3,
+} as const satisfies Required<TransientRetryPolicy>;
 
 /** Map<`${providerName}\0${keyId}`, KeyCooldown> */
 const keyCooldowns = new Map<string, KeyCooldown>();
@@ -115,6 +121,20 @@ export function rateLimitRetryPolicyFor(
     intervalMs: policy.intervalMs ?? DEFAULT_RATE_LIMIT_RETRY.intervalMs,
     maxIntervalMs: policy.maxIntervalMs ?? DEFAULT_RATE_LIMIT_RETRY.maxIntervalMs,
     respectRetryAfter: policy.respectRetryAfter ?? DEFAULT_RATE_LIMIT_RETRY.respectRetryAfter,
+  };
+}
+
+export function transientRetryPolicyFor(
+  provider: Pick<OcxProviderConfig, "transientRetryOn5xx" | "authMode" | "adapter" | "azureCredential">,
+): Required<TransientRetryPolicy> | null {
+  const policy = provider.transientRetryOn5xx;
+  if (!policy || policy.enabled === false) return null;
+  if (provider.adapter !== "openai-chat") return null;
+  if (provider.authMode !== undefined && provider.authMode !== "key") return null;
+  if (isAzureIdentityProvider(provider)) return null;
+  return {
+    enabled: policy.enabled ?? DEFAULT_TRANSIENT_RETRY.enabled,
+    attempts: policy.attempts ?? DEFAULT_TRANSIENT_RETRY.attempts,
   };
 }
 

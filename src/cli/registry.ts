@@ -65,7 +65,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     summary: "Run as a background service.",
     details: [
       "With no subcommand, installs when absent or repairs/restarts an existing service.",
-      "`restart` is an alias of `repair` and does not re-register an installed service.",
+      "`restart` aliases `repair`; healthy Windows tasks are reused, while stale definitions may re-register and elevate.",
       "Use `ocx service status` to see diagnostics and log paths.",
     ],
   },
@@ -195,7 +195,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   {
     name: "combo",
     usage: "ocx combo <list|show|set|remove> ...",
-    summary: "Manage combo failover and round-robin virtual models.",
+    summary: "Manage combo virtual models and routing strategies.",
     details: ["Alias hierarchy: ocx route combo ...", "Use --targets provider/model[:weight],provider/model[:weight]."],
   },
   {
@@ -245,8 +245,8 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   { name: "api-key", usage: "ocx api-key <list|create|remove> ...", summary: "Alias of ocx access key." },
   {
     name: "export",
-    usage: "ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime> [--json] [--out <path>] [--force]",
-    summary: "Print a client config (OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent) wired to the running proxy.",
+    usage: "ocx export --client <opencode|pi|omp|hermes|openclaw|kimi|gajae|dsh|mcode|zcode|prime|aside> [--json] [--out <path>] [--force]",
+    summary: "Print a client config (OpenCode, Pi, OMP, Hermes, OpenClaw, Kimi Code, Gajae Code, DeepSeek Harness, MiniMax Code, ZCode, Prime Agent, Aside) wired to the running proxy.",
     details: [
       "--json prints the generated document as JSON on stdout; use --out for the client's native format.",
       "--out <path> writes the native config there and refuses to replace an existing file without --force.",
@@ -269,8 +269,13 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "system",
-    usage: "ocx system <status|settings|startup|diagnostics|sync|update> ...",
-    summary: "Manage headless runtime settings, startup, sync, diagnostics, and updates.",
+    usage: "ocx system <status|settings|startup|diagnostics|sync|codex-app-server|codex-restart|update|codex-cli-update> ...",
+    summary: "Manage headless runtime settings, startup, sync, diagnostics, OpenCodex updates, and read-only Codex CLI inspection.",
+    details: [
+      "system update manages OpenCodex itself.",
+      "ocx system codex-cli-update check [--json]",
+      "The Codex CLI inspection command makes no package-registry request, does not execute Codex or npm, install or repair software, control a process, or write configuration or cache state.",
+    ],
   },
   {
     name: "config",
@@ -292,6 +297,7 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "Claude Desktop profile:",
       "  ocx claude desktop [apply]                         Save and apply the four-family profile",
       "  ocx claude desktop show [--json]                   Show routes, families, and defaults",
+      "  ocx claude desktop status [--json]                 Show applied state, drift, and health",
       "  ocx claude desktop move <route> <family> [--default]",
       "  ocx claude desktop default <family> <route|none>",
       "  ocx claude desktop export <path|->                 Export versioned JSON (`-` = stdout)",
@@ -309,11 +315,12 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
     summary: "Launch opencode wired to the proxy (runtime provider config).",
     details: [
       "Ensures the proxy is running, then execs `opencode` with the generated `provider.opencodex`",
-      "block injected through OpenCode's inline runtime layer (`OPENCODE_CONFIG_CONTENT`). Any",
-      "existing inline config in the environment is preserved and only `provider.opencodex` is",
-      "overwritten for this launch.",
-      "Global/project opencode.json may be read to warn about an existing provider.opencodex",
-      "override; on-disk files are never modified.",
+      "and `providers.opencodex` blocks injected through OpenCode's inline runtime layer",
+      "(`OPENCODE_CONFIG_CONTENT`). Any existing inline config in the environment is preserved",
+      "and only `provider.opencodex` and `providers.opencodex` are overwritten for this launch.",
+      "Only the V2 block (`providers.opencodex`) carries the reasoning-effort variants.",
+      "Global/project opencode.json may be read to warn about an existing provider.opencodex or",
+      "providers.opencodex override; on-disk files are never modified.",
       "Routed models appear in the model picker as opencodex/<provider>/<model>.",
       "Stop using `ocx opencode` and plain `opencode` behaves exactly as before.",
     ],

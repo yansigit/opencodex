@@ -77,15 +77,20 @@ function runShardProbe(testSource: string, env: Record<string, string | undefine
 }
 
 /** A fake "real home" the guard will protect, so no deny case aims at the true one. */
-function sentinelHome(): { realHome: string; opencodexHome: string } {
+function sentinelHome(): { realHome: string; opencodexHome: string; codexHome: string } {
   const realHome = mkdtempSync(join(tmpdir(), "ocx-sentinel-home-"));
   const opencodexHome = join(realHome, ".opencodex");
+  const codexHome = join(realHome, ".codex");
   mkdirSync(opencodexHome, { recursive: true });
-  return { realHome, opencodexHome };
+  mkdirSync(codexHome, { recursive: true });
+  return { realHome, opencodexHome, codexHome };
 }
 
 describe("real-home write guard", () => {
 
+  // This deliberately starts a nested copy of the repository test wrapper. Keep it in the
+  // main worker lane so the child can join the active run lock, and allow startup headroom
+  // when the other workers are compiling large suites.
   test("the shard wrapper arms the real writer guard without inherited preload state", () => {
     const { realHome, opencodexHome } = sentinelHome();
     const configPath = join(opencodexHome, "config.json");
@@ -104,6 +109,9 @@ describe("real-home write guard", () => {
         }
       });
     `, {
+      // The probe intentionally starts a second wrapper while its parent wrapper owns the
+      // user-level test lock. Declare that overlap explicitly so it cannot queue behind itself.
+      OCX_TEST_NO_QUEUE: "1",
       OCX_TEST_HOME_GUARD: undefined,
       OCX_TEST_PRELOAD_PID: undefined,
       OCX_REAL_HOME: realHome,
@@ -111,7 +119,7 @@ describe("real-home write guard", () => {
 
     expect(probe.code).toBe(0);
     expect(readFileSync(configPath, "utf8")).toBe(sentinel);
-  });
+  }, 15_000);
 
 /**
  * Windows without Developer Mode or admin cannot create symlinks (EPERM). The
@@ -156,6 +164,27 @@ const canSymlink = (() => {
     expect(() => readFileSync(join(opencodexHome, "config.json"))).toThrow();
     expect(() => readFileSync(join(opencodexHome, "auth.json"))).toThrow();
     expect(() => readFileSync(join(opencodexHome, "codex-accounts.json"))).toThrow();
+  });
+
+  test("armed native credential writes reject the protected Codex home", () => {
+    const { realHome, codexHome } = sentinelHome();
+    const probe = runProbe(`
+      import { assertNotRealCodexHomeUnderTest } from "${REPO_ROOT_URL}src/lib/test-home-guard";
+      try {
+        // JSON.stringify, not raw interpolation: a Windows temp path is
+        // C:\\Users\\..., and pasting it between quotes makes every backslash an
+        // escape sequence in the probe's own source. \U and \p are not valid
+        // escapes, so the path the guard compared was not the path under test and
+        // it correctly reported WRITE_ALLOWED for a directory it never saw.
+        assertNotRealCodexHomeUnderTest(${JSON.stringify(codexHome)});
+        console.log("WRITE_ALLOWED");
+      } catch (err) {
+        console.log(String(err).includes("refusing to write the real Codex home") ? "REFUSED" : "OTHER");
+      }
+    `, { OCX_TEST_HOME_GUARD: "1", OCX_REAL_HOME: realHome, CODEX_HOME: codexHome });
+
+    expect(probe.stdout).toContain("REFUSED");
+    expect(probe.stdout).not.toContain("WRITE_ALLOWED");
   });
 
   test.skipIf(!canSymlink)("armed + a symlink escaping a temp home into the protected home: refused", () => {
@@ -211,7 +240,9 @@ const canSymlink = (() => {
       import { atomicWriteFile, writePid } from "${REPO_ROOT_URL}src/config";
       const REFUSAL = "refusing to write the real OpenCodex home";
       try {
-        atomicWriteFile("${linkDir}/never-created.json", "x");
+        // Same escaping hazard as the Codex-home probe above: JSON.stringify the
+        // path, then join in the child so no backslash reaches the source text.
+        atomicWriteFile(${JSON.stringify(linkDir)} + "/never-created.json", "x");
         console.log("WRITE_SUCCEEDED");
       } catch (err) {
         console.log(String(err).includes(REFUSAL) ? "REFUSED" : "OTHER:" + String(err));

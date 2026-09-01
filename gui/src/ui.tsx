@@ -5,11 +5,17 @@ import { IconCheck, IconAlert } from "./icons";
 import { IconChevron } from "./icons";
 import { computeSelectMenuStyle } from "./select-position";
 
-export function Switch({ on, mixed = false, onClick, disabled, label }: { on: boolean; mixed?: boolean; onClick: () => void; disabled?: boolean; label?: string }) {
+export function Switch({ on, mixed = false, onClick, disabled, label, showLabel = false, title }: { on: boolean; mixed?: boolean; onClick: () => void; disabled?: boolean; label?: string; showLabel?: boolean; title?: string }) {
+  const labeled = showLabel && !!label;
   return (
-    <button type="button" className={`switch${on ? " on" : ""}${mixed ? " mixed" : ""}`} onClick={onClick} disabled={disabled}
-      aria-pressed={mixed ? "mixed" : on} aria-label={label ?? (on ? "enabled" : "disabled")}>
+    <button type="button"
+      className={`switch${on ? " on" : ""}${mixed ? " mixed" : ""}${labeled ? " switch-labeled" : ""}`}
+      onClick={onClick} disabled={disabled}
+      aria-pressed={mixed ? "mixed" : on}
+      aria-label={labeled ? undefined : (label ?? (on ? "enabled" : "disabled"))}
+      title={title}>
       <span className="knob" />
+      {labeled ? <span className="switch-labeled-text text-label muted">{label}</span> : null}
     </button>
   );
 }

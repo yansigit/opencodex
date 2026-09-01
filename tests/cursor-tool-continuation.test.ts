@@ -56,8 +56,11 @@ describe("363-B: tool result reaches the model via rootPromptMessagesJson", () =
     // tool result. Reference: danger-pi buildRootPromptMessagesJson.
     expect(serialized).toContain("FILE CONTENTS HERE");
     expect(serialized).toContain("call_1");
-    expect(serialized).not.toContain("[Tool Result]");
-    expect(serialized).not.toContain("[tool_result]");
+    // The result envelope may carry its marker; the paired invocation must stay inside that
+    // envelope so no standalone [Tool Call] template is available for model mimicry.
+    expect(serialized).toContain("[Tool Result]");
+    expect(serialized).not.toContain("[Tool Call]");
+    expect(serialized).toContain("[tool_result]");
     // The prior user turn must also be replayed (not system-only).
     expect(serialized).toContain("read a file");
   });

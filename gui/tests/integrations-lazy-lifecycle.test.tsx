@@ -62,10 +62,9 @@ afterEach(async () => {
   }
 });
 
-function tab(label: string): HTMLButtonElement {
-  const button = Array.from(document.querySelectorAll<HTMLButtonElement>("[role=tab]"))
-    .find(candidate => candidate.textContent?.trim() === label);
-  if (!button) throw new Error(`missing ${label} tab`);
+function tab(id: string): HTMLButtonElement {
+  const button = document.querySelector<HTMLButtonElement>(`#${id}[role=tab]`);
+  if (!button) throw new Error(`missing ${id} tab`);
   return button;
 }
 
@@ -97,13 +96,13 @@ test("a lazy Integration workspace stays mounted with its draft while hidden", a
   expect(modelSwitch.getAttribute("aria-pressed")).toBe("false");
 
   await act(async () => {
-    tab("Codex CLI").click();
+    tab("integrations-tab-codex").click();
     await new Promise(resolve => win.setTimeout(resolve, 10));
   });
   expect(grokPanel.hidden).toBe(true);
 
   await act(async () => {
-    tab("Grok Build").click();
+    tab("integrations-tab-grok").click();
     await new Promise(resolve => win.setTimeout(resolve, 10));
   });
   expect(document.querySelector("#integrations-panel-grok")).toBe(grokPanel);

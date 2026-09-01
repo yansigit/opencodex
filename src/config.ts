@@ -553,6 +553,7 @@ const providerConfigSchema = z.object({
     repairInvalidIds: z.boolean().optional(),
   }).strict().optional(),
   responsesSnapshotRepair: z.boolean().optional(),
+  xaiResponsesXSearch: z.boolean().optional(),
 }).passthrough();
 
 export { isValidProviderName, hasOwnProvider } from "./config/provider-name";
@@ -2604,6 +2605,29 @@ function configMutationDatabasePath(): string {
   return path;
 }
 
+/** Raised when an independent config-mutation transaction is requested recursively. */
+export class NestedConfigMutationError extends Error {
+  constructor() {
+    super("prepareConfigMutationDatabasePathForWrite must not run inside withConfigMutationLockSync");
+    this.name = "NestedConfigMutationError";
+  }
+}
+
+/**
+ * Prepare the shared config-mutation database path for an independent top-level
+ * SQLite transaction. Callers must not invoke this while holding
+ * {@link withConfigMutationLockSync}; a second `BEGIN IMMEDIATE` deliberately
+ * fails busy instead of joining an uncommitted transaction.
+ *
+ * @throws {NestedConfigMutationError} If a config mutation lock is already held.
+ */
+export function prepareConfigMutationDatabasePathForWrite(): string {
+  if (configMutationLockDepth > 0) {
+    throw new NestedConfigMutationError();
+  }
+  return configMutationDatabasePath();
+}
+
 let configMutationLockDepth = 0;
 let configMutationDatabase: Database | null = null;
 
@@ -3567,6 +3591,26 @@ export function resolveEnvValue(value: string | undefined): string | undefined {
   return value;
 }
 
+const warnedProxyConfigDiscards = new Set<"proxy" | "noProxy" | "noProxyElements">();
+
+function warnProxyConfigDiscardOnce(kind: "proxy" | "noProxy" | "noProxyElements"): void {
+  if (warnedProxyConfigDiscards.has(kind)) return;
+  warnedProxyConfigDiscards.add(kind);
+  if (kind === "proxy") {
+    console.warn(
+      "⚠️  config.json proxy was discarded because it is not a non-empty resolved string — configured proxy routing is disabled; existing proxy environment variables remain authoritative, otherwise outbound requests use direct egress",
+    );
+  } else if (kind === "noProxy") {
+    console.warn(
+      "⚠️  config.json noProxy was discarded because it is not a string, string array, or resolved environment reference — existing NO_PROXY and loopback bypasses remain",
+    );
+  } else {
+    console.warn(
+      "⚠️  config.json noProxy contains invalid elements — invalid elements were ignored; valid entries, existing NO_PROXY, and loopback bypasses remain",
+    );
+  }
+}
+
 /**
  * Mirror `config.proxy` into HTTP(S)_PROXY env vars so Bun's native fetch routes every outbound
  * provider call through the proxy — no per-callsite changes (verified: Bun honors these plus
@@ -3575,8 +3619,12 @@ export function resolveEnvValue(value: string | undefined): string | undefined {
  * that makes outbound provider requests (server start, catalog sync).
  */
 export function applyProxyEnv(config: OcxConfig): void {
-  const proxy = resolveEnvValue(config.proxy);
-  if (!proxy) return;
+  const rawProxy = config.proxy;
+  const proxy = typeof rawProxy === "string" ? resolveEnvValue(rawProxy) : undefined;
+  if (!proxy) {
+    if (rawProxy !== undefined) warnProxyConfigDiscardOnce("proxy");
+    return;
+  }
   if (!process.env.HTTP_PROXY?.trim() && !process.env.http_proxy?.trim()) process.env.HTTP_PROXY = proxy;
   if (!process.env.HTTPS_PROXY?.trim() && !process.env.https_proxy?.trim()) process.env.HTTPS_PROXY = proxy;
   const existing = process.env.NO_PROXY ?? process.env.no_proxy ?? "";
@@ -3585,7 +3633,19 @@ export function applyProxyEnv(config: OcxConfig): void {
   // Configured entries first, then loopback: loopback is unconditional, so appending it last
   // keeps it present even when the operator lists a loopback host themselves.
   const raw = config.noProxy;
-  const configured = (Array.isArray(raw) ? raw : (resolveEnvValue(raw) ?? "").split(","))
+  let configuredEntries: string[];
+  if (Array.isArray(raw)) {
+    if (raw.some(entry => typeof entry !== "string")) warnProxyConfigDiscardOnce("noProxyElements");
+    configuredEntries = raw.filter((entry): entry is string => typeof entry === "string");
+  } else if (typeof raw === "string") {
+    const resolved = resolveEnvValue(raw);
+    if (raw && resolved === undefined) warnProxyConfigDiscardOnce("noProxy");
+    configuredEntries = (resolved ?? "").split(",");
+  } else {
+    if (raw !== undefined) warnProxyConfigDiscardOnce("noProxy");
+    configuredEntries = [];
+  }
+  const configured = configuredEntries
     .map(entry => entry.trim())
     .filter(Boolean);
   for (const host of [...configured, "localhost", "127.0.0.1", "::1", "[::1]"]) {

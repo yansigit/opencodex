@@ -8,7 +8,7 @@
  * with EXPORT_CLIENT_IDS by hand; adding a client server-side renders no row
  * until this tuple changes.
  */
-export const CLIENTS = ["opencode", "pi", "omp", "hermes", "openclaw", "kimi", "gajae", "dsh", "mcode", "zcode", "prime"] as const;
+export const CLIENTS = ["opencode", "pi", "omp", "hermes", "openclaw", "kimi", "gajae", "dsh", "mcode", "zcode", "prime", "aside"] as const;
 export type ExportClientId = (typeof CLIENTS)[number];
 
 export const CLIENT_LABEL_KEYS = {
@@ -23,6 +23,7 @@ export const CLIENT_LABEL_KEYS = {
   mcode: "api.clientConfig.clientMcode",
   zcode: "api.clientConfig.clientZcode",
   prime: "api.clientConfig.clientPrime",
+  aside: "api.clientConfig.clientAside",
 } as const;
 
 /**
@@ -31,14 +32,57 @@ export const CLIENT_LABEL_KEYS = {
  * Separate from `provider-icons.ts` on purpose: export-client ids and provider
  * ids are unrelated namespaces that happen to share the string "opencode".
  *
- * `pi.svg` is the Pi project's own favicon (`https://pi.dev/favicon.svg`);
- * provenance is recorded in `gui/public/provider-icons/README.md`. Both marks
- * carry their own dark background, so they read the same in either theme.
+ * Every entry is the product's OWN first-party asset, fetched and verified;
+ * provenance per file is recorded in `gui/public/provider-icons/README.md`.
+ *
+ * `kimi` points at an asset already committed for the Moonshot provider, which
+ * is the same brand as the Kimi Code client -- reusing it beats fetching a
+ * second copy of one logo.
+ *
+ * `dsh` uses the DeepSeek Harness favicon rather than `deepseek-color.svg`: the
+ * harness is first-party DeepSeek but it is a different product from the model
+ * provider, and the provider logo would be a borrowed mark.
+ *
+ * `aside` is the one mark not taken from the web: Aside publishes no favicon.svg,
+ * so its symbol comes out of the shipping application, where the vendor names the
+ * module `official-brand-symbol`. Still first-party, just not fetched.
+ *
+ * Two clients are absent on purpose. `gajae` publishes only raster marks and
+ * `hermes` upstream ships a text-glyph placeholder with no path data. Both render
+ * a monogram, which is what this map's rule prescribes; the README records why.
  */
 export const CLIENT_MARKS: Partial<Record<ExportClientId, string>> = {
   opencode: "/provider-icons/opencode.svg",
   pi: "/provider-icons/pi.svg",
+  omp: "/provider-icons/oh-my-pi.svg",
+  openclaw: "/provider-icons/openclaw.svg",
+  kimi: "/provider-icons/kimi-color.svg",
+  dsh: "/provider-icons/deepseek-harness.svg",
+  zcode: "/provider-icons/zcode.svg",
+  prime: "/provider-icons/prime-agent.svg",
+  aside: "/provider-icons/aside.svg",
 };
+
+/**
+ * Marks whose artwork is a single-ink silhouette, so the ink has to come from the
+ * theme rather than from the file. Drawn through a CSS mask tinted with the row's
+ * text color, the way `.provider-icon-mask` already handles provider logos.
+ *
+ * Without this each of them disappears against one of the two themes: `prime`
+ * ships white-on-transparent and vanishes in light mode, while `opencode`
+ * (#211E1E) and `kimi` (#1A1A1A) vanish in dark. That is not hypothetical -- a
+ * rendered check of every mark showed `prime` blank on white and `opencode` and
+ * `kimi` blank on #0d1117.
+ *
+ * A multi-color mark must never be listed here: masking discards its colors and
+ * would flatten a brand palette into one ink.
+ */
+export const MONOCHROME_CLIENT_MARKS: ReadonlySet<ExportClientId> = new Set<ExportClientId>([
+  "opencode",
+  "kimi",
+  "prime",
+  "aside",
+]);
 
 /** The `/api/client-config` 200 envelope, read off the route rather than a design doc. */
 export interface ClientConfigEnvelope {

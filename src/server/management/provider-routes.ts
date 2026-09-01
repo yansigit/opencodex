@@ -60,6 +60,7 @@ import { codexAccountNamespaceProviderCollisionError } from "../../codex/account
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { clearModelCache, getProviderDiscoveryStatus } from "../../codex/model-cache";
+import { getCodexModelEntitlementStatus } from "../../codex/model-entitlements";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { modelAutoCompactTokenLimitsConfigError } from "../../providers/auto-compact-budget";
 import { resolveCodexHomeDir } from "../../codex/home";
@@ -386,6 +387,13 @@ function applyProviderPatchFields(
     next.liveModels = rawBody.liveModels;
     touched = true;
   }
+  if (Object.hasOwn(rawBody, "annotateEmptyToolOutputs")) {
+    const value = rawBody.annotateEmptyToolOutputs;
+    if (value === null) delete next.annotateEmptyToolOutputs;
+    else if (typeof value === "boolean") next.annotateEmptyToolOutputs = value;
+    else return { error: "annotateEmptyToolOutputs must be a boolean or null" };
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "wsUpstream")) {
     const value = rawBody.wsUpstream;
     if (value === null) {
@@ -698,6 +706,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       codexAccountMode: providerCodexAccountMode(name, p),
       ...(name === "xai" ? { xaiResponsesOptInState: xaiResponsesOptInState(p) } : {}),
       discovery: p.liveModels === false ? undefined : getProviderDiscoveryStatus(name),
+      ...(name === "openai" && isCanonicalOpenAiForwardProvider(p)
+        ? { entitlement: getCodexModelEntitlementStatus(config) }
+        : {}),
     })));
   }
 
@@ -827,6 +838,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const submittedModelContextWindows = Object.hasOwn(prov, "modelContextWindows");
     const submittedModelAutoCompactTokenLimits = Object.hasOwn(prov, "modelAutoCompactTokenLimits");
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
+    const submittedAnnotateEmptyToolOutputs = Object.hasOwn(prov, "annotateEmptyToolOutputs");
     const buildProvider = (existing: OcxProviderConfig | undefined): OcxProviderConfig => {
       const next = structuredClone(prov);
       // Native OpenAI capabilities are registry-owned runtime defaults. Enriching this exact
@@ -844,6 +856,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (existingFailover && !next.oauthAccountFailover) next.oauthAccountFailover = existingFailover;
       if (!submittedRequestPacing && existing?.requestPacing) next.requestPacing = structuredClone(existing.requestPacing);
       if (!submittedContextWindow && existing?.contextWindow !== undefined) next.contextWindow = existing.contextWindow;
+      if (!submittedAnnotateEmptyToolOutputs && existing?.annotateEmptyToolOutputs !== undefined) {
+        next.annotateEmptyToolOutputs = existing.annotateEmptyToolOutputs;
+      }
       if (existing?.modelContextWindows) {
         next.modelContextWindows = submittedModelContextWindows
           ? { ...existing.modelContextWindows, ...(next.modelContextWindows ?? {}) }

@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { extractAccountId } from "../oauth/chatgpt";
 import { assertServerTlsFiles, serverTlsConfigError } from "../lib/server-tls";
 import { formatErrorResponse } from "../bridge";
 import {
@@ -24,6 +25,7 @@ import {
   upstreamHttpVersionConfigError,
   wsUpstreamConfigError,
   isAzureIdentityProvider,
+  providerEmptyToolOutputConfigError,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { redactSecretString } from "../lib/redact";
@@ -31,6 +33,7 @@ import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { openRouterRoutingConfigError } from "../providers/openrouter-routing";
+import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-routing";
 import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compact-budget";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
@@ -447,6 +450,14 @@ export function validateForwardAdmissionCredential(headers: Headers, config: Ocx
   if (bearer && isProxyAdmissionSecret(bearer, config)) throw new ForwardAdmissionCredentialError();
 }
 
+/** Whether Authorization carries a caller-owned native Codex credential safe to forward. */
+export function hasForwardableCodexBearer(headers: Headers, config: OcxConfig): boolean {
+  const bearer = headers.get("authorization")?.replace(/^Bearer\s+/i, "").trim();
+  const accountId = headers.get("chatgpt-account-id")?.trim()
+    || (bearer ? extractAccountId(undefined, bearer) : undefined);
+  return !!bearer && !!accountId && !isProxyAdmissionSecret(bearer, config);
+}
+
 /**
  * Resolving form of `hasValidApiAuth`: identical header precedence, identical
  * decision, but it names the admission instead of collapsing it to a boolean.
@@ -584,6 +595,7 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     delete canonicalCandidate.modelContextWindows;
     // User-owned soft compaction policy; it does not alter the canonical transport seed.
     delete canonicalCandidate.modelAutoCompactTokenLimits;
+    delete canonicalCandidate.annotateEmptyToolOutputs;
     // Transport controls are user-owned overlays, not part of the immutable seed.
     delete canonicalCandidate.wsUpstream;
     delete canonicalCandidate.maxWsFrameBytes;
@@ -632,6 +644,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (wsUpstreamError) return `provider ${name} ${wsUpstreamError}`;
   const maxWsFrameBytesError = maxWsFrameBytesConfigError(raw.maxWsFrameBytes);
   if (maxWsFrameBytesError) return `provider ${name} ${maxWsFrameBytesError}`;
+  const emptyToolOutputError = providerEmptyToolOutputConfigError(name, raw);
+  if (emptyToolOutputError) return emptyToolOutputError;
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
   if (modelCostsError) {
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
@@ -670,6 +684,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (raw.responsesSnapshotRepair !== undefined && typeof raw.responsesSnapshotRepair !== "boolean") {
     return `provider ${name} responsesSnapshotRepair must be a boolean`;
   }
+  if (raw.xaiResponsesXSearch !== undefined && typeof raw.xaiResponsesXSearch !== "boolean") {
+    return `provider ${name} xaiResponsesXSearch must be a boolean`;
+  }
   const defaultMaxOutputError = positiveIntegerConfigError(raw.defaultMaxOutputTokens, "defaultMaxOutputTokens");
   if (defaultMaxOutputError) return `provider ${name} ${defaultMaxOutputError}`;
   const maxOutputError = positiveIntegerRecordConfigError(raw.modelMaxOutputTokens, "modelMaxOutputTokens");
@@ -681,6 +698,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (structuredOutputOptOutError) return `provider ${name} ${structuredOutputOptOutError}`;
   const openRouterError = openRouterRoutingConfigError(typed);
   if (openRouterError) return `provider ${name} ${openRouterError}`;
+  const vercelError = vercelGatewayRoutingConfigError(typed);
+  if (vercelError) return `provider ${name} ${vercelError}`;
   if (typed.authMode === "local") {
     // "local" bypasses key-requirement enforcement (api-keys/key-failover treat non-oauth/
     // forward as key auth; openai-chat skips credential checks for local). Only providers
@@ -754,6 +773,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "freeTier",
       "liveModels",
       "requestPacing",
+      "annotateEmptyToolOutputs",
       "tlsProfile",
       "models",
       "contextWindow",
@@ -765,6 +785,8 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "modelMaxOutputTokens",
       "openRouterRouting",
       "modelOpenRouterRouting",
+      "vercelGatewayRouting",
+      "modelVercelGatewayRouting",
       "reasoningEfforts",
       "modelReasoningEfforts",
       "reasoningWireFormat",
