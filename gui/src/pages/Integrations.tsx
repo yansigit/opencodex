@@ -1,16 +1,17 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { navigateHash, normalizeHashPath } from "../hash-routing";
 import { useT } from "../i18n/shared";
+import ErrorBoundary from "../components/ErrorBoundary";
 import ClientMark from "../components/ClientMark";
 import { INTEGRATION_MARKS } from "../components/integration-marks";
-import ApiKeys from "./ApiKeys";
-import Claude from "./Claude";
-import Grok from "./Grok";
-import IntegrationsOverview from "./integrations/IntegrationsOverview";
-import FileIntegrationPage, {
-  type FileIntegrationClientId,
-} from "./integrations/FileIntegrationPage";
+import type { FileIntegrationClientId } from "./integrations/FileIntegrationPage";
 import { FILE_CLIENTS, TABS, type IntegrationTab } from "./integrations/integration-tabs";
+
+const ApiKeys = lazy(() => import("./ApiKeys"));
+const Claude = lazy(() => import("./Claude"));
+const Grok = lazy(() => import("./Grok"));
+const IntegrationsOverview = lazy(() => import("./integrations/IntegrationsOverview"));
+const FileIntegrationPage = lazy(() => import("./integrations/FileIntegrationPage"));
 
 function readIntegrationTab(hash = window.location.hash): IntegrationTab {
   const raw = normalizeHashPath(hash);
@@ -142,32 +143,43 @@ export default function Integrations({ apiBase }: { apiBase: string }) {
             aria-labelledby={tabDomId(definition.id)}
             hidden={!active}
           >
-            {definition.id === "overview" && (
-              <IntegrationsOverview apiBase={apiBase} active={active} />
-            )}
-            {definition.id === "keys" && <ApiKeys apiBase={apiBase} active={active} />}
-            {definition.id === "codex" && (
-              <section className="integration-native-page" aria-labelledby="codex-integration-title">
-                <h3 id="codex-integration-title">{t("integrations.codex.title")}</h3>
-                <p>{t("integrations.codex.body")}</p>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={() => navigateHash("startup")}
-                >
-                  {t("integrations.codex.openService")}
-                </button>
-              </section>
-            )}
-            {definition.id === "claude" && <Claude apiBase={apiBase} active={active} />}
-            {definition.id === "grok" && <Grok apiBase={apiBase} active={active} />}
-            {FILE_CLIENTS.has(definition.id as FileIntegrationClientId) && (
-              <FileIntegrationPage
-                apiBase={apiBase}
-                client={definition.id as FileIntegrationClientId}
-                active={active}
-              />
-            )}
+            <ErrorBoundary
+              pageName={t(definition.labelKey)}
+              title={t("errorBoundary.title")}
+              message={t("errorBoundary.message")}
+              detailsLabel={t("errorBoundary.details")}
+              reloadLabel={t("errorBoundary.reload")}
+              onReload={() => window.location.reload()}
+            >
+              <Suspense fallback={<div className="route-loading" aria-busy="true"><span className="spin" aria-hidden="true" />{t("common.loading")}</div>}>
+                {definition.id === "overview" && (
+                  <IntegrationsOverview apiBase={apiBase} active={active} />
+                )}
+                {definition.id === "keys" && <ApiKeys apiBase={apiBase} active={active} />}
+                {definition.id === "codex" && (
+                  <section className="integration-native-page" aria-labelledby="codex-integration-title">
+                    <h3 id="codex-integration-title">{t("integrations.codex.title")}</h3>
+                    <p>{t("integrations.codex.body")}</p>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      onClick={() => navigateHash("startup")}
+                    >
+                      {t("integrations.codex.openService")}
+                    </button>
+                  </section>
+                )}
+                {definition.id === "claude" && <Claude apiBase={apiBase} active={active} />}
+                {definition.id === "grok" && <Grok apiBase={apiBase} active={active} />}
+                {FILE_CLIENTS.has(definition.id as FileIntegrationClientId) && (
+                  <FileIntegrationPage
+                    apiBase={apiBase}
+                    client={definition.id as FileIntegrationClientId}
+                    active={active}
+                  />
+                )}
+              </Suspense>
+            </ErrorBoundary>
           </div>
         );
       })}

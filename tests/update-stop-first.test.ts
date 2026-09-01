@@ -205,9 +205,13 @@ describe("update stops the running proxy before replacing files", () => {
         copyFileSync(join(repoRoot, "bin", "ocx.mjs"), launcher);
         chmodSync(launcher, 0o755);
         for (const relative of [
+          "src/config/pending-teardown-names.mjs",
           "src/lib/bun-binary-validator.mjs",
           "src/update/npm-invocation.mjs",
           "src/update/npm-cache-preflight.mjs",
+          "src/update/proxy-liveness-probe.mjs",
+          "src/update/stop-contract.mjs",
+          "src/update/stop-decision.mjs",
           "src/update/tray-update-plan.mjs",
           "src/update/transactional-install.mjs",
           "src/update/codex-cli-update-launch-policy.mjs",

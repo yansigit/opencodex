@@ -25,7 +25,7 @@ export function waitForExit(pid: number, timeoutMs: number): boolean {
 /** Injectable seams so the graceful-stop flow is unit-testable without a live proxy. */
 export interface GracefulStopIo {
   fetchFn?: typeof fetch;
-  readRuntime?: (pid: number) => { port: number; hostname?: string } | null;
+  readRuntime?: (pid: number) => { port: number; hostname?: string; origin?: string } | null;
   waitExit?: (pid: number, timeoutMs: number) => boolean;
   env?: Record<string, string | undefined>;
   exitTimeoutMs?: number;
@@ -46,7 +46,7 @@ export interface GracefulStopIo {
    * runtime file here could pick up a different one, which would make the receipt name an
    * endpoint the stop never contacted — and recovery probes exactly that endpoint.
    */
-  runtimeEndpoint?: { hostname: string; port: number };
+  runtimeEndpoint?: { hostname: string; port: number; origin?: string };
 }
 
 /**
@@ -96,7 +96,9 @@ export async function stopProxyGracefully(pid: number, io: GracefulStopIo = {}):
     // `ocx stop` asks the proxy NOT to restore shared client config: it does that itself,
     // after verifying a stopped Task Scheduler did not respawn the proxy (#3008). Letting
     // the child do it means a survivor found seconds later has already lost its config.
-    const stopUrl = `http://${gracefulStopHost(runtime.hostname)}:${runtime.port}/api/stop`
+    const baseUrl = runtime.origin
+      ?? `http://${gracefulStopHost(runtime.hostname)}:${runtime.port}`;
+    const stopUrl = `${baseUrl.replace(/\/$/, "")}/api/stop`
       + (io.deferSharedTeardownNonce
         ? `?deferSharedTeardown=1&teardownNonce=${encodeURIComponent(io.deferSharedTeardownNonce)}`
         : "");

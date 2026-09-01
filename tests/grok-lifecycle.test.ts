@@ -200,6 +200,10 @@ describe("Grok fence lifecycle wiring", () => {
     // The endpoint is resolved ONCE: reading the runtime record twice let the receipt name
     // the configured guess while the request went to one that appeared in between.
     expect(stopFn).toContain("const exact = discovered ?? endpointOf(readRuntimePort(pid));");
+    // TLS listeners must retain the canonical origin from the runtime record. Reducing
+    // the snapshot to host/port silently changes HTTPS to HTTP before process-control
+    // receives it, causing graceful stop to fail and fall through to a hard kill.
+    expect(stopFn).toContain("origin: runtime.origin");
     // Every stop claims a receipt, including the one that resolves no endpoint at all —
     // that path goes straight to the kill ladder with no child teardown, so a warning
     // instead of a receipt is exactly the parent-crash window this exists to close.

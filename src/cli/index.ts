@@ -710,8 +710,10 @@ async function handleStop() {
   // The receipt must name the endpoint the owner was stopping — an obligation nobody can
   // locate cannot be proven discharged. Only the runtime record knows it; a proxy started
   // with an explicit --port is not on the configured one.
-  const endpointOf = (runtime: { port: number; hostname?: string } | null): { hostname: string; port: number } | null =>
-    runtime?.port ? { hostname: runtime.hostname ?? "127.0.0.1", port: runtime.port } : null;
+  const endpointOf = (runtime: { port: number; hostname?: string; origin?: string } | null): { hostname: string; port: number; origin?: string } | null =>
+    runtime?.port
+      ? { hostname: runtime.hostname ?? "127.0.0.1", port: runtime.port, origin: runtime.origin }
+      : null;
   // Last-resort endpoint for a receipt: the address this home is configured to serve on,
   // which is what a later recovery probe would ask about anyway.
   const configuredEndpoint = (): { hostname: string; port: number } => {

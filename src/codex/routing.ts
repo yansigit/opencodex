@@ -1614,24 +1614,26 @@ function releaseDrainedCodexAccountPin(
     "nativeMainSelectionOnly" | "isMainAccountTokenLive"
   >,
   now: number = Date.now(),
-): void {
+  persist = true,
+): boolean {
   const pinned = pinnedCodexAccountId(config);
-  if (pinned === undefined) return;
+  if (pinned === undefined) return false;
   const knownUnavailable = isAccountNeedsReauth(pinned) || isCodexAccountPaused(config, pinned);
   if (knownUnavailable) {
     clearCodexAccountPin(config);
-    saveConfigPreservingClaudeCode(config);
-    return;
+    if (persist) saveConfigPreservingClaudeCode(config);
+    return true;
   }
   // Temporary drain deliberately forbids every native-main read. A pin on main
   // cannot be classified by credential liveness or quota until the fenced profile
   // is readable. Cached reauth and configured pause state were handled above.
-  if (pinned === MAIN_CODEX_ACCOUNT_ID && selectionOptions?.nativeMainSelectionOnly === true) return;
+  if (pinned === MAIN_CODEX_ACCOUNT_ID && selectionOptions?.nativeMainSelectionOnly === true) return false;
   const drained = !isCodexAccountUsable(config, pinned, selectionOptions)
     || !hasCodexQuotaHeadroom(config, pinned, selectionOptions, now);
-  if (!drained) return;
+  if (!drained) return false;
   clearCodexAccountPin(config);
-  saveConfigPreservingClaudeCode(config);
+  if (persist) saveConfigPreservingClaudeCode(config);
+  return true;
 }
 
 function applyQuotaAutoSwitch(
@@ -1927,6 +1929,15 @@ export function resolveCodexAccountForThreadDetailed(
   selectionOptions?: CodexAccountUsabilityOptions,
   modelId?: string,
 ): CodexThreadResolution {
+  const persistedActiveBeforePinRelease = config.activeCodexAccountId;
+  const releasedDrainedPin = !isIndependentCodexQuotaScope(quotaScope)
+    && releaseDrainedCodexAccountPin(
+      config,
+      sharedStateSelectionOptions(selectionOptions),
+      now,
+      false,
+    );
+  try {
   // An entitlement roster constrains only this model request. It must not rewrite
   // the operator's shared active/pin choice or the task's ordinary-model affinity.
   const modelScopedSelection = selectionOptions?.modelEligibleAccountIds !== undefined;
@@ -1938,9 +1949,6 @@ export function resolveCodexAccountForThreadDetailed(
   // keeps its account below, but the operator's tier ceiling must not silently
   // revive after quota resets. Independent model scopes must never persist a
   // change to shared routing state.
-  if (!isIndependentCodexQuotaScope(quotaScope)) {
-    releaseDrainedCodexAccountPin(config, sharedStateSelectionOptions(selectionOptions), now);
-  }
   const sharedActiveBeforeSelection = getEffectiveActiveCodexAccountId(config);
   const preserveSharedSelectionForModelDetour = modelScopedSelection && (
     sharedActiveBeforeSelection === undefined
@@ -2175,6 +2183,13 @@ export function resolveCodexAccountForThreadDetailed(
     }
   }
   return { status: "selected", accountId: active };
+  } finally {
+    // A later quota/failure promotion persists both mutations in one write. If routing kept the
+    // same persisted account, this deferred write is the sole pin retirement write.
+    if (releasedDrainedPin && config.activeCodexAccountId === persistedActiveBeforePinRelease) {
+      saveConfigPreservingClaudeCode(config);
+    }
+  }
 }
 
 export function recordCodexUpstreamOutcome(

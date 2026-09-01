@@ -25,9 +25,9 @@ import {
 } from "../../lib/upstream-http-version";
 import { isValidModelDiscoveryModelId } from "../../providers/model-discovery-limits";
 import { GetUsableModelsResponseSchema } from "./gen/agent_pb";
+import { CURSOR_VERIFIED_CLIENT_VERSION } from "./protocol-profile";
 
 const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
-const CURSOR_DISCOVERY_CLIENT_VERSION = "cli-2026.02.13-41ac335";
 const CURSOR_MODEL_DISCOVERY_MAX_BYTES = 4 * 1024 * 1024;
 type CursorUsableModelsFetcher = (opts: CursorUsableModelsOptions) => Promise<CursorUsableModelsResult>;
 let cursorUsableModelsFetcherForTests: CursorUsableModelsFetcher | null = null;
@@ -107,7 +107,7 @@ function cursorDiscoveryHeaders(opts: CursorUsableModelsOptions): Record<string,
     "connect-protocol-version": "1",
     authorization: `Bearer ${opts.apiKey}`,
     "x-ghost-mode": "true",
-    "x-cursor-client-version": opts.clientVersion ?? CURSOR_DISCOVERY_CLIENT_VERSION,
+    "x-cursor-client-version": opts.clientVersion ?? CURSOR_VERIFIED_CLIENT_VERSION,
     "x-cursor-client-type": "cli",
     "x-session-id": crypto.randomUUID(),
   };

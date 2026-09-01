@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { getDefaultConfig, initializePersistedConfigIfMissing } from "../src/config";
 import { STORE_BUDGET_MS } from "./helpers/test-budget";
 import {
   CODEX_FAILURE_WINDOW_MS,
@@ -178,6 +179,9 @@ describe("codex routing", () => {
     // tell a threaded clock from one that was dropped somewhere in the helper chain.
     const now = 1_700_000_000_000;
     const config = makeConfig({ activeCodexAccountId: "a" });
+    // Automatic quota moves persist by design. Seed the fixture through the same
+    // fail-closed initialization boundary production uses instead of weakening it.
+    expect(initializePersistedConfigIfMissing({ ...getDefaultConfig(), ...config })).toBe("created");
 
     // A is full for the next hour, recorded in SECONDS. B has ordinary headroom.
     setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: (now + 3_600_000) / 1000 });
