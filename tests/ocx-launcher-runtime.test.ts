@@ -426,7 +426,7 @@ test("first-start cleanup never hard-kills a health PID without matching isolate
   expect(killed).toEqual([]);
 });
 
-describe.skipIf(!nodeAvailable)("ocx npm launcher first startup", () => {
+describe.skipIf(!nodeAvailable || process.env.OCX_TEST_NETWORK_ISOLATED === "1")("ocx npm launcher first startup", () => {
   test("preserves an existing six-provider registry when startup defaults are saved", async () => {
     const root = mkdtempSync(join(tmpdir(), "ocx-launcher-first-start-"));
     const env = { ...isolatedLauncherEnv(root, process.execPath), CI: "1" };

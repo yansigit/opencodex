@@ -114,6 +114,12 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("FORK_SYNC_COORDINATORS: cursor-webhook");
   });
 
+  test("does not expose the GitHub token to the Cursor webhook step", () => {
+    const cursorStep = workflow.split("- name: Notify Cursor handoff")[1]?.split("\n      - name:")[0];
+    expect(cursorStep).toBeDefined();
+    expect(cursorStep).not.toContain("GITHUB_TOKEN");
+  });
+
   test("passes the prepare status into the Cursor handoff event", () => {
     expect(workflow).toContain("prepareStatus");
     expect(workflow).toContain("jq --arg prepareStatus");
@@ -144,15 +150,22 @@ describe("fork upstream sync workflow contract", () => {
   });
 
   test("falls back to a trusted Jules issue only when Cursor is unavailable", () => {
-    const cursorStep = workflow.split("- name: Notify Cursor handoff")[1];
-    expect(cursorStep).toContain("coordinator_status");
-    expect(cursorStep).toContain("FORK_SYNC_NOTIFIERS=github-issue");
-    expect(cursorStep).toContain("FORK_SYNC_COORDINATORS=\"\"");
+    const cursorStep = workflow.split("- name: Notify Cursor handoff")[1]?.split("\n      - name:")[0];
+    const fallbackStep = workflow.split("- name: Notify Jules fallback issue")[1]?.split("\n      - name:")[0];
+    expect(cursorStep).toBeDefined();
+    expect(cursorStep).toContain("continue-on-error: true");
     expect(cursorStep).toContain("FORK_SYNC_CURSOR_WEBHOOK_URL");
     expect(cursorStep).toContain("FORK_SYNC_CURSOR_WEBHOOK_SECRET");
-    expect(cursorStep).toContain("::warning::Cursor webhook unavailable - hotspot handoff will be handled by Jules via GitHub issue.");
-    expect(cursorStep).toContain("Cursor webhook failed (HTTP \${coordinator_status:-unknown}); falling back to Jules-tracked GitHub issue (agent:jules).");
-    expect(cursorStep).toContain("Jules fallback issue ensured for hotspot handoff.");
+    expect(cursorStep).not.toContain("GITHUB_TOKEN");
+    expect(fallbackStep).toBeDefined();
+    expect(fallbackStep).toContain("steps.cursor_handoff.outcome != 'success'");
+    expect(fallbackStep).toContain("GITHUB_TOKEN: ${{ github.token }}");
+    expect(fallbackStep).toContain("FORK_SYNC_NOTIFIERS: github-issue");
+    expect(fallbackStep).toContain('FORK_SYNC_COORDINATORS: ""');
+    expect(fallbackStep).not.toContain("FORK_SYNC_CURSOR_WEBHOOK_URL");
+    expect(fallbackStep).not.toContain("FORK_SYNC_CURSOR_WEBHOOK_SECRET");
+    expect(fallbackStep).toContain("::warning::Cursor webhook unavailable - hotspot handoff will be handled by Jules via GitHub issue.");
+    expect(fallbackStep).toContain("Jules fallback issue ensured for hotspot handoff.");
   });
 
   test("reports workflow failures and closes the notification after recovery", () => {

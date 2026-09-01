@@ -57,6 +57,7 @@ jobs:
           CURSOR_BUGBOT_POLICY: ${{ vars.CURSOR_BUGBOT_POLICY }}
           CURSOR_BUGBOT_USER_ID: ${{ vars.CURSOR_BUGBOT_USER_ID }}
           JULES_BOT_USER_ID: ${{ vars.JULES_BOT_USER_ID }}
+          JULES_API_KEY_POOL_JSON: ${{ secrets.JULES_API_KEY_POOL_JSON }}
           JULES_API_KEY: ${{ secrets.JULES_API_KEY }}
         with:
           script: |
@@ -67,11 +68,10 @@ jobs:
               buildJulesRepairComment,
               buildJulesSessionRequest,
               changedFileListComplete,
-              createJulesClient,
+              createJulesCredentialPoolClient,
               defaultAgentMaintenanceState,
               exactHeadBugbotEvidence,
               autonomousMergeEvidence,
-              findGithubSource,
               hasExactHeadMaintainerWaiver,
               isExpectedJulesHeadAdvance,
               julesSessionDisposition,
@@ -192,6 +192,7 @@ jobs:
                 "",
                 `Agent maintenance status: **${saved.status}**.`,
                 saved.sessionUrl ? `[Jules session](${saved.sessionUrl})` : "",
+                saved.selectedCredentialId ? `Jules credential: \`${saved.selectedCredentialId}\`.` : "",
                 saved.pullRequestNumber ? `Pull request: #${saved.pullRequestNumber}.` : "",
                 saved.reason ? `Reason: ${saved.reason}` : ""
               ].filter(Boolean).join("\n");
@@ -300,7 +301,11 @@ jobs:
               core.info(`Shadow mode observed ${context.eventName}; no dispatch or controller state changes.`);
               return;
             }
-            const client = createJulesClient({ apiKey: process.env.JULES_API_KEY });
+            const credentialPool = process.env.JULES_API_KEY_POOL_JSON || process.env.JULES_API_KEY;
+            const createIssueClient = () => createJulesCredentialPoolClient({
+              credentialPool,
+              registerSecret: value => core.setSecret(value)
+            });
             await ensureLabels();
 
             let candidates = [];
@@ -360,13 +365,11 @@ jobs:
               }
             }
             let activeCount = trustedActiveMaintenanceCount(activeRecords);
-            let source = null;
-            async function connectedSource() {
-              source ??= findGithubSource(await client.listSources(), owner, repo);
-              return source;
-            }
 
             for (const issue of candidates) {
+              // Selection is issue-local. A prior issue must never influence which
+              // Jules account owns a newly-created session.
+              const client = createIssueClient();
               let record;
               try {
                 record = await loadRecord(issue);
@@ -389,6 +392,24 @@ jobs:
                   continue;
                 }
                 state = null;
+              }
+              if (state?.selectedCredentialId) {
+                try {
+                  client.selectCredential(state.selectedCredentialId);
+                } catch (error) {
+                  state.status = "needs-human";
+                  state.reason = `Stored Jules credential is unavailable: ${error.message}`;
+                  await saveRecord(issue.number, comment, state);
+                  await setLifecycle(issue.number, "agent:needs-human");
+                  continue;
+                }
+              }
+              if (state?.sessionId && !state.selectedCredentialId && client.getState().credentialCount > 1) {
+                state.status = "needs-human";
+                state.reason = "Legacy Jules session has no credential affinity; select and record its credential before resuming";
+                await saveRecord(issue.number, comment, state);
+                await setLifecycle(issue.number, "agent:needs-human");
+                continue;
               }
               const labelNames = new Set((issue.labels || []).map(label => label.name || label));
 
@@ -452,14 +473,15 @@ jobs:
                   const request = buildJulesSessionRequest({
                     title: `opencodex-agent:${taskId}`,
                     prompt,
-                    source: await connectedSource(),
+                    source: "sources/resolved-per-credential",
                     startingBranch,
                     requirePlanApproval: taskKind === "plan"
                   });
                   if (request.automationMode !== "AUTO_CREATE_PR") throw new Error("Jules request is not PR-only");
-                  const session = await client.createSessionIdempotently(request);
+                  const session = await client.createRepoSessionIdempotently(request, { owner, repo });
                   state.sessionId = session.name.slice("sessions/".length);
                   state.sessionUrl = session.url || null;
+                  state.selectedCredentialId = session.credentialId;
                   state.status = taskKind === "plan" ? "planning" : "running";
                   comment = await saveRecord(issue.number, comment, state);
                   await setLifecycle(issue.number, "agent:running");

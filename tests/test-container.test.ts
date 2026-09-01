@@ -119,9 +119,11 @@ test("fails clearly for unavailable service and old CLI", () => {
 });
 
 test("image and ignore policy freeze dependencies and exclude host state", () => {
+  const packageJson = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
   const image = readFileSync(join(ROOT, "Containerfile.test"), "utf8");
   const ignored = readFileSync(join(ROOT, ".dockerignore"), "utf8").split("\n");
   const entrypoint = readFileSync(join(ROOT, "scripts/test-container-entrypoint.ts"), "utf8");
+  expect(packageJson.scripts?.["test:container"]).toBe("bun scripts/test-container.ts");
   expect(image).toContain("FROM oven/bun:1.4.0@sha256:5ff609364c049b54eb0ff560ec96319729a972078ef2c755d758f0c6ef89c2d6");
   expect(image.match(/bun install --frozen-lockfile/g)).toHaveLength(3);
   expect(image).toContain("bun run build");
@@ -129,7 +131,8 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(image).toContain("git add -A");
   expect(image).toContain("test -z \"$(git remote)\"");
   expect(image).toContain("USER ocx");
-  for (const pin of ["adduser=3.152", "git=1:2.47.3-0+deb13u1", "procps=2:4.0.4-9", "net-tools=2.10-1.3", "ca-certificates=20250419"]) expect(image).toContain(pin);
+  for (const pin of ["adduser=3.152", "git=1:2.47.3-0+deb13u1", "jq=1.7.1-6+deb13u3", "nodejs=20.19.2+dfsg-1+deb13u2", "procps=2:4.0.4-9", "net-tools=2.10-1.3", "ca-certificates=20250419"]) expect(image).toContain(pin);
+  expect(image).toContain("commit -qm container-baseline");
   expect(image).toContain("find /app -path");
   expect(image).toContain("-name '*.pem'");
   expect(image).toContain("-name '*.db'");
@@ -147,6 +150,7 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(entrypoint).toContain("let appWriteSucceeded = false");
   expect(entrypoint).toMatch(/if \(appWriteSucceeded\)[\s\S]*throw new Error\("\/app must be unwritable"\)/);
   expect(entrypoint).toContain('const workspace = "/tmp/ocx-test-workspace"');
+  expect(entrypoint).toContain('OCX_TEST_NETWORK_ISOLATED: "1"');
   expect(entrypoint).toContain('["cp", "-a", "/app/.", workspace]');
   expect(entrypoint).toContain('["chmod", "-R", "u+rwX", workspace]');
   expect(entrypoint).toContain('await run(workspace, ["run", "test", "--timeout", "60000"])');
