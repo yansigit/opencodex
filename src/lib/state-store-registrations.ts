@@ -10,6 +10,7 @@ import { reconcileModelMetadataSnapshot } from "../codex/catalog/model-metadata"
 import { reconcileModelCacheGeneration } from "../codex/model-cache";
 import { reconcilePoolRotationState } from "../codex/pool-rotation";
 import { reconcileCodexQuotaAccounts } from "../codex/quota";
+import { reconcileQuotaRecovery, sweepExpiredQuotaRecovery } from "../codex/quota-401-recovery";
 import {
   listLiveCodexAccountIds,
   reconcileCodexRoutingHealth,
@@ -87,6 +88,13 @@ export const STATE_STORE_REGISTRATIONS = [
   { name: "anthropic-routing-health", sweepExpired: sweepExpiredAnthropicRoutingHealth },
   { name: "antigravity-routing-health", sweepExpired: sweepExpiredAntigravityRoutingHealth },
   { name: "xai-refresh-verdicts", sweepExpired: sweepExpiredXaiPermanentFailureVerdicts },
+  {
+    name: "codex-quota-401-recovery",
+    // Only backoff windows and abandoned leases expire. A spent fence is durable: expiring
+    // it would grant the same credential lineage a second refresh (#3019).
+    sweepExpired: sweepExpiredQuotaRecovery,
+    reconcileGeneration: context => reconcileQuotaRecovery(context.codexAccountIds),
+  },
   {
     name: "responses-continuation",
     sweepExpired: sweepExpiredResponseStates,

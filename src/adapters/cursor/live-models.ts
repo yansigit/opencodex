@@ -25,9 +25,9 @@ import {
 } from "../../lib/upstream-http-version";
 import { isValidModelDiscoveryModelId } from "../../providers/model-discovery-limits";
 import { GetUsableModelsResponseSchema } from "./gen/agent_pb";
-import { CURSOR_VERIFIED_CLIENT_VERSION } from "./protocol-profile";
 
 const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
+const CURSOR_DISCOVERY_CLIENT_VERSION = "cli-2026.02.13-41ac335";
 const CURSOR_MODEL_DISCOVERY_MAX_BYTES = 4 * 1024 * 1024;
 type CursorUsableModelsFetcher = (opts: CursorUsableModelsOptions) => Promise<CursorUsableModelsResult>;
 let cursorUsableModelsFetcherForTests: CursorUsableModelsFetcher | null = null;
@@ -107,7 +107,7 @@ function cursorDiscoveryHeaders(opts: CursorUsableModelsOptions): Record<string,
     "connect-protocol-version": "1",
     authorization: `Bearer ${opts.apiKey}`,
     "x-ghost-mode": "true",
-    "x-cursor-client-version": opts.clientVersion ?? CURSOR_VERIFIED_CLIENT_VERSION,
+    "x-cursor-client-version": opts.clientVersion ?? CURSOR_DISCOVERY_CLIENT_VERSION,
     "x-cursor-client-type": "cli",
     "x-session-id": crypto.randomUUID(),
   };
@@ -236,12 +236,10 @@ async function fetchCursorUsableModelsHttp2Once(opts: CursorUsableModelsOptions)
    }
 
     let status = 0;
-    let responseReceived = false;
     const chunks: Buffer[] = [];
     let receivedBytes = 0;
     let bodyRejected = false;
     req.on("response", headers => {
-      responseReceived = true;
       status = Number(headers[":status"] ?? 0);
       const contentLength = Number(headers["content-length"] ?? 0);
       if (Number.isFinite(contentLength) && contentLength > CURSOR_MODEL_DISCOVERY_MAX_BYTES) {
@@ -264,12 +262,7 @@ async function fetchCursorUsableModelsHttp2Once(opts: CursorUsableModelsOptions)
     req.on("error", () => close({ ok: false, error: "transport", detail: "HTTP/2 request failed" }));
     req.on("end", () => {
       if (bodyRejected) return;
-      // A stream can end after an HTTP/2 session/reset without ever delivering response headers.
-      // Treat status 0 as a transient transport failure so the bounded discovery retry can recover;
-      // reporting it as `http/HTTP unknown` makes the pre-response failure non-retryable.
-      if (!responseReceived || status === 0) {
-        return close({ ok: false, error: "transport", detail: "HTTP/2 stream ended before response headers" });
-      }
+      if (status === 0) return close({ ok: false, error: "transport", detail: "HTTP/2 response ended before headers" });
       if (status === 401 || status === 403) {
         return close({ ok: false, error: "auth", detail: `HTTP ${status}` });
       }

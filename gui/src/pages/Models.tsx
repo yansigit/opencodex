@@ -4,7 +4,7 @@ import type { AppServerStateOutcome } from "../codex-app-server-state";
 import { useCodexRestart } from "../use-codex-restart";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Switch, Notice, EmptyState, Select, Tooltip } from "../ui";
-import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil, IconTrash } from "../icons";
+import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil } from "../icons";
 import { useT } from "../i18n/shared";
 import type { TFn, TKey } from "../i18n/shared";
 import { modelLabel } from "../model-display";
@@ -59,9 +59,6 @@ import {
   THREAD_OPTIONS,
   writeCollapsedProviders,
   discoveryFailureLabel,
-  claimedContextWindow,
-  formatModelContextTooltip,
-  modelContextSourceChipKey,
   REASONING_EFFORT_LEVELS,
   type ModelRow,
   type ProviderContextCapsResponse,
@@ -69,7 +66,7 @@ import {
   type V2Status,
 } from "./models-shared";
 import { EmptyProviderHint } from "./models-provider-hints";
-import { shadowCallModelOptions, useModalDialog } from "./dashboard-shared";
+import { shadowCallModelOptions } from "./dashboard-shared";
 import { shadowSourceModelBadge, shadowSourceModelLabel } from "./shadow-call-source";
 
 type CachedModelsPage = {
@@ -265,17 +262,18 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [threadsCustom, setThreadsCustom] = useState("");
   const [showThreadsCustom, setShowThreadsCustom] = useState(false);
   const [v2HelpOpen, setV2HelpOpen] = useState(false);
-  const v2HelpTriggerRef = useRef<HTMLButtonElement>(null);
-  const v2HelpDialogRef = useModalDialog(v2HelpOpen, v2HelpTriggerRef);
   const [customModalOpen, setCustomModalOpen] = useState(false);
-  const customModalTriggerRef = useRef<HTMLButtonElement>(null);
-  const customDialogRef = useModalDialog(customModalOpen, customModalTriggerRef);
 
   const reloadAliases = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(`${apiBase}/api/aliases`, { signal });
     const data = await readJsonIfOk<AliasView>(response);
     if (data && !signal?.aborted) setAliases(data);
   }, [apiBase]);
+  useEffect(() => {
+    const controller = new AbortController();
+    void reloadAliases(controller.signal);
+    return () => controller.abort();
+  }, [reloadAliases]);
 
   const saveProviderAlias = async (provider: string) => {
     const entered = window.prompt(t("models.aliasPrompt"), aliases.providers[provider] ?? "");
@@ -342,8 +340,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [contextDefaultTouched, setContextDefaultTouched] = useState(false);
   const [contextSaving, setContextSaving] = useState(false);
   const [contextError, setContextError] = useState("");
-  const contextModalTriggerRef = useRef<HTMLButtonElement>(null);
-  const contextDialogRef = useModalDialog(contextModalProvider !== null, contextModalTriggerRef);
   const [hoveredModel, setHoveredModel] = useState<{ namespaced: string; rect: DOMRect } | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [shadowCall, setShadowCall] = useState<ShadowCallData | null>(null);
@@ -494,25 +490,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   }, [applyCatalog, cacheKey, fetchCatalog]);
 
   // Shadow/v2 controls must not wait on the models catalog (live discovery can be slow).
-  /** #2465: load the per-provider preset preview. */
-  const loadPresets = useCallback(async () => {
-    try {
-      const bounded = createBoundedFetch(15_000);
-      const r = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
-      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(r);
-      setPresets(data?.providers ?? {});
-    } catch {
-      setPresets({});
-    }
-  }, [apiBase]);
-
-  const loadModelDiscovery = useCallback(async () => {
-    try {
-      const r = await fetch(`${apiBase}/api/model-discovery`);
-      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(r)) ?? null);
-    } catch { setModelDiscovery(null); }
-  }, [apiBase]);
-
   useEffect(() => {
     // Both belong to the catalog tab; a hidden panel polling /api/v2 every ten seconds
     // is the same leak as the catalog poll above.
@@ -520,7 +497,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     const timeout = window.setTimeout(() => {
       void loadShadowCall();
       void loadV2();
-      void reloadAliases();
       // Preset previews belong to the same tab. Loaded once rather than polled: the rules are
       // shipped code and the catalog poll above already refreshes the rows they describe.
       void loadPresets();
@@ -534,7 +510,18 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       window.clearTimeout(timeout);
       stop();
     };
-  }, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2, reloadAliases]);
+    // oxlint-disable-next-line react/react-compiler -- existing exhaustive-deps exception is intentional
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadPresets is a plain async loader
+    // like the rest of this file's; a useCallback wrapper trips PreserveManualMemo, and the
+    // effect only ever needs the current closure. Verified 2026-08-27: converting both loaders
+    // to useCallback and completing the dep array turns ONE warning into five react-compiler
+    // errors - two PreserveManualMemo, two Immutability (they are declared ~430 lines below this
+    // effect), and one EffectSetState - so the note above still holds against oxlint 1.78.
+    // Both gates suppress this one rule for this one file by config rather than by comment:
+    // gui/.oxlintrc.json (override) and gui/doctor.config.json (ignore.overrides). An in-file
+    // react-doctor-disable comment was tried and removed - it changed nothing, and
+    // react/react-compiler penalises a component for carrying suppressions at all.
+  }, [catalogActive, loadShadowCall, loadV2]);
 
   const groups = useMemo(
     () => buildProviderModelGroups(models, providers),
@@ -548,8 +535,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
    */
   const catalogCountReady = models.length > 0 || catalogState.data !== undefined;
 
-  const openContextSettings = (group: ProviderModelGroup<ModelRow>, trigger: HTMLButtonElement) => {
-    contextModalTriggerRef.current = trigger;
+  const openContextSettings = (group: ProviderModelGroup<ModelRow>) => {
     const modelIds = [...new Set([
       ...group.rows.map(model => model.id),
       ...group.configuredModels,
@@ -944,6 +930,32 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     if (!v2 || v2.multiAgentMode === mode) return;
     await putV2Setting({ multiAgentMode: mode });
   };
+
+
+  /**
+   * #2465: load the per-provider preset preview. Rules are evaluated server-side against the
+   * CURRENT catalog, so the count shown is the count an apply would produce.
+   */
+  const loadPresets = async () => {
+    try {
+      const bounded = createBoundedFetch(15_000);
+      const r = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
+      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(r);
+      setPresets(data?.providers ?? {});
+    } catch {
+      // A preset preview is decoration on top of a working Models page; failing to load it must
+      // not take the page down.
+      setPresets({});
+    }
+  };
+
+  const loadModelDiscovery = async () => {
+    try {
+      const r = await fetch(`${apiBase}/api/model-discovery`);
+      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(r)) ?? null);
+    } catch { setModelDiscovery(null); }
+  };
+
   const saveModelDiscovery = async (policy: "on" | "off", provider?: string) => {
     const r = await fetch(`${apiBase}/api/model-discovery`, {
       method: "PUT", headers: { "content-type": "application/json" },
@@ -1056,6 +1068,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     hoverTimerRef.current = setTimeout(() => setHoveredModel(null), 120);
   };
 
+  const keepRowTipOpen = () => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+  };
+
   const addCustomModel = async (
     provider: string,
     modelId: string,
@@ -1165,7 +1181,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     // native group that is the 350k default, which says nothing true about what Codex sees.
     // The honest number there is the largest window the rows actually advertise.
     const widestRowWindow = rows.reduce<number | undefined>((widest, row) => {
-      const window = claimedContextWindow(row);
+      const window = typeof row.contextWindow === "number" && row.contextWindow > 0 ? row.contextWindow : undefined;
       if (window === undefined) return widest;
       return widest === undefined || window > widest ? window : widest;
     }, undefined);
@@ -1229,20 +1245,19 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
           {recentForProvider.length > 0 && <span className="models-chip mono text-caption">{t("models.newCount", { count: recentForProvider.length })}</span>}
           </button>
            <div className="row models-provider-actions">
-             <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editProviderAlias")} title={t("models.editProviderAlias")} onClick={() => void saveProviderAlias(provider)}><IconPencil style={{ width: 14, height: 14 }} /></button>
-             <Switch
-               on={aliases.defaults.providers[provider] ?? aliases.defaults.global}
-               onClick={() => void setDefaultAliases(!(aliases.defaults.providers[provider] ?? aliases.defaults.global), provider)}
-               label={t("models.useDefaultAliases")}
-               showLabel
-             />
-             {
+             <button type="button" className="btn btn-ghost btn-sm models-alias-edit" aria-label={t("models.editProviderAlias")} title={t("models.editProviderAlias")} onClick={() => void saveProviderAlias(provider)}><IconPencil style={{ width: 14, height: 14 }} /></button>
+            <Switch
+              on={aliases.defaults.providers[provider] ?? aliases.defaults.global}
+              onClick={() => void setDefaultAliases(!(aliases.defaults.providers[provider] ?? aliases.defaults.global), provider)}
+              label={t("models.useDefaultAliases")}
+              showLabel
+            />
+            {
               <button
                 type="button"
                 className="btn btn-ghost btn-sm text-caption"
                 onClick={(e) => {
                   e.stopPropagation();
-                  customModalTriggerRef.current = e.currentTarget;
                   setCustomModalMode("add");
                    setCustomModalProvider(provider);
                    setCustomModalId("");
@@ -1325,28 +1340,44 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                );
              })()}
              <button type="button" className="btn btn-ghost btn-sm text-caption" disabled={busy || allOn} onClick={() => bulkToggle(true)}>{t("models.allOn")}</button>
-             <button type="button" className="btn btn-ghost btn-sm text-caption" disabled={busy || allOff} onClick={() => bulkToggle(false)}>{t("models.allOff")}</button>
-             <div className="models-cap-cluster">
-               <Switch on={capOn} onClick={() => toggleProviderCap(provider, nativeProviderGroup)} disabled={busy} label={t("models.contextCapLabel")} showLabel />
-               <>
-               <Select
-                     // A saved cap outside CAP_OPTIONS is still a real selectable option
-                     // (inserted below), so select it instead of falling back to "Custom";
-                     // otherwise the trigger hides the persisted 128k value behind the
-                     // custom-editor label.
-                    value={providerCapCustomOpen[provider] ? CUSTOM_OPTION : String(capDisplayValue)}
+            <button type="button" className="btn btn-ghost btn-sm text-caption" disabled={busy || allOff} onClick={() => bulkToggle(false)}>{t("models.allOff")}</button>
+            <div className="models-cap-cluster">
+              {/* The label names the FUNCTION. It used to be `models.capValue` -
+                  "기본 128k" - which is a value masquerading as a name: even a
+                  screen-reader user was not told this governs the context window.
+                  The number belongs to the adjacent Select, which is where a value
+                  goes (020_control_affordances.md). */}
+              <Switch on={capOn} onClick={() => toggleProviderCap(provider, nativeProviderGroup)} disabled={busy} label={t("models.contextCapLabel")} showLabel />
+              {/* Always rendered, disabled when the cap is off. A cap-off provider used to
+                  drop this control entirely, which is the defect the user reported: openai
+                  showed 1.05M and anthropic showed nothing, so the two rows started at
+                  different left edges. Disabled-with-a-value is honest — it says "no
+                  opinion", which is what an off cap means — and it keeps the slot occupied
+                  on every card (040_cap_cluster_and_occupied_slot.md). */}
+              <>
+                  <Select
+                    // A saved cap outside CAP_OPTIONS is still a real selectable option
+                    // (inserted below), so select it instead of falling back to "Custom";
+                    // otherwise the trigger hides the persisted 128k value behind the
+                    // custom-editor label.
+                   value={providerCapCustomOpen[provider] ? CUSTOM_OPTION : String(capDisplayValue)}
                     options={[
                       ...(!capOptionSet.has(capDisplayValue) && !providerCapCustomOpen[provider]
                         ? [{ value: String(capDisplayValue), label: fmtK(capDisplayValue) }] : []),
                       ...capOptions.map(v => ({ value: String(v), label: fmtK(v) })),
                       { value: CUSTOM_OPTION, label: t("models.custom") },
                     ]}
-                     onChange={v => onSelectProviderCap(provider, v)}
-                     disabled={busy || !capOn}
-                     label={t("models.capValue", { value: fmtK(capDisplayValue) })}
-                     title={t("models.contextCapLabel")}
-               />
-               {capOn && providerCapCustomOpen[provider] && (
+                    onChange={v => onSelectProviderCap(provider, v)}
+                    disabled={busy || !capOn}
+                    label={t("models.capValue", { value: fmtK(capDisplayValue) })}
+                    title={t("models.contextCapLabel")}
+                  />
+                   {/* `capOn &&` is load-bearing now that the Select no longer disappears with
+                       the cap. providerCapCustomOpen is independent state: with Custom already
+                       open, flipping the cap off used to leave this input and its Apply button
+                       standing, and Apply sends enabled: true — turning the cap back on from a
+                       field that looks like part of an off cluster. */}
+                   {capOn && providerCapCustomOpen[provider] && (
                      <>
                        <input
                          className="input"
@@ -1359,20 +1390,29 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                          disabled={busy}
                          aria-label={t("models.customPlaceholder")}
                        />
-                       <button type="button" onClick={() => applyProviderCustomCap(provider)} disabled={busy} className="btn btn-ghost btn-sm">{t("models.customApply")}</button>
-                     </>
-               )}
-               </>
-               {/* This remains a separate per-model action, visually grouped beside the
-                   provider-wide cap controls while preserving its own tab stop and scope. */}
-               <button
-                 type="button"
-                 className="btn btn-ghost btn-sm text-caption"
-                 onClick={event => openContextSettings(group, event.currentTarget)}
-                 aria-haspopup="dialog"
-               >{t("models.contextSettings")}</button>
-             </div>
-           </div>
+                      <button type="button" onClick={() => applyProviderCustomCap(provider)} disabled={busy} className="btn btn-ghost btn-sm">{t("models.customApply")}</button>
+                    </>
+                  )}
+                </>
+              {/* Available on every card, including the native one: the canonical `openai` seed
+                  check now admits contextWindow/modelContextWindows as user-owned overlays, and
+                  the native accessors only ever narrow the measured window with them. The cap
+                  beside it is the coarser sibling — one value for the whole provider.
+
+                  It sits in the cluster for VISUAL grouping only. This is deliberately not a
+                  functional merge: this button opens PER-MODEL overrides while the switch and
+                  select are the provider-wide default, and two different scopes cannot honestly
+                  become one control. Three separate tab stops remain. Moving it here from
+                  beside the alias controls does change tab order — switch, then select when
+                  enabled, then this — which reads in the order the controls are now seen. */}
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm text-caption"
+                onClick={() => openContextSettings(group)}
+                aria-haspopup="dialog"
+              >{t("models.contextSettings")}</button>
+            </div>
+          </div>
         </div>
         {!isCollapsed && (
           <div className="models-provider-body">
@@ -1407,8 +1447,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
              {visible.map(m => {
                // The row reflects the same final-visibility answer as the count and the picker.
                const off = !isVisible(m);
-               const sourceKey = modelContextSourceChipKey(m);
-               const contextTip = formatModelContextTooltip(m, t);
                return (
                  <div
                    key={m.namespaced}
@@ -1433,71 +1471,24 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                      )}
                      {!m.custom && recentIds.has(m.id) && <span className="badge badge-amber">{t("models.newBadge")}</span>}
                      {m.contextCapped && <span className="models-chip muted mono text-caption">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
-                     {sourceKey && <span className="models-chip muted mono text-caption">{t(sourceKey)}</span>}
-                     {m.metadataStale && <span className="models-chip muted mono text-caption">{t("models.contextMetadataStale")}</span>}
-                     {m.custom && m.customId && (
-                       <span className="models-model-row-actions">
-                         <button
-                           type="button"
-                           className="btn btn-ghost btn-sm text-caption"
-                           aria-label={t("models.customEditNamed", { name: m.displayName ?? m.id })}
-                           onClick={event => {
-                             customModalTriggerRef.current = event.currentTarget;
-                             setCustomModalMode("edit");
-                             setCustomModalProvider(m.provider);
-                             setCustomModalId(m.customId!);
-                             setCustomFormModelId(m.id);
-                             setCustomFormDisplayName(m.displayName ?? "");
-                             setCustomFormContextWindow(m.contextWindow ? String(m.contextWindow) : "");
-                             setCustomFormShowCustomCtx(false);
-                             setCustomFormModalities(m.inputModalities ?? ["text"]);
-                             setCustomFormReasoning(Array.isArray(m.reasoningEfforts));
-                             setCustomFormReasoningEfforts(m.reasoningEfforts ?? []);
-                             customFormReasoningInitializedRef.current = Array.isArray(m.reasoningEfforts);
-                             setCustomError("");
-                             setCustomModalOpen(true);
-                             setHoveredModel(null);
-                           }}
-                         ><IconPencil width={13} height={13} aria-hidden="true" /></button>
-                         <button
-                           type="button"
-                           className="btn btn-ghost btn-sm text-caption"
-                           aria-label={t("models.customDeleteNamed", { name: m.displayName ?? m.id })}
-                           style={{ color: "var(--red)" }}
-                           onClick={() => {
-                             if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
-                               void deleteCustomModel(m.customId!);
-                             }
-                             setHoveredModel(null);
-                           }}
-                         ><IconTrash width={13} height={13} aria-hidden="true" /></button>
-                       </span>
-                     )}
                    </div>
                    {hoveredModel?.namespaced === m.namespaced && (() => {
                      const r = hoveredModel.rect;
-                     const tipWidth = Math.max(0, Math.min(480, window.innerWidth - 16));
-                     const tipLeft = Math.max(8, Math.min(r.left + 24, window.innerWidth - tipWidth - 8));
-                     const tipTop = Math.max(8, r.bottom + 4);
-                     const roomBelow = Math.max(0, window.innerHeight - tipTop - 8);
-                     const roomAbove = Math.max(0, r.top - 12);
-                     const flipUp = roomBelow < Math.min(360, roomAbove);
-                     const tipMaxHeight = Math.min(360, flipUp ? roomAbove : roomBelow);
+                     const tipTop = r.bottom + 4;
+                     const flipUp = tipTop + 360 > window.innerHeight;
                      return (
                        <div
-                         className={`model-tip${flipUp ? " flip-up" : ""}`}
+                         className={`model-tip${m.custom ? " has-actions" : ""}${flipUp ? " flip-up" : ""}`}
                          role="tooltip"
                          style={{
                            position: "fixed",
-                           left: tipLeft,
-                           width: "max-content",
-                           minWidth: Math.min(320, tipWidth),
-                           maxWidth: tipWidth,
-                           maxHeight: tipMaxHeight,
+                           left: r.left + 24,
                            ...(flipUp
-                             ? { bottom: Math.max(8, window.innerHeight - r.top + 4) }
+                             ? { bottom: window.innerHeight - r.top + 4 }
                              : { top: tipTop }),
                          }}
+                         onMouseEnter={keepRowTipOpen}
+                         onMouseLeave={onRowLeave}
                        >
                           <div className="model-tip-id">{m.native ? m.id : m.namespaced}</div>
                          {m.displayName && <div className="model-tip-display">{m.displayName}</div>}
@@ -1509,16 +1500,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                          <div className="model-tip-grid">
                            <span className="model-tip-key">{t("models.tipProvider")}</span>
                            <span className="model-tip-val">{formatProviderDisplayName(m.provider, t)}</span>
-                           {contextTip && (
+                           {(m.contextWindow || m.contextCap) && (
                              <>
                                <span className="model-tip-key">{t("models.tipContext")}</span>
-                               <span className="model-tip-val">{contextTip}</span>
-                             </>
-                           )}
-                           {sourceKey && (
-                             <>
-                               <span className="model-tip-key">{t("models.contextMetadataSource")}</span>
-                               <span className="model-tip-val">{t(sourceKey)}</span>
+                               <span className="model-tip-val">{fmtK(m.contextWindow ?? m.contextCap ?? 0)}</span>
                              </>
                            )}
                            {m.inputModalities && m.inputModalities.length > 0 && (
@@ -1530,6 +1515,46 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                            <span className="model-tip-key">{t("models.tipStatus")}</span>
                            <span className="model-tip-val">{off ? t("models.tipDisabled") : t("models.tipActive")}</span>
                          </div>
+                         {m.custom && m.customId && (
+                           <div className="model-tip-actions">
+                             <button
+                               type="button"
+                               className="btn btn-ghost btn-sm text-caption"
+                               onClick={() => {
+                                 setCustomModalMode("edit");
+                                 setCustomModalProvider(m.provider);
+                                 setCustomModalId(m.customId!);
+                                 setCustomFormModelId(m.id);
+                                 setCustomFormDisplayName(m.displayName ?? "");
+                                 setCustomFormContextWindow(m.contextWindow ? String(m.contextWindow) : "");
+                                 setCustomFormShowCustomCtx(false);
+                                 setCustomFormModalities(m.inputModalities ?? ["text"]);
+                                 // Only a STORED ladder counts as "configured": an inherited one
+                                 // would show a phantom override that saves "inherit" over the
+                                 // provider row's current metadata.
+                                 setCustomFormReasoning(Array.isArray(m.reasoningEfforts));
+                                 setCustomFormReasoningEfforts(m.reasoningEfforts ?? []);
+                                 // A stored ladder — even an explicit empty one — is a real
+                                 // configuration: re-enabling must preserve it, not reseed.
+                                 customFormReasoningInitializedRef.current = Array.isArray(m.reasoningEfforts);
+                                 setCustomError("");
+                                 setCustomModalOpen(true);
+                                 setHoveredModel(null);
+                               }}
+                             >{t("models.customEdit")}</button>
+                             <button
+                               type="button"
+                               className="btn btn-ghost btn-sm text-caption"
+                               style={{ color: "var(--red)" }}
+                               onClick={() => {
+                                 if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
+                                   void deleteCustomModel(m.customId!);
+                                 }
+                                 setHoveredModel(null);
+                               }}
+                             >{t("models.customDelete")}</button>
+                           </div>
+                         )}
                        </div>
                      );
                    })()}
@@ -1599,10 +1624,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               className="btn btn-ghost btn-sm"
               style={{ width: 24, height: 24, minWidth: 24, flex: "0 0 24px", padding: 0, borderRadius: "var(--radius-pill)", color: "var(--muted)" }}
               disabled={!v2}
-              onClick={event => {
-                v2HelpTriggerRef.current = event.currentTarget;
-                setV2HelpOpen(true);
-              }}
+              onClick={() => setV2HelpOpen(true)}
               aria-label={t("models.v2Label")}
               aria-haspopup="dialog"
             >
@@ -1758,11 +1780,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const modalsBlock = (
     <>
       {v2HelpOpen && (
-        <dialog ref={v2HelpDialogRef} className="modal-overlay" aria-labelledby="models-v2-help-title" onCancel={event => { event.preventDefault(); setV2HelpOpen(false); }}>
-          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} onClick={() => setV2HelpOpen(false)} />
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={t("models.v2Label")} onClick={() => setV2HelpOpen(false)} onKeyDown={e => { if (e.key === "Escape") setV2HelpOpen(false); }}>
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3 id="models-v2-help-title">{t("models.v2Label")}</h3>
+              <h3>{t("models.v2Label")}</h3>
               <button type="button" className="btn btn-ghost btn-sm" onClick={() => setV2HelpOpen(false)} aria-label={t("common.close")}>&times;</button>
             </div>
             <div className="modal-desc leading-relaxed" style={{ whiteSpace: "pre-line" }}>
@@ -1777,23 +1798,23 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               <button type="button" className="btn btn-primary" onClick={() => setV2HelpOpen(false)}>{t("common.ok")}</button>
             </div>
           </div>
-        </dialog>
+        </div>
       )}
 
       {contextModalProvider && (
-        <dialog
-          ref={contextDialogRef}
+        <div
           className="modal-overlay"
-          aria-labelledby="models-context-dialog-title"
-          onCancel={event => {
-            event.preventDefault();
-            if (!contextSaving) setContextModalProvider(null);
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("models.contextSettings")}
+          onClick={() => { if (!contextSaving) setContextModalProvider(null); }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !contextSaving) setContextModalProvider(null);
           }}
         >
-          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={contextSaving} onClick={() => setContextModalProvider(null)} />
           <div className="modal-card" onClick={event => event.stopPropagation()}>
             <div className="modal-head">
-              <h3 id="models-context-dialog-title">{t("models.contextSettingsTitle", {
+              <h3>{t("models.contextSettingsTitle", {
                 provider: formatProviderDisplayName(contextModalProvider, t),
               })}</h3>
               <button
@@ -1875,23 +1896,23 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               </button>
             </div>
           </div>
-        </dialog>
+        </div>
       )}
 
       {customModalOpen && (
-        <dialog
-          ref={customDialogRef}
+        <div
           className="modal-overlay"
-          aria-labelledby="models-custom-dialog-title"
-          onCancel={event => {
-            event.preventDefault();
-            if (!customSaving) setCustomModalOpen(false);
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("models.customAdd")}
+          onClick={() => { if (!customSaving) setCustomModalOpen(false); }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && !customSaving) setCustomModalOpen(false);
           }}
         >
-          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={customSaving} onClick={() => setCustomModalOpen(false)} />
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3 id="models-custom-dialog-title">
+              <h3>
                 {customModalMode === "add"
                   ? t("models.customAddTitle", { provider: formatProviderDisplayName(customModalProvider, t) })
                   : t("models.customEditTitle", { provider: formatProviderDisplayName(customModalProvider, t) })}
@@ -2087,7 +2108,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               </button>
             </div>
           </div>
-        </dialog>
+        </div>
       )}
     </>
   );
