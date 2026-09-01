@@ -5,15 +5,22 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { describe, it } = require("node:test");
 const {
+  API_MAX_ATTEMPTS,
+  API_RETRY_BASE_MS,
+  API_RETRY_MAX_MS,
+  API_REQUEST_TIMEOUT_MS,
   CHECK_INTERVAL_MS,
+  HEALTH_CHECK_DEADLINE_MS,
   MISSED_WINDOWS,
   UPSTREAM_BACKSTOP_MS,
   UPSTREAM_DETECTION_MS,
   WORKFLOW_SPECS,
+  createGithubReader,
   evaluateHealth,
   evaluateRepositoryState,
   evaluateUpstreamSync,
   listWorkflowRuns,
+  listOpenPullRequests,
   openPromotionSyncPrs,
   selectLatestRun,
   selectLatestSuccessfulRun,
@@ -37,6 +44,146 @@ function healthyRuns() {
 }
 
 describe("automation health SLO checker", () => {
+  it("retries transient GitHub API failures with bounded exponential backoff", async () => {
+    const waits = [];
+    let calls = 0;
+    const reader = createGithubReader({
+      token: "test-token",
+      apiUrl: "https://api.github.test",
+      sleepImpl: async ms => waits.push(ms),
+      fetchImpl: async (_url, options) => {
+        calls += 1;
+        assert.equal(options.headers.authorization, "Bearer test-token");
+        if (calls < 3) {
+          return { ok: false, status: 502, headers: { get: () => null } };
+        }
+        return { ok: true, status: 200, json: async () => ({ healthy: true }) };
+      },
+    });
+
+    assert.deepEqual(await reader.get("/health"), { healthy: true });
+    assert.equal(calls, 3);
+    assert.deepEqual(waits, [API_RETRY_BASE_MS, API_RETRY_BASE_MS * 2]);
+    assert.equal(API_MAX_ATTEMPTS, 4);
+    assert.equal(API_RETRY_MAX_MS, 60_000);
+  });
+
+  it("honors Retry-After for rate limiting without retrying permanent failures", async () => {
+    const waits = [];
+    let rateLimitCalls = 0;
+    const rateLimited = createGithubReader({
+      token: "test-token",
+      sleepImpl: async ms => waits.push(ms),
+      fetchImpl: async () => {
+        rateLimitCalls += 1;
+        if (rateLimitCalls === 1) {
+          return { ok: false, status: 429, headers: { get: name => name === "retry-after" ? "2" : null } };
+        }
+        return { ok: true, status: 200, json: async () => ({ recovered: true }) };
+      },
+    });
+    assert.deepEqual(await rateLimited.get("/rate-limited"), { recovered: true });
+    assert.deepEqual(waits, [2_000]);
+
+    let permanentCalls = 0;
+    const permanent = createGithubReader({
+      token: "test-token",
+      sleepImpl: async () => assert.fail("permanent failures must not sleep"),
+      fetchImpl: async () => {
+        permanentCalls += 1;
+        return { ok: false, status: 403 };
+      },
+    });
+    await assert.rejects(permanent.get("/forbidden"), /GitHub API GET 403 for \/forbidden/);
+    assert.equal(permanentCalls, 1);
+  });
+
+  it("honors primary rate-limit reset and fails closed when it exceeds the deadline", async () => {
+    const now = 1_788_292_800_000;
+    const waits = [];
+    let calls = 0;
+    const reader = createGithubReader({
+      token: "test-token",
+      nowImpl: () => now,
+      deadlineAt: now + HEALTH_CHECK_DEADLINE_MS,
+      sleepImpl: async ms => waits.push(ms),
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            ok: false,
+            status: 403,
+            headers: { get: name => name === "x-ratelimit-remaining" ? "0" : name === "x-ratelimit-reset" ? String(now / 1000 + 30) : null },
+          };
+        }
+        return { ok: true, status: 200, json: async () => ({ recovered: true }) };
+      },
+    });
+    assert.deepEqual(await reader.get("/primary-limit"), { recovered: true });
+    assert.deepEqual(waits, [30_000]);
+
+    const overBudget = createGithubReader({
+      token: "test-token",
+      nowImpl: () => now,
+      deadlineAt: now + HEALTH_CHECK_DEADLINE_MS,
+      sleepImpl: async () => assert.fail("an over-budget reset must not sleep"),
+      fetchImpl: async () => ({
+        ok: false,
+        status: 403,
+        headers: { get: name => name === "x-ratelimit-remaining" ? "0" : name === "x-ratelimit-reset" ? String(now / 1000 + 120) : null },
+      }),
+    });
+    await assert.rejects(overBudget.get("/primary-limit"), /retry delay exceeds health-check budget/);
+  });
+
+  it("bounds each fetch and the complete GitHub read window", async () => {
+    const now = 1_788_292_800_000;
+    const timeouts = [];
+    const reader = createGithubReader({
+      token: "test-token",
+      nowImpl: () => now,
+      deadlineAt: now + 1_000,
+      signalFactory: timeoutMs => {
+        timeouts.push(timeoutMs);
+        return { timeoutMs };
+      },
+      fetchImpl: async (_url, options) => {
+        assert.deepEqual(options.signal, { timeoutMs: 1_000 });
+        return { ok: true, status: 200, json: async () => ({ bounded: true }) };
+      },
+    });
+    assert.deepEqual(await reader.get("/bounded"), { bounded: true });
+    assert.deepEqual(timeouts, [1_000]);
+    assert.equal(API_REQUEST_TIMEOUT_MS, 15_000);
+
+    const expired = createGithubReader({
+      token: "test-token",
+      nowImpl: () => now,
+      deadlineAt: now,
+      fetchImpl: async () => assert.fail("an expired reader must not fetch"),
+    });
+    await assert.rejects(expired.get("/expired"), /GitHub API deadline exceeded/);
+  });
+
+  it("fails closed on malformed or truncated pull-request pagination", async () => {
+    await assert.rejects(
+      listOpenPullRequests({ get: async () => ({ items: [] }) }, "yansigit/opencodex"),
+      /malformed open pull-request page 1/,
+    );
+
+    const calls = [];
+    await assert.rejects(
+      listOpenPullRequests({
+        async get(pathname) {
+          calls.push(pathname);
+          return Array.from({ length: 100 }, (_, number) => ({ number }));
+        },
+      }, "yansigit/opencodex", { maxPages: 2 }),
+      /exceeds the 2-page safety limit/,
+    );
+    assert.equal(calls.length, 2);
+  });
+
   it("encodes two missed windows plus one six-hour observation grace interval", () => {
     assert.equal(MISSED_WINDOWS, 2);
     assert.equal(thresholdMs(WORKFLOW_SPECS["fork-upstream-sync.yml"]), 54 * 60 * 60 * 1000);
