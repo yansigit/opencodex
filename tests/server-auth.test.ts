@@ -2220,6 +2220,12 @@ describe("server local API auth", () => {
     });
     redirectCanonicalCodexTo(upstream.url.toString());
     const now = 1_800_000_000_000;
+    const originalNow = Date.now;
+    const originalFetch = globalThis.fetch;
+    // Seed the credential and quota under the same clock the server will use. If the quota
+    // is stamped by the real clock first, the 2027 fixture clock makes it immediately stale;
+    // startup priming can then refresh the credential before the first websocket turn.
+    Date.now = () => now;
     saveConfig({
       port: 0,
       defaultProvider: "openai",
@@ -2241,12 +2247,8 @@ describe("server local API auth", () => {
     });
     updateAccountQuota("pool-a", 10, 5);
 
-    const originalNow = Date.now;
-    const originalFetch = globalThis.fetch;
-    // Install both controls before startServer. Its asynchronous pool-quota prime reads
-    // the clock and can refresh credentials, so a setup window here makes the first
-    // websocket turn race the fixture's intended token rotation.
-    Date.now = () => now;
+    // Install the fetch control before startServer. Its asynchronous pool-quota prime must
+    // remain inside the fixture's controlled world even though the fresh seed makes it a no-op.
     globalThis.fetch = (async (input, init) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       if (url === "https://auth.openai.com/oauth/token") {

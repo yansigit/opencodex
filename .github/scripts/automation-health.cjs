@@ -5,6 +5,11 @@ const CHECK_INTERVAL_MS = 6 * HOUR_MS;
 const MISSED_WINDOWS = 2;
 const UPSTREAM_DETECTION_MS = 30 * 60 * 1000;
 const UPSTREAM_BACKSTOP_MS = 26 * HOUR_MS;
+const API_MAX_ATTEMPTS = 4;
+const API_RETRY_BASE_MS = 250;
+const API_RETRY_MAX_MS = 60 * 1000;
+const API_REQUEST_TIMEOUT_MS = 15 * 1000;
+const HEALTH_CHECK_DEADLINE_MS = 4 * 60 * 1000;
 
 // The extra checker interval is deliberate: a six-hour checker can observe a
 // missed cron window only on its next tick. The two-window portion is the SLO;
@@ -353,20 +358,85 @@ function queryString(values) {
   return new URLSearchParams(Object.entries(values).filter(([, value]) => value !== null && value !== undefined)).toString();
 }
 
-function createGithubReader({ token, apiUrl, fetchImpl = fetch }) {
+function retryableStatus(response) {
+  if (!response) return true;
+  if (response.status === 408 || response.status === 429 || response.status >= 500) return true;
+  if (response.status !== 403) return false;
+  return response.headers?.get?.("retry-after") != null
+    || response.headers?.get?.("x-ratelimit-remaining") === "0";
+}
+
+function retryDelayMs(response, attempt, now = Date.now()) {
+  const retryAfter = response?.headers?.get?.("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    const requested = Number.isFinite(seconds)
+      ? seconds * 1000
+      : Math.max(0, Date.parse(retryAfter) - now);
+    if (Number.isFinite(requested)) return Math.max(0, requested);
+  }
+  if (response?.headers?.get?.("x-ratelimit-remaining") === "0") {
+    const resetSeconds = Number(response.headers?.get?.("x-ratelimit-reset"));
+    if (Number.isFinite(resetSeconds)) return Math.max(0, resetSeconds * 1000 - now);
+    return API_RETRY_MAX_MS;
+  }
+  if (response?.status === 429) return API_RETRY_MAX_MS;
+  return Math.min(API_RETRY_MAX_MS, API_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1));
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function createGithubReader({
+  token,
+  apiUrl,
+  fetchImpl = fetch,
+  sleepImpl = sleep,
+  nowImpl = Date.now,
+  deadlineAt = nowImpl() + HEALTH_CHECK_DEADLINE_MS,
+  signalFactory = timeoutMs => AbortSignal.timeout(timeoutMs),
+}) {
   if (!token) throw new Error("GITHUB_TOKEN is required");
   const base = apiBaseUrl(apiUrl);
   async function get(path) {
-    const response = await fetchImpl(`${base}${path}`, {
-      method: "GET",
-      headers: {
-        accept: "application/vnd.github+json",
-        authorization: `Bearer ${token}`,
-        "x-github-api-version": "2022-11-28",
-      },
-    });
-    if (!response.ok) throw new Error(`GitHub API GET ${response.status} for ${path}`);
-    return response.json();
+    for (let attempt = 1; attempt <= API_MAX_ATTEMPTS; attempt += 1) {
+      const remainingBeforeRequest = deadlineAt - nowImpl();
+      if (remainingBeforeRequest <= 0) throw new Error(`GitHub API deadline exceeded for ${path}`);
+      let response;
+      try {
+        response = await fetchImpl(`${base}${path}`, {
+          method: "GET",
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${token}`,
+            "user-agent": "opencodex-automation-health",
+            "x-github-api-version": "2022-11-28",
+          },
+          signal: signalFactory(Math.min(API_REQUEST_TIMEOUT_MS, remainingBeforeRequest)),
+        });
+        if (response.ok) return await response.json();
+      } catch (error) {
+        if (attempt === API_MAX_ATTEMPTS) {
+          throw new Error(`GitHub API GET failed after ${attempt} attempts for ${path}`, { cause: error });
+        }
+        const delay = retryDelayMs(null, attempt, nowImpl());
+        if (delay >= deadlineAt - nowImpl()) throw new Error(`GitHub API retry deadline exceeded for ${path}`, { cause: error });
+        await sleepImpl(delay);
+        continue;
+      }
+
+      if (!retryableStatus(response) || attempt === API_MAX_ATTEMPTS) {
+        const suffix = attempt > 1 ? ` after ${attempt} attempts` : "";
+        throw new Error(`GitHub API GET ${response.status}${suffix} for ${path}`);
+      }
+      const delay = retryDelayMs(response, attempt, nowImpl());
+      if (delay > API_RETRY_MAX_MS || delay >= deadlineAt - nowImpl()) {
+        throw new Error(`GitHub API GET ${response.status}; retry delay exceeds health-check budget for ${path}`);
+      }
+      await sleepImpl(delay);
+    }
+    throw new Error(`GitHub API GET exhausted retries for ${path}`);
   }
   return { get };
 }
@@ -407,16 +477,16 @@ async function readTagCommit(reader, repository, tag) {
   return object?.type === "commit" ? object.sha ?? null : null;
 }
 
-async function listOpenPullRequests(reader, repository) {
+async function listOpenPullRequests(reader, repository, { maxPages = 10 } = {}) {
   const result = [];
-  for (let page = 1; page <= 10; page += 1) {
+  for (let page = 1; page <= maxPages; page += 1) {
     const query = queryString({ state: "open", per_page: 100, page });
     const data = await reader.get(`/repos/${repository}/pulls?${query}`);
-    if (!Array.isArray(data)) return result;
+    if (!Array.isArray(data)) throw new Error(`GitHub API returned a malformed open pull-request page ${page}`);
     result.push(...data);
-    if (data.length < 100) break;
+    if (data.length < 100) return result;
   }
-  return result;
+  throw new Error(`Open pull-request listing exceeds the ${maxPages}-page safety limit`);
 }
 
 async function runHealthCheck({
@@ -480,17 +550,24 @@ async function main() {
 }
 
 module.exports = {
+  API_MAX_ATTEMPTS,
+  API_RETRY_BASE_MS,
+  API_RETRY_MAX_MS,
+  API_REQUEST_TIMEOUT_MS,
   CHECK_INTERVAL_MS,
+  HEALTH_CHECK_DEADLINE_MS,
   MISSED_WINDOWS,
   UPSTREAM_BACKSTOP_MS,
   UPSTREAM_DETECTION_MS,
   SYNC_BRANCH_RE,
   WORKFLOW_SPECS,
+  createGithubReader,
   evaluateCiFreshness,
   evaluateHealth,
   evaluateRepositoryState,
   evaluateUpstreamSync,
   evaluateWorkflowSignal,
+  listOpenPullRequests,
   listWorkflowRuns,
   openPromotionSyncPrs,
   selectLatestRun,
