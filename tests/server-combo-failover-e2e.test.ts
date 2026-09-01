@@ -2688,9 +2688,11 @@ describe("server combo failover 030 activation matrix", () => {
   test("connect cancellation wins with 499, no backup, warning, or cooldown", async () => {
     let bHits = 0;
     const aStarted = deferred();
+    let releaseA!: (response: Response) => void;
+    const aPending = new Promise<Response>(resolve => { releaseA = resolve; });
     const a = serve(() => {
       aStarted.resolve();
-      return new Promise<Response>(() => {});
+      return aPending;
     });
     const b = serve(() => { bHits += 1; return chatSuccess("must not run"); });
     const config = comboConfig({
@@ -2714,6 +2716,7 @@ describe("server combo failover 030 activation matrix", () => {
       expect(isComboTargetInCooldown("free", { provider: "a", model: "m1" })).toBe(false);
     } finally {
       console.warn = originalWarn;
+      releaseA(chatSuccess("released after cancellation"));
     }
   });
 

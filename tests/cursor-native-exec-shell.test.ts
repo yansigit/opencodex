@@ -111,6 +111,13 @@ function installFakeShellRuntime(options: {
   const signals: Array<NodeJS.Signals | undefined> = [];
   const fake = { clock, children, signals, spawnCalls: () => spawnCalls, spawnOptions };
   setBackgroundShellRuntimeForTests({
+    // Keep generic lifecycle fixtures independent of the host process table.
+    // FakeChild.pid is intentionally stable, so inheriting the production
+    // process-group helpers can signal an unrelated runner group with that PID.
+    // Process-tree-specific cases below override these deterministic defaults.
+    platform: "linux",
+    killProcessGroup: () => false,
+    isProcessGroupAlive: () => "gone",
     now: () => clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
