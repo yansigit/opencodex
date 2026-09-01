@@ -2126,9 +2126,11 @@ describe("server local API auth", () => {
     updateAccountQuota("pool-a", 10, 5);
 
     const originalNow = Date.now;
+    // Pin the clock before startServer: its asynchronous pool-quota prime must not
+    // compare the fixture's quota timestamp against a different clock.
+    Date.now = () => now;
     const server = startServer(0);
     try {
-      Date.now = () => now;
       for (const threadId of ["expired-http", "expired-compact", "expired-ws"]) {
         const response = await fetch(new URL("/v1/responses", server.url), {
           method: "POST",
@@ -2228,6 +2230,7 @@ describe("server local API auth", () => {
         { id: "main", email: "main@example.test", isMain: true },
         { id: "pool-a", email: "pool@example.test", isMain: false, chatgptAccountId: "acct-pool-a" },
       ],
+      codexAccountNamespaces: { "ws-refresh": "pool-a" },
       activeCodexAccountId: "pool-a",
     } as OcxConfig);
     saveCodexAccountCredential("pool-a", {
@@ -2240,22 +2243,25 @@ describe("server local API auth", () => {
 
     const originalNow = Date.now;
     const originalFetch = globalThis.fetch;
+    // Install both controls before startServer. Its asynchronous pool-quota prime reads
+    // the clock and can refresh credentials, so a setup window here makes the first
+    // websocket turn race the fixture's intended token rotation.
+    Date.now = () => now;
+    globalThis.fetch = (async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url === "https://auth.openai.com/oauth/token") {
+        return new Response(JSON.stringify({
+          access_token: "new-access-token",
+          refresh_token: "new-refresh-token",
+          expires_in: 3600,
+        }), { status: 200 });
+      }
+      return originalFetch(input, init);
+    }) as typeof fetch;
     const server = startServer(0);
     const wsUrl = new URL("/v1/responses", server.url);
     wsUrl.protocol = "ws:";
     try {
-      Date.now = () => now;
-      globalThis.fetch = (async (input, init) => {
-        const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-        if (url === "https://auth.openai.com/oauth/token") {
-          return new Response(JSON.stringify({
-            access_token: "new-access-token",
-            refresh_token: "new-refresh-token",
-            expires_in: 3600,
-          }), { status: 200 });
-        }
-        return originalFetch(input, init);
-      }) as typeof fetch;
 
       const ws = new WebSocket(wsUrl);
       const waitForOpen = new Promise<void>((resolve, reject) => {
@@ -2276,10 +2282,10 @@ describe("server local API auth", () => {
       });
 
       await waitForOpen;
-      ws.send(JSON.stringify({ type: "response.create", model: "gpt-test", input: "hello" }));
+      ws.send(JSON.stringify({ type: "response.create", model: "ws-refresh/gpt-test", input: "hello" }));
       await waitForTerminal();
       Date.now = () => now + 180_000;
-      ws.send(JSON.stringify({ type: "response.create", model: "gpt-test", input: "again" }));
+      ws.send(JSON.stringify({ type: "response.create", model: "ws-refresh/gpt-test", input: "again" }));
       await waitForTerminal();
       ws.close();
 
