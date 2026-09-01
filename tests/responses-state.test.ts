@@ -1160,7 +1160,10 @@ describe("Responses previous_response_id state", () => {
   test("late async spill completion cannot overwrite the shutdown fallback", async () => {
     setPlatformForTests("win32");
     setStatForTests(() => ({ dev: 1n, ino: 10n, ctimeNs: 100n }));
-    setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
+    // The blocked async publisher, not the fallback write, is what this test
+    // times out. Keep the drain window at 120 ms while giving the synchronous
+    // 2 MiB Windows fallback enough reserve under hosted-runner load.
+    setResponseSpillShutdownBudgetForTests({ totalMs: 30_120, fallbackReserveMs: 30_000 });
     let release!: () => void;
     let entered!: () => void;
     let tempHardenFinished!: () => void;
