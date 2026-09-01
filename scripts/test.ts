@@ -525,33 +525,45 @@ async function runTestLane(
   const startedAt = performance.now();
   let interrupted: NodeJS.Signals | null = null;
   let termination: Promise<void> | null = null;
-  const child = Bun.spawn(options.command ?? [process.execPath, "test", ...lane.args], {
-    env: isolated.env,
-    stdin: "inherit",
-    stdout: capture ? "pipe" : "inherit",
-    stderr: capture ? "pipe" : "inherit",
-    detached: process.platform !== "win32",
-  });
-  const stdoutP = capture ? new Response(child.stdout).text() : Promise.resolve("");
-  const stderrP = capture ? new Response(child.stderr).text() : Promise.resolve("");
+  let child: Bun.Subprocess | null = null;
   let resolveInterrupt!: (signal: NodeJS.Signals) => void;
   const interruptRequested = new Promise<NodeJS.Signals>(resolve => { resolveInterrupt = resolve; });
   const terminate = options.terminateProcess ?? ((target: Bun.Subprocess, signal: NodeJS.Signals) => (
     terminateSpawnedTestProcessForTests(target, signal, options)
   ));
+  const beginTermination = () => {
+    const target = child;
+    const signal = interrupted;
+    if (!target || !signal || termination) return;
+    termination = Promise.resolve().then(() => terminate(target, signal));
+  };
   const forward = (signal: NodeJS.Signals) => {
     if (interrupted) return;
     interrupted = signal;
-    termination ??= Promise.resolve().then(() => terminate(child, signal));
+    beginTermination();
     resolveInterrupt(signal);
   };
   const onInterrupt = () => forward("SIGINT");
   const onTerminate = () => forward("SIGTERM");
+  // Register before spawning. A fast child can publish readiness while this process is
+  // still returning from Bun.spawn; without handlers already installed, a supervisor's
+  // immediate signal takes the default path and can orphan that new process group.
   process.once("SIGINT", onInterrupt);
   process.once("SIGTERM", onTerminate);
 
-  const exited = child.exited;
   try {
+    child = Bun.spawn(options.command ?? [process.execPath, "test", ...lane.args], {
+      env: isolated.env,
+      stdin: "inherit",
+      stdout: capture ? "pipe" : "inherit",
+      stderr: capture ? "pipe" : "inherit",
+      detached: process.platform !== "win32",
+    });
+    beginTermination();
+    const target = child;
+    const stdoutP = capture ? new Response(target.stdout).text() : Promise.resolve("");
+    const stderrP = capture ? new Response(target.stderr).text() : Promise.resolve("");
+    const exited = target.exited;
     const outcome = await Promise.race([
       waitWithMonotonicTimeout(exited, lane.timeoutMs).then(exitCode => ({ kind: "exit" as const, exitCode })),
       interruptRequested.then(async signal => {
@@ -564,8 +576,8 @@ async function runTestLane(
     }
     const exitCode = outcome.exitCode;
     if (exitCode === null) {
-      console.error(`[test] ${lane.label} exceeded ${Math.round(lane.timeoutMs / 1000)}s; terminating pid ${child.pid}.`);
-      termination ??= Promise.resolve().then(() => terminate(child, "SIGTERM"));
+      console.error(`[test] ${lane.label} exceeded ${Math.round(lane.timeoutMs / 1000)}s; terminating pid ${target.pid}.`);
+      termination ??= Promise.resolve().then(() => terminate(target, "SIGTERM"));
       await termination;
       return { exitCode: 124, output: "" };
     }
