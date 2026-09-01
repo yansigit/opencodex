@@ -1185,6 +1185,35 @@ select.input { appearance: none; }
 .switch.on { background: var(--toggle-on-bg); border-color: var(--toggle-on-bg); }
 .switch.mixed { background: var(--amber-soft); border-color: var(--amber); }
 .switch:disabled { opacity: 0.6; cursor: default; }
+.switch.switch-labeled {
+  width: auto;
+  height: auto;
+  border: 0;
+  background: none;
+  border-radius: var(--radius-sm);
+  padding: 0;
+  gap: var(--space-1);
+  flex: 0 0 auto;
+  line-height: normal;
+  position: relative;
+}
+.switch.switch-labeled::before {
+  content: "";
+  width: 34px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--raised);
+  flex-shrink: 0;
+  box-sizing: border-box;
+  transition: background var(--motion-normal), border-color var(--motion-normal);
+}
+.switch.switch-labeled.on::before { background: var(--toggle-on-bg); border-color: var(--toggle-on-bg); }
+.switch.switch-labeled.mixed::before { background: var(--amber-soft); border-color: var(--amber); }
+.switch.switch-labeled .knob { position: absolute; left: 3px; }
+.switch.switch-labeled.on .knob { transform: translateX(14px); }
+.switch.switch-labeled.mixed .knob { transform: translateX(7px); }
+.switch-labeled-text { white-space: nowrap; }
 .switch .knob {
   width: 14px;
   height: 14px;

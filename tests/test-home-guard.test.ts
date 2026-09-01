@@ -88,6 +88,9 @@ function sentinelHome(): { realHome: string; opencodexHome: string; codexHome: s
 
 describe("real-home write guard", () => {
 
+  // This deliberately starts a nested copy of the repository test wrapper. Keep it in the
+  // main worker lane so the child can join the active run lock, and allow startup headroom
+  // when the other workers are compiling large suites.
   test("the shard wrapper arms the real writer guard without inherited preload state", () => {
     const { realHome, opencodexHome } = sentinelHome();
     const configPath = join(opencodexHome, "config.json");
@@ -106,6 +109,9 @@ describe("real-home write guard", () => {
         }
       });
     `, {
+      // The probe intentionally starts a second wrapper while its parent wrapper owns the
+      // user-level test lock. Declare that overlap explicitly so it cannot queue behind itself.
+      OCX_TEST_NO_QUEUE: "1",
       OCX_TEST_HOME_GUARD: undefined,
       OCX_TEST_PRELOAD_PID: undefined,
       OCX_REAL_HOME: realHome,
@@ -113,7 +119,7 @@ describe("real-home write guard", () => {
 
     expect(probe.code).toBe(0);
     expect(readFileSync(configPath, "utf8")).toBe(sentinel);
-  });
+  }, 15_000);
 
 /**
  * Windows without Developer Mode or admin cannot create symlinks (EPERM). The

@@ -80,11 +80,11 @@ test("fmtK renders past a million as M, not as four-digit k", () => {
   expect(fmtK(350_000)).toBe("350k");
 });
 
-test("the native group keeps its window readable with the cap switched off", async () => {
+test("every provider keeps its window readable with the cap switched off", async () => {
   const src = await Bun.file(new URL("../src/pages/Models.tsx", import.meta.url)).text();
-  // Routed providers hide the value when the cap is off (off = "no opinion"), but a native
-  // row always advertises some window, so the number stays on screen for that group.
-  expect(src).toContain("{(capOn || nativeProviderGroup) && (");
+  // Every provider keeps the value visible while the disabled select communicates that an
+  // off cap has no effect. This also keeps provider-card control rows aligned.
+  expect(src).not.toContain("{(capOn || nativeProviderGroup) && (");
   // With the cap off the stored value is only what a future toggle would apply — the 350k
   // default — so the display falls back to the widest window the rows actually advertise.
   // Matched as separate fragments because the expression is wrapped across lines now, and

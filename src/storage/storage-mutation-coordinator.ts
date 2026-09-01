@@ -20,6 +20,12 @@ export interface StorageMutationCoordinatorTestHooks {
   onAcquired?: () => void;
   /** Keep the lease held until a race test has issued its competing operation. */
   waitForRelease?: Promise<void>;
+  /** Cross-thread-safe handshake used by worker-backed race tests. */
+  pauseAfterAcquire?: {
+    kind: StorageMutationKind;
+    readyPath: string;
+    releasePath: string;
+  };
 }
 
 interface ActiveSlot {
@@ -98,7 +104,12 @@ export function endStorageMutation(codexHome?: string): void {
   slot.lease.release();
 }
 
-async function applyCoordinatorBlock(): Promise<void> {
+async function applyCoordinatorBlock(kind: StorageMutationKind): Promise<void> {
+  const pause = testHooks?.pauseAfterAcquire;
+  if (pause?.kind === kind) {
+    await Bun.write(pause.readyPath, "ready\n");
+    while (!Bun.file(pause.releasePath).size) await Bun.sleep(10);
+  }
   await testHooks?.waitForRelease;
   const blockMs = testHooks?.blockMs;
   if (typeof blockMs === "number" && Number.isFinite(blockMs) && blockMs > 0) {

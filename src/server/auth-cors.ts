@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { extractAccountId } from "../oauth/chatgpt";
 import { assertServerTlsFiles, serverTlsConfigError } from "../lib/server-tls";
 import { formatErrorResponse } from "../bridge";
 import {
@@ -24,6 +25,7 @@ import {
   upstreamHttpVersionConfigError,
   wsUpstreamConfigError,
   isAzureIdentityProvider,
+  providerEmptyToolOutputConfigError,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { redactSecretString } from "../lib/redact";
@@ -31,8 +33,8 @@ import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { openRouterRoutingConfigError } from "../providers/openrouter-routing";
-import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compact-budget";
 import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-routing";
+import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compact-budget";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
 import { antigravityOAuthDestinationConfigError, getProviderTlsProfileStatus, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
@@ -420,10 +422,6 @@ export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
   { endpoint: "/v1/chat/completions", bearer: "accepted", dedicated: "accepted", xApiKey: "rejected" },
   { endpoint: "/v1/messages", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
   { endpoint: "/v1/models", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
-  // #809: least-privilege catalog read for remote Codex clients. Same admission set as
-  // /v1/models and for the same reason — it forwards no caller credential upstream — so a
-  // remote client no longer needs an admin token just to read the model catalog.
-  { endpoint: "/v1/catalog", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
 ];
 
 /** Whether `token` is the environment-provided management secret. */
@@ -597,6 +595,7 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     delete canonicalCandidate.modelContextWindows;
     // User-owned soft compaction policy; it does not alter the canonical transport seed.
     delete canonicalCandidate.modelAutoCompactTokenLimits;
+    delete canonicalCandidate.annotateEmptyToolOutputs;
     // Transport controls are user-owned overlays, not part of the immutable seed.
     delete canonicalCandidate.wsUpstream;
     delete canonicalCandidate.maxWsFrameBytes;
@@ -645,6 +644,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (wsUpstreamError) return `provider ${name} ${wsUpstreamError}`;
   const maxWsFrameBytesError = maxWsFrameBytesConfigError(raw.maxWsFrameBytes);
   if (maxWsFrameBytesError) return `provider ${name} ${maxWsFrameBytesError}`;
+  const emptyToolOutputError = providerEmptyToolOutputConfigError(name, raw);
+  if (emptyToolOutputError) return emptyToolOutputError;
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
   if (modelCostsError) {
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
@@ -772,6 +773,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "freeTier",
       "liveModels",
       "requestPacing",
+      "annotateEmptyToolOutputs",
       "tlsProfile",
       "models",
       "contextWindow",

@@ -636,6 +636,6 @@ JSON mode: `envelope`.
 
 ## Counts
 
-- declared capabilities: 34
+- declared capabilities: 35
 - of those, state-changing: 16
 - head-resolved invocations: 2

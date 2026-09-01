@@ -277,6 +277,7 @@ function messagesToGeminiFormat(
   parsed: OcxParsedRequest,
   identityModelId: string,
   repairToolPairs: boolean,
+  stripRejectedClaudeSdkParagraph = false,
 ): { systemInstruction?: unknown; contents: unknown[]; replayedCallIds: string[] } {
   // Neutralize Codex's GPT-5 identity line (Gemini/Antigravity share this path) so a routed model
   // never misreports as GPT-5/OpenAI, and never leaks the proxy identity upstream.
@@ -895,10 +896,13 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           : resolveDirectGeminiWireModelId(parsed.modelId, provider.directGeminiWireRenames !== false);
       // AI Studio's `-tiered` spelling is wire-only; CCA aliases may migrate to another generation.
       const identityModelId = provider.googleMode === "cloud-code-assist" ? routedModelId : parsed.modelId;
+      const stripRejectedClaudeSdkParagraph = provider.googleMode === "cloud-code-assist"
+        && parsed.modelId === "gemini-3.7-flash";
       const { systemInstruction, contents, replayedCallIds } = messagesToGeminiFormat(
         parsed,
         identityModelId,
         provider.googleMode === "cloud-code-assist",
+        stripRejectedClaudeSdkParagraph,
       );
       lastInjectedCallIds = [...replayedCallIds];
       lastReasoningReplayScope = parsed._reasoningReplayScope;

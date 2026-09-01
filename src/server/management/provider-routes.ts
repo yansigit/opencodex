@@ -86,7 +86,6 @@ import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerS
 import type { PersistedUsageAttempt } from "../../usage/log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { providerServiceTierConfigError } from "./provider-capability-config";
-import { providerEmptyToolOutputConfigError } from "../../config/provider-validation";
 import { applySystemEnvToggle } from "../system-env";
 import {
   LOCAL_PROVIDER_RELOAD_NAME_HEADER,
@@ -388,6 +387,13 @@ function applyProviderPatchFields(
     next.liveModels = rawBody.liveModels;
     touched = true;
   }
+  if (Object.hasOwn(rawBody, "annotateEmptyToolOutputs")) {
+    const value = rawBody.annotateEmptyToolOutputs;
+    if (value === null) delete next.annotateEmptyToolOutputs;
+    else if (typeof value === "boolean") next.annotateEmptyToolOutputs = value;
+    else return { error: "annotateEmptyToolOutputs must be a boolean or null" };
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "wsUpstream")) {
     const value = rawBody.wsUpstream;
     if (value === null) {
@@ -646,8 +652,7 @@ function canonicalOpenAiBudgetPatchError(
   }
   const applied = applyProviderPatchFields("openai", seed, rawBody, keys, config);
   if ("error" in applied) return applied.error;
-  return providerManagementConfigError("openai", applied.next)
-    ?? providerEmptyToolOutputConfigError("openai", applied.next);
+  return providerManagementConfigError("openai", applied.next);
 }
 
 export async function handleProviderRoutes(ctx: ManagementContext): Promise<Response | null> {
@@ -727,8 +732,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return jsonResponse({ error: "provider reload target unavailable" }, 404);
     }
     const provider = diskConfig.providers[name]!;
-    const providerError = providerManagementConfigError(name, provider)
-      ?? providerEmptyToolOutputConfigError(name, provider);
+    const providerError = providerManagementConfigError(name, provider);
     if (providerError) return jsonResponse({ error: "provider reload target invalid" }, 409);
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
       diskConfig.codexAccountNamespaces,
@@ -834,6 +838,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const submittedModelContextWindows = Object.hasOwn(prov, "modelContextWindows");
     const submittedModelAutoCompactTokenLimits = Object.hasOwn(prov, "modelAutoCompactTokenLimits");
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
+    const submittedAnnotateEmptyToolOutputs = Object.hasOwn(prov, "annotateEmptyToolOutputs");
     const buildProvider = (existing: OcxProviderConfig | undefined): OcxProviderConfig => {
       const next = structuredClone(prov);
       // Native OpenAI capabilities are registry-owned runtime defaults. Enriching this exact
@@ -851,6 +856,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (existingFailover && !next.oauthAccountFailover) next.oauthAccountFailover = existingFailover;
       if (!submittedRequestPacing && existing?.requestPacing) next.requestPacing = structuredClone(existing.requestPacing);
       if (!submittedContextWindow && existing?.contextWindow !== undefined) next.contextWindow = existing.contextWindow;
+      if (!submittedAnnotateEmptyToolOutputs && existing?.annotateEmptyToolOutputs !== undefined) {
+        next.annotateEmptyToolOutputs = existing.annotateEmptyToolOutputs;
+      }
       if (existing?.modelContextWindows) {
         next.modelContextWindows = submittedModelContextWindows
           ? { ...existing.modelContextWindows, ...(next.modelContextWindows ?? {}) }
@@ -978,8 +986,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (applied.editorTouched && !pacingOnly) {
       const providerError = canonicalBudgetOnly
         ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
-        : providerManagementConfigError(name, next)
-          ?? providerEmptyToolOutputConfigError(name, next);
+        : providerManagementConfigError(name, next);
       if (providerError) return jsonResponse({ error: providerError }, 400);
       if (!canonicalBudgetOnly) {
         const serviceTierError = providerServiceTierConfigError(name, next);

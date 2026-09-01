@@ -70,9 +70,8 @@ function readDefaultReasoningEffort(raw: unknown, efforts: string[] | undefined)
   return { value: raw };
 }
 import type { CatalogModel } from "../../codex/catalog";
-import { accountBoundNativeOpenAiSlugsBySelector, catalogModelSlug, configuredNativeAliasSlugs, disabledNativeSlugs, invalidateCodexModelsCache, nativeModelRows, shouldIncludeAccountBoundNativeOpenAi, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
+import { accountBoundNativeOpenAiSlugsBySelector, catalogModelSlug, configuredNativeAliasSlugs, disabledNativeSlugs, invalidateCodexModelsCache, nativeModelRows, NATIVE_OPENAI_MODELS, shouldIncludeAccountBoundNativeOpenAi, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
 import { CatalogGatherBusyError } from "../../codex/catalog/provider-fetch";
-import { NATIVE_OPENAI_MODELS } from "../../codex/catalog/native-models";
 import { getProviderLiveModelCount } from "../../codex/model-cache";
 import {
   DEFAULT_SUBAGENT_MODELS,
@@ -210,6 +209,7 @@ function applyModelVisibility(
   const supportedNative = new Set([
     ...nativeModelRows(config).map(row => row.slug),
     ...accountNativeQualified,
+    ...NATIVE_OPENAI_MODELS,
   ]);
   const targets: Array<{ id: string; native: boolean }> = [];
   const seen = new Set<string>();
@@ -489,20 +489,17 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
   }
 
   if (url.pathname === "/api/catalog" && req.method === "GET") {
-    // Shared with GET|HEAD /v1/catalog (#809) so both planes emit identical bytes.
-    const { serializePersistedCatalog, persistedCodexVersion } = await import("../catalog-download");
-    const serialized = await serializePersistedCatalog();
-    // No size ceiling here on purpose: this route's behavior predates the shared serializer
-    // and a 2,000-model catalog (~92 MB, within the supported bound) must keep working.
-    if (serialized.body === null) return jsonResponse({ error: "catalog not found" }, 404, req, config);
+    const { readCatalog, readCodexCatalogPath } = await import("../../codex/catalog");
+    const catalog = readCatalog(readCodexCatalogPath());
+    if (!catalog) return jsonResponse({ error: "catalog not found" }, 404, req, config);
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       ...corsHeaders(req, config),
     };
-    if (serialized.etag) headers.ETag = serialized.etag;
-    const version = await persistedCodexVersion();
+    const { loadPersistedCodexRuntime } = await import("../../codex/runtime");
+    const version = loadPersistedCodexRuntime()?.selectedVersion;
     if (version) headers["x-opencodex-codex-version"] = version;
-    return new Response(serialized.body, { status: 200, headers });
+    return new Response(JSON.stringify(catalog), { status: 200, headers });
   }
 
   if (url.pathname === "/api/models" && req.method === "GET") {

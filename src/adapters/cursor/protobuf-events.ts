@@ -155,7 +155,13 @@ export interface CursorProtobufEventState {
    */
   contextCarryForwardTokens?: number;
   recordContextTokens?: (tokens: number) => void;
-  openToolCalls: Map<string, { name: string; args: string; announcementArgs?: Record<string, unknown>; awaitingNativeArgs?: boolean }>;
+  openToolCalls: Map<string, {
+    name: string;
+    args: string;
+    announcementArgs?: Record<string, unknown>;
+    awaitingNativeArgs?: boolean;
+    normalizeFreeformArgs?: boolean;
+  }>;
   completedToolCalls: Set<string>;
   /** Set once a terminal `done`/truncation has been emitted, so post-terminal frames stay inert. */
   terminated?: boolean;
@@ -1157,9 +1163,11 @@ function recordToolCall(state: CursorProtobufEventState, callId: string, cursorW
   // land on the tool Codex actually exposed this turn (#399).
   const mapKey = advertisedName ?? normalizeCursorWireName(cursorWireName);
   const announced = announcementArgs(toolCall);
+  const responseName = responsesToolNameFromCursorWire(mapKey, state.cursorToolNameMap);
   state.openToolCalls.set(callId, {
-    name: responsesToolNameFromCursorWire(mapKey, state.cursorToolNameMap),
+    name: responseName,
     args: "",
+    ...(responseName === mapKey ? { normalizeFreeformArgs: true } : {}),
     ...(announced ? { announcementArgs: announced } : {}),
   });
   state.translatorBudget?.openCall(callId);
@@ -1236,7 +1244,9 @@ function dropStructuredEditCall(state: CursorProtobufEventState, callId: string,
 function commitToolCall(state: CursorProtobufEventState, callId: string, finalArgs: string): CursorServerMessage[] {
   const open = state.openToolCalls.get(callId);
   if (!open) return [];
-  if (state.freeformToolNames?.has(open.name)) finalArgs = normalizeFreeformArgs(finalArgs);
+  if (state.freeformToolNames?.has(open.name) && open.normalizeFreeformArgs) {
+    finalArgs = normalizeFreeformArgs(finalArgs);
+  }
   if (state.freeformToolNames?.has(open.name) && !cursorFreeformWrapperValid(finalArgs)) {
     return dropInvalidFreeformCall(state, callId, open.name);
   }

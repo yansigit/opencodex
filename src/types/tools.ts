@@ -46,12 +46,7 @@ export function namespacedToolName(namespace: string | undefined, name: string):
 const LEGACY_SHELL_BRIDGE_TOOL_NAMES = ["exec_command", "shell_command"] as const;
 const CODE_MODE_HELPER_TOOL_NAMES = [...LEGACY_SHELL_BRIDGE_TOOL_NAMES, "apply_patch"] as const;
 
-/**
- * The one declared name that turns nested-helper normalization on. Declaring it is not just a
- * name: it also decides whether an emitted `exec_command`/`shell_command`/`apply_patch` is
- * accepted as that shell tool, so callers that build declared-name sets must add it only for a
- * genuine bare declaration.
- */
+/** The declared name that enables nested code-mode helper normalization. */
 export const CODE_MODE_EXEC_TOOL_NAME = "exec";
 
 export function normalizeDeclaredToolName(
@@ -60,7 +55,7 @@ export function normalizeDeclaredToolName(
 ): string {
   if (!declared) return name;
   if (declared.has(name)) return name;
-  if (declared.has("exec")) {
+  if (declared.has(CODE_MODE_EXEC_TOOL_NAME)) {
     // When the catalog explicitly declares any legacy shell bridge name, the environment
     // genuinely exposes that tool — turn normalization off so a call is never mis-routed
     // to `exec`.
@@ -68,7 +63,7 @@ export function normalizeDeclaredToolName(
       return name;
     }
     if ((CODE_MODE_HELPER_TOOL_NAMES as readonly string[]).includes(name)) {
-      return "exec";
+      return CODE_MODE_EXEC_TOOL_NAME;
     }
   }
   // Models may strip a namespace prefix or replace separators with underscores. Resolve only
@@ -76,7 +71,10 @@ export function normalizeDeclaredToolName(
   let matched: string | undefined;
   for (const dec of declared) {
     const matchesSuffix = !name.includes(":") && !name.includes("__")
-      && (dec.endsWith(`:${name}`) || dec.endsWith(`__${name}`));
+      && (
+        dec.endsWith(`:${name}`)
+        || (name !== CODE_MODE_EXEC_TOOL_NAME && dec.endsWith(`__${name}`))
+      );
     const matchesSanitized = dec.replace(/[^A-Za-z0-9_-]/g, "_") === name;
     if (!matchesSuffix && !matchesSanitized) continue;
     if (matched !== undefined) return name;

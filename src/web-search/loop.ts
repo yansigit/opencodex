@@ -13,7 +13,7 @@ import type { WebSearchBackendId } from "./index";
 import { clearableDeadline } from "../lib/abort";
 import { redactSecretString } from "../lib/redact";
 import { readBoundedResponseBody } from "../lib/bounded-body";
-import { applyUpstreamRecoveryInit, fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-retry";
+import { fetchWithResetRetry, prepareSameTarget429Wait } from "../lib/upstream-retry";
 import { rateLimitRetryDelayMs } from "../providers/key-failover";
 import {
   isTranslatorBudgetExceededError,
@@ -446,10 +446,10 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
           request = cachedRequest;
         } else {
           request = await requestAdapter.buildRequest(iterParsed, {
-            ...deps.incomingMeta,
             headers: selectedForwardHeaders,
             abortSignal: headerDeadline.signal,
             translatorBudget,
+            providerFetch: routedProviderFetch,
           });
           try {
             deps.onRequestBuilt?.(request);
@@ -468,6 +468,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
               timeoutMs: connectTimeoutMs,
               returnRawErrors: true,
               stream: true,
+              executor: routedProviderFetch,
               ...(deps.accountId ? { accountId: deps.accountId } : {}),
             });
           } else {
@@ -479,17 +480,12 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
                 deps.onAttemptSend?.(retryRecovery ?? recovery);
                 const h = new Headers(request.headers);
                 if (!h.has("accept-encoding")) h.set("accept-encoding", "identity");
-                // A connection-reset replay must leave the half-closed pooled socket, not just
-                // ask politely: Bun has ignored a bare `Connection: close` (oven-sh/bun#20492),
-                // so the transport-level `keepalive: false` this helper adds is what actually
-                // opens a new connection. Spending `retryRecovery` on telemetry alone left every
-                // replay on this leg eligible for the same dead socket the reset came from.
-                return routedProviderFetch(request.url, applyUpstreamRecoveryInit({
+                return routedProviderFetch(request.url, {
                   method: request.method,
                   headers: h,
                   body: request.body,
                   signal: headerDeadline.signal,
-                }, retryRecovery));
+                });
               },
               { abortSignal: headerDeadline.signal, label: "web-search-loop" },
             );

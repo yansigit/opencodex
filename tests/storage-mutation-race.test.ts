@@ -459,8 +459,15 @@ describe("storage mutation coordinator", () => {
 
   test("restore is rejected while cleanup holds the shared mutation slot", async () => {
     const home = isolatedCodexHome!.path;
-    const acquired = acquiredSignal();
-    setArchivedCleanupJobTestHooks({ blockMs: 10, onAcquired: acquired.notify, waitForRelease: acquired.releasePromise });
+    const cleanupReadyPath = join(testDir, "cleanup-slot-acquired.ready");
+    const releaseCleanupPath = join(testDir, "release-cleanup");
+    setArchivedCleanupJobTestHooks({
+      pauseAfterAcquire: {
+        kind: "cleanup",
+        readyPath: cleanupReadyPath,
+        releasePath: releaseCleanupPath,
+      },
+    });
     seedArchivedPair(home);
 
     const server = startServer(0);
@@ -473,7 +480,7 @@ describe("storage mutation coordinator", () => {
         body: JSON.stringify({ percent: 50, mode: "quarantine", digest: preview.digest }),
       });
 
-      await acquired.promise;
+      await waitForCondition("cleanup worker to acquire the mutation slot", () => existsSync(cleanupReadyPath));
 
       const restoreAttempt = await fetch(new URL("/api/storage/trash/restore", server.url), {
         method: "POST",
@@ -482,7 +489,6 @@ describe("storage mutation coordinator", () => {
       });
       expect(restoreAttempt.status).toBe(409);
       expect((await restoreAttempt.json()).error).toBe("storage_mutation_busy");
-      acquired.release();
       expect(existsSync(join(home, "archived_sessions", "rollout-old.jsonl"))).toBe(true);
       expect(existsSync(join(home, "archived_sessions", "rollout-new.jsonl"))).toBe(true);
       expect(trashStageCount(home)).toBe(0);
@@ -497,7 +503,8 @@ describe("storage mutation coordinator", () => {
       expect(existsSync(join(home, "archived_sessions", "rollout-new.jsonl"))).toBe(true);
       expect(threadCount(home)).toBe(1);
     } finally {
-      acquired.release();
+      writeFileSync(releaseCleanupPath, "release\n");
+      if (cleanupPromise) await cleanupPromise.catch(() => undefined);
       await stopRaceServer(server);
     }
   }, { timeout: 30_000 });

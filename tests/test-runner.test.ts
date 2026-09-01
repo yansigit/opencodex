@@ -13,6 +13,7 @@ import {
   selectChangedComparisonRef,
   SERIAL_FULL_SUITE_FILES,
   terminateTestProcessForTests,
+  waitWithMonotonicTimeout,
 } from "../scripts/test";
 import {
   acquireTestRunLock,
@@ -431,6 +432,34 @@ describe("bun test argv", () => {
 });
 
 describe("test-runner process-tree termination", () => {
+  test("a premature timer wakeup rearms against the monotonic deadline", async () => {
+    let now = 0;
+    let nextHandle = 0;
+    const scheduled = new Map<number, { callback: () => void; delayMs: number }>();
+    const pending = waitWithMonotonicTimeout(new Promise<never>(() => {}), 100, {
+      now: () => now,
+      schedule: (callback, delayMs) => {
+        const handle = ++nextHandle;
+        scheduled.set(handle, { callback, delayMs });
+        return handle;
+      },
+      clear: handle => { scheduled.delete(handle as number); },
+    });
+
+    expect([...scheduled.values()].map(entry => entry.delayMs)).toEqual([100]);
+    now = 10;
+    const early = scheduled.get(1);
+    scheduled.delete(1);
+    early?.callback();
+    expect([...scheduled.values()].map(entry => entry.delayMs)).toEqual([90]);
+    now = 100;
+    const deadline = scheduled.get(2);
+    scheduled.delete(2);
+    deadline?.callback();
+    expect(await pending).toBeNull();
+    expect(scheduled.size).toBe(0);
+  });
+
   test("rejects invalid process IDs before signaling", async () => {
     let signals = 0;
     await expect(terminateTestProcessForTests({

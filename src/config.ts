@@ -65,7 +65,6 @@ import { redactSecretString } from "./lib/redact";
 import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "./lib/provider-tls-profile";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import { MODEL_ALIAS_PATTERN } from "./providers/default-aliases";
-import { vercelGatewayRoutingConfigError } from "./providers/vercel-gateway-routing";
 import {
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
   OPENAI_PROVIDER_TIER_VERSION,
@@ -455,16 +454,6 @@ const retryOn429PolicySchema = z.object({
   respectRetryAfter: z.boolean().optional(),
 }).strict();
 
-/**
- * `transientRetryOn5xx` accepts only these keys. `attempts` is a TOTAL send budget shared by
- * both retry layers, so the ceiling is deliberately lower than `retryOn429`'s: 10 total sends
- * against an already-failing provider is already generous.
- */
-const transientRetryOn5xxPolicySchema = z.object({
-  enabled: z.boolean().optional(),
-  attempts: z.number().int().min(1).max(10).optional(),
-}).strict();
-
 const requestPacingRuleSchema = z.object({
   // Keep the RPM-derived timer within the same one-hour bound as minIntervalMs.
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
@@ -529,7 +518,6 @@ const providerConfigSchema = z.object({
   responsesPath: z.string().min(1).optional(),
   statelessResponses: z.boolean().optional(),
   requiresAdjacentResponsesToolResults: z.boolean().optional(),
-  annotateEmptyToolOutputs: z.boolean().optional(),
   fastWire: fastWireSchema.nullable().optional(),
   supportsServiceTier: z.boolean().optional(),
   modelSupportsServiceTier: z.record(z.string().min(1), z.boolean()).optional(),
@@ -996,7 +984,6 @@ const configSchema = z.object({
   // parse: a hand-edited typo must never trip the backup-and-defaults repair
   // path below and wipe providers/pool accounts. Warning emitted in loadConfig.
   streamMode: z.enum(["auto", "legacy-tee", "eager-relay"]).optional().catch(undefined),
-  blockedModelRedirects: z.record(z.string(), z.string()).optional().catch(undefined),
   // Same degrade-don't-reject rationale as the fields above: a hand-edited
   // non-string must not trip the backup-and-defaults repair path. Unset then
   // takes the canonical sideband path (src/server/live.ts normalizeSidebandRoot).
@@ -1105,20 +1092,6 @@ const configSchema = z.object({
             : "openRouterRouting",
         ],
         message: openRouterRoutingError,
-      });
-    }
-    const vercelRoutingError = vercelGatewayRoutingConfigError(provider);
-    if (vercelRoutingError) {
-      ctx.addIssue({
-        code: "custom",
-        path: [
-          "providers",
-          redactSecretString(name),
-          vercelRoutingError.startsWith("modelVercelGatewayRouting")
-            ? "modelVercelGatewayRouting"
-            : "vercelGatewayRouting",
-        ],
-        message: vercelRoutingError,
       });
     }
     if (Object.hasOwn(provider, "virtualModels")) {
@@ -3646,12 +3619,6 @@ function warnProxyConfigDiscardOnce(kind: "proxy" | "noProxy" | "noProxyElements
  * that makes outbound provider requests (server start, catalog sync).
  */
 export function applyProxyEnv(config: OcxConfig): void {
-  // `proxy` and `noProxy` are not declared in the top-level schema, which ends in
-  // `.passthrough()`, so whatever is on disk arrives here verbatim. A non-string value
-  // reached string-only methods and threw out of this function, and it runs once per
-  // process entry point — the failure was a startup crash, not a degraded proxy. Ignore
-  // malformed values with a privacy-safe warning instead: they cannot express a routing
-  // intent, and refusing to start is a worse answer than starting without them.
   const rawProxy = config.proxy;
   const proxy = typeof rawProxy === "string" ? resolveEnvValue(rawProxy) : undefined;
   if (!proxy) {
@@ -3668,7 +3635,6 @@ export function applyProxyEnv(config: OcxConfig): void {
   const raw = config.noProxy;
   let configuredEntries: string[];
   if (Array.isArray(raw)) {
-    // One unusable element must not discard the operator's other entries.
     if (raw.some(entry => typeof entry !== "string")) warnProxyConfigDiscardOnce("noProxyElements");
     configuredEntries = raw.filter((entry): entry is string => typeof entry === "string");
   } else if (typeof raw === "string") {

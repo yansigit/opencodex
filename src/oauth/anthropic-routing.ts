@@ -25,7 +25,7 @@ import {
   POOL_KEY_ANTHROPIC,
   seedPoolRotationAccount,
 } from "../codex/pool-rotation";
-import type { OcxAccountPoolRotationStrategy, OcxConfig } from "../types";
+import type { OcxAccountPoolQuotaWindow, OcxAccountPoolRotationStrategy, OcxConfig } from "../types";
 import {
   ACCOUNT_POOL_MAX_FAILOVERS,
   affinitySizeForTests,
@@ -62,7 +62,7 @@ export interface AnthropicAccountPoolConfig {
   strategy?: OcxAccountPoolRotationStrategy;
   /** Successful new-session binds retained on one round-robin selection. Default 1; range 1..100. */
   stickyLimit?: number;
-  /** Usage window for quota-based scoring. Default "five-hour" (today's behaviour). */
+  /** Usage window for quota-based scoring. Default "five-hour". */
   quotaWindow?: OcxAccountPoolQuotaWindow;
 }
 
@@ -79,7 +79,7 @@ const anthropicPoolPlugin: AccountPoolPlugin = {
       .map(account => account.id);
   },
   usageScore(accountId) {
-    return anthropicUsageScore(accountId);
+    return fiveHourScore(accountId);
   },
 };
 
@@ -99,6 +99,22 @@ export function anthropicAutoSwitchThreshold(config: OcxConfig): number {
   const value = anthropicAccountPoolConfig(config).autoSwitchThreshold;
   if (typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 100) return value;
   return DEFAULT_AUTO_SWITCH_THRESHOLD;
+}
+
+/** Strict parse for management APIs — returns null instead of defaulting. */
+export function parseAccountPoolQuotaWindow(raw: unknown): OcxAccountPoolQuotaWindow | null {
+  if (typeof raw === "string" && VALID_QUOTA_WINDOWS.has(raw as OcxAccountPoolQuotaWindow)) {
+    return raw as OcxAccountPoolQuotaWindow;
+  }
+  return null;
+}
+
+export function normalizeAccountPoolQuotaWindow(raw: unknown): OcxAccountPoolQuotaWindow {
+  return parseAccountPoolQuotaWindow(raw) ?? DEFAULT_QUOTA_WINDOW;
+}
+
+export function anthropicQuotaWindow(config: AnthropicAccountPoolConfig): OcxAccountPoolQuotaWindow {
+  return normalizeAccountPoolQuotaWindow(config.quotaWindow);
 }
 
 export function getAnthropicAccountHealthSnapshot(
@@ -136,10 +152,48 @@ function fiveHourKnown(accountId: string): boolean {
   return typeof percent === "number" && Number.isFinite(percent);
 }
 
-function anthropicUsageScore(accountId: string): number {
-  const quota = getCachedProviderAccountQuota(PROVIDER, accountId);
-  if (!quota || typeof quota.fiveHourPercent !== "number" || !Number.isFinite(quota.fiveHourPercent)) {
-    return UNKNOWN_USAGE_SCORE;
+function weeklyKnown(accountId: string): boolean {
+  const percent = getCachedProviderAccountQuota(PROVIDER, accountId)?.weeklyPercent;
+  return typeof percent === "number" && Number.isFinite(percent);
+}
+
+function fiveHourScore(accountId: string): number {
+  const percent = getCachedProviderAccountQuota(PROVIDER, accountId)?.fiveHourPercent;
+  return typeof percent === "number" && Number.isFinite(percent)
+    ? Math.max(0, Math.min(100, percent))
+    : UNKNOWN_USAGE_SCORE;
+}
+
+function weeklyScore(accountId: string): number {
+  const percent = getCachedProviderAccountQuota(PROVIDER, accountId)?.weeklyPercent;
+  return typeof percent === "number" && Number.isFinite(percent)
+    ? Math.max(0, Math.min(100, percent))
+    : UNKNOWN_USAGE_SCORE;
+}
+
+function exhausted5h(accountId: string): boolean {
+  return fiveHourKnown(accountId) && fiveHourScore(accountId) >= 100;
+}
+
+function hasKnownUsage(config: OcxConfig, accountId: string): boolean {
+  switch (anthropicQuotaWindow(anthropicAccountPoolConfig(config))) {
+    case "five-hour": return fiveHourKnown(accountId);
+    case "weekly": return weeklyKnown(accountId);
+    case "max-utilization": return fiveHourKnown(accountId) || weeklyKnown(accountId);
+  }
+}
+
+function anthropicUsageScore(config: OcxConfig, accountId: string): number {
+  switch (anthropicQuotaWindow(anthropicAccountPoolConfig(config))) {
+    case "five-hour": return fiveHourScore(accountId);
+    case "weekly": return weeklyScore(accountId);
+    case "max-utilization": {
+      const scores = [
+        ...(fiveHourKnown(accountId) ? [fiveHourScore(accountId)] : []),
+        ...(weeklyKnown(accountId) ? [weeklyScore(accountId)] : []),
+      ];
+      return scores.length > 0 ? Math.max(...scores) : UNKNOWN_USAGE_SCORE;
+    }
   }
 }
 
@@ -183,18 +237,17 @@ export function getAnthropicPoolRetryAfterSeconds(now = Date.now()): number | nu
   return Math.max(1, Math.ceil((earliest - now) / 1000));
 }
 
-function pickLowestUsage(excludeId: string | undefined, now: number): string | null {
-  const eligible = getEligibleAnthropicAccounts(now).filter(id => id !== excludeId);
-  if (eligible.length === 0) return null;
-  let best = eligible[0]!;
-  let bestScore = anthropicUsageScore(best);
-  for (let i = 1; i < eligible.length; i++) {
-    const id = eligible[i]!;
-    const score = anthropicUsageScore(id);
-    if (score < bestScore) {
-      best = id;
-      bestScore = score;
-    }
+interface ScoredAccount {
+  accountId: string;
+  hasKnownUsage: boolean;
+  score: number;
+  fiveHourTieBreak: number;
+  knownFirst: boolean;
+}
+
+function compareScoredAccounts(a: ScoredAccount, b: ScoredAccount): number {
+  if (a.knownFirst && b.knownFirst && a.hasKnownUsage !== b.hasKnownUsage) {
+    return a.hasKnownUsage ? -1 : 1;
   }
   return a.score - b.score || a.fiveHourTieBreak - b.fiveHourTieBreak;
 }
@@ -208,16 +261,13 @@ function pickLowestUsage(config: OcxConfig, excludeId: string | undefined, now: 
   const scored: ScoredAccount[] = eligible.map(accountId => ({
     accountId,
     hasKnownUsage: hasKnownUsage(config, accountId),
-    score: usageScore(config, accountId),
+    score: anthropicUsageScore(config, accountId),
     fiveHourTieBreak: window === "five-hour" ? 0 : fiveHourScore(accountId),
-    // Every window EXCEPT the legacy five-hour default is an explicit opt-in, so
-    // known-before-unknown applies to all of them and to none of the default path.
     knownFirst: window !== "five-hour",
   }));
   let best = scored[0]!;
   for (let i = 1; i < scored.length; i++) {
     const candidate = scored[i]!;
-    // Strict `< 0` keeps the earliest eligible account on an exact tie.
     if (compareScoredAccounts(candidate, best) < 0) best = candidate;
   }
   return best.accountId;
@@ -298,8 +348,10 @@ function anthropicPoolStrategy(config: OcxConfig): OcxAccountPoolRotationStrateg
 function isActiveUnderFillFirstThreshold(config: OcxConfig, accountId: string): boolean {
   const threshold = anthropicAutoSwitchThreshold(config);
   if (threshold <= 0) return true;
-  if (!hasKnownUsage(accountId)) return true;
-  return anthropicUsageScore(accountId) < threshold;
+  const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
+  if (window === "weekly" && exhausted5h(accountId)) return false;
+  if (!hasKnownUsage(config, accountId)) return true;
+  return anthropicUsageScore(config, accountId) < threshold;
 }
 
 function pickFillFirstAnthropicAccount(config: OcxConfig, now: number): string | null {
@@ -367,6 +419,75 @@ function resolveAnthropicFillFirst(
   return { accountId: picked, reason: "fill-first" };
 }
 
+function resolveAnthropicQuota(
+  sessionKey: string | null | undefined,
+  config: OcxConfig,
+  set: NonNullable<ReturnType<typeof getAccountSet>>,
+  now: number,
+): AnthropicAccountSelection {
+  const key = normalizeAffinityComponent(sessionKey);
+  if (key) {
+    const affined = getSessionAffinity(POOL_KEY_ANTHROPIC, key, now);
+    if (affined) {
+      const stillThere = set.accounts.some(a => a.id === affined.accountId && a.needsReauth !== true);
+      if (
+        stillThere
+        && isAnthropicAccountEligible(affined.accountId, now)
+        && isPoolCredentialUsable(affined.accountId, now)
+      ) {
+        touchSessionAffinity(POOL_KEY_ANTHROPIC, key, now);
+        return { accountId: affined.accountId, reason: "affinity" };
+      }
+      clearSessionAffinityForAccount(POOL_KEY_ANTHROPIC, affined.accountId);
+    }
+  }
+
+  const threshold = anthropicAutoSwitchThreshold(config);
+  const activeOk = set.accounts.some(a => a.id === set.activeAccountId && a.needsReauth !== true)
+    && isAnthropicAccountEligible(set.activeAccountId, now)
+    && isPoolCredentialUsable(set.activeAccountId, now);
+  let accountId: string | null = null;
+  let reason: AnthropicAccountSelectionReason = "none";
+
+  if (threshold > 0) {
+    const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
+    if (activeOk
+      && !(window === "weekly" && exhausted5h(set.activeAccountId))
+      && (!hasKnownUsage(config, set.activeAccountId)
+        || anthropicUsageScore(config, set.activeAccountId) < threshold)) {
+      accountId = set.activeAccountId;
+      reason = "active";
+    } else {
+      const picked = pickLowestUsage(config, undefined, now);
+      if (picked) {
+        accountId = picked;
+        reason = activeOk && picked === set.activeAccountId ? "active" : "lowest-usage";
+      } else if (activeOk) {
+        accountId = set.activeAccountId;
+        reason = "active";
+      }
+    }
+  } else if (activeOk) {
+    accountId = set.activeAccountId;
+    reason = "active";
+  } else {
+    const picked = pickLowestUsage(config, set.activeAccountId, now);
+    if (picked) {
+      accountId = picked;
+      reason = "only-eligible";
+    }
+  }
+
+  if (!accountId) {
+    const anyCooled = set.accounts.some(a => !isAnthropicAccountEligible(a.id, now));
+    return { accountId: null, reason: anyCooled ? "all-cooled" : "none" };
+  }
+  if (key && normalizeAffinityComponent(accountId)) {
+    bindSessionAffinity(POOL_KEY_ANTHROPIC, key, accountId, now);
+  }
+  return { accountId, reason };
+}
+
 /**
  * Resolve which Anthropic OAuth account should serve this session.
  * When the pool is disabled, always returns the store's active account.
@@ -383,15 +504,19 @@ export function resolveAnthropicAccountForSession(
     return { accountId: set.activeAccountId, reason: "pool-disabled" };
   }
 
-  if (anthropicPoolStrategy(config) === "fill-first") {
+  const strategy = anthropicPoolStrategy(config);
+  if (strategy === "fill-first") {
     return resolveAnthropicFillFirst(sessionKey, config, set, now);
+  }
+  if (strategy === "quota") {
+    return resolveAnthropicQuota(sessionKey, config, set, now);
   }
 
   const kernelResult = resolvePoolAccount(
     anthropicPoolPlugin,
     sessionKey ?? null,
     {
-      strategy: anthropicPoolStrategy(config) === "round-robin" ? "round-robin" : "quota",
+      strategy: "round-robin",
       enabled: true,
       activeAccountId: set.activeAccountId,
       stickyLimit: stickyLimitForPool(config),

@@ -44,6 +44,7 @@ import {
   applyCodexAuthContextToProvider,
   CodexMainProfileDrainingError,
   headersForCodexAuthContext,
+  materializeCodexUpstreamAuth,
   materializeCodexUpstreamAuthAsync,
   isCodexAuthContextUsable,
   resolveCodexAuthContext,
@@ -54,15 +55,19 @@ import {
   type CodexAuthContext,
 } from "../../codex/auth-context";
 import {
-  forceRefreshMainAccountToken,
-  type NativeMainRefreshDependencies,
-} from "../../codex/main-account";
-import {
   formatCodexProviderForLog,
   handOffThreadAffinityGeneration,
   recordCodexUpstreamOutcome,
   type CodexUpstreamOutcome,
 } from "../../codex/routing";
+import {
+  TokenRefreshError,
+  forceRefreshCodexPoolToken,
+} from "../../codex/account-store";
+import {
+  forceRefreshMainAccountToken,
+  type NativeMainRefreshDependencies,
+} from "../../codex/main-account";
 import {
   fetchWithTransientRetry,
   applyUpstreamRecoveryInit,
@@ -79,11 +84,7 @@ import {
   upstreamHostHealthKey,
   type UpstreamHostAdmissionLease,
 } from "../../codex/upstream-host-health";
-import {
-  ForwardAdmissionCredentialError,
-  hasForwardableCodexBearer,
-  validateForwardAdmissionCredential,
-} from "../auth-cors";
+import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
 import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, type ResolvedOpenAiForwardSidecar } from "../../providers/openai-sidecar";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider, supportsNativeResponsesCompactEndpoint } from "../../providers/openai-tiers";
@@ -136,8 +137,9 @@ import {
   usesCodexForwardPoolAuth,
 } from "./core";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel } from "./fetch-helpers";
-import { mapCodexAuthContextErrorToResponse } from "./codex-auth-error";
+import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { decideV2NativeParentOverride } from "./v2-native-parent-override";
+import { sessionLaneIdFromRequest } from "../request-log-conversation";
 
 export const COMPACT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 
@@ -150,11 +152,6 @@ interface CompactHandoffRoute {
   lastUsedAt: number;
 }
 
-/**
- * The Codex client does not send its newly selected model on an automatic
- * previous-model compact request. Keep the last route that demonstrably compacted
- * this same thread so a quota-blocked previous model has one safe fallback target.
- */
 const compactHandoffRoutes = new Map<string, CompactHandoffRoute>();
 
 export function clearCompactHandoffRoutesForTests(): void {
@@ -265,16 +262,10 @@ async function refreshNativeMainCompactContext(args: {
   }
 }
 
-/** See the core counterpart: only a dead grant is terminal (#2887). */
 function isTerminalCompactPoolRefreshFailure(error: unknown): boolean {
   return error instanceof TokenRefreshError && (error.reason === "revoked" || error.reason === "expired");
 }
 
-/**
- * Compact's forced refresh for an ordinary stored pool credential rejected with a
- * pre-stream 401. Mirrors {@link refreshNativeMainCompactContext} so the two 401
- * contracts on this endpoint cannot drift.
- */
 async function refreshPoolCompactContext(args: {
   req: Request;
   authCtx: CodexAuthContext & { kind: "pool" };
@@ -287,19 +278,13 @@ async function refreshPoolCompactContext(args: {
   | { ok: false; response: Response; quarantine: boolean; quarantineGeneration?: number }
 > {
   const { req, authCtx, provider, codexAccountMode, substituteMainCredential, options } = args;
-  const reauthResponse = () => formatErrorResponse(
-    401,
-    "authentication_error",
-    "Selected Codex account needs reauthentication",
-  );
+  const reauthResponse = () => formatErrorResponse(401, "authentication_error", "Selected Codex account needs reauthentication");
   try {
     const refreshed = await forceRefreshCodexPoolToken(authCtx.accountId, {
       rejectedGeneration: authCtx.generation,
       rejectedAccessToken: authCtx.accessToken,
       signal: req.signal,
     });
-    // See the core counterpart: a successful response can rotate only the refresh grant,
-    // so the credential may already sit at a later generation than the one we rejected.
     if (!refreshed.rotated) {
       return { ok: false, quarantine: true, quarantineGeneration: refreshed.generation, response: reauthResponse() };
     }
@@ -337,11 +322,7 @@ async function refreshPoolCompactContext(args: {
     if (isTerminalCompactPoolRefreshFailure(error)) {
       return { ok: false, quarantine: true, response: reauthResponse() };
     }
-    const response = formatErrorResponse(
-      503,
-      "server_busy",
-      "Codex credential refresh did not complete; retry this request",
-    );
+    const response = formatErrorResponse(503, "server_busy", "Codex credential refresh did not complete; retry this request");
     const headers = new Headers(response.headers);
     headers.set("Retry-After", "1");
     return { ok: false, quarantine: false, response: new Response(response.body, { status: response.status, headers }) };
@@ -373,7 +354,6 @@ async function resolveAlternateCompactContext(args: {
     const authCtx = await resolveCodexAuthContext(req.headers, config, route.codexAccountMode, {
       ...(selectedModelId ? { modelId: selectedModelId } : {}),
       excludeAccountId,
-      requestScopedMainCredential: hasForwardableCodexBearer(req.headers, config),
       beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
     });
     if (!authCtx.accountId || authCtx.accountId === excludeAccountId) return null;
@@ -561,9 +541,6 @@ export async function handleResponsesCompact(
   // consume that credential. See the longer note in core.ts resolveResponsesCodexAuth.
   const substituteMainCredential = admission?.source === "bearer"
     && route.codexAccountMode !== undefined;
-  const requestScopedMainCredential = route.codexAccountMode !== undefined
-    && !substituteMainCredential
-    && hasForwardableCodexBearer(req.headers, config);
   if (route.codexAccountMode === "direct" && !substituteMainCredential) {
     try { validateForwardAdmissionCredential(req.headers, config); }
     catch (err) {
@@ -610,7 +587,6 @@ export async function handleResponsesCompact(
           accountId: route.codexAccountId,
           modelId: selectedModelId,
           substituteMainCredentialForDirect: substituteMainCredential,
-          requestScopedMainCredential,
           beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
           signal: req.signal,
           nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,
@@ -711,9 +687,6 @@ export async function handleResponsesCompact(
         fixedAccount: ctx.fixedAccount,
         modelId: selectedModelId,
         probeLeaseId: codexProbeLeaseId(ctx),
-        // Fence a stored pool account's outcome on the credential the request was
-        // holding, so a 401 that lost a race with re-authentication cannot retire the
-        // replacement (#2887). Also covers the replay's own second 401.
         ...(ctx.kind === "pool" ? { credentialGeneration: ctx.generation } : {}),
         probeQuotaScope: codexProbeQuotaScope(ctx),
         writerGeneration: ctx.kind === "pool" || ctx.kind === "main-pool"
@@ -826,8 +799,6 @@ export async function handleResponsesCompact(
           options,
         });
       if (!replay.ok) {
-        // A transient refresh failure must not retire the account; only a dead grant
-        // does, and only while the rejected credential is still the stored one (#2887).
         if (poolAuthCtx) {
           if (poolReplay && !poolReplay.ok && poolReplay.quarantine) {
             recordCodexUpstreamOutcome(config, poolAuthCtx.accountId, 401, {
@@ -967,9 +938,8 @@ export async function handleResponsesCompact(
       recordCompactPoolOutcome(outcomeCtx, 499);
       return buffered;
     }
-    // A body-confirmed quota failure can arrive behind a generic 5xx. Record it as
-    // quota evidence; otherwise preserve the real upstream status so a local buffering
-    // failure after a 200 cannot soft-avoid a healthy account or rotate a thread.
+    // A quota failure may arrive behind a generic 5xx body. Preserve that evidence while a local
+    // buffering failure after a healthy 200 remains tied to the real upstream status.
     recordCompactPoolOutcome(outcomeCtx, bodyInferredQuota ? 429 : upstream.status, { retryAfter, resetAt });
     // Lift usage and response metadata from the buffered upstream JSON into the
     // request log; the routed branch gets the same through handleResponses. The
@@ -978,7 +948,7 @@ export async function handleResponsesCompact(
       inspectResponseLogJson(logCtx, await buffered.clone().text());
       forgetCompactHandoffRoute(req);
     } else if (quotaFailure && !storedPool401ReplayAttempted) {
-      const fallbackModel = compactHandoffRoute(req, raw.model);
+      const fallbackModel = compactHandoffRoute(req, requestedModel);
       if (fallbackModel && !req.signal.aborted) {
         const fallbackReq = new Request(req.url, {
           method: "POST",
@@ -998,8 +968,7 @@ export async function handleResponsesCompact(
           if (fallback.ok || fallback.status === 499) return fallback;
           await fallback.body?.cancel().catch(() => undefined);
         } catch {
-          // The previous-model rejection is the authoritative failure when the
-          // remembered handoff route can no longer compact this thread.
+          // Preserve the previous-model rejection if the remembered route is no longer viable.
         }
       }
     }
@@ -1101,7 +1070,7 @@ export async function handleResponsesCompact(
     const result = new Response(JSON.stringify({ output: compactionItems }), {
       headers: { "Content-Type": "application/json" },
     });
-    rememberCompactHandoffRoute(req, raw.model);
+    rememberCompactHandoffRoute(req, requestedModel);
     return result;
   }
   const encrypted = compactionItems[0]!.encrypted_content;
@@ -1112,6 +1081,6 @@ export async function handleResponsesCompact(
   }
   const summary = decoded;
   const output = buildCompactV1Output(extractCompactUserMessages(inputItems), summary);
-  rememberCompactHandoffRoute(req, raw.model);
+  rememberCompactHandoffRoute(req, requestedModel);
   return new Response(JSON.stringify({ output }), { headers: { "Content-Type": "application/json" } });
 }

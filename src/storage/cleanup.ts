@@ -2921,11 +2921,6 @@ export function restoreTrashEntry(
     return { ok: false, trashDir: id, ...partialCounts, error };
   };
 
-  if (hooks?.pauseAfterFileMoves) {
-    writeFileSync(hooks.pauseAfterFileMoves.readyPath, "ready\n");
-    while (!existsSync(hooks.pauseAfterFileMoves.releasePath)) Bun.sleepSync(10);
-  }
-
   if (hooks?.holdAfterFileMovesMs !== undefined) {
     const holdMs = Math.max(0, Math.floor(hooks.holdAfterFileMovesMs));
     if (holdMs > 0) {

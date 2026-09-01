@@ -72,7 +72,7 @@ export async function runGeminiWebSearch(
   const executor = providerFetch(provider, undefined, { providerName, modelId: settings.model });
   try {
     const res = await fetchWithResetRetry(
-      () => executor(`${base}/v1internal:generateContent`, {
+      recovery => executor(`${base}/v1internal:generateContent`, applyUpstreamRecoveryInit({
         method: "POST",
         headers: {
           "Content-Type": "application/json",

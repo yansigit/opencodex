@@ -294,11 +294,8 @@ function isFullSuiteRun(requested: string[]): boolean {
  * Default `bun test` argv for this repo.
  *
  * `--isolate` keeps a fresh global per file. Bounded parallelism is what makes the suite
- * finishable: with isolate alone Bun re-evaluates
- * the module graph once per file on a single core, so past ~900 files the run stops looking slow
- * and starts looking hung — measured here at 1 h 29 m with zero output, ~57 % CPU and 8.5 MB RSS,
- * against a few minutes for the identical suite with four workers. Leaving Bun to select all ten
- * workers made deadline-sensitive tests fail under load, so the repository default is deterministic.
+ * finishable: with isolate alone Bun re-evaluates the module graph once per file on a single core,
+ * while leaving Bun to select every host core makes deadline-sensitive tests fail under load.
  * A caller-supplied `--parallel` or `--parallel=N` is left alone.
  */
 export function resolveBunTestArgs(
@@ -332,8 +329,17 @@ export const SERIAL_FULL_SUITE_FILES = [
   "update-stop-first.test.ts",
   // These suites create subprocesses or large buffers and have proven unstable in
   // the shared parallel lane on CI/container hosts.
+  "anthropic-image-normalize.test.ts",
+  "cursor-images.test.ts",
+  "kiro-images.test.ts",
   "codex-journal.test.ts",
   "request-decompress.test.ts",
+  // These suites perform whole-graph scans or deliberately large linear repairs. They
+  // remain fast in isolation but can cross Bun's fixed five-second test deadline when
+  // four unrelated compiler-heavy files are competing for the same host.
+  "codex-prompt-route.test.ts",
+  "config-save-boundary.test.ts",
+  "responses-stateless-dangling-call-repair.test.ts",
 ] as const;
 
 const SERIAL_LANE_TIMEOUT_MS: Partial<Record<(typeof SERIAL_FULL_SUITE_FILES)[number], number>> = {
@@ -388,7 +394,7 @@ export async function terminateTestProcessForTests(options: TestTerminationOptio
     if (result !== 0) {
       throw new Error(`[test] failed to terminate process tree with ${command[0]} (exit ${result})`);
     }
-    if (await waitWithTimeout(options.exited, killGraceMs) === null) {
+    if (await waitWithMonotonicTimeout(options.exited, killGraceMs) === null) {
       throw new Error(`[test] process tree ${options.pid} did not terminate after taskkill`);
     }
     return;
@@ -404,9 +410,9 @@ export async function terminateTestProcessForTests(options: TestTerminationOptio
 }
 
 async function waitForProcessDeath(isAlive: () => boolean, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
+  const deadline = performance.now() + timeoutMs;
   while (isAlive()) {
-    const remaining = deadline - Date.now();
+    const remaining = deadline - performance.now();
     if (remaining <= 0) return false;
     await Bun.sleep(Math.min(10, remaining));
   }
@@ -443,18 +449,56 @@ export function resolveBunTestPlan(requested: string[], comparisonCommit?: strin
   ];
 }
 
-function waitWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+export interface MonotonicTimeoutRuntime {
+  now(): number;
+  schedule(callback: () => void, delayMs: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const monotonicTimeoutRuntime: MonotonicTimeoutRuntime = {
+  now: () => performance.now(),
+  schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+  clear: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/**
+ * Bound a promise without trusting one wall-clock-sensitive timer wakeup.
+ *
+ * Some Bun/macOS combinations wake a long timer when the host clock jumps. Rechecking a
+ * monotonic deadline turns that wakeup into a harmless re-arm instead of killing healthy CI.
+ */
+export function waitWithMonotonicTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  runtime: MonotonicTimeoutRuntime = monotonicTimeoutRuntime,
+): Promise<T | null> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve(null), timeoutMs);
+    const deadline = runtime.now() + Math.max(0, timeoutMs);
+    let timer: unknown;
+    let settled = false;
+
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) runtime.clear(timer);
+      callback();
+    };
+    const arm = () => {
+      const remaining = Math.max(0, deadline - runtime.now());
+      timer = runtime.schedule(() => {
+        timer = undefined;
+        if (runtime.now() < deadline) {
+          arm();
+          return;
+        }
+        finish(() => resolve(null));
+      }, remaining);
+    };
+
+    arm();
     promise.then(
-      value => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      error => {
-        clearTimeout(timer);
-        reject(error);
-      },
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error)),
     );
   });
 }
@@ -478,7 +522,7 @@ async function runTestLane(
     [TEST_RUN_LOCK_PATH_ENV]: inheritedLock?.lockPath,
     [TEST_RUN_LOCK_TOKEN_ENV]: inheritedLock?.ownerToken,
   });
-  const startedAt = Date.now();
+  const startedAt = performance.now();
   let interrupted: NodeJS.Signals | null = null;
   let termination: Promise<void> | null = null;
   const child = Bun.spawn(options.command ?? [process.execPath, "test", ...lane.args], {
@@ -509,7 +553,7 @@ async function runTestLane(
   const exited = child.exited;
   try {
     const outcome = await Promise.race([
-      waitWithTimeout(exited, lane.timeoutMs).then(exitCode => ({ kind: "exit" as const, exitCode })),
+      waitWithMonotonicTimeout(exited, lane.timeoutMs).then(exitCode => ({ kind: "exit" as const, exitCode })),
       interruptRequested.then(async signal => {
         await termination;
         return { kind: "interrupt" as const, signal };
@@ -531,7 +575,7 @@ async function runTestLane(
     const output = stdout + "\n" + stderr;
     if (interrupted === "SIGINT") return { exitCode: 130, output };
     if (interrupted === "SIGTERM") return { exitCode: 143, output };
-    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
     console.warn(`[test] ${lane.label} finished in ${seconds}s (exit ${exitCode}).`);
     return { exitCode, output };
   } finally {
@@ -675,7 +719,7 @@ if (import.meta.main) {
       ),
       onAcquiredAfterWait: elapsedMs => console.warn(`[test] acquired the user lock after ${Math.round(elapsedMs / 1000)}s.`),
     });
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     try {
       const inheritedLock = process.platform === "win32" && lockPath && lock.owner
         ? { lockPath, ownerToken: lock.owner.token }
@@ -695,8 +739,8 @@ if (import.meta.main) {
           exitCode = 1;
         }
       }
-      const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
-      if (isFullSuiteRun(requestedTests) && elapsedSeconds > 600) {
+      const elapsedSeconds = Math.round((performance.now() - startedAt) / 1000);
+      if (isFullSuiteRun(requestedTests) && elapsedSeconds > 10 * 60) {
         console.warn(
           `[test] the suite took ${elapsedSeconds}s; with --parallel=${DEFAULT_TEST_PARALLELISM} it should finish in a few minutes on an idle machine. `
           + "Check for another test runner, a busy CPU, or a test that started polling something real.",

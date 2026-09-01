@@ -347,8 +347,6 @@ function rootPromptMessages(
         }, "user", { messageIndex: i }));
       }
     } else if (message.role === "assistant") {
-      // External models: omit intermediate commentary preambles from flattened replay so
-      // alternating commentary/result turns do not few-shot prime preamble generation.
       if (externalModel && message.phase === "commentary") continue;
       // External Cursor clients do not replay hidden reasoning as assistant-visible prompt text.
       // Native Composer state can preserve it through ThinkingMessage/history structures.
@@ -371,7 +369,13 @@ function rootPromptMessages(
       // the same payload as assistant-role "[Tool Result]" / "[tool_result]" text teaches Auto
       // to echo that envelope as chat instead of continuing from the structured result.
       if (!echoToolResultInRoot) continue;
-      const text = externalToolResultToText(message);
+      // The bound compares in full-history space: this loop's `i` is already full-history on the
+      // full-replay path, and `knownCallsOffset` re-bases it when only a suffix is replayed.
+      const text = externalToolResultToText(
+        message,
+        callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i),
+        request.modelId.includes("grok-4.6") || request.modelId.startsWith("composer-2.5"),
+      );
       pushDeduped(toolResultRootPayload(text), "toolResult", { messageIndex: i, text }, text);
     }
   }
@@ -1034,21 +1038,35 @@ function toolResultToText(
   call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
 ): string {
   const normalized = normalizedToolResult(message, contentToText(message.content));
+  const name = namespacedToolName(message.toolNamespace, message.toolName);
+  const label = normalized.isError ? "Tool error" : "Tool output";
   return [
     "[tool_result]",
+    `${label} for ${name}`,
     `call_id: ${decodeCursorCallId(message.toolCallId)}`,
-    `name: ${namespacedToolName(message.toolNamespace, message.toolName)}`,
     ...(call ? [toolInvocationLine(call)] : []),
-    `is_error: ${normalized.isError}`,
+    ...(normalized.isError ? ["is_error: true"] : []),
     "output:",
     normalized.text,
   ].join("\n");
 }
 
-function externalToolResultToText(message: OcxToolResultMessage): string {
+function externalToolResultToText(
+  message: OcxToolResultMessage,
+  call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
+  protocolEnvelope = false,
+): string {
   const normalized = normalizedToolResult(message, contentToText(message.content));
+  if (protocolEnvelope) {
+    const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
+    return `${prefix}\n${toolResultToText(message, call)}`;
+  }
   const label = normalized.isError ? "Tool error" : "Tool output";
-  return `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${decodeCursorCallId(message.toolCallId)}, is_error: ${normalized.isError}):\n${normalized.text}`;
+  return [
+    `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${decodeCursorCallId(message.toolCallId)}, is_error: ${normalized.isError}):`,
+    ...(call ? [toolInvocationLine(call)] : []),
+    normalized.text,
+  ].join("\n");
 }
 
 /**
@@ -1250,10 +1268,20 @@ function conversationTurns(
         // #1920/#1866: this external-replay site bypasses toolResultToText, so it
         // must consume the normalizer directly — cursor/grok-4.6 is the exact
         // reported repro path for empty Computer Use results.
+        // Name the invocation here as well, for the same reason the root replay does: a result with
+        // no visible originating call reads as an interrupted attempt (devlog 260829 000_rca).
+        const call = callBefore(turnCalls, decodeCursorCallId(message.toolCallId), fullIndex);
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, { text: externalToolResultToText(message) }),
+            value: create(AssistantMessageSchema, {
+              text: externalToolResultToText(
+                message,
+                call,
+                (request.modelId.includes("grok-4.6") || request.modelId.startsWith("composer-2.5"))
+                  && message.toolName !== "exec",
+              ),
+            }),
           },
         })), requestScope));
         continue;
@@ -1367,7 +1395,7 @@ function buildPreparedCursorRunRequest(
     ? "userMessageAction"
     : "resumeAction";
   const actionText = externalToolContinuation
-    ? (request.echoRetryContinuationText ?? CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT)
+    ? (request.echoRetryContinuationText ?? externalToolContinuationText(request.rawMessages))
     : request.echoRetryContinuationText
       ? `${text}\n\n[correction] ${request.echoRetryContinuationText}`
       : text;
@@ -1558,6 +1586,40 @@ function buildPreparedCursorRunRequest(
   }
   // Hoisted out of the mcp_tools spread below so the estimate can read the same
   // filtered definitions the wire carries. Both helpers are pure.
+  // The envelope is measured HERE, on the final root set, and nowhere else.
+  //
+  // `rootPromptMessages` cannot do it: it sees only a checkpoint suffix, so 192 checkpoint roots
+  // plus a two-root suffix passed its per-call check and emitted 194 roots; and its empty-history
+  // early return skips the pruning branch entirely, which let 193 system prompts through. Both are
+  // downstream of this point, which is the first place the wire content is fully known (#1527).
+  //
+  // The same measurement feeds the diagnostic below, so telemetry cannot disagree with the guard.
+  //
+  // Roots carried inside a decoded checkpoint need not be in the local store — Cursor minted some
+  // of them, and a resumed conversation legitimately references ids this process never wrote. So an
+  // unmeasurable root is counted, not fatal: the COUNT limit still binds it (that is the 194-root
+  // case), and `unmeasuredRoots` records that the byte total is a floor rather than a total. An
+  // earlier fail-closed version broke three passing checkpoint tests, which is the evidence that
+  // failing closed here would reject working continuation.
+  const measuredRootCount = conversationState.rootPromptMessagesJson.length;
+  let measuredRootBytes = 0;
+  let unmeasuredRoots = 0;
+  for (const blobId of conversationState.rootPromptMessagesJson) {
+    const size = cursorBlobByteLength(blobId);
+    if (size === null) unmeasuredRoots += 1;
+    else measuredRootBytes += size;
+  }
+  if (
+    isCursorExternalWireModel(request.modelId)
+    && (measuredRootCount > CURSOR_EXTERNAL_ROOT_BLOB_LIMIT || measuredRootBytes > CURSOR_EXTERNAL_ROOT_BYTE_LIMIT)
+  ) {
+    throw new CursorRootEnvelopeLimitError(
+      measuredRootCount,
+      measuredRootBytes,
+      CURSOR_EXTERNAL_ROOT_BLOB_LIMIT,
+      CURSOR_EXTERNAL_ROOT_BYTE_LIMIT,
+    );
+  }
   debugProviderDiagnostic("cursor", "run-request", {
     wireModel: request.modelId,
     action: actionCase,

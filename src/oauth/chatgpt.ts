@@ -147,7 +147,10 @@ export async function loginChatGPT(ctrl: OAuthController, opts?: { forceLogin?: 
 
 // Note: uses form-urlencoded per OAuth 2.0 spec (RFC 6749 §6).
 // Codex-rs uses JSON for refresh — intentional divergence; both accepted by auth.openai.com.
-export async function refreshChatGPTToken(refreshToken: string): Promise<OAuthCredentials> {
+export async function refreshChatGPTToken(
+  refreshToken: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<OAuthCredentials> {
   const resp = await oauthFetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },

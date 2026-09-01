@@ -11,7 +11,9 @@ import {
   XAI_GROK_CLIENT_VERSION,
 } from "../src/providers/xai-transport";
 import { getProviderRegistryEntry } from "../src/providers/registry";
+import { XAI_RESPONSES_OPT_IN_MODELS } from "../src/providers/xai-responses-opt-in";
 import { providerFetch } from "../src/server/responses/fetch-helpers";
+import { resolveWireProtocolOverride } from "../src/server/adapter-resolve";
 import type { OcxAssistantMessage, OcxParsedRequest, OcxProviderConfig } from "../src/types";
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
