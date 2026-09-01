@@ -185,7 +185,7 @@ describe("planClosedPrBranchDeletions", () => {
   it("preserves Unicode whitespace so distinct valid refs never collapse", () => {
     const disposable = `codex/live${NBSP}`;
     const result = planClosedPrBranchDeletions({
-      pullRequests: [closedPr({ number: 86, headRefName: disposable })],
+      pullRequests: [closedPr({ number: 86, headRefName: disposable, headRefOid: HEAD_OID })],
       branches: [
         { name: "codex/live", oid: OTHER_OID },
         { name: disposable, oid: HEAD_OID },
