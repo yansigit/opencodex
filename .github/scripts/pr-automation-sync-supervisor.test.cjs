@@ -4,8 +4,10 @@ const assert = require("node:assert/strict");
 const { describe, it } = require("node:test");
 const {
   buildSyncRepairIssue,
+  parseSyncRepairMarker,
   syncCiRepairDisposition,
   syncFreshnessDisposition,
+  syncRepairIssueDisposition,
   syncRepairMarker,
 } = require("./pr-automation-sync-supervisor.cjs");
 
@@ -88,6 +90,54 @@ describe("sync repair issue", () => {
     assert.match(issue.title, /^\[agent:sync\]/);
     assert.match(issue.body, /Sync branch: sync\/upstream-v2\.39\.0-abcdef1/);
     assert.match(issue.body, /Do not weaken required checks/);
+  });
+
+  it("retires exact-head repair evidence after the sync PR advances", () => {
+    const issue = {
+      labels: ["fork-sync", "agent:generated"],
+      user: { type: "Bot", id: 41898282 },
+      body: [
+        "<!-- opencodex-fork-sync -->",
+        syncRepairMarker(193, HEAD),
+      ].join("\n"),
+    };
+    const pr = syncPr({ number: 193, head: {
+      ref: "sync/upstream-v2.39.0-abcdef1",
+      sha: RELEASE,
+      repo: { full_name: REPOSITORY },
+    }});
+    assert.deepEqual(parseSyncRepairMarker(issue.body), { prNumber: 193, headSha: HEAD });
+    assert.deepEqual(syncRepairIssueDisposition({ issue, pr, repository: REPOSITORY }), {
+      action: "close",
+      reason: "pr-head-changed",
+      prNumber: 193,
+      headSha: HEAD,
+      currentHeadSha: RELEASE,
+    });
+  });
+
+  it("keeps an exact-head repair issue and ignores spoofed records", () => {
+    const issue = {
+      labels: [{ name: "fork-sync" }, { name: "agent:generated" }],
+      user: { type: "Bot", id: 41898282 },
+      body: `<!-- opencodex-fork-sync -->\n${syncRepairMarker(184, HEAD)}`,
+    };
+    assert.deepEqual(syncRepairIssueDisposition({ issue, pr: syncPr(), repository: REPOSITORY }), {
+      action: "keep",
+      reason: "exact-head",
+      prNumber: 184,
+      headSha: HEAD,
+    });
+    assert.equal(syncRepairIssueDisposition({
+      issue: { body: syncRepairMarker(184, HEAD) },
+      pr: syncPr(),
+      repository: REPOSITORY,
+    }).action, "ignore");
+    assert.equal(syncRepairIssueDisposition({
+      issue: { ...issue, user: { type: "User", id: 41898282 } },
+      pr: syncPr(),
+      repository: REPOSITORY,
+    }).reason, "untrusted-sync-issue-producer");
   });
 });
 
