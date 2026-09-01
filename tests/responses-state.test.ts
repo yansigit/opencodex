@@ -1244,7 +1244,9 @@ describe("Responses previous_response_id state", () => {
 
   test("shutdown drain cap expiry enters the synchronous spill fallback", async () => {
     setPlatformForTests("win32");
-    setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
+    // Force the async drain to expire immediately, but leave the synchronous fallback
+    // enough time to serialize and harden the 2 MiB payload on a loaded CI runner.
+    setResponseSpillShutdownBudgetForTests({ totalMs: 2_001, fallbackReserveMs: 2_000 });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -1280,7 +1282,7 @@ describe("Responses previous_response_id state", () => {
     // (debt + footprint) and (old + debt + footprint) admits a publication that puts the
     // directory over budget.
     setPlatformForTests("win32");
-    setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
+    setResponseSpillShutdownBudgetForTests({ totalMs: 2_001, fallbackReserveMs: 2_000 });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
