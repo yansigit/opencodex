@@ -188,7 +188,10 @@ export function rejectShellStreamExecForPolicy(execMsg: ExecServerMessage, opts:
   ];
 }
 
-export async function shellStreamExec(execMsg: ExecServerMessage): Promise<Uint8Array[]> {
+export async function shellStreamExec(
+  execMsg: ExecServerMessage,
+  spawnProcess: typeof spawn = spawn,
+): Promise<Uint8Array[]> {
   if (execMsg.message.case !== "shellStreamArgs") throw new Error("invalid shell stream exec");
   const args = execMsg.message.value;
   const cwd = resolve(args.workingDirectory || process.cwd());
@@ -199,27 +202,55 @@ export async function shellStreamExec(execMsg: ExecServerMessage): Promise<Uint8
     })),
   ];
   const result = await new Promise<{ stdout: string; stderr: string; code: number; aborted: boolean }>(resolvePromise => {
-    const child = spawn(args.command, { cwd, shell: true });
+    const child = spawnProcess(args.command, { cwd, shell: true });
     let stdout = "";
     let stderr = "";
     let aborted = false;
+    let exited = false;
+    let stdoutEnded = false;
+    let stderrEnded = false;
+    let settled = false;
+    let exitCode: number | null = null;
     const timeout = setTimeout(() => {
       aborted = true;
       child.kill();
     }, args.hardTimeout || 120_000);
+
+    const finish = (code: number, error?: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolvePromise({ stdout, stderr: stderr + (error ? errorText(error) : ""), code, aborted });
+    };
+    const finishAfterExitAndPipes = (): void => {
+      if (exited && stdoutEnded && stderrEnded) finish(exitCode ?? 1);
+    };
     child.stdout.on("data", chunk => {
       stdout += String(chunk);
     });
     child.stderr.on("data", chunk => {
       stderr += String(chunk);
     });
-    child.on("close", code => {
-      clearTimeout(timeout);
-      resolvePromise({ stdout, stderr, code: code ?? 1, aborted });
+    child.stdout.once("end", () => {
+      stdoutEnded = true;
+      finishAfterExitAndPipes();
     });
-    child.on("error", err => {
-      clearTimeout(timeout);
-      resolvePromise({ stdout, stderr: stderr + errorText(err), code: 1, aborted });
+    child.stderr.once("end", () => {
+      stderrEnded = true;
+      finishAfterExitAndPipes();
+    });
+    child.once("exit", code => {
+      exited = true;
+      exitCode = code;
+      finishAfterExitAndPipes();
+    });
+    // Node documents `close` as following process exit and stdio closure. Keep it as
+    // the compatibility fallback for runtimes that do not surface one of those events.
+    child.once("close", code => finish(code ?? exitCode ?? 1));
+    child.stdout.once("error", error => finish(1, error));
+    child.stderr.once("error", error => finish(1, error));
+    child.once("error", err => {
+      finish(1, err);
     });
   });
   if (result.stdout) {
