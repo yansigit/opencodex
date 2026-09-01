@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   DEDICATED_TEST_FILES,
@@ -34,6 +36,32 @@ describe("CI lane manifest", () => {
   test("never accepts a lane path outside tests", () => {
     expect(() => validateLaneManifest(["tests/good.test.ts", "src/not-a-test.ts"]))
       .toThrow(/outside tests/);
+  });
+
+  test("ignores a scratch directory that vanishes during inventory", () => {
+    const root = join(tmpdir(), `opencodex-ci-lanes-${process.pid}-${Date.now()}`);
+    const testsRoot = join(root, "tests");
+    const vanishing = join(testsRoot, ".tmp-vanishing");
+    mkdirSync(vanishing, { recursive: true });
+    writeFileSync(join(testsRoot, "stable.test.ts"), "");
+
+    try {
+      expect(discoverTestFiles(root, directory => {
+        if (directory === vanishing) {
+          const error = new Error(`directory disappeared: ${directory}`) as NodeJS.ErrnoException;
+          error.code = "ENOENT";
+          throw error;
+        }
+        return readdirSync(directory, { withFileTypes: true });
+      })).toEqual(["tests/stable.test.ts"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("still fails when the required tests root is missing", () => {
+    const root = join(tmpdir(), `opencodex-ci-lanes-missing-${process.pid}-${Date.now()}`);
+    expect(() => discoverTestFiles(root)).toThrow(/ENOENT/);
   });
 
   test("timing data changes allocation only, never lane membership", () => {

@@ -138,4 +138,12 @@ describe("agent maintenance workflow", () => {
     assert.match(workflow, /startingBranch/);
     assert.ok(workflow.includes(String.raw`sync\/upstream-`));
   });
+
+  it("immediately accepts only identity-bound generated Jules issue events", () => {
+    assert.match(workflow, /trustedGeneratedEvent/);
+    assert.match(workflow, /eventIssue\.user\?\.login === "github-actions\[bot\]"/);
+    assert.match(workflow, /Number\(eventIssue\.user\?\.id\) === 41898282/);
+    assert.match(workflow, /Number\(context\.payload\.sender\?\.id\) === 41898282/);
+    assert.match(workflow, /eventLabels\.has\("agent:generated"\)/);
+  });
 });

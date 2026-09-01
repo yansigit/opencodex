@@ -218,4 +218,19 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /updatedResult\.classification\.eligibleForUpdate/);
     assert.match(source, /verify\.data\.behind_by === 0/);
   });
+
+  it("supervises upstream freshness and queues only trusted exact-head sync CI repairs", () => {
+    const source = workflow();
+    assert.match(source, /getLatestRelease/);
+    assert.match(source, /fork-upstream-sync\.yml/);
+    assert.match(source, /syncFreshnessDisposition/);
+    assert.match(source, /syncFreshness\.action === "dispatch"/);
+    assert.match(source, /syncCiRepairDisposition/);
+    assert.match(source, /newestSyncPrNumber/);
+    assert.match(source, /trustedProducerIds.*41898282/s);
+    assert.match(source, /agent:jules/);
+    assert.match(source, /agent:generated/);
+    assert.match(source, /pr-automation-sync-supervisor\.cjs/);
+    assert.doesNotMatch(source, /maintainer-sponsored/);
+  });
 });
