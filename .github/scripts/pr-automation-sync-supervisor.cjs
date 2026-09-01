@@ -12,6 +12,7 @@ const FAILED_CONCLUSIONS = new Set([
 ]);
 const ACTIVE_RUN_STATUSES = new Set(["in_progress", "pending", "queued", "requested", "waiting"]);
 const DEFAULT_RETRY_COOLDOWN_MS = 60 * 60 * 1000;
+const SYNC_REPAIR_MARKER_RE = /<!-- opencodex-sync-repair:pr=(\d+);head=([0-9a-f]{40}) -->/i;
 
 function latestCheck(checkRuns, name, headSha, expectedAppId) {
   return (checkRuns || [])
@@ -67,6 +68,54 @@ function syncRepairMarker(prNumber, headSha) {
   return `<!-- opencodex-sync-repair:pr=${Number(prNumber)};head=${String(headSha).toLowerCase()} -->`;
 }
 
+function parseSyncRepairMarker(body) {
+  const match = String(body || "").match(SYNC_REPAIR_MARKER_RE);
+  if (!match) return null;
+  const prNumber = Number(match[1]);
+  if (!Number.isSafeInteger(prNumber) || prNumber <= 0) return null;
+  return { prNumber, headSha: match[2].toLowerCase() };
+}
+
+function syncRepairIssueDisposition({
+  issue,
+  pr,
+  repository,
+  trustedProducerIds = [41898282],
+} = {}) {
+  const marker = parseSyncRepairMarker(issue?.body);
+  const labels = new Set((issue?.labels || [])
+    .map((label) => typeof label === "string" ? label : label?.name)
+    .filter(Boolean));
+  if (issue?.pull_request || !labels.has("fork-sync") || !labels.has("agent:generated") ||
+      !String(issue?.body || "").includes("<!-- opencodex-fork-sync -->") || !marker ||
+      typeof repository !== "string" || repository.length === 0) {
+    return { action: "ignore", reason: "untrusted-sync-repair" };
+  }
+  const producerIds = new Set((trustedProducerIds || [])
+    .map(Number)
+    .filter((id) => Number.isSafeInteger(id) && id > 0));
+  if (issue?.user?.type !== "Bot" || !producerIds.has(Number(issue?.user?.id))) {
+    return { action: "ignore", reason: "untrusted-sync-issue-producer" };
+  }
+  const trustedSyncPr =
+    pr?.number === marker.prNumber &&
+    pr?.base?.repo?.full_name === repository &&
+    pr?.head?.repo?.full_name === repository &&
+    pr?.base?.ref === "dev" &&
+    SYNC_BRANCH_RE.test(String(pr?.head?.ref || "")) &&
+    String(pr?.body || "").includes("<!-- opencodex-fork-sync -->") &&
+    pr?.user?.type === "Bot" &&
+    producerIds.has(Number(pr?.user?.id));
+  if (!trustedSyncPr) return { action: "ignore", reason: "untrusted-sync-pr" };
+
+  const currentHeadSha = String(pr?.head?.sha || "").toLowerCase();
+  if (pr.state !== "open") return { action: "close", reason: "pr-not-open", ...marker };
+  if (!SHA_RE.test(currentHeadSha) || currentHeadSha !== marker.headSha) {
+    return { action: "close", reason: "pr-head-changed", ...marker, currentHeadSha };
+  }
+  return { action: "keep", reason: "exact-head", ...marker };
+}
+
 function buildSyncRepairIssue({ pr, disposition }) {
   if (disposition?.action !== "repair" || !SYNC_BRANCH_RE.test(String(disposition.branch || ""))) {
     throw new Error("sync repair issue requires a validated repair disposition");
@@ -117,9 +166,11 @@ function syncFreshnessDisposition({
 
 module.exports = {
   DEFAULT_RETRY_COOLDOWN_MS,
+  parseSyncRepairMarker,
   SYNC_BRANCH_RE,
   buildSyncRepairIssue,
   syncCiRepairDisposition,
   syncFreshnessDisposition,
+  syncRepairIssueDisposition,
   syncRepairMarker,
 };

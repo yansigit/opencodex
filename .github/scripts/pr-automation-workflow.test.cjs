@@ -35,7 +35,7 @@ describe("PR automation workflow contract", () => {
     const source = workflow();
     assert.match(source, /permissions:\s*\{\}/);
     assert.match(source, /concurrency:[\s\S]*cancel-in-progress:\s*false/);
-    assert.match(source, /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4\.2\.2/);
+    assert.match(source, /actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7/);
     assert.match(source, /ref:\s*\$\{\{ github\.event_name == 'push' && github\.ref == 'refs\/heads\/dev' && github\.sha \|\| github\.event\.repository\.default_branch \}\}/);
     assert.match(source, /persist-credentials:\s*false/);
     assert.doesNotMatch(source, /github\.event\.pull_request\.head/);
@@ -226,6 +226,12 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /syncFreshnessDisposition/);
     assert.match(source, /syncFreshness\.action === "dispatch"/);
     assert.match(source, /syncCiRepairDisposition/);
+    assert.match(source, /syncRepairIssueDisposition/);
+    assert.match(source, /parseSyncRepairMarker/);
+    assert.match(source, /reconcileStaleSyncRepairIssues/);
+    assert.match(source, /state_reason:\s*"not_planned"/);
+    assert.match(source, /Shadow mode would retire stale sync repair issue/);
+    assert.match(source, /Stale sync repair reconciliation failed closed/);
     assert.match(source, /newestSyncPrNumber/);
     assert.match(source, /trustedProducerIds.*41898282/s);
     assert.match(source, /agent:jules/);

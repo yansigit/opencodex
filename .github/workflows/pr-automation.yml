@@ -32,7 +32,7 @@ jobs:
       PR_AUTOMATION_MODE: ${{ vars.PR_AUTOMATION_MODE || 'shadow' }}
     steps:
       - name: Checkout trusted controller
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           # A trusted push to dev may introduce a controller helper that is not
           # on main yet. Use that exact pushed commit; every other event keeps
@@ -77,8 +77,10 @@ jobs:
             const {
               SYNC_BRANCH_RE,
               buildSyncRepairIssue,
+              parseSyncRepairMarker,
               syncCiRepairDisposition,
               syncFreshnessDisposition,
+              syncRepairIssueDisposition,
             } = require(path.join(
               process.cwd(), ".github", "scripts", "pr-automation-sync-supervisor.cjs"
             ));
@@ -649,11 +651,61 @@ jobs:
               return { ...disposition, issueNumber: created.number, issueState: created.state };
             }
 
+            async function reconcileStaleSyncRepairIssues(trustedProducerIds) {
+              const issues = await github.paginate(github.rest.issues.listForRepo, {
+                owner, repo, state: "open", labels: "fork-sync", per_page: 100
+              });
+              let retired = 0;
+              for (const issue of issues.filter(item =>
+                !item.pull_request && parseSyncRepairMarker(item.body))) {
+                const marker = parseSyncRepairMarker(issue.body);
+                let pr;
+                try {
+                  pr = await getPr(marker.prNumber);
+                } catch (error) {
+                  if (error.status === 404) continue;
+                  throw error;
+                }
+                const disposition = syncRepairIssueDisposition({
+                  issue,
+                  pr,
+                  repository: `${owner}/${repo}`,
+                  trustedProducerIds: [...trustedProducerIds],
+                });
+                if (disposition.action !== "close") continue;
+                if (!["update", "merge"].includes(mode)) {
+                  core.info(`Shadow mode would retire stale sync repair issue #${issue.number}.`);
+                  continue;
+                }
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  body: `Repair evidence for PR #${disposition.prNumber} at ${disposition.headSha} is stale (${disposition.reason}; current head ${disposition.currentHeadSha || "closed"}).`,
+                });
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issue.number,
+                  state: "closed",
+                  state_reason: "not_planned",
+                });
+                retired += 1;
+              }
+              return retired;
+            }
+
             const all = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: "open", base: "dev", per_page: 100
             });
             const trustedProducerIds = new Set([41898282, Number(process.env.PR_AUTOMATION_APP_USER_ID)]
               .filter(id => Number.isSafeInteger(id) && id > 0));
+            let retiredSyncRepairs = 0;
+            try {
+              retiredSyncRepairs = await reconcileStaleSyncRepairIssues(trustedProducerIds);
+            } catch (error) {
+              core.warning(`Stale sync repair reconciliation failed closed: ${error.message}`);
+            }
             const newestSyncPrNumber = all
               .filter(pr =>
                 pr.head?.repo?.full_name === `${owner}/${repo}` &&
@@ -773,6 +825,7 @@ jobs:
               `- Updated: ${counts.updated}`,
               `- Merged: ${counts.merged}`,
               `- Sync repairs supervised: ${counts.repairs}`,
+              `- Stale sync repairs retired: ${retiredSyncRepairs}`,
               `- Upstream freshness: ${syncFreshness.action} (${syncFreshness.reason})`,
               `- Held: ${counts.held}`,
               `- Failed (isolated): ${counts.failed}`,
