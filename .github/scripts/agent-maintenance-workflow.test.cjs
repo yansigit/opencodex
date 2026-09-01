@@ -62,6 +62,7 @@ describe("agent maintenance workflow", () => {
     assert.match(workflow, /JULES_API_KEY/);
     assert.match(workflow, /JULES_API_KEY_POOL_JSON/);
     assert.match(workflow, /registerSecret: value => core\.setSecret\(value\)/);
+    assert.match(workflow, /createIssueClient\(\);\s*\n\s*await ensureLabels\(\);/);
     assert.match(workflow, /context\.eventName === "check_run"/);
     assert.match(workflow, /context\.payload\.check_run\?\.name !== "Cursor Bugbot"/);
     assert.match(workflow, /Number\(context\.payload\.check_run\?\.app\?\.id\) !== configuredBugbotAppId/);

@@ -306,6 +306,10 @@ jobs:
               credentialPool,
               registerSecret: value => core.setSecret(value)
             });
+            // Validate and mask every configured credential even when the queue
+            // is empty. Issue processing still receives a fresh client so no
+            // account selection can bleed between issues.
+            createIssueClient();
             await ensureLabels();
 
             let candidates = [];
