@@ -3,6 +3,7 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  MAX_JULES_CREDENTIALS,
   buildJulesSessionRequest,
   buildJulesRepairComment,
   createJulesClient,
@@ -698,6 +699,17 @@ describe("Jules credential pool", () => {
     }]);
   });
 
+  it("accepts four distinct accounts and keeps the pool bounded", () => {
+    const fourAccounts = Array.from({ length: MAX_JULES_CREDENTIALS }, (_, index) => ({
+      id: `credential-${index + 1}`,
+      apiKey: `key-${index + 1}`,
+      accountId: `account-${index + 1}`,
+      priority: index,
+    }));
+    assert.equal(MAX_JULES_CREDENTIALS, 4);
+    assert.deepEqual(parseJulesCredentialPool(fourAccounts), fourAccounts);
+  });
+
   it("auto-detects a JSON pool passed through the existing apiKey option", async () => {
     const client = createJulesClient({
       apiKey: JSON.stringify(entries),
@@ -751,7 +763,8 @@ describe("Jules credential pool", () => {
         { id: "two", apiKey: "key-two", accountId: "account-two", priority: 2 },
         { id: "three", apiKey: "key-three", accountId: "account-three", priority: 3 },
         { id: "four", apiKey: "key-four", accountId: "account-four", priority: 4 },
-      ], /maximum of 3 entries/],
+        { id: "five", apiKey: "key-five", accountId: "account-five", priority: 5 },
+      ], /maximum of 4 entries/],
       ["{not-json", /credential JSON is malformed/],
     ]) {
       assert.throws(() => parseJulesCredentialPool(input), error => {
