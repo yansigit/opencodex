@@ -109,12 +109,15 @@ jobs:
           fi
 
           # An existing branch is NOT terminal. If a previous run pushed the branch and then
-          # failed at `gh pr create`, exiting here would leave the repair permanently unqueued
-          # while every rerun reports success - the exact failure mode a reviewer caught. So
-          # reuse the branch and fall through to pull-request creation instead.
+          # failed at `gh pr create`, exiting here would leave the repair permanently unqueued.
+          # Validate that the name still belongs to this automation, then rebuild it from the
+          # CURRENT dev head. Reusing an old commit would open an immediately stale PR and could
+          # reintroduce files that moved on dev while the failed run was waiting for a retry.
+          existing_branch_sha=""
           if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
             echo "::notice::${branch} exists without an open pull request; validating it"
             git fetch origin "${branch}"
+            existing_branch_sha="$(git rev-parse "origin/${branch}")"
 
             # Fail closed on unexpected content. The branch carries the bot's own one-line
             # bump, so anything else on it means a human or another job is using that name and
@@ -129,13 +132,17 @@ jobs:
               echo "::error::${branch} carries ${branch_version}, expected ${NEXT_VERSION}"
               exit 1
             fi
-            git checkout -B "${branch}" "origin/${branch}"
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${branch}" origin/dev
+          git add package.json
+          git commit -m "fix(release): move dev to ${NEXT_VERSION} after ${RELEASED_VERSION}"
+          if [ -n "${existing_branch_sha}" ]; then
+            # Exact lease: fail if anything moved the validated branch after our fetch.
+            git push --force-with-lease="refs/heads/${branch}:${existing_branch_sha}" origin "${branch}"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git checkout -b "${branch}"
-            git add package.json
-            git commit -m "fix(release): move dev to ${NEXT_VERSION} after ${RELEASED_VERSION}"
             git push origin "${branch}"
           fi
 
@@ -168,3 +175,85 @@ jobs:
           - [x] Security-sensitive changes were reviewed for secrets, auth, and unsafe defaults.
           BODY
           )"
+
+  reconcile-failure-alert:
+    needs: open-bump-pr
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Queue repair or record recovery
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          BUMP_RESULT: ${{ needs.open-bump-pr.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const marker = "<!-- opencodex-dev-version-bump-failure -->";
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100
+            });
+            const existing = issues.find(issue => !issue.pull_request && String(issue.body || "").includes(marker));
+            const runUrl = process.env.RUN_URL;
+
+            if (process.env.BUMP_RESULT !== "failure") {
+              if (!existing) return;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `The dev-version bump automation recovered successfully: ${runUrl}`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, state: "closed", state_reason: "completed",
+              });
+              return;
+            }
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `The dev-version bump automation failed again: ${runUrl}`,
+              });
+              return;
+            }
+
+            const labels = {
+              "agent:jules": ["8250df", "Trusted Jules implementation request"],
+              "agent:generated": ["0969da", "Trusted generated maintenance issue"],
+              "agent:queued": ["d4c5f9", "Maintenance task queued"],
+            };
+            const known = new Set((await github.paginate(
+              github.rest.issues.listLabelsForRepo, { owner, repo, per_page: 100 }
+            )).map(label => label.name));
+            for (const [name, [color, description]] of Object.entries(labels)) {
+              if (!known.has(name)) {
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              }
+            }
+
+            await github.rest.issues.create({
+              owner, repo,
+              title: "[agent:release] Dev version bump automation failed",
+              labels: Object.keys(labels),
+              body: [
+                marker,
+                "### Area", "", "Installation or packaging", "",
+                "### What are you trying to accomplish?", "",
+                "Keep the dev package version strictly ahead of every published release so inherited CI stays green.", "",
+                "### What prevents this today?", "",
+                `The trusted dev-version bump workflow failed. Exact run: ${runUrl}`, "",
+                "### What should OpenCodex do?", "",
+                "Diagnose the exact failed run, prepare the smallest safe repair, and preserve the human-reviewed pull-request boundary for changes to dev.", "",
+                "### Example usage or interface", "",
+                `Inspect ${runUrl}, reproduce the failed gate locally, and open a template-complete PR against dev.`, "",
+                "### Alternatives or workarounds", "",
+                "A maintainer can run scripts/bump-dev-version.ts locally and open the bump PR manually while the automation is repaired.", "",
+                "### Additional context", "",
+                "Generated by the trusted release-version supervisor. Workflow and release changes remain protected and require explicit security review.", "",
+                "### Checks", "",
+                "- [x] I searched existing issues and documentation.",
+                "- [x] This request describes a concrete OpenCodex workflow rather than merely naming a desired technology.",
+                "- [x] I removed secrets and personal data.",
+              ].join("\n"),
+            });

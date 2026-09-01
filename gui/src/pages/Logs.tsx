@@ -391,9 +391,6 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const resourceKey = logsCacheKey(apiBase);
   const cachedLogs = validCachedLogs(readSessionListCache<LogEntry[]>(resourceKey));
   const [autoRefresh, setAutoRefresh] = useState(true);
-  const [failureStreak, setFailureStreak] = useState<{ error: unknown; count: number }>(
-    { error: null, count: 0 },
-  );
   const [detail, setDetail] = useState<LogEntry | null>(null);
   const [filters, setFilters] = useState<LogFilterState>(DEFAULT_LOG_FILTER_STATE);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -471,13 +468,19 @@ export default function Logs({ apiBase }: { apiBase: string }) {
         failures,
         LOGS_POLL_BACKOFF_MAX_EXPONENT,
       ));
-      logRetryRef.current = { key: resourceKey, failures, nextAttemptAt: Date.now() + backoffMs, error: normalized };
+      logRetryRef.current = {
+        key: resourceKey,
+        failures,
+        nextAttemptAt: Date.now() + backoffMs,
+        error: normalized,
+      };
       throw normalized;
     }
   }, [apiBase, resourceKey]);
 
-  // The resource layer owns the request and the 2s base poll. loadLogs backs off actual network
-  // attempts after failures while preserving those shared scheduler ticks and held rows.
+  // The resource layer owns the request and the 2s poll. It keeps held rows through a quiet
+  // poll on its own, which is what the old silent/non-silent split was hand-rolling — and an
+  // empty successful response is now a real empty result rather than a cold load.
   const logsResource = useDataSurface<LogEntry[]>(
     resourceKey,
     [apiBase],
@@ -506,6 +509,9 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   // in sync and no frame painted with a stale banner. `streak` counts CONSECUTIVE failed
   // settlements: it is stored keyed by the error identity that produced it, so repeated
   // renders of the same failure do not inflate the count and a success clears it.
+  const [failureStreak, setFailureStreak] = useState<{ error: unknown; count: number }>(
+    { error: null, count: 0 },
+  );
   if (settledSuccess && failureStreak.count !== 0) {
     setFailureStreak({ error: null, count: 0 });
   } else if (settledFailure && failureStreak.error !== logsState.error) {

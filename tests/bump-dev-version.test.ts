@@ -13,6 +13,10 @@ import { decideDevVersion } from "../scripts/bump-dev-version";
  */
 
 const CLI = new URL("../scripts/bump-dev-version.ts", import.meta.url).pathname;
+const WORKFLOW = readFileSync(
+  new URL("../.github/workflows/dev-version-bump.yml", import.meta.url),
+  "utf8",
+);
 
 function tempPackageJson(version: string): string {
   const dir = mkdtempSync(join(tmpdir(), "ocx-bump-"));
@@ -159,5 +163,36 @@ describe("dev version bump rule", () => {
     const proc = Bun.spawnSync(["bun", CLI, "nonsense", path]);
     expect(proc.exitCode).not.toBe(0);
     expect(readFileSync(path, "utf8")).toBe(before);
+  });
+});
+
+describe("dev version bump workflow safety", () => {
+  test("is release-only, least-privilege, and uses immutable external actions", () => {
+    expect(WORKFLOW).toContain("permissions: {}");
+    expect(WORKFLOW).toContain("release:\n    types: [published]");
+    expect(WORKFLOW).not.toMatch(/^\s+workflow_dispatch:/m);
+    for (const match of WORKFLOW.matchAll(/^\s+uses:\s+([^\s#]+)/gm)) {
+      const action = match[1];
+      if (action.startsWith("./")) continue;
+      expect(action).toMatch(/@[0-9a-f]{40}$/);
+    }
+    expect(WORKFLOW).toContain("contents: write");
+    expect(WORKFLOW).toContain("pull-requests: write");
+    expect(WORKFLOW).toContain("issues: write");
+  });
+
+  test("rebuilds a validated retry branch from current dev under an exact lease", () => {
+    expect(WORKFLOW).toContain('git checkout -B "${branch}" origin/dev');
+    expect(WORKFLOW).toContain('--force-with-lease="refs/heads/${branch}:${existing_branch_sha}"');
+    expect(WORKFLOW).toContain('changed_files="$(git diff --name-only "origin/dev...origin/${branch}")"');
+    expect(WORKFLOW).not.toMatch(/git push[^\n]*\bdev\b/);
+  });
+
+  test("deduplicates failure alerts, queues Jules, and closes the alert on recovery", () => {
+    expect(WORKFLOW).toContain("opencodex-dev-version-bump-failure");
+    expect(WORKFLOW).toContain('"agent:jules"');
+    expect(WORKFLOW).toContain('"agent:queued"');
+    expect(WORKFLOW).toContain('state_reason: "completed"');
+    expect(WORKFLOW).toContain("The dev-version bump automation failed again");
   });
 });

@@ -2,6 +2,8 @@ import { lazy, Suspense, useEffect, useRef, useState, type KeyboardEvent } from 
 import { navigateHash, normalizeHashPath } from "../hash-routing";
 import { useT, type TKey } from "../i18n/shared";
 import ErrorBoundary from "../components/ErrorBoundary";
+import ClientMark from "../components/ClientMark";
+import { INTEGRATION_MARKS } from "../components/integration-marks";
 import type { FileIntegrationClientId } from "./integrations/FileIntegrationPage";
 
 const ApiKeys = lazy(() => import("./ApiKeys"));
@@ -70,6 +72,11 @@ function tabDomId(tab: IntegrationTab): string {
 
 function panelDomId(tab: IntegrationTab): string {
   return `integrations-panel-${tab}`;
+}
+
+function tabMark(tab: IntegrationTab): string | null {
+  if (tab === "overview" || tab === "keys") return null;
+  return INTEGRATION_MARKS[tab] ?? null;
 }
 
 export default function Integrations({ apiBase }: { apiBase: string }) {
@@ -156,6 +163,9 @@ export default function Integrations({ apiBase }: { apiBase: string }) {
             onClick={() => selectTab(definition.id, true)}
             onKeyDown={handleTabKeyDown}
           >
+            {tabMark(definition.id) && (
+              <ClientMark src={tabMark(definition.id)} label={t(definition.labelKey)} size={14} />
+            )}
             {t(definition.labelKey)}
           </button>
         ))}
