@@ -34,7 +34,7 @@ import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthr
 import { loginKimi, refreshKimiToken } from "./kimi";
 import { loginNous, NousTokenError, refreshNousToken, clearNousRefreshIntent, RefreshIntentIOError } from "./nous";
 import { loginChatGPT, refreshChatGPTToken } from "./chatgpt";
-import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
+import { AntigravityTokenRequestError, loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
 import { loginGithubCopilot, refreshGithubCopilotToken, validateCopilotApiBaseUrl } from "./github-copilot";
 import { loginCommandCode, refreshCommandCodeToken } from "./command-code";
@@ -525,7 +525,13 @@ export async function getValidAccessTokenSnapshot(provider: string): Promise<OAu
 }
 
 /** Providers whose upstream-401 replay path may force a snapshot refresh. */
-const FORCE_REFRESH_PROVIDERS = new Set(["xai", "github-copilot", "kiro"]);
+const FORCE_REFRESH_PROVIDERS = new Set([
+  "xai",
+  "github-copilot",
+  "kiro",
+  "google-antigravity",
+  "cursor",
+]);
 
 export async function forceRefreshOAuthAccessSnapshot(
   rejected: OAuthAccessSnapshot,
@@ -565,6 +571,14 @@ export async function getValidAccessSnapshotForAccount(
   return resolveAccessSnapshotForAccount(provider, accountId, undefined, opts.requireUsableAccount === true);
 }
 
+/** Backward-compatible account snapshot name retained for fork call sites. */
+export async function getValidAccessTokenSnapshotForAccount(
+  provider: string,
+  accountId: string,
+): Promise<OAuthAccessSnapshot> {
+  return getValidAccessSnapshotForAccount(provider, accountId);
+}
+
 /** Terminal refresh failures (revoked/rotated-away grants) — retrying cannot succeed. */
 function isTerminalRefreshError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
@@ -576,6 +590,9 @@ function isTerminalRefreshError(err: unknown): boolean {
     || msg.includes("expired_token");
 }
 function terminal(error:unknown):boolean{
+  if (error instanceof AntigravityTokenRequestError) {
+    return (error.httpStatus === 400 || error.httpStatus === 401) && error.oauthError !== undefined;
+  }
   if(error instanceof XaiTokenRequestError)return ["invalid_grant","refresh_token_reused","revoked_token"].includes(error.oauthError??"");
   if(error instanceof AnthropicTokenError)return (error.httpStatus===400||error.httpStatus===401)&&["invalid_grant","refresh_token_reused","revoked","revoked_token","refresh_token_revoked"].includes(error.oauthError??"");
   if(error instanceof KiroTokenRefreshError)return (error.httpStatus===400||error.httpStatus===401)&&error.oauthError!==undefined;
