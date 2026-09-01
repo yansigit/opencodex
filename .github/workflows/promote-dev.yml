@@ -30,7 +30,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-      pull-requests: write
     steps:
       - name: Checkout trusted promotion controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -85,10 +84,22 @@ jobs:
             echo "main_ancestor=$main_ancestor"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Create promotion App token
+        id: promotion-app-token
+        if: steps.verify.outputs.trees_differ == 'true' && steps.verify.outputs.main_ancestor == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.PR_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-pull-requests: write
+          permission-issues: write
+
       - name: Create or update the human promotion PR
         if: steps.verify.outputs.trees_differ == 'true' && steps.verify.outputs.main_ancestor == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.promotion-app-token.outputs.token }}
           VERIFIED_CI_SHA: ${{ steps.verify.outputs.verified_sha }}
         run: |
           set -euo pipefail

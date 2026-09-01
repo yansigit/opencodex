@@ -40,6 +40,7 @@
     "start": "bun run src/cli/index.ts start",
     "test": "bun scripts/test.ts",
     "test:changed": "bun scripts/test.ts --changed=dev",
+    "test:container": "bun scripts/test-container.ts",
     "typecheck": "bun x tsc --noEmit",
     "audit:high": "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
     "privacy:scan": "bun scripts/privacy-scan.ts",

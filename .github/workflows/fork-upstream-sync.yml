@@ -283,9 +283,10 @@ jobs:
       # Cursor handles only conflicts the Action could not resolve or
       # disconnected histories; ordinary daily merges stop at a draft PR.
       - name: Notify Cursor handoff
+        id: cursor_handoff
         if: steps.prepare.outputs.handoff_required == 'true'
+        continue-on-error: true
         env:
-          GITHUB_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           FORK_SYNC_UPSTREAM_REPO: https://github.com/lidge-jun/opencodex.git
           FORK_SYNC_NOTIFIERS: ""
@@ -293,29 +294,31 @@ jobs:
           FORK_SYNC_CURSOR_WEBHOOK_URL: ${{ secrets.FORK_SYNC_CURSOR_WEBHOOK_URL }}
           FORK_SYNC_CURSOR_WEBHOOK_SECRET: ${{ secrets.FORK_SYNC_CURSOR_WEBHOOK_SECRET }}
         run: |
-          set -u
-          coordinator_status=1
-          cursor_attempted=false
-          if [ -n "${FORK_SYNC_CURSOR_WEBHOOK_URL:-}" ] && [ -n "${FORK_SYNC_CURSOR_WEBHOOK_SECRET:-}" ]; then
-            cursor_attempted=true
-            set +e
-            bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$RUNNER_TEMP/fork-sync-handoff.json"
-            coordinator_status=$?
-            set -e
+          set -eu
+          if [ -z "${FORK_SYNC_CURSOR_WEBHOOK_URL:-}" ] || [ -z "${FORK_SYNC_CURSOR_WEBHOOK_SECRET:-}" ]; then
+            echo "Cursor webhook not configured; requesting trusted GitHub issue fallback." >&2
+            exit 1
           fi
-          if [ "$coordinator_status" -ne 0 ]; then
-            if [ "$cursor_attempted" = true ]; then
-              echo "Cursor webhook failed (HTTP ${coordinator_status:-unknown}); falling back to Jules-tracked GitHub issue (agent:jules)." >&2
-              echo "::warning::Cursor webhook unavailable - hotspot handoff will be handled by Jules via GitHub issue." >&2
-            else
-              echo "Cursor webhook not configured; using Jules-tracked GitHub issue fallback." >&2
-            fi
-            FORK_SYNC_NOTIFIERS=github-issue FORK_SYNC_COORDINATORS="" \
-              bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$RUNNER_TEMP/fork-sync-handoff.json"
-            echo "Jules fallback issue ensured for hotspot handoff." >&2
-          else
-            echo "Cursor handoff succeeded." >&2
-          fi
+          bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$RUNNER_TEMP/fork-sync-handoff.json"
+          echo "Cursor handoff succeeded." >&2
+
+      # Keep the repository token out of the third-party webhook process. This
+      # trusted step receives no Cursor secret and runs only after that step fails.
+      - name: Notify Jules fallback issue
+        if: >-
+          steps.prepare.outputs.handoff_required == 'true' &&
+          steps.cursor_handoff.outcome != 'success'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          FORK_SYNC_UPSTREAM_REPO: https://github.com/lidge-jun/opencodex.git
+          FORK_SYNC_NOTIFIERS: github-issue
+          FORK_SYNC_COORDINATORS: ""
+        run: |
+          set -eu
+          echo "::warning::Cursor webhook unavailable - hotspot handoff will be handled by Jules via GitHub issue."
+          bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" emit < "$RUNNER_TEMP/fork-sync-handoff.json"
+          echo "Jules fallback issue ensured for hotspot handoff." >&2
 
       - name: Reconcile sync failure notification
         if: always()

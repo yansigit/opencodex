@@ -18,6 +18,7 @@ const {
   julesSessionDisposition,
   latestActiveLabelActor,
   parseAgentMaintenanceState,
+  parseJulesCredentialPool,
   quotaExhaustionExpired,
   requiredChecksSuccessful,
   repairMarker,
@@ -25,6 +26,7 @@ const {
   trustedActiveMaintenanceCount,
   validateSessionPullRequest,
   verifiedBugbotFindings,
+  createJulesCredentialPoolClient,
 } = require("./agent-maintenance.cjs");
 
 const SHA = "a".repeat(40);
@@ -667,7 +669,357 @@ describe("Jules API boundary", () => {
     assert.deepEqual(validateSessionPullRequest({ session, pr: { ...authoredPr, state: "closed", merged: true }, owner: "yansigit", repo: "opencodex", expectedAuthorId: 77, allowClosed: true }), { number: 77, headSha: SHA });
     assert.throws(() => validateSessionPullRequest({ session, pr: { ...authoredPr, user: { id: 8 } }, owner: "yansigit", repo: "opencodex", expectedAuthorId: 77 }), /author mismatch/);
     assert.throws(() => validateSessionPullRequest({ session, pr: { ...authoredPr, head: { ...authoredPr.head, repo: null } }, owner: "yansigit", repo: "opencodex", expectedAuthorId: 77 }), /head branch/);
+    assert.throws(() => validateSessionPullRequest({ session, pr: { ...authoredPr, head: { ...authoredPr.head, repo: { full_name: "attacker/opencodex" } } }, owner: "yansigit", repo: "opencodex", expectedAuthorId: 77 }), /head must belong to this repository/);
     assert.throws(() => validateSessionPullRequest({ session, pr: { ...authoredPr, base: { ...authoredPr.base, ref: "main" } }, owner: "yansigit", repo: "opencodex", expectedAuthorId: 77 }), /base dev/);
     assert.throws(() => validateSessionPullRequest({ session: { ...session, outputs: [{ pullRequest: { url: "https://example.com/yansigit/opencodex/pull/77" } }] }, pr: authoredPr, owner: "yansigit", repo: "opencodex", expectedAuthorId: 77 }), /GitHub URL/);
+  });
+});
+
+describe("Jules credential pool", () => {
+  const entries = [
+    { id: "slow", apiKey: "key-slow", accountId: "account-slow", priority: 20 },
+    { id: "fast", apiKey: "key-fast", accountId: "account-fast", priority: 1 },
+  ];
+  const session = { name: "sessions/1", id: "s1", title: "task" };
+
+  it("parses a sorted JSON pool and keeps the old one-key input valid", () => {
+    assert.deepEqual(parseJulesCredentialPool(JSON.stringify(entries)), [entries[1], entries[0]]);
+    assert.deepEqual(parseJulesCredentialPool("legacy-secret"), [{
+      id: "default",
+      apiKey: "legacy-secret",
+      accountId: "legacy",
+      priority: 0,
+    }]);
+    assert.deepEqual(parseJulesCredentialPool({ apiKey: "legacy-secret" }), [{
+      id: "default",
+      apiKey: "legacy-secret",
+      accountId: "legacy",
+      priority: 0,
+    }]);
+  });
+
+  it("auto-detects a JSON pool passed through the existing apiKey option", async () => {
+    const client = createJulesClient({
+      apiKey: JSON.stringify(entries),
+      fetchImpl: async (_url, options) => {
+        assert.equal(options.headers["x-goog-api-key"], "key-fast");
+        return Response.json(session);
+      },
+    });
+    const result = await client.createSession({ title: "task" });
+    assert.equal(result.credentialId, "fast");
+    assert.equal(client.getState().selectedCredentialId, "fast");
+  });
+
+  it("registers every parsed key exactly once for masking, including legacy input", () => {
+    const registered = [];
+    createJulesClient({
+      apiKey: JSON.stringify(entries),
+      registerSecret: key => registered.push(key),
+    });
+    assert.deepEqual(registered, ["key-fast", "key-slow"]);
+
+    const legacy = [];
+    createJulesClient({ apiKey: "legacy-secret", registerSecret: key => legacy.push(key) });
+    assert.deepEqual(legacy, ["legacy-secret"]);
+
+    assert.throws(
+      () => createJulesCredentialPoolClient({
+        credentials: entries,
+        registerSecret: key => { throw new Error(`mask failed for ${key}`); },
+      }),
+      error => error.message === "Jules secret registration failed" && !error.message.includes("key-"),
+    );
+  });
+
+  it("rejects malformed, duplicate-id, and duplicate-account pools without echoing secrets", () => {
+    const secret = "do-not-echo-this-key";
+    const duplicateId = [
+      { id: "one", apiKey: secret, accountId: "account-one", priority: 1 },
+      { id: "one", apiKey: "other-key", accountId: "account-two", priority: 2 },
+    ];
+    const duplicateAccount = [
+      { id: "one", apiKey: secret, accountId: "same-account", priority: 1 },
+      { id: "two", apiKey: "other-key", accountId: "same-account", priority: 2 },
+    ];
+    for (const [input, pattern] of [
+      [duplicateId, /duplicate credential id/],
+      [duplicateAccount, /duplicate credential accountId/],
+      [[{ id: "bad", apiKey: secret, accountId: "account", priority: "1" }], /malformed credential priority/],
+      [[
+        { id: "one", apiKey: secret, accountId: "account-one", priority: 1 },
+        { id: "two", apiKey: "key-two", accountId: "account-two", priority: 2 },
+        { id: "three", apiKey: "key-three", accountId: "account-three", priority: 3 },
+        { id: "four", apiKey: "key-four", accountId: "account-four", priority: 4 },
+      ], /maximum of 3 entries/],
+      ["{not-json", /credential JSON is malformed/],
+    ]) {
+      assert.throws(() => parseJulesCredentialPool(input), error => {
+        assert.match(error.message, pattern);
+        assert.equal(error.message.includes(secret), false);
+        return true;
+      });
+    }
+  });
+
+  it("never issues an alternate-account create after a session-create 429", async () => {
+    const calls = [];
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        return new Response("quota", { status: 429 });
+      },
+      sleep: async () => {},
+    });
+    await assert.rejects(() => client.createSession({ title: "task" }), error => error.status === 429);
+    assert.equal(client.selectedCredentialId, "fast");
+    assert.deepEqual(client.getState(), { selectedCredentialId: "fast", credentialCount: 2 });
+    assert.deepEqual(client.state, client.getState());
+    assert.deepEqual(calls.map(call => call.options.headers["x-goog-api-key"]), ["key-fast"]);
+    assert.equal(JSON.stringify(client.getState()).includes("key-"), false);
+  });
+
+  it("strictly re-selects the persisted credential for account-bound operations", async () => {
+    const calls = [];
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        if (options.method === "GET") return Response.json(session);
+        return Response.json({ accepted: true });
+      },
+    });
+    assert.deepEqual(client.selectCredential("slow"), { selectedCredentialId: "slow", credentialCount: 2 });
+    await client.getSession("1");
+    await client.sendMessage("1", "continue");
+    assert.ok(calls.every(call => call.options.headers["x-goog-api-key"] === "key-slow"));
+    assert.throws(() => client.selectCredential("missing"), /unknown Jules credential id/);
+    assert.throws(() => client.selectCredential(null), /unknown Jules credential id/);
+    assert.equal(client.selectedCredentialId, "slow");
+  });
+
+  it("uses priority[0] by default and explicit selection for later create affinity", async () => {
+    const keys = [];
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (_url, options) => {
+        keys.push(options.headers["x-goog-api-key"]);
+        return Response.json({ ...session, id: `s${keys.length}`, name: `sessions/${keys.length}` });
+      },
+    });
+    const first = await client.createSession({ title: "task-one" });
+    assert.equal(first.credentialId, "fast");
+    client.selectCredential("slow");
+    const second = await client.createSession({ title: "task-two" });
+    assert.equal(second.credentialId, "slow");
+    assert.deepEqual(keys, ["key-fast", "key-slow"]);
+  });
+
+  it("resolves the repository source separately for each explicitly selected account", async () => {
+    const calls = [];
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (url, options) => {
+        const key = options.headers["x-goog-api-key"];
+        calls.push({ url, options, key });
+        if (url.endsWith("/sources")) {
+          return Response.json({
+            sources: [{
+              name: key === "key-fast" ? "sources/account-fast/repo" : "sources/account-slow/repo",
+              githubRepo: { owner: "yansigit", repo: "opencodex" },
+            }],
+          });
+        }
+        const body = JSON.parse(options.body);
+        assert.equal(
+          body.sourceContext.source,
+          key === "key-fast" ? "sources/account-fast/repo" : "sources/account-slow/repo",
+        );
+        return Response.json({ ...session, id: `s${calls.length}`, name: `sessions/${calls.length}`, sourceContext: body.sourceContext });
+      },
+      sleep: async () => {},
+    });
+    const payload = {
+      title: "task",
+      sourceContext: { source: "sources/stale", githubRepoContext: { startingBranch: "dev" } },
+    };
+    const first = await client.createRepoSessionIdempotently(payload, { owner: "yansigit", repo: "opencodex" });
+    assert.equal(first.credentialId, "fast");
+    client.selectCredential("slow");
+    const second = await client.createRepoSessionIdempotently(payload, { owner: "yansigit", repo: "opencodex" });
+    assert.equal(second.credentialId, "slow");
+    assert.equal(payload.sourceContext.source, "sources/stale", "caller request is not mutated");
+    assert.deepEqual(calls.map(call => [call.key, new URL(call.url).pathname]), [
+      ["key-fast", "/v1alpha/sources"],
+      ["key-fast", "/v1alpha/sessions"],
+      ["key-slow", "/v1alpha/sources"],
+      ["key-slow", "/v1alpha/sessions"],
+    ]);
+  });
+
+  it("reconciles a create 429 only against the same account and returns its deterministic match", async () => {
+    const calls = [];
+    const source = "sources/account-fast/repo";
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (url, options) => {
+        const key = options.headers["x-goog-api-key"];
+        calls.push({ url, method: options.method, key });
+        if (url.endsWith("/sources")) {
+          return Response.json({ sources: [{ name: source, githubRepo: { owner: "yansigit", repo: "opencodex" } }] });
+        }
+        if (url.endsWith("/sessions") && options.method === "POST") {
+          return new Response("quota", { status: 429 });
+        }
+        if (url.endsWith("/sessions")) {
+          return Response.json({ sessions: [session] });
+        }
+        return Response.json({
+          ...session,
+          sourceContext: { source, githubRepoContext: { startingBranch: "dev" } },
+        });
+      },
+      sleep: async () => {},
+    });
+    const result = await client.createRepoSessionIdempotently({
+      title: "task",
+      sourceContext: { githubRepoContext: { startingBranch: "dev" } },
+    }, { owner: "yansigit", repo: "opencodex" });
+    assert.equal(result.credentialId, "fast");
+    assert.deepEqual(calls.map(call => [call.key, call.method, new URL(call.url).pathname]), [
+      ["key-fast", "GET", "/v1alpha/sources"],
+      ["key-fast", "POST", "/v1alpha/sessions"],
+      ["key-fast", "GET", "/v1alpha/sessions"],
+      ["key-fast", "GET", "/v1alpha/sessions/1"],
+    ]);
+  });
+
+  it("fails closed when same-account reconciliation after create 429 finds no session", async () => {
+    const keys = [];
+    let call = 0;
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (_url, options) => {
+        call += 1;
+        keys.push(options.headers["x-goog-api-key"]);
+        if (call === 1) {
+          return Response.json({
+            sources: [{
+              name: "sources/account-fast/repo",
+              githubRepo: { owner: "yansigit", repo: "opencodex" },
+            }],
+          });
+        }
+        if (call === 2) return new Response("quota", { status: 429 });
+        return Response.json({ sessions: [] });
+      },
+      sleep: async () => {},
+    });
+    await assert.rejects(
+      () => client.createRepoSessionIdempotently(
+        { title: "task", sourceContext: { githubRepoContext: { startingBranch: "dev" } } },
+        { owner: "yansigit", repo: "opencodex" },
+      ),
+      error => error.uncertain === true && !error.message.includes("key-fast") && !error.message.includes("key-slow"),
+    );
+    assert.deepEqual(keys, ["key-fast", "key-fast", "key-fast"]);
+    assert.equal(client.selectedCredentialId, "fast");
+  });
+
+  it("does not fail over when account-specific source discovery fails", async () => {
+    const calls = [];
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (_url, options) => {
+        calls.push(options.headers["x-goog-api-key"]);
+        throw new Error("source read failed with key-fast and key-slow");
+      },
+    });
+    await assert.rejects(
+      () => client.createRepoSessionIdempotently(
+        { title: "task", sourceContext: { githubRepoContext: { startingBranch: "dev" } } },
+        { owner: "yansigit", repo: "opencodex" },
+      ),
+      error => {
+        assert.equal(error.operation, "read");
+        assert.equal(error.message.includes("key-fast"), false);
+        assert.equal(error.message.includes("key-slow"), false);
+        return true;
+      },
+    );
+    assert.deepEqual(calls, ["key-fast"]);
+    assert.equal(client.selectedCredentialId, "fast");
+  });
+
+  it("does not fail over network errors, 5xx, authorization failures, or non-create mutations", async () => {
+    for (const failure of [
+      { name: "network", run: async client => client.createSession({ title: "task" }), response: new Error("network key-fast") },
+      { name: "5xx", run: async client => client.createSession({ title: "task" }), response: new Response("busy", { status: 503 }) },
+      { name: "401", run: async client => client.createSession({ title: "task" }), response: new Response("unauthorized", { status: 401 }) },
+      { name: "403", run: async client => client.createSession({ title: "task" }), response: new Response("forbidden", { status: 403 }) },
+      { name: "sendMessage 429", run: async client => client.sendMessage("1", "continue"), response: new Response("quota", { status: 429 }) },
+    ]) {
+      let calls = 0;
+      const client = createJulesCredentialPoolClient({
+        credentials: entries,
+        fetchImpl: async () => {
+          calls += 1;
+          if (failure.response instanceof Error) throw failure.response;
+          return failure.response;
+        },
+      });
+      await assert.rejects(failure.run(client), error => {
+        assert.equal(error.message.includes("key-fast"), false, failure.name);
+        return true;
+      });
+      assert.equal(calls, 1, failure.name);
+      assert.equal(client.selectedCredentialId, "fast", failure.name);
+    }
+  });
+
+  it("does not fail over read operations, including retried read 429s", async () => {
+    const calls = [];
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (_url, options) => {
+        calls.push(options);
+        return new Response("quota", { status: 429 });
+      },
+      sleep: async () => {},
+    });
+    await assert.rejects(() => client.getSession("1"), error => error.status === 429);
+    assert.equal(calls.length, 4, "read retry policy remains local to the selected credential");
+    assert.ok(calls.every(options => options.headers["x-goog-api-key"] === "key-fast"));
+    assert.equal(client.selectedCredentialId, "fast");
+  });
+
+  it("preserves idempotent reconciliation and does not fail over an ambiguous create", async () => {
+    const calls = [];
+    const client = createJulesCredentialPoolClient({
+      credentials: entries,
+      fetchImpl: async (url, options) => {
+        calls.push({ url, options });
+        if (calls.length === 1) return new Response("busy", { status: 503 });
+        if (calls.length === 2) return Response.json({ sessions: [session] });
+        return Response.json({ ...session, sourceContext: { source: "source", githubRepoContext: { startingBranch: "dev" } } });
+      },
+      sleep: async () => {},
+    });
+    const result = await client.createSessionIdempotently({
+      title: "task",
+      sourceContext: { source: "source", githubRepoContext: { startingBranch: "dev" } },
+    });
+    assert.equal(result.credentialId, "fast");
+    assert.deepEqual(calls.map(call => call.options.method), ["POST", "GET", "GET"]);
+    assert.ok(calls.every(call => call.options.headers["x-goog-api-key"] === "key-fast"));
+  });
+
+  it("records the selected credential id in state markers without accepting secrets", () => {
+    const state = defaultAgentMaintenanceState({ taskId: "issue-1", taskKind: "implement", issueNumber: 1 });
+    state.selectedCredentialId = "fast";
+    assert.equal(parseAgentMaintenanceState(stateMarker(state)).selectedCredentialId, "fast");
+    state.selectedCredentialId = "bad id";
+    assert.throws(() => stateMarker(state), /selectedCredentialId/);
   });
 });
