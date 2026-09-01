@@ -38,6 +38,7 @@ import {
   parseAccountPoolStickyLimit,
   parseAccountPoolStrategy,
 } from "../../codex/pool-rotation";
+import { normalizeAccountPoolQuotaWindow, parseAccountPoolQuotaWindow } from "../../oauth/anthropic-routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { resolveCodexHomeDir } from "../../codex/home";
@@ -393,6 +394,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       autoSwitchThreshold?: unknown;
       strategy?: unknown;
       stickyLimit?: unknown;
+      quotaWindow?: unknown;
     };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     if (provider !== "anthropic" && provider !== "cursor") {
@@ -454,11 +456,20 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       }
       stickyLimit = parsed;
     }
+    let quotaWindow = config.anthropicAccountPool?.quotaWindow;
+    if (body.quotaWindow !== undefined) {
+      const parsed = parseAccountPoolQuotaWindow(body.quotaWindow);
+      if (parsed === null) {
+        return jsonResponse({ error: "quotaWindow must be one of: five-hour, weekly, max-utilization" }, 400);
+      }
+      quotaWindow = parsed;
+    }
     config.anthropicAccountPool = {
       enabled,
       autoSwitchThreshold: threshold,
       ...(strategy !== undefined ? { strategy } : {}),
       ...(stickyLimit !== undefined ? { stickyLimit } : {}),
+      ...(quotaWindow !== undefined ? { quotaWindow } : {}),
     };
     saveManagementConfig(deps, config);
     reconcileLiveStateStores();
@@ -469,6 +480,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       autoSwitchThreshold: threshold,
       strategy: normalizeAccountPoolStrategy(strategy),
       stickyLimit: normalizeAccountPoolStickyLimit(stickyLimit),
+      quotaWindow: normalizeAccountPoolQuotaWindow(quotaWindow),
       experimental: true,
     });
   }

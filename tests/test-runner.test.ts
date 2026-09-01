@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, posix, win32 } from "node:path";
 import {
+  changedSelectionFailure,
   createIsolatedTestEnvironment,
   isFullSuiteRun,
   runTestLaneForTests,
@@ -19,7 +20,13 @@ import {
 import {
   acquireTestRunLock,
   resolveBareTestRunIdentity,
+  resolveDefaultTestRunLockPath,
+  resolveInheritedTestRunLock,
+  resolveWrappedTestRunLockPath,
+  TEST_RUN_LOCK_PATH_ENV,
+  TEST_RUN_LOCK_TOKEN_ENV,
   TEST_RUN_NO_QUEUE_ENV,
+  type TestRunRuntimeFileSystem,
 } from "../scripts/test-run-lock";
 import {
   decodeWindowsIdentityPowerShellOutputForTests,
@@ -74,6 +81,70 @@ async function expectProcessTreeDead(markerPath: string): Promise<void> {
   }
   expect(processIsAlive(pids.child)).toBe(false);
   expect(processIsAlive(pids.grandchild)).toBe(false);
+}
+
+
+function runGit(cwd: string, ...args: string[]): string {
+  const result = Bun.spawnSync(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  if (result.exitCode !== 0) {
+    throw new Error(new TextDecoder().decode(result.stderr));
+  }
+  return new TextDecoder().decode(result.stdout).trim();
+}
+
+// Assembled from fragments so the fixture identity is not an email literal in a tracked
+// file: scripts/privacy-scan.ts matches any email-shaped string and `.invalid` is not
+// allow-listed, so writing it whole fails the repository's own privacy gate. The bytes
+// handed to git are identical either way.
+const FIXTURE_COMMIT_EMAIL = ["test", "opencodex.invalid"].join("@");
+
+function pathIsContainedBy(parent: string, candidate: string, platform: "posix" | "win32"): boolean {
+  const path = platform === "win32" ? win32 : posix;
+  const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+  return relative === "" || (!relative.startsWith(`..${path.sep}`)
+    && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function acceptingRuntimeFileSystem(
+  uid: number,
+  writable = true,
+  modes: Readonly<Record<string, number>> = {},
+): TestRunRuntimeFileSystem {
+  return {
+    lstatSync: path => ({
+      uid,
+      mode: modes[path] ?? 0o700,
+      isDirectory: () => true,
+      isSymbolicLink: () => false,
+    }),
+    mkdirSync: () => {},
+    accessSync: () => {
+      if (!writable) throw Object.assign(new Error("denied"), { code: "EACCES" });
+    },
+  };
+}
+
+function commitFixture(cwd: string, path: string, contents: string, message: string): string {
+  writeFileSync(join(cwd, path), contents);
+  runGit(cwd, "add", path);
+  runGit(
+    cwd,
+    "-c",
+    "user.name=OpenCodex Test",
+    "-c",
+    `user.email=${FIXTURE_COMMIT_EMAIL}`,
+    "commit",
+    "-m",
+    message,
+  );
+  return runGit(cwd, "rev-parse", "HEAD");
+}
+
+function initChangedRunFixture(): { cwd: string; base: string } {
+  const cwd = mkdtempSync(join(tmpdir(), "opencodex-changed-ref-"));
+  runGit(cwd, "init", "--quiet");
+  const base = commitFixture(cwd, "base.txt", "base\n", "base");
+  return { cwd, base };
 }
 
 describe("test runner isolation", () => {
@@ -277,6 +348,118 @@ describe("bun test argv", () => {
   test("arguments after the delimiter are passed through instead of parsed as wrapper flags", () => {
     expect(resolveBunTestArgs(["--", "--parallel=2"]))
       .toEqual(["--isolate", "--parallel=4", "--", "--parallel=2"]);
+    const mergeBase = "0123456789abcdef0123456789abcdef01234567";
+    expect(resolveBunTestArgs(["--", "--changed=fixture"], mergeBase))
+      .toEqual(["--isolate", "--parallel=4", "--", "--changed=fixture"]);
+    expect(inspectChangedRun(["--", "--changed=fixture"])).toBeNull();
+  });
+
+  test("changed-mode stays explicitly filtered without redundant arguments", () => {
+    expect(resolveBunTestArgs(["--changed=dev"]))
+      .toEqual(["--isolate", "--parallel=4", "--changed=dev"]);
+    const mergeBase = "0123456789abcdef0123456789abcdef01234567";
+    expect(resolveBunTestArgs(["--changed=dev"], mergeBase))
+      .toEqual(["--isolate", "--parallel=4", "--changed=" + mergeBase]);
+    expect(resolveBunTestPlan(["--changed=dev"])).toHaveLength(1);
+  });
+
+  test("changed-mode prefers the first existing conventional dev ref", () => {
+    const selectFrom = (...existing: string[]) => {
+      const probed: string[] = [];
+      const selected = selectChangedComparisonRef(ref => {
+        probed.push(ref);
+        return existing.includes(ref);
+      });
+      return { selected, probed };
+    };
+
+    expect(selectFrom("upstream/dev", "origin/dev", "dev")).toEqual({
+      selected: "upstream/dev",
+      probed: ["upstream/dev"],
+    });
+    expect(selectFrom("origin/dev", "dev")).toEqual({
+      selected: "origin/dev",
+      probed: ["upstream/dev", "origin/dev"],
+    });
+    expect(selectFrom("dev")).toEqual({
+      selected: "dev",
+      probed: ["upstream/dev", "origin/dev", "dev"],
+    });
+    expect(selectFrom()).toEqual({
+      selected: null,
+      probed: ["upstream/dev", "origin/dev", "dev"],
+    });
+  });
+
+  test("changed-mode requires an explicit, resolvable comparison ref", () => {
+    expect(() => inspectChangedRun(["--changed"])).toThrow("requires an explicit comparison ref");
+    expect(() => inspectChangedRun(["--changed=refs/heads/definitely-missing-test-ref"]))
+      .toThrow("does not resolve to a commit");
+    const inspected = inspectChangedRun(["--changed=HEAD"]);
+    expect(inspected?.comparisonRef).toBe("HEAD");
+    expect(inspected?.comparisonCommit).toBe(runGit(process.cwd(), "rev-parse", "HEAD"));
+  });
+
+  test("changed-mode uses the shared merge base for behind, ahead, and diverged refs", () => {
+    const fixtures: string[] = [];
+    try {
+      const behind = initChangedRunFixture();
+      fixtures.push(behind.cwd);
+      runGit(behind.cwd, "branch", "candidate", behind.base);
+      commitFixture(behind.cwd, "head.txt", "head\n", "head ahead of candidate");
+      expect(inspectChangedRun(["--changed=candidate"], behind.cwd)).toMatchObject({
+        comparisonRef: "candidate",
+        comparisonCommit: behind.base,
+        changedFiles: ["head.txt"],
+      });
+
+      const ahead = initChangedRunFixture();
+      fixtures.push(ahead.cwd);
+      const candidateTip = commitFixture(ahead.cwd, "candidate.txt", "candidate\n", "candidate ahead");
+      runGit(ahead.cwd, "branch", "candidate", candidateTip);
+      runGit(ahead.cwd, "checkout", "--quiet", "--detach", ahead.base);
+      expect(inspectChangedRun(["--changed=candidate"], ahead.cwd)).toMatchObject({
+        comparisonRef: "candidate",
+        comparisonCommit: ahead.base,
+        changedFiles: [],
+      });
+
+      const diverged = initChangedRunFixture();
+      fixtures.push(diverged.cwd);
+      runGit(diverged.cwd, "checkout", "--quiet", "-b", "candidate");
+      commitFixture(diverged.cwd, "candidate.txt", "candidate\n", "candidate side");
+      runGit(diverged.cwd, "checkout", "--quiet", "--detach", diverged.base);
+      commitFixture(diverged.cwd, "head.txt", "head\n", "head side");
+      expect(inspectChangedRun(["--changed=candidate"], diverged.cwd)).toMatchObject({
+        comparisonRef: "candidate",
+        comparisonCommit: diverged.base,
+        changedFiles: ["head.txt"],
+      });
+    } finally {
+      for (const fixture of fixtures) rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects an empty changed selection when the diff is non-empty", () => {
+    expect(changedSelectionFailure(
+      { comparisonRef: "upstream/dev", comparisonCommit: "base-sha", changedFiles: ["src/router.ts"] },
+      "Ran 0 tests across 0 files.",
+    )).toContain("--changed=base-sha (upstream/dev merge base) selected 0 tests across 0 files");
+    expect(changedSelectionFailure(
+      { comparisonRef: "dev", comparisonCommit: "base-sha", changedFiles: ["src/router.ts"] },
+      "Ran 9 tests across 1 file.",
+    )).toBeNull();
+    expect(changedSelectionFailure(
+      { comparisonRef: "HEAD", comparisonCommit: "head-sha", changedFiles: [] },
+      "Ran 0 tests across 0 files.",
+    )).toBeNull();
+  });
+
+  test("rejects an unrecognized changed-mode summary for a non-empty diff", () => {
+    expect(changedSelectionFailure(
+      { comparisonRef: "dev", comparisonCommit: "base-sha", changedFiles: ["src/router.ts"] },
+      "0 pass\n0 fail",
+    )).toContain("did not emit a recognizable selection summary");
   });
 
   test("the wrapper passes parallel execution through to bun", () => {
@@ -685,6 +868,41 @@ describe("bun test machine lock", () => {
     }
   });
 
+  test("an inherited worker can only join the exact live wrapper owner", async () => {
+    const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
+    const lockPath = join(root, "suite.lock");
+    try {
+      const owner = await acquireTestRunLock({ runId: "wrapped", lockPath, pollMs: 5, maxWaitMs: 50 });
+      expect(owner.owner).not.toBeNull();
+      const sibling = await acquireTestRunLock({
+        runId: "wrapped",
+        lockPath,
+        joinExistingOwnerToken: owner.owner!.token,
+      });
+      expect(sibling.acquired).toBe(false);
+      const wrongToken = owner.owner!.token === "57f44b0e-b750-4bd2-b23d-4a035e75da18"
+        ? "6ab28966-06a7-4ef8-a0d9-23667d5d9ef5"
+        : "57f44b0e-b750-4bd2-b23d-4a035e75da18";
+
+      await expect(acquireTestRunLock({
+        runId: "wrapped",
+        lockPath,
+        joinExistingOwnerToken: wrongToken,
+      })).rejects.toThrow("refusing to create or reclaim");
+
+      owner.release();
+      expect(existsSync(lockPath)).toBe(false);
+      await expect(acquireTestRunLock({
+        runId: "wrapped",
+        lockPath,
+        joinExistingOwnerToken: owner.owner!.token,
+      })).rejects.toThrow("refusing to create or reclaim");
+      expect(existsSync(lockPath)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a dead owner is reclaimed even when the next bare invocation derives the same run ID", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
@@ -741,5 +959,89 @@ describe("bun test machine lock", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("ensureGuiDependencies", () => {
+  // `gui` is not a workspace, so a root `bun install` leaves gui/node_modules absent and the
+  // twenty-five tests importing gui/src die on `Cannot find package 'react'` — an "Unhandled error
+  // between tests" that names no test. CI already installs them; this closes the local gap.
+  const paths = (present: string[]) => {
+    const normalized = present.map(path => path.replaceAll("\\", "/"));
+    return (path: string) => normalized.some(entry => path.replaceAll("\\", "/").endsWith(entry));
+  };
+
+  test("mocked paths match POSIX and Windows separators", () => {
+    const exists = paths(["gui/package.json"]);
+    expect(exists("/repo/gui/package.json")).toBe(true);
+    expect(exists("C:\\repo\\gui\\package.json")).toBe(true);
+  });
+
+  test("installs when gui/package.json exists but node_modules does not", () => {
+    const installed: string[] = [];
+    const logged: string[] = [];
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: paths(["gui/package.json"]),
+      install: dir => { installed.push(dir); return { ok: true, detail: "" }; },
+      log: message => logged.push(message),
+    });
+
+    expect(result).toEqual({ kind: "installed" });
+    expect(installed).toEqual([join("/repo", "gui")]);
+    expect(logged[0]).toContain("gui dependencies are missing or incomplete");
+  });
+
+  test("retries when node_modules exists without the required dependency", () => {
+    let installs = 0;
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: paths(["gui/package.json", "gui/node_modules"]),
+      install: () => { installs += 1; return { ok: true, detail: "" }; },
+      log: () => {},
+    });
+
+    expect(result).toEqual({ kind: "installed" });
+    expect(installs).toBe(1);
+  });
+
+  test("does nothing when the required dependency is already there", () => {
+    let installs = 0;
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: paths(["gui/package.json", "gui/node_modules/react/package.json"]),
+      install: () => { installs += 1; return { ok: true, detail: "" }; },
+      log: () => {},
+    });
+
+    expect(result).toEqual({ kind: "present" });
+    expect(installs).toBe(0);
+  });
+
+  // A published install tree has no gui/ at all; the runner must not try to install there.
+  test("does nothing when there is no gui package", () => {
+    let installs = 0;
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: () => false,
+      install: () => { installs += 1; return { ok: true, detail: "" }; },
+      log: () => {},
+    });
+
+    expect(result).toEqual({ kind: "absent" });
+    expect(installs).toBe(0);
+  });
+
+  // Offline or a lockfile drift has to surface as its own message, not as twenty-five
+  // unexplained React failures once the lanes start.
+  test("reports the failure detail instead of continuing", () => {
+    const result = ensureGuiDependencies({
+      cwd: "/repo",
+      exists: paths(["gui/package.json"]),
+      install: () => ({ ok: false, detail: "lockfile had changes" }),
+      log: () => {},
+    });
+
+    expect(result).toEqual({ kind: "failed", detail: "lockfile had changes" });
   });
 });

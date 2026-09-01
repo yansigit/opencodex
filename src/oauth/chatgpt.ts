@@ -156,6 +156,7 @@ export async function refreshChatGPTToken(refreshToken: string): Promise<OAuthCr
       client_id: CLIENT_ID,
       refresh_token: refreshToken,
     }).toString(),
+    signal: options.signal,
   });
   if (!resp.ok) {
     const errDesc = await safeErrorDescription(resp);

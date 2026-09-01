@@ -146,6 +146,18 @@ async function waitForPolicyJob(
   throw new Error("policy job did not finish");
 }
 
+async function waitForCondition(
+  description: string,
+  condition: () => boolean,
+  timeoutMs = 8_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${description}`);
+    await Bun.sleep(20);
+  }
+}
+
 /** Windows can keep SQLite/job handles briefly after stop; retry only transient cleanup codes. */
 function removeTree(path: string): void {
   let lastError: unknown;
@@ -371,6 +383,7 @@ describe("storage mutation coordinator", () => {
     seedArchivedPair(home);
 
     const server = startServer(0);
+    let restorePromise: Promise<Response> | null = null;
     try {
       const preview = await previewDigest(server.url, 50);
       const cleanupRes = await fetch(new URL("/api/storage/cleanup", server.url), {
@@ -387,7 +400,7 @@ describe("storage mutation coordinator", () => {
       const remainingPreview = await previewDigest(server.url, 50);
       expect(remainingPreview.count).toBe(1);
 
-      const restorePromise = fetch(new URL("/api/storage/trash/restore", server.url), {
+      restorePromise = fetch(new URL("/api/storage/trash/restore", server.url), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ id: trashId }),
@@ -451,9 +464,10 @@ describe("storage mutation coordinator", () => {
     seedArchivedPair(home);
 
     const server = startServer(0);
+    let cleanupPromise: Promise<Response> | null = null;
     try {
       const preview = await previewDigest(server.url, 50);
-      const cleanupPromise = fetch(new URL("/api/storage/cleanup", server.url), {
+      cleanupPromise = fetch(new URL("/api/storage/cleanup", server.url), {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ percent: 50, mode: "quarantine", digest: preview.digest }),
@@ -473,6 +487,7 @@ describe("storage mutation coordinator", () => {
       expect(existsSync(join(home, "archived_sessions", "rollout-new.jsonl"))).toBe(true);
       expect(trashStageCount(home)).toBe(0);
 
+      writeFileSync(releaseCleanupPath, "release\n");
       const cleanupRes = await cleanupPromise;
       expect(cleanupRes.status).toBe(200);
       const cleanup = await cleanupRes.json();

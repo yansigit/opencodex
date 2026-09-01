@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveTrustedWindowsTaskkillExe } from "../src/lib/windows-elevation";
@@ -192,13 +192,25 @@ export function isFullSuiteRun(requested: string[]): boolean {
  * workers made deadline-sensitive tests fail under load, so the repository default is deterministic.
  * A caller-supplied `--parallel` or `--parallel=N` is left alone.
  */
-export function resolveBunTestArgs(requested: string[]): string[] {
+export function resolveBunTestArgs(
+  requested: string[],
+  comparisonCommit?: string,
+): string[] {
+  const delimiterIndex = requested.indexOf("--");
+  const effectiveRequested = comparisonCommit
+    ? requested.map((arg, index) => (
+        (delimiterIndex === -1 || index < delimiterIndex)
+          && (arg === "--changed" || arg.startsWith("--changed="))
+          ? "--changed=" + comparisonCommit
+          : arg
+      ))
+    : requested;
   const args = ["--isolate"];
-  if (!hasCliFlag(requested, "--parallel")) {
+  if (!hasCliFlag(effectiveRequested, "--parallel")) {
     args.push(`--parallel=${DEFAULT_TEST_PARALLELISM}`);
   }
-  args.push(...requested);
-  if (isFullSuiteRun(requested)) args.push("./tests/");
+  args.push(...effectiveRequested);
+  if (isFullSuiteRun(effectiveRequested)) args.push("./tests/");
   return args;
 }
 
@@ -313,12 +325,12 @@ function canUseSerialLanes(requested: string[]): boolean {
 }
 
 /** Build the default full-suite plan: one bounded main lane plus isolated risky files. */
-export function resolveBunTestPlan(requested: string[]): BunTestLane[] {
+export function resolveBunTestPlan(requested: string[], comparisonCommit?: string): BunTestLane[] {
   if (!canUseSerialLanes(requested)) {
-    return [{ label: "suite", args: resolveBunTestArgs(requested), timeoutMs: 15 * 60 * 1000 }];
+    return [{ label: "suite", args: resolveBunTestArgs(requested, comparisonCommit), timeoutMs: 15 * 60 * 1000 }];
   }
 
-  const mainArgs = resolveBunTestArgs(requested);
+  const mainArgs = resolveBunTestArgs(requested, comparisonCommit);
   const rootIndex = mainArgs.lastIndexOf("./tests/");
   const ignores = SERIAL_FULL_SUITE_FILES.flatMap(file => ["--path-ignore-patterns", `**/${file}`]);
   mainArgs.splice(rootIndex === -1 ? mainArgs.length : rootIndex, 0, ...ignores);
@@ -415,7 +427,7 @@ export async function runTestLaneForTests(
     if (interrupted === "SIGTERM") return laneExitCodeForTests(exitCode, interrupted);
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.warn(`[test] ${lane.label} finished in ${seconds}s (exit ${exitCode}).`);
-    return exitCode;
+    return { exitCode, output };
   } finally {
     try {
       try {
@@ -491,11 +503,11 @@ export async function runTestMainForTests(
       if (laneExitCode !== 0 && exitCode === 0) exitCode = laneExitCode;
       if ([124, 130, 143].includes(laneExitCode)) break;
     }
-    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
-    if (isFullSuiteRun(requestedTests) && elapsedSeconds > 600) {
+  }
+  if (process.exitCode !== 1) {
+    if (changedRun) {
       console.warn(
-        `[test] the suite took ${elapsedSeconds}s; with --parallel=${DEFAULT_TEST_PARALLELISM} it should finish in a few minutes on an idle machine. `
-        + "Check for another test runner, a busy CPU, or a test that started polling something real.",
+        `[test] changed mode comparison ref: ${changedRun.comparisonRef}; merge base: ${changedRun.comparisonCommit}`,
       );
     }
     return exitCode;

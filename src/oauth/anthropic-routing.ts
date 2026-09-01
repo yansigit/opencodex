@@ -49,6 +49,8 @@ import {
 const PROVIDER = "anthropic";
 const UNKNOWN_USAGE_SCORE = 100;
 const DEFAULT_AUTO_SWITCH_THRESHOLD = 80;
+const DEFAULT_QUOTA_WINDOW: OcxAccountPoolQuotaWindow = "five-hour";
+const VALID_QUOTA_WINDOWS = new Set<OcxAccountPoolQuotaWindow>(["five-hour", "weekly", "max-utilization"]);
 /** Cap same-request 429 rotations so short Retry-After cannot infinite-loop. */
 export const ANTHROPIC_POOL_MAX_FAILOVERS_PER_REQUEST = ACCOUNT_POOL_MAX_FAILOVERS;
 
@@ -60,6 +62,8 @@ export interface AnthropicAccountPoolConfig {
   strategy?: OcxAccountPoolRotationStrategy;
   /** Successful new-session binds retained on one round-robin selection. Default 1; range 1..100. */
   stickyLimit?: number;
+  /** Usage window for quota-based scoring. Default "five-hour" (today's behaviour). */
+  quotaWindow?: OcxAccountPoolQuotaWindow;
 }
 
 const anthropicPoolPlugin: AccountPoolPlugin = {
@@ -127,9 +131,9 @@ export function anthropicSessionAffinitySizeForTests(): number {
   return affinitySizeForTests(POOL_KEY_ANTHROPIC);
 }
 
-function hasKnownUsage(accountId: string): boolean {
-  const quota = getCachedProviderAccountQuota(PROVIDER, accountId);
-  return typeof quota?.fiveHourPercent === "number" && Number.isFinite(quota.fiveHourPercent);
+function fiveHourKnown(accountId: string): boolean {
+  const percent = getCachedProviderAccountQuota(PROVIDER, accountId)?.fiveHourPercent;
+  return typeof percent === "number" && Number.isFinite(percent);
 }
 
 function anthropicUsageScore(accountId: string): number {
@@ -137,7 +141,6 @@ function anthropicUsageScore(accountId: string): number {
   if (!quota || typeof quota.fiveHourPercent !== "number" || !Number.isFinite(quota.fiveHourPercent)) {
     return UNKNOWN_USAGE_SCORE;
   }
-  return Math.max(0, Math.min(100, quota.fiveHourPercent));
 }
 
 /** Background `local-cli` slots with expired access are not pool-eligible (identity adoption risk). */
@@ -193,7 +196,31 @@ function pickLowestUsage(excludeId: string | undefined, now: number): string | n
       bestScore = score;
     }
   }
-  return best;
+  return a.score - b.score || a.fiveHourTieBreak - b.fiveHourTieBreak;
+}
+
+function pickLowestUsage(config: OcxConfig, excludeId: string | undefined, now: number): string | null {
+  const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
+  const unfiltered = getEligibleAnthropicAccounts(now).filter(id => id !== excludeId);
+  const available = window === "weekly" ? unfiltered.filter(id => !exhausted5h(id)) : unfiltered;
+  const eligible = available.length > 0 ? available : unfiltered;
+  if (eligible.length === 0) return null;
+  const scored: ScoredAccount[] = eligible.map(accountId => ({
+    accountId,
+    hasKnownUsage: hasKnownUsage(config, accountId),
+    score: usageScore(config, accountId),
+    fiveHourTieBreak: window === "five-hour" ? 0 : fiveHourScore(accountId),
+    // Every window EXCEPT the legacy five-hour default is an explicit opt-in, so
+    // known-before-unknown applies to all of them and to none of the default path.
+    knownFirst: window !== "five-hour",
+  }));
+  let best = scored[0]!;
+  for (let i = 1; i < scored.length; i++) {
+    const candidate = scored[i]!;
+    // Strict `< 0` keeps the earliest eligible account on an exact tie.
+    if (compareScoredAccounts(candidate, best) < 0) best = candidate;
+  }
+  return best.accountId;
 }
 
 /** Next eligible Anthropic account in stable order after `afterId` (wrapping). */
@@ -202,8 +229,11 @@ function pickNextFillFirstAnthropicAccount(
   afterId: string,
   eligible: string[],
 ): string | null {
-  if (eligible.length === 0) return null;
-  const ordered = [...eligible].sort((a, b) => a.localeCompare(b));
+  const window = anthropicQuotaWindow(anthropicAccountPoolConfig(config));
+  const available = window === "weekly" ? eligible.filter(id => !exhausted5h(id)) : eligible;
+  const candidates = available.length > 0 ? available : eligible;
+  if (candidates.length === 0) return null;
+  const ordered = [...candidates].sort((a, b) => a.localeCompare(b));
   const set = getAccountSet(PROVIDER);
   const stableAll = set
     ? [...set.accounts.map(a => a.id)].sort((a, b) => a.localeCompare(b))
@@ -218,7 +248,7 @@ function pickNextFillFirstAnthropicAccount(
   let fallback: string | null = null;
   for (let step = 1; step <= stableAll.length; step++) {
     const candidate = stableAll[(startIdx + step) % stableAll.length]!;
-    if (!eligible.includes(candidate)) continue;
+    if (!candidates.includes(candidate)) continue;
     if (!fallback) fallback = candidate;
     if (isActiveUnderFillFirstThreshold(config, candidate)) return candidate;
   }
@@ -238,7 +268,7 @@ function pickAlternateAnthropicAccount(
   if (strategy === "fill-first") {
     return pickNextFillFirstAnthropicAccount(config, excludeId, eligible);
   }
-  return pickLowestUsage(excludeId, now);
+  return pickLowestUsage(config, excludeId, now);
 }
 
 export type AnthropicAccountSelectionReason =

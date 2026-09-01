@@ -120,7 +120,7 @@ export async function runPolicyStorageMutation<T>(
     return { ok: false, error: "storage_mutation_busy" };
   }
   try {
-    await applyCoordinatorBlock();
+    await applyCoordinatorBlock("policy");
     return await work();
   } finally {
     gate.lease.release();
@@ -137,7 +137,7 @@ export async function withStorageMutationSlot<T>(
     return { ok: false, error: "storage_mutation_busy" };
   }
   try {
-    await applyCoordinatorBlock();
+    await applyCoordinatorBlock(kind);
     return await work();
   } finally {
     gate.lease.release();

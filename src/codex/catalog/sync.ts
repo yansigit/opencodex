@@ -35,13 +35,14 @@ import { codexAccountNamespaceEntries, isMainCodexAccountTarget } from "../accou
 import { MAIN_CODEX_ACCOUNT_ID } from "../main-account";
 import {
   availableAccountGatedNativeModels,
+  codexModelEntitlementStateForAccount,
   isCodexModelEntitlementSnapshotCurrent,
   resolveCodexModelEntitlements,
   type CodexModelEntitlementSnapshot,
 } from "../model-entitlements";
 
 
-import { CODEX_CUSTOM_MODEL_CATALOG_KIND, CODEX_PROVIDER_MODEL_CATALOG_KIND, activeCodexModelsCachePath, applyCatalogMetadata, applyMultiAgentMode, applyNativeOpenAiContextOverride, applyRoutedCodexToolMode, catalogBackupPathFor, catalogHasRoutedEntries, catalogModelSlug, ensureStrictCatalogFields, findNativeTemplate, isDefaultCatalogPath, isRoutedModelCompatibilityExcluded, legacyCatalogBackupPath, normalizeRoutedCatalogEntry, normalizeServiceTiers, readCatalog, readCatalogBackup, readCodexCatalogPath, readCodexCatalogPathForHome, readConfiguredAutoReviewModel, readNativeBaseline } from "./parsing";
+import { CODEX_CUSTOM_MODEL_CATALOG_KIND, CODEX_PROVIDER_MODEL_CATALOG_KIND, activeCodexModelsCachePath, applyCatalogMetadata, applyMultiAgentMode, applyNativeOpenAiContextOverride, applyRoutedCodexToolMode, catalogBackupPathFor, catalogHasRoutedEntries, catalogModelSlug, ensureStrictCatalogFields, findNativeTemplate, findSupportedNativeTemplate, isDefaultCatalogPath, isRoutedModelCompatibilityExcluded, legacyCatalogBackupPath, normalizeRoutedCatalogEntry, normalizeServiceTiers, readCatalog, readCatalogBackup, readCodexCatalogPath, readCodexCatalogPathForHome, readConfiguredAutoReviewModel, readNativeBaseline } from "./parsing";
 import type { CatalogModel, MultiAgentMode, RawCatalog, RawEntry } from "./parsing";
 import { accountBoundNativeOpenAiSlugs, accountBoundNativeOpenAiSlugsBySelector, applyNativeVisibility, CODEX_NATIVE_ALIAS_CATALOG_KIND, desktopAllowlistSuppressedNativeSlugs, disabledNativeSlugs, isNativeAliasCatalogEntry, isUnsupportedOpenAiNativeSlug, NATIVE_OPENAI_MODELS, nativeContextLimits, observedAccountBoundNativeEntries, shouldIncludeAccountBoundNativeOpenAi, shouldIncludeNativeOpenAi, shouldUpgradeToUpstreamEntry, SUPPORTED_NATIVE_OPENAI_SLUGS, upstreamNativeEntry, type NativeContextLimitsInput } from "./metadata";
 import {
@@ -375,7 +376,7 @@ export function deriveEntry(
   const isCursorFallback = isRouted && model?.provider === "cursor";
   const entry: RawEntry = {
     slug, display_name: routedDisplayName(slug), description: desc,
-    shell_type: "shell_command", visibility: "list", supported_in_api: true,
+    shell_type: "unified_exec", visibility: "list", supported_in_api: true,
     priority, base_instructions: "You are a helpful coding assistant.",
     ...(isRouted
       ? isCursorFallback
@@ -1549,7 +1550,8 @@ function writeRetainedCatalogSync({
     catalog,
     onDiskCatalog,
   );
-  const template = findNativeTemplate(catalog);
+  // Strict selector for template inheritance; the validity gate above keeps the broad one.
+  const template = findSupportedNativeTemplate(catalog);
 
   try {
     // Once-only: preserve the PRISTINE pre-opencodex catalog as the native-priority baseline
@@ -1618,10 +1620,10 @@ function writeRetainedCatalogSync({
     ? new Map([...accountBoundNativeOpenAiSlugsBySelector(config, observedAccountNativeEntries)].map(([selector, slugs]) => {
       const target = accountTargets.get(selector);
       const accountId = target && isMainCodexAccountTarget(target) ? MAIN_CODEX_ACCOUNT_ID : target;
-      const entitled = accountId ? modelEntitlements.modelsByAccount.get(accountId) : undefined;
-      const confirmed = accountId ? modelEntitlements.confirmedAccountIds.has(accountId) : false;
       return [selector, slugs.filter(slug => (
-        !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug) || (confirmed && entitled?.has(slug) === true)
+        !ACCOUNT_GATED_NATIVE_OPENAI_MODELS.has(slug)
+        || (accountId !== undefined
+          && codexModelEntitlementStateForAccount(modelEntitlements, accountId, slug) === "granted")
       ))] as const;
     }))
     : new Map<string, readonly string[]>();

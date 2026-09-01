@@ -80,6 +80,16 @@ const GOOGLE_BREVITY_INSTRUCTION = [
   "- This applies only to intermediate progress text. Your final answer after the work is done is exempt: write it in full and at whatever length the task requires.",
 ].join("\n");
 
+const ANTIGRAVITY_REJECTED_CLAUDE_SDK_PARAGRAPH =
+  "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+
+function stripAntigravityRejectedClaudeSdkParagraph(systemText: string): string {
+  return systemText
+    .split("\n\n")
+    .filter(paragraph => paragraph !== ANTIGRAVITY_REJECTED_CLAUDE_SDK_PARAGRAPH)
+    .join("\n\n");
+}
+
 /**
  * Documented output ceiling for a Google-surface model, or `undefined` when the id is not
  * recognized.
@@ -271,11 +281,14 @@ function messagesToGeminiFormat(
   // Neutralize Codex's GPT-5 identity line (Gemini/Antigravity share this path) so a routed model
   // never misreports as GPT-5/OpenAI, and never leaks the proxy identity upstream.
   const toolCatalogNudge = buildNonOpenAIToolCatalogNudgeForTools(parsed.context.tools, parsed.options.toolChoice);
-  const systemText = identifyRoutedModel([
+  const identifiedSystemText = identifyRoutedModel([
     ...(parsed.context.systemPrompt ?? []),
     ...(toolCatalogNudge ? [toolCatalogNudge] : []),
     GOOGLE_BREVITY_INSTRUCTION,
   ].join("\n\n"), identityModelId);
+  const systemText = stripRejectedClaudeSdkParagraph
+    ? stripAntigravityRejectedClaudeSdkParagraph(identifiedSystemText)
+    : identifiedSystemText;
   const systemInstruction = { parts: [{ text: systemText }] };
 
   const contents: unknown[] = [];

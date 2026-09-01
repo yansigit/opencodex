@@ -60,6 +60,7 @@ import { codexAccountNamespaceProviderCollisionError } from "../../codex/account
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { clearModelCache, getProviderDiscoveryStatus } from "../../codex/model-cache";
+import { getCodexModelEntitlementStatus } from "../../codex/model-entitlements";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { modelAutoCompactTokenLimitsConfigError } from "../../providers/auto-compact-budget";
 import { resolveCodexHomeDir } from "../../codex/home";
@@ -85,6 +86,7 @@ import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerS
 import type { PersistedUsageAttempt } from "../../usage/log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { providerServiceTierConfigError } from "./provider-capability-config";
+import { providerEmptyToolOutputConfigError } from "../../config/provider-validation";
 import { applySystemEnvToggle } from "../system-env";
 import {
   LOCAL_PROVIDER_RELOAD_NAME_HEADER,
@@ -644,7 +646,8 @@ function canonicalOpenAiBudgetPatchError(
   }
   const applied = applyProviderPatchFields("openai", seed, rawBody, keys, config);
   if ("error" in applied) return applied.error;
-  return providerManagementConfigError("openai", applied.next);
+  return providerManagementConfigError("openai", applied.next)
+    ?? providerEmptyToolOutputConfigError("openai", applied.next);
 }
 
 export async function handleProviderRoutes(ctx: ManagementContext): Promise<Response | null> {
@@ -698,6 +701,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       codexAccountMode: providerCodexAccountMode(name, p),
       ...(name === "xai" ? { xaiResponsesOptInState: xaiResponsesOptInState(p) } : {}),
       discovery: p.liveModels === false ? undefined : getProviderDiscoveryStatus(name),
+      ...(name === "openai" && isCanonicalOpenAiForwardProvider(p)
+        ? { entitlement: getCodexModelEntitlementStatus(config) }
+        : {}),
     })));
   }
 
@@ -721,7 +727,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return jsonResponse({ error: "provider reload target unavailable" }, 404);
     }
     const provider = diskConfig.providers[name]!;
-    const providerError = providerManagementConfigError(name, provider);
+    const providerError = providerManagementConfigError(name, provider)
+      ?? providerEmptyToolOutputConfigError(name, provider);
     if (providerError) return jsonResponse({ error: "provider reload target invalid" }, 409);
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
       diskConfig.codexAccountNamespaces,
@@ -971,7 +978,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (applied.editorTouched && !pacingOnly) {
       const providerError = canonicalBudgetOnly
         ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
-        : providerManagementConfigError(name, next);
+        : providerManagementConfigError(name, next)
+          ?? providerEmptyToolOutputConfigError(name, next);
       if (providerError) return jsonResponse({ error: providerError }, 400);
       if (!canonicalBudgetOnly) {
         const serviceTierError = providerServiceTierConfigError(name, next);

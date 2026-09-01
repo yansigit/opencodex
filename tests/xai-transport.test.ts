@@ -644,7 +644,7 @@ describe("xAI outbound compatibility headers", () => {
 });
 
 describe("xAI reasoning_content cache preservation", () => {
-  test("registry preset replays reasoning_content for grok reasoning models only", () => {
+  test("registry preset exposes multi-agent only on Responses without claiming replay material", () => {
     const entry = getProviderRegistryEntry("xai");
     expect(entry?.preserveReasoningContentModels).toEqual([
       "grok-4.6",
@@ -652,7 +652,50 @@ describe("xAI reasoning_content cache preservation", () => {
       "grok-4.3",
       "grok-4.20-0309-reasoning",
     ]);
-    expect(entry?.models).not.toContain("grok-4.20-multi-agent-0309");
+    expect(entry?.models).toContain("grok-4.20-multi-agent-0309");
+    expect(entry?.preserveReasoningContentModels).not.toContain("grok-4.20-multi-agent-0309");
+    expect(entry?.modelSupportsReasoningSummaries?.["grok-4.20-multi-agent-0309"]).toBeUndefined();
+    expect(resolveWireProtocolOverride(
+      "xai",
+      "grok-4.20-multi-agent-0309",
+      provider("oauth"),
+      "responses",
+    ).adapter).toBe("openai-responses");
+    expect(resolveWireProtocolOverride(
+      "xai",
+      "grok-4.20-multi-agent-0309",
+      provider("key"),
+      "responses",
+    ).adapter).toBe("openai-responses");
+    expect(resolveWireProtocolOverride(
+      "xai",
+      "grok-4.20-multi-agent-0309",
+      provider("oauth"),
+      "chat",
+    ).adapter).toBe("openai-responses");
+    expect(resolveWireProtocolOverride(
+      "xai",
+      "grok-4.20-multi-agent-0309",
+      provider("key"),
+      "chat",
+    ).adapter).toBe("openai-responses");
+    // The Claude Messages lane resolves with inbound "anthropic" (src/server/claude-messages.ts).
+    // It is not a spelling of "responses": an inbound missing from the allow-list makes
+    // providerModelWireDefault return undefined, which silently keeps xAI's provider-wide
+    // openai-chat adapter — the one wire this model answers with a 400.
+    expect(resolveWireProtocolOverride(
+      "xai",
+      "grok-4.20-multi-agent-0309",
+      provider("oauth"),
+      "anthropic",
+    ).adapter).toBe("openai-responses");
+    expect(resolveWireProtocolOverride(
+      "xai",
+      "grok-4.20-multi-agent-0309",
+      provider("key"),
+      "anthropic",
+    ).adapter).toBe("openai-responses");
+    expect(XAI_RESPONSES_OPT_IN_MODELS).not.toContain("grok-4.20-multi-agent-0309");
     expect(entry?.models).toContain("grok-build-0.1");
     for (const noReasoning of entry?.noReasoningModels ?? []) {
       expect(entry?.preserveReasoningContentModels).not.toContain(noReasoning);

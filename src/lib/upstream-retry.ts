@@ -239,6 +239,7 @@ export interface ResetRetryOptions {
   abortSignal?: AbortSignal;
   /** Short host/path label for the retry warn log (no secrets/query strings). */
   label?: string;
+  /** Total upstream sends allowed, including the first one. Not a per-layer retry count. */
   attempts?: number;
   /** Shared replay allowance across sends in one logical generation. */
   replayBudget?: { remaining: number };
@@ -358,7 +359,8 @@ export async function fetchWithResetRetry(
  * its body intact. Honors Retry-After via retryBackoffDelayMs.
  *
  * A failed attempt slower than the slow budget is returned as-is (slow-502 shape);
- * note `opts.attempts` is shared with the inner reset layer (no caller passes it today).
+ * `opts.attempts` is ONE total-send budget covering this layer and the inner reset layer
+ * together, so it bounds the real number of upstream requests rather than multiplying.
  */
 export async function fetchWithTransientRetry(
   doFetch: ReplayableFetch,
@@ -367,6 +369,27 @@ export async function fetchWithTransientRetry(
   const attempts = Math.max(1, opts.attempts ?? (opts.replayTransientFailures ? TRANSIENT_RETRY_MAX_ATTEMPTS : 1));
   const slowAttemptMs = opts.slowAttemptMs ?? TRANSIENT_RETRY_SLOW_ATTEMPT_MS;
   const transientStatuses: number[] = [];
+  // `attempts` is ONE total-send budget shared with the inner reset layer, not a per-layer
+  // count. Forwarding it into every `fetchWithResetRetry` made the two multiply: with
+  // `attempts: 3` the outer loop ran 3 transient rounds and each round independently retried
+  // 3 connection resets, so a single call could emit 9 upstream sends — and 10 could emit 100.
+  // That was harmless only because no caller passed `attempts`; the provider-level
+  // `transientRetryOn5xx` policy is the first one that does, and multiplying load against an
+  // already-failing provider is worse than not retrying at all.
+  let sent = 0;
+  const countedFetch: ReplayableFetch = (recovery) => {
+    // Incremented BEFORE the await so a rejected send still consumes budget; counting only
+    // successes would let a reset storm loop without bound.
+    sent += 1;
+    return doFetch(recovery);
+  };
+  // Floor of 1 keeps the inner call legal once the budget is spent; the loop condition, not a
+  // zero-attempt inner call, is what actually stops the retries.
+  const remaining = () => Math.max(1, budget - sent);
+  // Reported in `finally` rather than at each exit: this function returns from five places
+  // and throws from one, and a caller sharing the budget across request legs must be told the
+  // real count on every one of them.
+  try {
   let attemptStart = Date.now();
   let sawReset = false;
   let resetSeen = false;

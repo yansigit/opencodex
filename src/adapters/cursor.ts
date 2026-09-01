@@ -77,6 +77,14 @@ function safeCursorTransportError(err: unknown, sizeContext?: CursorSizeContext)
   if (err instanceof CursorMissingCredentialError) {
     return "Cursor live transport is enabled, but no Cursor access token is configured. Set provider.apiKey or OPENCODEX_CURSOR_TEST_TOKEN.";
   }
+  // A locally raised envelope rejection is already safe, specific, and actionable: it was composed
+  // here from our own measurements and contains no upstream text. Passing it through
+  // `safeCursorErrorMessage` would collapse it to the bare label "Cursor invalid request" (it
+  // matches the "invalid"/"exceeds" keyword branch) and discard the counts that tell the operator
+  // which limit was hit and by how much.
+  if (isCursorRootEnvelopeError(err)) {
+    return err instanceof Error ? `Cursor invalid request: ${err.message}` : "Cursor invalid request";
+  }
   const message = err instanceof Error ? err.message : typeof err === "string" ? err : undefined;
   if (message) return safeCursorErrorMessage(message, sizeContext);
   return "Cursor upstream error: transport failed before completion.";
@@ -545,6 +553,12 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
             : safeCursorTransportError(err, requestSizeContext),
           ...(isTranslatorBudgetExceededError(err)
             ? { status: 502, errorType: "upstream_error", code: "translation_buffer_limit" }
+            : {}),
+          // A local envelope rejection is a client error with a stable code, and the caller needs
+          // that code to distinguish "this conversation cannot be sent" from a transient upstream
+          // fault. Without this the class was flattened to a bare message and the code was lost.
+          ...(isCursorRootEnvelopeError(err)
+            ? { status: 400, errorType: "invalid_request_error", code: "cursor_root_envelope_limit", retryable: false }
             : {}),
           ...(partialUsage ? { usage: partialUsage } : {}),
         });

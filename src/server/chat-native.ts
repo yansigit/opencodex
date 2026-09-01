@@ -33,6 +33,7 @@ import {
   rateLimitRetryDelayMs,
   rateLimitRetryPolicyFor,
   rotateProviderTransportOn429,
+  transientRetryPolicyFor,
 } from "../providers/key-failover";
 import { fastPolicyForModel } from "../providers/service-tier";
 import type { RouteResult } from "../router";

@@ -4,6 +4,7 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const {
   DEFAULT_GRACE_DAYS,
+  DISPOSABLE_BRANCH_PREFIXES,
   KEEP_REASONS,
   isProtectedBranch,
   planClosedPrBranchDeletions,
@@ -11,6 +12,9 @@ const {
 
 const NOW = Date.parse("2026-08-26T00:00:00Z");
 const DAY = 24 * 60 * 60 * 1000;
+const HEAD_OID = "a".repeat(40);
+const OTHER_OID = "b".repeat(40);
+const NBSP = "\u00a0";
 const longAgo = new Date(NOW - 60 * DAY).toISOString();
 const DEFAULT_OID = "1".repeat(40);
 
@@ -47,6 +51,10 @@ describe("isProtectedBranch", () => {
       assert.equal(isProtectedBranch(name), true, name);
     }
     assert.equal(isProtectedBranch("codex/dev"), false);
+  });
+
+  it("declares the disposable pull-request branch namespaces", () => {
+    assert.deepEqual(DISPOSABLE_BRANCH_PREFIXES, ["codex/", "ingw/"]);
   });
 });
 
@@ -158,6 +166,48 @@ describe("planClosedPrBranchDeletions", () => {
     });
     assert.deepEqual(deletedBranches(result), ["codex/known"]);
     assert.equal(keepReason(result, "codex/never-a-pr"), null);
+  });
+
+  it("keeps a persistent branch even when a closed pull request still matches its tip", () => {
+    const branch = "release/maintenance";
+    const result = planClosedPrBranchDeletions({
+      pullRequests: [closedPr({ number: 85, headRefName: branch })],
+      branches: [{ name: branch, oid: HEAD_OID }],
+      now: NOW,
+    });
+    assert.deepEqual(deletedBranches(result), []);
+    assert.equal(
+      keepReason(result, branch),
+      KEEP_REASONS.OUTSIDE_DISPOSABLE_NAMESPACE,
+    );
+  });
+
+  it("preserves Unicode whitespace so distinct valid refs never collapse", () => {
+    const disposable = `codex/live${NBSP}`;
+    const result = planClosedPrBranchDeletions({
+      pullRequests: [closedPr({ number: 86, headRefName: disposable })],
+      branches: [
+        { name: "codex/live", oid: OTHER_OID },
+        { name: disposable, oid: HEAD_OID },
+      ],
+      now: NOW,
+    });
+    assert.deepEqual(result.deletions, [{ branch: disposable, pullRequests: [86] }]);
+    assert.equal(keepReason(result, "codex/live"), null);
+  });
+
+  it("does not trim leading Unicode whitespace into a disposable namespace", () => {
+    const branch = `${NBSP}codex/persistent`;
+    const result = planClosedPrBranchDeletions({
+      pullRequests: [closedPr({ number: 87, headRefName: branch })],
+      branches: [{ name: branch, oid: HEAD_OID }],
+      now: NOW,
+    });
+    assert.deepEqual(deletedBranches(result), []);
+    assert.equal(
+      keepReason(result, branch),
+      KEEP_REASONS.OUTSIDE_DISPOSABLE_NAMESPACE,
+    );
   });
 
   it("only plans deletions for branches that still exist", () => {

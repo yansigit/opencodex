@@ -46,6 +46,14 @@ export function namespacedToolName(namespace: string | undefined, name: string):
 const LEGACY_SHELL_BRIDGE_TOOL_NAMES = ["exec_command", "shell_command"] as const;
 const CODE_MODE_HELPER_TOOL_NAMES = [...LEGACY_SHELL_BRIDGE_TOOL_NAMES, "apply_patch"] as const;
 
+/**
+ * The one declared name that turns nested-helper normalization on. Declaring it is not just a
+ * name: it also decides whether an emitted `exec_command`/`shell_command`/`apply_patch` is
+ * accepted as that shell tool, so callers that build declared-name sets must add it only for a
+ * genuine bare declaration.
+ */
+export const CODE_MODE_EXEC_TOOL_NAME = "exec";
+
 export function normalizeDeclaredToolName(
   name: string,
   declared: ReadonlySet<string> | undefined,
