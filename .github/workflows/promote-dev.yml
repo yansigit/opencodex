@@ -77,16 +77,37 @@ jobs:
             main_ancestor=false
             echo "Current main ancestry is missing from dev; waiting for protected dev reconciliation"
           fi
+
+          promotion_ready=false
+          if [ "$trees_differ" = true ] && [ "$main_ancestor" = true ]; then
+            changed_files_path="$RUNNER_TEMP/promotion-changed-files"
+            base_package_path="$RUNNER_TEMP/promotion-base-package.json"
+            head_package_path="$RUNNER_TEMP/promotion-head-package.json"
+            git diff --name-only -z HEAD "$fetched_dev_sha" -- > "$changed_files_path"
+            git show "HEAD:package.json" > "$base_package_path"
+            git show "$fetched_dev_sha:package.json" > "$head_package_path"
+            promotion_action="$(node .github/scripts/fork-promotion-decision.cjs \
+              "$changed_files_path" "$base_package_path" "$head_package_path")"
+            if [ "$promotion_action" = promote ]; then
+              promotion_ready=true
+            elif [ "$promotion_action" = wait ]; then
+              echo "Only the prepared successor version differs; waiting for release content"
+            else
+              echo "::error::promotion decision returned unexpected action: $promotion_action"
+              exit 1
+            fi
+          fi
           echo "Promoting verified dev commit $expected_ci_sha"
           {
             echo "verified_sha=$expected_ci_sha"
             echo "trees_differ=$trees_differ"
             echo "main_ancestor=$main_ancestor"
+            echo "promotion_ready=$promotion_ready"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create promotion App token
         id: promotion-app-token
-        if: steps.verify.outputs.trees_differ == 'true' && steps.verify.outputs.main_ancestor == 'true'
+        if: steps.verify.outputs.promotion_ready == 'true' && steps.verify.outputs.main_ancestor == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ vars.PR_AUTOMATION_APP_ID }}
@@ -97,7 +118,7 @@ jobs:
           permission-issues: write
 
       - name: Create or update the human promotion PR
-        if: steps.verify.outputs.trees_differ == 'true' && steps.verify.outputs.main_ancestor == 'true'
+        if: steps.verify.outputs.promotion_ready == 'true' && steps.verify.outputs.main_ancestor == 'true'
         env:
           GH_TOKEN: ${{ steps.promotion-app-token.outputs.token }}
           VERIFIED_CI_SHA: ${{ steps.verify.outputs.verified_sha }}
