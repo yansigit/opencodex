@@ -80,13 +80,17 @@ jobs:
     # and GitHub refuses the whole run at startup when the called workflow's own job
     # declares permissions the caller did not pass down ("startup_failure", runs
     # 33615174183 / 33615177849 — the first dispatches since #3129 wired this call).
-    # The callee's job declares exactly these two; nothing else in this file gains them.
+    # The callee's jobs declare exactly these three; nothing else in this file gains them.
     permissions:
       contents: write
+      issues: write
       pull-requests: write
     uses: ./.github/workflows/dev-version-bump.yml
     with:
-      released-version: v${{ env.DISPATCH_VERSION }}
+      # Reusable-workflow call inputs cannot read the workflow-level `env`
+      # context. Resolve the same two dispatch shapes directly in this
+      # context, which supports `github` and `inputs`.
+      released-version: v${{ github.event_name == 'repository_dispatch' && github.event.client_payload.version || inputs.version }}
 
   validate-dispatch:
     runs-on: ubuntu-latest

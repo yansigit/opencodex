@@ -50,15 +50,21 @@ const DEVLOG_PUBLICATION_PROOF_TOKEN = ["sk-", "liveKeyShaped9", "x8w7v6u5", "t4
 const DEVLOG_PUBLICATION_PROOF_HOME_USERNAME = ["someone", "else"].join("");
 const DEVLOG_PUBLICATION_PROOF_EMAIL = ["stranger", "third-party.example.org"].join("@");
 
-function gitLsFiles(): string[] {
-  const result = Bun.spawnSync(["git", "ls-files"], { stdout: "pipe", stderr: "pipe" });
+function gitScanFiles(): string[] {
+  // Scan the working tree that will become the next commit, not only the current
+  // index. Otherwise a clean local pre-push can turn red as soon as a new file is
+  // committed and GitHub scans it. Ignored files remain outside repository scope.
+  const result = Bun.spawnSync(
+    ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
   if (!result.success) {
     const stderr = new TextDecoder().decode(result.stderr);
     throw new Error(`git ls-files failed: ${stderr.trim() || result.exitCode}`);
   }
   return new TextDecoder()
     .decode(result.stdout)
-    .split(/\r?\n/)
+    .split("\0")
     .filter(Boolean);
 }
 
@@ -227,7 +233,7 @@ function scanFile(file: string): Finding[] {
   return findings;
 }
 
-const findings = gitLsFiles()
+const findings = gitScanFiles()
   .filter(existsSync)
   .filter(shouldScan)
   .flatMap(scanFile);

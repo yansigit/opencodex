@@ -660,6 +660,10 @@ describe("GitHub Actions hardening", () => {
     const release = Bun.YAML.parse(workflow) as {
       permissions?: Record<string, string>;
       jobs?: {
+        "bump-dev-version"?: {
+          permissions?: Record<string, string>;
+          with?: Record<string, string>;
+        };
         "validate-dispatch"?: {
           "runs-on"?: string;
           permissions?: Record<string, string>;
@@ -677,8 +681,17 @@ describe("GitHub Actions hardening", () => {
     expect(release.permissions).toEqual({});
     expect(workflow).toContain("repository_dispatch:\n    types: [fork-auto-release]");
     expect(workflow).toContain("github.event.client_payload.expected_sha");
-    expect(workflow).toContain("released-version: v${{ env.DISPATCH_VERSION }}");
-    expect(workflow).not.toContain("released-version: v${{ inputs.version }}");
+    expect(release.jobs?.["bump-dev-version"]?.with?.["released-version"]).toBe(
+      "v${{ github.event_name == 'repository_dispatch' && github.event.client_payload.version || inputs.version }}",
+    );
+    expect(release.jobs?.["bump-dev-version"]?.with?.["released-version"]).not.toContain(
+      "env.",
+    );
+    expect(release.jobs?.["bump-dev-version"]?.permissions).toEqual({
+      contents: "write",
+      issues: "write",
+      "pull-requests": "write",
+    });
     
     expect(release.jobs?.["validate-dispatch"]?.["runs-on"]).toBe("ubuntu-latest");
     expect(release.jobs?.["validate-dispatch"]?.permissions).toEqual({
@@ -5259,6 +5272,109 @@ describe("GitHub Actions hardening", () => {
     // Gating steps include lint and React Doctor only on gui/ pushes.
     expect(rootPkg).toContain("bun run typecheck && bun run lint:gui:if-changed && bun run test");
     expect(rootPkg).toContain("bun run privacy:scan && bun run doctor:gui:if-changed");
+  });
+
+  test("cross-platform CI gates include dependency and workflow validation", async () => {
+    const workflow = await readText(".github/workflows/ci.yml");
+    const ci = Bun.YAML.parse(workflow) as {
+      jobs?: Record<string, { steps?: Array<{ name?: string; run?: string }> }>;
+    };
+    const gatesSteps = ci.jobs?.gates?.steps ?? [];
+    const audit = gatesSteps.find(step => step.name === "Dependency audit (high severity)");
+    expect(audit).toBeDefined();
+    expect(audit?.run).toBe("bun run audit:high");
+    const workflowLint = gatesSteps.find(step => step.name === "Validate GitHub Actions workflows");
+    expect(workflowLint?.run).toBe("bun run lint:workflows");
+    expect(workflow).toContain("run: bun run audit:high");
+    const packageJson = JSON.parse(await readText("package.json")) as {
+      scripts?: Record<string, string>;
+    };
+    expect(packageJson.scripts?.["audit:high"]).toBe(
+      "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
+    );
+  });
+
+  test("scheduled dependency audit is minimal, read-only, pinned and bounded", async () => {
+    const workflow = await readText(".github/workflows/dependency-audit.yml");
+    const audit = Bun.YAML.parse(workflow) as {
+      on?: Record<string, unknown>;
+      permissions?: Record<string, string>;
+      jobs?: Record<string, { "timeout-minutes"?: number; permissions?: Record<string, string>; steps?: Array<{ uses?: string; run?: string }> }>;
+    };
+    expect(audit.on).toBeDefined();
+    expect(audit.on?.schedule).toBeDefined();
+    expect(audit.on?.workflow_dispatch).toBeDefined();
+    expect(workflow).toContain('cron: "0 6 * * *"');
+    expect(workflow).toContain("group: dependency-audit");
+    expect(workflow).toContain("cancel-in-progress: false");
+    expect(audit.permissions).toEqual({ contents: "read" });
+    const jobs = Object.entries(audit.jobs ?? {});
+    expect(jobs.length).toBeGreaterThanOrEqual(1);
+    for (const [name, job] of jobs) {
+      expect(typeof job["timeout-minutes"]).toBe("number");
+      expect(job.permissions).toEqual({ contents: "read" });
+      const runs = (job.steps ?? []).map(s => s.run ?? "").join("\n");
+      expect(runs).toContain("bun run audit:high");
+    }
+    expect(workflow).toContain("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0");
+    expect(workflow).toContain("./.github/actions/setup-project-bun");
+    expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
+    expect(workflow).toContain("timeout-minutes:");
+  });
+
+  test("reusable workflow calls do not use env or secrets in with and caller covers callee permissions", async () => {
+    const { readdir } = await import("node:fs/promises");
+    const workflowDir = new URL("../.github/workflows/", import.meta.url);
+    const files = await readdir(workflowDir);
+    const yamlFiles = files.filter(f => f.endsWith(".yml") || f.endsWith(".yaml"));
+    let checkedCalls = 0;
+    for (const file of yamlFiles) {
+      const text = await readText(`.github/workflows/${file}`);
+      const parsed = Bun.YAML.parse(text) as {
+        permissions?: Record<string, string> | string;
+        jobs?: Record<string, { uses?: string; with?: Record<string, unknown>; permissions?: Record<string, string> | string }>;
+      };
+      const callerPerms = parsed.permissions;
+      for (const [jobName, job] of Object.entries(parsed.jobs ?? {})) {
+        if (!job.uses || !job.uses.startsWith("./.github/workflows/")) continue;
+        checkedCalls++;
+        const withText = JSON.stringify(job.with ?? {});
+        expect(withText).not.toMatch(/\b(?:env|secrets)\s*\./);
+        const calleePath = String(job.uses).split("#")[0]!.replace(/^\.\//, "");
+        const calleeText = await readText(calleePath);
+        const callee = Bun.YAML.parse(calleeText) as {
+          permissions?: Record<string, string> | string;
+          jobs?: Record<string, { permissions?: Record<string, string> | string }>;
+        };
+        const asPermissionMap = (
+          value: Record<string, string> | string | undefined,
+          location: string,
+        ): Record<string, string> => {
+          if (value === undefined) return {};
+          if (typeof value === "string") {
+            throw new Error(`${location} uses ${value}; declare explicit permission scopes`);
+          }
+          return value;
+        };
+        const callerEffective = asPermissionMap(
+          job.permissions ?? callerPerms,
+          `${file}:${jobName}`,
+        );
+        const permissionRank: Record<string, number> = { none: 0, read: 1, write: 2 };
+        for (const [calleeJobName, calleeJob] of Object.entries(callee.jobs ?? {})) {
+          const needed = asPermissionMap(
+            calleeJob.permissions ?? callee.permissions,
+            `${calleePath}:${calleeJobName}`,
+          );
+          for (const [scope, level] of Object.entries(needed)) {
+            expect(permissionRank[callerEffective[scope] ?? "none"] ?? -1).toBeGreaterThanOrEqual(
+              permissionRank[level] ?? Number.POSITIVE_INFINITY,
+            );
+          }
+        }
+      }
+    }
+    expect(checkedCalls).toBeGreaterThan(0);
   });
 });
 
