@@ -140,6 +140,8 @@ export interface OcxClaudeCodeConfig {
    * Routing-sidecar alias decoding is unchanged — only the Desktop model list writer.
    */
   desktopNativeModels?: boolean;
+  /** Claude ingress compatibility gate. Defaults to enforce. */
+  compatibility?: "shadow" | "enforce";
 }
 
 export type OcxClaudeDesktopFamily = "opus" | "fable" | "sonnet" | "haiku";
@@ -247,9 +249,32 @@ export interface OcxClientIntegrationsConfig {
   "claude-desktop"?: boolean;
 }
 
+/** User-authored specialist the Codex parent may spawn by name. */
+export interface OcxSubagentRole {
+  /** `[a-z][a-z0-9-]{0,31}`, unique within the catalog. */
+  id: string;
+  /** 1..240 chars; parent "when to use" this specialist. */
+  description: string;
+  /** Bare native or `provider/model`, at most 128 characters. */
+  model: string;
+  /** Codex reasoning ladder; optional. */
+  effort?: string;
+  /** 1..8000 chars; child's developer prompt. */
+  developerInstructions: string;
+  /** Default true. Disabled roles stay in config but are omitted from guidance. */
+  enabled?: boolean;
+}
+
 export interface OcxConfigRebaseProvenance {
   version: 1;
   deletedTopLevelKeys: string[];
+}
+
+export interface OcxServerTlsConfig {
+  certFile: string;
+  keyFile: string;
+  /** Exact externally reachable HTTPS origin; paths, query strings, fragments, and credentials are rejected. */
+  publicOrigin: string;
 }
 
 export type OcxRuntimeRole = "standalone" | "hub" | "client";
@@ -325,6 +350,12 @@ export interface OcxClientConnectionConfig {
 
 export interface OcxConfig {
   port: number;
+  autonomousRemediation?: {
+    enabled?: boolean;
+    instanceId?: string;
+    threshold?: number;
+    rollingWindowMs?: number;
+  };
   /** Runtime topology role. Absence preserves the historical standalone behavior. */
   runtimeRole?: OcxRuntimeRole;
   /** Hub-only public management metadata. Presence is inert outside the hub role. */
@@ -386,6 +417,14 @@ export interface OcxConfig {
    * into a selector-qualified group; Codex still advertises only the first 5 visible rows.
    */
   subagentModels?: string[];
+  /** Named specialist roles the parent may spawn by id. */
+  subagentRoles?: OcxSubagentRole[];
+  /**
+   * Project enabled roles into marker-owned `$CODEX_HOME/agents/ocx-<id>.toml`.
+   * Unset means on once any enabled role exists. `false` leaves user files
+   * untouched and prunes our owned `ocx-*.toml` files.
+   */
+  syncCodexAgentRoles?: boolean;
   /**
    * Optional full picker ordering for the Codex model catalog, independent of the
    * 5-slot `subagentModels` spawn_agent cap. DISPLAY-ONLY: it controls the visual order of
@@ -417,6 +456,10 @@ export interface OcxConfig {
    * reject the whole role file as an unknown field (#1190).
    */
   subagentModelFallbackByModel?: Record<string, string[]>;
+  /**
+   * Ordered candidates for spawned sub-agents, globally or keyed by role/model.
+   */
+  subagentCandidates?: string[] | Record<string, string[]>;
   /**
    * TTL (ms) for cached sub-agent model availability probes. Default 60_000.
    */
@@ -554,6 +597,10 @@ export interface OcxConfig {
    * Routed parents get v2 tools; Sol/Terra can still spawn Grok/Claude (issue #92).
    */
   keepNativeChatGptOnV1?: boolean;
+  /** Experimental plaintext delegation bridge for eligible native V2 roots. */
+  v2RoutedDelegationBridge?: boolean;
+  /** Optional v2-native parent override for spawn_agent routing. */
+  v2NativeParentOverride?: { enabled?: boolean; model?: string };
   /** Experimental, default-off ChatGPT recovery for encrypted V2 routed tasks. */
   agentTaskRecovery?: {
     enabled?: boolean;
@@ -570,6 +617,8 @@ export interface OcxConfig {
   contextCapValue?: number;
   /** Bind hostname. Default "127.0.0.1" (loopback only). Set "0.0.0.0" to expose on all interfaces. */
   hostname?: string;
+  /** Native Bun TLS for the public listener. Required for non-loopback binds. */
+  tls?: OcxServerTlsConfig;
   /**
    * Optional second listener bound to 127.0.0.1 that admits data-plane requests without a
    * credential (issue #1102).
@@ -762,6 +811,10 @@ export interface OcxConfig {
    * `providers.<name>.oauthAccountFailover` overrides this per provider.
    */
   oauthAccountFailover?: {
+    enabled?: boolean;
+  };
+  /** Cursor OAuth account pool rotation for api2.cursor.sh. */
+  cursorAccountPool?: {
     enabled?: boolean;
   };
   /** Virtual `combo/<id>` models spanning concrete provider/model targets (issue #133). */

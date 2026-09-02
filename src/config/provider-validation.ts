@@ -26,6 +26,42 @@ const SENSITIVE_PROVIDER_HEADERS = new Set([
 const REASONING_SUMMARY_DELIVERY_SET = new Set<string>(REASONING_SUMMARY_DELIVERY_VALUES);
 const DISPLAY_NAME_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 const MAX_MODEL_DISPLAY_NAME_LENGTH = 128;
+const AZURE_ADAPTERS = new Set(["azure", "azure-openai"]);
+
+export function isAzureIdentityProvider(provider: Pick<OcxProviderConfig, "adapter" | "azureCredential">): boolean {
+  return AZURE_ADAPTERS.has(provider.adapter) && provider.azureCredential?.type === "default-azure-credential";
+}
+
+/** Shared semantic boundary for Azure's exact keyless identity mode. */
+export function azureCredentialConfigError(provider: {
+  adapter?: unknown;
+  azureCredential?: unknown;
+  apiKey?: unknown;
+  apiKeyPool?: unknown;
+  authMode?: unknown;
+}): string | null {
+  const credential = provider.azureCredential;
+  if (credential === undefined) return null;
+  if (!AZURE_ADAPTERS.has(provider.adapter as string)) return "azureCredential is supported only by azure adapters";
+  if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
+    return "azureCredential must be an object";
+  }
+  const record = credential as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key !== "type" && key !== "managedIdentityClientId") return "azureCredential has an unrecognized field";
+  }
+  if (record.type !== "default-azure-credential") return 'azureCredential.type must be "default-azure-credential"';
+  if (Object.hasOwn(record, "managedIdentityClientId")
+    && (typeof record.managedIdentityClientId !== "string" || !record.managedIdentityClientId.trim())) {
+    return "azureCredential.managedIdentityClientId must be a non-empty string";
+  }
+  if (Object.hasOwn(provider, "apiKey")) return "azureCredential conflicts with apiKey";
+  if (Object.hasOwn(provider, "apiKeyPool")) return "azureCredential conflicts with apiKeyPool";
+  if (provider.authMode !== undefined && provider.authMode !== "key") {
+    return "azureCredential requires authMode key or omitted";
+  }
+  return null;
+}
 
 /** Validate a provider destination without coupling DTO callers to config persistence. */
 export function providerBaseUrlConfigError(baseUrl: string): string | null {
@@ -223,6 +259,20 @@ export function modelAdapterRecordConfigError(
     if (isWirePinnedModel(providerName, key.trim())) {
       return `${field}.${key} cannot be overridden: the upstream only speaks one wire for this model`;
     }
+  }
+  return null;
+}
+
+export function wsUpstreamConfigError(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "boolean") return "wsUpstream must be a boolean";
+  return null;
+}
+
+export function maxWsFrameBytesConfigError(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    return "maxWsFrameBytes must be a positive finite integer";
   }
   return null;
 }

@@ -31,6 +31,7 @@ export type {
   OcxReasoningReplayIdentity,
   OcxReasoningReplayScopeRef,
   OcxParsedRequest,
+  ClaudeSourceEnvelope,
   OcxContext,
   OcxMessage,
   OcxUserMessage,
@@ -62,7 +63,9 @@ export type {
   OcxCustomModel,
   OcxApiKeyEntry,
   OcxClientIntegrationsConfig,
+  OcxSubagentRole,
   OcxConfigRebaseProvenance,
+  OcxServerTlsConfig,
   OcxHubConfig,
   OcxRemoteGuiConfig,
   OcxConnectedClientId,
@@ -94,6 +97,7 @@ export type {
 
 export type {
   RefreshPolicy,
+  ProviderTlsProfile,
   OpenRouterProviderRouting,
   VercelGatewayRouting,
   ResponsesItemIdRepairConfig,

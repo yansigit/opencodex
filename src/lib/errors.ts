@@ -4,6 +4,16 @@ export interface OcxErrorPayload {
   code: string | null;
 }
 
+/** A local request validation failure that must remain a client-visible HTTP 400. */
+export class OcxRequestValidationError extends Error {
+  readonly status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "OcxRequestValidationError";
+  }
+}
+
 /** Canonical human-readable message paths used by Responses upstream failures. */
 export function upstreamErrorMessageFromPayload(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;

@@ -566,6 +566,14 @@ export async function getValidAccessSnapshotForAccount(
   return resolveAccessSnapshotForAccount(provider, accountId, undefined, opts.requireUsableAccount === true);
 }
 
+export async function getValidAccessTokenSnapshotForAccount(
+  provider: string,
+  accountId: string,
+  opts: { requireUsableAccount?: boolean } = {},
+): Promise<OAuthAccessSnapshot> {
+  return getValidAccessSnapshotForAccount(provider, accountId, opts);
+}
+
 /** Terminal refresh failures (revoked/rotated-away grants) — retrying cannot succeed. */
 function isTerminalRefreshError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
