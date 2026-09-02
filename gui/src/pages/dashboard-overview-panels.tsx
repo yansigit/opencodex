@@ -1,7 +1,7 @@
 import MemoryObservabilityCard from "../components/MemoryObservabilityCard";
 import { useState } from "react";
 import { useCopyFeedback } from "../components/use-copy-feedback";
-import { openAiBaseUrlConfig, sshForwardCommand } from "../lib/server-access-commands";
+import { forwardedDashboardUrl, sshForwardCommand } from "../lib/server-access-commands";
 import type { useDashboardData } from "./use-dashboard-data";
 import {
   DashboardEffortCapPanel,
@@ -14,6 +14,7 @@ type Dash = ReturnType<typeof useDashboardData>;
 type ServerConfig = NonNullable<NonNullable<Dash["settings"]>["server"]>["configured"];
 type ServerTls = NonNullable<ServerConfig["tls"]>;
 const LOCAL_FORWARD_PORT = 20100;
+const PERSISTENT_TUNNEL_DOCS = "https://opencodex.me/reference/configuration/server/#persistent-macos-ssh-tunnel";
 
 function isLoopbackHostname(hostname: string): boolean {
   const n = hostname.trim().toLowerCase().replace(/\.$/, "");
@@ -42,7 +43,7 @@ export function DashboardServerSettingsPanel(props: Dash) {
   const mode: "loopback" | "remote" = draft?.tls ? "remote" : "loopback";
   const sshPort = draft?.port ?? 10100;
   const sshCmd = sshForwardCommand(sshPort, remoteHost(stashedTls ?? draft?.tls ?? null), LOCAL_FORWARD_PORT);
-  const localConfig = openAiBaseUrlConfig(LOCAL_FORWARD_PORT);
+  const dashboardUrl = forwardedDashboardUrl(LOCAL_FORWARD_PORT);
 
   const switchMode = (next: "loopback" | "remote") => {
     if (!draft) return;
@@ -88,10 +89,11 @@ export function DashboardServerSettingsPanel(props: Dash) {
                     <button type="button" className="btn btn-sm" onClick={() => copy(sshCmd, "ssh")}><span aria-live="polite">{copyLabel("ssh")}</span></button>
                   </div>
                   <div className="server-ssh-block">
-                    <code className="server-ssh-cmd">{localConfig}</code>
-                    <button type="button" className="btn btn-sm" onClick={() => copy(localConfig, "url")}><span aria-live="polite">{copyLabel("url")}</span></button>
+                    <code className="server-ssh-cmd">{dashboardUrl}</code>
+                    <button type="button" className="btn btn-sm" onClick={() => copy(dashboardUrl, "url")}><span aria-live="polite">{copyLabel("url")}</span></button>
                   </div>
                   <p className="server-mode-card-note">{props.t("dash.serverLoopbackCardNote")}</p>
+                  <a href={PERSISTENT_TUNNEL_DOCS} target="_blank" rel="noreferrer">{props.t("dash.serverPersistentTunnelDocs")}</a>
                 </div>
               ) : (
                 <div className="server-mode-card server-mode-card--remote">

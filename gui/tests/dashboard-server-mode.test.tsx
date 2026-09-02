@@ -91,8 +91,10 @@ test("mode toggle preserves TLS settings and generates a host-aware SSH command"
 
   await act(async () => { button(en["dash.serverModeLoopback"]).click(); });
   expect(button(en["dash.serverModeLoopback"]).getAttribute("aria-pressed")).toBe("true");
-  expect(host.textContent).toContain("ssh -L 20100:localhost:10443");
+  expect(host.textContent).toContain("ssh -N -L 127.0.0.1:20100:127.0.0.1:10443");
   expect(host.textContent).toContain("proxy.lan");
+  expect(host.textContent).toContain("http://127.0.0.1:20100/#dashboard");
+  expect(host.querySelector<HTMLAnchorElement>("a")?.href).toBe("https://opencodex.me/reference/configuration/server/#persistent-macos-ssh-tunnel");
   expect(host.querySelector("input[placeholder='/path/to/cert.pem']")).toBeNull();
 
   await act(async () => { button(en["dash.serverModeRemote"]).click(); });

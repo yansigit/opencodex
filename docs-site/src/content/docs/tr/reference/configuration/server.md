@@ -134,7 +134,7 @@ Uzaktan kullanım uzak bir bağlama gerektirmez. Geri döngüyü tutun ve
 yönlendirin:
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 you@remote
 ```
 
 Herhangi bir yerel port çalışır. Host'u `localhost`, `127.0.0.1` veya `::1`
@@ -147,7 +147,7 @@ Sağlayıcı OAuth geri aramaları sabit bir uzak portta dinler. Uzak makinede
 oturum açın veya bu portu da yönlendirin:
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@remote
 ```
 
 Kayıtlı bir geri arama portu zaten kullanımdaysa ve oturum açma yüzeyi manuel
