@@ -11,6 +11,7 @@ const {
   exactHeadGate,
   REQUIRED_CHECKS,
   summarizeAgedHolds,
+  workflowRunRetryDisposition,
 } = require("./pr-automation.cjs");
 
 const SHA = "a".repeat(40);
@@ -56,6 +57,69 @@ describe("classifyPullRequest", () => {
       assert.equal(result.reason, expectedReason);
     });
   }
+});
+
+describe("workflowRunRetryDisposition", () => {
+  function run(overrides = {}) {
+    return {
+      id: 123,
+      name: "Cross-platform CI",
+      path: ".github/workflows/ci.yml",
+      event: "pull_request",
+      status: "completed",
+      conclusion: "failure",
+      run_attempt: 1,
+      head_sha: SHA,
+      repository: { full_name: "yansigit/opencodex" },
+      head_repository: { full_name: "yansigit/opencodex" },
+      pull_requests: [{ number: 42 }],
+      ...overrides,
+    };
+  }
+  function retry(overrides = {}, prOverrides = {}) {
+    return workflowRunRetryDisposition({
+      run: run(overrides),
+      pr: { number: 42, ...pr(prOverrides) },
+      repository: "yansigit/opencodex",
+    });
+  }
+
+  it("reruns the first failed attempt for each allowlisted workflow", () => {
+    assert.equal(retry().action, "rerun");
+    assert.equal(retry({ name: "React Doctor", path: ".github/workflows/react-doctor.yml" }).action, "rerun");
+    assert.equal(retry({ name: "Service lifecycle", path: ".github/workflows/service-lifecycle.yml" }).action, "rerun");
+  });
+
+  it("never retries policy workflows or mismatched workflow paths", () => {
+    assert.equal(retry({ name: "PR hygiene", path: ".github/workflows/pr-hygiene.yml" }).action, "ignore");
+    assert.equal(retry({ path: ".github/workflows/untrusted.yml" }).action, "ignore");
+  });
+
+  it("stops after one retry and ignores non-PR or non-failure conclusions", () => {
+    assert.equal(retry({ run_attempt: 2 }).reason, "retry-already-used");
+    assert.equal(retry({ event: "push" }).reason, "run-not-failed-pr");
+    assert.equal(retry({ conclusion: "cancelled" }).reason, "run-not-failed-pr");
+  });
+
+  it("requires a trusted same-repository exact-head PR", () => {
+    assert.equal(retry({ head_repository: { full_name: "someone/opencodex" } }).reason, "untrusted-repository");
+    assert.equal(retry({ head_sha: OTHER_SHA }).reason, "pull-request-not-exact-head");
+    assert.equal(retry({ pull_requests: [{ number: 41 }, { number: 42 }] }).reason, "pull-request-ambiguous");
+    assert.equal(retry({}, { draft: true }).reason, "pull-request-not-exact-head");
+  });
+
+  it("allows an exact-head PR resolved from a run whose association list is empty", () => {
+    assert.equal(retry({ pull_requests: [] }).action, "rerun");
+  });
+
+  it("accepts only dev PRs and the canonical dev-to-main promotion", () => {
+    assert.equal(retry({}, { base: { ref: "release", sha: BASE_SHA, repo: { full_name: "yansigit/opencodex" } } }).reason, "unsupported-target");
+    assert.equal(retry({}, {
+      title: "promote: dev to main",
+      base: { ref: "main", sha: BASE_SHA, repo: { full_name: "yansigit/opencodex" } },
+      head: { ref: "dev", sha: SHA, repo: { full_name: "yansigit/opencodex" } },
+    }).action, "rerun");
+  });
 });
 
 function passingGateInput(overrides = {}) {
