@@ -72,7 +72,7 @@ Messages와 `count_tokens`는 라우팅 클라이언트 호환성을 위해 세 
 원격 사용에 원격 바인드는 필요하지 않습니다. 루프백으로 유지한 채 포워딩하면 됩니다:
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 you@remote
 ```
 
 로컬 포트는 무엇이든 사용할 수 있습니다. Host가 `localhost`, `127.0.0.1`, 또는 `::1`로 해석되는 요청은 포트와 무관하게 루프백으로 유지되므로 `http://localhost:20100/v1`이 동작합니다. 클라이언트에 그 base URL을 설정하십시오. `ocx`는 관리되는 클라이언트 config에 기본 로컬 `127.0.0.1` 주소만 기록합니다.
@@ -80,7 +80,7 @@ ssh -L 20100:localhost:10100 you@remote
 provider OAuth 콜백은 고정된 원격 포트에서 수신합니다. 원격 머신에서 로그인하거나 그 포트도 함께 포워딩합니다:
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@remote
 ```
 
 :::caution[Forwarded loopback is unauthenticated]

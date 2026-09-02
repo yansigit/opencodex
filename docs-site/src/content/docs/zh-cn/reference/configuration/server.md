@@ -77,7 +77,7 @@ Messages 和 `count_tokens` 为兼容路由客户端仍接受三种准入形式�
 远程使用并不要求远程绑定。保持回环绑定并将其转发即可：
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 you@remote
 ```
 
 任意本地端口都可以。Host 解析为 `localhost`、`127.0.0.1` 或 `::1` 的请求无论端口是多少都仍然算回环，因此 `http://localhost:20100/v1` 可以正常工作。在客户端中把这个 base URL 设为目标地址；
@@ -86,7 +86,7 @@ ssh -L 20100:localhost:10100 you@remote
 提供方 OAuth 回调监听在固定的远程端口上。请在远程机器上登录，或者也把那个端口转发出来：
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@remote
 ```
 
 :::caution[转发的回环地址未认证]
