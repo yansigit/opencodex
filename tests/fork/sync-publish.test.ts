@@ -80,9 +80,9 @@ async function fixture() {
 describe("fail-closed sync branch publisher", () => {
   test("creates a missing branch without force", async () => {
     const f = await fixture();
-    const published = await publishSyncBranch({ ...f, result: { ...f.result, status: "hotspot-handoff" } });
+    const published = await publishSyncBranch({ ...f, result: { ...f.result, status: "decision-handoff" } });
 
-    expect(published).toEqual({
+    expect(published).toMatchObject({
       action: "created",
       branch: f.branch,
       remoteSha: f.localSha,
@@ -138,17 +138,17 @@ describe("fail-closed sync branch publisher", () => {
 
     const published = await publishSyncBranch({
       ...f,
-      result: { ...f.result, status: "hotspot-handoff" },
+      result: { ...f.result, status: "decision-handoff" },
     });
 
-    expect(published).toEqual({
+    expect(published).toMatchObject({
       action: "preserved-advanced",
       branch: f.branch,
       remoteSha: resolvedSha,
       containsDev: true,
       containsVendorMain: true,
-      handoffRequired: false,
-      escalationRequired: false,
+      handoffRequired: true,
+      escalationRequired: true,
     });
     expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(resolvedSha);
   });
@@ -161,14 +161,14 @@ describe("fail-closed sync branch publisher", () => {
 
     const published = await publishSyncBranch({
       ...f,
-      result: { ...f.result, status: "hotspot-handoff" },
+      result: { ...f.result, status: "decision-handoff" },
     });
 
     expect(published).toMatchObject({
       action: "unchanged",
       remoteSha: f.devSha,
       containsVendorMain: false,
-      handoffRequired: false,
+      handoffRequired: true,
       escalationRequired: true,
     });
   });
@@ -184,14 +184,14 @@ describe("fail-closed sync branch publisher", () => {
 
     const published = await publishSyncBranch({
       ...f,
-      result: { ...f.result, status: "hotspot-handoff" },
+      result: { ...f.result, status: "decision-handoff" },
     });
 
     expect(published).toMatchObject({
       action: "preserved-diverged",
       remoteSha: partialSha,
       containsVendorMain: false,
-      handoffRequired: false,
+      handoffRequired: true,
       escalationRequired: true,
     });
   });
@@ -213,17 +213,17 @@ describe("fail-closed sync branch publisher", () => {
     const published = await publishSyncBranch({
       ...f,
       devSha: newDevSha,
-      result: { ...f.result, status: "hotspot-handoff" },
+      result: { ...f.result, status: "decision-handoff" },
     });
 
-    expect(published).toEqual({
+    expect(published).toMatchObject({
       action: "preserved-advanced",
       branch: f.branch,
       remoteSha: resolvedSha,
       containsDev: false,
       containsVendorMain: true,
-      handoffRequired: false,
-      escalationRequired: false,
+      handoffRequired: true,
+      escalationRequired: true,
     });
     expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(resolvedSha);
   });
@@ -255,7 +255,7 @@ describe("fail-closed sync branch publisher", () => {
 
     expect(published.action).toBe("preserved-diverged");
     expect(published.remoteSha).toBe(f.devSha);
-    expect(published.handoffRequired).toBe(false);
+    expect(published.handoffRequired).toBe(true);
     expect(published.escalationRequired).toBe(true);
   });
 

@@ -13,6 +13,13 @@ The automation must stop after preparing the disposable rebuild, decision
 table, and draft PR. A human reviews and merges `origin/dev`; this
 implementation does not open the Automations editor.
 
+The handoff payload's `prepareResult` is authoritative. For
+`decision-handoff`, inspect `handoffReason`: `conflict` means the merge was
+aborted without choosing either side; `preservation` means the clean result
+has unresolved preservation candidates. Complete the same questionnaire stored
+in `docs/fork/PRESERVATION.json`, regenerate exact-head provenance, and never
+apply an unrecorded drop. Any push invalidates the previous report and hashes.
+
 GitHub `pull_request_target` and scheduled workflows load their trusted
 automation from the repository default branch (`origin/main`). Promoting the
 maintenance workflow and its controller from `dev` to `origin/main` is a

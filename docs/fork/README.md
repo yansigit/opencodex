@@ -64,7 +64,8 @@ git switch -C sync/upstream-TAG-SHA origin/dev
 git merge --no-ff vendor/main
 ```
 
-Resolve conflicts using [`OWNED.md`](./OWNED.md). Run focused tests for every
+Resolve conflicts using [`OWNED.md`](./OWNED.md) and record every overlap in
+[`PRESERVATION.json`](./PRESERVATION.json). Run focused tests for every
 changed domain. Open or update a draft PR on the fork from
 `sync/upstream-TAG-SHA` into `dev`, and check
 `gh pr view <number> --json mergeable -q .mergeable` until it reports
@@ -107,7 +108,7 @@ failure in this order:
 
 Do not collapse these states:
 
-- A successful sync workflow may have stopped at hotspot handoff or used a
+- A successful sync workflow may have stopped at decision handoff or used a
   fallback coordinator; it does not prove that upstream reached `dev`.
 - A completed Cursor or Jules session does not prove that its PR is mergeable
   or that required checks passed.

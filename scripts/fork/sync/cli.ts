@@ -4,6 +4,8 @@ import { pinVendorRefs } from "./pin";
 import { prepareSync } from "./prepare";
 import { publishSyncBranch } from "./publish";
 import { createDraftPullRequestClient } from "./pull-request";
+import { analyzeOverlap, preservationReportHash } from "./overlap";
+import { loadRegistry, registryHash, registryPath } from "./preservation";
 import { enabledCoordinators, enabledNotifiers, registerCoordinator, registerNotifier } from "./registry";
 import { createCliCoordinator } from "./coordinators/cli";
 import { createCursorWebhookCoordinator } from "./coordinators/cursor-webhook";
@@ -17,11 +19,12 @@ import type {
   GitHubIssuesClient,
   PrepareResult,
   ProcessRunner,
+  PublishResult,
   SyncEvent,
 } from "./types";
 
 const DEFAULT_UPSTREAM_REPO = "https://github.com/lidge-jun/opencodex.git";
-const usage = "usage: bun scripts/fork/sync/cli.ts detect|pin|prepare|publish|draft-pr|emit";
+const usage = "usage: bun scripts/fork/sync/cli.ts detect|pin|prepare|publish|draft-pr|emit|overlap|verify|preservation-check";
 
 export interface CliOptions {
   env?: Record<string, string | undefined>;
@@ -61,6 +64,12 @@ async function commandRunner(args: readonly string[]): Promise<CommandResult> {
     stdout,
     stderr,
   };
+}
+
+async function runOk(runner: CommandRunner, args: readonly string[]): Promise<string> {
+  const r = await runner(args);
+  if (r.exitCode !== 0) throw new Error(r.stderr.trim() || `git ${args[0]} failed`);
+  return r.stdout.trim();
 }
 
 function githubClient(
@@ -188,6 +197,9 @@ export async function runCli(
     && command !== "publish"
     && command !== "draft-pr"
     && command !== "emit"
+    && command !== "overlap"
+    && command !== "verify"
+    && command !== "preservation-check"
   ) {
     throw new Error(usage);
   }
@@ -195,6 +207,47 @@ export async function runCli(
   const write = options.write ?? (value => process.stdout.write(`${value}\n`));
   if (env.FORK_SYNC_WORKTREE) process.chdir(env.FORK_SYNC_WORKTREE);
   const runner = options.runner ?? commandRunner;
+  if (command === "preservation-check") {
+    const registry = loadRegistry();
+    write(JSON.stringify({
+      registryPath: registryPath(),
+      registryHash: registryHash(),
+      releases: Object.keys(registry.releases),
+      baselineFeatures: Object.keys(registry.baseline?.features ?? {}),
+    }));
+    return;
+  }
+  if (command === "overlap" || command === "verify") {
+    const input = options.stdin ? JSON.parse(options.stdin) : JSON.parse(await readStdin());
+    const { base, fork, upstream, merge, dev, tag, provenance } = input as {
+      base: string;
+      fork: string;
+      upstream: string;
+      merge: string;
+      dev: string;
+      tag: string;
+      provenance?: PublishResult["provenance"];
+    };
+    if (!base || !fork || !upstream || !merge || !dev || !tag) throw new Error("overlap requires base/fork/upstream/merge/dev/tag");
+    const report = await analyzeOverlap({ runner, base, fork, upstream, merge, dev, tag });
+    if (command === "verify") {
+      if (!provenance) throw new Error("verify requires exact-head provenance");
+      const headSha = await runOk(runner, ["rev-parse", "HEAD"]);
+      const reportHash = preservationReportHash(report);
+      if (headSha !== merge || provenance.headSha !== headSha) throw new Error("stale preservation head SHA");
+      if (provenance.tagSha !== upstream || provenance.baseSha !== base) throw new Error("stale preservation ancestry");
+      if (provenance.registryHash !== report.registryHash
+        || provenance.decisionHash !== report.decisionHash
+        || provenance.reportHash !== reportHash) {
+        throw new Error("stale preservation evidence hash");
+      }
+    }
+    write(JSON.stringify(report));
+    if (report.status !== "passed") {
+      throw new Error(`overlap candidates detected: ${report.candidates.map(c => c.path).join(", ")}`);
+    }
+    return;
+  }
   if (command === "emit") {
     registerBuiltins(env, options);
     const input = options.stdin ?? await readStdin();
@@ -222,7 +275,38 @@ export async function runCli(
   if (command === "prepare") {
     const input = options.stdin ?? await readStdin();
     const event = JSON.parse(input) as SyncEvent;
+    const forkSha = await runOk(runner, ["rev-parse", "HEAD"]);
+    if (!forkSha) throw new Error("prepare could not resolve the fork head");
     const result = await prepareSync(event, { runner });
+    // Attempt overlap analysis for provenance; fail-closed on error or candidates.
+    try {
+      const bases = (await runOk(runner, ["merge-base", "--all", forkSha, event.vendorMainSha]))
+        .split(/\r?\n/).filter(Boolean);
+      if (bases.length !== 1) throw new Error("sync preservation requires one merge base");
+      const base = bases[0]!;
+      const mergeSha = await runOk(runner, ["rev-parse", result.branch ? `refs/heads/${result.branch}` : "HEAD"]);
+      const report = await analyzeOverlap({
+        runner,
+        base,
+        fork: forkSha,
+        upstream: event.vendorMainSha,
+        merge: mergeSha,
+        dev: forkSha,
+        tag: event.latestTag,
+      });
+      result.preservationReport = report;
+      if (report.status !== "passed") {
+        result.status = "decision-handoff";
+        result.handoffReason = "preservation";
+        result.unresolved = [...new Set([...result.unresolved, ...report.candidates.map(c => c.path)])];
+      }
+    } catch {
+      // If overlap analysis fails (non-unique base etc), preserve fail-closed by handoff.
+      if (result.status === "merged") {
+        result.status = "decision-handoff";
+        result.handoffReason = "preservation";
+      }
+    }
     write(JSON.stringify(result));
     return;
   }

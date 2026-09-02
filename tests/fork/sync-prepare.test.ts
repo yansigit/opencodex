@@ -54,41 +54,36 @@ describe("fork sync daily preparation", () => {
     ]);
   });
 
-  test("resolves fork-owned files with ours and commits the merge", async () => {
+  test("hands off fork-owned conflicts without choosing a side", async () => {
     const queued = queuedRunner([
       ok(),
       conflict(""),
       ok("scripts/fork/sync/cli.ts\n"),
       ok(),
-      ok(),
-      ok(),
     ]);
 
     const result = await prepareSync(event(), { runner: queued.runner });
 
-    expect(result.status).toBe("merged");
+    expect(result.status).toBe("decision-handoff");
+    expect(result.handoffReason).toBe("conflict");
     expect(result.resolutions).toEqual([{
       path: "scripts/fork/sync/cli.ts",
       classification: "fork-owned",
-      action: "checkout --ours",
+      action: "decision-handoff: merge --abort",
     }]);
     expect(queued.calls).toEqual([
       ["switch", "-C", "sync/upstream-v2.32.0-tagsha"],
       ["merge", "--no-ff", "vendor/main"],
       ["diff", "--name-only", "--diff-filter=U"],
-      ["checkout", "--ours", "--", "scripts/fork/sync/cli.ts"],
-      ["add", "--", "scripts/fork/sync/cli.ts"],
-      ["commit", "--no-edit"],
+      ["merge", "--abort"],
     ]);
   });
 
-  test("resolves upstream-owned files with theirs", async () => {
+  test("hands off upstream-owned conflicts without choosing a side", async () => {
     const queued = queuedRunner([
       ok(),
       conflict(""),
       ok("src/providers/new-provider.ts\n"),
-      ok(),
-      ok(),
       ok(),
     ]);
 
@@ -97,14 +92,37 @@ describe("fork sync daily preparation", () => {
     expect(result.resolutions).toEqual([{
       path: "src/providers/new-provider.ts",
       classification: "upstream-owned",
-      action: "checkout --theirs",
+      action: "decision-handoff: merge --abort",
     }]);
-    expect(queued.calls).toContainEqual([
-      "checkout",
-      "--theirs",
-      "--",
-      "src/providers/new-provider.ts",
+    expect(queued.calls).not.toContainEqual(expect.arrayContaining(["checkout"]));
+  });
+
+  test("automatically resolves only the named package.json recipe", async () => {
+    const queued = queuedRunner([
+      ok(),
+      conflict(""),
+      ok("package.json\n"),
+      ok('{"name":"ocx","version":"2.39.0","dependencies":{"left":"1.0.0"}}'),
+      ok('{"name":"ocx","version":"2.40.0","dependencies":{"right":"2.0.0"}}'),
+      ok(),
+      ok(),
+      ok(),
     ]);
+
+    const prepared = await prepareSync(event(), { runner: queued.runner });
+
+    expect(prepared).toEqual({
+      status: "merged",
+      branch: "sync/upstream-v2.32.0-tagsha",
+      resolutions: [{
+        path: "package.json",
+        classification: "recipe",
+        action: "merge package recipe",
+      }],
+      unresolved: [],
+    });
+    expect(queued.calls.some(args => args[0] === "checkout")).toBe(false);
+    expect(queued.calls.some(args => args[0] === "write-file" && args[1] === "package.json")).toBe(true);
   });
 
   test("aborts instead of pushing a shared-hotspot conflict", async () => {
@@ -118,12 +136,13 @@ describe("fork sync daily preparation", () => {
     const result = await prepareSync(event(), { runner: queued.runner });
 
     expect(result).toEqual({
-      status: "hotspot-handoff",
+      status: "decision-handoff",
+      handoffReason: "conflict",
       branch: "sync/upstream-v2.32.0-tagsha",
       resolutions: [{
         path: "src/server/responses/core.ts",
         classification: "shared-hotspot",
-        action: "merge --abort",
+        action: "decision-handoff: merge --abort",
       }],
       unresolved: ["src/server/responses/core.ts"],
     });

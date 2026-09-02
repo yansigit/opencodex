@@ -188,7 +188,7 @@ jobs:
             branch="$(jq -r '.branch' "$result_file")"
             git switch -C "$branch"
           fi
-          if [ "$status" = "merged" ] || [ "$status" = "hotspot-handoff" ] || [ "$status" = "history-diverged" ]; then
+          if [ "$status" = "merged" ] || [ "$status" = "decision-handoff" ] || [ "$status" = "history-diverged" ]; then
             publish_input="$RUNNER_TEMP/fork-sync-publish-input.json"
             publish_result="$RUNNER_TEMP/fork-sync-publish.json"
             jq -n \
@@ -204,7 +204,9 @@ jobs:
               echo "escalation_required=$(jq -r '.escalationRequired' "$publish_result")"
               echo "contains_vendor_main=$(jq -r '.containsVendorMain' "$publish_result")"
             } >> "$GITHUB_OUTPUT"
-            if [ "$status" = "merged" ] && [ "$(jq -r '.containsVendorMain' "$publish_result")" = "true" ]; then
+            handoff_reason="$(jq -r '.handoffReason // empty' "$result_file")"
+            if { [ "$status" = "merged" ] || { [ "$status" = "decision-handoff" ] && [ "$handoff_reason" = "preservation" ]; }; } \
+              && [ "$(jq -r '.containsVendorMain' "$publish_result")" = "true" ]; then
               echo "ready_for_pr=true" >> "$GITHUB_OUTPUT"
               jq -n \
                 --slurpfile event "$event_file" \
@@ -266,7 +268,7 @@ jobs:
             steps.prepare.outputs.escalation_required == 'true' ||
             (
               steps.vendor.outputs.kind != 'history-diverged' &&
-              steps.prepare.outputs.status != 'hotspot-handoff'
+              steps.prepare.outputs.status != 'decision-handoff'
             )
           )
         env:

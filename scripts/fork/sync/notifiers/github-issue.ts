@@ -45,8 +45,8 @@ function issueText(event: SyncEvent, upstreamRepo: string): {
   const tag = publicValue(event.latestTag) || "unknown-release";
   const kind = publicValue(event.kind);
   const recommendedLane = publicValue(event.recommendedLane ?? "unspecified");
-  const conflict = event.prepareStatus === "hotspot-handoff" || event.kind === "history-diverged";
-  const action = event.prepareStatus === "hotspot-handoff"
+  const conflict = event.prepareStatus === "decision-handoff" || event.kind === "history-diverged";
+  const action = event.prepareStatus === "decision-handoff"
     ? "Action: resolve shared hotspot conflicts according to docs/fork/OWNED.md and update the sync branch."
     : event.kind === "history-diverged"
     ? "Action: rebuild the sync branch from origin/dev and resolve the divergence according to docs/fork/OWNED.md."
@@ -105,7 +105,7 @@ export function createGitHubIssueNotifier(
         )
         : undefined;
       const text = issueText(event, options.upstreamRepo);
-      const conflict = event.prepareStatus === "hotspot-handoff" || event.kind === "history-diverged";
+      const conflict = event.prepareStatus === "decision-handoff" || event.kind === "history-diverged";
       const targetLabels = conflict
         ? [LABEL, JULES_LABEL, GENERATED_LABEL]
         : [LABEL];

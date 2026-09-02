@@ -77,7 +77,7 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain(
       "if: steps.vendor.outputs.kind == 'pin-updated' || steps.vendor.outputs.kind == 'main-behind' || steps.vendor.outputs.kind == 'history-diverged'",
     );
-    expect(workflow).toContain('[ "$status" = "hotspot-handoff" ] || [ "$status" = "history-diverged" ]');
+    expect(workflow).toContain('[ "$status" = "decision-handoff" ] || [ "$status" = "history-diverged" ]');
     expect(workflow).toContain('git switch -C "$branch"');
     expect(workflow).toContain('/scripts/fork/sync/cli.ts" publish');
   });
@@ -180,7 +180,7 @@ describe("fork upstream sync workflow contract", () => {
   test("does not create a Jules issue before Cursor fallback is known to fail", () => {
     const issueStep = workflow.split("- name: Notify GitHub issue")[1];
     expect(issueStep).toContain("steps.vendor.outputs.kind != 'history-diverged'");
-    expect(issueStep).toContain("steps.prepare.outputs.status != 'hotspot-handoff'");
+    expect(issueStep).toContain("steps.prepare.outputs.status != 'decision-handoff'");
     expect(issueStep).toContain("steps.prepare.outputs.escalation_required == 'true'");
   });
 

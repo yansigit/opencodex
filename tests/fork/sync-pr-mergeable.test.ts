@@ -54,4 +54,23 @@ describe("fork PR mergeable workflow", () => {
     expect(source).not.toMatch(/\bgh\s+(?:pr|issue)\s+(?:edit|comment|label)\b/);
     expect(source).not.toMatch(/pull-requests:\s*write/);
   });
+
+  test("runs the trusted base verifier only for sync PRs", () => {
+    const source = workflow();
+    expect(source).toContain("if: startsWith(github.head_ref, 'sync/')");
+    expect(source).toContain('git worktree add --detach "$trusted" "$BASE_SHA"');
+    expect(source).toContain('bun "$trusted/scripts/fork/sync/cli.ts" verify');
+    expect(source).toContain('FORK_SYNC_WORKTREE="$GITHUB_WORKSPACE"');
+    expect(source).toContain('FORK_SYNC_TRUSTED_REGISTRY="$trusted/docs/fork/PRESERVATION.json"');
+    expect(source).toContain('"$trusted/docs/fork/PRESERVATION.json"');
+    expect(source).not.toMatch(/jq[^\n]+\sdocs\/fork\/PRESERVATION\.json/);
+    expect(source).not.toContain("bun scripts/fork/sync/cli.ts overlap");
+  });
+
+  test("binds exact head, registry, decisions, and report through PR provenance", () => {
+    const source = workflow();
+    expect(source).toContain("opencodex-fork-sync-provenance");
+    expect(source).toContain('--arg merge "$HEAD_SHA"');
+    expect(source).toContain('--argjson provenance "$provenance"');
+  });
 });

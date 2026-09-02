@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { FetchImplementation, PrepareResult, PublishResult, SyncEvent } from "../../scripts/fork/sync/types";
 import { createDraftPullRequestClient } from "../../scripts/fork/sync/pull-request";
+import { preservationReportHash } from "../../scripts/fork/sync/overlap";
 
 const event: SyncEvent = {
   kind: "pin-updated",
@@ -32,7 +33,24 @@ const published: PublishResult = {
   containsVendorMain: true,
   handoffRequired: false,
   escalationRequired: false,
+  preservationReport: {
+    shas: { base: "0".repeat(40), fork: event.vendorDevSha, upstream: event.latestTagSha, merge: "4".repeat(40), dev: event.vendorDevSha, tag: event.latestTag },
+    registryHash: "5".repeat(64),
+    decisionHash: "6".repeat(64),
+    candidates: [],
+    decisions: {},
+    status: "passed",
+  },
+  provenance: {
+    headSha: "4".repeat(40),
+    tagSha: event.latestTagSha,
+    baseSha: "0".repeat(40),
+    registryHash: "5".repeat(64),
+    decisionHash: "6".repeat(64),
+    reportHash: "7".repeat(64),
+  },
 };
+published.provenance!.reportHash = preservationReportHash(published.preservationReport!);
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -130,12 +148,12 @@ describe("fork sync draft pull requests", () => {
     }).upsert({
       event,
       result: {
-        status: "hotspot-handoff",
+        status: "decision-handoff",
         branch: "sync/upstream-20260824",
         resolutions: [],
         unresolved: ["src/server/responses/core.ts"],
       },
-    })).rejects.toThrow("merged prepare result");
+    })).rejects.toThrow("merged or preservation-handoff prepare result");
     expect(requestCount).toBe(0);
   });
 

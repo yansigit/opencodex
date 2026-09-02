@@ -70,10 +70,10 @@ describe("fork sync Cursor webhook coordinator", () => {
         posted = JSON.parse(String(init?.body)) as SyncEvent;
         return new Response(null, { status: 200 });
       },
-    }).start({ ...event(), prepareStatus: "hotspot-handoff" });
+    }).start({ ...event(), prepareStatus: "decision-handoff" });
 
     expect(posted?.kind).toBe("pin-updated");
-    expect(posted?.prepareStatus).toBe("hotspot-handoff");
+    expect(posted?.prepareStatus).toBe("decision-handoff");
   });
 
   test("does not post issue-only events", async () => {
