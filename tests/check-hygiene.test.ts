@@ -26,7 +26,7 @@ describe("local hygiene checker", () => {
     git(root, "init", "-b", "dev");
     writeFileSync(join(root, "README.md"), "baseline\n");
     git(root, "add", "README.md");
-    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "baseline");
+    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "baseline");
 
     writeFileSync(
       join(root, "new-tool.ts"),
@@ -45,11 +45,11 @@ describe("local hygiene checker", () => {
     git(root, "init", "-b", "dev");
     writeFileSync(join(root, "README.md"), "baseline\n");
     git(root, "add", "README.md");
-    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "baseline");
+    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "baseline");
     git(root, "switch", "-c", "feature");
     writeFileSync(join(root, "tool.ts"), "try { work(); } cat" + "ch {}\n");
     git(root, "add", "tool.ts");
-    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "add tool");
+    git(root, "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "add tool");
 
     writeFileSync(join(root, "tool.ts"), "try { work(); } catch (error) { throw error; }\n");
 
