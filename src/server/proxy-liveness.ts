@@ -134,6 +134,24 @@ export async function proxyIdentityAt(
       const version = typeof body?.version === "string" ? body.version : undefined;
       return version === undefined ? { pid } : { pid, version };
     } catch {
+      // TLS fallback: HTTP probe against an HTTPS-only listener (0.0.0.0 + tls) times out
+      // via directLocalHttpFetch (HTTP-only). One HTTPS try with native fetch per attempt.
+      try {
+        const httpsUrl = `https://${probeHostname(opts.hostname)}:${port}/healthz`;
+        const res = await fetch(httpsUrl, {
+          signal: AbortSignal.timeout(timeoutMs),
+          ...( { tls: { rejectUnauthorized: false } } as unknown as Record<string, unknown>),
+        } as RequestInit & { tls?: unknown });
+        if (!res.ok) return null;
+        const body = (await res.json().catch(() => null)) as HealthzIdentity | null;
+        if (!isOpencodexHealthz(body)) return null;
+        const pid = typeof body?.pid === "number" ? body.pid : null;
+        if (opts.expectedPid !== undefined && pid !== null && pid !== opts.expectedPid) return null;
+        const version = typeof body?.version === "string" ? body.version : undefined;
+        return version === undefined ? { pid } : { pid, version };
+      } catch {
+        // HTTPS also unreachable — fall through to transport retry
+      }
       // Transport failure (timeout / refused) — retry while budget remains; a proxy that
       // has only just begun listening can miss a single short probe (#764).
       if (attempt >= attempts) return null;
@@ -347,6 +365,21 @@ export async function probeReadiness(
     if (parsed.status !== "ready" && res.status !== 503) return null;
     return parsed;
   } catch {
-    return null;
+    // TLS fallback — same rationale as proxyIdentityAt
+    try {
+      const httpsUrl = `https://${probeHostname(opts.hostname)}:${port}/readyz`;
+      const res = await fetch(httpsUrl, {
+        signal: AbortSignal.timeout(io.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS),
+        ...( { tls: { rejectUnauthorized: false } } as unknown as Record<string, unknown>),
+      } as RequestInit & { tls?: unknown });
+      const body = (await res.json().catch(() => null)) as unknown;
+      const parsed = validateReadyzBody(body, port, opts);
+      if (!parsed) return null;
+      if (parsed.status === "ready" && res.status !== 200) return null;
+      if (parsed.status !== "ready" && res.status !== 503) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
   }
 }
