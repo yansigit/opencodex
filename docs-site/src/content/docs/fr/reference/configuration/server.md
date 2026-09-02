@@ -126,7 +126,7 @@ mêmes vérifications `Host` et `Origin` qu'une liaison de bouclage ordinaire. D
 L'utilisation à distance ne nécessite pas de liaison à distance. Gardez le bouclage et transférez-le :
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 you@remote
 ```
 
 N'importe quel port local fonctionne. Les requêtes dont l'hôte se résout en `localhost`, `127.0.0.1` ou `::1` restent
@@ -137,7 +137,7 @@ Les rappels OAuth du fournisseur écoutent sur un port distant fixe. Connectez-v
 également ce port :
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@remote
 ```
 
 Si un port de rappel enregistré est déjà utilisé et que la surface de connexion propose une saisie manuelle, OpenCodex

@@ -153,21 +153,26 @@ The server-mode selector updates the saved listener configuration. Listener chan
 
 ### SSH port forwarding
 
-Remote use does not require a remote bind. Keep loopback and forward it:
+Remote use does not require a remote bind. Keep OpenCodex on loopback, then run this temporary
+tunnel on the computer where you want to open the dashboard:
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 user@10.0.0.51
 ```
 
-Any local port works. Requests whose Host resolves to `localhost`, `127.0.0.1`, or `::1` remain
-loopback regardless of port, so `http://localhost:20100/v1` works. Set that base URL in the client;
-`ocx` writes only the default local `127.0.0.1` address into managed client config.
+Keep that terminal open, then visit `http://127.0.0.1:20100/#dashboard`. Use HTTP at the forwarded
+address: SSH encrypts the connection between the two computers. Replace the SSH user and host, and
+choose another local port if `20100` is occupied.
+
+Requests whose Host resolves to `localhost`, `127.0.0.1`, or `::1` remain loopback regardless of
+port, so `http://127.0.0.1:20100/v1` also works as a client base URL. `ocx` writes only the default
+local `127.0.0.1` address into managed client config.
 
 Provider OAuth callbacks listen on a fixed remote port. Log in on the remote machine or forward that
 port too:
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 user@10.0.0.51
 ```
 
 If a registered callback port is already in use and the login surface offers manual input, OpenCodex
@@ -177,10 +182,83 @@ code into OpenCodex. The pending flow preserves state and PKCE validation. Calle
 input still fail closed.
 
 :::caution[Forwarded loopback is unauthenticated]
-Plain `ssh -L` listens on your local loopback and is safe for the default unauthenticated bind. Do not
-use `ssh -g -L`, broad container publishing, or forwarding modes that expose the client side on
-`0.0.0.0`. Bind explicitly with `ssh -L 127.0.0.1:20100:localhost:10100` when unsure.
+Always bind the forwarded port explicitly to `127.0.0.1`. Do not use `ssh -g`, broad container
+publishing, or forwarding modes that expose the client side on `0.0.0.0`; doing so can make the
+unauthenticated loopback dashboard and provider access reachable by other machines.
 :::
+
+### Persistent macOS SSH tunnel
+
+A per-user LaunchAgent can keep the same tunnel running after login. The dashboard cannot install
+this for you; create it on the Mac where you open the dashboard.
+
+First create a dedicated SSH key, verify the server's host-key fingerprint, and authorize the public
+key on the OpenCodex host. The first two SSH connections may request the remote account password:
+
+```bash
+ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/opencodex-dashboard" -C "opencodex dashboard tunnel"
+ssh user@10.0.0.51 true
+cat "$HOME/.ssh/opencodex-dashboard.pub" | ssh user@10.0.0.51 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys'
+ssh -i "$HOME/.ssh/opencodex-dashboard" -o BatchMode=yes user@10.0.0.51 true
+```
+
+Only continue when the final command exits successfully without a password prompt. Create the log
+directory, then save the following as
+`~/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist`. Replace `example`, the SSH user, and host
+value; LaunchAgent paths must be absolute, so do not put `$HOME` or `~` in the plist.
+
+```bash
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/OpenCodex"
+```
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>me.opencodex.dashboard-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-T</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>ServerAliveInterval=30</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-i</string><string>/Users/example/.ssh/opencodex-dashboard</string>
+    <string>-L</string><string>127.0.0.1:20100:127.0.0.1:10100</string>
+    <string>user@10.0.0.51</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/example/Library/Logs/OpenCodex/dashboard-tunnel.log</string>
+  <key>StandardErrorPath</key><string>/Users/example/Library/Logs/OpenCodex/dashboard-tunnel.error.log</string>
+</dict>
+</plist>
+```
+
+Validate and load it, then verify both the agent and tunnel:
+
+```bash
+plutil -lint "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
+launchctl print "gui/$(id -u)/me.opencodex.dashboard-tunnel"
+curl -fsS http://127.0.0.1:20100/healthz
+open http://127.0.0.1:20100/#dashboard
+```
+
+Inspect failures in `~/Library/Logs/OpenCodex/dashboard-tunnel.error.log`. After editing the plist,
+unload and reload it; `kickstart -k` restarts the already-loaded agent without rereading the plist:
+
+```bash
+tail -f "$HOME/Library/Logs/OpenCodex/dashboard-tunnel.error.log"
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
+launchctl kickstart -k "gui/$(id -u)/me.opencodex.dashboard-tunnel"
+```
 
 ## Storage cleanup
 
