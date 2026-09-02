@@ -736,3 +736,34 @@ describe("probeReadiness adversarial contract (never counts ready)", () => {
     expect(probe).toBeNull();
   });
 });
+
+describe("TLS fallback (https:// on TLS-only listener)", () => {
+  test("proxyIdentityAt falls back to https when http throws", async () => {
+    const orig = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        if (String(url).startsWith("https:")) return healthz(OURS);
+        throw new Error("unreachable");
+      }) as typeof fetch;
+      const identity = await proxyIdentityAt(10100, {}, { fetchFn: (async () => { throw new Error("http-only probe timed out"); }) as typeof fetch });
+      expect(identity).toEqual({ pid: 4242, version: "2.6.17" });
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+
+  test("probeReadiness falls back to https when http throws", async () => {
+    const orig = globalThis.fetch;
+    try {
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        if (String(url).startsWith("https:")) return readyz(READY_BODY, 200);
+        throw new Error("unreachable");
+      }) as typeof fetch;
+      const probe = await probeReadiness(10100, {}, { fetchFn: (async () => { throw new Error("http-only probe timed out"); }) as typeof fetch });
+      expect(probe).toEqual({ ready: true, status: "ready", pid: 4242, port: 10100 });
+    } finally {
+      globalThis.fetch = orig;
+    }
+  });
+});
+
