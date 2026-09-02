@@ -226,7 +226,7 @@ function assessHygiene({ files = [], labels = [] }) {
  */
 const HYGIENE_FAILURE_HINTS = {
   missing_regression_test:
-    "Behavior changed under `src/` or `gui/src/` without a test change. Add focused coverage or obtain `test-exception-approved`.",
+    "Behavior changed under `src/` or `gui/src/` without a test change. Add focused coverage or obtain `test-exception-approved`. Local: bun run check:hygiene.",
   generated_output:
     "Generated build output is committed. Remove it or obtain `generated-change-approved`.",
   orphan_lockfile:
