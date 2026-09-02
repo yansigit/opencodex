@@ -270,13 +270,6 @@ export interface OcxConfigRebaseProvenance {
   deletedTopLevelKeys: string[];
 }
 
-export interface OcxServerTlsConfig {
-  certFile: string;
-  keyFile: string;
-  /** Exact externally reachable HTTPS origin; paths, query strings, fragments, and credentials are rejected. */
-  publicOrigin: string;
-}
-
 export type OcxRuntimeRole = "standalone" | "hub" | "client";
 
 export interface OcxHubConfig {
@@ -617,8 +610,6 @@ export interface OcxConfig {
   contextCapValue?: number;
   /** Bind hostname. Default "127.0.0.1" (loopback only). Set "0.0.0.0" to expose on all interfaces. */
   hostname?: string;
-  /** Native Bun TLS for the public listener. Required for non-loopback binds. */
-  tls?: OcxServerTlsConfig;
   /**
    * Optional second listener bound to 127.0.0.1 that admits data-plane requests without a
    * credential (issue #1102).
