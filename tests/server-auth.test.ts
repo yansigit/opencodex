@@ -2292,16 +2292,6 @@ describe("server local API auth", () => {
       codexAccountNamespaces: { "ws-refresh": "pool-a" },
       activeCodexAccountId: "pool-a",
     } as OcxConfig);
-    const originalNow = Date.now;
-    const originalFetch = globalThis.fetch;
-    // Both the clock and the fetch stub go up before `startServer`. The async pool-quota
-    // prime it arms (src/server/index.ts:2054-2064) reads the clock AND fetches, so leaving
-    // either real for the width of two dynamic `import()` resolutions is what made this test
-    // fail on loaded CI runners while passing locally: the prime judged `pool-a` stale
-    // against a 2027 clock versus a `updatedAt` stamped in real time, then refreshed the
-    // credential before the first turn was served — so `seenAuth[0]` was already the new
-    // token. The failure diff was always the first element, never the second.
-    Date.now = () => now;
     // Seed the credential and quota AFTER the clock is pinned.
     //
     // Both writes stamp real time when they run before the pin: `updateAccountQuota` sets

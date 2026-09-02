@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAccountSet, saveCredential } from "../src/oauth/store";
@@ -12,6 +12,7 @@ import {
   getCachedProviderAccountQuota,
   reconcileProviderAccountQuotaRows,
   resetProviderQuotaReconcileStateForTests,
+  setAntigravityAccountQuotaTransportForTests,
   supportsPerAccountQuota,
 } from "../src/providers/quota";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
@@ -47,6 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  setAntigravityAccountQuotaTransportForTests(null);
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   removeTreeWithRetry(opencodexHome);
@@ -432,19 +434,21 @@ describe("fetchProviderAccountQuotas", () => {
     const id1 = set.accounts.find(a => a.credential.accountId === "acct-g1")!.id;
     const id2 = set.accounts.find(a => a.credential.accountId === "acct-g2")!.id;
 
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const auth = new Headers(init?.headers).get("authorization");
-      const url = String(input);
-      if (url.endsWith(":retrieveUserQuota")) {
-        const fraction = auth?.includes("token-g1") ? 0.8 : 0.4;
-        return Response.json({
-          buckets: [
-            { modelId: "gemini-test", remainingFraction: fraction, resetTime: "2026-07-05T12:00:00Z" },
-          ],
-        });
-      }
-      return Response.json({}, { status: 404 });
-    }) as typeof fetch;
+    globalThis.fetch = (async () => { throw new Error("plain fetch must not be used for account bearers"); }) as typeof fetch;
+    const antigravityBody = (gemRemaining: number) =>
+      JSON.stringify({
+        models: {
+          "gemini-3.7-flash": { displayName: "Gemini 3.7 Flash", quotaInfo: { remainingFraction: gemRemaining, resetTime: "2026-07-05T12:00:00Z" } },
+        },
+      });
+    setAntigravityAccountQuotaTransportForTests({
+      resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
+      pinnedPost: async (_url, _pinned, body, _signal, requestOptions) => {
+        const auth = new Headers(requestOptions?.headers).get("authorization") ?? "";
+        const gemRemaining = auth.includes("token-g1") ? 0.8 : 0.4;
+        return new Response(antigravityBody(gemRemaining), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
 
     expect(supportsPerAccountQuota("google-antigravity")).toBe(true);
     const rows = await fetchProviderAccountQuotas("google-antigravity");

@@ -588,6 +588,12 @@ function withRequestLogId(response: Response, requestId: string): Response {
   });
 }
 
+export function remoteDashboardStartupHint(hostname: string | undefined): string | null {
+  return isLoopbackHostname(hostname)
+    ? "   Remote dashboard → SSH tunnel guide: https://opencodex.me/reference/configuration/server/#ssh-port-forwarding"
+    : null;
+}
+
 export interface StartServerDeps {
   /** Test-only seam; production always initializes its own management credential state. */
   managementAuthState?: ManagementAuthState;
@@ -2489,6 +2495,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   console.log(`   GET  /healthz      → health check`);
   console.log(`   GET  /api/*        → management API`);
   console.log(`   GET  /             → GUI dashboard`);
+  const remoteDashboardHint = remoteDashboardStartupHint(config.hostname);
+  if (remoteDashboardHint) console.log(remoteDashboardHint);
 
   if (loopbackServer) {
     // Loud on every start, not once at enable time. An operator who inherits a config, or

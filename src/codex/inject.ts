@@ -180,6 +180,12 @@ function validateCodexRoutingTarget(target: CodexRoutingTarget): CodexRoutingTar
   return { ...target, baseUrl: `${parsed.origin}/v1` };
 }
 
+function normalizePublicOriginToBaseUrl(publicOrigin: string): string {
+  let trimmed = publicOrigin;
+  while (trimmed.endsWith("/")) trimmed = trimmed.slice(0, -1);
+  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
 /** Provider-table form is used for non-loopback admission and for the authless Desktop opt-in. */
 function usesProviderTable(target: CodexRoutingTarget): boolean {
   return target.requiresAdmissionToken || target.desktopAuthless === true;
@@ -295,9 +301,10 @@ export function buildProviderTableBlock(
   hostname?: string,
   publicOrigin?: string,
 ): string {
+  const normalizedPublicOrigin = publicOrigin ? normalizePublicOriginToBaseUrl(publicOrigin) : undefined;
   const target = typeof portOrTarget === "number"
     ? validateCodexRoutingTarget({
-        baseUrl: publicOrigin ?? `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
+        baseUrl: normalizedPublicOrigin ?? `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
         requiresAdmissionToken: includeApiAuthHeader,
         tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
       })
@@ -346,7 +353,7 @@ export function buildOpenaiBaseUrlLine(
   if (typeof portOrTarget !== "number") {
     return buildOpenaiBaseUrlLineForTarget(validateCodexRoutingTarget(portOrTarget));
   }
-  const baseUrl = publicOrigin ?? `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`;
+  const baseUrl = publicOrigin ? normalizePublicOriginToBaseUrl(publicOrigin) : `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`;
   return `openai_base_url = ${tomlString(baseUrl)}`;
 }
 
@@ -782,7 +789,7 @@ export function buildProfileFile(
     return buildProfileFileForTarget(validateCodexRoutingTarget(portOrTarget), catalogPath, supportsWebsockets, includeApiAuthHeaderOrFastMode as boolean | undefined);
   }
   const target = validateCodexRoutingTarget({
-    baseUrl: publicOrigin ?? `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
+    baseUrl: publicOrigin ? normalizePublicOriginToBaseUrl(publicOrigin) : `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
     requiresAdmissionToken: includeApiAuthHeaderOrFastMode === true,
     tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
   });

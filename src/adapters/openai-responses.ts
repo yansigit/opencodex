@@ -614,6 +614,23 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 /** Codex's reserved client-tool group on Responses Lite; carries no wire prefix. */
 const SPARK_RESERVED_FUNCTIONS_NAMESPACE = "functions";
 
+function isLiteSparkRequestBody(body: unknown): boolean {
+  if (!isPlainObject(body)) return false;
+  const model = typeof body.model === "string" ? body.model : "";
+  if (!model.includes("codex-spark")) return false;
+  const input = (body as Record<string, unknown>).input;
+  if (!Array.isArray(input)) return false;
+  for (const item of input) {
+    if (!isPlainObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) continue;
+    for (const tool of item.tools) {
+      if (isPlainObject(tool) && tool.type === "namespace" && tool.name === SPARK_RESERVED_FUNCTIONS_NAMESPACE) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /**
  * Apply the routed provider's real effort ladder to an existing Responses reasoning field.
  * Native forward requests keep the server-owned native clamp; unknown third-party ladders stay
@@ -2208,7 +2225,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = stripInternalChatMessageMetadataPassthrough(outBody);
         outBody = promoteClientLoadedTools(outBody);
       }
-      if (!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) {
+      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
         const rewritten = rewriteRoutedCustomToolsForUpstream(
           outBody,
           provider.supportsResponsesCustomTools,
@@ -2217,16 +2234,17 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         convertedRoutedCustomToolNames = rewritten.names;
         routedCustomToolRepairNames = rewritten.repairNames;
       }
-      if (!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) {
+      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
         // Run after custom-tool lowering so the search compatibility layer can choose a
         // collision-free public function name against the final routed function catalog.
         const rewritten = rewriteRoutedToolSearchForUpstream(outBody);
         outBody = rewritten.body;
         convertedRoutedToolSearchNames = rewritten.names;
       }
-      if (!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) {
+      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
         // Codex 0.147 emits private namespace tool groups, while public/third-party Responses
-        // gateways and canonical Spark accept only flat tool variants. Run after custom/tool-search
+        // gateways accept only flat tool variants. Spark keeps the reserved `functions` group intact
+        // (#3217) via stripSparkCompatibility, so routed namespace lowering is skipped for spark.
         // lowering so namespace children already carry their final public kind before promotion.
         const rewritten = rewriteRoutedNamespaceToolsForUpstream(outBody);
         outBody = rewritten.body;

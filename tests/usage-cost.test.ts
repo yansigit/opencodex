@@ -298,7 +298,7 @@ describe("resolveMatchedPrice", () => {
   });
 
   test("16. shipped overlay membership includes Fable 5.1, Cursor, and compatibility pricing", () => {
-    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(65);
+    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(70);
     expect(EXPECTED_PRICE_OVERLAYS.some(row => row.status === "unverified")).toBe(false);
     const keys = new Set(EXPECTED_PRICE_OVERLAYS.map(row => `${row.provider}/${row.modelId}`));
     for (const expected of [

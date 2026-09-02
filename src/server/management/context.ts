@@ -139,7 +139,8 @@ export class ManagementPersistenceError extends Error {
   response?: Response;
 
   constructor(cause: unknown) {
-    super("Management config persistence failed.", { cause });
+    const message = cause instanceof Error && cause.message ? `Management config persistence failed: ${cause.message}` : "Management config persistence failed.";
+    super(message, { cause });
     this.name = "ManagementPersistenceError";
     this.code = cause && typeof cause === "object" ? (cause as { code?: unknown }).code : undefined;
   }

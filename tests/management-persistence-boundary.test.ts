@@ -633,7 +633,7 @@ test("V2 reports a failed compensating rollback", async () => {
       },
     });
     expect(response?.status).toBe(502);
-    expect(await response?.text()).toContain("config rollback failed: Management config persistence failed.");
+    expect(await response?.text()).toContain("config rollback failed: Management config persistence failed: rollback disk failure");
   } finally {
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
