@@ -337,25 +337,44 @@ JSON mode: `payload`.
 
 Each of these writes. Check the flags column before running one unattended.
 
-### `ocx provider install-replit`
+### `ocx connect rotate`
 
-Install the paired Replit OpenAI and Anthropic providers.
+Rotate the connected client's data key against the hub, with commit and abort.
 
 | Method | Route |
 |---|---|
-| POST | `/api/providers/replit-pair` |
+| POST | `/api/keys/rotate` |
+| POST | `/api/keys/rotate/commit` |
+| DELETE | `/api/keys/rotate` |
 
 | Flag | Value | Meaning |
 |---|---|---|
-| `--origin` | string | Replit gateway origin. |
-| `--stdin` | boolean | Read the gateway key from stdin. |
-| `--gateway-key-file` | string | Read the gateway key from a private file. |
-| `--allow-custom-domain` | boolean | Allow a non-Replit gateway domain. |
-| `--replace` | boolean | Replace an existing provider pair. |
-| `--set-default` | boolean | Select Replit as the default provider. |
-| `--json` | boolean | Emit the installation result as JSON. |
+| `--pairing-code-stdin` | boolean | Read a one-time pairing code from stdin as the rotation authority. |
+| `--admin-token-stdin` | boolean | Read the hub admin token from stdin as the rotation authority. |
+| `--json` | boolean | Emit the rotation result as JSON. |
 
 JSON mode: `payload`.
+
+- Requires transient authority on stdin; the credential is never persisted or echoed.
+- A rotation left pending by a crash is resumed here — startup and status stop rather than guess which key generation is live.
+
+### `ocx provider keychain`
+
+Move a provider's API key into the OS keychain, restore it, or report where it lives.
+
+| Method | Route |
+|---|---|
+| GET | `/api/providers/keychain` |
+| POST | `/api/providers/keychain` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--json` | boolean | Emit the keychain status or result as JSON. |
+
+JSON mode: `payload`.
+
+- `store` verifies every keychain write by read-back before config.json is rewritten with keychain: references; an unavailable keychain refuses with 503 and leaves the file untouched.
+- Headless services usually have no unlocked keychain session; prefer ${ENV_VAR} references there.
 
 ### `ocx account pause`
 
@@ -529,7 +548,7 @@ JSON mode: `payload`.
 
 ### `ocx integration native`
 
-Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations.
+Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, and read the Cursor status (which builds are installed, gateway values, last request seen).
 
 | Method | Route |
 |---|---|
@@ -538,6 +557,7 @@ Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations.
 | PUT | `/api/native-integrations/claude-desktop` |
 | PUT | `/api/native-integrations/codex` |
 | PUT | `/api/native-integrations/grok` |
+| GET | `/api/native-integrations/cursor` |
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -565,77 +585,8 @@ JSON mode: `payload`.
 
 - A bare invocation reads and never writes.
 
-### `ocx agent roles`
-
-Show, replace, or remove subagent roles.
-
-| Method | Route |
-|---|---|
-| GET | `/api/subagent-roles` |
-| PUT | `/api/subagent-roles` |
-
-| Flag | Value | Meaning |
-|---|---|---|
-| `--file` | string | Read role JSON from a file instead of stdin. |
-| `--json` | boolean | Emit role state as JSON. |
-
-JSON mode: `payload`.
-
-- A status invocation reads and never writes.
-
-### `ocx agent authority`
-
-Resolve subagent model authority for a supplied request.
-
-| Method | Route |
-|---|---|
-| POST | `/api/subagent-model-authority` |
-
-| Flag | Value | Meaning |
-|---|---|---|
-| `--file` | string | Read authority JSON from a file instead of stdin. |
-
-JSON mode: `none`.
-
-### `ocx lab run`
-
-Enqueue a manual Lab run and optionally pair a stored Cursor oracle observation.
-
-Drives no management route.
-
-| Flag | Value | Meaning |
-|---|---|---|
-| `--layer` | string | protocol_conformance | live_route_compatibility | task_effectiveness |
-| `--scenario` | string | Scenario id |
-| `--provider` | string | Optional provider filter |
-| `--model` | string | Model id |
-| `--oracle-run` | string | Stored oracle run id; scenario and model must match |
-| `--json` | boolean | Emit {run, oracle?, comparison?} envelope as JSON |
-
-JSON mode: `envelope`.
-
-- Reads local projection, validates an immutable sanitized oracle sidecar when supplied, then enqueues the manual run.
-
-### `ocx lab oracle cursor`
-
-Cursor oracle probe: isolated working state and loopback-only sanitized observation V1.
-
-Drives no management route.
-
-| Flag | Value | Meaning |
-|---|---|---|
-| `--scenario` | string | Lab scenario id |
-| `--model` | string | Model id for oracle prompt |
-| `--agent-bin` | string | Path to cursor-agent binary |
-| `--keep-raw` | boolean | Persist raw bytes 0600 under lab scratch 24h TTL; without it only names + byte lengths are kept |
-| `--json` | boolean | Emit sanitized observation V1 as JSON |
-
-JSON mode: `envelope`.
-
-- Config/data/workspace use OS tmp 0700 while the authenticated child retains normal home/keychain access; loopback 127.0.0.1:0 forwards only to https://api2.cursor.sh; auth bodies are opaque; sanitized observations contain protocol cases, counts, byte lengths, hashes, and diagnostics.
-
 ## Counts
 
-- declared capabilities: 35
-- of those, state-changing: 16
+- declared capabilities: 32
+- of those, state-changing: 13
 - head-resolved invocations: 2

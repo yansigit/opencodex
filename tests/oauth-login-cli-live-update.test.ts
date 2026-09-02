@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { managementFetch as fetch } from "./helpers/management-auth";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, mutatePersistedConfig, saveConfig, writePid, writeRuntimePort } from "../src/config";
+import { loadConfig, saveConfig, writePid, writeRuntimePort } from "../src/config";
 import { upsertOAuthProvider } from "../src/oauth";
 import {
   commitKeyLoginProvider,
@@ -12,17 +12,9 @@ import {
 } from "../src/oauth/login-cli";
 import { startServer } from "../src/server";
 import { createLocalAttestationSecret } from "../src/lib/local-management-attestation";
-import { LOCAL_PROVIDER_RELOAD_TIMEOUT_MS } from "../src/server/local-provider-reload-client";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
-import { watchdogMs } from "./helpers/ci-watchdog";
-
-/**
- * `requestBoundLocalProviderReload` may spend one HTTP ceiling on /healthz and
- * another on the reload POST. A 15s bun-test budget dies first on the unsharded
- * macOS CI runner (observed 15012ms timeout after the proxy had already bound).
- */
-const LIVE_UPDATE_TIMEOUT_MS = watchdogMs(LOCAL_PROVIDER_RELOAD_TIMEOUT_MS * 2 + 5_000);
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 /**
  * Regression: CLI OAuth login used to POST the bare OAuth preset into a running proxy.
@@ -63,14 +55,10 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
-  if (testDir) rmSync(testDir, { recursive: true, force: true });
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 describe("CLI OAuth live-update credential preservation", () => {
-  test("live notify case budget outlasts two reload HTTP ceilings", () => {
-    expect(LIVE_UPDATE_TIMEOUT_MS).toBeGreaterThan(LOCAL_PROVIDER_RELOAD_TIMEOUT_MS * 2);
-  });
-
   test("does not post provider credentials when a legacy health listener has no verified pid", async () => {
     const receivedPaths: string[] = [];
     let healthProbeCount = 0;
@@ -177,42 +165,7 @@ describe("CLI OAuth live-update credential preservation", () => {
     } finally {
       await server.stop(true);
     }
-  }, LIVE_UPDATE_TIMEOUT_MS);
-
-  test("AI Studio login participates in attested live reload", async () => {
-    const localAttestationSecret = createLocalAttestationSecret();
-    const server = startServer(0, { localAttestationSecret });
-    try {
-      const port = server.port!;
-      writeRuntimePort({
-        pid: process.pid,
-        port,
-        hostname: "127.0.0.1",
-        attestationSecret: localAttestationSecret,
-      });
-      writePid(process.pid);
-      const boot = loadConfig();
-      boot.port = port;
-      saveConfig(boot);
-      mutatePersistedConfig(fresh => {
-        fresh.providers["google-aistudio"] = {
-          adapter: "google",
-          googleMode: "ai-studio-web",
-          baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
-          authMode: "local",
-        };
-        return { changed: true, value: undefined };
-      });
-
-      const result = await notifyRunningProxy("google-aistudio");
-      expect(result?.kind).toBe("reloaded");
-
-      const listed = await fetch(new URL("/api/providers", server.url)).then(r => r.json()) as Array<{ name: string }>;
-      expect(listed.some(entry => entry.name === "google-aistudio")).toBe(true);
-    } finally {
-      await server.stop(true);
-    }
-  }, LIVE_UPDATE_TIMEOUT_MS);
+  }, 15_000);
 });
 
 /**

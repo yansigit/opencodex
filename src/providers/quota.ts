@@ -9,10 +9,11 @@ import type { StoredAccountQuota } from "../codex/quota";
 import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache";
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { codexPlanKey } from "../codex/plan";
-import { resolveEnvValue } from "../config";
-import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, getValidAccessTokenSnapshotForAccount, type OAuthAccessSnapshot } from "../oauth";
+import { resolveProviderApiKey } from "./key-store";
+import { getValidAccessToken, getValidAccessTokenForAccount } from "../oauth";
 import { getAccountCredential, getAccountSet, getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
+import { providerOutboundPost, providerRedirectError, type ProviderOutboundDependencies } from "../lib/provider-outbound";
 import { apiKeyPoolEntryId } from "./api-keys";
 import { XAI_GROK_CLIENT_VERSION, XAI_GROK_COMPATIBILITY } from "./xai-transport";
 import { getProviderRegistryEntry, providerCodexAccountMode, registryEntryForProviderDestination } from "./registry";
@@ -23,35 +24,52 @@ import {
   sweepExpiredOnWrite,
   type GenerationContext,
 } from "../lib/state-store-sweeper";
-import { readBoundedResponseBody } from "../lib/bounded-body";
+import {
+  ACCOUNT_QUOTA_TTL_MS,
+  asRecord,
+  CACHE_TTL_MS,
+  normalizePercent,
+  normalizeResetAt,
+  QUOTA_JSON_READ_FAILURE,
+  readQuotaJson,
+  REQUEST_TIMEOUT_MS,
+  toFiniteNumber,
+} from "./quota-wire";
+import {
+  clearCachedProviderQuotas,
+  replaceCachedProviderQuotas,
+} from "./quota-routing-cache";
 import {
   aggregateCodexPoolCapacity,
   CODEX_CAPACITY_MAX_QUOTA_AGE_MS,
   type CodexCapacityAggregation,
   type CodexCapacityQuota,
 } from "./codex-capacity";
-import {
-  AntigravityQuotaRpcError,
-  fetchAntigravityLiveQuota,
-  isTerminalAntigravityQuotaStatus,
-} from "./antigravity-quota";
-import { antigravityHostCandidates, isAntigravityHttpsHost } from "../adapters/google-antigravity-hosts";
-import { providerTlsFetch } from "../lib/provider-tls-profile";
+import type {
+  ProviderQuota,
+  ProviderQuotaCreditsUsd,
+  ProviderQuotaWindow,
+} from "./quota-types";
 import {
   clearKiroAccountUsageState,
   commitKiroAccountUsageState,
   fetchKiroUsageSnapshot,
   type KiroUsageSnapshot,
   kiroUsageContextForAccount,
+  reconcileKiroAccountUsageState,
 } from "./kiro-usage";
+import {
+  cancelPendingAccountQuotaPersist,
+  readPersistedAccountQuotas,
+  schedulePersistAccountQuotas,
+} from "./account-quota-disk";
+
+export type { ProviderQuota, ProviderQuotaCreditsUsd, ProviderQuotaWindow } from "./quota-types";
 
 /** Match oauth/index REFRESH_SKEW_MS — use stored access without refresh when still fresh. */
 const ACCOUNT_TOKEN_SKEW_MS = 60_000;
-
-const CACHE_TTL_MS = 5 * 60_000;
-const REQUEST_TIMEOUT_MS = 8_000;
 /** Successful provider quota payloads are small; reject oversized or stalled JSON before parsing. */
-export const QUOTA_RESPONSE_MAX_BYTES = 512 * 1024;
+export { QUOTA_RESPONSE_MAX_BYTES } from "./quota-wire";
 const KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1";
 const KIMI_CODE_USAGE_URL = `${KIMI_CODE_BASE_URL}/usages`;
 const COMMAND_CODE_BASE_URL = "https://api.commandcode.ai";
@@ -87,40 +105,23 @@ export function setProviderQuotaBeforePublishForTests(
   providerQuotaBeforePublishForTests = hook;
 }
 const TERMINAL_QUOTA_FAILURE = Symbol("terminal-quota-failure");
-/** The provider successfully reported that no model-quota windows remain in this payload. */
+/**
+ * The probe succeeded and the upstream authoritatively reported NO model-quota windows.
+ *
+ * Distinct from `null`, which means "this probe told us nothing" and deliberately preserves
+ * the last-good row for up to 30 minutes. Collapsing the two would let a stale report outlive
+ * the authoritative answer that replaced it: a GLM plan whose payload carries only MCP
+ * `TIME_LIMIT` rows has no model windows, and the dashboard and quota-aware routing must stop
+ * showing the previous token windows rather than keep them for another half hour.
+ *
+ * Suppression is shared with `TERMINAL_QUOTA_FAILURE`; only the reason differs.
+ */
 const AUTHORITATIVE_EMPTY_QUOTA = Symbol("authoritative-empty-quota");
 type ProviderQuotaProbeResult =
   | ProviderQuotaReport
   | null
   | typeof TERMINAL_QUOTA_FAILURE
   | typeof AUTHORITATIVE_EMPTY_QUOTA;
-
-export interface ProviderQuotaWindow {
-  label: string;
-  percent: number;
-  resetAt?: number;
-}
-
-export interface ProviderQuotaCreditsUsd {
-  used: number;
-  limit: number;
-  remaining: number;
-  percent: number;
-  expiresAt?: number;
-  unlimited?: boolean;
-}
-
-export interface ProviderQuota {
-  fiveHourPercent?: number;
-  fiveHourResetAt?: number;
-  weeklyPercent?: number;
-  weeklyResetAt?: number;
-  monthlyPercent?: number;
-  monthlyResetAt?: number;
-  customWindows?: ProviderQuotaWindow[];
-  creditsUsd?: ProviderQuotaCreditsUsd;
-  updatedAt: number;
-}
 
 export interface ProviderQuotaReport {
   provider: string;
@@ -145,6 +146,7 @@ let invalidationEpoch = 0;
 /** Invalidate the report cache (e.g. after switching a provider's active account). */
 export function clearProviderQuotaCache(): void {
   cache = null;
+  clearCachedProviderQuotas();
   invalidationEpoch += 1;
 }
 
@@ -152,7 +154,7 @@ function cacheKey(config: OcxConfig): string {
   const providers = Object.entries(config.providers)
     .map(([name, provider]) => {
       const resolvedKey = typeof provider.apiKey === "string"
-        ? resolveEnvValue(provider.apiKey)?.trim()
+        ? resolveProviderApiKey(provider.apiKey)?.trim()
         : undefined;
       const activeKeyId = resolvedKey ? apiKeyPoolEntryId(resolvedKey) : "none";
       return `${name}:${provider.adapter}:${provider.authMode ?? "key"}:${providerCodexAccountMode(name, provider) ?? "none"}:${provider.disabled === true ? "off" : "on"}:${provider.baseUrl}:${activeKeyId}`;
@@ -280,78 +282,6 @@ function providerLabel(providerId: string): string {
   return getProviderRegistryEntry(providerId)?.label ?? providerId;
 }
 
-function normalizeResetAt(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return epochMillis(value);
-  if (typeof value === "string" && value.trim()) {
-    const trimmed = value.trim();
-    // Cursor Connect RPC returns billingCycleEnd as a unix-ms decimal string ("1771077734000").
-    // Date.parse treats that as invalid; numeric epoch strings must be handled explicitly.
-    if (/^[+-]?\d+(\.\d+)?$/.test(trimmed)) {
-      const numeric = Number(trimmed);
-      return epochMillis(numeric);
-    }
-    const parsed = Date.parse(trimmed);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-  }
-  return undefined;
-}
-
-/** Unix 0 / negative values are sentinels, not reset clocks (Command Code fiveHour.resetAt: 0). */
-function epochMillis(value: number): number | undefined {
-  if (!Number.isFinite(value) || value <= 0) return undefined;
-  const milliseconds = value > 10_000_000_000 ? value : value * 1000;
-  return Number.isFinite(new Date(milliseconds).getTime()) ? milliseconds : undefined;
-}
-
-function toFiniteNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim()) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : undefined;
-  }
-  return undefined;
-}
-
-function normalizePercent(value: unknown): number | undefined {
-  const numeric = toFiniteNumber(value);
-  return numeric === undefined ? undefined : Math.max(0, Math.min(100, numeric));
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-const QUOTA_JSON_READ_FAILURE = Symbol("quota-json-read-failure");
-
-async function readQuotaJson(
-  response: Response,
-  timeoutMs = REQUEST_TIMEOUT_MS,
-): Promise<unknown | typeof QUOTA_JSON_READ_FAILURE> {
-  const declaredLength = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > QUOTA_RESPONSE_MAX_BYTES) {
-    try {
-      void response.body?.cancel(
-        new DOMException("Provider quota response is too large", "QuotaExceededError"),
-      ).catch(() => undefined);
-    } catch {
-      // Best-effort cancellation only.
-    }
-    return QUOTA_JSON_READ_FAILURE;
-  }
-
-  try {
-    const bounded = await readBoundedResponseBody(response, {
-      maxBytes: QUOTA_RESPONSE_MAX_BYTES,
-      totalTimeoutMs: timeoutMs,
-      inactivityTimeoutMs: timeoutMs,
-    });
-    if (bounded.oversized || bounded.truncated || !bounded.displaySafe) return QUOTA_JSON_READ_FAILURE;
-    return JSON.parse(bounded.text) as unknown;
-  } catch {
-    return QUOTA_JSON_READ_FAILURE;
-  }
-}
-
 /** Test-only access to the quota reader's deadline and cancellation contract. */
 export async function readProviderQuotaJsonForTests(response: Response, timeoutMs: number): Promise<unknown> {
   const result = await readQuotaJson(response, timeoutMs);
@@ -441,7 +371,7 @@ function firstFinite(record: Record<string, unknown> | null, names: string[]): n
 async function fetchA6apiQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   // Never send a configured API key to a lookalike host or through a redirect.
   if (!isCanonicalA6apiBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const headers = { Accept: "application/json", Authorization: `Bearer ${apiKey}` } as const;
   const [subscriptionResponse, tokenResponse] = await Promise.all([
@@ -535,7 +465,7 @@ function parseOpenCodeGoUsageWindow(value: unknown): { percent: number; resetAt?
 async function fetchOpenCodeGoQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   // Never send a configured API key when the provider destination is not the built-in Go endpoint.
   if (!isCanonicalOpenCodeGoBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const response = await fetch(OPENCODE_GO_USAGE_URL, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
@@ -581,7 +511,7 @@ async function fetchOpenCodeGoQuota(provider: string, config: OcxProviderConfig)
 async function fetchOpenRouterQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   // Never send a configured API key to a lookalike host or through a redirect.
   if (!isCanonicalOpenRouterBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const response = await fetch(`${OPENROUTER_BASE_URL}/key`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
@@ -628,7 +558,7 @@ async function fetchOpenRouterQuota(provider: string, config: OcxProviderConfig)
  */
 async function fetchDeepSeekQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalDeepSeekBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const response = await fetch(`${DEEPSEEK_BASE_URL}/user/balance`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
@@ -673,7 +603,7 @@ async function fetchDeepSeekQuota(provider: string, config: OcxProviderConfig): 
  */
 async function fetchClineQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalClineBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const response = await fetch(`${CLINE_BASE_URL}/api/v1/users/me/plan/usage-limits`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
@@ -723,11 +653,19 @@ async function fetchClineQuota(provider: string, config: OcxProviderConfig): Pro
  * same rows `CREDIT_LIMIT`) and `TIME_LIMIT` rows. `TOKENS_LIMIT`/`CREDIT_LIMIT`
  * rows carry the window length as `unit`/`number`: unit 3 is hours (number 5 →
  * the rolling five-hour window), unit 6 is weeks (number 1 → the weekly
- * window). `TIME_LIMIT` rows are a separate MCP tool budget and are ignored so
- * they cannot distort model-capacity routing. Every model row's `percentage`
- * is the consumed share (falling
+ * window). Every row's `percentage` is the consumed share (falling
  * back to `currentValue`/`usage` when absent) and `nextResetTime` (unix ms)
  * the window reset.
+ *
+ * `TIME_LIMIT` rows are deliberately ignored (issue #1168). They are the shared
+ * monthly MCP *call* allowance for Web Search / Web Reader / Zread — not a
+ * model-token budget — and `ProviderQuota.monthlyPercent` is consumed as a
+ * model-capacity signal: `headroomOf()` in `src/oauth/account-quota-rank.ts`
+ * takes the MAX across every window, so a user who spent their MCP search
+ * allowance would be ranked as having no model capacity left, and the dashboard
+ * would draw a full monthly bar for a plan whose model tokens are untouched.
+ * A payload carrying only `TIME_LIMIT` rows therefore reports no quota at all,
+ * which is the honest answer rather than a fabricated one.
  */
 export function parseZaiQuotaLimits(data: Record<string, unknown> | null): ProviderQuota | null {
   const limits = Array.isArray(data?.limits) ? data.limits as unknown[] : null;
@@ -737,6 +675,8 @@ export function parseZaiQuotaLimits(data: Record<string, unknown> | null): Provi
   for (const raw of limits) {
     const row = asRecord(raw);
     if (!row) continue;
+    // Gate on row type before deriving a percentage: an MCP row must not even
+    // contribute a parsed value to a model-quota report.
     if (row.type !== "TOKENS_LIMIT" && row.type !== "CREDIT_LIMIT") continue;
     const resetAt = normalizeResetAt(row.nextResetTime);
     let percent = normalizePercent(row.percentage);
@@ -798,13 +738,20 @@ function parseZaiQuotaLegacyFields(data: Record<string, unknown> | null): Provid
 
 /**
  * Fetches the Z.AI GLM Coding Plan quota — on whichever region the provider
- * points at (api.z.ai or open.bigmodel.cn). Authenticates with the API key as
- * a Bearer token per Z.AI's API reference. The `limits` array shape is
+ * points at (api.z.ai or open.bigmodel.cn). The `limits` array shape is
  * preferred; older field-name payloads fall back to the legacy parser.
+ *
+ * Authentication differs by host (issue #1168). `api.z.ai` takes the API key as
+ * a Bearer token per Z.AI's API reference; `open.bigmodel.cn` expects the key
+ * directly in `Authorization` with no scheme prefix and answers a Bearer header
+ * with an auth error, which is why BigModel Coding Plan quota never rendered.
+ * The host is already canonicalized by `isCanonicalZaiBaseUrl` above and
+ * `redirect: "error"` stays set, so the bare key cannot travel to a lookalike
+ * host or follow a redirect off-origin.
  */
 async function fetchZaiQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalZaiBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const normalized = normalizedBaseUrl(config.baseUrl);
   const monitorHost = normalized === ZAI_BASE_URL || normalized === `${ZAI_BASE_URL}/api/coding/paas/v4`
@@ -826,10 +773,14 @@ async function fetchZaiQuota(provider: string, config: OcxProviderConfig): Promi
   const data = asRecord(body.data) ?? body;
   if (Array.isArray(data?.limits)) {
     const quota = parseZaiQuotaLimits(data);
+    // A well-formed `limits[]` we fully understood is authoritative even when it yields no
+    // model window — for example a plan reporting only the monthly MCP `TIME_LIMIT` row.
+    // Returning `null` here would preserve the previous token windows for up to 30 minutes
+    // and keep quota-aware routing acting on a report the provider has already superseded.
     return quota ? report(provider, "zai:quota-limit", quota) : AUTHORITATIVE_EMPTY_QUOTA;
   }
-  const quota = parseZaiQuotaLegacyFields(data);
-  return quota ? report(provider, "zai:quota-limit", quota) : null;
+  const legacy = parseZaiQuotaLegacyFields(data);
+  return legacy ? report(provider, "zai:quota-limit", legacy) : null;
 }
 
 /**
@@ -843,7 +794,7 @@ async function fetchZaiQuota(provider: string, config: OcxProviderConfig): Promi
  */
 async function fetchMinimaxQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalMinimaxBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const cnHost = normalizedBaseUrl(config.baseUrl)?.startsWith("https://api.minimaxi.com");
   const remainsUrl = cnHost ? "https://api.minimaxi.com/v1/token_plan/remains" : MINIMAX_REMAINS_URL;
@@ -887,7 +838,7 @@ async function fetchMinimaxQuota(provider: string, config: OcxProviderConfig): P
  */
 async function fetchMoonshotQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalMoonshotBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const host = normalizedBaseUrl(config.baseUrl)?.startsWith("https://api.moonshot.cn") ? "https://api.moonshot.cn/v1" : MOONSHOT_BASE_URL;
   const response = await fetch(`${host}/users/me/balance`, {
@@ -931,7 +882,7 @@ async function fetchMoonshotQuota(provider: string, config: OcxProviderConfig): 
  */
 async function fetchVeniceQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalVeniceBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const response = await fetch(`${VENICE_BASE_URL}/billing/balance`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
@@ -974,7 +925,7 @@ async function fetchVeniceQuota(provider: string, config: OcxProviderConfig): Pr
  */
 async function fetchSyntheticQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalSyntheticBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const response = await fetch(`${SYNTHETIC_BASE_URL}/quotas`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
@@ -1022,7 +973,7 @@ async function fetchSyntheticQuota(provider: string, config: OcxProviderConfig):
  */
 async function fetchDeepInfraQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalDeepInfraBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const response = await fetch(`${DEEPINFRA_BASE_URL}/payment/checklist?compute_owed=true`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
@@ -1064,7 +1015,7 @@ async function fetchDeepInfraQuota(provider: string, config: OcxProviderConfig):
  */
 async function fetchNeuralwattQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
   if (!isCanonicalNeuralwattBaseUrl(config.baseUrl)) return null;
-  const apiKey = resolveEnvValue(config.apiKey)?.trim();
+  const apiKey = resolveProviderApiKey(config.apiKey)?.trim();
   if (!apiKey) return null;
   const response = await fetch(`${NEURALWATT_BASE_URL}/quota`, {
     headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
@@ -1178,12 +1129,7 @@ async function fetchChatGptForwardQuota(
   }
   const activeUsable = !!active && !active.paused && active.needsReauth !== true;
   const quota = activeUsable && active?.quota
-    ? {
-        ...active.quota,
-        fiveHourPercent: active.quota.fiveHourPercent ?? active.quota.shortPercent,
-        fiveHourResetAt: active.quota.fiveHourResetAt ?? active.quota.shortResetAt,
-        updatedAt: active.quota.updatedAt ?? Date.now(),
-      } as CodexCapacityQuota
+    ? { ...active.quota, updatedAt: active.quota.updatedAt ?? Date.now() } as CodexCapacityQuota
     : null;
   const quotaFresh = !!quota
     && Number.isFinite(quota.updatedAt)
@@ -1251,7 +1197,10 @@ export function parseXaiCreditsResponse(value: unknown): { percent: number; rese
     percent = normalized;
   }
   const resetAt = normalizeResetAt(period.end);
-  return { percent, ...(resetAt !== undefined ? { resetAt } : {}) };
+  return {
+    percent,
+    ...(resetAt !== undefined ? { resetAt } : {}),
+  };
 }
 
 async function fetchXaiWeeklyCredits(accessToken: string, userId: string): Promise<ProviderQuota | null> {
@@ -1434,20 +1383,44 @@ async function fetchAnthropicQuota(provider: string): Promise<ProviderQuotaRepor
   return report(provider, "anthropic:oauth-usage", quota);
 }
 
+/**
+ * Provider-level Kiro row: the active account's usage, shown on the Providers page.
+ *
+ * The per-account cache is seeded from the same probe so opening that page does not read
+ * the active account twice, and the account id is captured before the await so a
+ * concurrent account switch cannot file this answer under the wrong account.
+ */
+async function fetchKiroQuota(provider: string): Promise<ProviderQuotaReport | null> {
+  const probedAccountId = getAccountSet("kiro")?.activeAccountId;
+  if (!probedAccountId) return null;
+  const probedAccountKey = accountCacheKey("kiro", probedAccountId);
+  const writerGeneration = captureConfigGeneration();
+  let snapshot: KiroUsageSnapshot | null;
+  try {
+    snapshot = await fetchKiroUsageSnapshot(await kiroUsageContextForAccount(probedAccountId));
+  } catch {
+    return null;
+  }
+  if (!snapshot) return null;
+  if (mayCommitAccountQuotaKey(probedAccountKey, writerGeneration)) {
+    accountQuotaCache.set(probedAccountKey, { ts: Date.now(), quota: snapshot.quota });
+    commitKiroAccountUsageState(probedAccountKey, snapshot);
+  }
+  return report(provider, "kiro:usage-limits", snapshot.quota);
+}
+
 // ---------------------------------------------------------------------------
 // Per-account quota (multiauth)
 // ---------------------------------------------------------------------------
 
 /**
- * Anthropic reports usage per CREDENTIAL, so every logged-in account can be probed with its
- * own bearer token — the active-account selection and the local usage log are irrelevant here.
- * Mirrors the Codex pool behaviour (codex/auth-api.ts:fetchPoolAccountQuota), including a
- * per-account TTL so N accounts cost at most N upstream calls per window.
- *
- * The TTL is deliberately longer than the provider-level one: this path multiplies by account
- * count, and Anthropic rate-limits the usage endpoint (observed 429 under repeated probing).
+ * Anthropic and Kiro both report usage per CREDENTIAL, so every logged-in account can be
+ * probed with its own bearer token — the active-account selection and the local usage log
+ * are irrelevant here. Mirrors the Codex pool behaviour
+ * (codex/auth-api.ts:fetchPoolAccountQuota), including a per-account TTL so N accounts cost
+ * at most N upstream calls per window. `ACCOUNT_QUOTA_TTL_MS` lives in `quota-wire.ts`
+ * because the Kiro exhaustion reader applies the same staleness bound.
  */
-const ACCOUNT_QUOTA_TTL_MS = 10 * 60_000;
 type AccountQuotaCacheEntry = {
   ts: number;
   quota: ProviderQuota | null;
@@ -1455,6 +1428,31 @@ type AccountQuotaCacheEntry = {
   unavailable?: true;
 };
 const accountQuotaCache = new Map<string, AccountQuotaCacheEntry>();
+
+/**
+ * Seed the cache from the last run, once.
+ *
+ * Without this a restart forgets every measurement, so the pool opens its next turn with
+ * no idea which account has room — the exact blindness pre-dispatch selection exists to
+ * remove. A hydrated row is still subject to the ordinary TTL, so it orders the first
+ * request and is replaced by a live probe immediately after.
+ */
+let diskHydrated = false;
+function hydrateAccountQuotaCache(): void {
+  if (diskHydrated) return;
+  diskHydrated = true;
+  for (const [key, quota] of readPersistedAccountQuotas()) {
+    if (!accountQuotaCache.has(key)) accountQuotaCache.set(key, { ts: quota.updatedAt, quota });
+  }
+}
+
+function persistAccountQuotaCache(): void {
+  schedulePersistAccountQuotas(function* () {
+    for (const [key, entry] of accountQuotaCache) {
+      if (entry.quota) yield [key, entry.quota] as [string, ProviderQuota];
+    }
+  });
+}
 const accountQuotaInflight = new Map<string, Promise<AccountQuotaCacheEntry>>();
 let lastReconciledGeneration = 0;
 let liveAccountQuotaKeys = new Set<string>();
@@ -1531,10 +1529,14 @@ export function reconcileProviderAccountQuotaRows(context: GenerationContext): n
     accountQuotaCache.delete(key);
     removed += 1;
   }
+  // Kiro exhaustion rows are keyed identically, so they retire with their quota row; a
+  // verdict outliving its account would hand the replacement a cooldown it never earned.
+  removed += reconcileKiroAccountUsageState(context.oauthAccountKeys);
   if (cache) {
     const reports = cache.response.reports.filter(report => context.providerNames.has(report.provider));
     removed += cache.response.reports.length - reports.length;
     cache = { ...cache, response: { ...cache.response, reports } };
+    replaceCachedProviderQuotas(reports);
   }
   liveAccountQuotaKeys = new Set(context.oauthAccountKeys);
   liveProviderQuotaKeys = new Set(context.providerNames);
@@ -1555,17 +1557,22 @@ export function clearAccountQuotaCache(provider?: string): void {
     accountQuotaCache.clear();
     accountQuotaInflight.clear();
     clearKiroAccountUsageState();
+    // A cleared cache must not be re-seeded from the file it was just cleared of, and any
+    // pending write of the old rows is abandoned.
+    diskHydrated = false;
+    cancelPendingAccountQuotaPersist();
     return;
   }
   const prefix = `${provider}\u0000`;
   for (const key of [...accountQuotaCache.keys()]) {
     if (key.startsWith(prefix)) accountQuotaCache.delete(key);
   }
+  clearKiroAccountUsageState(prefix);
   // Drop in-flight probes too so a late resolve cannot repopulate after logout/remove.
   for (const key of [...accountQuotaInflight.keys()]) {
     if (key.startsWith(prefix)) accountQuotaInflight.delete(key);
   }
-  if (provider === "kiro") clearKiroAccountUsageState(prefix);
+  persistAccountQuotaCache();
 }
 
 /**
@@ -1604,24 +1611,35 @@ async function fetchAccountQuota(
 
   const probe = (async (): Promise<AccountQuotaCacheEntry> => {
     try {
-      let quota: ProviderQuota | null = null;
+      let quota: ProviderQuota | null;
       let kiroSnapshot: KiroUsageSnapshot | null = null;
       if (provider === "kiro") {
+        // Kiro resolves the bearer and its routing metadata from ONE account-scoped
+        // snapshot. It deliberately does not use getTokenForAccountQuotaProbe: that
+        // helper refuses to refresh a background `local-cli` slot because Anthropic's
+        // lock can adopt a mismatched Claude CLI identity, but Kiro marks every
+        // CLI-imported credential `local-cli`, so the same rule would blank the quota of
+        // every inactive pool account the moment its token expired.
         kiroSnapshot = await fetchKiroUsageSnapshot(await kiroUsageContextForAccount(accountId));
         quota = kiroSnapshot?.quota ?? null;
-      } else if (provider === "anthropic") {
+      } else {
         const token = await getTokenForAccountQuotaProbe(provider, accountId);
-        quota = await fetchAnthropicUsageQuota(token);
-      } else if (provider === "google-antigravity") {
-        quota = await fetchAntigravityAccountQuota(accountId);
-      } else if (provider === "command-code") {
-        const token = await getTokenForAccountQuotaProbe(provider, accountId);
-        const res = await fetchCommandCodeUsageQuota(token);
-        quota = res === TERMINAL_QUOTA_FAILURE ? null : res;
-      } else if (provider === "cursor") {
-        const token = await getTokenForAccountQuotaProbe(provider, accountId);
-        const res = await fetchCursorUsageQuota(token);
-        quota = res?.quota ?? null;
+        if (provider === "google-antigravity") {
+          // Per-account Gem/Cla windows (#1082). The project id is part of the stored
+          // credential; without it the probe cannot be made, and that is "unavailable",
+          // never 0%.
+          const projectId = getAccountCredential(provider, accountId)?.projectId;
+          if (!projectId) throw new Error("antigravity account has no project id");
+          quota = await fetchAntigravityUsageQuota(token, projectId);
+        } else if (provider === "command-code") {
+          const res = await fetchCommandCodeUsageQuota(token);
+          quota = res === TERMINAL_QUOTA_FAILURE ? null : res;
+        } else if (provider === "cursor") {
+          const res = await fetchCursorUsageQuota(token);
+          quota = res?.quota ?? null;
+        } else {
+          quota = await fetchAnthropicUsageQuota(token);
+        }
       }
       if (!quota) {
         // Preserve last-good bars and mark unavailable; advance TTL so failures
@@ -1641,6 +1659,8 @@ async function fetchAccountQuota(
       const entry: AccountQuotaCacheEntry = { ts: Date.now(), quota };
       if (mayCommitAccountQuotaKey(key, writerGeneration)) {
         accountQuotaCache.set(key, entry);
+        // Exhaustion state rides the SAME commit guard as the quota row: a probe from a
+        // superseded config generation must not publish either half.
         if (provider === "kiro") commitKiroAccountUsageState(key, kiroSnapshot);
         sweepExpiredOnWrite(entry.ts);
       }
@@ -1653,7 +1673,6 @@ async function fetchAccountQuota(
       };
       if (mayCommitAccountQuotaKey(key, writerGeneration)) {
         accountQuotaCache.set(key, entry);
-        if (provider === "kiro") commitKiroAccountUsageState(key, null);
         sweepExpiredOnWrite(entry.ts);
       }
       return entry;
@@ -1813,7 +1832,7 @@ async function resolveKimiQuotaBearer(config: OcxProviderConfig): Promise<string
   // ACTIVE key only: silently walking apiKeyPool when the primary env reference is
   // unresolved would render a quota bar for a DIFFERENT account than the one routing
   // requests — a wrong meter is worse than no meter.
-  const primary = resolveEnvValue(config.apiKey)?.trim();
+  const primary = resolveProviderApiKey(config.apiKey)?.trim();
   return primary || null;
 }
 
@@ -1840,9 +1859,8 @@ function parseCommandCodeWindow(value: unknown): { percent: number; resetAt?: nu
   if (!row) return null;
   const cap = toFiniteNumber(row.cap);
   const used = toFiniteNumber(row.used);
-  const percent = cap !== undefined && used !== undefined && cap > 0 && used >= 0
-    ? normalizePercent((used / cap) * 100)
-    : normalizePercent(row.percent);
+  if (cap === undefined || used === undefined || cap <= 0 || used < 0) return null;
+  const percent = normalizePercent((used / cap) * 100);
   if (percent === undefined) return null;
   const resetAt = quotaResetAt(row);
   return { percent, ...(resetAt !== undefined ? { resetAt } : {}) };
@@ -1921,7 +1939,7 @@ async function resolveCommandCodeQuotaBearer(config: OcxProviderConfig): Promise
   }
   // ACTIVE key only: a quota bar for a different account than the one routing
   // requests is a wrong meter, not a helpful one.
-  return resolveEnvValue(config.apiKey)?.trim() || null;
+  return resolveProviderApiKey(config.apiKey)?.trim() || null;
 }
 
 /**
@@ -2195,159 +2213,103 @@ function antigravityUsedPercent(quotaInfo: Record<string, unknown>): number | un
   const remaining = normalizePercent(toFiniteNumber(quotaInfo.remainingFraction) !== undefined
     ? toFiniteNumber(quotaInfo.remainingFraction)! * 100
     : toFiniteNumber(quotaInfo.remainingPercentage) !== undefined
-      ? toFiniteNumber(quotaInfo.remainingPercentage)!
+      ? toFiniteNumber(quotaInfo.remainingPercentage)! * 100
       : undefined);
   if (remaining === undefined) return undefined;
   return normalizePercent(100 - remaining);
 }
 
-async function fetchAntigravityAccountQuota(accountId: string): Promise<ProviderQuota | null> {
-  let snapshot: OAuthAccessSnapshot;
-  try {
-    snapshot = await getValidAccessTokenSnapshotForAccount("google-antigravity", accountId);
-  } catch {
-    return null;
-  }
-  if (!snapshot.projectId) return null;
-  const entry = getProviderRegistryEntry("google-antigravity");
-  const baseUrl = (entry?.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
-  const providerConfig: Pick<OcxProviderConfig, "adapter" | "authMode" | "baseUrl" | "googleMode" | "tlsProfile"> = {
-    adapter: "google",
-    authMode: "oauth",
-    googleMode: "cloud-code-assist",
-    baseUrl,
-  };
-  const fetchImpl = providerTlsFetch("google-antigravity", providerConfig, globalThis.fetch);
-  let liveQuota: ProviderQuota | null;
-  try {
-    liveQuota = await fetchAntigravityLiveQuota({
-      accessToken: snapshot.accessToken,
-      projectId: snapshot.projectId,
-      baseUrl,
-      timeoutMs: REQUEST_TIMEOUT_MS,
-      fetchImpl,
-    });
-  } catch (error) {
-    if (error instanceof AntigravityQuotaRpcError && isTerminalAntigravityQuotaStatus(error.status)) {
-      return null;
-    }
-    liveQuota = null;
-  }
-  if (!liveQuota) return null;
-  return {
-    ...liveQuota,
-    updatedAt: Date.now(),
-  };
-}
-
-async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
-  let snapshot: OAuthAccessSnapshot;
-  try {
-    snapshot = await getValidAccessTokenSnapshot("google-antigravity");
-  } catch {
-    return null;
-  }
-  if (!snapshot.projectId) return null;
-  const baseUrl = (config.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
-  const fetchImpl = providerTlsFetch(provider, config, globalThis.fetch);
-  let liveQuota: ProviderQuota | null;
-  try {
-    liveQuota = await fetchAntigravityLiveQuota({
-      accessToken: snapshot.accessToken,
-      projectId: snapshot.projectId,
-      baseUrl,
-      timeoutMs: REQUEST_TIMEOUT_MS,
-      fetchImpl,
-    });
-  } catch (error) {
-    if (error instanceof AntigravityQuotaRpcError && isTerminalAntigravityQuotaStatus(error.status)) {
-      return TERMINAL_QUOTA_FAILURE;
-    }
-    liveQuota = null;
-  }
+/** Gem/Cla windows from a `fetchAvailableModels` body; shared by the provider and account probes. */
+function antigravityWindowsFromModels(body: Record<string, unknown> | null): ProviderQuotaWindow[] {
+  const models = asRecord(body?.models);
+  if (!models) return [];
 
   const windows = new Map<string, ProviderQuotaWindow>();
-  for (const [index, host] of antigravityHostCandidates(baseUrl).entries()) {
-    if (!isAntigravityHttpsHost(host)) continue;
-    try {
-      const response = await fetchImpl(`${host}/v1internal:fetchAvailableModels`, {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          "User-Agent": antigravityUserAgent(),
-          Authorization: `Bearer ${snapshot.accessToken}`,
-        },
-        body: JSON.stringify({ project: snapshot.projectId }),
-        redirect: "error",
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  for (const [modelId, rawModelInfo] of Object.entries(models)) {
+    const modelInfo = asRecord(rawModelInfo);
+    if (!modelInfo) continue;
+    for (const quotaInfo of quotaInfoEntries(modelInfo)) {
+      const label = classifyAntigravityFamily(modelId, modelInfo, quotaInfo);
+      if (!label || windows.has(label)) continue;
+      const percent = antigravityUsedPercent(quotaInfo);
+      if (percent === undefined) continue;
+      windows.set(label, {
+        label,
+        percent,
+        ...(normalizeResetAt(quotaInfo.resetTime) !== undefined ? { resetAt: normalizeResetAt(quotaInfo.resetTime) } : {}),
       });
-      if (!response.ok) {
-        if (index === 0 && (response.status === 404 || response.status === 503)) continue;
-        break;
-      }
-      const body = asRecord(await readQuotaJson(response));
-      const models = asRecord(body?.models);
-      if (models) {
-        for (const [modelId, rawModelInfo] of Object.entries(models)) {
-          const modelInfo = asRecord(rawModelInfo);
-          if (!modelInfo) continue;
-          for (const quotaInfo of quotaInfoEntries(modelInfo)) {
-            const label = classifyAntigravityFamily(modelId, modelInfo, quotaInfo);
-            if (!label || windows.has(label)) continue;
-            const percent = antigravityUsedPercent(quotaInfo);
-            if (percent === undefined) continue;
-            windows.set(label, {
-              label,
-              percent,
-              ...(normalizeResetAt(quotaInfo.resetTime) !== undefined ? { resetAt: normalizeResetAt(quotaInfo.resetTime) } : {}),
-            });
-          }
-        }
-      }
-      break;
-    } catch {
-      if (index === 0) continue;
-      break;
     }
-  }
-
-  if (liveQuota) {
-    const liveWindows = liveQuota.customWindows ?? [];
-    const catalogClaude = windows.get("Cla");
-    const customWindows = [
-      ...liveWindows,
-      ...(liveWindows.some(window => window.label === "Cla") || !catalogClaude ? [] : [catalogClaude]),
-    ];
-    return report(provider, "google-antigravity:retrieveUserQuota", {
-      ...liveQuota,
-      ...(customWindows.length > 0 ? { customWindows } : {}),
-      updatedAt: Date.now(),
-    });
   }
 
   const customWindows = ["Gem", "Cla"].flatMap(label => {
     const window = windows.get(label);
     return window ? [window] : [];
   });
+  return customWindows;
+}
+
+const ANTIGRAVITY_ACCOUNT_QUOTA_BASE = "https://daily-cloudcode-pa.googleapis.com";
+let antigravityOutboundDependencies: ProviderOutboundDependencies = {};
+
+/** Test seam: inject resolver/pinned transport for the per-account Antigravity probe. */
+export function setAntigravityAccountQuotaTransportForTests(dependencies: ProviderOutboundDependencies | null): void {
+  antigravityOutboundDependencies = dependencies ?? {};
+}
+
+/**
+ * Per-account Antigravity quota (#1082). Always probes Google's own Cloud Code Assist host
+ * through the pinned provider-outbound transport: a configured `baseUrl` is a routing choice
+ * for requests, not a second source of Google's accounting for a stored credential, and fixing
+ * the destination keeps the `provider\0accountId` cache identity exact across config changes.
+ * A redirect or non-2xx yields null (unavailable), never a partial row.
+ */
+export async function fetchAntigravityUsageQuota(accessToken: string, projectId: string): Promise<ProviderQuota | null> {
+  const url = `${ANTIGRAVITY_ACCOUNT_QUOTA_BASE}/v1internal:fetchAvailableModels`;
+  const response = await providerOutboundPost("google-antigravity", { baseUrl: ANTIGRAVITY_ACCOUNT_QUOTA_BASE }, url, {
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": antigravityUserAgent(),
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ project: projectId }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  }, antigravityOutboundDependencies);
+  if (await providerRedirectError(response, url)) return null;
+  if (!response.ok) return null;
+  const customWindows = antigravityWindowsFromModels(asRecord(await readQuotaJson(response)));
+  if (customWindows.length === 0) return null;
+  return { customWindows, updatedAt: Date.now() };
+}
+
+async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
+  const credential = getCredential("google-antigravity");
+  if (!credential?.projectId) return null;
+  let accessToken: string;
+  try {
+    accessToken = await getValidAccessToken("google-antigravity");
+  } catch {
+    return null;
+  }
+  const baseUrl = (config.baseUrl || ANTIGRAVITY_ACCOUNT_QUOTA_BASE).replace(/\/+$/, "");
+  const response = await fetch(`${baseUrl}/v1internal:fetchAvailableModels`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": antigravityUserAgent(),
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ project: credential.projectId }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) return null;
+  const customWindows = antigravityWindowsFromModels(asRecord(await readQuotaJson(response)));
   if (customWindows.length === 0) return null;
   return report(provider, "google-antigravity:fetchAvailableModels", {
     customWindows,
     updatedAt: Date.now(),
   });
-}
-
-async function fetchAiStudioQuota(name: string, _provider: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
-  const now = Date.now();
-  return {
-    provider: name,
-    label: "Google AI Studio (Web)",
-    source: "Direct Session",
-    updatedAt: now,
-    quota: {
-      updatedAt: now,
-    },
-  };
 }
 
 async function maybeFetchProviderQuota(
@@ -2366,6 +2328,7 @@ async function maybeFetchProviderQuota(
     if (provider.authMode === "oauth" && name === "anthropic") return fetchAnthropicQuota(name);
     if (provider.authMode === "oauth" && name === "cursor") return fetchCursorQuota(name);
     if (provider.authMode === "oauth" && name === "google-antigravity") return fetchAntigravityQuota(name, provider);
+    if (provider.authMode === "oauth" && name === "kiro") return fetchKiroQuota(name);
     // Kimi Code `/usages` accepts OAuth or coding-plan API keys, but only on the canonical
     // host and only for real key auth — forward/local modes carry no credential of ours.
     if (provider.authMode === "oauth" && name === "kimi") return fetchKimiQuota(name, provider);
@@ -2425,9 +2388,6 @@ async function maybeFetchProviderQuota(
     if ((provider.authMode ?? "key") === "key" && name === "neuralwatt") {
       return fetchNeuralwattQuota(name, provider);
     }
-    if (provider.googleMode === "ai-studio-web" || name === "google-aistudio") {
-      return fetchAiStudioQuota(name, provider);
-    }
     return null;
   } catch {
     return null;
@@ -2466,6 +2426,10 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     const fresh = probeResults.filter((item): item is ProviderQuotaReport => (
       item !== null && item !== TERMINAL_QUOTA_FAILURE && item !== AUTHORITATIVE_EMPTY_QUOTA
     ));
+    // Both sentinels suppress the previous row. A terminal failure means the response was
+    // invalid; an authoritative empty means the response was valid and said there are no
+    // model windows. Either way the old row is no longer true, which is what separates them
+    // from `null` (told us nothing — keep the last-good row).
     const terminalFailures = new Set(
       Object.keys(config.providers).filter((_, index) => (
         probeResults[index] === TERMINAL_QUOTA_FAILURE
@@ -2516,6 +2480,7 @@ export async function fetchProviderQuotaReports(config: OcxConfig, forceRefresh 
     ) {
       const reports = response.reports.filter(item => mayCommitProviderQuotaKey(item.provider, writerGeneration));
       cache = { key, ts: Date.now(), response: { ...response, reports } };
+      replaceCachedProviderQuotas(reports);
     }
     return response;
   })();

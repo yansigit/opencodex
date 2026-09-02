@@ -1,12 +1,14 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isConnectionRefused, isUncleanExitEvidence, proxyHealthFailureReason, resolveStatusPid, selectListenTarget } from "../src/cli/status";
+import { findDeadPid } from "./helpers/dead-pid";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
@@ -68,6 +70,13 @@ describe("CLI status JSON", () => {
         };
         defaultProvider?: unknown;
         config?: { source?: unknown; error?: unknown };
+        connection?: {
+          state?: unknown;
+          serverUrl?: unknown;
+          apiKeyId?: unknown;
+          credentialFile?: unknown;
+          catalog?: unknown;
+        };
         service?: { summary?: unknown };
         codexShim?: { summary?: unknown };
         codexRuntime?: {
@@ -130,13 +139,17 @@ describe("CLI status JSON", () => {
       expect(typeof parsed.codexHome?.appCodexHome).toBe("string");
       expect(typeof parsed.codexHome?.mismatch).toBe("boolean");
       expect(parsed.codexHome?.warning === null || typeof parsed.codexHome?.warning === "string").toBe(true);
+      expect(parsed.connection).toMatchObject({
+        state: "disconnected",
+        credentialFile: "missing",
+      });
 
       const serialized = JSON.stringify(parsed).toLowerCase();
       for (const forbidden of ["apikey", "sk-test-secret", "token", "refreshtoken", "authorization", "email"]) {
         expect(serialized).not.toContain(forbidden);
       }
     } finally {
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -193,7 +206,7 @@ describe("CLI status JSON", () => {
       });
     } finally {
       resetCodexRuntimeResolveCacheForTests();
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -216,7 +229,7 @@ describe("CLI status JSON", () => {
       expect(result.stderr).toContain("Usage: ocx status [--json]");
       expect(result.stdout).toBe("");
     } finally {
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -239,7 +252,7 @@ describe("CLI status JSON", () => {
       expect(result.stderr).toContain("Usage: ocx status [--json]");
       expect(result.stdout).toBe("");
     } finally {
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -270,7 +283,7 @@ describe("CLI status JSON", () => {
       expect(serialized).not.toContain("sk-status-secret");
       expect(serialized).not.toContain("apiKey");
     } finally {
-      rmSync(opencodexHome, { recursive: true, force: true });
+      removeTreeWithRetry(opencodexHome);
     }
   });
 
@@ -429,14 +442,9 @@ describe("unclean prior exit evidence", () => {
  * drive the real CLI, so the field has to travel from disk to output.
  */
 describe("status reports stale process records end to end", () => {
-  // The Linux hosted runner can legitimately assign low PIDs such as 4242 while this
-  // parallel batch runs. INT_MAX is accepted by process.kill but cannot name a live
-  // process on the supported platforms, so these end-to-end fixtures stay deterministic.
-  const deadPid = 2_147_483_647;
-
   const seed = (home: string, opts: { pid?: number; runtime?: boolean; port: number }): void => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ port: opts.port, codexAutoStart: false }), "utf8");
-    const pid = opts.pid ?? deadPid;
+    const pid = opts.pid ?? findDeadPid();
     if (opts.pid !== 0) writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
     if (opts.runtime) {
       writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: opts.port, hostname: "127.0.0.1" }), "utf8");
@@ -473,7 +481,7 @@ describe("status reports stale process records end to end", () => {
       });
       expect(human.stdout).toContain("may have exited unexpectedly");
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -493,7 +501,7 @@ describe("status reports stale process records end to end", () => {
       });
       expect(human.stdout).not.toContain("may have exited unexpectedly");
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -507,7 +515,7 @@ describe("status reports stale process records end to end", () => {
       const parsed = JSON.parse(runStatusJson(home).stdout) as { proxy?: { staleProcessState?: unknown } };
       expect(parsed.proxy?.staleProcessState).toBe(false);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -524,7 +532,7 @@ describe("status reports stale process records end to end", () => {
     await new Promise<void>(resolve => { occupied.listen(0, "127.0.0.1", () => resolve()); });
     const occupiedPort = (occupied.address() as AddressInfo).port;
     try {
-      const pid = deadPid;
+      const pid = findDeadPid();
       writeFileSync(join(home, "config.json"), JSON.stringify({ port: occupiedPort, codexAutoStart: false }), "utf8");
       writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
       writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: freePort, hostname: "127.0.0.1" }), "utf8");
@@ -533,44 +541,7 @@ describe("status reports stale process records end to end", () => {
       expect(parsed.proxy?.staleProcessState).toBe(true);
     } finally {
       await new Promise<void>(resolve => { occupied.close(() => resolve()); });
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
-  });
-});
-
-describe("TLS-aware status URLs", () => {
-  test("selectListenTarget uses https and canonical public origin when tls is set", () => {
-    const target = selectListenTarget(
-      { port: 10443, hostname: "0.0.0.0", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
-      null,
-      null,
-    );
-    expect(target.healthUrl).toBe("https://127.0.0.1:10443/healthz");
-    expect(target.dashboardUrl).toBe("https://example.com");
-  });
-
-  test("selectListenTarget brackets IPv6 and uses https when tls set", () => {
-    const target = selectListenTarget(
-      { port: 10443, hostname: "::1", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
-      123,
-      { pid: 123, port: 10443, hostname: "::1" },
-    );
-    expect(target.healthUrl).toBe("https://[::1]:10443/healthz");
-    expect(target.dashboardUrl).toBe("https://example.com");
-  });
-
-  test("selectListenTarget maps 0.0.0.0 to 127.0.0.1 with https", () => {
-    const target = selectListenTarget(
-      { port: 10443, hostname: "0.0.0.0", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
-      null,
-      null,
-    );
-    expect(target.healthUrl).toBe("https://127.0.0.1:10443/healthz");
-  });
-
-  test("without tls dashboard stays http localhost", () => {
-    const target = selectListenTarget({ port: 10100, hostname: "0.0.0.0" }, null, null);
-    expect(target.healthUrl).toBe("http://127.0.0.1:10100/healthz");
-    expect(target.dashboardUrl).toBe("http://localhost:10100/");
   });
 });

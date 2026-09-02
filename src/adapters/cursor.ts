@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-import type { AdapterEvent, OcxParsedRequest, OcxProviderConfig } from "../types";
+import type { AdapterEvent, OcxProviderConfig } from "../types";
 import type { ProviderAdapter } from "./base";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
 import { cursorExecDeniedMessage, cursorRequestDeclaresFullAccess } from "./cursor/exec-policy";
-import { isCursorBenignCancelError, isCursorInvalidArgumentError, isCursorOverflowRemintCandidate, isCursorRootEnvelopeError, safeCursorErrorMessage, type CursorSizeContext } from "./cursor/cursor-errors";
+import { isCursorBenignCancelError, isCursorInvalidArgumentError, isCursorRootEnvelopeError, safeCursorErrorMessage, type CursorSizeContext } from "./cursor/cursor-errors";
 import { cursorCheckpointModelAffinityId, inferCursorContextWindow, isCursorExternalWireModel } from "./cursor/discovery";
 import { createCursorKvStore, type CursorKvStore } from "./cursor/kv-store";
 import { mapCursorServerMessage } from "./cursor/message-mapper";
@@ -12,6 +12,7 @@ import {
   cursorClientThreadOwner,
   cursorCoveredPrefixDigest,
   cursorInstructionDigest,
+  cursorRequestEmitsFastVariant,
 } from "./cursor/request-builder";
 import {
   createLiveCursorTransport,
@@ -26,15 +27,9 @@ import {
   invalidateCursorCheckpoint,
 } from "./cursor/checkpoint-store";
 import { debugProviderDiagnostic } from "../lib/debug";
+import { createAdapterTierMetadata } from "../providers/fastwire";
 import { estimateTokens } from "../lib/token-estimate";
-import {
-  cursorOverflowRemintScopeKey,
-  markCursorOverflowSurfaced,
-  recordCursorOverflowRemint,
-  rememberCursorThreadConversation,
-  shouldSkipCursorOverflowRemint,
-  shouldSurfaceCursorOverflowFirst,
-} from "./cursor/thread-continuity";
+import { rememberCursorThreadConversation } from "./cursor/thread-continuity";
 import { runCursorTurnWithRetry } from "./cursor/transport-retry";
 import { cursorRequestHasShellAlias, cursorRequestUsesCodeMode } from "./cursor/tool-definitions";
 import {
@@ -77,6 +72,11 @@ function safeCursorTransportError(err: unknown, sizeContext?: CursorSizeContext)
   if (err instanceof CursorMissingCredentialError) {
     return "Cursor live transport is enabled, but no Cursor access token is configured. Set provider.apiKey or OPENCODEX_CURSOR_TEST_TOKEN.";
   }
+  // A locally raised envelope rejection is already safe, specific, and actionable: it was composed
+  // here from our own measurements and contains no upstream text. Passing it through
+  // `safeCursorErrorMessage` would collapse it to the bare label "Cursor invalid request" (it
+  // matches the "invalid"/"exceeds" keyword branch) and discard the counts that tell the operator
+  // which limit was hit and by how much.
   if (isCursorRootEnvelopeError(err)) {
     return err instanceof Error ? `Cursor invalid request: ${err.message}` : "Cursor invalid request";
   }
@@ -98,17 +98,24 @@ function cursorRequestSizeContext(request: { modelId: string; system: string[]; 
   };
 }
 
-function assertCursorRequestSupported(parsed: OcxParsedRequest): void {
-  if (parsed.options.textFormat !== undefined || parsed._structuredOutput === true) {
-    throw new Error("Cursor does not support structured output");
-  }
-}
-
 export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAdapterDeps = {}): ProviderAdapter {
   return {
     name: "cursor",
 
-    validateRequest: assertCursorRequestSupported,
+    // Cursor emits Fast as a model variant, so the generic "no field emitted" fallback in
+    // adapters/registry.ts would report every Fast turn as downgraded. This recomputes the
+    // variant from the same pure inputs the builder uses: tierLogForRunTurn runs BEFORE
+    // runTurn, and createCursorRequest mints conversation ids, so rebuilding it here would
+    // describe a request that was never sent.
+    tierLogForRunTurn(parsed) {
+      const fast = cursorRequestEmitsFastVariant(parsed);
+      return createAdapterTierMetadata(
+        parsed.options.tierObservation,
+        parsed.options.tierDecision,
+        fast ? "cursor-variant" : null,
+        fast ? "fast" : null,
+      );
+    },
 
     buildRequest() {
       return {
@@ -127,7 +134,6 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
     },
 
     async runTurn(_parsed, incoming, emit) {
-      assertCursorRequestSupported(_parsed);
       if (incoming.abortSignal?.aborted) {
         emit({ type: "error", message: "Cursor turn was aborted before start." });
         return;
@@ -240,14 +246,6 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
         };
 
         const runOnce = async (activeRequest: ReturnType<typeof createCursorRequest>) => {
-          const effort = _parsed.options.reasoning;
-          const isHeavyReasoning = effort === "high"
-            || effort === "max"
-            || effort === "xhigh"
-            || activeRequest.modelId.includes("grok-4.6")
-            || activeRequest.modelId.includes("kimi-k3")
-            || activeRequest.modelId.includes("opus-4-8");
-          const heartbeatOnlyMs = isHeavyReasoning ? 300_000 : 180_000;
           // Envelope echo quarantine (devlog 260826 gap-10): external full-replay continuations
           // whose trailing input is a tool result sometimes ECHO the replayed "[Tool Result]"
           // envelope as assistant text (kimi-k3 ~30-40% of multi-round probes). Hold the first
@@ -297,7 +295,6 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
               translatorBudget: incoming.translatorBudget,
               requestDeclaresFullAccess: cursorRequestDeclaresFullAccess(activeRequest),
               sessionId: activeRequest.conversationId,
-              streamHeartbeatOnlyFailMs: heartbeatOnlyMs,
               ...(incoming.providerFetch ? { fetch: incoming.providerFetch } : {}),
             },
             activeRequest,
@@ -396,32 +393,9 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
           );
         };
 
-        const overflowRemintBaseId = _parsed._clientThreadId
-          ? undefined
-          : (previousConversationId ?? _parsed._cursorConversationId);
-
-        const remintConversationId = (failedConversationId: string) => {
-          lastTransport = undefined;
-          _parsed._cursorConversationId = undefined;
-          const next = createCursorRequest(_parsed, { forceFreshConversation: true });
-          rekeyContextUsage(failedConversationId, next.conversationId);
-          _parsed._cursorConversationId = next.conversationId;
-          const threadOwner = cursorClientThreadOwner(_parsed);
-          if (threadOwner && _parsed._cursorIsolateConversation !== true) {
-            rememberCursorThreadConversation(
-              threadOwner,
-              next.conversationId,
-              _parsed._cursorIdentityScope,
-            );
-          }
-          return next;
-        };
-
-        for (;;) {
-          try {
-            await runOnce(request);
-            break;
-          } catch (err) {
+        try {
+          await runOnce(request);
+        } catch (err) {
           const outputGuardRetryText =
             err instanceof CursorToolResultEchoError
               ? CURSOR_ECHO_RETRY_CONTINUATION_TEXT
@@ -465,34 +439,7 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
               );
             }
             await runOnce(request);
-            break;
           } else {
-            const overflowRemintSafe =
-              !lastRawIsToolResult
-              && !emittedOutput
-              && !replayUnsafe
-              && request.contextUsageStoreCheckpoints !== false
-              && !incoming.abortSignal?.aborted;
-            const overflowScopeKey = cursorOverflowRemintScopeKey(
-              _parsed,
-              overflowRemintBaseId ?? request.conversationId,
-            );
-            if (
-              overflowScopeKey
-              && overflowRemintSafe
-              && isCursorOverflowRemintCandidate(err, requestSizeContext)
-            ) {
-              if (shouldSkipCursorOverflowRemint(overflowScopeKey)) throw err;
-              if (shouldSurfaceCursorOverflowFirst(overflowScopeKey)) {
-                markCursorOverflowSurfaced(overflowScopeKey);
-                throw err;
-              }
-              if (!recordCursorOverflowRemint(overflowScopeKey)) throw err;
-              if (inheritedCheckpointRef) invalidateCursorCheckpoint(inheritedCheckpointRef);
-              request = remintConversationId(request.conversationId);
-              continue;
-            }
-
             // One-shot fallback for external-model Connect invalid_argument before any
             // non-heartbeat output. Retries apply only to safe plain-user turns; tool-result
             // resumes, local exec/MCP side effects, and already-emitted output fail closed.
@@ -506,11 +453,25 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
             ) {
               throw err;
             }
-            request = remintConversationId(request.conversationId);
+            const failedConversationId = request.conversationId;
+            lastTransport = undefined;
+            _parsed._cursorConversationId = undefined;
+            request = createCursorRequest(_parsed, { forceFreshConversation: true });
+            rekeyContextUsage(failedConversationId, request.conversationId);
+            _parsed._cursorConversationId = request.conversationId;
+            // Persist recovery for store:false clients that send any stable Cursor thread owner, so
+            // the next turn does not recompute the stale deterministic thread hash. Isolated helper /
+            // compaction turns must not park their throwaway id under the parent or Desktop owner.
+            const threadOwner = cursorClientThreadOwner(_parsed);
+            if (threadOwner && _parsed._cursorIsolateConversation !== true) {
+              rememberCursorThreadConversation(
+                threadOwner,
+                request.conversationId,
+                _parsed._cursorIdentityScope,
+              );
+            }
             await runOnce(request);
-            break;
           }
-        }
         }
         if (
           request.checkpointInvalidationReason
@@ -549,6 +510,9 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
           ...(isTranslatorBudgetExceededError(err)
             ? { status: 502, errorType: "upstream_error", code: "translation_buffer_limit" }
             : {}),
+          // A local envelope rejection is a client error with a stable code, and the caller needs
+          // that code to distinguish "this conversation cannot be sent" from a transient upstream
+          // fault. Without this the class was flattened to a bare message and the code was lost.
           ...(isCursorRootEnvelopeError(err)
             ? { status: 400, errorType: "invalid_request_error", code: "cursor_root_envelope_limit", retryable: false }
             : {}),

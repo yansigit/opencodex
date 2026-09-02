@@ -6,7 +6,7 @@
  * config.json, and a fresh `loadConfig()` reads it back.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../src/config";
@@ -14,7 +14,7 @@ import { handleManagementAPI, type ManagementApiDeps } from "../src/server/manag
 import { invalidateStartupHealthCache } from "../src/server/startup-health-cache";
 import type { OcxConfig } from "../src/types";
 import { startupHealthFixture } from "./helpers/startup-health";
-import { isolatedDiskManagementPersistence } from "./helpers/management-auth";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let TEST_DIR = "";
 const previousHome = process.env.OPENCODEX_HOME;
@@ -40,10 +40,7 @@ function settingsRequest(config: OcxConfig, body?: unknown): Promise<Response | 
       headers: { "content-type": "application/json", host: "127.0.0.1:10100" },
       body: JSON.stringify(body),
     });
-  return handleManagementAPI(req, new URL(req.url), config, {
-    ...isolatedDiskManagementPersistence(),
-    getCachedStartupHealth: readTestStartupHealth,
-  });
+  return handleManagementAPI(req, new URL(req.url), config, { getCachedStartupHealth: readTestStartupHealth });
 }
 
 beforeEach(() => {
@@ -57,7 +54,7 @@ afterEach(() => {
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   if (TEST_DIR && existsSync(TEST_DIR)) {
-    try { rmSync(TEST_DIR, { recursive: true, force: true }); } catch { /* Windows handle retention */ }
+    try { removeTreeWithRetry(TEST_DIR); } catch { /* Windows handle retention */ }
   }
 });
 

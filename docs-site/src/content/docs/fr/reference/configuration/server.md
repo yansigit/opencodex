@@ -11,16 +11,15 @@ exécute des fonctionnalités d'assistance autour des demandes du fournisseur.
 | Champ | Type | Par défaut | Signification |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Port d'écoute proxy. |
-| `hostname?` | `string` | `"127.0.0.1"` | Adresse de liaison. Les liaisons hors bouclage nécessitent TLS et un identifiant du plan de données. |
-| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | Sert HTTPS avec les fichiers de certificat et de clé privée lisibles fournis. `publicOrigin` doit être l’origine HTTPS exacte utilisée par les URL client. |
+| `hostname?` | `string` | `"127.0.0.1"` | Adresse de liaison. Les liaisons hors bouclage nécessitent `OPENCODEX_API_AUTH_TOKEN`. |
 | `proxy?` | `string` | — | URL du proxy HTTP(S) sortant ou `${ENV_VAR}`. Appliquée à `HTTP_PROXY` / `HTTPS_PROXY` uniquement lorsque ces variables ne sont pas définies ; le bouclage reste dans `NO_PROXY`. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Active une nouvelle tentative Responses identique lorsqu’une réponse ne contient ni texte ni appel d’outil. Cette tentative peut être facturée. `OCX_EMPTY_COMPLETION_RETRY=0` la désactive sans modifier la configuration ; les combinaisons et les tours de compactage routés restent exclus. |
 | `stallTimeoutSec?` | `number` | `300` | Nombre de secondes sans données en amont avant `response.incomplete`. Minimum : 1. |
 | `connectTimeoutMs?` | `number` | `200000` | Délai maximal par tentative pour DNS/TCP/TLS et les en-têtes finaux ; il prend fin avant la génération du corps. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Délai de vidange gracieux avant l’annulation des tours actifs. |
-| `websockets?` | `boolean` | `false` | Annonce et autorise la route WebSocket Responses destinée aux clients. La valeur false maintient les clients sur HTTP/SSE. L’optimisation WebSocket canonique vers ChatGPT est une option distincte : `wsUpstream` du fournisseur est prioritaire (`true` active, `false` désactive) ; s’il est absent, `OCX_CODEX_WS_UPSTREAM=true` ou `1` l’active, tandis que `false`/`0`, une valeur absente ou invalide maintiennent HTTP/SSE. |
+| `websockets?` | `boolean` | `false` | Annonce et autorise la route WebSocket Responses destinée aux clients. La valeur false maintient les clients sur HTTP/SSE ; elle ne désactive pas une optimisation WebSocket canonique admissible vers ChatGPT en amont. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Origines exactes supplémentaires autorisées par CORS. Les origines de bouclage sont toujours autorisées. Les origines d'extensions de navigateur basées sur l'autorité telles que `chrome-extension://<extension-id>` sont prises en charge ; `*` n'est pas un caractère générique. Firefox et Safari régénèrent l'extension UUID (par installation / par lancement de navigateur), mettez donc à jour l'entrée lorsque l'origine change. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Identifiants `ocx_…` générés pour l’authentification du plan de données sur les liaisons hors bouclage. Gérés depuis le tableau de bord ; les routes de gestion exigent le jeton administrateur distinct. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Identifiants `ocx_…` générés, acceptés par l'API de gestion et l'authentification du plan de données sur les liaisons hors bouclage. Gérés depuis le tableau de bord. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | désactivé | Politique facultative de nettoyage des sessions archivées. Elle n'est jamais activée implicitement. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Plafond en Mio pour les journaux, caches, objets binaires et charges utiles de continuation évincables qui appartiennent à l'application. Plage : 64–4096 ; il ne s'agit pas d'un plafond RSS. |
 | `codexAutoStart?` | `boolean` | `true` | Autorise le lanceur intermédiaire Codex à exécuter `ocx ensure` avant de démarrer Codex. Avec la valeur false, cette vérification ne fait rien. |
@@ -38,18 +37,15 @@ La commande réétiquette chaque ligne `opencodex` contenant un message utilisat
 ## Accès à distance
 
 La liaison par défaut à `127.0.0.1` est limitée au bouclage. Une adresse hors bouclage telle que `0.0.0.0`
-exige TLS et un identifiant pour le plan de données : `OPENCODEX_API_AUTH_TOKEN` ou au moins une entrée `apiKeys`
-configurée. Un tableau de bord distant exige en plus le jeton administrateur distinct
-(`OPENCODEX_ADMIN_AUTH_TOKEN` ou le fichier de jeton administrateur généré). Pour utiliser le jeton d’environnement,
-exportez-le avant le démarrage :
+exige un identifiant pour le plan de données : `OPENCODEX_API_AUTH_TOKEN` ou au moins une entrée `apiKeys`
+configurée. Pour utiliser le jeton d’environnement, exportez-le avant le démarrage :
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-Le proxy refuse une liaison distante sans TLS ou identifiant du plan de données. Les modifications du certificat
-et de l’écouteur prennent effet après redémarrage. L’installation d’un service exige
+Le proxy refuse une liaison distante sans identifiant du plan de données. L’installation d’un service exige
 spécifiquement `OPENCODEX_API_AUTH_TOKEN` ; exportez-le avant `ocx service install` afin que launchd, systemd
 ou le Planificateur de tâches le reçoive. Les clients du plan de données peuvent envoyer :
 
@@ -109,7 +105,8 @@ Le port est obligatoire et doit différer du port proxy. Il n'est jamais attribu
 changerait au fil des redémarrages tandis que les serveurs d'applications déjà en cours d'exécution conservaient le `base_url` précédent.
 
 L'écouteur ne sert que `POST /v1/responses`, sa mise à niveau WebSocket, `POST /v1/responses/compact`,
-et `GET /v1/models`. Tout le reste, y compris `/api/*` et le tableau de bord, renvoie `404`.
+`POST /v1/alpha/search` (le relais de recherche web natif de Codex), `GET /v1/models` et les mises à
+niveau WebSocket vocales autonomes. Tout le reste, y compris `/api/*` et le tableau de bord, renvoie `404`.
 
 :::danger[Surface non authentifiée]
 Chaque processus de la machine peut utiliser cet écouteur. Il consomme le quota du compte et utilise les identifiants de
@@ -255,6 +252,9 @@ Les images `https:` distantes et les descriptions échouées ou vides ne sont pa
 
 Les services auxiliaires Anthropic OAuth réutilisent l'empreinte OAuth Claude Code existante d'opencodex. Effectuez un test d'endurance avec le
 compte et la charge de travail prévus.
-### TLS et WebSocket
 
-`tls` accepte `certFile`, `keyFile` et `publicOrigin`. Les WebSockets ont un délai d’inactivité de 255 secondes et ferment la connexion à la limite de contre-pression (1 MiB).
+## Clés Remote Hub et valeurs par défaut
+
+`runtimeRole` vaut `standalone` par défaut. Un hub utilise `hub.managementPublicOrigin`, `hub.managementIngress` limité au loopback (`enabled:false` si absent) et les identités exactes de `remoteGui.allowedTailscaleUsers` (liste vide si absente). La clé client reste dans `service-api-token`, jamais dans `config.json`; `service-api-token.prev` peut exister pendant une rotation. Les usages ne sont pas répliqués.
+
+`remoteGui.allowInsecureHttp` est un ancien no-op déprécié, conservé uniquement pour que les anciens fichiers passent encore le schéma strict. Supprimez-le de la configuration : les grants de pairing ne sont acceptés que sur loopback ou via HTTPS authentifié, et `true` ne réactive pas le pairing HTTP en clair.

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, statSync, symlinkSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import {
@@ -22,8 +22,8 @@ import {
   readRuntimePort,
   removePid,
   removeRuntimePort,
+  runtimeRole,
   ocxStartProcessCacheSizeForTests,
-  requestPacingConfigError,
   setOcxStartProcessCacheForTests,
   setProcessCommandLineExecForTests,
   setProcessCommandLinePlatformForTests,
@@ -38,6 +38,7 @@ import { AtomicWriteResidualTempError, atomicWriteFile, atomicWriteFileAsync, ha
 import { nextAtomicTempSequence } from "../src/config/atomic-write";
 import { flushConfigDirHardeningForTests } from "../src/config/paths";
 import { providerManagementConfigError } from "../src/server/auth-cors";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 let testDir = "";
 
 /**
@@ -55,7 +56,7 @@ const canSymlink = (() => {
     if ((e as NodeJS.ErrnoException).code === "EPERM") return false;
     throw e;
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    removeTreeWithRetry(dir);
   }
 })();
 
@@ -66,7 +67,7 @@ beforeEach(() => {
 
 afterEach(() => {
   delete process.env.OPENCODEX_HOME;
-  if (testDir && existsSync(testDir)) rmSync(testDir, { recursive: true, force: true });
+  if (testDir && existsSync(testDir)) removeTreeWithRetry(testDir);
   testDir = "";
 });
 
@@ -116,48 +117,261 @@ function writeAccountNamespaceConfig(
 }
 
 describe("opencodex config defaults", () => {
-  test("accepts and preserves provider-level jitter-only request pacing", () => {
+  test("runtime role is absent-by-default and resolves to standalone", () => {
     const defaults = getDefaultConfig();
-    const requestPacing = { enabled: true, jitterMs: 500 };
-    const result = validateConfigCandidate({
-      ...defaults,
-      providers: {
-        ...defaults.providers,
-        openai: { ...defaults.providers.openai!, requestPacing },
-      },
-    });
-
-    expect(requestPacingConfigError(requestPacing)).toBeNull();
-    expect(result).toMatchObject({ ok: true, config: { providers: { openai: { requestPacing } } } });
+    expect(Object.hasOwn(defaults, "runtimeRole")).toBe(false);
+    expect(runtimeRole(defaults)).toBe("standalone");
+    writeConfig(defaults);
+    const before = readFileSync(getConfigPath(), "utf8");
+    expect(runtimeRole(loadConfig())).toBe("standalone");
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(before);
   });
 
-  test("config candidate validates and preserves strict Azure identity", () => {
-    const base = getDefaultConfig();
-    const valid = validateConfigCandidate({
-      ...base,
-      defaultProvider: "azure",
-      providers: {
-        azure: {
-          adapter: "azure-openai",
-          baseUrl: "https://resource.openai.azure.com/openai",
-          azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " },
+  test("runtime role accepts standalone/hub alone while client requires atomic state", () => {
+    for (const role of ["standalone", "hub"] as const) {
+      expect(validateConfigCandidate({ ...getDefaultConfig(), runtimeRole: role })).toMatchObject({
+        ok: true,
+        config: { runtimeRole: role },
+      });
+    }
+    expect(validateConfigCandidate({ ...getDefaultConfig(), runtimeRole: "client" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires a complete client connection"),
+    });
+  });
+
+  test("runtime role rejects malformed live candidates", () => {
+    for (const runtimeRole of ["server", "", 1, null]) {
+      expect(validateConfigCandidate({ ...getDefaultConfig(), runtimeRole })).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("runtimeRole"),
+      });
+    }
+  });
+
+  test("a malformed persisted runtime role preserves providers and API keys", () => {
+    const invalidRole = "future-secret-shaped-role";
+    writeConfig({
+      port: 12345,
+      runtimeRole: invalidRole,
+      defaultProvider: "custom",
+      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
+      apiKeys: [{ id: "key-1", name: "default", key: "ocx_persisted", createdAt: "2026-08-28T00:00:00.000Z" }],
+    });
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const loaded = loadConfig();
+      const diagnostics = readConfigDiagnostics();
+      expect(runtimeRole(loaded)).toBe("standalone");
+      expect(loaded.runtimeRole).toBeUndefined();
+      expect(loaded).toMatchObject({
+        port: 12345,
+        defaultProvider: "custom",
+        providers: { custom: { baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
+        apiKeys: [expect.objectContaining({ id: "key-1", key: "ocx_persisted" })],
+      });
+      expect(diagnostics).toMatchObject({
+        source: "file",
+        error: null,
+        warnings: [expect.stringContaining("runtimeRole ignored")],
+      });
+      expect(backupNames()).toEqual([]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls.flat().join(" ")).not.toContain(invalidRole);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("hub and remote GUI config normalize valid origins and exact Tailscale users", () => {
+    expect(validateConfigCandidate({
+      ...getDefaultConfig(),
+      runtimeRole: "hub",
+      hub: { managementPublicOrigin: "https://hub.example.test:443" },
+      remoteGui: {
+        allowedTailscaleUsers: [" alice@example.test ", "bob@example.test"],
+        allowInsecureHttp: false,
+      },
+    })).toMatchObject({
+      ok: true,
+      config: {
+        hub: { managementPublicOrigin: "https://hub.example.test" },
+        remoteGui: { allowedTailscaleUsers: ["alice@example.test", "bob@example.test"] },
+      },
+    });
+    expect(validateConfigCandidate({
+      ...getDefaultConfig(),
+      runtimeRole: "hub",
+      hub: { managementPublicOrigin: "http://hub.example.test" },
+      remoteGui: { allowInsecureHttp: true },
+    }).ok).toBe(true);
+  });
+
+  test("remote GUI live candidates reject unsafe origins and malformed identity allowlists", () => {
+    for (const managementPublicOrigin of [
+      "ftp://hub.example.test",
+      "https://user@hub.example.test",
+      "https://hub.example.test/path",
+      "https://hub.example.test/?query=1",
+      "https://hub.example.test/#fragment",
+    ]) {
+      const result = validateConfigCandidate({
+        ...getDefaultConfig(),
+        hub: { managementPublicOrigin },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("hub.managementPublicOrigin");
+    }
+    for (const allowedTailscaleUsers of [
+      [""],
+      ["alice@example.test", " alice@example.test "],
+      ["alice\n@example.test"],
+      ["x".repeat(321)],
+      Array.from({ length: 65 }, (_, index) => `user-${index}@example.test`),
+    ]) {
+      const result = validateConfigCandidate({
+        ...getDefaultConfig(),
+        remoteGui: { allowedTailscaleUsers },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.error).toContain("remoteGui.allowedTailscaleUsers");
+    }
+  });
+
+  test("a malformed persisted remote GUI block is disabled without discarding providers or API keys", () => {
+    const malformedValue = "https://hub.example.test/private-secret-path";
+    writeConfig({
+      port: 12345,
+      runtimeRole: "hub",
+      hub: { managementPublicOrigin: malformedValue },
+      remoteGui: { allowedTailscaleUsers: ["alice@example.test"] },
+      defaultProvider: "custom",
+      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
+      apiKeys: [{ id: "key-1", name: "default", key: "ocx_persisted", createdAt: "2026-08-28T00:00:00.000Z" }],
+    });
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const loaded = loadConfig();
+      expect(loaded.hub).toBeUndefined();
+      expect(loaded.remoteGui).toEqual({ allowedTailscaleUsers: ["alice@example.test"] });
+      expect(loaded.providers.custom?.apiKey).toBe("upstream-secret");
+      expect(loaded.apiKeys?.[0]?.key).toBe("ocx_persisted");
+      expect(readConfigDiagnostics().warnings?.join(" ")).toContain("hub.managementPublicOrigin");
+      expect(warnSpy.mock.calls.flat().join(" ")).not.toContain(malformedValue);
+      expect(backupNames()).toEqual([]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  test("remote GUI config round-trips but remains inert outside the hub role", () => {
+    for (const runtimeRole of [undefined, "standalone"] as const) {
+      const result = validateConfigCandidate({
+        ...getDefaultConfig(),
+        ...(runtimeRole ? { runtimeRole } : {}),
+        hub: { managementPublicOrigin: "https://hub.example.test" },
+        remoteGui: { allowedTailscaleUsers: ["alice@example.test"], allowInsecureHttp: true },
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.config.runtimeRole).toBe(runtimeRole);
+    }
+  });
+
+  test("remote client state round-trips without accepting a secret field", () => {
+    const client = {
+      serverUrl: "https://hub.example.test",
+      managementUrl: "https://manage.example.test:443",
+      managementTransport: "direct" as const,
+      selectedClients: ["codex", "claude"] as const,
+      tokenEnv: "OPENCODEX_API_AUTH_TOKEN" as const,
+      apiKeyId: "issued-key-id",
+      tokenFingerprint: "a".repeat(64),
+      protocolVersion: 1 as const,
+      connectedAt: "2026-08-28T00:00:00.000Z",
+      catalogFingerprint: "sha256-example",
+      catalogSyncedAt: "2026-08-28T00:01:00.000Z",
+      pendingOperation: {
+        kind: "rotate" as const,
+        rotationId: "rotation-1",
+        newKeyIssuedAt: "2026-08-28T00:02:00.000Z",
+        oldKeyBackupPath: join(testDir, "service-api-token.prev"),
+      },
+    };
+    const result = validateConfigCandidate({
+      ...getDefaultConfig(),
+      runtimeRole: "client",
+      client,
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      config: {
+        runtimeRole: "client",
+        client: {
+          serverUrl: "https://hub.example.test",
+          managementUrl: "https://manage.example.test",
+          apiKeyId: "issued-key-id",
         },
       },
     });
-    expect(valid.ok).toBe(true);
-    if (valid.ok) expect(valid.config.providers.azure?.azureCredential?.managedIdentityClientId).toBe("client-123");
+    if (!result.ok) return;
+    saveConfig(result.config);
+    expect(loadConfig().client).toEqual(result.config.client);
+    expect(readFileSync(getConfigPath(), "utf8")).not.toContain("ocx_data_");
 
     expect(validateConfigCandidate({
-      ...base,
-      defaultProvider: "azure",
-      providers: { azure: { adapter: "openai-chat", baseUrl: "https://example.test/v1", azureCredential: { type: "default-azure-credential" } } },
-    }).ok).toBe(false);
-    expect(validateConfigCandidate({
-      ...base,
-      defaultProvider: "azure",
-      providers: { azure: { adapter: "azure-openai", baseUrl: "https://resource.openai.azure.com/openai", azureCredential: { type: "default-azure-credential", unknown: "x" } } },
-    }).ok).toBe(false);
+      ...getDefaultConfig(),
+      runtimeRole: "client",
+      client: { ...client, key: "ocx_data_forbidden" },
+    })).toMatchObject({ ok: false, error: expect.stringContaining("client") });
   });
+
+  test("remote client state rejects half-present and malformed rotation recovery state", () => {
+    const validClient = {
+      serverUrl: "https://hub.example.test",
+      managementUrl: "https://hub.example.test",
+      managementTransport: "direct",
+      selectedClients: ["codex"],
+      tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+      apiKeyId: "issued-key-id",
+      tokenFingerprint: "b".repeat(64),
+      protocolVersion: 1,
+      connectedAt: "2026-08-28T00:00:00.000Z",
+    };
+    expect(validateConfigCandidate({ ...getDefaultConfig(), runtimeRole: "client" })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires a complete client connection"),
+    });
+    expect(validateConfigCandidate({ ...getDefaultConfig(), client: validClient })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining("requires runtimeRole client"),
+    });
+    for (const pendingOperation of [
+      { kind: "rotate", newKeyIssuedAt: "2026-08-28T00:00:00.000Z", oldKeyBackupPath: join(testDir, "service-api-token.prev") },
+      { kind: "rotate", rotationId: "r", newKeyIssuedAt: "not-a-time", oldKeyBackupPath: join(testDir, "service-api-token.prev") },
+      { kind: "rotate", rotationId: "r", newKeyIssuedAt: "2026-08-28T00:00:00.000Z", oldKeyBackupPath: join(testDir, "foreign.prev") },
+    ]) {
+      expect(validateConfigCandidate({
+        ...getDefaultConfig(),
+        runtimeRole: "client",
+        client: { ...validClient, pendingOperation },
+      })).toMatchObject({ ok: false, error: expect.stringContaining("client.pendingOperation") });
+    }
+  });
+
+  test("an unrelated save cannot erase malformed-present client state", () => {
+    const raw = {
+      ...getDefaultConfig(),
+      runtimeRole: "client",
+      client: { apiKeyId: "half-present", key: "must-not-be-reemitted" },
+    };
+    writeConfig(raw);
+    const before = readFileSync(getConfigPath(), "utf8");
+    const loaded = loadConfig();
+    loaded.codexAutoStart = false;
+    expect(() => saveConfig(loaded)).toThrow("malformed or mismatched remote client state");
+    expect(readFileSync(getConfigPath(), "utf8")).toBe(before);
+  });
+
   test("malformed classifier config is normalized at load, even with subagentEffort absent (#1697)", () => {
     // normalizePersistedClaudeCode used to be reached only through a subagentEffort short-circuit,
     // so a config whose ONLY defect was elsewhere in claudeCode was never normalized. These
@@ -194,88 +408,6 @@ describe("opencodex config defaults", () => {
       ok: false,
       error: expect.stringContaining("emptyCompletionRetry"),
     });
-  });
-
-  test("config candidates reject noncanonical Antigravity OAuth destinations", () => {
-    const defaults = getDefaultConfig();
-    const antigravity = {
-      adapter: "google",
-      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-      authMode: "oauth",
-      googleMode: "cloud-code-assist",
-    };
-    expect(validateConfigCandidate({
-      ...defaults,
-      providers: {
-        ...defaults.providers,
-        "google-antigravity": { ...antigravity, baseUrl: "https://evil.example.test", authMode: "oauth" },
-      },
-    })).toMatchObject({ ok: false, error: expect.stringContaining("canonical Antigravity") });
-    for (const baseUrl of ["https://daily-cloudcode-pa.googleapis.com", "https://cloudcode-pa.googleapis.com"]) {
-      expect(validateConfigCandidate({
-        ...defaults,
-        providers: { ...defaults.providers, "google-antigravity": { ...antigravity, baseUrl, authMode: "oauth" } },
-      }).ok).toBe(true);
-    }
-  });
-  test("v2 native parent override round-trips trimmed and isolates malformed hand edits", () => {
-    const defaults = getDefaultConfig();
-    const valid = validateConfigCandidate({
-      ...defaults,
-      v2NativeParentOverride: { enabled: false, model: "  relay/model  " },
-    });
-    expect(valid).toMatchObject({
-      ok: true,
-      config: { v2NativeParentOverride: { enabled: false, model: "relay/model" } },
-    });
-
-    writeConfig({
-      port: 12345,
-      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1" } },
-      defaultProvider: "custom",
-      v2NativeParentOverride: { enabled: "yes", model: 42 },
-    });
-    const loaded = loadConfig();
-    expect(loaded.v2NativeParentOverride).toBeUndefined();
-    expect(loaded.providers.custom).toBeDefined();
-    expect(loaded.port).toBe(12345);
-  });
-
-  test("v2 native parent override rejects malformed programmatic writes", () => {
-    const defaults = getDefaultConfig();
-    for (const override of [
-      { enabled: "yes", model: "relay/model" },
-      { enabled: true, model: "   " },
-      { enabled: true, model: null },
-      { enabled: true, model: "relay/model", extra: true },
-    ]) {
-      const result = validateConfigCandidate({ ...defaults, v2NativeParentOverride: override });
-      expect(result.ok).toBe(false);
-      if (!result.ok) expect(result.error).toContain("v2NativeParentOverride");
-    }
-  });
-
-  test("v2 routed delegation bridge is strict on writes and degrades malformed hand edits", () => {
-    const defaults = getDefaultConfig();
-    expect(validateConfigCandidate({ ...defaults, v2RoutedDelegationBridge: true })).toMatchObject({
-      ok: true,
-      config: { v2RoutedDelegationBridge: true },
-    });
-    expect(validateConfigCandidate({ ...defaults, v2RoutedDelegationBridge: "true" })).toMatchObject({
-      ok: false,
-      error: expect.stringContaining("v2RoutedDelegationBridge"),
-    });
-
-    writeConfig({
-      port: 12345,
-      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1" } },
-      defaultProvider: "custom",
-      v2RoutedDelegationBridge: "true",
-    });
-    const loaded = loadConfig();
-    expect(loaded.v2RoutedDelegationBridge).toBeUndefined();
-    expect(loaded.providers.custom).toBeDefined();
-    expect(loaded.port).toBe(12345);
   });
 
   test("usage and MCP config overrides change the effective bound while defaults remain compatible", () => {
@@ -481,114 +613,6 @@ describe("opencodex config defaults", () => {
     expect(backupNames()).toEqual([]);
     expect(warnSpy).toHaveBeenCalled();
     expect(warnSpy.mock.calls.flat().join(" ")).not.toContain(invalidEffort);
-    warnSpy.mockRestore();
-  });
-
-  test("config candidates validate subagentRoles id, uniqueness, and length rules", () => {
-    const base = getDefaultConfig();
-    const role = {
-      id: "reviewer",
-      description: "PR review",
-      model: "anthropic/claude-sonnet-5",
-      effort: "high",
-      developerInstructions: "Review the diff for regressions.",
-    };
-    expect(validateConfigCandidate({ ...base, subagentRoles: [role] })).toMatchObject({
-      ok: true,
-      config: { subagentRoles: [expect.objectContaining({ id: "reviewer", enabled: true })] },
-    });
-    expect(validateConfigCandidate({ ...base, subagentRoles: [] })).toMatchObject({
-      ok: true,
-      config: { subagentRoles: [] },
-    });
-    expect(validateConfigCandidate({
-      ...base,
-      subagentRoles: [{ ...role, id: "Reviewer" }],
-    })).toMatchObject({
-      ok: false,
-      error: expect.stringContaining("subagentRoles"),
-    });
-    expect(validateConfigCandidate({
-      ...base,
-      subagentRoles: [role, { ...role, id: "reviewer", description: "duplicate" }],
-    })).toMatchObject({
-      ok: false,
-      error: expect.stringContaining("subagentRoles"),
-    });
-    expect(validateConfigCandidate({
-      ...base,
-      subagentRoles: Array.from({ length: 9 }, (_, i) => ({ ...role, id: `role-${i}` })),
-    })).toMatchObject({
-      ok: false,
-      error: expect.stringContaining("subagentRoles"),
-    });
-    expect(validateConfigCandidate({ ...base, syncCodexAgentRoles: false })).toMatchObject({
-      ok: true,
-      config: { syncCodexAgentRoles: false },
-    });
-  });
-
-  test("malformed persisted subagentRoles are dropped with a warning without wiping config", () => {
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-    writeConfig({
-      port: 12345,
-      defaultProvider: "custom",
-      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
-      apiKeys: [{ id: "key-1", name: "default", key: "ocx_persisted", createdAt: "2026-07-28T00:00:00.000Z" }],
-      subagentRoles: [
-        {
-          id: "reviewer",
-          description: "PR review",
-          model: "anthropic/claude-sonnet-5",
-          developerInstructions: "Review the diff.",
-        },
-        { id: "BAD", description: "nope", model: "gpt-5.6-luna", developerInstructions: "x" },
-      ],
-    });
-
-    const config = loadConfig();
-    const diagnostics = readConfigDiagnostics();
-
-    expect(config.subagentRoles).toEqual([
-      expect.objectContaining({ id: "reviewer", model: "anthropic/claude-sonnet-5" }),
-    ]);
-    expect(config).toMatchObject({
-      port: 12345,
-      defaultProvider: "custom",
-      providers: { custom: { baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
-      apiKeys: [expect.objectContaining({ id: "key-1", key: "ocx_persisted" })],
-    });
-    expect(diagnostics).toMatchObject({
-      source: "file",
-      error: null,
-      warnings: [expect.stringContaining("subagentRoles")],
-    });
-    expect(backupNames()).toEqual([]);
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
-  });
-
-  test("malformed persisted syncCodexAgentRoles becomes false rather than default-on", () => {
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-    writeConfig({
-      port: 12345,
-      defaultProvider: "custom",
-      providers: { custom: { adapter: "openai-chat", baseUrl: "https://example.test/v1", apiKey: "upstream-secret" } },
-      apiKeys: [{ id: "key-1", name: "default", key: "ocx_persisted", createdAt: "2026-07-28T00:00:00.000Z" }],
-      subagentRoles: [{
-        id: "reviewer",
-        description: "PR review",
-        model: "anthropic/claude-sonnet-5",
-        developerInstructions: "Review the diff.",
-      }],
-      syncCodexAgentRoles: "yes",
-    });
-
-    const config = loadConfig();
-    const diagnostics = readConfigDiagnostics();
-    expect(config.syncCodexAgentRoles).toBe(false);
-    expect(diagnostics.warnings?.some(warning => warning.includes("syncCodexAgentRoles"))).toBe(true);
-    expect(warnSpy.mock.calls.flat().join(" ")).toContain("syncCodexAgentRoles");
     warnSpy.mockRestore();
   });
 
@@ -1025,44 +1049,6 @@ describe("opencodex config defaults", () => {
     }
   });
 
-  test("validates and persists Codex WebSocket provider controls", () => {
-    const base = getDefaultConfig();
-    const provider = {
-      adapter: "openai-chat",
-      baseUrl: "https://example.test/v1",
-      wsUpstream: true,
-      maxWsFrameBytes: 1234,
-    };
-    const candidate = validateConfigCandidate({
-      ...base,
-      defaultProvider: "custom",
-      providers: { custom: provider },
-    });
-    expect(candidate).toMatchObject({
-      ok: true,
-      config: { providers: { custom: provider } },
-    });
-
-    for (const [field, value] of [
-      ["wsUpstream", "true"],
-      ["maxWsFrameBytes", -1],
-      ["maxWsFrameBytes", 1.5],
-    ] as const) {
-      expect(validateConfigCandidate({
-        ...base,
-        defaultProvider: "custom",
-        providers: { custom: { ...provider, [field]: value } },
-      }).ok).toBe(false);
-    }
-
-    writeConfig({
-      ...base,
-      defaultProvider: "custom",
-      providers: { custom: provider },
-    });
-    expect(loadConfig().providers.custom).toMatchObject(provider);
-  });
-
   test("rejects invalid or noncanonical codexAccountMode placements", () => {
     for (const [name, provider] of [
       ["custom", { adapter: "openai-chat", baseUrl: "https://example.test/v1", codexAccountMode: "pool" }],
@@ -1101,32 +1087,6 @@ describe("opencodex config defaults", () => {
     });
     expect(readConfigDiagnostics().source).toBe("fallback");
     expect(readConfigDiagnostics().error).toContain("codexToolMode");
-  });
-
-  test("accepts both projectContext values and rejects non-enum spellings", () => {
-    for (const projectContext of ["off", "on"] as const) {
-      writeConfig({
-        port: 12345,
-        providers: {
-          custom: { adapter: "command-code", baseUrl: "https://example.test", projectContext },
-        },
-        defaultProvider: "custom",
-      });
-      expect(readConfigDiagnostics().config.providers.custom.projectContext).toBe(projectContext);
-      expect(readConfigDiagnostics().error).toBeNull();
-    }
-
-    for (const projectContext of ["true", true, "yes"] as const) {
-      writeConfig({
-        port: 12345,
-        providers: {
-          custom: { adapter: "command-code", baseUrl: "https://example.test", projectContext },
-        },
-        defaultProvider: "custom",
-      });
-      expect(readConfigDiagnostics().source).toBe("fallback");
-      expect(readConfigDiagnostics().error).toContain("projectContext");
-    }
   });
 
   test("accepts the exact responsesItemIdRepair shape and rejects the old nested placeholderIds proposal", () => {
@@ -1354,7 +1314,7 @@ describe("opencodex config defaults", () => {
       expect(getPidPath()).toBe(join(expectedConfigDir, "ocx.pid"));
     } finally {
       process.chdir(oldCwd);
-      rmSync(parent, { recursive: true, force: true });
+      removeTreeWithRetry(parent);
     }
   });
 
@@ -1421,21 +1381,6 @@ describe("opencodex config defaults", () => {
     }
   });
 
-  test("refuses to persist a config synthesized by missing-field repair", () => {
-    const before = JSON.stringify({ port: 10100 });
-    writeConfig(before);
-    const errorSpy = spyOn(console, "error").mockImplementation(() => {});
-
-    try {
-      const repaired = { ...loadConfig(), openaiProviderTierVersion: 2 as const };
-
-      expect(() => saveConfig(repaired)).toThrow("refusing to overwrite a config repaired with defaults");
-      expect(readFileSync(getConfigPath(), "utf-8")).toBe(before);
-    } finally {
-      errorSpy.mockRestore();
-    }
-  });
-
   test("backs up config when defaultProvider is absent from providers", () => {
     writeConfig({
       port: 10100,
@@ -1466,7 +1411,7 @@ describe("opencodex config defaults", () => {
       { adapter: "openai-chat", baseUrl: "https://example.test/v1", headers: { Authorization: "Bearer secret" } },
       { adapter: "openai-chat", baseUrl: "https://example.test/v1", headers: { "X-Custom": "ok\r\nInjected: yes" } },
     ]) {
-      rmSync(testDir, { recursive: true, force: true });
+      removeTreeWithRetry(testDir);
       mkdirSync(testDir, { recursive: true });
       writeConfig({
         port: 10100,
@@ -1529,7 +1474,7 @@ describe("opencodex config defaults", () => {
 
     expect(loadConfig().providerContextCaps).toEqual({ custom: 350_000 });
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -1966,7 +1911,7 @@ describe("opencodex config defaults", () => {
     expect(readConfigDiagnostics().source).toBe("fallback");
     expect(readConfigDiagnostics().error).toContain("providers.custom.defaultMaxOutputTokens");
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -2006,7 +1951,7 @@ describe("opencodex config defaults", () => {
     expect(readConfigDiagnostics().source).toBe("fallback");
     expect(readConfigDiagnostics().error).toContain("providers.custom.modelAutoCompactTokenLimits");
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -2043,7 +1988,7 @@ describe("opencodex config defaults", () => {
       modelOpenRouterRouting: { "anthropic/claude-sonnet-5": { only: ["anthropic"] } },
     });
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -2089,7 +2034,7 @@ describe("opencodex config defaults", () => {
 
     expect(loadConfig().contextCapValue).toBe(500_000);
 
-    rmSync(testDir, { recursive: true, force: true });
+    removeTreeWithRetry(testDir);
     mkdirSync(testDir, { recursive: true });
     writeConfig({
       port: 10100,
@@ -2630,13 +2575,9 @@ describe("opencodex config defaults", () => {
     expect(isOcxStartCommandLine('bun run src/cli.ts start')).toBe(true);
     expect(isOcxStartCommandLine('"C:/tools/bun/bin/bun.exe" "run" "src/cli/index.ts" "start"')).toBe(true);
     expect(isOcxStartCommandLine('bun C:/tools/bun/install/global/node_modules/@bitkyc08/opencodex/src/cli.ts start')).toBe(true);
-    expect(isOcxStartCommandLine('bun C:/tools/bun/install/global/node_modules/@yansigit/opencodex/src/cli.ts start')).toBe(true);
     // npm's in-place rename during `npm install -g` (Windows service wrapper respawn mid-update).
     expect(isOcxStartCommandLine(
       'bun C:/nvm/node_modules/@bitkyc08/.opencodex-1JejBqbZ/src/cli/index.ts start --port 10100',
-    )).toBe(true);
-    expect(isOcxStartCommandLine(
-      'bun C:/nvm/node_modules/@yansigit/.opencodex-1JejBqbZ/src/cli/index.ts start --port 10100',
     )).toBe(true);
     expect(isOcxStartCommandLine("opencodex start")).toBe(true);
 

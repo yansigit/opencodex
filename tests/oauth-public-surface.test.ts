@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync} from "node:fs";
 import { join } from "node:path";
 import {
   cancelLoginFlow,
@@ -18,8 +18,15 @@ import type { OcxConfig } from "../src/types";
 import type { OAuthController } from "../src/oauth/types";
 import { getCredential } from "../src/oauth/store";
 import * as oauthStore from "../src/oauth/store";
-import { armClaudeCodeBaseline, loadConfig, mutatePersistedConfig, saveConfig, saveConfigPreservingClaudeCode } from "../src/config";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+
+// Server-less OAuth store test: nothing drains hardenConfigDir()'s icacls flight before
+// teardown (run 33612731522 shard 3). Same treatment as oauth-reauth-bind.
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+import { armClaudeCodeBaseline, loadConfig, saveConfig, saveConfigPreservingClaudeCode } from "../src/config";
 import { isApiAuthRequired, requireApiAuth } from "../src/server/auth-cors";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-oauth-public-surface");
 const PUBLIC_OAUTH_ERROR = "OAuth authentication failed. Check the OpenCodex account status and retry.";
@@ -40,17 +47,22 @@ function config(): OcxConfig {
 }
 
 beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   clearLoginState("xai");
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTreeWithRetry(TEST_DIR);
   mkdirSync(TEST_DIR, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
 });
 
-afterEach(() => {
+afterEach(async () => {
   clearLoginState("xai");
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
-  rmSync(TEST_DIR, { recursive: true, force: true });
+  removeTreeWithRetry(TEST_DIR);
 });
 
 async function waitForOAuthDone(provider: string): Promise<ReturnType<typeof getLoginStatus>> {
@@ -199,12 +211,7 @@ describe("legacy ChatGPT OAuth public-surface exclusion", () => {
         XAI: "side-account-id",
         retained: "retained-account-id",
       };
-      mutatePersistedConfig(fresh => {
-        fresh.defaultProvider = changed.defaultProvider;
-        fresh.providers = changed.providers;
-        fresh.codexAccountNamespaces = changed.codexAccountNamespaces;
-        return { changed: true, value: undefined };
-      });
+      saveConfig(changed);
       changedAfterCredential = true;
     });
 
@@ -256,18 +263,17 @@ describe("legacy ChatGPT OAuth public-surface exclusion", () => {
     });
     const saveSpy = spyOn(oauthStore, "saveCredential").mockImplementation(async (provider, credential) => {
       await originalSaveCredential(provider, credential);
-      mutatePersistedConfig(fresh => {
-        fresh.providers.xai = {
-          ...fresh.providers.xai!,
-          authMode: "key",
-          apiKey: "test-key-b",
-          apiKeyPool: [
-            { id: "key-a", key: "test-key-a" },
-            { id: "key-b", key: "test-key-b" },
-          ],
-        };
-        return { changed: true, value: undefined };
-      });
+      const changed = loadConfig();
+      changed.providers.xai = {
+        ...changed.providers.xai!,
+        authMode: "key",
+        apiKey: "test-key-b",
+        apiKeyPool: [
+          { id: "key-a", key: "test-key-a" },
+          { id: "key-b", key: "test-key-b" },
+        ],
+      };
+      saveConfig(changed);
     });
 
     try {
@@ -334,13 +340,6 @@ describe("legacy ChatGPT OAuth public-surface exclusion", () => {
   test("management OAuth merges its provider row with a pending live provider edit", async () => {
     const liveConfig = config();
     saveConfig(liveConfig);
-    mutatePersistedConfig(fresh => {
-      fresh.providers.xai = {
-        ...OAUTH_PROVIDERS.xai.providerConfig,
-        selectedModels: ["pending-model"],
-      };
-      return { changed: true, value: undefined };
-    });
     liveConfig.providers.xai = {
       ...OAUTH_PROVIDERS.xai.providerConfig,
       selectedModels: ["pending-model"],
@@ -376,10 +375,7 @@ describe("legacy ChatGPT OAuth public-surface exclusion", () => {
         selectedModels: ["pending-model"],
       });
 
-      mutatePersistedConfig(fresh => {
-        fresh.providers.xai = structuredClone(liveConfig.providers.xai!);
-        return { changed: true, value: undefined };
-      });
+      saveConfigPreservingClaudeCode(liveConfig);
       expect(loadConfig().providers.xai?.selectedModels).toEqual(["pending-model"]);
     } finally {
       OAUTH_PROVIDERS.xai.login = originalLogin;
@@ -608,13 +604,7 @@ describe("legacy ChatGPT OAuth public-surface exclusion", () => {
         retained: "retained-account-id",
       };
       concurrentConfig.claudeCode = { authMode: "proxy" };
-      mutatePersistedConfig(fresh => {
-        fresh.defaultProvider = concurrentConfig.defaultProvider;
-        fresh.providers = concurrentConfig.providers;
-        fresh.codexAccountNamespaces = concurrentConfig.codexAccountNamespaces;
-        fresh.claudeCode = concurrentConfig.claudeCode;
-        return { changed: true, value: undefined };
-      });
+      saveConfig(concurrentConfig);
     });
 
     try {

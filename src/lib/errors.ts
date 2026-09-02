@@ -4,14 +4,22 @@ export interface OcxErrorPayload {
   code: string | null;
 }
 
-/** A local request validation failure that must remain a client-visible HTTP 400. */
-export class OcxRequestValidationError extends Error {
-  readonly status = 400;
-
-  constructor(message: string) {
-    super(message);
-    this.name = "OcxRequestValidationError";
-  }
+/** Canonical human-readable message paths used by Responses upstream failures. */
+export function upstreamErrorMessageFromPayload(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const json = payload as {
+    error?: { message?: unknown };
+    last_error?: { message?: unknown };
+    response?: {
+      error?: { message?: unknown };
+      incomplete_details?: { message?: unknown };
+    };
+  };
+  const message = json.error?.message
+    ?? json.last_error?.message
+    ?? json.response?.error?.message
+    ?? json.response?.incomplete_details?.message;
+  return typeof message === "string" ? message : undefined;
 }
 
 /** OpenAI / Codex hard block for high-risk cybersecurity activity (HTTP 400 or mid-stream). */
@@ -199,10 +207,6 @@ export function classifyError(status: number, type: string, message: string): Oc
   }
   if (
     text.includes("insufficient_quota") ||
-    text.includes("insufficient credits") ||
-    text.includes("purchase more credits") ||
-    text.includes("run out of credits") ||
-    text.includes("out of credits") ||
     text.includes("exceeded your current quota") ||
     text.includes("quota exhausted") ||
     text.includes("account quota exceeded") ||

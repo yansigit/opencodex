@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, initializePersistedConfigIfMissing, setPersistedConfigMutationBeforeCommitForTests } from "../src/config";
 import { createOpenAIChatAdapter } from "../src/adapters/openai-chat";
 import {
   clearKeyCooldowns,
@@ -14,11 +13,12 @@ import {
 import { deriveXaiConvId } from "../src/providers/xai-transport";
 import { routeModel } from "../src/router";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let home: string;
 
 function makeConfig(provider: Partial<OcxProviderConfig>): OcxConfig {
-  const config = {
+  return {
     port: 10199,
     defaultProvider: "p",
     providers: {
@@ -29,8 +29,6 @@ function makeConfig(provider: Partial<OcxProviderConfig>): OcxConfig {
       } as OcxProviderConfig,
     },
   } as OcxConfig;
-  initializePersistedConfigIfMissing(config);
-  return config;
 }
 
 function pool3(): OcxProviderConfig["apiKeyPool"] {
@@ -48,9 +46,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setPersistedConfigMutationBeforeCommitForTests(null);
   delete process.env.OPENCODEX_HOME;
-  rmSync(home, { recursive: true, force: true });
+  removeTreeWithRetry(home);
   clearKeyCooldowns();
 });
 
@@ -61,12 +58,6 @@ describe("hasKeyPoolFailover", () => {
     expect(hasKeyPoolFailover({ adapter: "openai-chat", baseUrl: "x" } as OcxProviderConfig)).toBe(false);
     expect(hasKeyPoolFailover({ adapter: "anthropic", baseUrl: "x", authMode: "oauth", apiKeyPool: pool3() } as OcxProviderConfig)).toBe(false);
     expect(hasKeyPoolFailover({ adapter: "openai-responses", baseUrl: "x", authMode: "forward", apiKeyPool: pool3() } as OcxProviderConfig)).toBe(false);
-    expect(hasKeyPoolFailover({
-      adapter: "azure-openai",
-      baseUrl: "https://resource.openai.azure.com/openai",
-      azureCredential: { type: "default-azure-credential" },
-      apiKeyPool: pool3(),
-    } as OcxProviderConfig)).toBe(false);
   });
 });
 
@@ -112,13 +103,6 @@ describe("rotateKeyOn429", () => {
     const single = makeConfig({ apiKey: "key-alpha-000111222333", apiKeyPool: [pool3()![0]] });
     expect(rotateKeyOn429(single, "p", null)).toBeNull();
     expect(rotateKeyOn429(makeConfig({}), "missing", null)).toBeNull();
-    const identity = makeConfig({
-      adapter: "azure-openai",
-      baseUrl: "https://resource.openai.azure.com/openai",
-      azureCredential: { type: "default-azure-credential" },
-      apiKeyPool: pool3(),
-    });
-    expect(rotateKeyOn429(identity, "p", null)).toBeNull();
   });
 
   test("clearKeyCooldowns scoped to a provider", () => {
@@ -146,28 +130,6 @@ describe("rotateKeyOn429", () => {
     // A REAL beta failure afterwards still rotates to gamma.
     expect(rotateKeyOn429(config, "p", null, now, "key-beta-444555666777")?.apiKey).toBe("key-gamma-888999000111");
   });
-
-  test("a lost active-key race adopts the committed provider row without rotating again", () => {
-    const config = makeConfig({
-      apiKey: "key-alpha-000111222333",
-      apiKeyPool: pool3(),
-      note: "stale row",
-    });
-    const winner = structuredClone(config);
-    winner.providers.p.apiKey = "key-gamma-888999000111";
-    winner.providers.p.note = "concurrent winner";
-    winner.providers.p.baseUrl = "https://winner.example.com/v1";
-    setPersistedConfigMutationBeforeCommitForTests(() => {
-      writeFileSync(getConfigPath(), `${JSON.stringify(winner, null, 2)}\n`);
-    });
-
-    const rotated = rotateKeyOn429(config, "p", null, 1_000_000);
-    const disk = (JSON.parse(readFileSync(getConfigPath(), "utf8")) as OcxConfig).providers.p;
-    expect(rotated).toEqual(disk);
-    expect(config.providers.p).toEqual(disk);
-    expect(rotated?.apiKey).toBe("key-gamma-888999000111");
-    expect(rotated?.note).toBe("concurrent winner");
-  });
 });
 
 describe("rotateProviderTransportOn429", () => {
@@ -184,7 +146,6 @@ describe("rotateProviderTransportOn429", () => {
       baseUrl: "https://api.kimi.com/coding/v1",
     };
     delete config.providers.p;
-    writeFileSync(getConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
     expect(config.providers["kimi-code"].promptCacheKey).toBeUndefined();
 
     const parsed: OcxParsedRequest = {
@@ -208,9 +169,10 @@ describe("rotateProviderTransportOn429", () => {
     expect(retryBody.prompt_cache_key).toBe(promptCacheKey);
   });
 
-  test("inherits routed-only backfills while persisted fields stay authoritative", () => {
-    // Rotation must keep fields absent from the persisted snapshot while honoring fields
-    // that are present there; registered providers are canonicalized by routedProviderConfig.
+  test("inherits the routed provider's registry backfills; only the key changes", () => {
+    // The persisted config predates the registry scalar flags and merged metadata —
+    // routedProviderConfig backfilled them at request time. Rotation must not fall back
+    // to the bare persisted snapshot and silently drop them for the retried request.
     const config = makeConfig({ apiKey: "key-alpha-000111222333", apiKeyPool: pool3() });
     const routedProvider = {
       ...config.providers.p,
@@ -227,7 +189,7 @@ describe("rotateProviderTransportOn429", () => {
     });
 
     expect(rotated?.apiKey).toBe("key-beta-444555666777");
-    expect(rotated?.baseUrl).toBe("https://api.example.com/v1");
+    expect(rotated?.baseUrl).toBe("https://registry-pinned.example/v1");
     expect(rotated?.promptCacheKey).toBe(true);
     expect(rotated?.parallelToolCalls).toBe(false);
     expect(rotated?.modelContextWindows).toEqual({ "some-model": 262_144 });
@@ -246,8 +208,6 @@ describe("rotateProviderTransportOn429", () => {
     });
     config.providers.xai = config.providers.p;
     delete config.providers.p;
-    config.defaultProvider = "xai";
-    writeFileSync(getConfigPath(), `${JSON.stringify(config, null, 2)}\n`);
 
     const rotated = rotateProviderTransportOn429(config, "xai", { ...config.providers.xai }, {
       now: 1_000_000,

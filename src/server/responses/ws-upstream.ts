@@ -4,8 +4,8 @@
 // a measurably faster queue than the plain SSE POST path. Measured 2026-08-12
 // KST (same account, same payload, strictly sequential): gpt-5.6-luna TTFT p50
 // ~1.0s over WS vs ~3.9s over SSE. Codex CLI itself defaults to the WS
-// transport; opencodex keeps HTTP/SSE as its reliable default and allows
-// operators to opt into WS when the lower latency is worth the risk.
+// transport; opencodex previously always POSTed SSE, which is where its extra
+// 2-3s of TTFT came from.
 //
 // The wrapper only swaps the transport. It dials wss:// with the same headers,
 // sends the JSON body as a single `response.create` frame, and re-encodes the
@@ -14,11 +14,40 @@
 
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import { compareBunVersions } from "../../lib/bun-stream-caps";
-import { interceptRuntimeFailure } from "../../telemetry/hook";
 
 const CODEX_RESPONSES_HTTP_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_RESPONSES_WS_URL = "wss://chatgpt.com/backend-api/codex/responses";
 const WS_BETA = "responses_websockets=2026-02-06";
+
+/**
+ * Dial URL for a request URL. The canonical ChatGPT backend keeps its constant;
+ * an operator-opted OpenAI-compatible upstream swaps https for wss on the same
+ * path so gateways that serve the Responses WebSocket protocol on their
+ * /v1/responses path get the same fast lane. Plain HTTP remains on SSE because
+ * a provider WS handshake would otherwise send credentials and request data
+ * without transport encryption.
+ */
+function wsUpstreamUrlFor(httpUrl: string): string {
+  if (httpUrl === CODEX_RESPONSES_HTTP_URL) return CODEX_RESPONSES_WS_URL;
+  return httpUrl.replace(/^http(s?):/, "ws$1:");
+}
+
+/**
+ * An operator-opted OpenAI-compatible upstream only joins the WS lane for
+ * Responses endpoints: the WebSocket path speaks the Responses event protocol,
+ * and every downstream consumer (adapter parsers, usage sniffing, SSE relay)
+ * assumes that wire. Other paths (chat completions, images, search) stay HTTP.
+ */
+function isResponsesWebsocketEligibleUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:"
+    && parsed.pathname.endsWith("/responses");
+}
 // If the 101 never arrives (network black hole), give SSE a chance well before
 // the caller's connect timeout (default 200s) would fire.
 const UPGRADE_DEADLINE_MS = 10_000;
@@ -55,29 +84,6 @@ export type BunRuntimeIdentity = {
 };
 
 export type BunRuntimeGateInput = string | BunRuntimeIdentity;
-
-export interface CodexWsUpstreamOptions {
-  wsUpstream?: boolean;
-  maxWsFrameBytes?: number;
-}
-
-export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boolean {
-  if (options?.wsUpstream !== undefined) return options.wsUpstream !== true;
-  const env = process.env.OCX_CODEX_WS_UPSTREAM;
-  return env !== "true" && env !== "1";
-}
-
-export function resolveCodexWsMaxFrameBytes(options?: CodexWsUpstreamOptions): number {
-  if (typeof options?.maxWsFrameBytes === "number" && Number.isFinite(options.maxWsFrameBytes) && options.maxWsFrameBytes > 0) {
-    return Math.min(options.maxWsFrameBytes, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
-  }
-  const envVal = process.env.OCX_CODEX_WS_MAX_FRAME_BYTES;
-  if (envVal) {
-    const parsed = Number.parseInt(envVal, 10);
-    if (Number.isFinite(parsed) && parsed > 0) return Math.min(parsed, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
-  }
-  return CODEX_WS_CREATE_FRAME_LIMIT_BYTES;
-}
 
 const codexWsUpstreamResponses = new WeakSet<Response>();
 
@@ -126,11 +132,11 @@ export function shouldUseCodexWsUpstream(
   url: string,
   init?: RequestInit,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  options?: CodexWsUpstreamOptions,
+  upstreamWebsocketConfigured = false,
 ): boolean {
-  if (isCodexWsUpstreamDisabled(options)) return false;
   if (!bunSupportsBoundedCodexWsRelay(runtime)) return false;
-  if (url !== CODEX_RESPONSES_HTTP_URL) return false;
+  if (url !== CODEX_RESPONSES_HTTP_URL && !upstreamWebsocketConfigured) return false;
+  if (upstreamWebsocketConfigured && !isResponsesWebsocketEligibleUrl(url)) return false;
   if ((init?.method ?? "GET").toUpperCase() !== "POST") return false;
   const body = init?.body;
   if (typeof body !== "string") return false;
@@ -148,6 +154,50 @@ export function shouldUseCodexWsUpstream(
 }
 
 const CLOSED_BEFORE_TERMINAL = "codex websocket closed before a Responses terminal event";
+
+type ResponsesWsRelayEvent = {
+  type: string;
+  text: string;
+};
+
+/**
+ * Responses WebSocket uses `response.done` as its terminal event, while the
+ * SSE Responses surface uses status-specific terminal events. Normalize the
+ * WS-only discriminator before relaying so the existing SSE consumers can
+ * settle the turn and the socket close cannot be mistaken for a drop. Unknown
+ * or missing status values fail closed instead of being reported as success.
+ */
+function normalizeResponsesWsRelayEvent(text: string): ResponsesWsRelayEvent | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  if (typeof record.type !== "string") return null;
+  if (record.type !== "response.done") return { type: record.type, text };
+
+  const response = record.response;
+  const status = response && typeof response === "object" && !Array.isArray(response)
+    ? (response as Record<string, unknown>).status
+    : undefined;
+  const type = status === "completed"
+    ? "response.completed"
+    : status === "failed"
+      ? "response.failed"
+      : status === "incomplete" || status === "cancelled"
+        ? "response.incomplete"
+        : "response.failed";
+  const normalizedRecord: Record<string, unknown> = { ...record, type };
+  if (type === "response.failed" && status !== "failed") {
+    normalizedRecord.response = response && typeof response === "object" && !Array.isArray(response)
+      ? { ...(response as Record<string, unknown>), status: "failed" }
+      : { status: "failed" };
+  }
+  return { type, text: JSON.stringify(normalizedRecord) };
+}
 
 /**
  * The close code is the only thing that separates "the backend refused this
@@ -198,9 +248,8 @@ export function codexWsUpstreamFetch(
   init: RequestInit,
   sseFallback: typeof globalThis.fetch,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  options?: CodexWsUpstreamOptions,
 ): Promise<Response> {
-  if (isCodexWsUpstreamDisabled(options) || !bunSupportsBoundedCodexWsRelay(runtime)) {
+  if (!bunSupportsBoundedCodexWsRelay(runtime)) {
     return sseFallback(url, init);
   }
   const signal = init.signal ?? undefined;
@@ -223,8 +272,7 @@ export function codexWsUpstreamFetch(
   // streaming Response, so the oversized close can only be surfaced as a stream
   // error — and a resend at that point could double-generate. Measuring the
   // frame we are about to send keeps the whole failure mode unreachable.
-  const maxFrameBytes = resolveCodexWsMaxFrameBytes(options);
-  if (codexWsCreateFrameExceedsLimit(frameText, maxFrameBytes)) {
+  if (codexWsCreateFrameExceedsLimit(frameText)) {
     return sseFallback(url, init);
   }
 
@@ -249,7 +297,7 @@ export function codexWsUpstreamFetch(
     let ws: WebSocket;
     try {
       // Bun accepts per-handshake headers; the DOM lib types only list protocol arrays.
-      ws = new WebSocket(CODEX_RESPONSES_WS_URL, { headers } as unknown as string[]);
+      ws = new WebSocket(wsUpstreamUrlFor(url), { headers } as unknown as string[]);
     } catch {
       resolve(sseFallback(url, init));
       return;
@@ -339,14 +387,19 @@ export function codexWsUpstreamFetch(
         failStream("codex websocket frame exceeds the response size limit");
         return;
       }
-      const encodedText = encoder.encode(text);
+      const rawEncodedText = encoder.encode(text);
+      if (rawEncodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
+        failStream("codex websocket frame exceeds the response size limit");
+        return;
+      }
+      const normalized = normalizeResponsesWsRelayEvent(text);
+      if (!normalized) return;
+      const { type } = normalized;
+      const encodedText = normalized.text === text ? rawEncodedText : encoder.encode(normalized.text);
       if (encodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
         failStream("codex websocket frame exceeds the response size limit");
         return;
       }
-      let type: unknown;
-      try { type = (JSON.parse(text) as { type?: unknown }).type; } catch { return; }
-      if (typeof type !== "string") return;
       // Relay only the event surface the SSE path produces today. WS-only
       // frames (codex.rate_limits, responsesapi.websocket_timing) are dropped
       // so downstream clients see exactly the stream shape they always got.
@@ -398,9 +451,7 @@ export function codexWsUpstreamFetch(
         // here would reach clients with no response.completed/failed at all —
         // relaySseWithFailedTail() only synthesizes a failed terminal when the
         // body read THROWS. Error the stream like a reset TCP socket.
-        const error = new Error(closedBeforeTerminalMessage(event));
-        if ((event as { code?: unknown } | null)?.code === 1006) interceptRuntimeFailure(error, { category: "websocket_1006" });
-        try { controller.error(error); } catch { /* stream already done */ }
+        try { controller.error(new Error(closedBeforeTerminalMessage(event))); } catch { /* stream already done */ }
       }
     });
 

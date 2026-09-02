@@ -1,14 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, loadConfig, saveConfig } from "../src/config";
+import { loadConfig } from "../src/config";
 import { OAUTH_PROVIDERS, reconcileOAuthProviders, upsertOAuthProvider } from "../src/oauth";
 import { getCredential, saveCredential } from "../src/oauth/store";
 import { routeModel } from "../src/router";
 import { CURSOR_NO_VISION_MODELS, CURSOR_STATIC_MODELS, cursorModelIds } from "../src/adapters/cursor/discovery";
 import { modelInList } from "../src/types";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const originalHome = process.env.OPENCODEX_HOME;
 const homes: string[] = [];
@@ -16,7 +17,7 @@ const homes: string[] = [];
 afterEach(() => {
   if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = originalHome;
-  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  for (const home of homes.splice(0)) removeTreeWithRetry(home);
 });
 
 describe("OAuth provider reconciliation", () => {
@@ -38,7 +39,6 @@ describe("OAuth provider reconciliation", () => {
         },
       },
     } satisfies OcxConfig;
-    saveConfig(config);
 
     expect(reconcileOAuthProviders(config)).toBe(true);
     expect(config.providers.cursor.noVisionModels).toEqual(preset.noVisionModels);
@@ -76,7 +76,6 @@ describe("OAuth provider reconciliation", () => {
         },
       },
     } satisfies OcxConfig;
-    saveConfig(config);
 
     expect(reconcileOAuthProviders(config)).toBe(true);
     const provider = config.providers["google-antigravity"];
@@ -110,35 +109,7 @@ describe("OAuth provider reconciliation", () => {
     expect(reconcileOAuthProviders(config)).toBe(false);
   });
 
-  test("unavailable persistence leaves live OAuth reconciliation input unchanged", () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-oauth-reconcile-unavailable-"));
-    homes.push(home);
-    process.env.OPENCODEX_HOME = home;
-    const config = {
-      port: 10100,
-      defaultProvider: "google-antigravity",
-      providers: {
-        "google-antigravity": {
-          adapter: "google",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-          authMode: "oauth",
-          googleMode: "cloud-code-assist",
-          defaultModel: "gemini-3.5-flash-low",
-          models: ["gemini-3.5-flash-low", "gemini-3.5-flash-high"],
-          liveModels: true,
-        },
-      },
-    } satisfies OcxConfig;
-    const before = structuredClone(config);
-
-    expect(reconcileOAuthProviders(config)).toBe(true);
-    expect(config).toEqual(before);
-  });
-
   test("migrates the version-1 canonical Antigravity static row to live discovery", () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-antigravity-static-reconcile-"));
-    homes.push(home);
-    process.env.OPENCODEX_HOME = home;
     const config = {
       port: 10100,
       defaultProvider: "google-antigravity",
@@ -161,7 +132,6 @@ describe("OAuth provider reconciliation", () => {
         },
       },
     } satisfies OcxConfig;
-    saveConfig(config);
 
     expect(reconcileOAuthProviders(config)).toBe(true);
     expect(config.providers["google-antigravity"].liveModels).toBe(true);
@@ -170,57 +140,6 @@ describe("OAuth provider reconciliation", () => {
     upsertOAuthProvider(config, "google-antigravity");
     expect(config.providers["google-antigravity"].liveModels).toBe(true);
     expect(config.providers["google-antigravity"].models).toHaveLength(6);
-  });
-
-  test("adopts already-reconciled persisted OAuth state into a stale live config", () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-antigravity-unchanged-adopt-"));
-    homes.push(home);
-    process.env.OPENCODEX_HOME = home;
-    const staleLive = {
-      port: 10100,
-      defaultProvider: "google-antigravity",
-      googleAntigravityStaticCatalogVersion: 1,
-      providers: {
-        "google-antigravity": {
-          ...structuredClone(OAUTH_PROVIDERS["google-antigravity"].providerConfig),
-          defaultModel: "gemini-3.6-flash",
-          models: [
-            "gemini-3.6-flash",
-            "gemini-3.1-pro",
-            "gemini-3.1-flash-image",
-            "claude-sonnet-4-6",
-            "claude-opus-4-6-thinking",
-            "gpt-oss-120b-medium",
-          ],
-          liveModels: false,
-        },
-        "local-only": {
-          adapter: "openai",
-          baseUrl: "http://127.0.0.1:9999/v1",
-          allowPrivateNetwork: true,
-          models: ["local-live"],
-          note: "live-only",
-        },
-      },
-    } satisfies OcxConfig;
-    const reconciledDisk = structuredClone(staleLive);
-    reconciledDisk.providers["disk-only"] = {
-      adapter: "openai",
-      baseUrl: "http://127.0.0.1:9998/v1",
-      allowPrivateNetwork: true,
-      models: ["disk-only"],
-    };
-    delete reconciledDisk.providers["local-only"];
-    expect(reconcileOAuthProviders(reconciledDisk, false)).toBe(true);
-    saveConfig(reconciledDisk);
-    const beforeBytes = readFileSync(getConfigPath(), "utf8");
-
-    expect(reconcileOAuthProviders(staleLive)).toBe(true);
-    expect(readFileSync(getConfigPath(), "utf8")).toBe(beforeBytes);
-    expect(staleLive.googleAntigravityStaticCatalogVersion).toBe(2);
-    expect(staleLive.providers["google-antigravity"]).toEqual(reconciledDisk.providers["google-antigravity"]);
-    expect(staleLive.providers["local-only"]?.note).toBe("live-only");
-    expect(staleLive.providers["disk-only"]).toBeUndefined();
   });
 
   test("preserves an explicit Antigravity static opt-out without the legacy migration marker", () => {
@@ -334,7 +253,6 @@ describe("OAuth provider reconciliation", () => {
         },
       },
     } satisfies OcxConfig;
-    saveConfig(config);
 
     expect(reconcileOAuthProviders(config)).toBe(true);
     expect(config.providers.xai.modelReasoningEfforts?.["grok-4.6"])

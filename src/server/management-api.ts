@@ -63,7 +63,6 @@ import { handleStorageLogGuardRoutes } from "./management/storage-log-guard-rout
 import { handleRequestHistoryRoutes } from "./management/request-history-routes";
 import { handleRoutingAnalyticsRoutes } from "./management/routing-analytics-routes";
 import { handleProviderRoutes } from "./management/provider-routes";
-import { handleReplitProviderRoutes } from "./management/replit-provider-routes";
 import { handleModelRoutes } from "./management/model-routes";
 import { handleAgentSettingsRoutes } from "./management/agent-settings-routes";
 import { handleOauthAccountRoutes } from "./management/oauth-account-routes";
@@ -73,15 +72,16 @@ import { handleSidebarRoutes } from "./management/sidebar-routes";
 import { handleCodexPromptRoutes } from "./management/codex-prompt-routes";
 import { handleIntegrationRoutes } from "./management/integration-routes";
 import { handleNativeIntegrationRoutes } from "./management/native-integration-routes";
+import { handleCursorIntegrationRoutes } from "./management/cursor-integration-routes";
 import type { ManagementContext } from "./management/context";
-import type { ManagementPrincipal } from "./management-auth";
-import { ManagementPersistenceError, MissingManagementPersistenceError } from "./management/context";
+import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
 import { CatalogGatherBusyError } from "../codex/catalog/provider-fetch";
 import type { CatalogDisposition, ConvergeCodex } from "../codex/convergence-types";
 import { normalizeCatalogDisposition } from "../codex/catalog-refresh-status";
 import { managementBodyTooLargeResponse } from "./management/body";
+import { handleSessionRoutes } from "./management/session-routes";
 
 // installed npm version instead of a stale hardcode.
 export const VERSION = (() => {
@@ -138,6 +138,7 @@ export async function handleManagementAPI(
   config: OcxConfig,
   deps: ManagementApiDeps = {},
   principal?: ManagementPrincipal,
+  sessionControl?: ManagementSessionControl,
 ): Promise<Response | null> {
   if (!isAllowedManagementOrigin(req, config)) {
     return jsonResponse({ error: "cross-origin request blocked" }, 403, req, config);
@@ -220,24 +221,21 @@ export async function handleManagementAPI(
       }
     } catch { /* best-effort */ }
   }
-  const ctx: ManagementContext = { req, url, config, deps, principal, convergeCodexCatalog, syncClaudeAgentDefsBestEffort };
-  const configBeforeDispatch = (["GET", "HEAD", "OPTIONS"].includes(req.method)
-    || (req.method === "POST" && url.pathname === "/api/providers/test"))
-    ? undefined
-    : structuredClone(config);
+  const ctx: ManagementContext = { req, url, config, deps, version: VERSION, principal, sessionControl, convergeCodexCatalog, syncClaudeAgentDefsBestEffort };
   let routed: Response | null;
   try {
-    routed = (await handleConfigRoutes(ctx))
+    routed = handleSessionRoutes(ctx)
+    ??     (await handleConfigRoutes(ctx))
     ??     (await handleStorageLogGuardRoutes(ctx))
     ??     (await handleLogsUsageRoutes(ctx))
     ??     (await handleRequestHistoryRoutes(ctx))
     ??     (await handleRoutingAnalyticsRoutes(ctx))
     ??     (await handleRoutingProfileRoutesOnDemand(ctx))
-    ??     (await handleReplitProviderRoutes(ctx))
     ??     (await handleProviderRoutes(ctx))
     ??     (await handleModelRoutes(ctx))
     ??     (await handleIntegrationRoutes(ctx))
     ??     (await handleNativeIntegrationRoutes(ctx))
+    ??     (await handleCursorIntegrationRoutes(ctx))
     ??     (await handleAgentSettingsRoutes(ctx))
     ??     (await handleCodexPromptRoutes(ctx))
     ??     (await handleOauthAccountRoutes(ctx))
@@ -248,13 +246,6 @@ export async function handleManagementAPI(
   } catch (error) {
     const tooLarge = managementBodyTooLargeResponse(error, req, config);
     if (tooLarge) return tooLarge;
-    if (error instanceof MissingManagementPersistenceError || error instanceof ManagementPersistenceError) {
-      if (configBeforeDispatch === undefined) throw error;
-      const response = error instanceof ManagementPersistenceError ? error.response : undefined;
-      for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
-      Object.assign(config, configBeforeDispatch);
-      return response ?? jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
-    }
     if (error instanceof OAuthMutationBusyError) {
       return new Response(JSON.stringify({ error: { type: "server_error", code: "oauth_mutation_busy", message: error.message } }), {
         status: 503,

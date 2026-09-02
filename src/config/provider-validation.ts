@@ -1,5 +1,9 @@
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
 import { redactSecretString } from "../lib/redact";
+import {
+  isValidModelDiscoveryModelId,
+  MODEL_DISCOVERY_MAX_MODELS,
+} from "../providers/model-discovery-limits";
 import { modelRecordValue } from "../reasoning-effort";
 import {
   isWirePinnedModel,
@@ -12,7 +16,6 @@ import {
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 const SENSITIVE_PROVIDER_HEADERS = new Set([
   "authorization",
-  "api-key",
   "cookie",
   "set-cookie",
   "proxy-authorization",
@@ -21,42 +24,8 @@ const SENSITIVE_PROVIDER_HEADERS = new Set([
   "x-amz-security-token",
 ]);
 const REASONING_SUMMARY_DELIVERY_SET = new Set<string>(REASONING_SUMMARY_DELIVERY_VALUES);
-const AZURE_ADAPTERS = new Set(["azure", "azure-openai"]);
-
-export function isAzureIdentityProvider(provider: Pick<OcxProviderConfig, "adapter" | "azureCredential">): boolean {
-  return AZURE_ADAPTERS.has(provider.adapter) && provider.azureCredential?.type === "default-azure-credential";
-}
-
-/** Shared semantic boundary for Azure's exact keyless identity mode. */
-export function azureCredentialConfigError(provider: {
-  adapter?: unknown;
-  azureCredential?: unknown;
-  apiKey?: unknown;
-  apiKeyPool?: unknown;
-  authMode?: unknown;
-}): string | null {
-  const credential = provider.azureCredential;
-  if (credential === undefined) return null;
-  if (!AZURE_ADAPTERS.has(provider.adapter as string)) return "azureCredential is supported only by azure adapters";
-  if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
-    return "azureCredential must be an object";
-  }
-  const record = credential as Record<string, unknown>;
-  for (const key of Object.keys(record)) {
-    if (key !== "type" && key !== "managedIdentityClientId") return "azureCredential has an unrecognized field";
-  }
-  if (record.type !== "default-azure-credential") return 'azureCredential.type must be "default-azure-credential"';
-  if (Object.hasOwn(record, "managedIdentityClientId")
-    && (typeof record.managedIdentityClientId !== "string" || !record.managedIdentityClientId.trim())) {
-    return "azureCredential.managedIdentityClientId must be a non-empty string";
-  }
-  if (Object.hasOwn(provider, "apiKey")) return "azureCredential conflicts with apiKey";
-  if (Object.hasOwn(provider, "apiKeyPool")) return "azureCredential conflicts with apiKeyPool";
-  if (provider.authMode !== undefined && provider.authMode !== "key") {
-    return "azureCredential requires authMode key or omitted";
-  }
-  return null;
-}
+const DISPLAY_NAME_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+const MAX_MODEL_DISPLAY_NAME_LENGTH = 128;
 
 /** Validate a provider destination without coupling DTO callers to config persistence. */
 export function providerBaseUrlConfigError(baseUrl: string): string | null {
@@ -161,6 +130,40 @@ export function booleanRecordConfigError(value: unknown, field: string): string 
   return null;
 }
 
+/** Validate display-only labels without changing the provider's model identity. */
+export function modelDisplayNamesConfigError(
+  value: unknown,
+  field = "modelDisplayNames",
+): string | null {
+  if (value === undefined) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return `${field} must be a plain object`;
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return `${field} must be a plain object with own properties`;
+  }
+  const entries = Object.entries(value);
+  // One discovered model can own one label, so both maps share the same safe cap.
+  if (entries.length > MODEL_DISCOVERY_MAX_MODELS) {
+    return `${field} must contain at most ${MODEL_DISCOVERY_MAX_MODELS} entries`;
+  }
+  for (const [modelId, displayName] of entries) {
+    if (!isValidModelDiscoveryModelId(modelId)) return `${field} keys must be valid model ids`;
+    const safeModelId = JSON.stringify(redactSecretString(modelId));
+    if (typeof displayName !== "string") return `${field}.${safeModelId} must be a string`;
+    const trimmed = displayName.trim();
+    if (!trimmed) return `${field}.${safeModelId} must be nonblank`;
+    if (displayName !== trimmed) return `${field}.${safeModelId} must be trimmed`;
+    if (displayName.length > MAX_MODEL_DISPLAY_NAME_LENGTH) {
+      return `${field}.${safeModelId} must be at most ${MAX_MODEL_DISPLAY_NAME_LENGTH} characters`;
+    }
+    if (displayName.includes("/")) return `${field}.${safeModelId} must not contain /`;
+    if (DISPLAY_NAME_CONTROL_CHARS.test(displayName)) {
+      return `${field}.${safeModelId} must not contain control characters`;
+    }
+  }
+  return null;
+}
+
 /** Validate the management DTO boundary for the opt-in empty-tool-output annotation. */
 export function providerEmptyToolOutputConfigError(name: string, provider: unknown): string | null {
   const raw = provider as Record<string, unknown> | null | undefined;
@@ -220,20 +223,6 @@ export function modelAdapterRecordConfigError(
     if (isWirePinnedModel(providerName, key.trim())) {
       return `${field}.${key} cannot be overridden: the upstream only speaks one wire for this model`;
     }
-  }
-  return null;
-}
-
-export function wsUpstreamConfigError(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "boolean") return "wsUpstream must be a boolean";
-  return null;
-}
-
-export function maxWsFrameBytesConfigError(value: unknown): string | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-    return "maxWsFrameBytes must be a positive finite integer";
   }
   return null;
 }

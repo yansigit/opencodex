@@ -108,6 +108,29 @@ export const CAPABILITIES: readonly Capability[] = [
     details: ["Reads /healthz plus local config; drives no management API route."],
   },
   {
+    command: ["connect", "rotate"],
+    summary: "Rotate the connected client's data key against the hub, with commit and abort.",
+    // One command drives all three: start returns the new secret once, commit promotes it,
+    // and abort unwinds a rotation that could not be confirmed. They are not separate verbs
+    // because a half-rotation is not a state an operator should be able to leave behind.
+    routes: [
+      { method: "POST", path: "/api/keys/rotate" },
+      { method: "POST", path: "/api/keys/rotate/commit" },
+      { method: "DELETE", path: "/api/keys/rotate" },
+    ],
+    flags: [
+      { name: "--pairing-code-stdin", value: "boolean", summary: "Read a one-time pairing code from stdin as the rotation authority." },
+      { name: "--admin-token-stdin", value: "boolean", summary: "Read the hub admin token from stdin as the rotation authority." },
+      { name: "--json", value: "boolean", summary: "Emit the rotation result as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: [
+      "Requires transient authority on stdin; the credential is never persisted or echoed.",
+      "A rotation left pending by a crash is resumed here — startup and status stop rather than guess which key generation is live.",
+    ],
+  },
+  {
     command: ["capabilities"],
     summary: "List the declared CLI capabilities and the management routes they drive.",
     routes: [],
@@ -131,20 +154,19 @@ export const CAPABILITIES: readonly Capability[] = [
     details: ["Reads local config; drives no management API route."],
   },
   {
-    command: ["provider", "install-replit"],
-    summary: "Install the paired Replit OpenAI and Anthropic providers.",
-    routes: [{ method: "POST", path: "/api/providers/replit-pair" }],
-    flags: [
-      { name: "--origin", value: "string", required: true, summary: "Replit gateway origin." },
-      { name: "--stdin", value: "boolean", summary: "Read the gateway key from stdin." },
-      { name: "--gateway-key-file", value: "string", summary: "Read the gateway key from a private file." },
-      { name: "--allow-custom-domain", value: "boolean", summary: "Allow a non-Replit gateway domain." },
-      { name: "--replace", value: "boolean", summary: "Replace an existing provider pair." },
-      { name: "--set-default", value: "boolean", summary: "Select Replit as the default provider." },
-      { name: "--json", value: "boolean", summary: "Emit the installation result as JSON." },
+    command: ["provider", "keychain"],
+    summary: "Move a provider's API key into the OS keychain, restore it, or report where it lives.",
+    routes: [
+      { method: "GET", path: "/api/providers/keychain" },
+      { method: "POST", path: "/api/providers/keychain" },
     ],
+    flags: [{ name: "--json", value: "boolean", summary: "Emit the keychain status or result as JSON." }],
     mutates: true,
     json: "payload",
+    details: [
+      "`store` verifies every keychain write by read-back before config.json is rewritten with keychain: references; an unavailable keychain refuses with 503 and leaves the file untouched.",
+      "Headless services usually have no unlocked keychain session; prefer ${ENV_VAR} references there.",
+    ],
   },
   {
     command: ["account", "list"],
@@ -476,13 +498,14 @@ export const CAPABILITIES: readonly Capability[] = [
   },
   {
     command: ["integration", "native"],
-    summary: "Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations.",
+    summary: "Show or toggle the native Claude, Claude Desktop, Codex, and Grok integrations, and read the Cursor status (which builds are installed, gateway values, last request seen).",
     routes: [
       { method: "GET", path: "/api/native-integrations" },
       { method: "PUT", path: "/api/native-integrations/claude" },
       { method: "PUT", path: "/api/native-integrations/claude-desktop" },
       { method: "PUT", path: "/api/native-integrations/codex" },
       { method: "PUT", path: "/api/native-integrations/grok" },
+      { method: "GET", path: "/api/native-integrations/cursor" },
     ],
     flags: [{ name: "--json", value: "boolean", summary: "Emit the client rows or toggle result as JSON." }],
     mutates: true,
@@ -503,60 +526,6 @@ export const CAPABILITIES: readonly Capability[] = [
     mutates: true,
     json: "payload",
     details: ["A bare invocation reads and never writes."],
-  },
-  {
-    command: ["agent", "roles"],
-    summary: "Show, replace, or remove subagent roles.",
-    routes: [
-      { method: "GET", path: "/api/subagent-roles" },
-      { method: "PUT", path: "/api/subagent-roles" },
-    ],
-    flags: [
-      { name: "--file", value: "string", summary: "Read role JSON from a file instead of stdin." },
-      { name: "--json", value: "boolean", summary: "Emit role state as JSON." },
-    ],
-    mutates: true,
-    json: "payload",
-    details: ["A status invocation reads and never writes."],
-  },
-  {
-    command: ["agent", "authority"],
-    summary: "Resolve subagent model authority for a supplied request.",
-    routes: [{ method: "POST", path: "/api/subagent-model-authority" }],
-    flags: [{ name: "--file", value: "string", summary: "Read authority JSON from a file instead of stdin." }],
-    mutates: true,
-    json: "none",
-  },
-  {
-    command: ["lab", "run"],
-    summary: "Enqueue a manual Lab run and optionally pair a stored Cursor oracle observation.",
-    routes: [],
-    flags: [
-      { name: "--layer", value: "string", required: true, summary: "protocol_conformance | live_route_compatibility | task_effectiveness" },
-      { name: "--scenario", value: "string", required: true, summary: "Scenario id" },
-      { name: "--provider", value: "string", summary: "Optional provider filter" },
-      { name: "--model", value: "string", summary: "Model id" },
-      { name: "--oracle-run", value: "string", summary: "Stored oracle run id; scenario and model must match" },
-      { name: "--json", value: "boolean", summary: "Emit {run, oracle?, comparison?} envelope as JSON" },
-    ],
-    mutates: true,
-    json: "envelope",
-    details: ["Reads local projection, validates an immutable sanitized oracle sidecar when supplied, then enqueues the manual run."],
-  },
-  {
-    command: ["lab", "oracle", "cursor"],
-    summary: "Cursor oracle probe: isolated working state and loopback-only sanitized observation V1.",
-    routes: [],
-    flags: [
-      { name: "--scenario", value: "string", required: true, summary: "Lab scenario id" },
-      { name: "--model", value: "string", required: true, summary: "Model id for oracle prompt" },
-      { name: "--agent-bin", value: "string", summary: "Path to cursor-agent binary" },
-      { name: "--keep-raw", value: "boolean", summary: "Persist raw bytes 0600 under lab scratch 24h TTL; without it only names + byte lengths are kept" },
-      { name: "--json", value: "boolean", summary: "Emit sanitized observation V1 as JSON" },
-    ],
-    mutates: true,
-    json: "envelope",
-    details: ["Config/data/workspace use OS tmp 0700 while the authenticated child retains normal home/keychain access; loopback 127.0.0.1:0 forwards only to https://api2.cursor.sh; auth bodies are opaque; sanitized observations contain protocol cases, counts, byte lengths, hashes, and diagnostics."],
   },
 ];
 

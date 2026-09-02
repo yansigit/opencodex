@@ -4,7 +4,7 @@
  * default follows modern clients, while sourceModels keeps an escape hatch.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleResponses, isShadowSourceModel } from "../src/server/responses";
@@ -13,7 +13,7 @@ import { handleManagementAPI } from "../src/server/management-api";
 import type { RequestLogContext } from "../src/server/request-log";
 import type { OcxConfig } from "../src/types";
 import { catalogConvergenceFactory } from "./helpers/catalog-convergence";
-import { inMemoryManagementPersistence } from "./helpers/management-auth";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const originalFetch = globalThis.fetch;
 
@@ -264,7 +264,7 @@ async function withTempHome<T>(run: () => Promise<T>): Promise<T> {
   } finally {
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
-    rmSync(dir, { recursive: true, force: true });
+    removeTreeWithRetry(dir);
   }
 }
 
@@ -278,7 +278,6 @@ async function shadowApi(config: OcxConfig, method: string, body?: unknown): Pro
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const res = await handleManagementAPI(req, new URL(req.url), config, {
-    ...inMemoryManagementPersistence(config),
     createManagementConvergeCodex: catalogConvergenceFactory(),
   });
   expect(res).not.toBeNull();
