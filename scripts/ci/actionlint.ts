@@ -125,10 +125,10 @@ function extractArchive(archivePath: string, destDir: string): void {
     const exeName = archivePath.includes("windows") ? "actionlint.exe" : "actionlint";
     const finalPath = join(destDir, exeName);
     // Ensure destDir clean then move
-    try { rmSync(finalPath, { force: true }); } catch {}
+    rmSync(finalPath, { force: true });
     renameSync(found, finalPath);
     if (process.platform !== "win32") {
-      try { chmodSync(finalPath, 0o755); } catch {}
+      chmodSync(finalPath, 0o755);
     }
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
