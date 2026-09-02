@@ -12,6 +12,7 @@
 import { loadConfig } from "../config";
 import { readAlivePid, readRuntimePort, verifyPidIdentity } from "../config/process-state";
 import { directLocalHttpFetch } from "./direct-local-http";
+import type { OcxConfig } from "../types";
 
 export interface HealthzIdentity {
   service?: unknown;
@@ -33,7 +34,7 @@ export interface LivenessIo {
    */
   verifyPidFn?: (candidatePid: number) => number | null;
   readRuntimeFn?: (pid?: number) => { pid?: number; port: number; hostname?: string } | null;
-  configFn?: () => { port?: number; hostname?: string };
+  configFn?: () => { port?: number; hostname?: string; tls?: OcxConfig["tls"] };
   timeoutMs?: number;
   /**
    * How many times to retry a probe that failed with a transport error (timeout /
@@ -105,7 +106,7 @@ export function isOpencodexHealthz(body: HealthzIdentity | null): boolean {
 /** Identity-checked /healthz probe; null when unreachable, non-OK, or not our proxy. */
 export async function proxyIdentityAt(
   port: number,
-  opts: { hostname?: string; expectedPid?: number } = {},
+  opts: { hostname?: string; expectedPid?: number; scheme?: "http" | "https" } = {},
   io: LivenessIo = {},
 ): Promise<{ pid: number | null; version?: string } | null> {
   const fetchFn = io.fetchFn ?? directLocalHttpFetch;
@@ -116,48 +117,50 @@ export async function proxyIdentityAt(
   const attempts = Number.isNaN(requestedAttempts)
     ? 1
     : Math.max(1, Math.min(requestedAttempts, 5));
+  const primaryScheme: "http" | "https" = opts.scheme ?? "http";
+  const fallbackScheme: "http" | "https" = primaryScheme === "http" ? "https" : "http";
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
     const remainingMs = io.deadlineAt === undefined ? baseTimeoutMs : io.deadlineAt - nowFn();
     if (remainingMs <= 0) return null;
     const timeoutMs = Math.min(baseTimeoutMs, remainingMs);
+    let res: Response | null = null;
+    let fetchSucceeded = false;
     try {
-      const res = await fetchFn(`http://${probeHostname(opts.hostname)}:${port}/healthz`, {
+      res = await fetchFn(`${primaryScheme}://${probeHostname(opts.hostname)}:${port}/healthz`, {
         signal: AbortSignal.timeout(timeoutMs),
       });
-      if (!res.ok) return null;
-      const body = (await res.json().catch(() => null)) as HealthzIdentity | null;
-      if (!isOpencodexHealthz(body)) return null;
-      const pid = typeof body?.pid === "number" ? body.pid : null;
-      if (opts.expectedPid !== undefined && pid !== null && pid !== opts.expectedPid) return null;
-      // Guarded the same way `pid` is: a non-string version is absent, not coerced.
-      const version = typeof body?.version === "string" ? body.version : undefined;
-      return version === undefined ? { pid } : { pid, version };
+      fetchSucceeded = true;
     } catch {
-      // TLS fallback: HTTP probe against an HTTPS-only listener (0.0.0.0 + tls) times out
-      // via directLocalHttpFetch (HTTP-only). One HTTPS try with native fetch per attempt.
-      try {
-        const httpsUrl = `https://${probeHostname(opts.hostname)}:${port}/healthz`;
-        const res = await fetch(httpsUrl, {
-          signal: AbortSignal.timeout(timeoutMs),
-          ...( { tls: { rejectUnauthorized: false } } as unknown as Record<string, unknown>),
-        } as RequestInit & { tls?: unknown });
-        if (!res.ok) return null;
-        const body = (await res.json().catch(() => null)) as HealthzIdentity | null;
-        if (!isOpencodexHealthz(body)) return null;
-        const pid = typeof body?.pid === "number" ? body.pid : null;
-        if (opts.expectedPid !== undefined && pid !== null && pid !== opts.expectedPid) return null;
-        const version = typeof body?.version === "string" ? body.version : undefined;
-        return version === undefined ? { pid } : { pid, version };
-      } catch {
-        // HTTPS also unreachable — fall through to transport retry
+      const fallbackRemainingMs = io.deadlineAt === undefined ? baseTimeoutMs : io.deadlineAt - nowFn();
+      if (fallbackRemainingMs > 0) {
+        const fallbackTimeoutMs = Math.min(baseTimeoutMs, fallbackRemainingMs);
+        try {
+          res = await fetchFn(`${fallbackScheme}://${probeHostname(opts.hostname)}:${port}/healthz`, {
+            signal: AbortSignal.timeout(fallbackTimeoutMs),
+          });
+          fetchSucceeded = true;
+        } catch {
+          res = null;
+        }
       }
+    }
+    if (!fetchSucceeded) {
       // Transport failure (timeout / refused) — retry while budget remains; a proxy that
       // has only just begun listening can miss a single short probe (#764).
       if (attempt >= attempts) return null;
       if (io.deadlineAt !== undefined && io.deadlineAt - nowFn() <= 0) return null;
       await sleepFn(100);
+      continue;
     }
+    if (!res || !res.ok) return null;
+    const body = (await res.json().catch(() => null)) as HealthzIdentity | null;
+    if (!isOpencodexHealthz(body)) return null;
+    const pid = typeof body?.pid === "number" ? body.pid : null;
+    if (opts.expectedPid !== undefined && pid !== null && pid !== opts.expectedPid) return null;
+    // Guarded the same way `pid` is: a non-string version is absent, not coerced.
+    const version = typeof body?.version === "string" ? body.version : undefined;
+    return version === undefined ? { pid } : { pid, version };
   }
   return null;
 }
@@ -196,6 +199,8 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
     return verified === reported ? verified : null;
   };
 
+  const config = configFn();
+  const defaultScheme: "http" | "https" = config.tls ? "https" : "http";
   const pid = readPidFn();
   let probedPort: number | null = null;
   if (pid) {
@@ -203,7 +208,7 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
     if (runtime?.port) {
       if (budgetExhausted()) return null;
       probedPort = runtime.port;
-      const identity = await proxyIdentityAt(runtime.port, { hostname: runtime.hostname, expectedPid: pid }, probeIo);
+      const identity = await proxyIdentityAt(runtime.port, { hostname: runtime.hostname, expectedPid: pid, scheme: defaultScheme }, probeIo);
       if (identity) {
         // healthz confirmed the pid itself → trusted; a pidless legacy body did not,
         // so the cheap pid must pass full identity verification before it is returned.
@@ -226,7 +231,7 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
   if (record?.port && record.port !== probedPort) {
     if (budgetExhausted()) return null;
     const expectedPid = typeof record.pid === "number" ? record.pid : undefined;
-    const identity = await proxyIdentityAt(record.port, { hostname: record.hostname, expectedPid }, probeIo);
+    const identity = await proxyIdentityAt(record.port, { hostname: record.hostname, expectedPid, scheme: defaultScheme }, probeIo);
     // Only the healthz-reported pid is authoritative here. The record's pid may be stale
     // (its process dead, the port reused by a pidless legacy proxy) — synthesizing it
     // would hand destructive callers (stopProxy → kill fallback) a reusable pid.
@@ -241,10 +246,9 @@ export async function findLiveProxy(io: LivenessIo = {}): Promise<LiveProxy | nu
     }
   }
 
-  const config = configFn();
   const port = config.port ?? 10100;
   if (budgetExhausted()) return null;
-  const identity = await proxyIdentityAt(port, { hostname: config.hostname }, probeIo);
+  const identity = await proxyIdentityAt(port, { hostname: config.hostname, scheme: defaultScheme }, probeIo);
   if (identity) {
     return {
       pid: verifiedReportedPid(identity.pid) ?? killablePid(pid),
@@ -348,36 +352,30 @@ export function validateReadyzBody(
  */
 export async function probeReadiness(
   port: number,
-  opts: { hostname?: string; expectedPid?: number } = {},
+  opts: { hostname?: string; expectedPid?: number; scheme?: "http" | "https" } = {},
   io: ReadinessProbeIo = {},
 ): Promise<ReadinessProbeResult | null> {
   const fetchFn = io.fetchFn ?? directLocalHttpFetch;
-  try {
-    const res = await fetchFn(`http://${probeHostname(opts.hostname)}:${port}/readyz`, {
+  const primaryScheme: "http" | "https" = opts.scheme ?? "http";
+  const fallbackScheme: "http" | "https" = primaryScheme === "http" ? "https" : "http";
+  const tryFetch = async (scheme: "http" | "https"): Promise<ReadinessProbeResult | null> => {
+    const res = await fetchFn(`${scheme}://${probeHostname(opts.hostname)}:${port}/readyz`, {
       signal: AbortSignal.timeout(io.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS),
     });
-    // Parse even on 503: /readyz returns JSON with a sanitized status while pending.
     const body = (await res.json().catch(() => null)) as unknown;
     const parsed = validateReadyzBody(body, port, opts);
     if (!parsed) return null;
-    // HTTP/body-status consistency: ready requires 200; pending/failed require 503.
     if (parsed.status === "ready" && res.status !== 200) return null;
     if (parsed.status !== "ready" && res.status !== 503) return null;
     return parsed;
+  };
+  try {
+    const result = await tryFetch(primaryScheme);
+    if (result !== null) return result;
+    return null;
   } catch {
-    // TLS fallback — same rationale as proxyIdentityAt
     try {
-      const httpsUrl = `https://${probeHostname(opts.hostname)}:${port}/readyz`;
-      const res = await fetch(httpsUrl, {
-        signal: AbortSignal.timeout(io.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS),
-        ...( { tls: { rejectUnauthorized: false } } as unknown as Record<string, unknown>),
-      } as RequestInit & { tls?: unknown });
-      const body = (await res.json().catch(() => null)) as unknown;
-      const parsed = validateReadyzBody(body, port, opts);
-      if (!parsed) return null;
-      if (parsed.status === "ready" && res.status !== 200) return null;
-      if (parsed.status !== "ready" && res.status !== 503) return null;
-      return parsed;
+      return await tryFetch(fallbackScheme);
     } catch {
       return null;
     }

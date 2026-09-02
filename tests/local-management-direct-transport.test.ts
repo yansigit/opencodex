@@ -376,3 +376,30 @@ describe("local management direct transport", () => {
     }
   });
 });
+
+describe("direct local HTTPS transport", () => {
+  test("https request rejects non-HTTP(S) protocols with widened message", async () => {
+    await expect(directLocalHttpFetch("ftp://127.0.0.1/healthz", {}))
+      .rejects.toThrow("direct local request must use HTTP or HTTPS");
+  });
+
+  test("succeeds against a real local HTTPS server", async () => {
+    const certFile = new URL("./fixtures/network-tls-test-cert.pem", import.meta.url);
+    const keyFile = new URL("./fixtures/network-tls-test-key.pem", import.meta.url);
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      tls: { cert: Bun.file(certFile), key: Bun.file(keyFile) },
+      fetch() {
+        return Response.json({ ok: true });
+      },
+    });
+    try {
+      const response = await directLocalHttpFetch(`https://127.0.0.1:${server.port}/healthz`);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ok: true });
+    } finally {
+      server.stop(true);
+    }
+  });
+});
