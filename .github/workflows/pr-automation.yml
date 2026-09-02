@@ -8,6 +8,9 @@ on:
     branches: [dev]
   check_run:
     types: [completed]
+  workflow_run:
+    workflows: ["Cross-platform CI", "React Doctor", "Service lifecycle"]
+    types: [completed]
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
@@ -73,6 +76,7 @@ jobs:
               classifyPullRequest,
               exactHeadGate,
               summarizeAgedHolds,
+              workflowRunRetryDisposition,
             } = require(path.join(process.cwd(), ".github", "scripts", "pr-automation.cjs"));
             const {
               SYNC_BRANCH_RE,
@@ -123,6 +127,44 @@ jobs:
             }
             async function getPr(number) {
               return (await github.rest.pulls.get({ owner, repo, pull_number: number })).data;
+            }
+            async function rerunFailedWorkflowIfEligible() {
+              if (context.eventName !== "workflow_run") return;
+              const eventRun = context.payload.workflow_run;
+              if (!Number.isSafeInteger(Number(eventRun?.id)) || Number(eventRun.id) <= 0) return;
+              const run = (await github.rest.actions.getWorkflowRun({
+                owner, repo, run_id: Number(eventRun?.id),
+              })).data;
+              const linked = Array.isArray(run.pull_requests) ? run.pull_requests : [];
+              if (linked.length > 1) return;
+              let candidates = linked;
+              if (candidates.length === 0) {
+                candidates = (await github.paginate(github.rest.pulls.list, {
+                  owner, repo, state: "open", per_page: 100,
+                })).filter(pr => !pr.merged && pr.head?.sha === run.head_sha);
+              }
+              if (candidates.length !== 1) return;
+              const pr = await getPr(Number(candidates[0].number));
+              const disposition = workflowRunRetryDisposition({
+                run, pr, repository: `${owner}/${repo}`,
+              });
+              if (disposition.action !== "rerun") {
+                core.info(`CI rerun skipped: ${disposition.reason}.`);
+                return;
+              }
+              if (!["update", "merge"].includes(mode)) {
+                core.info(`Shadow mode would rerun failed jobs for PR #${pr.number}, run ${run.id}.`);
+                return;
+              }
+              try {
+                await github.rest.actions.reRunWorkflowFailedJobs({
+                  owner, repo, run_id: disposition.runId,
+                });
+                core.notice(`Rerunning failed jobs once for PR #${pr.number}, run ${run.id}.`);
+              } catch (error) {
+                if (![409, 422].includes(Number(error.status))) throw error;
+                core.info(`CI rerun already started for run ${run.id}.`);
+              }
             }
             async function currentDevSha() {
               return (await github.rest.repos.getBranch({ owner, repo, branch: "dev" })).data.commit.sha;
@@ -695,6 +737,7 @@ jobs:
               return retired;
             }
 
+            await rerunFailedWorkflowIfEligible();
             const all = await github.paginate(github.rest.pulls.list, {
               owner, repo, state: "open", base: "dev", per_page: 100
             });
