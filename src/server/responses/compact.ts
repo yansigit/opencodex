@@ -84,7 +84,7 @@ import {
   upstreamHostHealthKey,
   type UpstreamHostAdmissionLease,
 } from "../../codex/upstream-host-health";
-import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "../auth-cors";
+import { ForwardAdmissionCredentialError, hasForwardableCodexBearer, validateForwardAdmissionCredential } from "../auth-cors";
 import type { DataPlaneAdmission } from "../auth-cors";
 import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, type ResolvedOpenAiForwardSidecar } from "../../providers/openai-sidecar";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider, supportsNativeResponsesCompactEndpoint } from "../../providers/openai-tiers";
@@ -549,7 +549,10 @@ export async function handleResponsesCompact(
   // #2132: and only when the route is a native Codex one, which is the only route that can
   // consume that credential. See the longer note in core.ts resolveResponsesCodexAuth.
   const substituteMainCredential = admission?.source === "bearer"
-    && route.codexAccountMode !== undefined;
+    && (route.codexAccountMode !== undefined || isCanonicalOpenAiForwardProvider(route.provider));
+  const requestScopedMainCredential = route.codexAccountMode !== undefined
+    && !substituteMainCredential
+    && hasForwardableCodexBearer(req.headers, config);
   if (route.codexAccountMode === "direct" && !substituteMainCredential) {
     try { validateForwardAdmissionCredential(req.headers, config); }
     catch (err) {
@@ -599,6 +602,7 @@ export async function handleResponsesCompact(
           accountId: route.codexAccountId,
           modelId: selectedModelId,
           substituteMainCredentialForDirect: substituteMainCredential,
+          requestScopedMainCredential,
           beginCodexAccountSelection: codexAccountSelectionForTurn(turnAdmissionLease),
           signal: req.signal,
           nativeMainRefreshDependencies: options.nativeMainRefreshDependencies,

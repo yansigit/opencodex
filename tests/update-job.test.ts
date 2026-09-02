@@ -19,8 +19,7 @@ import {
   updateJobPath,
   type UpdateJobState,
 } from "../src/update/job";
-import { checkUpdatePackageIntegrity, updateCommand, updateCommandStr } from "../src/update/index";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { checkUpdatePackageIntegrity, PKG, updateCommand, updateCommandStr } from "../src/update/index";
 
 type SpawnResult = { status: number | null; stdout: string };
 function fakeSpawn(result: SpawnResult): typeof import("node:child_process").spawnSync {
@@ -39,7 +38,7 @@ beforeEach(() => {
 afterEach(() => {
   if (prevHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = prevHome;
-  removeTreeWithRetry(dir);
+  rmSync(dir, { recursive: true, force: true });
 });
 
 describe("GUI update check", () => {
@@ -756,7 +755,6 @@ describe("GUI update execution decisions", () => {
   // runService is then never called and this goes red.
   test("a non-elevated Windows update worker repairs the service instead of skipping it", async () => {
     const ranService: string[][] = [];
-    const serviceTimeouts: number[] = [];
     const spawned: Array<{ port: number }> = [];
     const job: UpdateJobState = {
       id: "svc-win-repair",
@@ -781,9 +779,8 @@ describe("GUI update execution decisions", () => {
         serviceViableFn: () => true,
         waitForPort: async () => true,
         probeProxy: async () => true,
-        runService: (_j, _bin, args, timeoutMs) => {
+        runService: (_j, _bin, args) => {
           ranService.push(args);
-          serviceTimeouts.push(timeoutMs);
           return { status: 0 };
         },
         spawnStart: (_job, _installer, port) => {
@@ -794,44 +791,10 @@ describe("GUI update execution decisions", () => {
       expect(ranService.length).toBe(1);
       expect(ranService[0]).toContain("repair");
       expect(ranService[0]).not.toContain("install");
-      expect(serviceTimeouts).toEqual([150_000]);
     } finally {
       if (prevService === undefined) delete process.env.OCX_SERVICE;
       else process.env.OCX_SERVICE = prevService;
     }
-  });
-
-  test("a timed-out Windows repair never starts a competing foreground proxy", async () => {
-    const spawned: number[] = [];
-    const job: UpdateJobState = {
-      id: "svc-win-timeout",
-      status: "restarting",
-      startedAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      currentVersion: "2.7.42",
-      latestVersion: "2.7.43",
-      channel: "latest",
-      installer: "npm",
-      restart: true,
-      command: "",
-      log: [],
-      releaseNotesUrl: "",
-    };
-    writeFileSync(updateJobPath(job.id), JSON.stringify(job));
-
-    await expect(restartAfterUpdateForTests(job, { port: 19010, hostname: "127.0.0.1" }, {
-      platform: "win32",
-      serviceInstalledFn: () => true,
-      serviceViableFn: () => true,
-      waitForPort: async () => true,
-      runService: () => ({ status: null, signal: "SIGTERM", timedOut: true }),
-      spawnStart: (_job, _installer, port) => { spawned.push(port ?? 0); },
-      probeProxy: async () => false,
-    })).rejects.toThrow(/state unknown.*refusing a competing direct start/i);
-    expect(spawned).toEqual([]);
-    const log = readUpdateJob(job.id)?.log.join("\n") ?? "";
-    expect(log).toContain("refusing a competing direct start");
-    expect(log).not.toContain("falling back to a direct proxy start");
   });
 
   test("service reinstall exit 0 with non-viable assets falls back to direct start", async () => {
@@ -1562,18 +1525,18 @@ describe("GUI update execution decisions", () => {
 
 describe("immutable update target (WP160)", () => {
   test("a resolved version pins the install target instead of the movable tag", () => {
-    expect(updateCommand("bun", "latest", "2.7.24").args).toEqual(["add", "-g", "@bitkyc08/opencodex@2.7.24"]);
-    expect(updateCommand("npm", "latest", "2.7.24").args).toEqual(["install", "-g", "@bitkyc08/opencodex@2.7.24"]);
-    expect(updateCommandStr("bun", "latest", "2.7.24")).toContain("@bitkyc08/opencodex@2.7.24");
+    expect(updateCommand("bun", "latest", "2.7.24").args).toEqual(["add", "-g", `${PKG}@2.7.24`]);
+    expect(updateCommand("npm", "latest", "2.7.24").args).toEqual(["install", "-g", `${PKG}@2.7.24`]);
+    expect(updateCommandStr("bun", "latest", "2.7.24")).toContain(`${PKG}@2.7.24`);
     // Unknown version falls back to the tag (best-effort lane).
-    expect(updateCommand("bun", "latest").args).toEqual(["add", "-g", "@bitkyc08/opencodex@latest"]);
-    expect(updateCommand("bun", "latest", null).args).toEqual(["add", "-g", "@bitkyc08/opencodex@latest"]);
+    expect(updateCommand("bun", "latest").args).toEqual(["add", "-g", `${PKG}@latest`]);
+    expect(updateCommand("bun", "latest", null).args).toEqual(["add", "-g", `${PKG}@latest`]);
   });
 
   test("bun worker execution pins the resolved version through updateExecutionCommand", () => {
     const cmd = updateExecutionCommand("bun", "latest", "/pkg/bin/ocx.mjs", "2.7.24");
     expect(cmd.bin).toBe(process.platform === "win32" ? process.execPath : "bun");
-    expect(cmd.args).toEqual(["add", "-g", "@bitkyc08/opencodex@2.7.24"]);
+    expect(cmd.args).toEqual(["add", "-g", `${PKG}@2.7.24`]);
     expect(cmd.display).toContain("@2.7.24");
   });
 

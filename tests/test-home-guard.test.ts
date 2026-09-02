@@ -69,7 +69,7 @@ function runShardProbe(testSource: string, env: Record<string, string | undefine
     [process.execPath, "run", join(REPO_ROOT, "scripts/test.ts"), "--shard=1/1", file],
     { cwd: REPO_ROOT, env: childEnv, stdout: "pipe", stderr: "pipe" },
   );
-  rmSync(dir, { recursive: true, force: true });
+  removeTreeWithRetry(dir);
   return {
     code: result.exitCode ?? 1,
     stdout: new TextDecoder().decode(result.stdout),

@@ -9,6 +9,9 @@ import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
 import { waitForProviderRequestSlot } from "../../providers/request-pacing";
 import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
+import { providerTlsFetch } from "../../lib/provider-tls-profile";
+import { testProviderFetch } from "../../lib/test-provider-fetch";
+import { runtimeProviderFetch } from "../../lib/provider-runtime-fetch";
 
 export { withUpstreamHttpVersion };
 
@@ -56,6 +59,8 @@ export interface ProviderFetchOptions {
   modelId?: string;
   /** One pacing slot was acquired immediately before this fetch wrapper was created. */
   pacingSlotAcquired?: boolean;
+  /** Explicit test/integration executor; never read from serialized provider config. */
+  fetch?: typeof globalThis.fetch;
 }
 
 export function providerFetch(
@@ -63,13 +68,16 @@ export function providerFetch(
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   options: ProviderFetchOptions = {},
 ): ProviderFetch {
-  const base = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
+  const base = options.fetch ?? testProviderFetch(provider) ?? runtimeProviderFetch(provider, options.providerName) ?? globalThis.fetch;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
   };
+  const transport = options.providerName
+    ? providerTlsFetch(options.providerName, provider, base)
+    : base;
   const httpFetch = Object.assign(
     (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
-      base(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 }),
+      transport(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 }),
     { preconnect },
   ) as typeof globalThis.fetch;
   // ChatGPT Codex backend: streaming turns ride the responses_websockets
@@ -77,12 +85,17 @@ export function providerFetch(
   // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
   const unpaced = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
     const upstreamWebsocket = provider.upstreamWebsocket === true;
-    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, upstreamWebsocket)) {
+    const wsOpts = {
+      wsUpstream: provider.wsUpstream ?? upstreamWebsocket,
+      maxWsFrameBytes: provider.maxWsFrameBytes,
+      upstreamWebsocket,
+    };
+    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, wsOpts)) {
       // The fallback has to be the same HTTP fetch the non-WS branch would have
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOpts);
     }
     return httpFetch(input, init);
   };
@@ -158,7 +171,7 @@ export async function fetchWithHeaderTimeout(
   timeoutMs: number,
   preferIdentityEncoding = false,
   executor: typeof globalThis.fetch = globalThis.fetch,
-  manualRedirect = false,
+  _manualRedirect = true,
 ): Promise<Response> {
   const pacing = executor as ProviderFetch;
   await pacing.waitForPacing?.(abortSignal);
@@ -174,16 +187,20 @@ export async function fetchWithHeaderTimeout(
     headers.set("accept-encoding", "identity");
   }
   try {
-    return await fetchExecutor(url, {
+    const response = await fetchExecutor(url, {
       ...init,
       headers,
-      // Credential-bearing sends opt into manual redirects so a 3xx is relayed
-      // as a Response instead of being followed into a rejection that is
-      // indistinguishable from a pre-connection failure (#914).
-      ...(manualRedirect ? { redirect: "manual" as const } : {}),
+      // Upstream URLs are configuration, not navigation. Refuse every redirect
+      // so POST bodies and provider headers are never replayed to another hop.
+      redirect: "manual",
       signal: AbortSignal.any([abortSignal, timeout.signal]),
       timeout: 0,
     });
+    if (response.status >= 300 && response.status < 400) {
+      try { await response.body?.cancel(); } catch { /* ignore cancellation failures */ }
+      throw new Error(`upstream returned ${response.status} redirect; configure the final upstream URL directly`);
+    }
+    return response;
   } finally {
     clearTimeout(timer);
   }

@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
 import * as modelRows from "../src/server/management/model-rows";
 import type { OcxConfig } from "../src/types";
 import { BASELINE_VISION_MODELS } from "../src/vision/eligibility";
-import { ManagementRequest as Request } from "./helpers/management-auth";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 
 async function getSidecarSettings(config: OcxConfig): Promise<Response> {
   const url = new URL("http://localhost/api/sidecar-settings");
@@ -26,6 +25,7 @@ async function putSidecarSettings(config: OcxConfig, vision: Record<string, unkn
     }),
     url,
     config,
+    inMemoryManagementPersistence(config),
   );
   if (!response) throw new Error("sidecar settings route did not handle PUT");
   return response;
@@ -41,6 +41,7 @@ async function putClaudeCode(config: OcxConfig, body: Record<string, unknown>): 
     }),
     url,
     config,
+    inMemoryManagementPersistence(config),
   );
   if (!response) throw new Error("claude-code route did not handle PUT");
   return response;
@@ -68,7 +69,7 @@ describe("sidecar-settings vision model filter", () => {
   afterEach(() => {
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
-    if (isolatedHome) removeTreeWithRetry(isolatedHome);
+    if (isolatedHome) rmSync(isolatedHome, { recursive: true, force: true });
     isolatedHome = undefined;
   });
 

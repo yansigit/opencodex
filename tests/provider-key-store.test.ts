@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig } from "../src/config";
+import { loadConfig, replacePersistedConfig, saveConfig } from "../src/config";
 import { maskApiKey } from "../src/providers/api-keys";
 import {
   PROVIDER_KEYCHAIN_SERVICE,
@@ -127,6 +127,9 @@ describe("store / restore", () => {
     expect(result).toEqual({ ok: true, moved: 2 });
     expect(config.providers.relay!.apiKey).toBe("keychain:relay/a1");
     expect(config.providers.relay!.apiKeyPool!.map(e => e.key)).toEqual(["keychain:relay/a1", "keychain:relay/b2"]);
+    // key-store is now pure (no disk write) so the management boundary test passes;
+    // direct callers persist the mutated config themselves.
+    replacePersistedConfig(config);
     const onDisk = readFileSync(join(testDir, "config.json"), "utf8");
     expect(onDisk).not.toContain(SECRET);
     expect(onDisk).not.toContain(POOL_SECRET);
@@ -139,6 +142,7 @@ describe("store / restore", () => {
     expect(restored).toEqual({ ok: true, restored: 2 });
     expect(config.providers.relay!.apiKey).toBe(SECRET);
     expect(config.providers.relay!.apiKeyPool!.map(e => e.key)).toEqual([SECRET, POOL_SECRET]);
+    replacePersistedConfig(config);
     expect(store.size).toBe(0);
   });
 
@@ -192,4 +196,3 @@ describe("store / restore", () => {
     }
   });
 });
-

@@ -33,7 +33,9 @@ import { readJsonRequestBody } from "./request-decompress";
 import { ForwardAdmissionCredentialError, validateForwardAdmissionCredential } from "./auth-cors";
 import type { RequestLogContext } from "./request-log";
 import { codexLogAccountId, decodeRequestErrorResponse } from "./responses";
-import { getValidAccessToken, getOAuthCredentialProjectId } from "../oauth/index";
+import { getValidAccessTokenSnapshot, type OAuthAccessSnapshot } from "../oauth/index";
+import { isCanonicalAntigravityUrl, isLoopbackAntigravityUrl, providerTlsFetch } from "../lib/provider-tls-profile";
+import { redactErrorMessage } from "../lib/redact";
 import { safeAntigravityHttpErrorMessage } from "../adapters/google-errors";
 import { sanitizeUpstreamErrorText } from "../adapters/upstream-http-error";
 import { ANTIGRAVITY_REQUEST_UA } from "../adapters/google-antigravity-wire";
@@ -127,6 +129,14 @@ const CCA_BLOCKING_FINISH_REASONS: ReadonlySet<string> = new Set([
   "RECITATION",
 ]);
 
+function ccaAmbiguousImageTransportError(detail: string): Response {
+  return formatErrorResponse(
+    400,
+    "invalid_request_error",
+    `CCA image generation may have started and must not be blindly retried: ${detail}`,
+  );
+}
+
 function decodedBytesFromBase64(encoded: string): number {
   const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
   return Math.max(0, Math.floor((encoded.length * 3) / 4) - padding);
@@ -208,6 +218,9 @@ async function tryCcaImageGeneration(
   if (endpoint !== "generations") return undefined;
   const provider = config.providers?.["google-antigravity"];
   if (!provider || provider.disabled) return undefined;
+  if (provider.baseUrl && !isCanonicalAntigravityUrl(provider.baseUrl) && !isLoopbackAntigravityUrl(provider.baseUrl)) {
+    return formatErrorResponse(400, "invalid_request_error", "google-antigravity requires a canonical destination");
+  }
 
   const prompt = (body as { prompt?: unknown })?.prompt;
   if (typeof prompt !== "string" || !prompt.trim()) {
@@ -226,16 +239,16 @@ async function tryCcaImageGeneration(
   // OAuth token refresh and project discovery, not just the upstream fetch.
   const timeoutMs = config.images?.timeoutMs ?? IMAGES_UPSTREAM_TIMEOUT_MS;
   const linkedSignal = signalWithTimeout(timeoutMs, signal);
-  let token: string;
+  let snapshot: OAuthAccessSnapshot;
   try {
-    // Race the OAuth refresh against the deadline signal. getValidAccessToken
+    // Race the OAuth refresh against the deadline signal. getValidAccessTokenSnapshot
     // chains through 4 layers (resolveAccessSnapshotForAccount →
     // refreshAndPersistAccessToken → refreshGenericAccountWithLock →
     // def.refresh()) that do HTTP calls without accepting a signal. Rather than
     // threading signal through the entire chain, race the whole call against
     // linkedSignal: when the signal aborts we stop awaiting and surface the
     // cancellation immediately instead of hanging on the refresh HTTP call.
-    token = await abortableRace(getValidAccessToken("google-antigravity"), linkedSignal.signal);
+    snapshot = await abortableRace(getValidAccessTokenSnapshot("google-antigravity"), linkedSignal.signal);
   } catch (err) {
     linkedSignal.cleanup();
     // abortableRace rejects immediately when the signal fires, so client
@@ -255,7 +268,8 @@ async function tryCcaImageGeneration(
     }
     return formatErrorResponse(502, "upstream_error", "CCA image generation failed: OAuth token refresh failed");
   }
-  const project = getOAuthCredentialProjectId("google-antigravity");
+  const token = snapshot.accessToken;
+  const project = snapshot.projectId;
   if (!project) {
     linkedSignal.cleanup();
     return formatErrorResponse(
@@ -283,10 +297,11 @@ async function tryCcaImageGeneration(
       sessionId: `ocx-img-${crypto.randomUUID().slice(0, 8)}`,
     },
   };
-  let upstream: Response;
+  let upstream: Response | undefined;
   try {
     try {
-      upstream = await fetch(`${baseUrl}/v1internal:generateContent`, {
+      const executor = providerTlsFetch("google-antigravity", provider, globalThis.fetch);
+      upstream = await executor(`${baseUrl}/v1internal:generateContent`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -298,20 +313,15 @@ async function tryCcaImageGeneration(
       });
     } catch (err) {
       if (signal.aborted) return formatErrorResponse(499, "client_closed_request", "CCA image request canceled by client");
-      if (err instanceof Error && err.name === "TimeoutError") {
-        return formatErrorResponse(504, "upstream_error", "CCA image generation timed out");
-      }
-      // Network/DNS/runtime errors may embed the request URL or headers verbatim
-      // (e.g. "fetch failed: https://…/v1internal:generateContent"). The token
-      // lives in an Authorization header, not in the URL, but sanitize defensively
-      // so no upstream-rejected credential or query param can reach the client,
-      // and strip the internal base URL host from the surfaced message.
       const rawMsg = err instanceof Error ? err.message : String(err);
-      const safeMsg = sanitizeUpstreamErrorText(rawMsg).replace(
-        /https?:\/\/[^\s"'<>]+/gi,
-        "[upstream-url]",
-      );
-      return formatErrorResponse(502, "upstream_error", `CCA image generation failed: ${safeMsg}`);
+      const safeMsg = redactErrorMessage(sanitizeUpstreamErrorText(rawMsg));
+      if (err instanceof Error && err.name === "TimeoutError") {
+        return formatErrorResponse(504, "upstream_error", `CCA image generation timed out: ${safeMsg}`);
+      }
+      if (provider.tlsProfile === "antigravity-browser") {
+        return formatErrorResponse(502, "upstream_error", `CCA image generation failed: ${safeMsg}`);
+      }
+      return ccaAmbiguousImageTransportError(safeMsg.replace(/https?:\/\/[^\s"'<>]+/gi, "[upstream-url]"));
     }
 
     // Stream the upstream body with a bounded reader so an oversized or malicious
@@ -320,7 +330,7 @@ async function tryCcaImageGeneration(
     try {
       const reader = upstream.body?.getReader();
       if (!reader) {
-        return formatErrorResponse(502, "upstream_error", "CCA image response had no body");
+        return ccaAmbiguousImageTransportError("upstream response had no body");
       }
       const chunks: Uint8Array[] = [];
       let total = 0;
@@ -346,21 +356,17 @@ async function tryCcaImageGeneration(
         offset += chunk.byteLength;
       }
     } catch (err) {
-      // Body-read timeout/abort: when CCA returns headers then stalls, the linked
-      // signal's timeout aborts reader.read(), which rejects here. The rejection
-      // often surfaces as AbortError (not TimeoutError), so distinguish by signal
-      // state, not error name. Parent abort propagates into the linked signal, so
-      // check the parent first: parent abort → 499 (client cancelled); linked-only
-      // abort → 504 (upstream stall); anything else → 502 body-read failure.
+      // Body-read timeout/abort: when CCA returns headers then stalls or the
+      // connection fails, the paid POST may already have started. Parent abort
+      // remains 499; every other ambiguous transport failure is non-retryable.
       if (signal.aborted) {
         return formatErrorResponse(499, "client_closed_request", "CCA image request canceled by client");
       }
-      if (linkedSignal.signal.aborted) {
-        return formatErrorResponse(504, "upstream_error", "CCA image response timed out during body read");
-      }
       const rawMsg = err instanceof Error ? err.message : String(err);
       const safeMsg = sanitizeUpstreamErrorText(rawMsg).replace(/https?:\/\/[^\s"'<>]+/gi, "[upstream-url]");
-      return formatErrorResponse(502, "upstream_error", `CCA image body read failed: ${safeMsg}`);
+      return ccaAmbiguousImageTransportError(
+        linkedSignal.signal.aborted ? "upstream response timed out during body read" : safeMsg,
+      );
     }
 
     if (!upstream.ok) {

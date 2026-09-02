@@ -4,8 +4,8 @@
 // a measurably faster queue than the plain SSE POST path. Measured 2026-08-12
 // KST (same account, same payload, strictly sequential): gpt-5.6-luna TTFT p50
 // ~1.0s over WS vs ~3.9s over SSE. Codex CLI itself defaults to the WS
-// transport; opencodex previously always POSTed SSE, which is where its extra
-// 2-3s of TTFT came from.
+// transport; opencodex keeps HTTP/SSE as its reliable default and allows
+// operators to opt into WS when the lower latency is worth the risk.
 //
 // The wrapper only swaps the transport. It dials wss:// with the same headers,
 // sends the JSON body as a single `response.create` frame, and re-encodes the
@@ -14,11 +14,11 @@
 
 import { MAX_CLIENT_SSE_FRAME_BYTES } from "../sse-frame-buffer";
 import { compareBunVersions } from "../../lib/bun-stream-caps";
+import { interceptRuntimeFailure } from "../../telemetry/hook";
 
 const CODEX_RESPONSES_HTTP_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_RESPONSES_WS_URL = "wss://chatgpt.com/backend-api/codex/responses";
 const WS_BETA = "responses_websockets=2026-02-06";
-
 /**
  * Dial URL for a request URL. The canonical ChatGPT backend keeps its constant;
  * an operator-opted OpenAI-compatible upstream swaps https for wss on the same
@@ -27,9 +27,9 @@ const WS_BETA = "responses_websockets=2026-02-06";
  * a provider WS handshake would otherwise send credentials and request data
  * without transport encryption.
  */
-function wsUpstreamUrlFor(httpUrl: string): string {
+export function wsUpstreamUrlFor(httpUrl: string): string {
   if (httpUrl === CODEX_RESPONSES_HTTP_URL) return CODEX_RESPONSES_WS_URL;
-  return httpUrl.replace(/^http(s?):/, "ws$1:");
+  return httpUrl.replace(/^http(s?):/, "ws\$1:");
 }
 
 /**
@@ -38,15 +38,14 @@ function wsUpstreamUrlFor(httpUrl: string): string {
  * and every downstream consumer (adapter parsers, usage sniffing, SSE relay)
  * assumes that wire. Other paths (chat completions, images, search) stay HTTP.
  */
-function isResponsesWebsocketEligibleUrl(url: string): boolean {
+export function isResponsesWebsocketEligibleUrl(url: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     return false;
   }
-  return parsed.protocol === "https:"
-    && parsed.pathname.endsWith("/responses");
+  return parsed.protocol === "https:" && parsed.pathname.endsWith("/responses");
 }
 // If the 101 never arrives (network black hole), give SSE a chance well before
 // the caller's connect timeout (default 200s) would fire.
@@ -84,6 +83,30 @@ export type BunRuntimeIdentity = {
 };
 
 export type BunRuntimeGateInput = string | BunRuntimeIdentity;
+
+export interface CodexWsUpstreamOptions {
+  wsUpstream?: boolean;
+  maxWsFrameBytes?: number;
+  upstreamWebsocket?: boolean;
+}
+
+export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boolean {
+  if (options?.wsUpstream !== undefined) return options.wsUpstream !== true;
+  const env = process.env.OCX_CODEX_WS_UPSTREAM;
+  return env !== "true" && env !== "1";
+}
+
+export function resolveCodexWsMaxFrameBytes(options?: CodexWsUpstreamOptions): number {
+  if (typeof options?.maxWsFrameBytes === "number" && Number.isFinite(options.maxWsFrameBytes) && options.maxWsFrameBytes > 0) {
+    return Math.min(options.maxWsFrameBytes, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
+  }
+  const envVal = process.env.OCX_CODEX_WS_MAX_FRAME_BYTES;
+  if (envVal) {
+    const parsed = Number.parseInt(envVal, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return Math.min(parsed, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
+  }
+  return CODEX_WS_CREATE_FRAME_LIMIT_BYTES;
+}
 
 const codexWsUpstreamResponses = new WeakSet<Response>();
 
@@ -132,11 +155,24 @@ export function shouldUseCodexWsUpstream(
   url: string,
   init?: RequestInit,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  upstreamWebsocketConfigured = false,
+  options?: CodexWsUpstreamOptions | boolean,
 ): boolean {
+  // Union: accept boolean legacy (vendor upstreamWebsocketConfigured) and object (fork CodexWsUpstreamOptions).
+  let opts: CodexWsUpstreamOptions | undefined;
+  let upstreamWebsocketConfigured = false;
+  if (typeof options === "boolean") {
+    upstreamWebsocketConfigured = options;
+  } else {
+    opts = options;
+    upstreamWebsocketConfigured = opts?.upstreamWebsocket === true;
+    if (isCodexWsUpstreamDisabled(opts)) return false;
+  }
   if (!bunSupportsBoundedCodexWsRelay(runtime)) return false;
-  if (url !== CODEX_RESPONSES_HTTP_URL && !upstreamWebsocketConfigured) return false;
-  if (upstreamWebsocketConfigured && !isResponsesWebsocketEligibleUrl(url)) return false;
+  if (upstreamWebsocketConfigured) {
+    if (!isResponsesWebsocketEligibleUrl(url)) return false;
+  } else {
+    if (url !== CODEX_RESPONSES_HTTP_URL) return false;
+  }
   if ((init?.method ?? "GET").toUpperCase() !== "POST") return false;
   const body = init?.body;
   if (typeof body !== "string") return false;
@@ -167,7 +203,7 @@ type ResponsesWsRelayEvent = {
  * settle the turn and the socket close cannot be mistaken for a drop. Unknown
  * or missing status values fail closed instead of being reported as success.
  */
-function normalizeResponsesWsRelayEvent(text: string): ResponsesWsRelayEvent | null {
+export function normalizeResponsesWsRelayEvent(text: string): ResponsesWsRelayEvent | null {
   let payload: unknown;
   try {
     payload = JSON.parse(text);
@@ -178,7 +214,6 @@ function normalizeResponsesWsRelayEvent(text: string): ResponsesWsRelayEvent | n
   const record = payload as Record<string, unknown>;
   if (typeof record.type !== "string") return null;
   if (record.type !== "response.done") return { type: record.type, text };
-
   const response = record.response;
   const status = response && typeof response === "object" && !Array.isArray(response)
     ? (response as Record<string, unknown>).status
@@ -248,8 +283,10 @@ export function codexWsUpstreamFetch(
   init: RequestInit,
   sseFallback: typeof globalThis.fetch,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
+  options?: CodexWsUpstreamOptions | boolean,
 ): Promise<Response> {
-  if (!bunSupportsBoundedCodexWsRelay(runtime)) {
+  const opts = typeof options === "boolean" ? undefined : options;
+  if ((typeof options !== "boolean" && isCodexWsUpstreamDisabled(opts)) || !bunSupportsBoundedCodexWsRelay(runtime)) {
     return sseFallback(url, init);
   }
   const signal = init.signal ?? undefined;
@@ -272,7 +309,8 @@ export function codexWsUpstreamFetch(
   // streaming Response, so the oversized close can only be surfaced as a stream
   // error — and a resend at that point could double-generate. Measuring the
   // frame we are about to send keeps the whole failure mode unreachable.
-  if (codexWsCreateFrameExceedsLimit(frameText)) {
+  const maxFrameBytes = resolveCodexWsMaxFrameBytes(opts);
+  if (codexWsCreateFrameExceedsLimit(frameText, maxFrameBytes)) {
     return sseFallback(url, init);
   }
 
@@ -451,7 +489,9 @@ export function codexWsUpstreamFetch(
         // here would reach clients with no response.completed/failed at all —
         // relaySseWithFailedTail() only synthesizes a failed terminal when the
         // body read THROWS. Error the stream like a reset TCP socket.
-        try { controller.error(new Error(closedBeforeTerminalMessage(event))); } catch { /* stream already done */ }
+        const error = new Error(closedBeforeTerminalMessage(event));
+        if ((event as { code?: unknown } | null)?.code === 1006) interceptRuntimeFailure(error, { category: "websocket_1006" });
+        try { controller.error(error); } catch { /* stream already done */ }
       }
     });
 

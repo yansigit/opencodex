@@ -41,11 +41,11 @@ describe("Cursor request builder", () => {
     expect(request.conversationId.startsWith("cursor_")).toBe(true);
   });
 
-  test("requests standard Composer without the fast variant and leaves Composer Fast unchanged", () => {
+  test("leaves explicit standard and Fast Composer variant ids unchanged", () => {
     const standard = createCursorRequest({ ...base, modelId: "cursor/composer-2.5" });
     const fast = createCursorRequest({ ...base, modelId: "cursor/composer-2.5-fast" });
 
-    expect(standard.requestedModelParameters).toEqual([{ id: "fast", value: "false" }]);
+    expect(standard.requestedModelParameters).toBeUndefined();
     expect(fast.requestedModelParameters).toBeUndefined();
   });
 

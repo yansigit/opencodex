@@ -253,7 +253,7 @@ describe("Antigravity live model discovery", () => {
       expect(models.filter(model => model.provider === "google-antigravity").map(model => model.id))
         .toEqual(["configured-only"]);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 
@@ -292,7 +292,7 @@ describe("Antigravity live model discovery", () => {
       expect(models.filter(model => model.provider === "google-antigravity").map(model => model.id))
         .toEqual(["configured-only"]);
     } finally {
-      rmSync(home, { recursive: true, force: true });
+      removeTreeWithRetry(home);
     }
   });
 

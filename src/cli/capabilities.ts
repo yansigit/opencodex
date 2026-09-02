@@ -154,6 +154,22 @@ export const CAPABILITIES: readonly Capability[] = [
     details: ["Reads local config; drives no management API route."],
   },
   {
+    command: ["provider", "install-replit"],
+    summary: "Install the paired Replit OpenAI and Anthropic providers.",
+    routes: [{ method: "POST", path: "/api/providers/replit-pair" }],
+    flags: [
+      { name: "--origin", value: "string", required: true, summary: "Replit gateway origin." },
+      { name: "--stdin", value: "boolean", summary: "Read the gateway key from stdin." },
+      { name: "--gateway-key-file", value: "string", summary: "Read the gateway key from a private file." },
+      { name: "--allow-custom-domain", value: "boolean", summary: "Allow a non-Replit gateway domain." },
+      { name: "--replace", value: "boolean", summary: "Replace an existing provider pair." },
+      { name: "--set-default", value: "boolean", summary: "Select Replit as the default provider." },
+      { name: "--json", value: "boolean", summary: "Emit the installation result as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+  },
+  {
     command: ["provider", "keychain"],
     summary: "Move a provider's API key into the OS keychain, restore it, or report where it lives.",
     routes: [
@@ -526,6 +542,60 @@ export const CAPABILITIES: readonly Capability[] = [
     mutates: true,
     json: "payload",
     details: ["A bare invocation reads and never writes."],
+  },
+  {
+    command: ["agent", "roles"],
+    summary: "Show, replace, or remove subagent roles.",
+    routes: [
+      { method: "GET", path: "/api/subagent-roles" },
+      { method: "PUT", path: "/api/subagent-roles" },
+    ],
+    flags: [
+      { name: "--file", value: "string", summary: "Read role JSON from a file instead of stdin." },
+      { name: "--json", value: "boolean", summary: "Emit role state as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: ["A status invocation reads and never writes."],
+  },
+  {
+    command: ["agent", "authority"],
+    summary: "Resolve subagent model authority for a supplied request.",
+    routes: [{ method: "POST", path: "/api/subagent-model-authority" }],
+    flags: [{ name: "--file", value: "string", summary: "Read authority JSON from a file instead of stdin." }],
+    mutates: true,
+    json: "none",
+  },
+  {
+    command: ["lab", "run"],
+    summary: "Enqueue a manual Lab run and optionally pair a stored Cursor oracle observation.",
+    routes: [],
+    flags: [
+      { name: "--layer", value: "string", required: true, summary: "protocol_conformance | live_route_compatibility | task_effectiveness" },
+      { name: "--scenario", value: "string", required: true, summary: "Scenario id" },
+      { name: "--provider", value: "string", summary: "Optional provider filter" },
+      { name: "--model", value: "string", summary: "Model id" },
+      { name: "--oracle-run", value: "string", summary: "Stored oracle run id; scenario and model must match" },
+      { name: "--json", value: "boolean", summary: "Emit {run, oracle?, comparison?} envelope as JSON" },
+    ],
+    mutates: true,
+    json: "envelope",
+    details: ["Reads local projection, validates an immutable sanitized oracle sidecar when supplied, then enqueues the manual run."],
+  },
+  {
+    command: ["lab", "oracle", "cursor"],
+    summary: "Cursor oracle probe: isolated working state and loopback-only sanitized observation V1.",
+    routes: [],
+    flags: [
+      { name: "--scenario", value: "string", required: true, summary: "Lab scenario id" },
+      { name: "--model", value: "string", required: true, summary: "Model id for oracle prompt" },
+      { name: "--agent-bin", value: "string", summary: "Path to cursor-agent binary" },
+      { name: "--keep-raw", value: "boolean", summary: "Persist raw bytes 0600 under lab scratch 24h TTL; without it only names + byte lengths are kept" },
+      { name: "--json", value: "boolean", summary: "Emit sanitized observation V1 as JSON" },
+    ],
+    mutates: true,
+    json: "envelope",
+    details: ["Config/data/workspace use OS tmp 0700 while the authenticated child retains normal home/keychain access; loopback 127.0.0.1:0 forwards only to https://api2.cursor.sh; auth bodies are opaque; sanitized observations contain protocol cases, counts, byte lengths, hashes, and diagnostics."],
   },
 ];
 

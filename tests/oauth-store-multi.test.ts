@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { INTERNAL_DEADLINE_MS, STORE_BUDGET_MS } from "./helpers/test-budget";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   resetHardenedStateForTests,
@@ -26,7 +26,7 @@ import {
   setActiveAccount,
 } from "../src/oauth/store";
 import type { OAuthCredentials } from "../src/oauth/types";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { bindAntigravitySessionAffinity, clearAntigravityRoutingState, resolveAntigravityAccountForSession } from "../src/oauth/antigravity-routing";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-oauth-store-multi-test");
 let previousOpencodexHome: string | undefined;
@@ -41,7 +41,7 @@ const cred = (over: Partial<OAuthCredentials> = {}): OAuthCredentials => ({
 describe("multi-account auth store", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
     resetHardenedStateForTests();
@@ -58,7 +58,7 @@ describe("multi-account auth store", () => {
     resetHardenedStateForTests();
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
   });
 
   test("legacy single-credential auth.json normalizes and round-trips without losing login", async () => {
@@ -280,6 +280,33 @@ describe("multi-account auth store", () => {
     await removeCredential("anthropic"); // active is b
     expect(listAccounts("anthropic").length).toBe(1);
     expect(getCredential("anthropic")?.access).toBe("access-a");
+  });
+
+  test("removing the active Antigravity account clears affinity while leaving the next account available", async () => {
+    await saveCredential("google-antigravity", cred({ email: "a@example.com", accountId: "acct-a", access: "access-a" }));
+    await saveCredential("google-antigravity", cred({ email: "b@example.com", accountId: "acct-b", access: "access-b" }));
+    const set = getAccountSet("google-antigravity")!;
+    const active = set.accounts.find(account => account.credential.accountId === "acct-b")!;
+    bindAntigravitySessionAffinity("conversation", active.id);
+    await removeCredential("google-antigravity");
+    expect(resolveAntigravityAccountForSession("conversation").reason).toBe("active");
+    expect(resolveAntigravityAccountForSession("conversation").accountId).toBe(getAccountSet("google-antigravity")!.activeAccountId);
+    clearAntigravityRoutingState();
+  });
+
+  test("removing an active Antigravity account preserves affinity for a surviving middle account", async () => {
+    await saveCredential("google-antigravity", cred({ email: "a@example.com", accountId: "acct-a", access: "access-a" }));
+    await saveCredential("google-antigravity", cred({ email: "b@example.com", accountId: "acct-b", access: "access-b" }));
+    await saveCredential("google-antigravity", cred({ email: "c@example.com", accountId: "acct-c", access: "access-c" }));
+    const set = getAccountSet("google-antigravity")!;
+    const middle = set.accounts.find(account => account.credential.accountId === "acct-b")!;
+    bindAntigravitySessionAffinity("conversation-middle", middle.id);
+    await removeCredential("google-antigravity"); // removes c; a becomes active
+    expect(resolveAntigravityAccountForSession("conversation-middle")).toMatchObject({
+      accountId: middle.id,
+      reason: "affinity",
+    });
+    clearAntigravityRoutingState();
   });
 
   test("needsReauth flag persists and clears on fresh save", async () => {

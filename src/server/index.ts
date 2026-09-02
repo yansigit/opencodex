@@ -16,7 +16,9 @@ import {
   applyProxyEnv,
   armClaudeCodeBaseline,
   loadConfig,
+  mutatePersistedConfig,
   saveConfig,
+  saveConfigPreservingClaudeCode,
   getConfigDir,
   websocketsEnabled,
 } from "../config";
@@ -41,6 +43,11 @@ import {
 } from "../lib/state-store-registrations";
 import { startUserCostOverlayReconciler } from "../usage/user-cost-overlay-reconciler";
 import {
+  getStorageCleanupPolicyJobState,
+  getStorageCleanupPolicyTestStreamResponse,
+  requestStorageCleanupPolicyRun,
+} from "../storage/policy-job";
+import {
   configureAppOwnedMemoryBudget,
   enforceAppOwnedMemoryBudget,
   resolveAppOwnedMemoryBudgetBytes,
@@ -57,7 +64,7 @@ import { runAlibabaRegionStartupMigration } from "../providers/alibaba-region-st
 import { runModelRenameStartupMigration } from "../providers/model-rename-startup";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
-import type { StorageCleanupPolicy } from "../types";
+import type { OcxConfig, StorageCleanupPolicy } from "../types";
 import { MAX_DECOMPRESSED_BODY_BYTES } from "./request-decompress";
 import {
   CodexAccountCooldownError,
@@ -116,6 +123,7 @@ import {
   type RequestLogEntry,
 } from "./request-log";
 import { sessionLaneIdFromRequest } from "./request-log-conversation";
+import { classifyAgentKind } from "./effort-policy";
 export {
   addFinalRequestLog,
   filterRequestLogs,
@@ -155,6 +163,7 @@ import {
   jsonResponse,
   admissionFields,
   resolveApiAuth,
+  resolveDataPlaneAdmissionSecret,
   resolveResponsesApiAuth,
   requestPolicyView,
   type DataPlaneAdmission,
@@ -164,6 +173,7 @@ import {
   withCors,
   withManagementCors,
 } from "./auth-cors";
+import { managementBodyTooLargeResponse, readManagementJsonBody } from "./management/body";
 export {
   assertServerAuthConfig,
   corsHeaders,
@@ -219,6 +229,8 @@ import {
   createGuiPairingGrant,
 } from "./gui-session";
 import { createReadinessGate, type ReadinessGate } from "./readiness";
+import { allowPlaintextRemoteForTests } from "../lib/test-server-start";
+import { canonicalServerOrigin } from "../lib/server-tls";
 import {
   createRuntimePackageTreeIntegrityGuard,
   type PackageTreeIntegrityGuard,
@@ -227,9 +239,24 @@ import { detectInstall } from "../update/index";
 import { readyProtocolMetadata } from "../remote/protocol";
 import { modelCapabilityFields } from "./models-capabilities";
 import { recordCursorSeen } from "../integrations/cursor-seen";
+import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
+
+function isAiStudioSessionOrigin(origin: string | null, config: Pick<OcxConfig, "corsAllowOrigins">): boolean {
+  return !!origin && (
+    origin === "https://aistudio.google.com"
+    || (origin.startsWith("chrome-extension://") && config.corsAllowOrigins?.includes(origin) === true)
+  );
+}
+
+function withAiStudioSessionCors(resp: Response, req: Request, config: RequestPolicyView): Response {
+  const origin = req.headers.get("Origin");
+  if (isAiStudioSessionOrigin(origin, config) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
+  return resp;
+}
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
-const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
+const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 255;
+const WEBSOCKET_BACKPRESSURE_LIMIT = 1024 * 1024;
 
 // Header-safe by construction: a key id reaches a response header, so anything outside this
 // class could inject a header break or a control character into a response we control.
@@ -580,6 +607,8 @@ export interface StartServerDeps {
   readinessGate?: ReadinessGate;
   /** Test-only package-tree observation; production captures package.json identity at boot. */
   packageTreeIntegrity?: PackageTreeIntegrityGuard;
+  /** Test-only seam for the awaited native AI Studio login process. */
+  runAiStudioNativeLogin?: typeof runAiStudioNativeLogin;
 }
 
 function inspectStartupOwnership(
@@ -638,6 +667,16 @@ export function warnAgentTaskRecoveryStartup(config: {
 }
 
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
+  const managementApi: ManagementApiDeps = {
+    saveConfigPreservingClaudeCode,
+    mutatePersistedConfig,
+    storageCleanupPolicyJob: {
+      getState: getStorageCleanupPolicyJobState,
+      getTestStream: getStorageCleanupPolicyTestStreamResponse,
+      requestRun: requestStorageCleanupPolicyRun,
+    },
+    ...deps.managementApi,
+  };
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();
   // Captured before loadConfig() starts the optional ACL flight so stop() drains the same dir
   // even if OPENCODEX_HOME changes underneath a long-lived process.
@@ -646,7 +685,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
-  assertServerAuthConfig(config);
+  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: allowPlaintextRemoteForTests() });
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   const managementSessionControl = createManagementSessionControl(managementAuth);
   let userCostOverlayReconciler: { stop(): void } | null = null;
@@ -1014,6 +1053,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     // release the owner-scoped lease on any listener failure.
     userCostOverlayReconciler = startUserCostOverlayReconciler({ liveConfig: config });
     const serveOptions = {
+      ...(config.tls ? { tls: { cert: Bun.file(config.tls.certFile), key: Bun.file(config.tls.keyFile) } } : {}),
       idleTimeout: 255,
       maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
       async fetch(req: Request, requestServer: Server<WsData>): Promise<Response> {
@@ -1088,6 +1128,20 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (readyzPath !== undefined) {
           return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
         }
+        if (url.pathname === "/api/aistudio/session") {
+          const origin = req.headers.get("Origin");
+          if (isAiStudioSessionOrigin(origin, policy)) {
+            return new Response(null, {
+              status: 204,
+              headers: {
+                "Access-Control-Allow-Origin": origin as string,
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, X-OpenCodex-API-Key",
+                Vary: "Origin, Access-Control-Request-Headers",
+              },
+            });
+          }
+        }
         const managementPreflight = url.pathname.startsWith("/api/");
         const allowed = managementPreflight
           ? isAllowedManagementOrigin(req, config)
@@ -1138,6 +1192,90 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
+      }
+
+      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws" || url.pathname === "/v1/ws/aistudio/status") {
+        return withCors(jsonResponse({
+          error: "gone",
+          message: "AI Studio browser relay endpoints are deprecated and return 410 Gone. Use native macOS login (ocx login) or the session exporter extension.",
+        }, 410), req, policy);
+      }
+
+      if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
+        const dedicated = req.headers.get("x-opencodex-api-key")?.trim() ?? "";
+        const admission = dedicated
+          ? resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated")
+          : null;
+        if (!admission) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy), req, policy);
+        }
+        const origin = req.headers.get("Origin");
+        if (!isAiStudioSessionOrigin(origin, policy)) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req, policy);
+        }
+        try {
+          const bodyJson = await readManagementJsonBody(req) as any;
+          const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
+          if (typeof bodyJson.token === "string" && bodyJson.token) {
+            saveAiStudioSessionFromToken(bodyJson.token);
+          } else if (Array.isArray(bodyJson.cookies)) {
+            saveAiStudioSession({
+              selectedProject: bodyJson.selectedProject || "",
+              windowId: bodyJson.windowId || "",
+              cookies: bodyJson.cookies,
+            });
+          } else {
+            return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req, policy);
+          }
+          return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req, policy);
+        } catch (error) {
+          const tooLarge = managementBodyTooLargeResponse(error, req, config);
+          return withAiStudioSessionCors(
+            withCors(tooLarge ?? jsonResponse({ error: "invalid session payload" }, 400), req, policy),
+            req,
+            policy,
+          );
+        }
+      }
+
+      if (url.pathname === "/aistudio/bridge" && req.method === "GET") {
+        const bridgeHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Google AI Studio Relay Deprecated - OpenCodex</title></head>
+<body><h1>HTTP 410 Gone: AI Studio Browser Relay Deprecated</h1>
+<p>The browser relay has been retired. Use native macOS authentication or the session exporter extension.</p>
+<p>Run <code>ocx login</code> to connect.</p></body></html>`;
+        return new Response(bridgeHtml, { status: 410, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+
+      if (url.pathname === "/aistudio/bridge.user.js" && req.method === "GET") {
+        return new Response("// HTTP 410 Gone: OpenCodex AI Studio browser relay and userscripts are deprecated.\\n", {
+          status: 410,
+          headers: { "Content-Type": "application/javascript; charset=utf-8" },
+        });
+      }
+
+      if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        if (!isAllowedRequestOrigin(req, policy)) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
+        }
+        try {
+          const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
+          if (login.kind === "unsupported") return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
+          if (login.kind === "cancelled") return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
+          if (login.kind === "failed") return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
+          const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
+            method: "POST",
+            headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
+          });
+          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, managementApi);
+          const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+          if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
+          return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
+        } catch (error) {
+          return jsonResponse({ ok: false, error: String(error) }, 500, req, policy);
+        }
       }
 
       if (url.pathname === "/healthz" && req.method === "GET") {
@@ -1233,7 +1371,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             }), req, config);
           }
         }
-        const mgmtResponse = await handleManagementAPI(req, url, config, deps.managementApi, principal, managementSessionControl);
+        const mgmtResponse = await handleManagementAPI(req, url, config, managementApi, principal, managementSessionControl);
         if (mgmtResponse) return withManagementCors(mgmtResponse, req, config);
         return withManagementCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
       }
@@ -1626,6 +1764,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
@@ -1739,6 +1878,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;
@@ -2030,6 +2170,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     websocket: {
       maxPayloadLength: MAX_WS_FRAME_BYTES,
       idleTimeout: WEBSOCKET_IDLE_TIMEOUT_SECONDS,
+      backpressureLimit: WEBSOCKET_BACKPRESSURE_LIMIT,
+      closeOnBackpressureLimit: true,
       // Responses WebSocket data plane (phase 120.2). Re-frames the same SSE pipeline onto the
       // socket: parse response.create → run handleResponses unchanged → pump its SSE body as WS
       // Text frames. response.processed is a no-op ack. close() aborts the upstream (RC2 parity).
@@ -2251,6 +2393,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       try {
         loopbackServer = Bun.serve<WsData>({
           ...serveOptions,
+          tls: undefined,
           port: loopbackListenerPort,
           hostname: "127.0.0.1",
         });
@@ -2271,6 +2414,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       try {
         managementIngressServer = Bun.serve<WsData>({
           ...serveOptions,
+          tls: undefined,
           port: managementIngressPort,
           hostname: "127.0.0.1",
         });
@@ -2331,9 +2475,15 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   setServerRef(server);
   const actualPort = server.port ?? listenPort;
   boundPort = actualPort;
+  managementApi.activeServerOrigin = canonicalServerOrigin(config, actualPort);
+  managementApi.activeServerConfig = {
+    hostname: config.hostname,
+    port: actualPort,
+    tls: config.tls ? { ...config.tls } : undefined,
+  };
   setCorsOrigin(actualPort);
 
-  console.log(`🚀 opencodex proxy running on http://localhost:${actualPort}`);
+  console.log(`🚀 opencodex proxy running on ${managementApi.activeServerOrigin}`);
   console.log(`   POST /v1/responses → provider translation`);
   console.log(`   POST /v1/chat/completions → OpenAI-compatible clients`);
   console.log(`   GET  /healthz      → health check`);

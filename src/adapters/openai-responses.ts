@@ -2211,13 +2211,13 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       if (!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) {
         const rewritten = rewriteRoutedCustomToolsForUpstream(
           outBody,
-          canonicalSpark ? false : provider.supportsResponsesCustomTools,
+          provider.supportsResponsesCustomTools,
         );
         outBody = rewritten.body;
         convertedRoutedCustomToolNames = rewritten.names;
         routedCustomToolRepairNames = rewritten.repairNames;
       }
-      if (!isCanonicalOpenAiForwardProvider(provider)) {
+      if (!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) {
         // Run after custom-tool lowering so the search compatibility layer can choose a
         // collision-free public function name against the final routed function catalog.
         const rewritten = rewriteRoutedToolSearchForUpstream(outBody);

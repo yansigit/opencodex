@@ -366,15 +366,16 @@ describe("release helper", () => {
     // a time. Assert the grouping, not just that "a test command ran" — the whole
     // point of the change is WHICH processes the files land in.
     const testIndex = findCallIndex(calls, "bun", call =>
-      call.args[0] === "test"
+      call.args[0] === "scripts/test.ts"
+      && call.args.includes("--isolate")
       && call.args.includes("tests")
       && call.args.some(arg => arg.startsWith("--path-ignore-patterns=") && arg.includes("api-usage")),
     );
     const isolatedUsageIndex = findCallIndex(calls, "bun", call =>
-      call.args.join(" ") === "test --isolate ./tests/api-usage.test.ts",
+      call.args.join(" ") === "scripts/test.ts --isolate ./tests/api-usage.test.ts",
     );
     const isolatedStorageIndex = findCallIndex(calls, "bun", call =>
-      call.args.join(" ") === "test --isolate ./tests/api-storage.test.ts",
+      call.args.join(" ") === "scripts/test.ts --isolate ./tests/api-storage.test.ts",
     );
     const privacyIndex = findCallIndex(calls, "bun", call => call.args.join(" ") === "run privacy:scan");
     const versionIndex = findCallIndex(calls, "npm", call => call.args.join(" ") === "version 9.9.9 --no-git-tag-version");

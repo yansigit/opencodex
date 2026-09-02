@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleConfigCommand } from "../src/cli/config-command";
@@ -11,8 +11,7 @@ import {
 } from "../src/codex/model-entitlements";
 import type { OcxConfig } from "../src/types";
 import { resolveOpenAiVisionModel } from "../src/vision";
-import { ManagementRequest as Request } from "./helpers/management-auth";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 
 async function getVision(config: OcxConfig): Promise<Response> {
   const url = new URL("http://localhost/api/sidecar-settings");
@@ -31,6 +30,7 @@ async function putVision(config: OcxConfig, vision: Record<string, unknown>): Pr
     }),
     url,
     config,
+    inMemoryManagementPersistence(config),
   );
   if (!response) throw new Error("sidecar settings route did not handle request");
   return response;
@@ -161,7 +161,7 @@ describe("vision reasoning capability contracts", () => {
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
-      removeTreeWithRetry(isolatedHome);
+      rmSync(isolatedHome, { recursive: true, force: true });
     }
   });
 
@@ -186,7 +186,7 @@ describe("vision reasoning capability contracts", () => {
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
-      removeTreeWithRetry(isolatedHome);
+      rmSync(isolatedHome, { recursive: true, force: true });
     }
   });
 
@@ -216,7 +216,7 @@ describe("vision reasoning capability contracts", () => {
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
-      removeTreeWithRetry(isolatedHome);
+      rmSync(isolatedHome, { recursive: true, force: true });
       resetCodexModelEntitlementCacheForTests();
     }
   });

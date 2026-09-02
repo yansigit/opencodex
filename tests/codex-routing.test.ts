@@ -179,10 +179,18 @@ describe("codex routing", () => {
     // clock far from wall time is the point: a fixture whose now matches Date.now() cannot
     // tell a threaded clock from one that was dropped somewhere in the helper chain.
     const now = 1_700_000_000_000;
-    const config = makeConfig({ activeCodexAccountId: "a" });
+    const defaults = getDefaultConfig();
+    const config = makeConfig({
+      activeCodexAccountId: "a",
+      providers: structuredClone(defaults.providers),
+      defaultProvider: defaults.defaultProvider,
+    });
     // Automatic quota moves persist by design. Seed the fixture through the same
     // fail-closed initialization boundary production uses instead of weakening it.
-    expect(initializePersistedConfigIfMissing({ ...getDefaultConfig(), ...config })).toBe("created");
+    expect(initializePersistedConfigIfMissing({
+      ...defaults,
+      ...config,
+    })).toBe("created");
 
     // A is full for the next hour, recorded in SECONDS. B has ordinary headroom.
     setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: (now + 3_600_000) / 1000 });
@@ -195,7 +203,11 @@ describe("codex routing", () => {
     clearAccountQuota("b");
     updateAccountQuota("a", 10);
     updateAccountQuota("b", 20);
-    const bound = makeConfig({ activeCodexAccountId: "a" });
+    const bound = makeConfig({
+      activeCodexAccountId: "a",
+      providers: structuredClone(defaults.providers),
+      defaultProvider: defaults.defaultProvider,
+    });
     expect(resolveCodexAccountForThread("thread-terminal-bound", bound, now)).toBe("a");
     // A's burst window fills, in MILLISECONDS this time so both units run through the real
     // selection path. The bound thread must move rather than keep an account that cannot

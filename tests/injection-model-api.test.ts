@@ -4,7 +4,7 @@
  * model, and GET surfaces `{ effort, efforts }` next to the existing model picker.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync} from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, loadConfig } from "../src/config";
@@ -12,6 +12,7 @@ import { refreshCodexModelCatalog } from "../src/codex/refresh";
 import { handleManagementAPI } from "../src/server/management-api";
 import { CODEX_REASONING_LEVELS } from "../src/reasoning-effort";
 import type { OcxConfig } from "../src/types";
+import { isolatedDiskManagementPersistence } from "./helpers/management-auth";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const savedHome = process.env.OPENCODEX_HOME;
@@ -38,7 +39,7 @@ async function put(config: OcxConfig, body: unknown): Promise<Response> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const res = await handleManagementAPI(req, new URL(req.url), config);
+  const res = await handleManagementAPI(req, new URL(req.url), config, isolatedDiskManagementPersistence());
   expect(res).not.toBeNull();
   return res!;
 }

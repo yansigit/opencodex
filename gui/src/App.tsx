@@ -1,15 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useKeyedClientResource } from "./client-resource";
 import Dashboard from "./pages/Dashboard";
-import Providers from "./pages/Providers";
-import Models from "./pages/Models";
-import Subagents from "./pages/Subagents";
-import Logs from "./pages/Logs";
-import Usage from "./pages/Usage";
-import Storage from "./pages/Storage";
-import CodexSet from "./pages/CodexSet";
-import Integrations from "./pages/Integrations";
-import Startup from "./pages/Startup";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { SidebarGithubRow } from "./components/sidebar-github-row";
 import { IconGrid, IconServer, IconBoxes, IconBot, IconList, IconActivity, IconHardDrive, IconKey, IconMenu, IconSun, IconMoon, IconMonitor, IconGlobe, IconPower, IconX, IconRefresh} from "./icons";
@@ -18,11 +9,21 @@ import { Select } from "./ui";
 import { configureApiTargets, hasApiSession, installApiAuthFetch, installApiSessionFromHtml, logoutApiSession } from "./api";
 import { apiBaseForPlane, discoverApiTargets, isConnectedRuntime, standaloneApiTargets, type ApiTargets } from "./api-targets";
 import { ConnectPairingForm } from "./connect-pairing";
-import { type Page } from "./app-routing";
+import { readPageFromHash, type Page } from "./app-routing";
 import { readModelsTab, type ModelsTab } from "./pages/models-tab";
 import { useAppRouteState } from "./use-app-route-state";
 import { requestProxyStop } from "./stop-proxy";
 import { useCodexRestart } from "./use-codex-restart";
+
+const Startup = lazy(() => import("./pages/Startup"));
+const Providers = lazy(() => import("./pages/Providers"));
+const Models = lazy(() => import("./pages/Models"));
+const Subagents = lazy(() => import("./pages/Subagents"));
+const Logs = lazy(() => import("./pages/Logs"));
+const Usage = lazy(() => import("./pages/Usage"));
+const Storage = lazy(() => import("./pages/Storage"));
+const CodexSet = lazy(() => import("./pages/CodexSet"));
+const Integrations = lazy(() => import("./pages/Integrations"));
 
 type Theme = "light" | "dark" | "system";
 
@@ -86,7 +87,7 @@ function readStoredTheme(): Theme {
 }
 
 export default function App() {
-  const { page, navigateToPage } = useAppRouteState();
+  const { page, transitionId, animate, navigateToPage } = useAppRouteState();
   /*
    * App needs the Models tab for one reason only: the full-bleed combos modifier lives
    * on `.main-inner`, which is App's element. Models owns every other tab concern.
@@ -145,18 +146,39 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const announcementRef = useRef<HTMLDivElement>(null);
   const navWasOpen = useRef(false);
+  const restoreMenuFocus = useRef(false);
+  const previousPage = useRef(page);
+
+  const dismissNav = useCallback((destination?: Page) => {
+    restoreMenuFocus.current = destination === undefined || destination === page;
+    setNavOpen(false);
+  }, [page]);
+
+  useEffect(() => {
+    document.title = t("app.pageTitle", { page: t(PAGE_TKEY[page]) });
+  }, [page, t]);
+
+  useEffect(() => {
+    if (previousPage.current === page) return;
+    previousPage.current = page;
+    window.scrollTo(0, 0);
+    mainRef.current?.focus({ preventScroll: true });
+    if (announcementRef.current) announcementRef.current.textContent = t(PAGE_TKEY[page]);
+  }, [page, t]);
 
   useEffect(() => {
     // External navigation (hash edit, back/forward) also dismisses the mobile drawer.
-    const dismissNav = () => setNavOpen(false);
-    window.addEventListener("hashchange", dismissNav);
-    window.addEventListener("popstate", dismissNav);
+    const dismissForRoute = () => dismissNav(readPageFromHash());
+    window.addEventListener("hashchange", dismissForRoute);
+    window.addEventListener("popstate", dismissForRoute);
     return () => {
-      window.removeEventListener("hashchange", dismissNav);
-      window.removeEventListener("popstate", dismissNav);
+      window.removeEventListener("hashchange", dismissForRoute);
+      window.removeEventListener("popstate", dismissForRoute);
     };
-  }, []);
+  }, [dismissNav]);
 
   useEffect(() => {
     const el = document.documentElement;
@@ -183,22 +205,34 @@ export default function App() {
 
   useEffect(() => {
     if (!navOpen) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setNavOpen(false); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      dismissNav();
+    };
     window.addEventListener("keydown", onKey);
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";         // no background scroll behind the drawer
     return () => { window.removeEventListener("keydown", onKey); document.body.style.overflow = prevOverflow; };
-  }, [navOpen]);
+  }, [dismissNav, navOpen]);
 
   // Move focus into the drawer on open; hand it back to the toggle on close.
   useEffect(() => {
     if (navOpen) {
       navWasOpen.current = true;
+      restoreMenuFocus.current = false;
       // after the 180ms slide-in: while visibility is transitioning, focus() no-ops
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        sidebarRef.current?.focus();
+        return;
+      }
       const timer = setTimeout(() => sidebarRef.current?.focus(), 200);
       return () => clearTimeout(timer);
     }
-    if (navWasOpen.current) { navWasOpen.current = false; menuBtnRef.current?.focus(); }
+    if (navWasOpen.current) {
+      navWasOpen.current = false;
+      if (restoreMenuFocus.current) menuBtnRef.current?.focus();
+      restoreMenuFocus.current = false;
+    }
   }, [navOpen]);
 
   // Growing the window past the breakpoint dismisses the drawer state.
@@ -279,11 +313,11 @@ export default function App() {
           </button>
         </div>
       </header>
-      {navOpen && <div className="drawer-scrim" onClick={() => setNavOpen(false)} aria-hidden="true" />}
+      {navOpen && <div className="drawer-scrim" onClick={() => dismissNav()} aria-hidden="true" />}
       <aside id="app-sidebar" className={`sidebar${navOpen ? " open" : ""}`} ref={sidebarRef} tabIndex={-1}>
         <div className="drawer-head">
           {brand}
-          <button type="button" className="menu-toggle drawer-close" onClick={() => setNavOpen(false)}
+          <button type="button" className="menu-toggle drawer-close" onClick={() => dismissNav()}
             aria-label={t("nav.closeMenu")} title={t("nav.closeMenu")}>
             <IconX />
           </button>
@@ -310,7 +344,7 @@ export default function App() {
                   onClick={() => {
                     // Deliberate sidebar navigation — push a history entry.
                     navigateToPage(id);
-                    setNavOpen(false);
+                    dismissNav(id);
                   }}
                   aria-current={active ? "page" : undefined}>
                   <Icon /> {t(tkey)}
@@ -366,22 +400,23 @@ export default function App() {
               // The update dialog lives on the dashboard maintenance panel. Deep-link to
               // `#dashboard/update` and let the dashboard own the check/run flow — no
               // cross-component event bus, and the link survives a refresh.
-              setNavOpen(false);
+              dismissNav("dashboard");
               navigateToPage("dashboard", "update");
             }}
           />
         </div>
       </aside>
 
-      <main className="main" inert={navOpen}>
+      <main ref={mainRef} className="main" inert={navOpen} tabIndex={-1}>
+        <div ref={announcementRef} className="sr-only route-announcement" aria-live="polite" aria-atomic="true" />
         {/*
           Combos is full-bleed, unlike every other surface, and it is reachable only as
           a Models tab. `.main-inner` is App's element, so App is the only place that
           can know which tab is showing.
         */}
-        <div className={`main-inner${
+        <div key={transitionId} className={`main-inner${
           page === "models" && modelsTab === "combos" ? " main-inner--combos" : ""
-        }`}>
+        }${animate ? " route-enter" : ""}`}>
           <ErrorBoundary
             key={page}
             pageName={t(PAGE_TKEY[page])}
@@ -389,11 +424,12 @@ export default function App() {
             message={t("errorBoundary.message")}
             detailsLabel={t("errorBoundary.details")}
             reloadLabel={t("errorBoundary.reload")}
+            onReload={() => window.location.reload()}
           >
             {!targetsSettled ? (
               <div className="alert">{t("connection.discovering")}</div>
             ) : (
-              <>
+              <Suspense fallback={<div className="route-loading" aria-busy="true"><span className="spin" aria-hidden="true" />{t("common.loading")}</div>}>
                 {/*
                   A failed discovery is a banner, not a replacement. It used to take over the
                   whole body, so a slow or restarting proxy cost a standalone user their
@@ -416,7 +452,7 @@ export default function App() {
                 {page === "storage" && <Storage apiBase={sharedBase} />}
                 {page === "codex-set" && <CodexSet apiBase={sharedBase} />}
                 {page === "integrations" && <Integrations apiBase={sharedBase} machineApiBase={machineBase} connected={targets.connected} />}
-              </>
+              </Suspense>
             )}
           </ErrorBoundary>
         </div>

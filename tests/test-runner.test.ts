@@ -504,7 +504,7 @@ describe("test-runner process-tree termination", () => {
           const { child } = JSON.parse(await Bun.file(markerPath).text()) as { child: number };
           try { process.kill(-child, "SIGKILL"); } catch { /* already dead */ }
         }
-        rmSync(root, { recursive: true, force: true });
+        removeTreeWithRetry(root);
       }
     },
   );

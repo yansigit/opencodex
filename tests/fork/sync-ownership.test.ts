@@ -19,10 +19,22 @@ describe("fork sync ownership", () => {
 
   test("classifies shared hotspots before fork defaults", () => {
     for (const path of [
+      "gui/src/i18n/de.ts",
       "src/adapters/google.ts",
       "src/adapters/google-http.ts",
+      "src/cli/capabilities.ts",
+      "src/codex/inject.ts",
+      "src/config.ts",
+      "src/router.ts",
+      "src/server/auth-cors.ts",
+      "src/server/index.ts",
+      "src/server/management/config-routes.ts",
       "src/server/responses/core.ts",
+      "src/server/responses/ws-upstream.ts",
+      "src/service.ts",
       "src/providers/antigravity-quota.ts",
+      "src/providers/key-failover.ts",
+      "src/providers/key-store.ts",
       "src/providers/quota.ts",
     ]) {
       expect(classifyPath(path)).toBe("shared-hotspot");
@@ -63,6 +75,101 @@ describe("fork sync ownership", () => {
       forkOnlyTopLevel: { enabled: true },
       repository: { url: "https://github.com/yansigit/opencodex" },
     });
+  });
+
+  test("preserves fork-owned scripts when upstream drops them", () => {
+    const ours = JSON.stringify({
+      name: "@yansigit/opencodex",
+      version: "2.40.0",
+      scripts: {
+        "test:container": "bun scripts/test-container.ts",
+        "check:hygiene": "node scripts/check-hygiene.mjs",
+        prepush: "bun run check:hygiene && bun run typecheck",
+        start: "fork start",
+      },
+    });
+    const theirs = JSON.stringify({
+      name: "opencodex",
+      version: "2.40.0",
+      scripts: {
+        start: "bun src/index.ts",
+        typecheck: "bun x tsc --noEmit",
+        prepush: "bun run typecheck && bun run test",
+      },
+    });
+    const merged = JSON.parse(mergePackageJson(ours, theirs));
+    expect(merged.scripts["test:container"]).toBe("bun scripts/test-container.ts");
+    expect(merged.scripts["check:hygiene"]).toBe("node scripts/check-hygiene.mjs");
+    // upstream scripts win for shared keys, fork-only keys preserved
+    expect(merged.scripts.start).toBe("bun src/index.ts");
+    expect(merged.scripts.typecheck).toBe("bun x tsc --noEmit");
+  });
+
+  test("preserves prepush hygiene prefix without duplication", () => {
+    const forkPrepush = "bun run check:hygiene && bun run typecheck && bun run lint:gui:if-changed && bun run test";
+    const upstreamPrepush = "bun run typecheck && bun run lint:gui:if-changed && bun run test";
+    const ours = JSON.stringify({
+      name: "@yansigit/opencodex",
+      version: "2.40.0",
+      scripts: { prepush: forkPrepush, "check:hygiene": "node scripts/check-hygiene.mjs" },
+    });
+    const theirs = JSON.stringify({
+      name: "opencodex",
+      version: "2.40.0",
+      scripts: { prepush: upstreamPrepush },
+    });
+    const merged = JSON.parse(mergePackageJson(ours, theirs));
+    expect(merged.scripts.prepush).toBe(forkPrepush);
+    expect(merged.scripts.prepush.startsWith("bun run check:hygiene && ")).toBe(true);
+    // idempotent: running again does not double-prefix
+    const ours2 = JSON.stringify({ name: "@yansigit/opencodex", version: "2.40.0", scripts: merged.scripts });
+    const merged2 = JSON.parse(mergePackageJson(ours2, theirs));
+    expect(merged2.scripts.prepush).toBe(forkPrepush);
+  });
+
+  test("does not duplicate hygiene prefix when upstream already has it", () => {
+    const prepush = "bun run check:hygiene && bun run typecheck";
+    const ours = JSON.stringify({ name: "@yansigit/opencodex", version: "2.40.0", scripts: { prepush, "check:hygiene": "node scripts/check-hygiene.mjs" } });
+    const theirs = JSON.stringify({ name: "opencodex", version: "2.40.0", scripts: { prepush } });
+    expect(JSON.parse(mergePackageJson(ours, theirs)).scripts.prepush).toBe(prepush);
+  });
+
+  test("preserves pinned @anthropic-ai/sdk when upstream drops it", () => {
+    const ours = JSON.stringify({
+      name: "@yansigit/opencodex",
+      version: "2.40.0",
+      devDependencies: { "@anthropic-ai/sdk": "0.122.0", typescript: "7.0.2" },
+    });
+    const theirs = JSON.stringify({
+      name: "opencodex",
+      version: "2.40.0",
+      devDependencies: { "@types/bun": "1.4.0", typescript: "7.0.2" },
+    });
+    const merged = JSON.parse(mergePackageJson(ours, theirs));
+    expect(merged.devDependencies["@anthropic-ai/sdk"]).toBe("0.122.0");
+    expect(merged.devDependencies["@types/bun"]).toBe("1.4.0");
+  });
+
+  test("prefers upstream devDependency when both have @anthropic-ai/sdk", () => {
+    const ours = JSON.stringify({ name: "@yansigit/opencodex", version: "2.40.0", devDependencies: { "@anthropic-ai/sdk": "0.122.0" } });
+    const theirs = JSON.stringify({ name: "opencodex", version: "2.40.0", devDependencies: { "@anthropic-ai/sdk": "0.130.0" } });
+    expect(JSON.parse(mergePackageJson(ours, theirs)).devDependencies["@anthropic-ai/sdk"]).toBe("0.130.0");
+  });
+
+  test("does not drop upstream scripts when replacing prepush prefix", () => {
+    const ours = JSON.stringify({
+      name: "@yansigit/opencodex",
+      version: "2.40.0",
+      scripts: { prepush: "bun run check:hygiene && bun run typecheck", "test:container": "bun scripts/test-container.ts" },
+    });
+    const theirs = JSON.stringify({
+      name: "opencodex",
+      version: "2.40.0",
+      scripts: { prepush: "bun run typecheck", "lint:gui": "cd gui && bun run lint" },
+    });
+    const merged = JSON.parse(mergePackageJson(ours, theirs));
+    expect(merged.scripts["lint:gui"]).toBe("cd gui && bun run lint");
+    expect(merged.scripts["test:container"]).toBe("bun scripts/test-container.ts");
   });
 
   test.each([

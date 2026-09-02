@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { atomicWriteFile } from "../config/atomic-write";
 
-const MAX_SERVICE_API_TOKEN_BYTES = 4096;
+const MAX_SERVICE_API_TOKEN_BYTES = 512;
 
 export interface PersistedServiceApiToken {
   path: string;
@@ -192,7 +192,10 @@ export function loadServiceTokenFromFile(env: Record<string, string | undefined>
  */
 export function readInstalledServiceToken(): string | null {
   try {
-    const token = readFileSync(serviceApiTokenFilePath(), "utf8").trim();
+    const path = serviceApiTokenFilePath();
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_SERVICE_API_TOKEN_BYTES) return null;
+    const token = readFileSync(path, "utf8").trim();
     return token || null;
   } catch {
     return null;

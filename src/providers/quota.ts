@@ -10,9 +10,16 @@ import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { codexPlanKey } from "../codex/plan";
 import { resolveProviderApiKey } from "./key-store";
-import { getValidAccessToken, getValidAccessTokenForAccount } from "../oauth";
+import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, getValidAccessTokenSnapshotForAccount, type OAuthAccessSnapshot } from "../oauth";
 import { getAccountCredential, getAccountSet, getCredential } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
+import {
+  AntigravityQuotaRpcError,
+  fetchAntigravityLiveQuota,
+  isTerminalAntigravityQuotaStatus,
+} from "./antigravity-quota";
+import { antigravityHostCandidates, isAntigravityHttpsHost } from "../adapters/google-antigravity-hosts";
+import { providerTlsFetch } from "../lib/provider-tls-profile";
 import { providerOutboundPost, providerRedirectError, type ProviderOutboundDependencies } from "../lib/provider-outbound";
 import { apiKeyPoolEntryId } from "./api-keys";
 import { XAI_GROK_CLIENT_VERSION, XAI_GROK_COMPATIBILITY } from "./xai-transport";
@@ -2282,34 +2289,151 @@ export async function fetchAntigravityUsageQuota(accessToken: string, projectId:
   return { customWindows, updatedAt: Date.now() };
 }
 
-async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaReport | null> {
-  const credential = getCredential("google-antigravity");
-  if (!credential?.projectId) return null;
-  let accessToken: string;
+async function fetchAntigravityAccountQuota(accountId: string): Promise<ProviderQuota | null> {
+  let snapshot: OAuthAccessSnapshot;
   try {
-    accessToken = await getValidAccessToken("google-antigravity");
+    snapshot = await getValidAccessTokenSnapshotForAccount("google-antigravity", accountId);
   } catch {
     return null;
   }
-  const baseUrl = (config.baseUrl || ANTIGRAVITY_ACCOUNT_QUOTA_BASE).replace(/\/+$/, "");
-  const response = await fetch(`${baseUrl}/v1internal:fetchAvailableModels`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-      "User-Agent": antigravityUserAgent(),
-      Authorization: `Bearer ${accessToken}`,
-    },
-    body: JSON.stringify({ project: credential.projectId }),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  if (!snapshot.projectId) return null;
+  const entry = getProviderRegistryEntry("google-antigravity");
+  const baseUrl = (entry?.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
+  const providerConfig: Pick<OcxProviderConfig, "adapter" | "authMode" | "baseUrl" | "googleMode" | "tlsProfile"> = {
+    adapter: "google",
+    authMode: "oauth",
+    googleMode: "cloud-code-assist",
+    baseUrl,
+  };
+  const fetchImpl = providerTlsFetch("google-antigravity", providerConfig, globalThis.fetch);
+  let liveQuota: ProviderQuota | null;
+  try {
+    liveQuota = await fetchAntigravityLiveQuota({
+      accessToken: snapshot.accessToken,
+      projectId: snapshot.projectId,
+      baseUrl,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      fetchImpl,
+    });
+  } catch (error) {
+    if (error instanceof AntigravityQuotaRpcError && isTerminalAntigravityQuotaStatus(error.status)) {
+      return null;
+    }
+    liveQuota = null;
+  }
+  if (!liveQuota) return null;
+  return {
+    ...liveQuota,
+    updatedAt: Date.now(),
+  };
+}
+
+async function fetchAntigravityQuota(provider: string, config: OcxProviderConfig): Promise<ProviderQuotaProbeResult> {
+  let snapshot: OAuthAccessSnapshot;
+  try {
+    snapshot = await getValidAccessTokenSnapshot("google-antigravity");
+  } catch {
+    return null;
+  }
+  if (!snapshot.projectId) return null;
+  const baseUrl = (config.baseUrl || "https://daily-cloudcode-pa.googleapis.com").replace(/\/+$/, "");
+  const fetchImpl = providerTlsFetch(provider, config, globalThis.fetch);
+  let liveQuota: ProviderQuota | null;
+  try {
+    liveQuota = await fetchAntigravityLiveQuota({
+      accessToken: snapshot.accessToken,
+      projectId: snapshot.projectId,
+      baseUrl,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      fetchImpl,
+    });
+  } catch (error) {
+    if (error instanceof AntigravityQuotaRpcError && isTerminalAntigravityQuotaStatus(error.status)) {
+      return TERMINAL_QUOTA_FAILURE;
+    }
+    liveQuota = null;
+  }
+
+  const windows = new Map<string, ProviderQuotaWindow>();
+  for (const [index, host] of antigravityHostCandidates(baseUrl).entries()) {
+    if (!isAntigravityHttpsHost(host)) continue;
+    try {
+      const response = await fetchImpl(`${host}/v1internal:fetchAvailableModels`, {
+        method: "POST",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "User-Agent": antigravityUserAgent(),
+          Authorization: `Bearer ${snapshot.accessToken}`,
+        },
+        body: JSON.stringify({ project: snapshot.projectId }),
+        redirect: "error",
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        if (index === 0 && (response.status === 404 || response.status === 503)) continue;
+        break;
+      }
+      const body = asRecord(await readQuotaJson(response));
+      const models = asRecord(body?.models);
+      if (models) {
+        for (const [modelId, rawModelInfo] of Object.entries(models)) {
+          const modelInfo = asRecord(rawModelInfo);
+          if (!modelInfo) continue;
+          for (const quotaInfo of quotaInfoEntries(modelInfo)) {
+            const label = classifyAntigravityFamily(modelId, modelInfo, quotaInfo);
+            if (!label || windows.has(label)) continue;
+            const percent = antigravityUsedPercent(quotaInfo);
+            if (percent === undefined) continue;
+            windows.set(label, {
+              label,
+              percent,
+              ...(normalizeResetAt(quotaInfo.resetTime) !== undefined ? { resetAt: normalizeResetAt(quotaInfo.resetTime) } : {}),
+            });
+          }
+        }
+      }
+      break;
+    } catch {
+      if (index === 0) continue;
+      break;
+    }
+  }
+
+  if (liveQuota) {
+    const liveWindows = liveQuota.customWindows ?? [];
+    const catalogClaude = windows.get("Cla");
+    const customWindows = [
+      ...liveWindows,
+      ...(liveWindows.some(window => window.label === "Cla") || !catalogClaude ? [] : [catalogClaude]),
+    ];
+    return report(provider, "google-antigravity:retrieveUserQuota", {
+      ...liveQuota,
+      ...(customWindows.length > 0 ? { customWindows } : {}),
+      updatedAt: Date.now(),
+    });
+  }
+
+  const customWindows = ["Gem", "Cla"].flatMap(label => {
+    const window = windows.get(label);
+    return window ? [window] : [];
   });
-  if (!response.ok) return null;
-  const customWindows = antigravityWindowsFromModels(asRecord(await readQuotaJson(response)));
   if (customWindows.length === 0) return null;
   return report(provider, "google-antigravity:fetchAvailableModels", {
     customWindows,
     updatedAt: Date.now(),
   });
+}
+
+async function fetchAiStudioQuota(name: string, _provider: OcxProviderConfig): Promise<ProviderQuotaReport> {
+  const now = Date.now();
+  return {
+    provider: name,
+    label: "Google AI Studio (Web)",
+    source: "Direct Session",
+    updatedAt: now,
+    quota: { updatedAt: now },
+  };
 }
 
 async function maybeFetchProviderQuota(
@@ -2387,6 +2511,9 @@ async function maybeFetchProviderQuota(
     }
     if ((provider.authMode ?? "key") === "key" && name === "neuralwatt") {
       return fetchNeuralwattQuota(name, provider);
+    }
+    if (provider.googleMode === "ai-studio-web" || name === "google-aistudio") {
+      return fetchAiStudioQuota(name, provider);
     }
     return null;
   } catch {

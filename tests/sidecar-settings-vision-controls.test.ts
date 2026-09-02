@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync} from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
+import { saveConfig } from "../src/config";
 import type { OcxConfig } from "../src/types";
 import {
   DEFAULT_VISION_TIMEOUT_MS,
@@ -11,8 +12,7 @@ import {
   resolveMaxDescriptionsPerTurn,
   resolveVisionTimeoutMs,
 } from "../src/vision";
-import { ManagementRequest as Request } from "./helpers/management-auth";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "./helpers/management-auth";
 
 async function getSidecarSettings(config: OcxConfig): Promise<Response> {
   const url = new URL("http://localhost/api/sidecar-settings");
@@ -34,16 +34,18 @@ async function putSidecarSettings(
     }),
     url,
     config,
+    inMemoryManagementPersistence(config),
   );
   if (!response) throw new Error("sidecar settings route did not handle PUT");
+  if (response.ok) saveConfig(config);
   return response;
 }
 
 function emptyConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
     port: 10100,
-    defaultProvider: "none",
-    providers: {},
+    defaultProvider: "test",
+    providers: { test: { adapter: "openai-chat", baseUrl: "https://example.test/v1" } },
     ...overrides,
   } as OcxConfig;
 }
@@ -77,7 +79,7 @@ describe("sidecar-settings remaining vision controls", () => {
   afterEach(() => {
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
-    if (isolatedHome) removeTreeWithRetry(isolatedHome);
+    if (isolatedHome) rmSync(isolatedHome, { recursive: true, force: true });
     isolatedHome = undefined;
   });
 

@@ -6,6 +6,7 @@ import * as z from "zod/v4";
 import { isValidProviderName, hasOwnProvider } from "./config/provider-name";
 import {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   modelDisplayNamesConfigError,
@@ -16,7 +17,9 @@ import {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "./config/provider-validation";
 import {
   bumpConfigGenerationAtPath,
@@ -60,10 +63,10 @@ import { recordOwnedConfigPath } from "./lib/config-ownership";
 import { assertNotRealHomeUnderTest } from "./lib/test-home-guard";
 import { providerDestinationConfigError } from "./lib/destination-policy";
 import { redactSecretString } from "./lib/redact";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "./lib/provider-tls-profile";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import { MODEL_ALIAS_PATTERN } from "./providers/default-aliases";
 import { MODEL_DISCOVERY_MAX_MODELS } from "./providers/model-discovery-limits";
-import { vercelGatewayRoutingConfigError } from "./providers/vercel-gateway-routing";
 import {
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
   OPENAI_PROVIDER_TIER_VERSION,
@@ -76,9 +79,7 @@ import {
   type FastWire,
   type ProviderCostOverlay,
 } from "./types";
-import type { OcxRuntimeRole } from "./types/config";
 import { OPENAI_CODEX_PROVIDER_ID } from "./providers/openai-tiers";
-import { slugEquivalenceKey, slugsEquivalent } from "./providers/slug-codec";
 import { modelAutoCompactTokenLimitsConfigError } from "./providers/auto-compact-budget";
 import { fastWireDeclarationError, hasFastWireCapabilityConflict } from "./providers/fastwire";
 import {
@@ -88,14 +89,15 @@ import {
   registryModelServiceTierCapabilityApplies,
 } from "./providers/registry";
 import { resolveOpenAiVirtualModel } from "./providers/openai-virtual-models";
+import { slugEquivalenceKey, slugsEquivalent } from "./providers/slug-codec";
 import { parseDesktopProfile } from "./claude/desktop-profile";
 import { isCodexReasoningEffort } from "./reasoning-effort";
+import { parseSubagentRoles, salvageSubagentRoles } from "./codex/agent-roles";
 import {
   COST4_RATE_KEYS,
   isValidCost4Rate,
   refreshPreservedProviderOwner,
   refreshUserCostOverlays,
-  withPreservedDiskOnlyProviders,
 } from "./usage/user-cost-overlays";
 import { MAX_COST4_RATE } from "./usage/expected-prices";
 import {
@@ -105,12 +107,12 @@ import {
 } from "./lib/app-owned-memory";
 import { isHostedToolUnsupportedForModel } from "./responses/hosted-tool-policy";
 import {
+  AtomicWriteResidualTempError,
+  AtomicWriteSecretResidualError,
   atomicWriteFile,
   isMissingPathError,
   nextAtomicTempSequence,
   resolveWriteTarget,
-  AtomicWriteSecretResidualError,
-  AtomicWriteResidualTempError,
 } from "./config/atomic-write";
 export {
   AtomicWriteResidualTempError,
@@ -155,6 +157,7 @@ export {
   writeRuntimePort,
   type RuntimePortState,
 } from "./config/process-state";
+import { serverTlsConfigError } from "./lib/server-tls";
 import {
   clearPendingConfigTopLevelDeletions,
   configHasRebaseProvenance,
@@ -458,32 +461,25 @@ const retryOn429PolicySchema = z.object({
   respectRetryAfter: z.boolean().optional(),
 }).strict();
 
-/**
- * `transientRetryOn5xx` accepts only these keys. `attempts` is a TOTAL send budget shared by
- * both retry layers, so the ceiling is deliberately lower than `retryOn429`'s: 10 total sends
- * against an already-failing provider is already generous.
- */
-const transientRetryOn5xxPolicySchema = z.object({
-  enabled: z.boolean().optional(),
-  attempts: z.number().int().min(1).max(10).optional(),
-}).strict();
-
 const requestPacingRuleSchema = z.object({
   // Keep the RPM-derived timer within the same one-hour bound as minIntervalMs.
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
-}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined, {
-  message: "request pacing rules need requestsPerMinute or minIntervalMs",
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
+}).strict().refine(value => value.requestsPerMinute !== undefined || value.minIntervalMs !== undefined || value.jitterMs !== undefined, {
+  message: "request pacing rules need requestsPerMinute, minIntervalMs, or jitterMs",
 });
 
 const requestPacingSchema = z.object({
   enabled: z.boolean(),
   requestsPerMinute: z.number().min(1 / 60).max(60_000).optional(),
   minIntervalMs: z.number().int().min(1).max(3_600_000).optional(),
+  jitterMs: z.number().int().min(0).max(60_000).optional(),
   models: z.record(z.string().trim().min(1), requestPacingRuleSchema).optional(),
 }).strict().refine(value => value.enabled === false
   || value.requestsPerMinute !== undefined
   || value.minIntervalMs !== undefined
+  || value.jitterMs !== undefined
   || (value.models !== undefined && Object.keys(value.models).length > 0), {
   message: "enabled request pacing needs a provider rule or model override",
 });
@@ -523,6 +519,12 @@ const modelDisplayNamesSchema = z.unknown().superRefine((value, ctx) => {
 const providerConfigSchema = z.object({
   adapter: z.string().min(1),
   baseUrl: z.string().min(1),
+  azureCredential: z.object({
+    type: z.literal("default-azure-credential"),
+    managedIdentityClientId: z.string().trim().min(1).optional(),
+  }).strict().transform(value => value.managedIdentityClientId === undefined
+    ? value
+    : { ...value, managedIdentityClientId: value.managedIdentityClientId.trim() }).optional(),
   alias: z.string().optional(),
   modelAliases: z.record(z.string(), z.string()).optional(),
   modelDisplayNames: modelDisplayNamesSchema.optional(),
@@ -535,41 +537,34 @@ const providerConfigSchema = z.object({
   responsesPath: z.string().min(1).optional(),
   statelessResponses: z.boolean().optional(),
   requiresAdjacentResponsesToolResults: z.boolean().optional(),
-  annotateEmptyToolOutputs: z.boolean().optional(),
   fastWire: fastWireSchema.nullable().optional(),
   supportsServiceTier: z.boolean().optional(),
   modelSupportsServiceTier: z.record(z.string().min(1), z.boolean()).optional(),
   preserveResponsesReasoningContent: z.boolean().optional(),
   decodesNativeCompactionBlobs: z.boolean().optional(),
   allowPrivateNetwork: z.boolean().optional(),
+  wsUpstream: z.boolean().nullish().transform(value => value ?? undefined),
+  maxWsFrameBytes: z.number().int().positive().nullish().transform(value => value ?? undefined),
   // The management API accepts `null` as "clear this", so a config written before the POST
   // canonicalization below can hold one on disk. Rejecting it here would send the operator
   // through invalid-config recovery for a value the API told them was fine.
   upstreamHttpVersion: z.enum(UPSTREAM_HTTP_VERSION_VALUES)
     .nullish()
     .transform(value => value ?? undefined),
-  // Opt-in upstream Responses WebSocket for OpenAI-compatible providers (e.g.
-  // aggregators whose WebSocket ingress is measurably faster than SSE). The
-  // canonical ChatGPT backend WS selection is independent of this flag.
-  upstreamWebsocket: z.boolean().optional(),
   directGeminiWireRenames: z.boolean().optional(),
   noStructuredOutputModels: z.array(z.string().min(1))
     .transform(normalizeNonBlankStringArray)
     .optional(),
-  retainModels: z.array(z.string().min(1))
-    .transform(normalizeNonBlankStringArray)
-    .optional(),
-  omitReasoningEffortWithToolsModels: z.array(z.string().min(1))
-    .transform(normalizeNonBlankStringArray)
-    .optional(),
   retryOn429: retryOn429PolicySchema.optional(),
-  transientRetryOn5xx: transientRetryOn5xxPolicySchema.optional(),
+  replayTransientFailures: z.boolean().optional(),
   codexAccountMode: z.enum(["pool", "direct"]).optional(),
   // Validated rather than passed through: this schema ends in `.passthrough()`, so an
   // undeclared key survives verbatim. A misspelled `codexToolMode` therefore used to be
   // accepted, persisted, and then silently resolved to the `code_mode_only` default — the
   // operator asked for shell mode, got code mode, and was told nothing (#2106).
   codexToolMode: z.enum(["code_mode_only", "shell"]).optional(),
+  projectContext: z.enum(["off", "on"]).optional(),
+  tlsProfile: z.literal("antigravity-browser").optional(),
   responsesItemIdRepair: z.object({
     message: z.array(z.string().min(1)).optional(),
     reasoning: z.array(z.string().min(1)).optional(),
@@ -583,6 +578,8 @@ const providerConfigSchema = z.object({
 export { isValidProviderName, hasOwnProvider } from "./config/provider-name";
 export {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
+  isAzureIdentityProvider,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   modelDisplayNamesConfigError,
@@ -593,7 +590,9 @@ export {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "./config/provider-validation";
 
 function providerResponsesPathConfigError(responsesPath: string | undefined): string | null {
@@ -905,126 +904,24 @@ const agentTaskRecoverySchema = z.object({
   cacheEntries: z.number().int().min(1).max(512).optional(),
 }).strict();
 
-const runtimeRoleSchema = z.enum(["standalone", "hub", "client"]);
-
-function canonicalHttpOrigin(value: string): string | null {
-  try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
-    if (parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) return null;
-    return parsed.origin;
-  } catch {
-    return null;
-  }
-}
-
-const hubConfigSchema = z.object({
-  managementPublicOrigin: z.string().transform((value, ctx) => {
-    const origin = canonicalHttpOrigin(value);
-    if (!origin) {
-      ctx.addIssue({ code: "custom", message: "must be a canonical http(s) origin without credentials, path, query, or fragment" });
-      return z.NEVER;
-    }
-    return origin;
-  }).optional(),
-  // A malformed hand edit disables only the optional ingress. Live writes are rejected by
-  // managementIngressConfigError before this load-time degradation can hide the mistake.
-  managementIngress: z.union([
-    z.object({ enabled: z.literal(false) }).strict(),
-    z.object({ enabled: z.literal(true), port: z.number().int().min(1).max(65535) }).strict(),
-  ]).optional().catch(undefined),
-}).strict();
-
-const tailscaleUserSchema = z.string().trim().min(1).superRefine((value, ctx) => {
-  if (new TextEncoder().encode(value).byteLength > 320) {
-    ctx.addIssue({ code: "custom", message: "must be at most 320 UTF-8 bytes" });
-  }
-  if (/[\x00-\x1f\x7f]/.test(value)) {
-    ctx.addIssue({ code: "custom", message: "must not contain ASCII control characters" });
-  }
-});
-
-const remoteGuiConfigSchema = z.object({
-  allowedTailscaleUsers: z.array(tailscaleUserSchema).max(64).superRefine((users, ctx) => {
-    const seen = new Set<string>();
-    for (let index = 0; index < users.length; index++) {
-      const user = users[index]!;
-      if (seen.has(user)) {
-        ctx.addIssue({ code: "custom", path: [index], message: "must contain unique users after trimming" });
-      }
-      seen.add(user);
-    }
-  }).optional(),
-  // Retired (see OcxRemoteGuiConfig): accepted so an existing file still loads, ignored by
-  // the pairing path. Removing it from a strict schema would reject the whole config.
-  allowInsecureHttp: z.boolean().optional(),
-}).strict();
-
-const connectedClientIdSchema = z.enum(["codex", "claude"]);
-const clientTimestampSchema = z.string().datetime({ offset: true });
-const clientOriginSchema = z.string().transform((value, ctx) => {
-  const origin = canonicalHttpOrigin(value);
-  if (!origin) {
-    ctx.addIssue({ code: "custom", message: "must be a canonical http(s) origin without credentials, path, query, or fragment" });
-    return z.NEVER;
-  }
-  return origin;
-});
-const clientConnectionSchema = z.object({
-  serverUrl: clientOriginSchema,
-  managementUrl: clientOriginSchema,
-  managementTransport: z.enum(["direct", "relay"]),
-  selectedClients: z.array(connectedClientIdSchema).min(1).max(2).superRefine((clients, ctx) => {
-    if (new Set(clients).size !== clients.length) {
-      ctx.addIssue({ code: "custom", message: "must contain unique client ids" });
-    }
-  }),
-  tokenEnv: z.literal("OPENCODEX_API_AUTH_TOKEN"),
-  apiKeyId: z.string().trim().min(1).max(256),
-  tokenFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
-  protocolVersion: z.literal(1),
-  connectedAt: clientTimestampSchema,
-  catalogFingerprint: z.string().min(1).max(512).optional(),
-  // base64 of the pre-connect catalog, or "" for "there was none". Bounded above the
-  // catalog size cap so a legitimate snapshot round-trips.
-  priorCatalog: z.string().max(64 * 1024 * 1024).optional(),
-  catalogSyncedAt: clientTimestampSchema.optional(),
-  pendingOperation: z.object({
-    kind: z.literal("rotate"),
-    rotationId: z.string().trim().min(1).max(256),
-    newKeyIssuedAt: clientTimestampSchema,
-    oldKeyBackupPath: z.string().min(1),
-  }).strict().superRefine((operation, ctx) => {
-    const expected = join(getConfigDir(), "service-api-token.prev");
-    if (operation.oldKeyBackupPath !== expected) {
-      ctx.addIssue({ code: "custom", path: ["oldKeyBackupPath"], message: `must equal ${expected}` });
-    }
-  }).optional(),
+const v2NativeParentOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  model: z.string().trim().min(1).optional(),
 }).strict();
 
 const configSchema = z.object({
   port: z.number().int().min(0).max(65535).default(10100),
-  // A malformed hand edit must disable only remote-role behavior, not discard
-  // providers or data-plane keys. Live writes are rejected explicitly below.
-  runtimeRole: runtimeRoleSchema.optional().catch(undefined),
-  // Malformed optional remote blocks disable only remote GUI behavior. Live
-  // candidates are rejected explicitly by remoteGuiConfigError below.
-  hub: hubConfigSchema.optional().catch(undefined),
-  remoteGui: remoteGuiConfigSchema.optional().catch(undefined),
-  // A malformed present client block must remain diagnosable from raw config and
-  // fail closed through src/client/state.ts; unrelated provider state still loads.
-  client: clientConnectionSchema.optional().catch(undefined),
+  autonomousRemediation: z.object({
+    enabled: z.boolean().optional(),
+    instanceId: z.string().trim().min(1).optional(),
+    threshold: z.number().int().positive().optional(),
+    rollingWindowMs: z.number().int().positive().optional(),
+  }).strict().optional().catch(undefined),
   managementUsageMaxReadBytes: z.number().int().positive().default(64 * 1024 * 1024),
   // Invalid hand edits disable only this opt-in circuit. Live writes remain strict.
   upstreamHostCircuitThreshold: z.number().int()
     .min(0)
     .max(UPSTREAM_HOST_CIRCUIT_MAX_THRESHOLD)
-    .optional()
-    .catch(undefined),
-  // Opt-in outbound body ceiling. An invalid hand edit disables only this guard, matching the
-  // circuit threshold above: a malformed number must not make the proxy refuse traffic.
-  maxUpstreamBodyBytes: z.number().int()
-    .min(0)
     .optional()
     .catch(undefined),
   appOwnedMemoryBudgetMb: z.number().int()
@@ -1039,6 +936,11 @@ const configSchema = z.object({
   // is safe: startServer() already falls back to 127.0.0.1 for a missing hostname. Write-time
   // rejection lives in validateConfigCandidate() so bad values still surface to the caller.
   hostname: z.string().trim().min(1).optional().catch(undefined),
+  tls: z.object({
+    certFile: z.string().trim().min(1),
+    keyFile: z.string().trim().min(1),
+    publicOrigin: z.string().trim().min(1),
+  }).strict().optional().catch(undefined),
   // Discriminated on `enabled` so a disabled entry cannot be forced to carry a port, and an
   // enabled one cannot omit it (#1102). A malformed value degrades to undefined rather than
   // failing the whole parse: this is an opt-in convenience surface, and a hand-edit typo here
@@ -1065,6 +967,10 @@ const configSchema = z.object({
   providerContextCaps: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
+  // Invalid hand edits disable only this experimental opt-in.
+  v2RoutedDelegationBridge: z.boolean().optional().catch(undefined),
+  // Invalid hand edits disable only this experimental opt-in subtree.
+  v2NativeParentOverride: v2NativeParentOverrideSchema.optional().catch(undefined),
   // Invalid optional recovery config must not discard unrelated provider/account state.
   agentTaskRecovery: agentTaskRecoverySchema.optional().catch(undefined),
   // These selections pre-date schema validation and used to pass through as
@@ -1074,14 +980,19 @@ const configSchema = z.object({
   injectionModel: z.string().optional().catch(undefined),
   injectionEffort: z.string().optional().catch(undefined),
   syncCodexSubagentDefaults: z.boolean().optional().catch(undefined),
+  syncCodexAgentRoles: z.boolean().optional().catch(undefined),
+  subagentRoles: z.unknown().optional(),
   // Per-primary-model fallback chains. Values must be non-empty string arrays;
   // malformed entries degrade to undefined rather than rejecting the whole config.
   subagentModelFallbackByModel: z.record(
     z.string(),
     z.array(z.string().trim().min(1)).min(1),
   ).optional().catch(undefined),
+  subagentCandidates: z.union([
+    z.array(z.string().trim().min(1)).min(1),
+    z.record(z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)),
+  ]).optional().catch(undefined),
   codexShimAutoRestore: z.boolean().optional(),
-  codexDesktopAuthless: z.boolean().optional().catch(undefined),
   pausedCodexAccountIds: z.array(z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/)).optional(),
   codexAccountNamespaces: codexAccountNamespacesSchema.optional(),
   // Selection order is a preference, not a safety control like pause: a malformed
@@ -1096,17 +1007,12 @@ const configSchema = z.object({
   // Same degrade-not-reject rule: a malformed hand edit hides Spark rather than discarding the
   // whole config. Hidden is also the default, so `catch(false)` and the default agree.
   showCodexSparkQuota: z.boolean().optional().catch(false),
-  resetCreditAutoRedeem: z.object({
-    enabled: z.boolean().optional(),
-    leadTimeMinutes: z.number().int().min(1).max(60).optional(),
-  }).optional().catch(undefined),
   // Model ids excluded from the Grok Build managed block (dashboard switches).
   grokExcludedModels: z.array(z.string()).optional(),
   // Invalid values degrade to undefined ("auto") instead of failing the whole
   // parse: a hand-edited typo must never trip the backup-and-defaults repair
   // path below and wipe providers/pool accounts. Warning emitted in loadConfig.
   streamMode: z.enum(["auto", "legacy-tee", "eager-relay"]).optional().catch(undefined),
-  blockedModelRedirects: z.record(z.string(), z.string()).optional().catch(undefined),
   // Same degrade-don't-reject rationale as the fields above: a hand-edited
   // non-string must not trip the backup-and-defaults repair path. Unset then
   // takes the canonical sideband path (src/server/live.ts normalizeSidebandRoot).
@@ -1133,7 +1039,10 @@ const configSchema = z.object({
   if (claudeCode !== undefined && (!claudeCode || typeof claudeCode !== "object" || Array.isArray(claudeCode))) {
     ctx.addIssue({ code: "custom", path: ["claudeCode"], message: "claudeCode must be an object" });
   } else if (claudeCode) {
-    const claude = claudeCode as { desktopProfile?: unknown };
+    const claude = claudeCode as {
+      desktopProfile?: unknown;
+      compatibility?: unknown;
+    };
     if (claude.desktopProfile !== undefined) {
       try {
         parseDesktopProfile(claude.desktopProfile);
@@ -1144,6 +1053,13 @@ const configSchema = z.object({
           message: error instanceof Error ? error.message : String(error),
         });
       }
+    }
+    if (claude.compatibility !== undefined && claude.compatibility !== "shadow" && claude.compatibility !== "enforce") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["claudeCode", "compatibility"],
+        message: "compatibility must be \"shadow\" or \"enforce\"",
+      });
     }
   }
 
@@ -1207,20 +1123,6 @@ const configSchema = z.object({
         message: openRouterRoutingError,
       });
     }
-    const vercelRoutingError = vercelGatewayRoutingConfigError(provider);
-    if (vercelRoutingError) {
-      ctx.addIssue({
-        code: "custom",
-        path: [
-          "providers",
-          redactSecretString(name),
-          vercelRoutingError.startsWith("modelVercelGatewayRouting")
-            ? "modelVercelGatewayRouting"
-            : "vercelGatewayRouting",
-        ],
-        message: vercelRoutingError,
-      });
-    }
     if (Object.hasOwn(provider, "virtualModels")) {
       ctx.addIssue({
         code: "custom",
@@ -1251,6 +1153,30 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "responsesPath"],
         message: responsesPathError,
+      });
+    }
+    const wsUpstreamError = wsUpstreamConfigError((provider as { wsUpstream?: unknown }).wsUpstream);
+    if (wsUpstreamError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "wsUpstream"],
+        message: wsUpstreamError,
+      });
+    }
+    const maxWsFrameBytesError = maxWsFrameBytesConfigError((provider as { maxWsFrameBytes?: unknown }).maxWsFrameBytes);
+    if (maxWsFrameBytesError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "maxWsFrameBytes"],
+        message: maxWsFrameBytesError,
+      });
+    }
+    const tlsProfileError = providerTlsProfileConfigError(name, provider);
+    if (tlsProfileError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "tlsProfile"],
+        message: tlsProfileError,
       });
     }
     const headersError = providerHeadersConfigError((provider as { headers?: unknown }).headers);
@@ -1287,6 +1213,14 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "apiKeyTransport"],
         message: apiKeyTransportError,
+      });
+    }
+    const azureCredentialError = azureCredentialConfigError(provider);
+    if (azureCredentialError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "azureCredential"],
+        message: azureCredentialError,
       });
     }
     const modelAdaptersError = modelAdapterRecordConfigError(
@@ -1412,28 +1346,6 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "noStructuredOutputModels"],
         message: structuredOutputOptOutError,
-      });
-    }
-    const retainModelsError = nonBlankStringArrayConfigError(
-      (provider as { retainModels?: unknown }).retainModels,
-      "retainModels",
-    );
-    if (retainModelsError) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["providers", redactSecretString(name), "retainModels"],
-        message: retainModelsError,
-      });
-    }
-    const toolReasoningOptOutError = nonBlankStringArrayConfigError(
-      (provider as { omitReasoningEffortWithToolsModels?: unknown }).omitReasoningEffortWithToolsModels,
-      "omitReasoningEffortWithToolsModels",
-    );
-    if (toolReasoningOptOutError) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["providers", redactSecretString(name), "omitReasoningEffortWithToolsModels"],
-        message: toolReasoningOptOutError,
       });
     }
     if (Object.hasOwn(provider, "codexAccountMode") && provider.codexAccountMode !== undefined) {
@@ -1563,6 +1475,11 @@ function sanitizeRetryOn429ForLoad(parsed: unknown): void {
     const safeProviderName = JSON.stringify(redactSecretString(name));
     if (!provider || typeof provider !== "object" || Array.isArray(provider)) continue;
     const p = provider as Record<string, unknown>;
+    if (p.replayTransientFailures !== undefined && typeof p.replayTransientFailures !== "boolean") {
+      const receivedType = typeof p.replayTransientFailures;
+      delete p.replayTransientFailures;
+      console.warn(`⚠️  config.json providers.${safeProviderName}.replayTransientFailures (${receivedType}) is invalid — ignoring the field`);
+    }
     const policy = p.retryOn429;
     if (policy === undefined) continue;
     if (!policy || typeof policy !== "object" || Array.isArray(policy)) {
@@ -1835,6 +1752,8 @@ function normalizePersistedClaudeCode(claudeCode: unknown): OcxConfig["claudeCod
   if (Object.hasOwn(normalized, "subagentEffort") && !isClaudeSubagentEffort(normalized.subagentEffort)) {
     delete normalized.subagentEffort;
   }
+  const isValidMode = (v: unknown): v is "shadow" | "enforce" => v === "shadow" || v === "enforce";
+  if (Object.hasOwn(normalized, "compatibility") && !isValidMode(normalized.compatibility)) delete normalized.compatibility;
   // A hand-authored config never passes through the management validator, so coerce here too.
   // A malformed classifierFallbacks (a bare string, or an array with non-string entries) would
   // otherwise reach the resolver unchecked.
@@ -1869,6 +1788,53 @@ function warnDegradedClaudeSubagentEffort(rawParsed: unknown): void {
   }
 }
 
+function normalizeSubagentRoles(config: OcxConfig, rawParsed: unknown): OcxConfig {
+  const raw = rawConfigRecord(rawParsed);
+  if (!raw || !Object.hasOwn(raw, "subagentRoles")) return config;
+  const salvaged = salvageSubagentRoles(raw.subagentRoles);
+  const normalized = { ...config };
+  if (salvaged.roles === undefined) delete normalized.subagentRoles;
+  else normalized.subagentRoles = salvaged.roles;
+  return normalized;
+}
+
+function subagentRolesLoadWarnings(rawParsed: unknown): string[] {
+  const raw = rawConfigRecord(rawParsed);
+  if (!raw || !Object.hasOwn(raw, "subagentRoles")) return [];
+  return salvageSubagentRoles(raw.subagentRoles).warnings;
+}
+
+function malformedSyncCodexAgentRolesWarning(rawParsed: unknown): string | null {
+  const raw = rawConfigRecord(rawParsed);
+  if (!raw || !Object.hasOwn(raw, "syncCodexAgentRoles")) return null;
+  if (typeof raw.syncCodexAgentRoles === "boolean") return null;
+  return "syncCodexAgentRoles ignored: expected a boolean; treating as false";
+}
+
+function normalizeSyncCodexAgentRoles(config: OcxConfig, rawParsed: unknown): OcxConfig {
+  return malformedSyncCodexAgentRolesWarning(rawParsed)
+    ? { ...config, syncCodexAgentRoles: false }
+    : config;
+}
+
+function warnDegradedSyncCodexAgentRoles(rawParsed: unknown): void {
+  const warning = malformedSyncCodexAgentRolesWarning(rawParsed);
+  if (warning) console.warn(`⚠️  config.json ${warning}. Other settings were preserved.`);
+}
+
+function warnDegradedSubagentRoles(rawParsed: unknown): void {
+  for (const warning of subagentRolesLoadWarnings(rawParsed)) {
+    console.warn(`⚠️  config.json ${warning}. Other settings were preserved.`);
+  }
+}
+
+function subagentRolesError(value: unknown): string | null {
+  const raw = rawConfigRecord(value);
+  if (!raw || !Object.hasOwn(raw, "subagentRoles")) return null;
+  const parsed = parseSubagentRoles(raw.subagentRoles);
+  return parsed.ok ? null : `schema_invalid: ${parsed.error}`;
+}
+
 function malformedUpstreamHostCircuitThresholdWarning(rawParsed: unknown): string | null {
   const raw = rawConfigRecord(rawParsed);
   if (!raw || !Object.hasOwn(raw, "upstreamHostCircuitThreshold")) return null;
@@ -1898,47 +1864,6 @@ function malformedAgentTaskRecoveryWarning(rawParsed: unknown): string | null {
 function warnDegradedAgentTaskRecovery(rawParsed: unknown): void {
   const warning = malformedAgentTaskRecoveryWarning(rawParsed);
   if (warning) console.warn(`⚠️  config.json ${warning}. Other settings were preserved.`);
-}
-
-function malformedRuntimeRoleWarning(rawParsed: unknown): string | null {
-  const raw = rawConfigRecord(rawParsed);
-  if (!raw || !Object.hasOwn(raw, "runtimeRole") || raw.runtimeRole === undefined) return null;
-  if (runtimeRoleSchema.safeParse(raw.runtimeRole).success) return null;
-  return 'runtimeRole ignored: expected "standalone", "hub", or "client"; falling back to "standalone"';
-}
-
-function warnDegradedRuntimeRole(rawParsed: unknown): void {
-  const warning = malformedRuntimeRoleWarning(rawParsed);
-  if (warning) console.warn(`⚠️  config.json ${warning}. Other settings were preserved.`);
-}
-
-function malformedOptionalRemoteBlockWarning(
-  rawParsed: unknown,
-  key: "hub" | "remoteGui",
-): string | null {
-  const raw = rawConfigRecord(rawParsed);
-  if (!raw || !Object.hasOwn(raw, key) || raw[key] === undefined) return null;
-  const schema = key === "hub" ? hubConfigSchema : remoteGuiConfigSchema;
-  const result = schema.safeParse(raw[key]);
-  if (result.success) return null;
-  const field = result.error.issues[0]?.path.join(".");
-  return `${key}${field ? `.${field}` : ""} ignored: invalid remote GUI configuration`;
-}
-
-function malformedClientConnectionWarning(rawParsed: unknown): string | null {
-  const raw = rawConfigRecord(rawParsed);
-  if (!raw || !Object.hasOwn(raw, "client") || raw.client === undefined) return null;
-  const result = clientConnectionSchema.safeParse(raw.client);
-  if (result.success) return null;
-  const field = result.error.issues[0]?.path.join(".");
-  return `client${field ? `.${field}` : ""} invalid: remote client mode is disabled until config.json is repaired`;
-}
-
-function warnDegradedOptionalRemoteBlocks(rawParsed: unknown): void {
-  for (const key of ["hub", "remoteGui"] as const) {
-    const warning = malformedOptionalRemoteBlockWarning(rawParsed, key);
-    if (warning) console.warn(`⚠️  config.json ${warning}. Other settings were preserved.`);
-  }
 }
 
 type NativeSubagentPersistedField = "injectionModel" | "injectionEffort" | "syncCodexSubagentDefaults";
@@ -2091,13 +2016,13 @@ export function loadConfig(): OcxConfig {
       warnDegradedApiKeys(parsed, config);
       warnDegradedCodexAccountPriorities(parsed, config);
       warnDegradedClaudeSubagentEffort(parsed);
+      warnDegradedSubagentRoles(parsed);
+      warnDegradedSyncCodexAgentRoles(parsed);
       warnDegradedNativeSubagentConfig(parsed, config);
       warnDegradedCodexAccountPicker(parsed);
       warnDegradedUpstreamHostCircuitThreshold(parsed);
       warnDegradedAgentTaskRecovery(parsed);
-      warnDegradedRuntimeRole(parsed);
-      warnDegradedOptionalRemoteBlocks(parsed);
-      return withRefreshedCostOverlays(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed));
+      return withRefreshedCostOverlays(normalizeSyncCodexAgentRoles(normalizeSubagentRoles(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed), parsed), parsed));
     }
     // Schema validation failed — merge defaults into the raw object instead of
     // discarding it entirely, so pool accounts and providers survive a missing
@@ -2117,13 +2042,13 @@ export function loadConfig(): OcxConfig {
       warnDegradedApiKeys(parsed, config);
       warnDegradedCodexAccountPriorities(parsed, config);
       warnDegradedClaudeSubagentEffort(parsed);
+      warnDegradedSubagentRoles(parsed);
+      warnDegradedSyncCodexAgentRoles(parsed);
       warnDegradedNativeSubagentConfig(parsed, config);
       warnDegradedCodexAccountPicker(parsed);
       warnDegradedUpstreamHostCircuitThreshold(parsed);
       warnDegradedAgentTaskRecovery(parsed);
-      warnDegradedRuntimeRole(parsed);
-      warnDegradedOptionalRemoteBlocks(parsed);
-      return withRefreshedCostOverlays(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed));
+      return withRefreshedCostOverlays(normalizeSyncCodexAgentRoles(normalizeSubagentRoles(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed), parsed), parsed));
     }
     // Still failing, but if every complaint is about one or more named entries
     // in an independent section, drop exactly those and keep the rest. Falling
@@ -2139,13 +2064,13 @@ export function loadConfig(): OcxConfig {
         warnDegradedApiKeys(parsed, config);
         warnDegradedCodexAccountPriorities(parsed, config);
         warnDegradedClaudeSubagentEffort(parsed);
+        warnDegradedSubagentRoles(parsed);
+        warnDegradedSyncCodexAgentRoles(parsed);
         warnDegradedNativeSubagentConfig(parsed, config);
         warnDegradedCodexAccountPicker(parsed);
         warnDegradedUpstreamHostCircuitThreshold(parsed);
         warnDegradedAgentTaskRecovery(parsed);
-        warnDegradedRuntimeRole(parsed);
-        warnDegradedOptionalRemoteBlocks(parsed);
-        return withRefreshedCostOverlays(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed));
+        return withRefreshedCostOverlays(normalizeSyncCodexAgentRoles(normalizeSubagentRoles(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, parsed), parsed), parsed), parsed));
       }
     }
     // Merge couldn't fix it — truly broken config
@@ -2263,13 +2188,16 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   // ordinary save persists the normalized absence.
   const syncDisabledReason = nativeSubagentSyncDisabledReason(config, rawParsed);
   const rawEffort = rawClaudeSubagentEffort(rawParsed);
-  const normalized = normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, rawParsed), rawParsed);
+  const normalized = normalizeSyncCodexAgentRoles(normalizeSubagentRoles(normalizeClaudeSubagentEffort(normalizeNativeSubagentSync(config, rawParsed), rawParsed), rawParsed), rawParsed);
   const warnings = configPlaceholderWarnings(normalized);
   warnings.push(...inheritedFastWireConflictProviderNames(normalized).map(inheritedFastWireConflictWarning));
   warnings.push(...degradedCodexAccountPriorityWarnings(rawParsed, normalized));
   if (rawEffort !== undefined && !isClaudeSubagentEffort(rawEffort)) {
     warnings.push(`claudeCode.subagentEffort ignored: expected one of ${CLAUDE_SUBAGENT_EFFORTS.join(", ")}`);
   }
+  warnings.push(...subagentRolesLoadWarnings(rawParsed));
+  const agentRoleSyncWarning = malformedSyncCodexAgentRolesWarning(rawParsed);
+  if (agentRoleSyncWarning) warnings.push(agentRoleSyncWarning);
   warnings.push(...malformedNativeSubagentFields(rawParsed).map(malformedNativeSubagentFieldWarning));
   const pickerWarning = malformedCodexAccountPickerWarning(rawParsed);
   if (pickerWarning) warnings.push(pickerWarning);
@@ -2277,14 +2205,6 @@ function validFileConfigDiagnostics(config: OcxConfig, rawParsed: unknown): Conf
   if (hostCircuitWarning) warnings.push(hostCircuitWarning);
   const recoveryWarning = malformedAgentTaskRecoveryWarning(rawParsed);
   if (recoveryWarning) warnings.push(recoveryWarning);
-  const runtimeRoleWarning = malformedRuntimeRoleWarning(rawParsed);
-  if (runtimeRoleWarning) warnings.push(runtimeRoleWarning);
-  const hubWarning = malformedOptionalRemoteBlockWarning(rawParsed, "hub");
-  if (hubWarning) warnings.push(hubWarning);
-  const remoteGuiWarning = malformedOptionalRemoteBlockWarning(rawParsed, "remoteGui");
-  if (remoteGuiWarning) warnings.push(remoteGuiWarning);
-  const clientWarning = malformedClientConnectionWarning(rawParsed);
-  if (clientWarning) warnings.push(clientWarning);
   if (syncDisabledReason) {
     warnings.push(`syncCodexSubagentDefaults ignored: ${syncDisabledReason}`);
   }
@@ -2359,6 +2279,20 @@ function mergeConfigDefaults(parsed: unknown): unknown {
   return merged;
 }
 
+function configNeedsProviderRepair(parsed: Record<string, unknown>): boolean {
+  const providers = parsed.providers;
+  if (parsed.defaultProvider !== undefined
+    || (providers && typeof providers === "object" && !Array.isArray(providers)
+      && Object.keys(providers).length > 0)) return false;
+  const candidate = structuredClone(parsed);
+  sanitizeAliasesForLoad(candidate);
+  sanitizeModelDisplayNamesForLoad(candidate);
+  sanitizeRetryOn429ForLoad(candidate);
+  sanitizeModelCostsForLoad(candidate);
+  return !configSchema.safeParse(candidate).success
+    && configSchema.safeParse(mergeConfigDefaults(candidate)).success;
+}
+
 function schemaDiagnosticsError(error: z.ZodError): string {
   const details = error.issues.map(issue => {
     const path = issue.path.join(".") || "config";
@@ -2422,51 +2356,23 @@ function agentTaskRecoveryError(value: unknown): string | null {
   return `schema_invalid: agentTaskRecovery${field ? `.${field}` : ""}: ${issue?.message ?? "invalid configuration"}`;
 }
 
-function runtimeRoleError(value: unknown): string | null {
+function v2RoutedDelegationBridgeError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
-  if (!raw || !Object.hasOwn(raw, "runtimeRole") || raw.runtimeRole === undefined) return null;
-  if (runtimeRoleSchema.safeParse(raw.runtimeRole).success) return null;
-  return 'schema_invalid: runtimeRole: must be one of "standalone", "hub", or "client"';
+  if (!raw || !Object.hasOwn(raw, "v2RoutedDelegationBridge")) return null;
+  const enabled = raw.v2RoutedDelegationBridge;
+  return enabled === undefined || typeof enabled === "boolean"
+    ? null
+    : "schema_invalid: v2RoutedDelegationBridge: must be a boolean or omitted";
 }
 
-function remoteGuiConfigError(value: unknown): string | null {
+function v2NativeParentOverrideError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
-  if (!raw) return null;
-  for (const [key, schema] of [
-    ["hub", hubConfigSchema],
-    ["remoteGui", remoteGuiConfigSchema],
-  ] as const) {
-    if (!Object.hasOwn(raw, key) || raw[key] === undefined) continue;
-    const result = schema.safeParse(raw[key]);
-    if (result.success) continue;
-    const issue = result.error.issues[0];
-    const field = issue?.path.join(".");
-    return `schema_invalid: ${key}${field ? `.${field}` : ""}: ${issue?.message ?? "invalid configuration"}`;
-  }
-  return null;
-}
-
-function clientConnectionConfigError(value: unknown): string | null {
-  const raw = rawConfigRecord(value);
-  if (!raw || !Object.hasOwn(raw, "client") || raw.client === undefined) return null;
-  const result = clientConnectionSchema.safeParse(raw.client);
+  if (!raw || !Object.hasOwn(raw, "v2NativeParentOverride") || raw.v2NativeParentOverride === undefined) return null;
+  const result = v2NativeParentOverrideSchema.safeParse(raw.v2NativeParentOverride);
   if (result.success) return null;
   const issue = result.error.issues[0];
   const field = issue?.path.join(".");
-  return `schema_invalid: client${field ? `.${field}` : ""}: ${issue?.message ?? "invalid client connection"}`;
-}
-
-function clientRolePairError(value: unknown): string | null {
-  const raw = rawConfigRecord(value);
-  if (!raw) return null;
-  const hasClient = Object.hasOwn(raw, "client") && raw.client !== undefined;
-  if (raw.runtimeRole === "client" && !hasClient) {
-    return "schema_invalid: runtimeRole client requires a complete client connection";
-  }
-  if (hasClient && raw.runtimeRole !== "client") {
-    return "schema_invalid: client connection requires runtimeRole client";
-  }
-  return null;
+  return `schema_invalid: v2NativeParentOverride${field ? `.${field}` : ""}: ${issue?.message ?? "invalid configuration"}`;
 }
 
 /**
@@ -2575,22 +2481,14 @@ function loopbackListenerPortError(value: unknown): string | null {
   return null;
 }
 
-/**
- * Validate the hub management ingress at the live-write boundary.
- *
- * The persisted schema intentionally degrades a malformed hand edit to disabled so a typo in
- * this opt-in listener cannot discard providers or credentials. A live config mutation must not
- * get that leniency: it receives an exact field error before the degrading schema is applied.
- */
+/** Live writes reject invalid optional hub ingress instead of relying on load-time pass-through. */
 function managementIngressConfigError(value: unknown): string | null {
   const raw = rawConfigRecord(value);
   if (!raw) return null;
   const hub = rawConfigRecord(raw.hub);
   if (!hub || !Object.hasOwn(hub, "managementIngress") || hub.managementIngress === undefined) return null;
   const ingress = rawConfigRecord(hub.managementIngress);
-  if (!ingress) {
-    return "schema_invalid: hub.managementIngress: must be an object or omitted";
-  }
+  if (!ingress) return "schema_invalid: hub.managementIngress: must be an object or omitted";
   if (typeof ingress.enabled !== "boolean") {
     return "schema_invalid: hub.managementIngress.enabled: must be a boolean";
   }
@@ -2623,25 +2521,38 @@ function managementIngressConfigError(value: unknown): string | null {
 
 export function validateConfigCandidate(value: unknown): { ok: true; config: OcxConfig } | { ok: false; error: string } {
   const boundaryError = blankHostnameError(value)
+    ?? (() => {
+      const raw = rawConfigRecord(value);
+      const error = raw ? serverTlsConfigError(raw.tls) : null;
+      return error ? `schema_invalid: ${error}` : null;
+    })()
     ?? claudeSubagentEffortError(value)
+    ?? subagentRolesError(value)
     ?? appOwnedMemoryBudgetError(value)
     ?? upstreamHostCircuitThresholdError(value)
     ?? agentTaskRecoveryError(value)
+    ?? v2RoutedDelegationBridgeError(value)
+    ?? v2NativeParentOverrideError(value)
     ?? googleAntigravityStaticCatalogVersionError(value)
     ?? codexAccountPrioritiesError(value)
     ?? codexAccountPickerEnabledError(value)
     ?? emptyCompletionRetryError(value)
     ?? oauthOpenBrowserError(value)
-    ?? runtimeRoleError(value)
-    ?? remoteGuiConfigError(value)
-    ?? clientConnectionConfigError(value)
-    ?? clientRolePairError(value)
     ?? loopbackListenerPortError(value)
     ?? managementIngressConfigError(value);
   if (boundaryError) return { ok: false, error: boundaryError };
   const result = configSchema.safeParse(value);
   if (result.success) {
     const config = normalizeApiKeyIds(result.data as OcxConfig);
+    for (const [name, provider] of Object.entries(config.providers)) {
+      const antigravityError = antigravityOAuthDestinationConfigError(name, provider);
+      if (antigravityError) return { ok: false, error: `providers.${name}.baseUrl: ${antigravityError}` };
+    }
+    if (value && typeof value === "object" && !Array.isArray(value) && Object.hasOwn(value, "subagentRoles")) {
+      const parsedRoles = parseSubagentRoles((value as { subagentRoles?: unknown }).subagentRoles);
+      if (!parsedRoles.ok) return { ok: false, error: `schema_invalid: ${parsedRoles.error}` };
+      config.subagentRoles = parsedRoles.roles;
+    }
     return { ok: true, config };
   }
   return { ok: false, error: schemaDiagnosticsError(result.error) };
@@ -2982,28 +2893,40 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
   }
 };
 
-type PersistConfigAuthority = "ordinary" | "replacement";
-
 /**
  * Atomic config.json write WITHOUT the mutation lock; callers must hold
  * `withConfigMutationLockSync`. Returns true when bytes changed. Refreshes the
  * cost-overlay registry from the persisted config so runtime estimates follow
  * every save path.
  */
+type PersistConfigAuthority = "ordinary" | "mutation" | "replacement";
+
 function persistConfigUnlocked(config: OcxConfig, authority: PersistConfigAuthority = "ordinary"): boolean {
   const configPath = getConfigPath();
-  const rawBeforeWrite = readRawConfigJson();
-  if (authority !== "replacement") {
-    const clientPersistenceError = failClosedClientPersistenceError(rawBeforeWrite, config);
-    if (clientPersistenceError) throw new Error(clientPersistenceError);
+  // Check the resolved file target before reading it: a symlink can point from an
+  // isolated test home into the protected real home, where another write guard
+  // must not mask this refusal based on the target's current contents.
+  assertNotRealHomeUnderTest(dirname(resolveWriteTarget(configPath)));
+  const raw = readRawConfigJson();
+  if (authority !== "replacement" && raw && configNeedsProviderRepair(raw)) {
+    throw new Error("refusing to overwrite a config repaired with defaults; fix the persisted config first");
   }
-  // External editors can add provider rows the live config deliberately does
-  // not route with yet; merge them at the serialization boundary so an
-  // unrelated in-process save cannot erase the provider or its overlay.
-  // Provider preservation reads symbol-keyed live-owner state, which structuredClone
-  // intentionally drops. Resolve that ownership before projecting JSON provenance.
+  const snapshot = readConfigFileSnapshot();
+  if (authority !== "replacement" && snapshot.diagnostics.source === "fallback") {
+    throw new Error("refusing to overwrite an invalid persisted config; fix the persisted config first");
+  }
+  // Automatic whole-config writes own non-provider settings only. A valid disk
+  // registry is authoritative; explicit locked mutations pass replacement
+  // authority for intentional provider/default changes.
+  const base = snapshot.diagnostics.source === "file" && authority === "ordinary"
+    ? {
+      ...config,
+      providers: snapshot.diagnostics.config.providers,
+      defaultProvider: snapshot.diagnostics.config.defaultProvider,
+    }
+    : config;
   const provenanceProjection = projectConfigRebaseProvenance(config);
-  const persisted = authority === "replacement" ? config : withPreservedDiskOnlyProviders(config);
+  const persisted = base;
   if (provenanceProjection.configRebaseProvenance === undefined) delete persisted.configRebaseProvenance;
   else persisted.configRebaseProvenance = provenanceProjection.configRebaseProvenance;
   const bytes = JSON.stringify(persisted, null, 2) + "\n";
@@ -3167,6 +3090,7 @@ function publishInitialConfigNoReplace(
         if (isMissingPathError(secondError)) {
           forgetEphemeralSecretPath(temp);
         } else {
+          // Both names point to one inode. Remove the published name before scrubbing.
           try { io.unlink(target); }
           catch (cause) { throw new PersistedConfigInitializationRollbackError({ cause }); }
           published = false;
@@ -3229,6 +3153,13 @@ export type PersistedConfigMutation<T> = {
 export type PersistedConfigMutationOutcome<T> =
   | { status: "committed" | "unchanged"; value: T }
   | { status: "unavailable"; reason: "missing" | "invalid" | "conflict" };
+
+export class ConfigMutationValidationError extends Error {
+  constructor(readonly validationError: string) {
+    super(`Config mutation rejected: ${validationError}`);
+    this.name = "ConfigMutationValidationError";
+  }
+}
 
 const CONFIG_MUTATION_MAX_REBASE_ATTEMPTS = 3;
 let persistedConfigMutationBeforeCommitForTests: (() => void) | null = null;
@@ -3300,38 +3231,15 @@ export function mutatePersistedConfig<T>(
 
       const projected = projectCustomModelCatalogMigration(
         commitBase.diagnostics.config,
-        projectConfigRebaseProvenance(confirmedConfig),
+        confirmedConfig,
       );
-      if (persistConfigUnlocked(projected)) bumpGenerationForCooperatingConfigWrite();
+      const validation = validateConfigCandidate(projected);
+      if (!validation.ok) throw new ConfigMutationValidationError(validation.error);
+      if (persistConfigUnlocked(projected, "mutation")) bumpGenerationForCooperatingConfigWrite();
       return { status: "committed", value: confirmed.value };
     }
     return { status: "unavailable", reason: "conflict" };
   });
-}
-
-function failClosedClientPersistenceError(
-  raw: Record<string, unknown> | undefined,
-  candidate: OcxConfig,
-): string | null {
-  if (!raw) return null;
-  const rawHasClient = Object.hasOwn(raw, "client") && raw.client !== undefined;
-  const rawRole = raw.runtimeRole;
-  const rawRoleValid = rawRole === undefined
-    || rawRole === "standalone"
-    || rawRole === "hub"
-    || rawRole === "client";
-  const rawClientValid = !rawHasClient || clientConnectionSchema.safeParse(raw.client).success;
-  const rawPairValid = rawRoleValid
-    && ((rawRole === "client" && rawHasClient && rawClientValid)
-      || (rawRole !== "client" && !rawHasClient));
-  if (rawPairValid) return null;
-
-  const candidateValid = candidate.runtimeRole === "client"
-    && clientConnectionSchema.safeParse(candidate.client).success;
-  const deletions = configRebaseDeletionKeys(candidate);
-  const explicitClear = deletions.has("client") && deletions.has("runtimeRole");
-  if (candidateValid || explicitClear) return null;
-  return "config write refused: malformed or mismatched remote client state must be repaired or explicitly cleared";
 }
 
 export function websocketsEnabled(config: Pick<OcxConfig, "websockets">): boolean {
@@ -3649,7 +3557,7 @@ function readPersistedServerBinding(
  *   conflict keeps the live value;
  * - a provider or custom-model row deleted on disk stays deleted even if stale
  *   live state edited that same row;
- * - file missing/unreadable → save what we have, no throw.
+ * - missing file → save what we have; invalid existing file → fail closed.
  *
  * Custom-model rows are merged by their stable `id`, preserving independent
  * edits and deletions across stale whole-config saves.
@@ -3721,10 +3629,10 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
       const persistedConfig: OcxConfig = { ...projectedConfig, port: persistedBinding.port };
       if (persistedBinding.hostname === undefined) delete persistedConfig.hostname;
       else persistedConfig.hostname = persistedBinding.hostname;
-      if (persistConfigUnlocked(persistedConfig)) bumpGenerationForCooperatingConfigWrite();
+      if (persistConfigUnlocked(persistedConfig, "mutation")) bumpGenerationForCooperatingConfigWrite();
       persistedLiveServerBinding.set(config, persistedBinding);
     } else {
-      if (persistConfigUnlocked(projectedConfig)) bumpGenerationForCooperatingConfigWrite();
+      if (persistConfigUnlocked(projectedConfig, "mutation")) bumpGenerationForCooperatingConfigWrite();
     }
     adoptCustomModelCatalogMigration(config, projectedConfig);
     if (claudeCodeBaseline.has(config)) {
@@ -3756,10 +3664,6 @@ export function multiAgentGuidanceEnabled(
   config: Pick<OcxConfig, "multiAgentGuidanceEnabled">,
 ): boolean {
   return config.multiAgentGuidanceEnabled !== false;
-}
-
-export function runtimeRole(config: Pick<OcxConfig, "runtimeRole">): OcxRuntimeRole {
-  return config.runtimeRole ?? "standalone";
 }
 
 export function getDefaultConfig(): OcxConfig {
@@ -3836,12 +3740,6 @@ export function applyProxyEnvWith(
   config: OcxConfig,
   auto: { reader?: WindowsProxyRegistryReader; platform?: NodeJS.Platform } = {},
 ): void {
-  // `proxy` and `noProxy` are not declared in the top-level schema, which ends in
-  // `.passthrough()`, so whatever is on disk arrives here verbatim. A non-string value
-  // reached string-only methods and threw out of this function, and it runs once per
-  // process entry point — the failure was a startup crash, not a degraded proxy. Ignore
-  // malformed values with a privacy-safe warning instead: they cannot express a routing
-  // intent, and refusing to start is a worse answer than starting without them.
   const rawProxy = config.proxy;
   let proxy = typeof rawProxy === "string" ? resolveEnvValue(rawProxy) : undefined;
   if (!proxy) {
@@ -3849,8 +3747,6 @@ export function applyProxyEnvWith(
     return;
   }
   if (proxy.trim().toLowerCase() === "auto") {
-    // #1525 slice 1: one startup read of the Windows static proxy. Never copy the literal
-    // "auto" into HTTP_PROXY; every non-proxy outcome leaves outbound routing as it was.
     if (process.env.HTTP_PROXY?.trim() || process.env.http_proxy?.trim()
       || process.env.HTTPS_PROXY?.trim() || process.env.https_proxy?.trim()) {
       console.log("[opencodex] proxy \"auto\": existing HTTP_PROXY/HTTPS_PROXY environment wins; system proxy not consulted");
@@ -3885,7 +3781,6 @@ export function applyProxyEnvWith(
   const raw = config.noProxy;
   let configuredEntries: string[];
   if (Array.isArray(raw)) {
-    // One unusable element must not discard the operator's other entries.
     if (raw.some(entry => typeof entry !== "string")) warnProxyConfigDiscardOnce("noProxyElements");
     configuredEntries = raw.filter((entry): entry is string => typeof entry === "string");
   } else if (typeof raw === "string") {
@@ -3913,7 +3808,7 @@ function warnConfigRepaired(configPath: string, error: z.ZodError): void {
   if (warnedConfigFallbacks.has(configPath)) return;
   warnedConfigFallbacks.add(configPath);
   const fields = error.issues.map(i => i.path.join(".") || "config").join(", ");
-  console.error(`opencodex config at ${configPath}: repaired missing field(s) [${fields}] with defaults. Your providers and accounts are preserved.`);
+  console.error(`opencodex config at ${configPath}: repaired invalid or missing field(s) [${fields}] in memory. A providerless fallback config will not be written automatically.`);
 }
 
 /**

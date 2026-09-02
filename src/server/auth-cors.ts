@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import { extractAccountId } from "../oauth/chatgpt";
+import { assertServerTlsFiles, serverTlsConfigError } from "../lib/server-tls";
 import { formatErrorResponse } from "../bridge";
 import {
   codexAutoStartEnabled,
@@ -11,8 +12,13 @@ import {
 } from "../config";
 import {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
+  modelDisplayNamesConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
+  providerEmptyToolOutputConfigError,
+  wsUpstreamConfigError,
+  maxWsFrameBytesConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
   positiveIntegerRecordConfigError,
@@ -21,9 +27,11 @@ import {
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
 } from "../config/provider-validation";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { redactSecretString } from "../lib/redact";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../providers/registry";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { openRouterRoutingConfigError } from "../providers/openrouter-routing";
@@ -313,7 +321,10 @@ export function requestPolicyView(config: OcxConfig, bindHostname: string): Requ
   };
 }
 
-export function assertServerAuthConfig(config: OcxConfig): void {
+export function assertServerAuthConfig(
+  config: OcxConfig,
+  options: { allowPlaintextRemoteForTests?: boolean } = {},
+): void {
   const hasConfiguredDataCredential = !!configuredApiAuthToken(config)
     || (config.apiKeys ?? []).some(entry => !!entry.key.trim());
   if (isApiAuthRequired(config) && !hasConfiguredDataCredential) {
@@ -321,6 +332,12 @@ export function assertServerAuthConfig(config: OcxConfig): void {
       "A data-plane credential (OPENCODEX_API_AUTH_TOKEN or config.apiKeys) is required when binding opencodex to a non-loopback hostname",
     );
   }
+  const tlsError = serverTlsConfigError(config.tls);
+  if (tlsError) throw new Error(`Invalid server TLS configuration: ${tlsError}`);
+  if (isApiAuthRequired(config) && !config.tls && !options.allowPlaintextRemoteForTests) {
+    throw new Error("Native TLS is required when binding opencodex to a non-loopback hostname; configure tls.certFile, tls.keyFile, and tls.publicOrigin or bind to loopback behind a TLS tunnel");
+  }
+  if (config.tls) assertServerTlsFiles(config.tls);
 }
 
 function secretEquals(actual: string, expected: string | undefined): boolean {
@@ -614,6 +631,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // validation and then rejected by the seed comparison, so canonical OpenAI could never
     // set OR clear it — the value was admitted and then refused in the same request.
     delete canonicalCandidate.annotateEmptyToolOutputs;
+    // Transport controls are user-owned overlays, not part of the immutable seed.
+    delete canonicalCandidate.wsUpstream;
+    delete canonicalCandidate.maxWsFrameBytes;
     const canonical = seed && sameCanonicalProviderSeed(canonicalCandidate, seed);
     if (!canonical) {
       return `provider ${name} must equal the canonical built-in provider seed`;
@@ -622,6 +642,12 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     return `provider ${name} must not include codexAccountMode`;
   }
   const typed = provider as unknown as OcxProviderConfig;
+  const tlsProfileError = providerTlsProfileConfigError(name, typed);
+  if (tlsProfileError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${tlsProfileError}`;
+  }
+  const antigravityError = antigravityOAuthDestinationConfigError(name, typed);
+  if (antigravityError) return `provider ${name} ${antigravityError}`;
   const baseUrlError = providerBaseUrlConfigError(typed.baseUrl);
   if (baseUrlError) return `provider ${name} ${baseUrlError}`;
   if (effectiveGoogleMode(name, typed) === "vertex" && typed.location !== undefined) {
@@ -646,6 +672,17 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (upstreamHttpVersionError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${upstreamHttpVersionError}`;
   }
+  const wsUpstreamError = wsUpstreamConfigError(raw.wsUpstream);
+  if (wsUpstreamError) return `provider ${name} ${wsUpstreamError}`;
+  const maxWsFrameBytesError = maxWsFrameBytesConfigError(raw.maxWsFrameBytes);
+  if (maxWsFrameBytesError) return `provider ${name} ${maxWsFrameBytesError}`;
+  const displayNamesError = modelDisplayNamesConfigError(raw.modelDisplayNames);
+  if (displayNamesError) return `provider ${name} ${displayNamesError}`;
+  if (raw.replayTransientFailures !== undefined && typeof raw.replayTransientFailures !== "boolean") {
+    return `provider ${JSON.stringify(redactSecretString(name))} replayTransientFailures must be a boolean`;
+  }
+  const emptyToolOutputError = providerEmptyToolOutputConfigError(name, raw);
+  if (emptyToolOutputError) return emptyToolOutputError;
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
   if (modelCostsError) {
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
@@ -654,6 +691,8 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const apiKeyTransportError = apiKeyTransportConfigError(typed);
   if (apiKeyTransportError) return `provider ${name} ${apiKeyTransportError}`;
+  const azureCredentialError = azureCredentialConfigError(raw);
+  if (azureCredentialError) return `provider ${JSON.stringify(redactSecretString(name))} ${azureCredentialError}`;
   const maxInputError = positiveIntegerRecordConfigError(raw.modelMaxInputTokens, "modelMaxInputTokens");
   if (maxInputError) return `provider ${name} ${maxInputError}`;
   const autoCompactError = modelAutoCompactTokenLimitsConfigError(
@@ -758,6 +797,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       baseUrl: publicProviderBaseUrl(provider.baseUrl),
       hasApiKey: !!provider.apiKey,
       hasHeaders: !!provider.headers && Object.keys(provider.headers).length > 0,
+      hasAzureCredential: !!provider.azureCredential,
     };
     if (name === "xai") {
       dto.xaiResponsesOptInState = xaiResponsesOptInState(provider);
@@ -769,16 +809,23 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "defaultAliases",
       "disabled",
       "allowPrivateNetwork",
+      "replayTransientFailures",
       "authMode",
+      "googleMode",
       "apiKeyTransport",
       "keyOptional",
       "freeTier",
       "liveModels",
       "requestPacing",
+      "annotateEmptyToolOutputs",
+      "tlsProfile",
       "models",
       "contextWindow",
       "modelContextWindows",
       "modelAutoCompactTokenLimits",
+      "wsUpstream",
+      "maxWsFrameBytes",
+      "upstreamWebsocket",
       "defaultMaxOutputTokens",
       "modelMaxOutputTokens",
       "openRouterRouting",
@@ -816,6 +863,13 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     if (typeof registryNote === "string" && registryNote.trim()) dto.note = registryNote;
     const codexAccountMode = providerCodexAccountMode(name, provider);
     if (codexAccountMode) dto.codexAccountMode = codexAccountMode;
+    if (effectiveGoogleMode(name, provider) === "ai-studio-web" || name === "google-aistudio") {
+      const credentials = resolveAiStudioCredentials(provider);
+      dto.hasAiStudioSession = credentials.kind === "ready";
+      dto.aiStudioAuthState = process.platform !== "darwin"
+        ? "unsupported"
+        : credentials.kind === "ready" ? "checking" : "needs_reauth";
+    }
     providers[name] = dto;
   }
   return {

@@ -4713,6 +4713,51 @@ async function handleResponsesInner(
         poolRetryOutcome = upstreamResponse.status >= 500 ? 429 : upstreamResponse.status;
       }
 
+      // Wrapped quota in 5xx: mirror the transient-5xx immediate-retry budget on the
+      // exhausted account before pool rotation. The ordinary transient layer is opt-in
+      // (replayTransientFailures), so a plain quota-wrapped 502 would otherwise rotate
+      // after one send. The docs and tests require up to three sends on the same
+      // credential before the alternate attempt, and three sends + cooldown for sole
+      // accounts.
+      if (poolRetryOutcome === 429 && upstreamResponse.status >= 500) {
+        const maxSameAccountQuotaRetries = 2;
+        for (let wrappedRetry = 0; wrappedRetry < maxSameAccountQuotaRetries; wrappedRetry++) {
+          if (options.abortSignal?.aborted || upstream.signal.aborted) break;
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* ignore */ }
+          if (replayBudget) replayBudget.remaining = Math.max(0, replayBudget.remaining - 1);
+          try {
+            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate);
+            noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, "transient-5xx", route.provider.adapter);
+            upstreamResponse = await fetchWithHeaderTimeout(
+              request.url,
+              {
+                method: request.method,
+                headers: request.headers,
+                body: request.body,
+              },
+              upstream.signal,
+              connectMs,
+              parsed.stream,
+              providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                providerName: route.providerName,
+                modelId: route.modelId,
+              }),
+              route.provider.authMode === "forward",
+            );
+            settleObservedHostResponse();
+            captureAffinityResponse(upstreamResponse);
+          } catch (err) {
+            upstream.abort();
+            break;
+          }
+          const stillQuota = await shouldRetryCodexPoolAccountQuota(upstreamResponse, options.abortSignal);
+          if (!stillQuota) {
+            poolRetryOutcome = undefined;
+            break;
+          }
+        }
+      }
+
       if (poolRetryOutcome !== undefined) {
         const storedReplaySpent = codex401ReplayKind === "stored";
         const retry = await retryCodexPoolOnAlternateAccount({

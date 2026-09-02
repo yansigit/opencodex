@@ -9,6 +9,7 @@ import {
 } from "./combos";
 import type { NormalizedComboConfig } from "./combos/types";
 import { hasOwnProvider } from "./config/provider-name";
+import { isAzureIdentityProvider } from "./config/provider-validation";
 import { resolveProviderApiKey } from "./providers/key-store";
 import { assertProviderDestinationAllowed } from "./lib/destination-policy";
 import { redactSecretString, redactUrlForLog } from "./lib/redact";
@@ -293,10 +294,15 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
   const registryEntry = PROVIDER_REGISTRY.find(entry => entry.id === providerName);
   if (!registryEntry || !providerMatchesRegistryTransportWithStaticGuards(providerName, provider)) {
     assertProviderDestinationAllowed(providerName, provider);
-    return { ...provider, apiKey: usableResolvedApiKey(provider.apiKey) };
+    return {
+      ...provider,
+      apiKey: usableResolvedApiKey(provider.apiKey),
+      ...(isAzureIdentityProvider(provider) ? { liveModels: false } : {}),
+    };
   }
   const resolvedApiKey = usableResolvedApiKey(provider.apiKey);
-  const staticModelCatalog = !providerSupportsLiveModelDiscovery(providerName, provider);
+  const staticModelCatalog = isAzureIdentityProvider(provider)
+    || !providerSupportsLiveModelDiscovery(providerName, provider);
   const repairLegacyMimoFreeAuth = providerName === "mimo-free"
     && staticModelCatalog
     && (provider.authMode === undefined || provider.authMode === "local");
@@ -423,6 +429,9 @@ export function routedProviderConfig(providerName: string, provider: OcxProvider
     authMode: canonicalAuthMode,
     apiKey: resolvedApiKey,
     ...(staticModelCatalog ? { liveModels: false } : {}),
+    ...(provider.requestPacing === undefined && registryEntry.requestPacing
+      ? { requestPacing: structuredClone(registryEntry.requestPacing) }
+      : {}),
     ...(headers ? { headers } : {}),
     // Backfill the Google wire mode + Vertex project/location from the registry when the user
     // config omits them, so a minimal `google-vertex`/`google-antigravity` entry still routes

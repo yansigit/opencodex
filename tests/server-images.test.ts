@@ -4,7 +4,7 @@
  * instead of the /v1/* JSON-404 guard.
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync} from "node:fs";
+import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearAccountNeedsReauth, clearAccountQuota } from "../src/codex/auth-api";
@@ -12,14 +12,13 @@ import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexUpstreamHealth
 import { saveConfig } from "../src/config";
 import { selectImagesProvider } from "../src/providers/openai-sidecar";
 import { startServer } from "../src/server";
-import { handleImages, IMAGES_RESPONSE_MAX_BYTES, readImageResponseBytes, setXaiResultPinnedDownloadForTests } from "../src/server/images";
-import { MAX_ENCODED_BYTES_PER_IMAGE } from "../src/images/artifacts";
+import { handleImages, IMAGES_RESPONSE_MAX_BYTES, readImageResponseBytes } from "../src/server/images";
 import { saveCredential } from "../src/oauth/store";
 import type { OcxConfig } from "../src/types";
 import { ANTIGRAVITY_REQUEST_UA } from "../src/adapters/google-antigravity-wire";
+import { resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../src/lib/provider-tls-profile";
 import { fakeChatGptJwt } from "./helpers/fake-chatgpt-jwt";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -30,7 +29,7 @@ let isolatedCodexHome: IsolatedCodexHome | null = null;
 const DIRECT_CHATGPT_TOKEN = fakeChatGptJwt({ chatgpt_account_id: "acct-123" });
 
 beforeEach(() => {
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
   mkdirSync(TEST_DIR, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
   delete process.env.OPENCODEX_API_AUTH_TOKEN;
@@ -44,7 +43,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setXaiResultPinnedDownloadForTests(undefined);
   globalThis.fetch = originalFetch;
   if (previousApiToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
@@ -58,7 +56,8 @@ afterEach(() => {
   clearThreadAccountMap();
   clearAccountNeedsReauth("pool-a");
   clearAccountQuota();
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  resetProviderTlsProfileForTests();
+  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
 });
 
 interface CapturedRequest {
@@ -156,403 +155,6 @@ test("image response byte reader enforces the stream cap when Content-Length is 
   expect(canceled).toBe(true);
   // One queued chunk may be prefetched; cancellation must stop later draining.
   expect(tailPulled).toBe(false);
-});
-
-function xaiBridgeConfig(): OcxConfig {
-  return {
-    ...forwardConfig(),
-    images: { bridgeEnabled: true },
-    providers: {
-      ...forwardConfig().providers,
-      xai: { adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", apiKey: "xai-test-token" },
-    },
-  } as OcxConfig;
-}
-
-function stubXaiImagine(payload: unknown): CapturedRequest[] {
-  const captured: CapturedRequest[] = [];
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const parsed = new URL(url);
-    if (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost") {
-      return originalFetch(input, init);
-    }
-    captured.push({
-      path: parsed.pathname,
-      headers: new Headers(init?.headers),
-      body: init?.body ? JSON.parse(String(init.body)) : undefined,
-    });
-    if (parsed.hostname === "api.x.ai") {
-      return Response.json(payload);
-    }
-    throw new Error(`unexpected upstream ${parsed.host}`);
-  }) as typeof fetch;
-  return captured;
-}
-
-test("POST /v1/images/generations relays to xAI Imagine when the image bridge is enabled", async () => {
-  const captured = stubXaiImagine({ data: [{ b64_json: CCA_TINY_PNG }] });
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2", size: "1024x1024" }),
-    });
-    expect(response.status).toBe(200);
-    const json = await response.json() as { data?: Array<{ b64_json?: string }> };
-    expect(json.data?.[0]?.b64_json).toBe(CCA_TINY_PNG);
-    expect(captured).toHaveLength(1);
-    expect(captured[0]!.path).toBe("/v1/images/generations");
-    expect(JSON.stringify(captured[0]!.body)).toContain("grok-imagine-image-quality");
-    expect(captured[0]!.headers.get("authorization")).toBe("Bearer xai-test-token");
-    expect(captured[0]!.headers.get("chatgpt-account-id")).toBeNull();
-    expect(captured[0]!.headers.get("session_id")).toBeNull();
-    expect(captured[0]!.headers.get("x-codex-turn-metadata")).toBeNull();
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations with an empty prompt does not resolve xAI auth", async () => {
-  const captured = stubXaiImagine({ data: [{ b64_json: CCA_TINY_PNG }] });
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "   ", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(400);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toContain("image generation requires a prompt");
-    expect(captured).toHaveLength(0);
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations relays with Grok OAuth and no ChatGPT headers", async () => {
-  const captured = stubXaiImagine({ data: [{ b64_json: CCA_TINY_PNG }] });
-  saveConfig({
-    ...forwardConfig(),
-    images: { bridgeEnabled: true },
-    providers: {
-      ...forwardConfig().providers,
-      xai: { adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", authMode: "oauth" },
-    },
-  } as OcxConfig);
-  await saveCredential("xai", {
-    access: "xai-oauth-token",
-    refresh: "xai-refresh",
-    expires: Date.now() + 10 * 60_000,
-    source: "oauth",
-  });
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`,
-        "chatgpt-account-id": "acct-123",
-        "session_id": "sess-9",
-        "x-codex-turn-metadata": "meta",
-      },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(200);
-    expect(captured).toHaveLength(1);
-    expect(captured[0]!.path).toBe("/v1/images/generations");
-    expect(captured[0]!.headers.get("authorization")).toBe("Bearer xai-oauth-token");
-    expect(captured[0]!.headers.get("chatgpt-account-id")).toBeNull();
-    expect(captured[0]!.headers.get("session_id")).toBeNull();
-    expect(captured[0]!.headers.get("x-codex-turn-metadata")).toBeNull();
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations does not reach api.x.ai when OAuth token resolution fails", async () => {
-  const captured = stubXaiImagine({ data: [{ b64_json: CCA_TINY_PNG }] });
-  saveConfig({
-    ...forwardConfig(),
-    images: { bridgeEnabled: true },
-    providers: {
-      openai: { ...disabledOpenAiProvider },
-      xai: { adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", authMode: "oauth" },
-    },
-  } as OcxConfig);
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(400);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toContain("ocx login xai");
-    expect(captured.filter(call => call.path.includes("/images/"))).toHaveLength(0);
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations does not bill ChatGPT when Imagine is opted in without a Grok token", async () => {
-  const chatgptCaptured: CapturedRequest[] = [];
-  const upstream = fakeImagesUpstream(chatgptCaptured);
-  const innerFetch = globalThis.fetch;
-  const xaiCaptured: CapturedRequest[] = [];
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-    const parsed = new URL(url);
-    if (parsed.hostname === "api.x.ai") {
-      xaiCaptured.push({
-        path: parsed.pathname,
-        headers: new Headers(init?.headers),
-        body: init?.body ? JSON.parse(String(init.body)) : undefined,
-      });
-      return Response.json({ data: [{ b64_json: CCA_TINY_PNG }] });
-    }
-    return innerFetch(input, init);
-  }) as typeof fetch;
-
-  saveConfig({
-    ...forwardConfig(),
-    images: { bridgeEnabled: true },
-    providers: {
-      ...forwardConfig().providers,
-      xai: { adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", authMode: "oauth" },
-    },
-  } as OcxConfig);
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(400);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toContain("ocx login xai");
-    expect(json.error?.message).toContain("not forwarded to ChatGPT");
-    expect(xaiCaptured).toHaveLength(0);
-    expect(chatgptCaptured).toHaveLength(0);
-  } finally {
-    await server.stop(true);
-    await upstream.stop(true);
-  }
-});
-
-test("POST /v1/images/generations rejects oversized xAI inline payloads", async () => {
-  const oversized = "A".repeat(MAX_ENCODED_BYTES_PER_IMAGE + 4);
-  stubXaiImagine({ data: [{ b64_json: oversized }] });
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(502);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toContain("per-image size cap");
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations rejects invalid xAI inline image bytes", async () => {
-  stubXaiImagine({ data: [{ b64_json: "dHJhaW4=" }] });
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(502);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toMatch(/base64|magic|validation/i);
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/edits with no image URL does not call xAI generation", async () => {
-  const captured = stubXaiImagine({ data: [{ b64_json: "dHJhaW4=" }] });
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/edits", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "make it blue", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(400);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toContain("image edits require an image URL");
-    expect(captured).toHaveLength(0);
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations rejects xAI batches that exceed the aggregate output budget", async () => {
-  stubXaiImagine({
-    data: [
-      { b64_json: CCA_TINY_PNG },
-      { url: "https://8.8.8.8/huge.png" },
-    ],
-  });
-  setXaiResultPinnedDownloadForTests(async () => new Response(new ReadableStream<Uint8Array>({
-    start(controller) { controller.close(); },
-  }), {
-    status: 200,
-    headers: { "content-length": String(IMAGES_RESPONSE_MAX_BYTES) },
-  }));
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2", n: 2 }),
-    });
-    expect(response.status).toBe(502);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toContain("xAI image generation output too large");
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations returns multiple xAI URL images under the aggregate budget", async () => {
-  const png = new Uint8Array(Buffer.from(CCA_TINY_PNG, "base64"));
-  const pinned: Array<{ address: string; family: number }> = [];
-  stubXaiImagine({
-    data: [
-      { url: "https://8.8.8.8/one.png" },
-      { url: "https://8.8.8.8/two.png" },
-    ],
-  });
-  setXaiResultPinnedDownloadForTests(async (_url, peer) => {
-    pinned.push(peer);
-    return new Response(png, { status: 200, headers: { "content-length": String(png.byteLength) } });
-  });
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "two trains", model: "gpt-image-2", n: 2 }),
-    });
-    expect(response.status).toBe(200);
-    const json = await response.json() as { data?: Array<{ b64_json?: string }> };
-    expect(json.data).toHaveLength(2);
-    expect(json.data?.[0]?.b64_json).toBe(Buffer.from(png).toString("base64"));
-    expect(json.data?.[1]?.b64_json).toBe(Buffer.from(png).toString("base64"));
-    expect(pinned).toEqual([
-      { address: "8.8.8.8", family: 4 },
-      { address: "8.8.8.8", family: 4 },
-    ]);
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations rejects a non-image xAI result URL", async () => {
-  stubXaiImagine({ data: [{ url: "https://8.8.8.8/page.html" }] });
-  setXaiResultPinnedDownloadForTests(async () => new Response("<html>not an image</html>", {
-    status: 200,
-    headers: { "content-type": "text/html" },
-  }));
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(502);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toBe("xAI image download failed");
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations rejects a private xAI result URL without fetching it", async () => {
-  let pinnedCalls = 0;
-  stubXaiImagine({ data: [{ url: "https://127.0.0.1/secret.png" }] });
-  setXaiResultPinnedDownloadForTests(async () => {
-    pinnedCalls += 1;
-    return new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
-  });
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(502);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toBe("xAI image download failed");
-    expect(json.error?.message).not.toContain("127.0.0.1");
-    expect(pinnedCalls).toBe(0);
-  } finally {
-    await server.stop(true);
-  }
-});
-
-test("POST /v1/images/generations does not follow a 3xx on an xAI result URL", async () => {
-  const seen: string[] = [];
-  stubXaiImagine({ data: [{ url: "https://8.8.8.8/img.png" }] });
-  setXaiResultPinnedDownloadForTests(async (url, pinned) => {
-    seen.push(`${pinned.address}:${url}`);
-    return new Response(null, {
-      status: 302,
-      headers: { location: "https://127.0.0.1/secret.png" },
-    });
-  });
-  saveConfig(xaiBridgeConfig());
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}` },
-      body: JSON.stringify({ prompt: "a train", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(502);
-    const json = await response.json() as { error?: { message?: string } };
-    expect(json.error?.message).toBe("xAI image download failed");
-    expect(json.error?.message).not.toContain("127.0.0.1");
-    expect(seen).toEqual(["8.8.8.8:https://8.8.8.8/img.png"]);
-  } finally {
-    await server.stop(true);
-  }
 });
 
 test("POST /v1/images/generations relays to the ChatGPT forward provider with forwarded auth", async () => {
@@ -766,57 +368,6 @@ test("an explicit custom Images provider uses its configured endpoint, key, and 
     expect(captured[0].headers.get("authorization")).toBe("Bearer custom-images-key");
     expect(captured[0].headers.get("x-provider-route")).toBe("images");
     expect(captured[0].body).toMatchObject({ prompt: "a cat", model: "gpt-image-2" });
-  } finally {
-    await server.stop(true);
-    await upstream.stop(true);
-  }
-});
-
-test("an explicit Images provider wins over the xAI Imagine relay", async () => {
-  const xaiCaptured = stubXaiImagine({ data: [{ b64_json: CCA_TINY_PNG }] });
-  const captured: CapturedRequest[] = [];
-  const upstream = Bun.serve({
-    port: 0,
-    async fetch(req) {
-      captured.push({
-        path: new URL(req.url).pathname,
-        headers: req.headers,
-        body: await req.json(),
-      });
-      return Response.json({ created: 1_767_000_000, data: [{ b64_json: "aGVsbG8=" }] });
-    },
-  });
-  saveConfig({
-    port: 0,
-    defaultProvider: "custom-images",
-    openaiProviderTierVersion: 2,
-    providers: {
-      "custom-images": {
-        adapter: "openai-responses",
-        baseUrl: `${upstream.url.toString().replace(/\/$/, "")}/v1`,
-        allowPrivateNetwork: true,
-        authMode: "key",
-        apiKey: "${OPENCODEX_TEST_IMAGES_API_KEY}",
-      },
-      xai: { adapter: "openai-chat", baseUrl: "https://api.x.ai/v1", apiKey: "xai-test-token" },
-    },
-    images: { bridgeEnabled: true, provider: "custom-images" },
-  } as OcxConfig);
-
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/images/generations", server.url), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${DIRECT_CHATGPT_TOKEN}`,
-      },
-      body: JSON.stringify({ prompt: "a cat", model: "gpt-image-2" }),
-    });
-    expect(response.status).toBe(200);
-    expect(captured).toHaveLength(1);
-    expect(captured[0].headers.get("authorization")).toBe("Bearer custom-images-key");
-    expect(xaiCaptured).toHaveLength(0);
   } finally {
     await server.stop(true);
     await upstream.stop(true);
@@ -1560,7 +1111,7 @@ function ccaConfig(): OcxConfig {
       openai: disabledOpenAiProvider,
       "google-antigravity": {
         adapter: "google",
-        baseUrl: "https://attacker.example.com",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
         googleMode: "cloud-code-assist",
       } as OcxConfig["providers"][string],
     },
@@ -1620,6 +1171,147 @@ const CCA_CREDENTIAL = {
   expires: Date.now() + 3_600_000,
   projectId: "cca-project-123",
 } as const;
+
+test("CCA image generation uses the opted-in profiled executor", async () => {
+  let nativeCalls = 0;
+  let bunCalls = 0;
+  let project: string | undefined;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    bunCalls += 1;
+    return new Response(null, { status: 500 });
+  }) as typeof fetch;
+  setProviderTlsRuntimeForTest({
+    importWreq: async () => ({
+      createTransport: async () => ({ close: async () => undefined }),
+      fetch: async (_input, init) => {
+        nativeCalls += 1;
+        project = (JSON.parse(String(init?.body)) as { project?: string }).project;
+        return Response.json({
+          response: {
+            candidates: [{ content: { parts: [{ inlineData: { mimeType: "image/png", data: CCA_TINY_PNG } }] } }],
+          },
+        });
+      },
+    }),
+  });
+  const config = {
+    ...ccaConfig(),
+    providers: {
+      ...ccaConfig().providers,
+      "google-antigravity": {
+        adapter: "google",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        authMode: "oauth",
+        googleMode: "cloud-code-assist",
+        project: "configured-stale-project",
+        tlsProfile: "antigravity-browser",
+      },
+    },
+  } as OcxConfig;
+  saveConfig(config);
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+  try {
+    const response = await handleImages(
+      new Request("http://127.0.0.1/v1/images/generations", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ prompt: "a neon cat" }),
+      }),
+      config,
+      "generations",
+      { model: "", provider: "" },
+    );
+    expect(response.status).toBe(200);
+    expect(nativeCalls).toBe(1);
+    expect(bunCalls).toBe(0);
+    expect(project).toBe("cca-project-123");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("CCA image native errors redact proxy credentials", async () => {
+  setProviderTlsRuntimeForTest({
+    importWreq: async () => ({
+      createTransport: async () => ({ close: async () => undefined }),
+      fetch: async () => {
+        throw new Error("native image failure at http://proxy-user:proxy-secret@example.test:8080/?api_key=image-secret");
+      },
+    }),
+  });
+  const config = {
+    ...ccaConfig(),
+    providers: {
+      ...ccaConfig().providers,
+      "google-antigravity": {
+        adapter: "google",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        authMode: "oauth",
+        googleMode: "cloud-code-assist",
+        tlsProfile: "antigravity-browser",
+      },
+    },
+  } as OcxConfig;
+  saveConfig(config);
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+  const response = await handleImages(
+    new Request("http://127.0.0.1/v1/images/generations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "a neon cat" }),
+    }),
+    config,
+    "generations",
+    { model: "", provider: "" },
+  );
+  expect(response.status).toBe(502);
+  const json = await response.json() as { error: { message: string } };
+  expect(json.error.message).toContain("CCA image generation failed");
+  expect(json.error.message).not.toMatch(/proxy-user|proxy-secret|image-secret|api_key/);
+});
+
+test("CCA image preserves profiled TimeoutError semantics", async () => {
+  setProviderTlsRuntimeForTest({
+    importWreq: async () => ({
+      createTransport: async () => ({ close: async () => undefined }),
+      fetch: async () => {
+        const timeout = new Error("timed out at http://proxy-user:proxy-secret@example.test:8080/?token=image-secret");
+        timeout.name = "TimeoutError";
+        throw timeout;
+      },
+    }),
+  });
+  const config = {
+    ...ccaConfig(),
+    providers: {
+      ...ccaConfig().providers,
+      "google-antigravity": {
+        adapter: "google",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+        authMode: "oauth",
+        googleMode: "cloud-code-assist",
+        tlsProfile: "antigravity-browser",
+      },
+    },
+  } as OcxConfig;
+  saveConfig(config);
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+  const response = await handleImages(
+    new Request("http://127.0.0.1/v1/images/generations", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "a neon cat" }),
+    }),
+    config,
+    "generations",
+    { model: "", provider: "" },
+  );
+  expect(response.status).toBe(504);
+  const json = await response.json() as { error: { message: string } };
+  expect(json.error.message).toContain("timed out");
+  expect(json.error.message).not.toMatch(/proxy-user|proxy-secret|image-secret|token=/);
+});
 
 test("CCA image fallback generates images via Google Antigravity when no OpenAI upstream exists", async () => {
   const registryHits: CcaFetchRequest[] = [];
@@ -1685,6 +1377,42 @@ test("CCA image fallback preserves upstream 429 status", async () => {
   }
 });
 
+test("CCA image fallback does not retry a transport failure on the peer host", async () => {
+  let calls = 0;
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const hostname = new URL(requestUrl).hostname;
+    if (hostname === "daily-cloudcode-pa.googleapis.com") {
+      calls += 1;
+      throw new TypeError("fetch failed: connection reset after acceptance");
+    }
+    if (hostname === "cloudcode-pa.googleapis.com") {
+      calls += 1;
+      return Response.json({
+        response: {
+          candidates: [{
+            content: { parts: [{ inlineData: { mimeType: "image/png", data: CCA_TINY_PNG } }] },
+          }],
+        },
+      });
+    }
+    return originalFetch(input);
+  }) as typeof fetch;
+
+  saveConfig(ccaConfig());
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+
+  const request = new Request("http://localhost:0/v1/images/generations", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ prompt: "a cat" }),
+  });
+  const response = await handleImages(request, ccaConfig(), "generations", { model: "", provider: "" } as never);
+
+  expect(response.status).toBe(400);
+  expect(calls).toBe(1);
+});
+
 test("CCA fallback does not serve image edits", async () => {
   saveConfig(ccaConfig());
   await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
@@ -1710,9 +1438,19 @@ test("CCA image fallback never sends Authorization to a tampered config baseUrl 
   const attackerHits: CcaFetchRequest[] = [];
   ccaFetchMock(registryHits, attackerHits);
 
-  // ccaConfig already sets baseUrl to https://attacker.example.com — if the pin
-  // were ever removed, this host would receive the OAuth bearer token.
-  saveConfig(ccaConfig());
+  // Tampered baseUrl must fail closed and never send OAuth credentials
+  const tampered = {
+    ...ccaConfig(),
+    providers: {
+      ...ccaConfig().providers,
+      "google-antigravity": {
+        adapter: "google",
+        baseUrl: "https://attacker.example.com",
+        googleMode: "cloud-code-assist",
+      } as OcxConfig["providers"][string],
+    },
+  } as OcxConfig;
+  saveConfig(tampered);
   await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
 
   const server = startServer(0);
@@ -1722,16 +1460,12 @@ test("CCA image fallback never sends Authorization to a tampered config baseUrl 
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt: "a cat" }),
     });
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(400);
 
-    // The registry host received the request with the OAuth bearer token.
-    expect(registryHits).toHaveLength(1);
-    expect(registryHits[0].url).toContain("daily-cloudcode-pa.googleapis.com");
-    expect(registryHits[0].headers.get("authorization")).toBe("Bearer cca-access-token");
-
-    // The attacker host received ZERO requests — no Authorization header leak.
+    // No calls should go to the attacker host or registry host.
     const authLeak = attackerHits.filter(r => r.headers.get("authorization"));
     expect(attackerHits).toHaveLength(0);
+    expect(registryHits).toHaveLength(0);
     expect(authLeak).toHaveLength(0);
   } finally {
     await server.stop(true);
@@ -1794,7 +1528,7 @@ test("CCA fallback serves images when OpenAI forward auth fails but Google Antig
       openai: { ...canonicalOpenAiProvider, codexAccountMode: "pool" },
       "google-antigravity": {
         adapter: "google",
-        baseUrl: "https://attacker.example.com",
+        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
         googleMode: "cloud-code-assist",
       } as OcxConfig["providers"][string],
     },
@@ -1850,16 +1584,19 @@ test("CCA OAuth no credential saved returns 401 (login required), not a misleadi
   }
 });
 
-test("CCA fetch network failure returns 502 without leaking the timeout timer", async () => {
-  // Mock: CCA fetch always fails with a network error. The bug was that the
-  // fetch catch returned 502 without calling linkedSignal.cleanup(), leaving
-  // the timeout timer alive. With a short timeout this would keep the process
-  // alive. The fix wraps everything in try/finally so cleanup always runs.
+test("CCA fetch network failure returns 400 without leaking the timeout timer", async () => {
+  // Mock: CCA fetch always fails with a network error after the POST is attempted.
+  // Image generation is a paid non-idempotent POST; Codex retries every 5xx up to 5
+  // attempts, so transport failure after fetch is attempted must be non-5xx (400).
+  // The timeout timer still must not leak: linkedSignal.cleanup() runs in finally.
+  // With a 10s images timeout and a 5s test timeout, a leaked timer fails this test.
+  let ccaPosts = 0;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(requestUrl);
     if (url.hostname === "daily-cloudcode-pa.googleapis.com") {
-      throw new TypeError("fetch failed: connection refused");
+      if ((init?.method ?? "GET").toUpperCase() === "POST") ccaPosts += 1;
+      throw new TypeError("fetch failed: https://daily-cloudcode-pa.googleapis.com/v1internal:generateContent connection refused");
     }
     return originalFetch(input, init);
   }) as typeof fetch;
@@ -1874,21 +1611,26 @@ test("CCA fetch network failure returns 502 without leaking the timeout timer", 
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt: "a cat" }),
     });
-    expect(response.status).toBe(502);
-    const json = await response.json() as { error: { message: string } };
-    expect(json.error.message).toContain("CCA image generation failed");
+    expect(response.status).toBe(400);
+    const json = await response.json() as { error: { message: string; type: string } };
+    expect(json.error.type).toBe("invalid_request_error");
+    expect(json.error.message).toMatch(/may have started/i);
+    expect(json.error.message).toMatch(/must not be blindly retried/i);
+    expect(json.error.message).not.toContain("https://");
+    expect(json.error.message).not.toContain("daily-cloudcode-pa.googleapis.com");
+    expect(ccaPosts).toBe(1);
   } finally {
     await server.stop(true);
   }
 }, 5_000);
 
-test("CCA body-read timeout returns 504 when upstream stalls after sending headers", async () => {
+test("CCA body-read timeout returns 400 when upstream stalls after sending headers", async () => {
   // Mock: CCA returns 200 OK headers immediately but the body stream never
   // produces data. The linked signal's timeout aborts reader.read(), which
-  // must be caught and mapped to 504. The abort surfaces as a generic
+  // must be caught and mapped to 400 because the paid POST may have started.
+  // The abort surfaces as a generic
   // AbortError (not TimeoutError) — just like in production Bun — so the
-  // signal-state check (linkedSignal.signal.aborted) is what maps it, not
-  // err.name matching.
+  // signal-state check (linkedSignal.signal.aborted) identifies it.
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     const url = new URL(requestUrl);
@@ -1927,14 +1669,49 @@ test("CCA body-read timeout returns 504 when upstream stalls after sending heade
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ prompt: "a cat" }),
     });
-    expect(response.status).toBe(504);
+    expect(response.status).toBe(400);
     const json = await response.json() as { error: { message: string } };
-    // Either the body-read timeout message or the general timeout message.
-    expect(json.error.message).toMatch(/body read|timed out/i);
+    expect(json.error.message).toMatch(/may have started|must not be blindly retried/i);
   } finally {
     await server.stop(true);
   }
 }, 5_000);
+
+test("CCA body-read transport failure returns 400 after headers are received", async () => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url = new URL(requestUrl);
+    if (url.hostname === "daily-cloudcode-pa.googleapis.com") {
+      const brokenBody = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new TypeError("connection reset after headers"));
+        },
+      });
+      return new Response(brokenBody, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  saveConfig({ ...ccaConfig(), images: { timeoutMs: 1_000 } } as OcxConfig);
+  await saveCredential("google-antigravity", { ...CCA_CREDENTIAL });
+
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/images/generations", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "a cat" }),
+    });
+    expect(response.status).toBe(400);
+    const json = await response.json() as { error: { message: string } };
+    expect(json.error.message).toMatch(/may have started|must not be blindly retried/i);
+  } finally {
+    await server.stop(true);
+  }
+});
 
 test("CCA body-read client cancellation returns 499, not 504", async () => {
   // Regression for Wibias R4 finding 1: when the client aborts during the body-read

@@ -280,7 +280,7 @@ describe("provider model display name mutation route", () => {
         return catalogRefresh;
       },
       syncClaudeAgentDefsBestEffort: async () => {},
-    })).rejects.toThrow("disk full");
+    })).rejects.toThrow("Management config persistence failed.");
 
     expect(liveConfig.providers[DISPLAY_PROVIDER].modelDisplayNames).toEqual({ "model-b": "Beta" });
     expect(convergeCalls).toBe(0);

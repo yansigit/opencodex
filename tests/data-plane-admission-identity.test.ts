@@ -9,7 +9,7 @@ import {
   resolveDataPlaneAdmissionSecret,
   resolveResponsesApiAuth,
 } from "../src/server/auth-cors";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";

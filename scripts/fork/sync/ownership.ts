@@ -14,12 +14,24 @@ const FORK_OWNED_FILES = new Set([
 ]);
 
 const SHARED_HOTSPOT_PREFIXES = [
+  "gui/src/i18n/",
   "src/adapters/google",
+  "src/server/management/",
+  "src/server/responses/",
 ] as const;
 
 const SHARED_HOTSPOT_FILES = new Set([
+  "src/cli/capabilities.ts",
+  "src/codex/inject.ts",
+  "src/config.ts",
+  "src/router.ts",
+  "src/server/auth-cors.ts",
+  "src/server/index.ts",
+  "src/service.ts",
   "src/server/responses/core.ts",
   "src/providers/antigravity-quota.ts",
+  "src/providers/key-failover.ts",
+  "src/providers/key-store.ts",
   "src/providers/quota.ts",
 ]);
 

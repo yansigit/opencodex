@@ -121,19 +121,21 @@ export type ListenTarget = {
 };
 
 export function selectListenTarget(
-  config: Pick<OcxConfig, "port" | "hostname">,
+  config: Pick<OcxConfig, "port" | "hostname" | "tls">,
   pid: number | null,
   runtimePort: RuntimePortState | null,
 ): ListenTarget {
   const currentRuntimePort = pid && runtimePort?.pid === pid ? runtimePort : null;
   const port = currentRuntimePort ? currentRuntimePort.port : config.port ?? 10100;
   const hostname = currentRuntimePort ? currentRuntimePort.hostname : config.hostname;
+  const hasTls = Boolean(config.tls);
+  const scheme = hasTls ? "https" : "http";
   return {
     port,
     hostname,
     source: currentRuntimePort ? "runtime" : "config",
-    healthUrl: `http://${probeHostname(hostname)}:${port}/healthz`,
-    dashboardUrl: `http://localhost:${port}/`,
+    healthUrl: `${scheme}://${probeHostname(hostname)}:${port}/healthz`,
+    dashboardUrl: hasTls && config.tls?.publicOrigin ? config.tls.publicOrigin : `http://localhost:${port}/`,
   };
 }
 

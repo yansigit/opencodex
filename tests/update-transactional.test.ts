@@ -11,9 +11,7 @@ import {
   transactionalNpmUpdate,
   verifyInstallTree,
 } from "../src/update/transactional-install.mjs";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
-
-const PKG = "@bitkyc08/opencodex";
+import { PKG } from "../src/update/index";
 
 function writeTree(packageDir: string, version: string): void {
   mkdirSync(join(packageDir, "bin"), { recursive: true });
@@ -62,7 +60,7 @@ describe("#1942 transactional update", () => {
   });
 
   afterEach(() => {
-    removeTreeWithRetry(scopeDir);
+    rmSync(scopeDir, { recursive: true, force: true });
   });
 
   test("manifest verifies a complete tree and rejects a truncated one", () => {

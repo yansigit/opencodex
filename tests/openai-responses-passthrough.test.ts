@@ -1836,7 +1836,7 @@ describe("OpenAI Responses passthrough sanitization", () => {
     });
   });
 
-  test("keeps the reserved functions group intact for codex-spark, flattens MCP groups (#3217)", () => {
+  test("lowers reserved and MCP namespace groups to Spark-safe flat functions (#3217)", () => {
     // Codex 0.147+ on Responses Lite ships every ordinary client tool inside the reserved
     // `functions` namespace group, carried in an `additional_tools` input item. Flattening that
     // group made the backend answer `custom_tool_call { name: "exec", namespace: "exec" }`,
@@ -1875,20 +1875,20 @@ describe("OpenAI Responses passthrough sanitization", () => {
       tools: Array<Record<string, unknown>>;
       input: Array<{ type: string; tools?: Array<Record<string, unknown>> }>;
     };
-    const expectedGroup = {
-      type: "namespace",
-      name: "functions",
-      description: "client tools",
-      tools: [
-        { type: "custom", name: "exec", description: "shell" },
-        { type: "function", name: "wait", parameters: { type: "object", properties: {} } },
-      ],
-    };
-    // The reserved group survives as a group with its custom child; tool_search is still dropped
-    // and defer_loading still stripped inside it. The MCP group is still flattened.
-    expect(body.tools).toEqual([expectedGroup, { type: "function", name: "search", parameters: { type: "object", properties: {} } }]);
+    // Spark accepts flat functions only. The custom exec tool is lowered to the code-mode
+    // function schema and MCP identities retain their namespace in the flat wire name.
+    expect(body.tools.map(tool => ({ type: tool.type, name: tool.name }))).toEqual([
+      { type: "function", name: "exec" },
+      { type: "function", name: "wait" },
+      { type: "function", name: "mcp__docs__search" },
+    ]);
+    expect(body.tools[0]?.parameters).toMatchObject({
+      type: "object",
+      required: ["input"],
+      properties: { input: { type: "string" } },
+    });
     const additional = body.input.find(item => item.type === "additional_tools");
-    expect(additional?.tools).toEqual([expectedGroup, { type: "function", name: "search", parameters: { type: "object", properties: {} } }]);
+    expect(additional?.tools).toEqual([]);
   });
 
   test("strips image_generation hosted tool for codex-spark passthrough", () => {

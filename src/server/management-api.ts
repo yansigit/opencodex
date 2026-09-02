@@ -10,7 +10,6 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
-  saveConfigPreservingClaudeCode,
 } from "../config";
 import {
   clearLoginState,
@@ -62,6 +61,7 @@ import { handleLogsUsageRoutes } from "./management/logs-usage-routes";
 import { handleStorageLogGuardRoutes } from "./management/storage-log-guard-routes";
 import { handleRequestHistoryRoutes } from "./management/request-history-routes";
 import { handleRoutingAnalyticsRoutes } from "./management/routing-analytics-routes";
+import { handleReplitProviderRoutes } from "./management/replit-provider-routes";
 import { handleProviderRoutes } from "./management/provider-routes";
 import { handleModelRoutes } from "./management/model-routes";
 import { handleAgentSettingsRoutes } from "./management/agent-settings-routes";
@@ -75,6 +75,7 @@ import { handleNativeIntegrationRoutes } from "./management/native-integration-r
 import { handleCursorIntegrationRoutes } from "./management/cursor-integration-routes";
 import type { ManagementContext } from "./management/context";
 import type { ManagementPrincipal, ManagementSessionControl } from "./management-auth";
+import { ManagementPersistenceError, MissingManagementPersistenceError } from "./management/context";
 export type { ManagementApiDeps } from "./management/context";
 import { fetchAllModels } from "./management/shared";
 import { CatalogGatherBusyError } from "../codex/catalog/provider-fetch";
@@ -222,6 +223,10 @@ export async function handleManagementAPI(
     } catch { /* best-effort */ }
   }
   const ctx: ManagementContext = { req, url, config, deps, version: VERSION, principal, sessionControl, convergeCodexCatalog, syncClaudeAgentDefsBestEffort };
+  const configBeforeDispatch = (["GET", "HEAD", "OPTIONS"].includes(req.method)
+    || (req.method === "POST" && url.pathname === "/api/providers/test"))
+    ? undefined
+    : structuredClone(config);
   let routed: Response | null;
   try {
     routed = handleSessionRoutes(ctx)
@@ -231,6 +236,7 @@ export async function handleManagementAPI(
     ??     (await handleRequestHistoryRoutes(ctx))
     ??     (await handleRoutingAnalyticsRoutes(ctx))
     ??     (await handleRoutingProfileRoutesOnDemand(ctx))
+    ??     (await handleReplitProviderRoutes(ctx))
     ??     (await handleProviderRoutes(ctx))
     ??     (await handleModelRoutes(ctx))
     ??     (await handleIntegrationRoutes(ctx))
@@ -246,6 +252,13 @@ export async function handleManagementAPI(
   } catch (error) {
     const tooLarge = managementBodyTooLargeResponse(error, req, config);
     if (tooLarge) return tooLarge;
+    if (error instanceof MissingManagementPersistenceError || error instanceof ManagementPersistenceError) {
+      if (configBeforeDispatch === undefined) throw error;
+      const response = error instanceof ManagementPersistenceError ? error.response : undefined;
+      for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
+      Object.assign(config, configBeforeDispatch);
+      return response ?? jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
+    }
     if (error instanceof OAuthMutationBusyError) {
       return new Response(JSON.stringify({ error: { type: "server_error", code: "oauth_mutation_busy", message: error.message } }), {
         status: 503,

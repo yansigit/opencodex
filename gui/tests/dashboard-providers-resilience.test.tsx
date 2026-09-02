@@ -50,9 +50,9 @@ test("overview resource retains data across a failed poll and recovers on retry"
   let attempt = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.endsWith("/healthz") || url.endsWith("/api/providers")) {
+    if (url.endsWith("/api/system/health") || url.endsWith("/api/providers")) {
       if (attempt === 1) return new Response("offline", { status: 503 });
-      return Response.json(url.endsWith("/healthz")
+      return Response.json(url.endsWith("/api/system/health")
         ? { status: "ok", version: attempt ? "2" : "1", uptime: 10 }
         : [{ name: "openai", adapter: "openai", baseUrl: "https://api.openai.com/v1", hasApiKey: false }]);
     }
@@ -200,9 +200,9 @@ test("Dashboard retains rendered overview content through failure and clears rec
   let version = "1";
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.endsWith("/healthz") || url.endsWith("/api/providers")) {
+    if (url.endsWith("/api/system/health") || url.endsWith("/api/providers")) {
       if (failed) return new Response("offline", { status: 503 });
-      return Response.json(url.endsWith("/healthz")
+      return Response.json(url.endsWith("/api/system/health")
         ? { status: "ok", version, uptime: 10 }
         : [{ name: "openai", adapter: "openai", baseUrl: "https://api.openai.com/v1", hasApiKey: false }]);
     }
@@ -243,7 +243,7 @@ test("Dashboard keeps the full cannot-connect state for a cold overview failure"
   let overviewCalls = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.endsWith("/healthz") || url.endsWith("/api/providers")) {
+    if (url.endsWith("/api/system/health") || url.endsWith("/api/providers")) {
       overviewCalls += 1;
       return new Response("offline", { status: 503 });
     }

@@ -349,7 +349,7 @@ describe("ocx provider", () => {
       expect(result.stderr).toContain("routing profile(s) depend on it: daily");
       expect(readFileSync(configPath, "utf8")).toBe(before);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -432,7 +432,7 @@ describe("ocx provider", () => {
         hasManagedIdentityClientId: true,
       });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
