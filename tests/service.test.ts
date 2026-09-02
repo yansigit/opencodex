@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, posix, win32 } from "node:path";
@@ -20,6 +20,7 @@ const TEST_DIR = join(import.meta.dir, ".tmp-service-test");
 const previousOpenCodexHome = process.env.OPENCODEX_HOME;
 const previousCodexHome = process.env.CODEX_HOME;
 const previousApiAuthToken = process.env.OPENCODEX_API_AUTH_TOKEN;
+const previousAdminAuthToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
 
 afterEach(() => {
   if (previousOpenCodexHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -28,6 +29,8 @@ afterEach(() => {
   else process.env.CODEX_HOME = previousCodexHome;
   if (previousApiAuthToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiAuthToken;
+  if (previousAdminAuthToken === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+  else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = previousAdminAuthToken;
   if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
 });
 
@@ -372,34 +375,82 @@ describe("systemd service unit", () => {
 });
 
 describe("service install auth preflight", () => {
-  test("rejects non-loopback service install without a persisted API token", () => {
+  function prepare(opts: { hostname?: string; envToken?: string; fileContent?: string; adminToken?: string } = {}) {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
-    delete process.env.OPENCODEX_API_AUTH_TOKEN;
+    if (opts.envToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
+    else process.env.OPENCODEX_API_AUTH_TOKEN = opts.envToken;
+    if (opts.adminToken === undefined) delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+    else process.env.OPENCODEX_ADMIN_AUTH_TOKEN = opts.adminToken;
+    if (opts.fileContent !== undefined) writeFileSync(join(TEST_DIR, "service-api-token"), opts.fileContent);
     saveConfig({
       port: 10100,
-      hostname: "0.0.0.0",
+      hostname: opts.hostname ?? "0.0.0.0",
       providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1" } },
       defaultProvider: "openai",
     } as OcxConfig);
+  }
 
+  test("rejects non-loopback service install without a persisted API token", () => {
+    prepare();
     expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN");
   });
 
   test("allows non-loopback service install when the API token is in the service environment", () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
-    saveConfig({
-      port: 10100,
-      hostname: "0.0.0.0",
-      providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1" } },
-      defaultProvider: "openai",
-    } as OcxConfig);
-
+    prepare({ envToken: "local-secret" });
     expect(() => assertServiceAuthEnvironment()).not.toThrow();
+  });
+
+  test("allows non-loopback service install when the API token is persisted on disk in service-api-token", () => {
+    prepare({ fileContent: "persisted-secret\n" });
+    expect(() => assertServiceAuthEnvironment()).not.toThrow();
+    expect(process.env.OPENCODEX_API_AUTH_TOKEN).toBe("persisted-secret");
+  });
+
+  test("preserves env precedence over persisted token", () => {
+    prepare({ envToken: "env-secret", fileContent: "file-secret\n" });
+    expect(() => assertServiceAuthEnvironment()).not.toThrow();
+    expect(process.env.OPENCODEX_API_AUTH_TOKEN).toBe("env-secret");
+  });
+
+  test.each(["", "   \n", "\n"])("rejects non-loopback when persisted token file is empty/whitespace: %j", (content) => {
+    prepare({ fileContent: content });
+    expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN");
+    expect(process.env.OPENCODEX_API_AUTH_TOKEN ?? "").toBe("");
+  });
+
+  test("rejects unsafe persisted token reads: symlink and oversize file", () => {
+    prepare({ fileContent: "x".repeat(600) }); // >512 bytes -> hardened reader returns null
+    expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN");
+    if (process.platform !== "win32") {
+      if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+      mkdirSync(TEST_DIR, { recursive: true });
+      const target = join(TEST_DIR, "real-token");
+      writeFileSync(target, "persisted-secret\n");
+      symlinkSync(target, join(TEST_DIR, "service-api-token"));
+      process.env.OPENCODEX_HOME = TEST_DIR;
+      delete process.env.OPENCODEX_API_AUTH_TOKEN;
+      delete process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
+      saveConfig({
+        port: 10100,
+        hostname: "0.0.0.0",
+        providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.example.test/v1" } },
+        defaultProvider: "openai",
+      } as OcxConfig);
+      expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN");
+    }
+  });
+
+  test.each(["0.0.0.0", "127.0.0.1"])("rejects persisted admin token collision before loopback short-circuit (%s)", (hostname) => {
+    prepare({ hostname, fileContent: "ocx_admin_" + "a".repeat(43) + "\n" });
+    expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN holds a management");
+  });
+
+  test("rejects persisted token that equals configured admin token", () => {
+    const colliding = "data-plane-but-equals-admin-123";
+    prepare({ fileContent: colliding + "\n", adminToken: colliding });
+    expect(() => assertServiceAuthEnvironment()).toThrow("OPENCODEX_API_AUTH_TOKEN holds a management");
   });
 
   test("rejects restore operations from a different CODEX_HOME than service install", () => {
