@@ -167,6 +167,27 @@ describe("shouldUseCodexWsUpstream", () => {
     process.env.OCX_CODEX_WS_UPSTREAM = "false";
     expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { wsUpstream: true })).toBe(true);
   });
+
+  test("opt-in upstream WebSocket only for configured OpenAI-compatible Responses endpoints", () => {
+    // The canonical backend keeps its independent, default-off wsUpstream contract.
+    expect(shouldUseCodexWsUpstream(CODEX_URL, streamingInit(), { upstreamWebsocket: true })).toBe(false);
+    // Configured providers join the WS lane on their own /v1/responses path.
+    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/responses", streamingInit(), { upstreamWebsocket: true })).toBe(true);
+    // Plain HTTP stays on SSE; never send credentials or request data through ws://.
+    expect(shouldUseCodexWsUpstream("http://10.0.0.5:8080/v1/responses", streamingInit(), { upstreamWebsocket: true })).toBe(false);
+    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/responses", streamingInit())).toBe(false);
+    // Non-Responses paths on a configured provider stay on HTTP.
+    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/chat/completions", streamingInit(), { upstreamWebsocket: true })).toBe(false);
+    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/images", streamingInit(), { upstreamWebsocket: true })).toBe(false);
+    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/alpha/search", streamingInit(), { upstreamWebsocket: true })).toBe(false);
+    // The usual streaming/body rules still apply to configured providers.
+    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/responses", { method: "GET" }, { upstreamWebsocket: true })).toBe(false);
+    expect(shouldUseCodexWsUpstream("https://sub2api.example.com/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "m" }),
+    }, { upstreamWebsocket: true })).toBe(false);
+    expect(shouldUseCodexWsUpstream("not a url", streamingInit(), { upstreamWebsocket: true })).toBe(false);
+  });
 });
 
 type Listener = (event: unknown) => void;
@@ -327,6 +348,34 @@ describe("providerFetch routing", () => {
       expect(baseCalls).toBe(1);
       expect(FakeWebSocket.instances).toHaveLength(0);
     }
+  });
+
+  test("routes an opt-in provider's Responses streams over its upstream WS", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id: "r1" } }) });
+    });
+    const baseCalls: string[] = [];
+    const sentinel = new Response("base");
+    const provider = {
+      upstreamWebsocket: true,
+      fetch: (async (input: unknown) => {
+        baseCalls.push(String(input));
+        return sentinel.clone();
+      }) as unknown as typeof fetch,
+    } as unknown as OcxProviderConfig;
+    const wrapped = providerFetch(provider, BOUNDED_WS_RUNTIME);
+
+    const wsResponse = await wrapped("https://sub2api.example.com/v1/responses", streamingInit());
+    expect(wsResponse.headers.get("content-type")).toContain("text/event-stream");
+    expect(baseCalls).toHaveLength(0);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances[0]!.url).toBe("wss://sub2api.example.com/v1/responses");
+
+    // The same provider's non-Responses paths (images/search/chat) stay on the base fetch.
+    await wrapped("https://sub2api.example.com/v1/images", streamingInit());
+    expect(baseCalls).toHaveLength(1);
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });
 
@@ -603,6 +652,56 @@ describe("codexWsUpstreamFetch", () => {
     expect(text).toContain("event: error");
     expect(text).toContain("upstream refused the turn");
     expect(FakeWebSocket.instances[0].closed).toBe(true);
+  });
+
+  test("normalizes the Responses WebSocket response.done terminal to SSE", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", {
+        data: JSON.stringify({
+          type: "response.done",
+          response: { id: "r-done", status: "completed", output: [] },
+        }),
+      });
+      ws.emit("close", { code: 1000, reason: "normal" });
+    });
+    const response = await codexWsUpstreamFetch(CODEX_URL, streamingInit(), (() => {
+      throw new Error("fallback must not run after open");
+    }) as unknown as typeof fetch);
+
+    const text = await response.text();
+    expect(text).toContain("event: response.completed");
+    expect(text).toContain('"type":"response.completed"');
+    expect(text).not.toContain("response.done");
+    expect(FakeWebSocket.instances[0]!.closed).toBe(true);
+  });
+
+  test("fails closed when response.done has no recognized terminal status", async () => {
+    const cases: Array<{ id: string; status?: string }> = [
+      { id: "r-missing" },
+      { id: "r-queued", status: "queued" },
+      { id: "r-unknown", status: "provider_future_state" },
+    ];
+    for (const response of cases) {
+      installFake(ws => {
+        ws.emit("open", {});
+        ws.emit("message", {
+          data: JSON.stringify({ type: "response.done", response }),
+        });
+      });
+      const upstream = await codexWsUpstreamFetch(CODEX_URL, streamingInit(), (() => {
+        throw new Error("fallback must not run after open");
+      }) as unknown as typeof fetch);
+
+      const text = await upstream.text();
+      expect(text).toContain("event: response.failed");
+      const payload = text
+        .split("\n")
+        .filter(line => line.startsWith("data: ") && line !== "data: [DONE]")
+        .map(line => JSON.parse(line.slice("data: ".length)))
+        .find(event => event.type === "response.failed");
+      expect(payload?.response?.status).toBe("failed");
+    }
   });
 
   test("falls back to the HTTP fetch when the upgrade is rejected before open", async () => {
@@ -1048,5 +1147,22 @@ describe("oversized Codex create frames", () => {
     }) as unknown as typeof fetch);
 
     await expect(response.text()).rejects.toThrow("closed before a Responses terminal event (close 1006)");
+  });
+
+  test("dials the configured provider's own wss URL for an opt-in upstream", async () => {
+    installFake(ws => {
+      ws.emit("open", {});
+      ws.emit("message", { data: JSON.stringify({ type: "response.completed", response: { id: "r-ws" } }) });
+    });
+    const sentinel = new Response("fallback");
+    const response = await codexWsUpstreamFetch(
+      "https://sub2api.example.com/v1/responses",
+      streamingInit(),
+      (async () => sentinel) as typeof fetch,
+    );
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances[0]!.url).toBe("wss://sub2api.example.com/v1/responses");
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(await response.text()).toContain("response.completed");
   });
 });

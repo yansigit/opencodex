@@ -3,7 +3,6 @@ import {
   codexWsUpstreamFetch,
   currentBunRuntimeIdentity,
   shouldUseCodexWsUpstream,
-  type CodexWsUpstreamOptions,
   type BunRuntimeGateInput,
 } from "./ws-upstream";
 import type { OcxProviderConfig } from "../../types";
@@ -81,22 +80,24 @@ export function providerFetch(
       transport(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 }),
     { preconnect },
   ) as typeof globalThis.fetch;
-  // ChatGPT Codex backend: eligible streaming turns stay on HTTP/SSE by
-  // default. `wsUpstream: true`, or (when that option is omitted)
-  // OCX_CODEX_WS_UPSTREAM=true/1, opts into the responses_websockets transport;
-  // everything else keeps the provider's HTTP fetch. See ws-upstream.ts for
-  // the details.
-  const wsOptions: CodexWsUpstreamOptions = {
-    wsUpstream: provider.wsUpstream,
-    maxWsFrameBytes: provider.maxWsFrameBytes,
-  };
+  // ChatGPT Codex backend: streaming turns ride the responses_websockets
+  // transport (measured ~3s faster TTFT than the SSE POST queue); everything
+  // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
   const unpaced = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
-    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, wsOptions)) {
+    const upstreamWebsocket = provider.upstreamWebsocket === true;
+    const wsOpts = {
+      // Keep the canonical ChatGPT fast lane independent: upstreamWebsocket opts a
+      // configured HTTPS /responses endpoint in, but must not silently enable Codex WS.
+      wsUpstream: provider.wsUpstream,
+      maxWsFrameBytes: provider.maxWsFrameBytes,
+      upstreamWebsocket,
+    };
+    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, wsOpts)) {
       // The fallback has to be the same HTTP fetch the non-WS branch would have
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOptions);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOpts);
     }
     return httpFetch(input, init);
   };

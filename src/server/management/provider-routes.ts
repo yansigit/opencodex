@@ -115,6 +115,56 @@ type ProviderPatchApplication =
       headersTouched: boolean;
     };
 
+const PROVIDER_ALIAS_OVERLAY_FIELDS = ["alias", "modelAliases", "defaultAliases"] as const;
+type ProviderAliasOverlayField = typeof PROVIDER_ALIAS_OVERLAY_FIELDS[number];
+
+function providerAliasOverlayOwnershipError(
+  submitted: Record<string, unknown>,
+  existing: OcxProviderConfig | undefined,
+): string | null {
+  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) {
+    if (!Object.hasOwn(submitted, field)) continue;
+    if (!existing || !Object.hasOwn(existing, field)) {
+      return `${field} is managed by the dedicated alias API`;
+    }
+    const incoming = submitted[field];
+    const persisted = existing[field];
+    if (field === "modelAliases") {
+      if (!isPlainRecord(incoming) || !isPlainRecord(persisted)) {
+        return "modelAliases is managed by the dedicated alias API";
+      }
+      const incomingEntries = Object.entries(incoming);
+      const persistedEntries = Object.entries(persisted);
+      if (
+        incomingEntries.length !== persistedEntries.length
+        || incomingEntries.some(([model, alias]) => typeof alias !== "string" || persisted[model] !== alias)
+      ) {
+        return "modelAliases is managed by the dedicated alias API";
+      }
+      continue;
+    }
+    if (incoming !== persisted) return `${field} is managed by the dedicated alias API`;
+  }
+  return null;
+}
+
+function providerTransportValidationCandidate(provider: Record<string, unknown>): Record<string, unknown> {
+  const candidate = { ...provider };
+  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) delete candidate[field];
+  return candidate;
+}
+
+function restorePersistedAliasOverlays(target: OcxProviderConfig, existing: OcxProviderConfig | undefined): void {
+  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) {
+    delete (target as Record<ProviderAliasOverlayField, unknown>)[field];
+    if (!existing || !Object.hasOwn(existing, field)) continue;
+    const value = existing[field];
+    (target as Record<ProviderAliasOverlayField, unknown>)[field] = field === "modelAliases"
+      ? structuredClone(value)
+      : value;
+  }
+}
+
 type ProviderMutationValue =
   | { config: OcxConfig; fallbackDefault?: string; droppedCustomModels?: number }
   | {
@@ -567,6 +617,38 @@ function applyProviderPatchFields(
     touched = true;
   }
 
+  if (Object.hasOwn(rawBody, "retainModels")) {
+    const value = rawBody.retainModels;
+    if (value === null) {
+      delete next.retainModels;
+    } else {
+      const error = nonBlankStringArrayConfigError(value, "retainModels");
+      if (error) return { error };
+      const models = normalizeNonBlankStringArray(value as string[]);
+      if (models.length > 0) next.retainModels = models;
+      else delete next.retainModels;
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "omitReasoningEffortWithToolsModels")) {
+    const value = rawBody.omitReasoningEffortWithToolsModels;
+    if (value === null) {
+      delete next.omitReasoningEffortWithToolsModels;
+    } else {
+      const error = nonBlankStringArrayConfigError(value, "omitReasoningEffortWithToolsModels");
+      if (error) return { error };
+      const models = normalizeNonBlankStringArray(value as string[]);
+      if (models.length > 0) next.omitReasoningEffortWithToolsModels = models;
+      else delete next.omitReasoningEffortWithToolsModels;
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "upstreamWebsocket")) {
+    if (typeof rawBody.upstreamWebsocket !== "boolean") return { error: "upstreamWebsocket must be a boolean" };
+    next.upstreamWebsocket = rawBody.upstreamWebsocket;
+    touched = true;
+  }
+
   // headers is the one object-valued field in the mask. PATCH semantics merge it
   // shallowly into the existing block so a single fingerprint header can be added
   // without wiping the rest; null or an empty object clears user-managed headers.
@@ -697,6 +779,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       maxWsFrameBytes: p.maxWsFrameBytes,
       modelSupportsServiceTier: p.modelSupportsServiceTier,
       noStructuredOutputModels: p.noStructuredOutputModels,
+      retainModels: p.retainModels,
+      omitReasoningEffortWithToolsModels: p.omitReasoningEffortWithToolsModels,
+      upstreamWebsocket: p.upstreamWebsocket,
       upstreamHttpVersion: p.upstreamHttpVersion,
       authMode: p.authMode,
       apiKeyTransport: p.apiKeyTransport,
@@ -794,6 +879,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const submittedProvider = isPlainRecord(body.provider)
       ? structuredClone(body.provider) as Record<string, unknown>
       : body.provider;
+    if (!isPlainRecord(submittedProvider)) {
+      return jsonResponse({ error: "provider must be a plain object" }, 400);
+    }
     const submittedCredential = isPlainRecord(submittedProvider)
       && isPlainRecord(submittedProvider.azureCredential)
       ? submittedProvider.azureCredential as Record<string, unknown>
@@ -801,16 +889,24 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (typeof submittedCredential?.managedIdentityClientId === "string") {
       submittedCredential.managedIdentityClientId = submittedCredential.managedIdentityClientId.trim();
     }
-    const providerError = providerManagementConfigError(name, submittedProvider);
+    const existingForAlias = config.providers[name];
+    const aliasOwnershipError = providerAliasOverlayOwnershipError(submittedProvider, existingForAlias);
+    if (aliasOwnershipError) return jsonResponse({ error: aliasOwnershipError }, 400);
+    const transportCandidate = providerTransportValidationCandidate(submittedProvider);
+    const providerError = providerManagementConfigError(name, transportCandidate);
     if (providerError) return jsonResponse({ error: providerError }, 400);
-    const serviceTierError = providerServiceTierConfigError(name, submittedProvider);
+    if (submittedProvider.upstreamWebsocket !== undefined && typeof submittedProvider.upstreamWebsocket !== "boolean") {
+      return jsonResponse({ error: "upstreamWebsocket must be a boolean" }, 400);
+    }
+    const serviceTierError = providerServiceTierConfigError(name, transportCandidate);
     if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
-    const prov = submittedProvider ? stripCodexRuntimeProviderFields(submittedProvider as OcxProviderConfig) : undefined;
+    const prov = transportCandidate ? stripCodexRuntimeProviderFields(transportCandidate as unknown as OcxProviderConfig) : undefined;
     // PATCH already clears on null; POST persisted the body as submitted, so a `null` here
     // reached disk and the next loadConfig() refused it. Canonicalize to absent, which is what
     // "clear" means everywhere else.
     if (prov && prov.upstreamHttpVersion === null) delete prov.upstreamHttpVersion;
     if (prov && prov.wsUpstream === null) delete prov.wsUpstream;
+    if (prov && (prov as unknown as Record<string, unknown>).upstreamWebsocket === null) delete (prov as unknown as Record<string, unknown>).upstreamWebsocket;
     if (!name || !prov?.adapter || !prov?.baseUrl) {
       return jsonResponse({ error: "name, provider.adapter and provider.baseUrl are required" }, 400);
     }
@@ -839,6 +935,11 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const submittedModelAutoCompactTokenLimits = Object.hasOwn(prov, "modelAutoCompactTokenLimits");
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
     const submittedAnnotateEmptyToolOutputs = Object.hasOwn(prov, "annotateEmptyToolOutputs");
+    const submittedWsUpstream = Object.hasOwn(prov, "wsUpstream");
+    const submittedMaxWsFrameBytes = Object.hasOwn(prov, "maxWsFrameBytes");
+    const submittedModelDisplayNames = Object.hasOwn(prov, "modelDisplayNames");
+    const submittedUpstreamHttpVersion = Object.hasOwn(prov, "upstreamHttpVersion");
+    const submittedUpstreamWebsocket = Object.hasOwn(prov, "upstreamWebsocket");
     const buildProvider = (existing: OcxProviderConfig | undefined): OcxProviderConfig => {
       const next = structuredClone(prov);
       // Native OpenAI capabilities are registry-owned runtime defaults. Enriching this exact
@@ -859,6 +960,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (!submittedAnnotateEmptyToolOutputs && existing?.annotateEmptyToolOutputs !== undefined) {
         next.annotateEmptyToolOutputs = existing.annotateEmptyToolOutputs;
       }
+      if (!submittedWsUpstream && existing?.wsUpstream !== undefined) next.wsUpstream = existing.wsUpstream;
+      if (!submittedMaxWsFrameBytes && existing?.maxWsFrameBytes !== undefined) next.maxWsFrameBytes = existing.maxWsFrameBytes;
+      if (!submittedModelDisplayNames && existing?.modelDisplayNames) next.modelDisplayNames = structuredClone(existing.modelDisplayNames);
+      // upstreamHttpVersion null is already handled at top; preserve omitted value on overwrite
+      if (!submittedUpstreamHttpVersion && existing?.upstreamHttpVersion !== undefined) next.upstreamHttpVersion = existing.upstreamHttpVersion;
+      if (!submittedUpstreamWebsocket && existing?.upstreamWebsocket !== undefined) next.upstreamWebsocket = existing.upstreamWebsocket;
       if (existing?.modelContextWindows) {
         next.modelContextWindows = submittedModelContextWindows
           ? { ...existing.modelContextWindows, ...(next.modelContextWindows ?? {}) }
@@ -869,6 +976,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
           ? { ...existing.modelAutoCompactTokenLimits, ...(next.modelAutoCompactTokenLimits ?? {}) }
           : { ...existing.modelAutoCompactTokenLimits };
       }
+      restorePersistedAliasOverlays(next, existing);
       return stripRegistryOnlyStaticHeaders(name, next);
     };
     const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
@@ -877,7 +985,10 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       const next = buildProvider(fresh.providers[name]);
       const keyCollision = reconcileSubmittedApiKey(next);
       if (keyCollision) return { changed: false, value: { error: keyCollision, status: 409 } };
-      const providerError = providerManagementConfigError(name, next)
+      const providerError = providerManagementConfigError(
+        name,
+        providerTransportValidationCandidate(next as unknown as Record<string, unknown>),
+      )
         ?? providerServiceTierConfigError(name, next);
       if (providerError) return { changed: false, value: { error: providerError, status: 400 } };
       fresh.providers[name] = next;
@@ -901,6 +1012,10 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     try { rawBody = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     if (!isPlainRecord(rawBody)) return jsonResponse({ error: "provider patch body must be a plain object" }, 400);
     const keys = Object.keys(rawBody);
+    const aliasField = PROVIDER_ALIAS_OVERLAY_FIELDS.find(field => Object.hasOwn(rawBody, field));
+    if (aliasField) {
+      return jsonResponse({ error: `${aliasField} is managed by the dedicated alias API` }, 400);
+    }
     const hasMode = Object.hasOwn(rawBody, "codexAccountMode");
     const hasSetDefault = Object.hasOwn(rawBody, "setDefault");
     const canonicalBudgetOnly = name === "openai"
@@ -986,12 +1101,16 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (applied.editorTouched && !pacingOnly) {
       const providerError = canonicalBudgetOnly
         ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
-        : providerManagementConfigError(name, next);
+        : providerManagementConfigError(
+            name,
+            providerTransportValidationCandidate(next as unknown as Record<string, unknown>),
+          );
       if (providerError) return jsonResponse({ error: providerError }, 400);
       if (!canonicalBudgetOnly) {
         const serviceTierError = providerServiceTierConfigError(name, next);
         if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
-        const resolvedError = await providerDestinationResolvedError(name, next);
+        const allowBenchmarkAddresses = name === "openai" && isCanonicalOpenAiForwardProvider(next);
+        const resolvedError = await providerDestinationResolvedError(name, next, { allowBenchmarkAddresses });
         if (resolvedError) return jsonResponse({ error: resolvedError }, 400);
       }
     } else if (applied.enablingOpenAi) {
@@ -1021,7 +1140,10 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (replay.editorTouched && !pacingOnly) {
         const syncError = canonicalBudgetOnly
           ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, fresh)
-          : providerManagementConfigError(name, replay.next);
+          : providerManagementConfigError(
+              name,
+              providerTransportValidationCandidate(replay.next as unknown as Record<string, unknown>),
+            );
         if (syncError) {
           replayError = syncError;
           return { changed: false, value: { error: syncError } };

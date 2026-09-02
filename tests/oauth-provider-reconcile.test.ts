@@ -9,6 +9,7 @@ import { routeModel } from "../src/router";
 import { CURSOR_NO_VISION_MODELS, CURSOR_STATIC_MODELS, cursorModelIds } from "../src/adapters/cursor/discovery";
 import { modelInList } from "../src/types";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const originalHome = process.env.OPENCODEX_HOME;
 const homes: string[] = [];
@@ -16,7 +17,7 @@ const homes: string[] = [];
 afterEach(() => {
   if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = originalHome;
-  for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
+  for (const home of homes.splice(0)) removeTreeWithRetry(home);
 });
 
 describe("OAuth provider reconciliation", () => {

@@ -13,6 +13,7 @@ import { refreshUserCostOverlays } from "../src/usage/user-cost-overlays";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 import { managementFetch as fetch } from "./helpers/management-auth";
 import { watchdogMs } from "./helpers/ci-watchdog";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const LIVE_UPDATE_TIMEOUT_MS = watchdogMs(LOCAL_PROVIDER_RELOAD_TIMEOUT_MS * 2 + 5_000);
 
@@ -58,7 +59,7 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
-  if (testDir) rmSync(testDir, { recursive: true, force: true });
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 describe("CLI key-login live-update overlay preservation", () => {

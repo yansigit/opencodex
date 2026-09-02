@@ -12,6 +12,7 @@ import {
   cursorClientThreadOwner,
   cursorCoveredPrefixDigest,
   cursorInstructionDigest,
+  cursorRequestEmitsFastVariant,
 } from "./cursor/request-builder";
 import {
   createLiveCursorTransport,
@@ -26,6 +27,7 @@ import {
   invalidateCursorCheckpoint,
 } from "./cursor/checkpoint-store";
 import { debugProviderDiagnostic } from "../lib/debug";
+import { createAdapterTierMetadata } from "../providers/fastwire";
 import { estimateTokens } from "../lib/token-estimate";
 import {
   cursorOverflowRemintScopeKey,
@@ -77,6 +79,11 @@ function safeCursorTransportError(err: unknown, sizeContext?: CursorSizeContext)
   if (err instanceof CursorMissingCredentialError) {
     return "Cursor live transport is enabled, but no Cursor access token is configured. Set provider.apiKey or OPENCODEX_CURSOR_TEST_TOKEN.";
   }
+  // A locally raised envelope rejection is already safe, specific, and actionable: it was composed
+  // here from our own measurements and contains no upstream text. Passing it through
+  // `safeCursorErrorMessage` would collapse it to the bare label "Cursor invalid request" (it
+  // matches the "invalid"/"exceeds" keyword branch) and discard the counts that tell the operator
+  // which limit was hit and by how much.
   if (isCursorRootEnvelopeError(err)) {
     return err instanceof Error ? `Cursor invalid request: ${err.message}` : "Cursor invalid request";
   }
@@ -109,6 +116,21 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
     name: "cursor",
 
     validateRequest: assertCursorRequestSupported,
+
+    // Cursor emits Fast as a model variant, so the generic "no field emitted" fallback in
+    // adapters/registry.ts would report every Fast turn as downgraded. This recomputes the
+    // variant from the same pure inputs the builder uses: tierLogForRunTurn runs BEFORE
+    // runTurn, and createCursorRequest mints conversation ids, so rebuilding it here would
+    // describe a request that was never sent.
+    tierLogForRunTurn(parsed) {
+      const fast = cursorRequestEmitsFastVariant(parsed);
+      return createAdapterTierMetadata(
+        parsed.options.tierObservation,
+        parsed.options.tierDecision,
+        fast ? "cursor-variant" : null,
+        fast ? "fast" : null,
+      );
+    },
 
     buildRequest() {
       return {
@@ -229,7 +251,7 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
               checkpointRef,
             },
           };
-          debugProviderDiagnostic("cursor", "checkpoint-continuation", {
+        debugProviderDiagnostic("cursor", "checkpoint-continuation", {
             mode: activeRequest.continuationMode ?? "full-replay",
             conversationHash: activeRequest.conversationId.slice(0, 16),
             checkpointRefHash: cursorCheckpointRefHash(checkpointRef),
@@ -549,6 +571,9 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
           ...(isTranslatorBudgetExceededError(err)
             ? { status: 502, errorType: "upstream_error", code: "translation_buffer_limit" }
             : {}),
+          // A local envelope rejection is a client error with a stable code, and the caller needs
+          // that code to distinguish "this conversation cannot be sent" from a transient upstream
+          // fault. Without this the class was flattened to a bare message and the code was lost.
           ...(isCursorRootEnvelopeError(err)
             ? { status: 400, errorType: "invalid_request_error", code: "cursor_root_envelope_limit", retryable: false }
             : {}),

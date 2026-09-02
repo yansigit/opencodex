@@ -112,8 +112,9 @@ tarafından atanmaz: geçici bir port yeniden başlatmalar arasında değişirke
 zaten çalışan app-server'lar önceki `base_url`'i tutardı.
 
 Dinleyici yalnızca `POST /v1/responses`, onun WebSocket yükseltmesi, `POST
-/v1/responses/compact` ve `GET /v1/models` sunar. `/api/*` ve kontrol paneli
-dahil diğer her şey `404` döndürür.
+/v1/responses/compact`, `POST /v1/alpha/search` (yerel Codex web arama aktarımı),
+`GET /v1/models` ve bağımsız sesli WebSocket yükseltmelerini sunar. `/api/*` ve
+kontrol paneli dahil diğer her şey `404` döndürür.
 
 :::danger[Bu kimliği doğrulanmamış bir yüzeydir]
 Makinedeki her süreç bu dinleyiciyi kullanabilir. Hesap kotasını ve ücretli
@@ -285,3 +286,9 @@ yeniden kullanır. Hedeflenen hesap ve iş yükünü kapsamlı bir şekilde test
 ### TLS ve WebSocket
 
 `tls`, `certFile`, `keyFile` ve `publicOrigin` alanlarını kabul eder. WebSocket boşta kalma süresi 255 saniyedir; geri basınç sınırında (1 MiB) bağlantı kapatılır.
+
+## Remote Hub anahtarları ve varsayılanlar
+
+`runtimeRole` varsayılan olarak `standalone` değerindedir. Hub; `hub.managementPublicOrigin`, yalnız loopback `hub.managementIngress` (yokken `enabled:false`) ve tam `remoteGui.allowedTailscaleUsers` (yokken boş) kullanır. İstemci anahtarı `config.json` yerine `service-api-token` içinde kalır; döndürme sırasında `service-api-token.prev` geçici olarak bulunabilir. Kullanım kayıtları yansıtılmaz.
+
+`remoteGui.allowInsecureHttp`, yalnızca eski strict-schema yapılandırmalarının yüklenebilmesi için tutulan, kullanımdan kaldırılmış bir no-op'tur. Yapılandırmadan silin: pairing grant'leri yalnız loopback veya kimliği doğrulanmış HTTPS üzerinden kabul edilir ve `true` değeri düz HTTP pairing'i yeniden açmaz.

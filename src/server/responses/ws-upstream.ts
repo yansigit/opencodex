@@ -19,6 +19,34 @@ import { interceptRuntimeFailure } from "../../telemetry/hook";
 const CODEX_RESPONSES_HTTP_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_RESPONSES_WS_URL = "wss://chatgpt.com/backend-api/codex/responses";
 const WS_BETA = "responses_websockets=2026-02-06";
+/**
+ * Dial URL for a request URL. The canonical ChatGPT backend keeps its constant;
+ * an operator-opted OpenAI-compatible upstream swaps https for wss on the same
+ * path so gateways that serve the Responses WebSocket protocol on their
+ * /v1/responses path get the same fast lane. Plain HTTP remains on SSE because
+ * a provider WS handshake would otherwise send credentials and request data
+ * without transport encryption.
+ */
+export function wsUpstreamUrlFor(httpUrl: string): string {
+  if (httpUrl === CODEX_RESPONSES_HTTP_URL) return CODEX_RESPONSES_WS_URL;
+  return httpUrl.replace(/^http(s?):/, "ws\$1:");
+}
+
+/**
+ * An operator-opted OpenAI-compatible upstream only joins the WS lane for
+ * Responses endpoints: the WebSocket path speaks the Responses event protocol,
+ * and every downstream consumer (adapter parsers, usage sniffing, SSE relay)
+ * assumes that wire. Other paths (chat completions, images, search) stay HTTP.
+ */
+export function isResponsesWebsocketEligibleUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:" && parsed.pathname.endsWith("/responses");
+}
 // If the 101 never arrives (network black hole), give SSE a chance well before
 // the caller's connect timeout (default 200s) would fire.
 const UPGRADE_DEADLINE_MS = 10_000;
@@ -59,6 +87,7 @@ export type BunRuntimeGateInput = string | BunRuntimeIdentity;
 export interface CodexWsUpstreamOptions {
   wsUpstream?: boolean;
   maxWsFrameBytes?: number;
+  upstreamWebsocket?: boolean;
 }
 
 export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boolean {
@@ -126,11 +155,26 @@ export function shouldUseCodexWsUpstream(
   url: string,
   init?: RequestInit,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  options?: CodexWsUpstreamOptions,
+  options?: CodexWsUpstreamOptions | boolean,
 ): boolean {
-  if (isCodexWsUpstreamDisabled(options)) return false;
+  // Union: accept boolean legacy (vendor upstreamWebsocketConfigured) and object (fork CodexWsUpstreamOptions).
+  let opts: CodexWsUpstreamOptions | undefined;
+  let upstreamWebsocketConfigured = false;
+  if (typeof options === "boolean") {
+    upstreamWebsocketConfigured = options;
+  } else {
+    opts = options;
+    upstreamWebsocketConfigured = opts?.upstreamWebsocket === true;
+  }
   if (!bunSupportsBoundedCodexWsRelay(runtime)) return false;
-  if (url !== CODEX_RESPONSES_HTTP_URL) return false;
+  if (url === CODEX_RESPONSES_HTTP_URL) {
+    // A custom-upstream opt-in never enables the canonical ChatGPT fast lane.
+    if (typeof options !== "boolean" && isCodexWsUpstreamDisabled(opts)) return false;
+  } else if (upstreamWebsocketConfigured) {
+    if (!isResponsesWebsocketEligibleUrl(url)) return false;
+  } else {
+    return false;
+  }
   if ((init?.method ?? "GET").toUpperCase() !== "POST") return false;
   const body = init?.body;
   if (typeof body !== "string") return false;
@@ -148,6 +192,49 @@ export function shouldUseCodexWsUpstream(
 }
 
 const CLOSED_BEFORE_TERMINAL = "codex websocket closed before a Responses terminal event";
+
+type ResponsesWsRelayEvent = {
+  type: string;
+  text: string;
+};
+
+/**
+ * Responses WebSocket uses `response.done` as its terminal event, while the
+ * SSE Responses surface uses status-specific terminal events. Normalize the
+ * WS-only discriminator before relaying so the existing SSE consumers can
+ * settle the turn and the socket close cannot be mistaken for a drop. Unknown
+ * or missing status values fail closed instead of being reported as success.
+ */
+export function normalizeResponsesWsRelayEvent(text: string): ResponsesWsRelayEvent | null {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  if (typeof record.type !== "string") return null;
+  if (record.type !== "response.done") return { type: record.type, text };
+  const response = record.response;
+  const status = response && typeof response === "object" && !Array.isArray(response)
+    ? (response as Record<string, unknown>).status
+    : undefined;
+  const type = status === "completed"
+    ? "response.completed"
+    : status === "failed"
+      ? "response.failed"
+      : status === "incomplete" || status === "cancelled"
+        ? "response.incomplete"
+        : "response.failed";
+  const normalizedRecord: Record<string, unknown> = { ...record, type };
+  if (type === "response.failed" && status !== "failed") {
+    normalizedRecord.response = response && typeof response === "object" && !Array.isArray(response)
+      ? { ...(response as Record<string, unknown>), status: "failed" }
+      : { status: "failed" };
+  }
+  return { type, text: JSON.stringify(normalizedRecord) };
+}
 
 /**
  * The close code is the only thing that separates "the backend refused this
@@ -198,9 +285,11 @@ export function codexWsUpstreamFetch(
   init: RequestInit,
   sseFallback: typeof globalThis.fetch,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  options?: CodexWsUpstreamOptions,
+  options?: CodexWsUpstreamOptions | boolean,
 ): Promise<Response> {
-  if (isCodexWsUpstreamDisabled(options) || !bunSupportsBoundedCodexWsRelay(runtime)) {
+  const opts = typeof options === "boolean" ? undefined : options;
+  const customUpstream = options === true || opts?.upstreamWebsocket === true;
+  if ((!customUpstream && isCodexWsUpstreamDisabled(opts)) || !bunSupportsBoundedCodexWsRelay(runtime)) {
     return sseFallback(url, init);
   }
   const signal = init.signal ?? undefined;
@@ -223,7 +312,7 @@ export function codexWsUpstreamFetch(
   // streaming Response, so the oversized close can only be surfaced as a stream
   // error — and a resend at that point could double-generate. Measuring the
   // frame we are about to send keeps the whole failure mode unreachable.
-  const maxFrameBytes = resolveCodexWsMaxFrameBytes(options);
+  const maxFrameBytes = resolveCodexWsMaxFrameBytes(opts);
   if (codexWsCreateFrameExceedsLimit(frameText, maxFrameBytes)) {
     return sseFallback(url, init);
   }
@@ -249,7 +338,7 @@ export function codexWsUpstreamFetch(
     let ws: WebSocket;
     try {
       // Bun accepts per-handshake headers; the DOM lib types only list protocol arrays.
-      ws = new WebSocket(CODEX_RESPONSES_WS_URL, { headers } as unknown as string[]);
+      ws = new WebSocket(wsUpstreamUrlFor(url), { headers } as unknown as string[]);
     } catch {
       resolve(sseFallback(url, init));
       return;
@@ -339,14 +428,19 @@ export function codexWsUpstreamFetch(
         failStream("codex websocket frame exceeds the response size limit");
         return;
       }
-      const encodedText = encoder.encode(text);
+      const rawEncodedText = encoder.encode(text);
+      if (rawEncodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
+        failStream("codex websocket frame exceeds the response size limit");
+        return;
+      }
+      const normalized = normalizeResponsesWsRelayEvent(text);
+      if (!normalized) return;
+      const { type } = normalized;
+      const encodedText = normalized.text === text ? rawEncodedText : encoder.encode(normalized.text);
       if (encodedText.byteLength > MAX_CODEX_WS_FRAME_BYTES) {
         failStream("codex websocket frame exceeds the response size limit");
         return;
       }
-      let type: unknown;
-      try { type = (JSON.parse(text) as { type?: unknown }).type; } catch { return; }
-      if (typeof type !== "string") return;
       // Relay only the event surface the SSE path produces today. WS-only
       // frames (codex.rate_limits, responsesapi.websocket_timing) are dropped
       // so downstream clients see exactly the stream shape they always got.

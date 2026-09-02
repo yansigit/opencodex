@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { managementFetch as fetch } from "./helpers/management-auth";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, mutatePersistedConfig, saveConfig, writePid, writeRuntimePort } from "../src/config";
@@ -16,6 +16,7 @@ import { LOCAL_PROVIDER_RELOAD_TIMEOUT_MS } from "../src/server/local-provider-r
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 import { watchdogMs } from "./helpers/ci-watchdog";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 /**
  * `requestBoundLocalProviderReload` may spend one HTTP ceiling on /healthz and
@@ -63,7 +64,7 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
-  if (testDir) rmSync(testDir, { recursive: true, force: true });
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 describe("CLI OAuth live-update credential preservation", () => {

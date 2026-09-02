@@ -18,6 +18,7 @@ import type {
 } from "../src/types";
 import { getDebugLogEntries, resetDebugLogBufferForTests } from "../src/lib/debug-log-buffer";
 import { resetDebugSettingsForTests } from "../src/lib/debug-settings";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 interface BuildObservation {
   key: string;
@@ -143,7 +144,7 @@ describe("terminal continuation provider-owner rotation", () => {
     resetDebugLogBufferForTests();
     if (PREVIOUS_DEBUG === undefined) delete process.env.OCX_DEBUG;
     else process.env.OCX_DEBUG = PREVIOUS_DEBUG;
-    rmSync(testHome, { recursive: true, force: true });
+    removeTreeWithRetry(testHome);
   });
 
   test("continuation connection-reset recovery labels adapter and bridge diagnostics", async () => {
