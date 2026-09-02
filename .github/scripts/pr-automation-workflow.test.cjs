@@ -117,6 +117,12 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /ci.*hygiene|hygiene.*ci/);
   });
 
+  it("removes stale sync provenance when a sync head advances", () => {
+    const source = workflow();
+    assert.match(source, /opencodex-fork-sync-provenance/);
+    assert.match(source, /github\.rest\.pulls\.update\(\{ owner, repo, pull_number: pr\.number, body: cleanedBody \}\)/);
+  });
+
   it("reports aged automation holds while retaining the label", () => {
     const source = workflow();
     assert.match(source, /summarizeAgedHolds/);

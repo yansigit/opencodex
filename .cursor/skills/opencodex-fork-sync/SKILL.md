@@ -37,6 +37,16 @@ bun scripts/fork/sync/cli.ts prepare < "$RUNNER_TEMP/fork-sync-event.json"
 bun scripts/fork/sync/cli.ts draft-pr < "$RUNNER_TEMP/fork-sync-draft-pr.json"
 ```
 
+The preservation gate runs after `prepare`:
+
+```bash
+bun scripts/fork/sync/cli.ts overlap < overlap-input.json   # generate/check candidates and decisions
+bun scripts/fork/sync/cli.ts verify < verify-input.json     # exact-head hashes and provenance
+bun scripts/fork/sync/cli.ts preservation-check              # validates docs/fork/PRESERVATION.json
+```
+
+For every candidate, answer: upstream intent; fork invariant; whether upstream is equivalent or better; selected disposition; implementation evidence; exact tests. `intentional-drop` requires a separate prior baseline change and is never autonomous. Provenance binds head/tag/base, registry, decision, and report hashes.
+
 Only `vendor/main` and `vendor/dev` are allowlisted, and both updates use
 fast-forward-only fetch refspecs. `vendor/dev` moves only when a new main tag
 is pinned. The Action has `contents: write`, `issues: write`, and
@@ -139,14 +149,16 @@ recommendation, just like Cursor.
 ## Cursor Automation stages 3–8
 
 The webhook-triggered Cursor Automation starts only when `prepareStatus` is
-`hotspot-handoff` or the event `kind` is `history-diverged`. The Action already creates an upstream-identified sync branch from
-the `origin/dev` worktree, merges `vendor/main`, resolves fork-owned and
-upstream-owned files, applies recipes, pushes the sync branch, and opens or
+`decision-handoff` or the event `kind` is `history-diverged`. The Action already creates an upstream-identified sync branch from
+the `origin/dev` worktree, merges `vendor/main`, applies only named deterministic
+recipes, pushes a conflict-free sync branch, and opens or
 updates a draft PR.
 
-For a hotspot handoff, recreate the sync branch from current `origin/dev`,
+For a conflict handoff, recreate the sync branch from current `origin/dev`,
 merge `origin/vendor/main`, and read `docs/fork/OWNED.md` before resolving
-conflicts. The Action never pushes a conflicted branch. For
+conflicts. For a preservation handoff, continue the published clean-merge
+branch and complete its candidate decisions. The Action never pushes a
+conflicted branch. For
 `history-diverged`, use the disconnected `run/dev` rebuild only.
 Replay `fork:` commits on `origin/dev` or feature patches only when they are not already contained,
 using `scripts/fork/sync/contained.ts` or
@@ -180,25 +192,24 @@ and stop replaying a `feat/*` once it is contained in the sync branch or
 `vendor/main`. A timeout-only `macos-launchd` check flake may be retried with
 `gh run rerun`; do not edit the upstream lifecycle workflow.
 
-## Conflict report (required for every conflict)
+## Preservation decision (required for every conflict and candidate)
 
 ```text
-file/hunk:
 upstream intent:
-overlay intent:
-classification: upstream-owned | fork-owned | shared-hotspot
-options: theirs+reapply | ours | true merge | drop absorbed | extract to src/fork/
-recommendation: (correctness, then features, then fewer future conflicts)
-exact test commands:
+fork invariant:
+upstream equivalent or better: yes | no (commit/path evidence)
+disposition: preserve | upstream-equivalent
+implementation evidence:
+exact tests:
 ```
 
 | Classification | Default |
 |---|---|
-| `upstream-owned` | Take theirs; re-apply still-needed fork intent as a small new commit |
-| `fork-owned` | Take ours |
-| `shared-hotspot` | Manual/agent report; preserve upstream control flow and re-fit fork behavior |
+| `upstream-owned` | Decide explicitly; upstream control flow does not waive fork behavior |
+| `fork-owned` | Preserve unless equivalence is proved |
+| `shared-hotspot` | Preserve upstream control flow and re-fit fork behavior |
 | Lockfile | Take theirs; regenerate if the fork added dependencies |
-| Absorbed idea | Drop ours |
+| Absorbed idea | `upstream-equivalent` only with commit/path evidence and the same test |
 
 ## Decision policy
 

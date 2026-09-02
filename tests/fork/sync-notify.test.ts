@@ -104,19 +104,19 @@ describe("fork sync GitHub issue notifier", () => {
     expect(failedBody.body).not.toContain("rebuild the sync branch from origin/dev");
   });
 
-  test("attaches agent:jules label for hotspot-handoff prepare status", async () => {
+  test("attaches agent:jules label for decision-handoff prepare status", async () => {
     const fake = client();
     await createGitHubIssueNotifier({
       client: fake.api,
       upstreamRepo: "lidge-jun/opencodex",
     }).notify({
       ...event("pin-updated", "daily-merge"),
-      prepareStatus: "hotspot-handoff",
+      prepareStatus: "decision-handoff",
       headSha: "4444444444444444444444444444444444444444",
       mergeBaseCount: 1,
       mergeBaseShas: ["5555555555555555555555555555555555555555"],
       prepareResult: {
-        status: "hotspot-handoff",
+        status: "decision-handoff",
         branch: "sync/upstream-v2.29.0-1111111",
         resolutions: [{
           path: ".github/workflows/fork-upstream-sync.yml",

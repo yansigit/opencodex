@@ -67,7 +67,6 @@ export interface MinimalLogEntry {
   surface?: LogSurface;
   status?: number;
   conversationId?: string;
-  shadowCallSource?: string;
   shadowCallRewrittenFrom?: string;
   attempts?: MinimalLogAttempt[];
   displayMetrics?: {
@@ -103,7 +102,7 @@ export function filterLogs<T extends MinimalLogEntry>(
     }
 
     // Intercepted helpers
-    if (filters.interceptedHelpersOnly && !log.shadowCallRewrittenFrom && log.shadowCallSource !== "agent-helper") {
+    if (filters.interceptedHelpersOnly && !log.shadowCallRewrittenFrom) {
       return false;
     }
 
@@ -130,9 +129,9 @@ export function filterLogs<T extends MinimalLogEntry>(
     // Model filter
     if (modelQuery) {
       const matchModel =
-        log.model?.toLowerCase() === modelQuery ||
-        log.resolvedModel?.toLowerCase() === modelQuery ||
-        log.attempts?.some(a => a.model?.toLowerCase() === modelQuery);
+        log.model?.toLowerCase().includes(modelQuery) ||
+        log.resolvedModel?.toLowerCase().includes(modelQuery) ||
+        log.attempts?.some(a => a.model?.toLowerCase().includes(modelQuery));
       if (!matchModel) return false;
     }
 

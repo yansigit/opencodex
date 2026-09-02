@@ -542,6 +542,12 @@ jobs:
               const staleRecord = record && record.headSha !== pr.head.sha;
               if ((labelUnbound || staleRecord) && mode !== "off") {
                 await clearApprovalState(pr, false, true);
+                const fresh = await getPr(pr.number);
+                const currentBody = String(fresh.body || "");
+                const cleanedBody = currentBody.replace(/\n*<!-- opencodex-fork-sync-provenance:[\s\S]*? -->/g, "").trimEnd();
+                if (cleanedBody !== currentBody) {
+                  await github.rest.pulls.update({ owner, repo, pull_number: pr.number, body: cleanedBody });
+                }
                 return true;
               }
               return false;

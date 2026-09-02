@@ -1,6 +1,6 @@
 # Jules and Cursor maintenance
 
-This repository uses GitHub as the control plane. Jules implements trusted maintenance issues and opens pull requests against `dev` (the repository integration branch); the existing Cursor Automation continues to own only `hotspot-handoff` and `history-diverged` upstream-sync cases. Cursor Bugbot, CodeRabbit, CI, and maintainers review every resulting pull request. Changes merge to `dev` first and promote to `main` on release.
+This repository uses GitHub as the control plane. Jules implements trusted maintenance issues and opens pull requests against `dev` (the repository integration branch); the existing Cursor Automation continues to own only `decision-handoff` and `history-diverged` upstream-sync cases. Cursor Bugbot, CodeRabbit, CI, and maintainers review every resulting pull request. Changes merge to `dev` first and promote to `main` on release.
 
 ## Repository settings
 
