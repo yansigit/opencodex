@@ -18,6 +18,8 @@ import {
 } from "../../oauth-health-display";
 import CodexAccountPool from "../CodexAccountPool";
 import AnthropicAccountPoolSettings from "./AnthropicAccountPoolSettings";
+import CursorAccountPoolSettings from "./CursorAccountPoolSettings";
+import AntigravityFailoverNote from "./AntigravityFailoverNote";
 import { LoginHint as LoginHintView } from "../login-url-block";
 import { OpenBrowserPrefToggle } from "../open-browser-pref-toggle";
 import QuotaBars from "../QuotaBars";
@@ -357,6 +359,10 @@ export default function ProviderAuthPanel({
             {item.name === "anthropic" && (
               <AnthropicAccountPoolSettings apiBase={apiBase} accountCount={accounts.length} />
             )}
+            {item.name === "cursor" && (
+              <CursorAccountPoolSettings apiBase={apiBase} accountCount={accounts.length} />
+            )}
+            {item.name === "google-antigravity" && <AntigravityFailoverNote />}
             {item.name === "google-antigravity" && (
               <div className="pwi-auth-add-key">
                 <div>
