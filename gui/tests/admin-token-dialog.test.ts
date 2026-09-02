@@ -29,6 +29,7 @@ afterEach(() => {
 });
 
 test("renders stable password-manager-compatible sign-in fields", async () => {
+  localStorage.setItem("opencodex-remember-token", "must-not-be-read");
   const pending = promptForAdminToken(async () => "accepted");
   const dialog = document.querySelector<HTMLDialogElement>("#opencodex-admin-token-dialog");
   const form = dialog?.querySelector<HTMLFormElement>("form");
@@ -49,13 +50,14 @@ test("renders stable password-manager-compatible sign-in fields", async () => {
   expect(password?.type).toBe("password");
   expect(password?.autocomplete).toBe("current-password");
   expect(password?.required).toBe(true);
+  expect(password?.value).toBe("");
 
   password!.value = "  ocx_admin_test  ";
   form!.dispatchEvent(new testWindow.Event("submit", { bubbles: true, cancelable: true }));
 
   expect(await pending).toBe("ocx_admin_test");
   expect(document.querySelector("#opencodex-admin-token-dialog")).toBeNull();
-  expect(localStorage.length).toBe(0);
+  expect(localStorage.getItem("opencodex-remember-token")).toBe("must-not-be-read");
 });
 
 test("cancel resolves null and restores the previous focus target", async () => {
