@@ -582,3 +582,47 @@
   color: var(--text);
   white-space: nowrap;
 }
+
+.server-mode-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  padding: 2px;
+  gap: 2px;
+  background: var(--surface);
+  width: fit-content;
+}
+.server-mode-hint {
+  margin: -4px 0 0;
+  color: var(--muted);
+  font-size: var(--text-label);
+  line-height: 1.4;
+}
+.server-mode-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--raised);
+  display: grid;
+  gap: var(--space-2);
+}
+.server-mode-card--loopback { border-color: var(--border); }
+.server-mode-card--remote { border-color: var(--amber); background: var(--surface); }
+.server-mode-card-title { font-weight: var(--weight-semibold); font-size: var(--text-label); color: var(--text); }
+.server-mode-card-desc { color: var(--muted); font-size: var(--text-label); margin: 0; line-height: 1.5; }
+.server-mode-card-note { color: var(--muted); font-size: var(--text-label); margin: 0; line-height: 1.4; }
+.server-ssh-block {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  overflow: hidden;
+}
+.server-ssh-cmd { flex: 1 1 auto; min-width: 0; font-size: var(--text-label); overflow: auto; white-space: nowrap; color: var(--text); }
+.server-ssh-block .btn { flex: 0 0 auto; }
+.server-advanced-details { border-top: 1px dashed var(--border); padding-top: var(--space-2); }
+.server-advanced-details > summary { cursor: pointer; color: var(--muted); font-size: var(--text-label); user-select: none; }
+.server-settings-error { color: var(--red); font-size: var(--text-label); }
