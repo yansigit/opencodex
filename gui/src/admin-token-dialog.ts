@@ -90,7 +90,6 @@ export function promptForAdminToken(
     password.autocapitalize = "none";
     password.placeholder = messages["auth.adminTokenPlaceholder"];
     password.style.paddingRight = "64px";
-    try { const saved = localStorage.getItem("opencodex-remember-token"); if(saved) password.value = saved; } catch { /* localStorage unavailable - ignore */ }
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "btn btn-ghost";
@@ -110,19 +109,6 @@ export function promptForAdminToken(
     pwWrap.append(password, toggle);
     tokenField.append(tokenLabel, pwWrap);
 
-    const rememberRow = document.createElement("label");
-    rememberRow.style.display = "flex";
-    rememberRow.style.alignItems = "center";
-    rememberRow.style.gap = "6px";
-    rememberRow.style.fontSize = "var(--text-label)";
-    rememberRow.style.color = "var(--muted)";
-    rememberRow.style.marginTop = "2px";
-    const remember = document.createElement("input");
-    remember.id = "ocx-remember";
-    remember.type = "checkbox";
-    remember.checked = true;
-    rememberRow.append(remember, document.createTextNode(" Remember on this device"));
-
     const validationError = document.createElement("div");
     validationError.className = "notice notice-err";
     validationError.setAttribute("role", "alert");
@@ -141,7 +127,7 @@ export function promptForAdminToken(
     submit.textContent = messages["common.ok"];
     actions.append(cancel, submit);
 
-    form.append(heading, desc, accountField, tokenField, rememberRow, validationError, actions);
+    form.append(heading, desc, accountField, tokenField, validationError, actions);
     dialog.append(form);
 
     const finish = (value: string | null): void => {
@@ -169,7 +155,6 @@ export function promptForAdminToken(
       void verifyToken(token).then((result) => {
         if (settled) return;
         if (result === "accepted") {
-          try { const cb = document.getElementById("ocx-remember") as HTMLInputElement | null; if(cb?.checked) localStorage.setItem("opencodex-remember-token", token); else localStorage.removeItem("opencodex-remember-token"); } catch { /* localStorage unavailable - ignore */ }
           finish(token);
           return;
         }
