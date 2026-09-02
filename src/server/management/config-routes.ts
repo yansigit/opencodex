@@ -342,6 +342,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // without having to know that `undefined` and `true` mean the same thing.
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       server: serverSettings(config, deps.activeServerOrigin, deps.activeServerConfig),
+      codexDesktopAuthless: config.codexDesktopAuthless === true,
       startupHealth: await readStartupHealth(config),
       codexRuntime: {
         path: displayCodexRuntimePath(resolved.runtime.command),
@@ -429,6 +430,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       oauthOpenBrowser?: unknown;
       showCodexSparkQuota?: unknown;
       server?: unknown;
+      codexDesktopAuthless?: unknown;
     };
     if (body.codexAutoStart === undefined
       && body.streamMode === undefined
@@ -436,7 +438,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.codexAccountPickerEnabled === undefined
       && body.oauthOpenBrowser === undefined
       && body.showCodexSparkQuota === undefined
-      && body.server === undefined) {
+      && body.server === undefined
+      && body.codexDesktopAuthless === undefined) {
       return jsonResponse({ error: "provide a supported settings field" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
@@ -454,6 +457,9 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     if (body.showCodexSparkQuota !== undefined && typeof body.showCodexSparkQuota !== "boolean") {
       return jsonResponse({ error: "showCodexSparkQuota boolean is required" }, 400);
+    }
+    if (body.codexDesktopAuthless !== undefined && typeof body.codexDesktopAuthless !== "boolean") {
+      return jsonResponse({ error: "codexDesktopAuthless boolean is required" }, 400);
     }
     let nextServer: {
       hostname: string;
@@ -509,8 +515,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasTls: Object.hasOwn(config, "tls"),
       corsAllowOrigins: config.corsAllowOrigins,
       hasCorsAllowOrigins: Object.hasOwn(config, "corsAllowOrigins"),
+      codexDesktopAuthless: config.codexDesktopAuthless,
+      hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
     };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
+    const authlessWasEnabled = config.codexDesktopAuthless === true;
     const applySettings = (target: OcxConfig): boolean => {
       if (typeof body.codexAutoStart === "boolean") {
         target.codexAutoStart = body.codexAutoStart;
@@ -537,6 +546,8 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (typeof body.showCodexSparkQuota === "boolean") {
         target.showCodexSparkQuota = body.showCodexSparkQuota;
       }
+      if (body.codexDesktopAuthless === true) target.codexDesktopAuthless = true;
+      else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(target, "codexDesktopAuthless");
       if (nextServer) {
         target.hostname = nextServer.hostname;
         target.port = nextServer.port;
@@ -591,13 +602,16 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       else deleteConfigTopLevelKey(config, "tls");
       if (previousSettings.hasCorsAllowOrigins) config.corsAllowOrigins = previousSettings.corsAllowOrigins;
       else deleteConfigTopLevelKey(config, "corsAllowOrigins");
+      if (previousSettings.hasCodexDesktopAuthless) config.codexDesktopAuthless = previousSettings.codexDesktopAuthless;
+      else deleteConfigTopLevelKey(config, "codexDesktopAuthless");
       throw error;
     }
     if (typeof body.appOwnedMemoryBudgetMb === "number") {
       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
       enforceAppOwnedMemoryBudget();
     }
-    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled
+    const authlessIsEnabled = config.codexDesktopAuthless === true;
+    const catalogRefresh = pickerWasEnabled !== pickerIsEnabled || authlessWasEnabled !== authlessIsEnabled
       ? await convergeCodexCatalog()
       : undefined;
     const catalogRefreshPending = catalogRefresh
@@ -613,6 +627,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
       catalogRefreshPending,
       showCodexSparkQuota: config.showCodexSparkQuota === true,
+      codexDesktopAuthless: authlessIsEnabled,
       startupHealth: await readStartupHealth(config),
       server: serverSettings(config, deps.activeServerOrigin, deps.activeServerConfig),
     });

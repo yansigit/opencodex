@@ -58,6 +58,9 @@ describe("fork PR mergeable workflow", () => {
   test("runs the trusted base verifier only for sync PRs", () => {
     const source = workflow();
     expect(source).toContain("if: startsWith(github.head_ref, 'sync/')");
+    expect(source).toContain("uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2");
+    expect(source.indexOf("Setup Bun for trusted preservation verifier"))
+      .toBeLessThan(source.indexOf("Preservation overlap check for sync PR"));
     expect(source).toContain('git worktree add --detach "$trusted" "$BASE_SHA"');
     expect(source).toContain('bun "$trusted/scripts/fork/sync/cli.ts" verify');
     expect(source).toContain('FORK_SYNC_WORKTREE="$GITHUB_WORKSPACE"');

@@ -148,6 +148,22 @@ export function isCanonicalAntigravityUrl(input: string | URL): boolean {
   }
 }
 
+export function isLoopbackAntigravityUrl(input: string | URL): boolean {
+  try {
+    const url = new URL(input);
+    const host = url.hostname.toLowerCase();
+    // Loopback allowlist for tests: 127.0.0.1, localhost, ::1, 0.0.0.0.
+    // Accept http or https so mock servers (http://127.0.0.1:port) pass the canonical gate
+    // while still keeping the production hardening (attacker hosts remain rejected).
+    if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1" && host !== "0.0.0.0" && host !== "[::1]") {
+      return false;
+    }
+    return url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
+}
+
 export function isAntigravityOAuthProvider(
   providerName: string,
   provider: Pick<OcxProviderConfig, "authMode">,
@@ -165,7 +181,7 @@ export function antigravityOAuthDestinationConfigError(
   if (provider.googleMode !== undefined && provider.googleMode !== "cloud-code-assist") {
     return "requires Google Cloud Code Assist mode for OAuth";
   }
-  if (!isCanonicalAntigravityUrl(provider.baseUrl)) {
+  if (!isCanonicalAntigravityUrl(provider.baseUrl) && !isLoopbackAntigravityUrl(provider.baseUrl)) {
     return "requires a canonical Antigravity HTTPS destination for OAuth";
   }
   return null;

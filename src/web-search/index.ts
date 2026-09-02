@@ -245,7 +245,7 @@ export function resolveCcaInTurnGrounding(
   const cfg = config.webSearchSidecar ?? {};
   if (cfg.enabled === false) return undefined;
   if (cfg.backend !== undefined && EXPLICIT_SIDECAR_BACKENDS.has(cfg.backend)) return undefined;
-  const hasCodexTools = (parsed.context.tools?.length ?? 0) > 0 || hasMediaBridge;
+  const hasCodexTools = (parsed.context.tools?.some(tool => !tool.imageGeneration) ?? false) || hasMediaBridge;
   if (hasCodexTools && !isGemini3ModelId(modelId)) return undefined;
   return {
     search: true,

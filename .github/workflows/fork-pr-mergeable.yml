@@ -26,6 +26,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Setup Bun for trusted preservation verifier
+        if: startsWith(github.head_ref, 'sync/')
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+
       - name: Check GitHub mergeability
         env:
           GH_TOKEN: ${{ github.token }}
