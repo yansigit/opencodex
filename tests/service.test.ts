@@ -3222,6 +3222,24 @@ describe("service serving confirmation", () => {
       });
       expect(seen).toEqual([18999]);
     });
+    test("passes TLS-aware scheme to injected probe", async () => {
+      let seenScheme: string | undefined;
+      const out = await confirmServiceServing({
+        port: 18999,
+        configFn: () => ({
+          hostname: "127.0.0.1",
+          tls: { certFile: "cert.pem", keyFile: "key.pem", publicOrigin: "https://localhost:18999" },
+        }),
+        probe: async (p, _h, scheme) => {
+          seenScheme = scheme;
+          return p === 18999;
+        },
+        sleep: async () => {},
+        now: () => 0,
+      });
+      expect(out).toEqual({ ok: true, port: 18999 });
+      expect(seenScheme).toBe("https");
+    });
   });
 
   /**

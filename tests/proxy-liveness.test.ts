@@ -70,14 +70,16 @@ describe("proxyIdentityAt", () => {
       attempts: 3,
       timeoutMs: 50,
       sleepFn: async (ms) => { sleeps.push(ms); },
-      fetchFn: (async () => {
+      fetchFn: (async (url: string | URL | Request) => {
         calls += 1;
-        if (calls < 3) throw new Error("timeout");
+        // Fallback per attempt means each failed attempt costs 2 fetches (primary + fallback).
+        // Succeed on the 3rd attempt's primary (5th total call).
+        if (calls < 5) throw new Error("timeout");
         return healthz(OURS);
       }) as typeof fetch,
     });
     expect(identity).toEqual({ pid: 4242, version: "2.6.17" });
-    expect(calls).toBe(3);
+    expect(calls).toBe(5);
     expect(sleeps).toEqual([100, 100]);
   });
 
@@ -123,7 +125,7 @@ describe("proxyIdentityAt", () => {
       }) as typeof fetch,
     });
     expect(identity).toBeNull();
-    // First attempt spends the budget; remaining retries must not fire.
+    // First attempt spends the budget — fallback must not fire when the aggregate deadline is already expired.
     expect(calls).toBe(1);
   });
 });
@@ -738,32 +740,85 @@ describe("probeReadiness adversarial contract (never counts ready)", () => {
 });
 
 describe("TLS fallback (https:// on TLS-only listener)", () => {
-  test("proxyIdentityAt falls back to https when http throws", async () => {
-    const orig = globalThis.fetch;
-    try {
-      globalThis.fetch = (async (url: string | URL | Request) => {
+  test("proxyIdentityAt falls back to https when http throws via fetchFn", async () => {
+    const identity = await proxyIdentityAt(10100, {}, {
+      fetchFn: (async (url: string | URL | Request) => {
         if (String(url).startsWith("https:")) return healthz(OURS);
-        throw new Error("unreachable");
-      }) as typeof fetch;
-      const identity = await proxyIdentityAt(10100, {}, { fetchFn: (async () => { throw new Error("http-only probe timed out"); }) as typeof fetch });
-      expect(identity).toEqual({ pid: 4242, version: "2.6.17" });
-    } finally {
-      globalThis.fetch = orig;
-    }
+        throw new Error("http-only probe timed out");
+      }) as typeof fetch,
+    });
+    expect(identity).toEqual({ pid: 4242, version: "2.6.17" });
   });
 
-  test("probeReadiness falls back to https when http throws", async () => {
-    const orig = globalThis.fetch;
-    try {
-      globalThis.fetch = (async (url: string | URL | Request) => {
+  test("proxyIdentityAt with explicit https scheme falls back to http on throw", async () => {
+    const identity = await proxyIdentityAt(10100, { scheme: "https" }, {
+      fetchFn: (async (url: string | URL | Request) => {
+        if (String(url).startsWith("http://")) return healthz(OURS);
+        throw new Error("https probe failed");
+      }) as typeof fetch,
+    });
+    expect(identity).toEqual({ pid: 4242, version: "2.6.17" });
+  });
+
+  test("proxyIdentityAt does not fallback on definitive foreign body", async () => {
+    let calls = 0;
+    const identity = await proxyIdentityAt(10100, {}, {
+      attempts: 3,
+      fetchFn: (async () => {
+        calls += 1;
+        return healthz({ ok: true });
+      }) as typeof fetch,
+    });
+    expect(identity).toBeNull();
+    expect(calls).toBe(1);
+  });
+
+  test("probeReadiness falls back to https when http throws via fetchFn", async () => {
+    const probe = await probeReadiness(10100, {}, {
+      fetchFn: (async (url: string | URL | Request) => {
         if (String(url).startsWith("https:")) return readyz(READY_BODY, 200);
-        throw new Error("unreachable");
-      }) as typeof fetch;
-      const probe = await probeReadiness(10100, {}, { fetchFn: (async () => { throw new Error("http-only probe timed out"); }) as typeof fetch });
-      expect(probe).toEqual({ ready: true, status: "ready", pid: 4242, port: 10100 });
-    } finally {
-      globalThis.fetch = orig;
-    }
+        throw new Error("http-only probe timed out");
+      }) as typeof fetch,
+    });
+    expect(probe).toEqual({ ready: true, status: "ready", pid: 4242, port: 10100 });
+  });
+
+  test("probeReadiness with explicit https scheme falls back to http", async () => {
+    const probe = await probeReadiness(10100, { scheme: "https" }, {
+      fetchFn: (async (url: string | URL | Request) => {
+        if (String(url).startsWith("http://")) return readyz(READY_BODY, 200);
+        throw new Error("https failed");
+      }) as typeof fetch,
+    });
+    expect(probe).toEqual({ ready: true, status: "ready", pid: 4242, port: 10100 });
+  });
+
+  test("findLiveProxy with config.tls probes https first", async () => {
+    const urls: string[] = [];
+    const live = await findLiveProxy({
+      readPidFn: () => null,
+      readRuntimeFn: () => null,
+      configFn: () => ({ port: 10100, tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } }),
+      fetchFn: (async (url: string | URL | Request) => {
+        urls.push(String(url));
+        return healthz(OURS);
+      }) as typeof fetch,
+    });
+    expect(live).not.toBeNull();
+    expect(urls[0]).toBe("https://127.0.0.1:10100/healthz");
+  });
+
+  test("findLiveProxy falls back to http when https throws and config.tls is set", async () => {
+    const live = await findLiveProxy({
+      readPidFn: () => null,
+      readRuntimeFn: () => null,
+      configFn: () => ({ port: 10100, tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } }),
+      fetchFn: (async (url: string | URL | Request) => {
+        if (String(url).startsWith("https:")) throw new Error("https failed");
+        return healthz(OURS);
+      }) as typeof fetch,
+    });
+    expect(live).not.toBeNull();
+    expect(live?.port).toBe(10100);
   });
 });
-

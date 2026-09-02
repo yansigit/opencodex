@@ -57,6 +57,7 @@ import { withWindowsServiceMutationLock } from "./lib/windows-service-mutation-l
 import { maybeShowStarPrompt } from "./cli/star-prompt";
 import { systemdProperty } from "./service-manager-probe";
 import { isTestHomeGuardArmed } from "./lib/test-home-guard";
+import type { OcxConfig } from "./types";
 
 const LABEL = "com.opencodex.proxy";
 const TASK = "opencodex-proxy";
@@ -688,20 +689,23 @@ export async function confirmServiceServing(
   deps: {
     port?: number;
     hostname?: string;
-    probe?: (port: number, hostname: string) => Promise<boolean>;
+    configFn?: () => Pick<OcxConfig, "hostname" | "tls">;
+    probe?: (port: number, hostname: string, scheme: "http" | "https") => Promise<boolean>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
     timeoutMs?: number;
   } = {},
 ): Promise<{ ok: true; port: number } | { ok: false; port: number }> {
+  const config = (deps.configFn ?? loadConfig)();
   const port = deps.port ?? installedServiceListenPort();
-  const hostname = deps.hostname ?? loadConfig().hostname ?? "127.0.0.1";
+  const hostname = deps.hostname ?? config.hostname ?? "127.0.0.1";
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
-  const probe = deps.probe ?? (async (p, h) => !!(await proxyIdentityAt(p, { hostname: h })));
+  const scheme: "http" | "https" = config.tls ? "https" : "http";
+  const probe = deps.probe ?? (async (p, h, s) => !!(await proxyIdentityAt(p, { hostname: h, scheme: s })));
   const deadline = now() + (deps.timeoutMs ?? SERVICE_INSTALL_HEALTH_MS);
   for (;;) {
-    if (await probe(port, hostname)) return { ok: true, port };
+    if (await probe(port, hostname, scheme)) return { ok: true, port };
     if (now() >= deadline) return { ok: false, port };
     await sleep(500);
   }
