@@ -53,7 +53,7 @@
     "prepublishOnly": "bun run audit:high && bun run typecheck && bun run build:gui",
     "release": "bun scripts/release.ts",
     "release:watch": "bun scripts/release.ts watch",
-    "prepush": "bun run check:hygiene && bun run typecheck && bun run lint:gui:if-changed && bun run test && bun run privacy:scan && bun run doctor:gui:if-changed",
+    "prepush": "bun run check:hygiene && bun run lint:workflows && bun run audit:high && bun run typecheck && bun run lint:gui:if-changed && bun run test && bun run privacy:scan && bun run doctor:gui:if-changed",
     "lint:gui": "cd gui && bun run lint",
     "lint:gui:if-changed": "bun scripts/lint-gui-if-changed.ts",
     "postmerge": "bun scripts/build-gui-if-changed.ts",
@@ -61,7 +61,8 @@
     "doctor:gui:full": "cd gui && bun run doctor:full",
     "doctor:gui:if-changed": "bun scripts/doctor-gui-if-changed.ts",
     "setup:hooks": "bun scripts/setup-hooks.ts",
-    "check:hygiene": "node scripts/check-hygiene.mjs"
+    "check:hygiene": "node scripts/check-hygiene.mjs",
+    "lint:workflows": "bun scripts/ci/actionlint.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.14.0",
@@ -80,7 +81,7 @@
   },
   "overrides": {
     "@hono/node-server": "2.1.0",
-    "fast-uri": "^3.1.5",
+    "fast-uri": "^3.1.7",
     "hono": "4.13.1",
     "ip-address": "^10.4.0"
   },

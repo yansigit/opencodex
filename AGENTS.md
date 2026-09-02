@@ -180,9 +180,19 @@ bun run check:hygiene  # local hygiene gate (same as CI hygiene/enforce-target)
 bun run test:container # macOS with Apple Container: isolated container suite
 bun scripts/test.ts --shard=1/4  # supported isolated manual shard
 bun run lint:gui       # GUI eslint
+bun run lint:workflows  # actionlint semantic validation for .github/workflows
+bun run audit:high      # high-severity audit (root + gui)
 bun run privacy:scan   # credential/privacy scan used by CI
 bun run build:gui      # Vite GUI build
 ```
+
+## CI hardening
+
+- Workflow edits (`.github/workflows/**`, actionlint config): run `bun run lint:workflows` and the matching workflow tests (e.g. `bun test tests/ci-workflows.test.ts`) plus `bun run prepush` for CI/release/dependency/packaging changes. Do not claim the workflow passed until GitHub Actions reports success for the exact commit.
+- Dependency or lock changes (`package.json`, `bun.lock`, `gui/package.json`, `gui/bun.lock`, overrides): run `bun run audit:high` (covers root and gui) and `bun run typecheck` plus relevant tests.
+- Reusable workflow calls (`uses: ./.github/workflows/*.yml` with `with:`): expressions in `with:` must not use `env` or `secrets` contexts. Use contexts GitHub permits there, such as `github`, `inputs`, `needs`, `strategy`, `matrix`, and `vars`. Caller `permissions:` must cover every callee job's needs.
+- Release workflows (`release.yml`, `dev-version-bump.yml`): must validate `workflow_dispatch.inputs` and `repository_dispatch.client_payload` shapes in a dedicated `validate-dispatch` job before use; never trust relayed env/secrets for version or SHA.
+- Upstream sync / promotion readiness: when workflow files changed, workflow lint must be clean; when dependency files changed, audit must be clean; exact-head/provenance checks (tag, base, published head) are required; `cancelled` or `skipped` runs are not evidence of green — only `success` counts.
 
 `skills/ocx/` is the operating reference for the CLI — what an agent reads to *drive* a running
 proxy, as opposed to [`AGENTS_INSTALL.md`](./AGENTS_INSTALL.md) (installing and operating consent)

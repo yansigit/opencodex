@@ -505,6 +505,12 @@ jobs:
           cd gui
           bun install --frozen-lockfile
 
+      - name: Dependency audit (high severity)
+        run: bun run audit:high
+
+      - name: Validate GitHub Actions workflows
+        run: bun run lint:workflows
+
       - name: GUI lint
         if: needs.changes.outputs.gui == 'true'
         run: |

@@ -1,0 +1,14 @@
+# actionlint configuration
+# shellcheck is disabled via -shellcheck= flag in scripts/ci/actionlint.ts
+# for deterministic local/CI behavior without external dependencies.
+self-hosted-runner:
+  labels: []
+# copilot-requests is a newer GitHub permission scope not yet in actionlint 1.7.12's allowlist.
+# Ignore until upstream adds it; tracked separately so lint stays deterministic.
+paths:
+  .github/workflows/enforce-issue-quality.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
+  .github/workflows/issue-triage.yml:
+    ignore:
+      - 'unknown permission scope "copilot-requests"'
