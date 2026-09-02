@@ -15,6 +15,12 @@ const SYNC_BRANCH_RE = /^sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64}$/i;
 const ACTIVE_JULES_STATES = new Set(["QUEUED", "IN_PROGRESS", "PLANNING", "AWAITING_PLAN_APPROVAL"]);
 const TERMINAL_JULES_STATES = new Set(["COMPLETED", "FAILED", "CANCELLED", "CANCELED"]);
 const REQUIRED_CHECKS = ["ci", "hygiene", "enforce-target", "mergeable"];
+const RETRYABLE_WORKFLOWS = new Map([
+  ["Cross-platform CI", ".github/workflows/ci.yml"],
+  ["React Doctor", ".github/workflows/react-doctor.yml"],
+  ["Service lifecycle", ".github/workflows/service-lifecycle.yml"],
+]);
+const RETRYABLE_CONCLUSIONS = new Set(["failure", "startup_failure", "timed_out"]);
 const KNOWN_CHECKS = new Set([
   ...REQUIRED_CHECKS,
   "react-doctor",
@@ -141,6 +147,35 @@ function classifyPullRequest(input = {}) {
     eligibleForUpdate: updateable,
     eligibleForMerge: false,
   };
+}
+
+function workflowRunRetryDisposition({ run, pr, repository } = {}) {
+  const repo = repositoryName(repository);
+  const runRepo = repositoryName(run?.repository);
+  const headRepo = repositoryName(run?.head_repository);
+  const expectedPath = RETRYABLE_WORKFLOWS.get(String(run?.name || ""));
+  const linkedPulls = Array.isArray(run?.pull_requests) ? run.pull_requests : [];
+  const promotion = pr?.base?.ref === "main" && pr?.head?.ref === "dev" &&
+    /^promote:/i.test(String(pr?.title || ""));
+  if (!expectedPath || run?.path !== expectedPath) return { action: "ignore", reason: "workflow-not-retryable" };
+  if (run?.event !== "pull_request" || run?.status !== "completed" ||
+      !RETRYABLE_CONCLUSIONS.has(String(run?.conclusion || ""))) {
+    return { action: "ignore", reason: "run-not-failed-pr" };
+  }
+  if (Number(run?.run_attempt) !== 1) return { action: "ignore", reason: "retry-already-used" };
+  if (!repo || runRepo !== repo || headRepo !== repo) return { action: "ignore", reason: "untrusted-repository" };
+  if (!Number.isSafeInteger(Number(run?.id)) || Number(run.id) <= 0 || !SHA_RE.test(String(run?.head_sha || ""))) {
+    return { action: "ignore", reason: "invalid-run-identity" };
+  }
+  if (linkedPulls.length > 1 || (linkedPulls.length === 1 && Number(linkedPulls[0]?.number) !== Number(pr?.number))) {
+    return { action: "ignore", reason: "pull-request-ambiguous" };
+  }
+  if (pr?.state !== "open" || pr?.draft || repositoryName(pr?.base?.repo) !== repo ||
+      repositoryName(pr?.head?.repo) !== repo || pr?.head?.sha !== run.head_sha) {
+    return { action: "ignore", reason: "pull-request-not-exact-head" };
+  }
+  if (pr.base?.ref !== "dev" && !promotion) return { action: "ignore", reason: "unsupported-target" };
+  return { action: "rerun", reason: `first-${run.conclusion}`, runId: Number(run.id), pullNumber: Number(pr.number) };
 }
 
 function filePathEntries(files = []) {
@@ -407,4 +442,5 @@ module.exports = {
   classifyPullRequest,
   exactHeadGate,
   summarizeAgedHolds,
+  workflowRunRetryDisposition,
 };

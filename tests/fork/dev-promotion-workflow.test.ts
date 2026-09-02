@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { decidePromotion } = require("../../.github/scripts/fork-promotion-decision.cjs") as {
+  decidePromotion(state: { changedFiles: string[]; basePackage: string; headPackage: string }): "promote" | "wait";
+};
 
 const workflowText = readFileSync(new URL("../../.github/workflows/promote-dev.yml", import.meta.url), "utf8");
 const workflow = Bun.YAML.parse(workflowText) as {
@@ -79,7 +85,32 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain('git diff --quiet HEAD "$fetched_dev_sha" --');
     expect(workflowSource).toContain("trees_differ=false");
     expect(workflowSource).toContain("trees_differ=true");
-    expect(workflowSource).toContain("if: steps.verify.outputs.trees_differ == 'true'");
+    expect(workflowSource).toContain("promotion_ready=false");
+    expect(workflowSource).toContain("if: steps.verify.outputs.promotion_ready == 'true'");
+  });
+
+  test("waits when the generated stable successor version is the only change", () => {
+    const basePackage = JSON.stringify({ name: "@yansigit/opencodex", version: "2.39.5", scripts: { test: "bun test" } });
+    const headPackage = JSON.stringify({ name: "@yansigit/opencodex", version: "2.39.6", scripts: { test: "bun test" } });
+
+    expect(decidePromotion({ changedFiles: ["package.json"], basePackage, headPackage })).toBe("wait");
+    expect(decidePromotion({ changedFiles: ["package.json", "src/index.ts"], basePackage, headPackage })).toBe("promote");
+    expect(decidePromotion({
+      changedFiles: ["package.json"],
+      basePackage,
+      headPackage: JSON.stringify({ name: "@yansigit/opencodex", version: "2.39.6", scripts: { test: "bun test --timeout 30000" } }),
+    })).toBe("promote");
+    expect(decidePromotion({
+      changedFiles: ["package.json"],
+      basePackage,
+      headPackage: JSON.stringify({ name: "@yansigit/opencodex", version: "2.40.0", scripts: { test: "bun test" } }),
+    })).toBe("promote");
+
+    expect(workflowSource).toContain(".github/scripts/fork-promotion-decision.cjs");
+    expect(workflowSource).toContain('git diff --name-only -z HEAD "$fetched_dev_sha"');
+    expect(workflowSource).toContain("Only the prepared successor version differs; waiting for release content");
+    expect(workflowSource).toContain("promotion_ready=$promotion_ready");
+    expect(workflowSource).toContain("if: steps.verify.outputs.promotion_ready == 'true'");
   });
 
   test("uses least privilege and an immutable trusted checkout", () => {
@@ -99,7 +130,7 @@ describe("dev promotion workflow contract", () => {
     const tokenUse = "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1";
 
     expect(promoteSteps.find((step) => step.id === "promotion-app-token")).toMatchObject({
-      if: "steps.verify.outputs.trees_differ == 'true' && steps.verify.outputs.main_ancestor == 'true'",
+      if: "steps.verify.outputs.promotion_ready == 'true' && steps.verify.outputs.main_ancestor == 'true'",
       uses: tokenUse,
       with: {
         "client-id": "${{ vars.PR_AUTOMATION_APP_ID }}",

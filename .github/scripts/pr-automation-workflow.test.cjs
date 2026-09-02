@@ -21,6 +21,7 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /push:\s*\n\s+branches:\s*\[dev\]/);
     assert.match(source, /pull_request_target:/);
     assert.match(source, /check_run:/);
+    assert.match(source, /workflow_run:\s*\n\s+workflows: \["Cross-platform CI", "React Doctor", "Service lifecycle"\]/);
     assert.match(source, /schedule:\s*\n\s+- cron: "\*\/15 \* \* \* \*"/);
     assert.match(source, /workflow_dispatch:/);
     assert.match(source, /state:\s*["']open["'][^\n]*base:\s*["']dev["']/);
@@ -70,6 +71,17 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /github\.token/);
     assert.match(source, /steps\.app-token\.outputs\.token/);
     assert.match(source, /shadow|off/);
+  });
+
+  it("reruns only failed jobs through the exact-head workflow-run guard", () => {
+    const source = workflow();
+    assert.match(source, /workflowRunRetryDisposition/);
+    assert.match(source, /actions\.getWorkflowRun/);
+    assert.match(source, /actions\.reRunWorkflowFailedJobs/);
+    assert.match(source, /!pr\.merged && pr\.head\?\.sha === run\.head_sha/);
+    assert.match(source, /context\.eventName !== "workflow_run"/);
+    assert.match(source, /\[409, 422\]/);
+    assert.doesNotMatch(source, /reRunWorkflow\s*\(/);
   });
 
   it("updates branches through the guarded GitHub API and handles stale-head races", () => {
