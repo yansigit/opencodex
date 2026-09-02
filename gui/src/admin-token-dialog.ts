@@ -34,13 +34,25 @@ export function promptForAdminToken(
     form.method = "post";
     form.action = window.location.href;
     form.autocomplete = "on";
+    form.style.display = "flex";
+    form.style.flexDirection = "column";
+    form.style.gap = "8px";
 
     const heading = document.createElement("div");
     heading.className = "modal-head";
+    heading.style.marginBottom = "4px";
     const title = document.createElement("h3");
     title.id = `${ADMIN_TOKEN_DIALOG_ID}-title`;
     title.textContent = titleText;
     heading.append(title);
+
+    const desc = document.createElement("p");
+    desc.className = "modal-desc";
+    desc.style.fontSize = "var(--text-label)";
+    desc.style.color = "var(--muted)";
+    desc.style.lineHeight = "var(--leading-body)";
+    desc.style.margin = "0 0 8px";
+    desc.textContent = messages["auth.adminTokenDesc"];
 
     const accountField = document.createElement("div");
     const accountLabel = document.createElement("label");
@@ -58,11 +70,15 @@ export function promptForAdminToken(
     accountField.append(accountLabel, username);
 
     const tokenField = document.createElement("div");
-    tokenField.style.marginTop = "var(--space-4)";
+    tokenField.style.marginTop = "4px";
     const tokenLabel = document.createElement("label");
     tokenLabel.className = "field-label";
     tokenLabel.htmlFor = `${ADMIN_TOKEN_DIALOG_ID}-password`;
     tokenLabel.textContent = messages["auth.adminTokenFieldLabel"];
+    const pwWrap = document.createElement("div");
+    pwWrap.style.position = "relative";
+    pwWrap.style.display = "flex";
+    pwWrap.style.alignItems = "center";
     const password = document.createElement("input");
     password.id = tokenLabel.htmlFor;
     password.className = "input";
@@ -72,7 +88,26 @@ export function promptForAdminToken(
     password.required = true;
     password.spellcheck = false;
     password.autocapitalize = "none";
-    tokenField.append(tokenLabel, password);
+    password.placeholder = messages["auth.adminTokenPlaceholder"];
+    password.style.paddingRight = "64px";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "btn btn-ghost";
+    toggle.textContent = messages["auth.adminTokenShow"];
+    toggle.style.position = "absolute";
+    toggle.style.right = "4px";
+    toggle.style.minHeight = "28px";
+    toggle.style.padding = "2px 10px";
+    toggle.style.fontSize = "var(--text-label)";
+    toggle.setAttribute("aria-label", messages["auth.adminTokenShow"]);
+    toggle.addEventListener("click", () => {
+      const show = password.type === "password";
+      password.type = show ? "text" : "password";
+      toggle.textContent = show ? messages["auth.adminTokenHide"] : messages["auth.adminTokenShow"];
+      toggle.setAttribute("aria-label", toggle.textContent);
+    });
+    pwWrap.append(password, toggle);
+    tokenField.append(tokenLabel, pwWrap);
 
     const validationError = document.createElement("div");
     validationError.className = "notice notice-err";
@@ -81,6 +116,7 @@ export function promptForAdminToken(
 
     const actions = document.createElement("div");
     actions.className = "modal-actions";
+    actions.style.marginTop = "8px";
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.className = "btn btn-ghost";
@@ -91,7 +127,7 @@ export function promptForAdminToken(
     submit.textContent = messages["common.ok"];
     actions.append(cancel, submit);
 
-    form.append(heading, accountField, tokenField, validationError, actions);
+    form.append(heading, desc, accountField, tokenField, validationError, actions);
     dialog.append(form);
 
     const finish = (value: string | null): void => {
@@ -114,6 +150,7 @@ export function promptForAdminToken(
       password.disabled = true;
       submit.disabled = true;
       validationError.hidden = true;
+      validationError.textContent = "";
 
       void verifyToken(token).then((result) => {
         if (settled) return;
@@ -127,7 +164,7 @@ export function promptForAdminToken(
         validationError.textContent = result === "rejected"
           ? messages["auth.adminTokenRejected"]
           : messages["auth.adminTokenUnavailable"];
-        validationError.hidden = false;
+        validationError.hidden = !validationError.textContent;
         password.focus();
       }).catch(() => {
         if (settled) return;
@@ -135,7 +172,7 @@ export function promptForAdminToken(
         password.disabled = false;
         submit.disabled = false;
         validationError.textContent = messages["auth.adminTokenUnavailable"];
-        validationError.hidden = false;
+        validationError.hidden = !validationError.textContent;
         password.focus();
       });
     });
