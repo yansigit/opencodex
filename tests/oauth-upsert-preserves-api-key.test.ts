@@ -12,6 +12,7 @@ import {
 } from "../src/providers/api-keys";
 import { routeModel } from "../src/router";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 /**
  * Regression: `upsertOAuthProvider` used to overwrite the provider entry with the bare preset
@@ -271,7 +272,7 @@ describe("upsertOAuthProvider credential preservation", () => {
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
-      rmSync(testHome, { recursive: true, force: true });
+      removeTreeWithRetry(testHome);
     }
   });
 
@@ -398,7 +399,7 @@ describe("upsertOAuthProvider credential preservation", () => {
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previousHome;
-      rmSync(testHome, { recursive: true, force: true });
+      removeTreeWithRetry(testHome);
     }
   });
 

@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getDefaultConfig, initializePersistedConfigIfMissing } from "../src/config";
+import { initializePersistedConfigIfMissing } from "../src/config";
 import { STORE_BUDGET_MS } from "./helpers/test-budget";
 import {
   CODEX_FAILURE_WINDOW_MS,
@@ -53,6 +53,7 @@ import { MAIN_CODEX_ACCOUNT_ID } from "../src/codex/main-account";
 import { routeModel } from "../src/router";
 import { consumeForInspection } from "../src/server/relay";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-codex-routing-test");
 let previousOpencodexHome: string | undefined;
@@ -90,7 +91,7 @@ function pendingInspectionStream(): ReadableStream<Uint8Array> {
 describe("codex routing", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
     // Isolate the main-account credential source: TEST_DIR has no auth.json, so the main
@@ -118,7 +119,7 @@ describe("codex routing", () => {
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   });
 
   test("usage score uses the hottest known quota window", () => {
@@ -178,10 +179,20 @@ describe("codex routing", () => {
     // clock far from wall time is the point: a fixture whose now matches Date.now() cannot
     // tell a threaded clock from one that was dropped somewhere in the helper chain.
     const now = 1_700_000_000_000;
-    const config = makeConfig({ activeCodexAccountId: "a" });
+    const config = makeConfig({
+      activeCodexAccountId: "a",
+      defaultProvider: "test",
+      providers: {
+        test: {
+          adapter: "openai-responses",
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "test-key",
+        },
+      },
+    });
     // Automatic quota moves persist by design. Seed the fixture through the same
     // fail-closed initialization boundary production uses instead of weakening it.
-    expect(initializePersistedConfigIfMissing({ ...getDefaultConfig(), ...config })).toBe("created");
+    expect(initializePersistedConfigIfMissing(config)).toBe("created");
 
     // A is full for the next hour, recorded in SECONDS. B has ordinary headroom.
     setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: (now + 3_600_000) / 1000 });
@@ -1977,7 +1988,7 @@ describe("codex routing", () => {
 describe("codex account selection order", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
     previousCodexHome = process.env.CODEX_HOME;
@@ -2003,7 +2014,7 @@ describe("codex account selection order", () => {
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   });
 
   /** `a` is ordered above `b`; the persisted operator selection is the lower tier. */

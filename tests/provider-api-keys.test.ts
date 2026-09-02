@@ -16,6 +16,7 @@ import {
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let testDir = "";
 let previousHome: string | undefined;
@@ -45,7 +46,7 @@ afterEach(() => {
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
   isolatedCodexHome = null;
-  if (testDir) rmSync(testDir, { recursive: true, force: true });
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 describe("provider API key pool", () => {

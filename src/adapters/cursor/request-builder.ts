@@ -186,7 +186,11 @@ function catalogLimitNote(kept: readonly OcxTool[], omitted: readonly OcxTool[])
  * instead: current Cursor clients send the matching Grok base id plus `effort` and `fast` parameters.
  * A fully-qualified id (one that is not a known effort base) passes through unchanged.
  */
-function normalizeCursorModelId(modelId: string, reasoning?: string): {
+export function cursorFastRequested(parsed: OcxParsedRequest): boolean {
+  return parsed.options.tierDecision?.kind === "set";
+}
+
+function normalizeCursorModelId(modelId: string, reasoning?: string, fast?: boolean): {
   modelId: string;
   requestedModelParameters?: readonly CursorRequestedModelParameter[];
   routingLevel?: CursorRoutingLevel;
@@ -201,7 +205,7 @@ function normalizeCursorModelId(modelId: string, reasoning?: string): {
   const id = selection.modelId;
   // Grok Fast stays parameterized: current Cursor clients send the base id
   // plus effort/fast parameters instead of the flattened -fast id.
-  const grokFast = cursorGrokFastSelection(id, reasoning);
+  const grokFast = cursorGrokFastSelection(id, reasoning, fast);
   if (grokFast) {
     return {
       ...selection,
@@ -212,6 +216,9 @@ function normalizeCursorModelId(modelId: string, reasoning?: string): {
       ],
     };
   }
+  // Composer 2.5 requires an explicit standard-lane marker. Omitting this field is
+  // not equivalent to false on Cursor's wire contract, and the generic fast-option
+  // refactor must not silently move Composer conversations onto a fast variant.
   if (id === "composer-2.5") {
     return {
       ...selection,
@@ -219,12 +226,20 @@ function normalizeCursorModelId(modelId: string, reasoning?: string): {
       requestedModelParameters: [{ id: "fast", value: "false" }],
     };
   }
-  const resolved = resolveCursorSelection(id, reasoning);
+  const resolved = resolveCursorSelection(id, reasoning, undefined, { fast });
   return {
     ...selection,
     ...(resolved.maxMode ? { maxMode: true } : {}),
     modelId: resolved.wireId,
   };
+}
+
+/** Whether the resolved Cursor wire selection explicitly requests a fast variant. */
+export function cursorRequestEmitsFastVariant(parsed: OcxParsedRequest): boolean {
+  if (!cursorFastRequested(parsed)) return false;
+  const model = normalizeCursorModelId(parsed.modelId, parsed.options.reasoning, true);
+  return model.modelId.endsWith("-fast")
+    || (model.requestedModelParameters ?? []).some(parameter => parameter.id === "fast" && parameter.value === "true");
 }
 
 function contentPartToText(part: OcxContentPart | OcxAssistantContentPart): string | undefined {
@@ -462,7 +477,7 @@ export function createCursorRequest(
   const visibleTools = cursorToolsForActivePrompt(parsed.context.tools, activeText, parsed.options.toolChoice);
   const budget = applyCursorToolBudget(visibleTools, parsed.options.toolChoice);
   const limitNote = catalogLimitNote(budget.tools, budget.omitted);
-  const model = normalizeCursorModelId(parsed.modelId, parsed.options.reasoning);
+  const model = normalizeCursorModelId(parsed.modelId, parsed.options.reasoning, cursorFastRequested(parsed));
   const request: CursorRunRequest = {
     modelId: model.modelId,
     ...(model.requestedModelParameters ? { requestedModelParameters: model.requestedModelParameters } : {}),

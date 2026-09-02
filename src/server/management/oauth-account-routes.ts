@@ -13,6 +13,7 @@ import {
   readConfigDiagnostics,
   reconcileLiveConfigFromDisk,
 } from "../../config";
+import { isAzureIdentityProvider } from "../../config/provider-validation";
 import {
   clearLoginState,
   getLoginStatus,
@@ -38,6 +39,7 @@ import {
   parseAccountPoolStickyLimit,
   parseAccountPoolStrategy,
 } from "../../codex/pool-rotation";
+import { normalizeAccountPoolQuotaWindow, parseAccountPoolQuotaWindow } from "../../oauth/anthropic-routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { DEFAULT_PROVIDER_CONTEXT_CAP, globalContextCapValue, providerContextCap, providerContextCaps, setAllProviderContextCaps, setGlobalContextCapValue, setProviderContextCap } from "../../providers/context-cap";
 import { resolveCodexHomeDir } from "../../codex/home";
@@ -63,7 +65,12 @@ import type { PersistedUsageAttempt } from "../../usage/log";
 import { AUTH_MATRIX, isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { applySystemEnvToggle } from "../system-env";
 import { buildApiAccessEndpoints } from "./api-access";
-import { isAzureIdentityProvider } from "../../config/provider-validation";
+import {
+  abortApiKeyRotation,
+  commitApiKeyRotation,
+  removeExpiredApiKeyRotations,
+  startApiKeyRotation,
+} from "./api-key-rotation";
 import { apiKeyPoolEntryId } from "../../providers/api-keys";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
@@ -116,9 +123,7 @@ function mutateProviderKey<T>(
 ): { ok: true; value: T } | { ok: false; error: string; status: number } {
   const outcome = mutateManagementConfig(deps, fresh => {
     const provider = fresh.providers[name];
-    if (!provider || !providerUsesKeyAuth(provider)) {
-      return { changed: false, value: null };
-    }
+    if (!provider || !providerUsesKeyAuth(provider)) return { changed: false, value: null };
     const before = JSON.stringify(provider);
     const value = mutate(provider);
     return {
@@ -127,11 +132,25 @@ function mutateProviderKey<T>(
     };
   });
   if (outcome.status === "unavailable") {
-    return { ok: false, error: outcome.reason === "conflict" ? "config changed; retry" : `config is ${outcome.reason}`, status: outcome.reason === "conflict" ? 409 : 500 };
+    return {
+      ok: false,
+      error: outcome.reason === "conflict" ? "config changed; retry" : `config is ${outcome.reason}`,
+      status: outcome.reason === "conflict" ? 409 : 500,
+    };
   }
   if (outcome.value === null) return { ok: false, error: "key not found", status: 404 };
   config.providers[name] = outcome.value.provider;
   return { ok: true, value: outcome.value.value };
+}
+
+type KeychainMutationResult =
+  | { ok: true; moved: number }
+  | { ok: true; restored: number }
+  | { ok: false; error: string; status: number };
+
+interface KeychainMutationValue {
+  result: KeychainMutationResult;
+  provider?: OcxProviderConfig;
 }
 
 /**
@@ -358,29 +377,29 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     return jsonResponse({ ok: true, provider, activeAccountId: body.accountId });
   }
 
-  // Opt-in OAuth account pool settings (Anthropic + Cursor).
+  // Opt-in Anthropic OAuth account pool (#294): enable/threshold/strategy + clear cooldown.
   if (url.pathname === "/api/oauth/accounts/pool" && req.method === "GET") {
     const provider = (url.searchParams.get("provider") ?? "").trim().toLowerCase();
-    if (provider === "anthropic") {
-      const pool = config.anthropicAccountPool ?? {};
-      return jsonResponse({
-        provider,
-        enabled: pool.enabled === true,
-        autoSwitchThreshold: typeof pool.autoSwitchThreshold === "number" ? pool.autoSwitchThreshold : 80,
-        strategy: normalizeAccountPoolStrategy(pool.strategy),
-        stickyLimit: normalizeAccountPoolStickyLimit(pool.stickyLimit),
-        experimental: true,
-      });
+    if (provider !== "anthropic") {
+      // Generic OAuth pool-settings contract (#695 slice 1): persisted per provider, inert until
+      // the selector consumes it. Codex keeps /api/codex-auth; api-key providers have no pool.
+      const { poolSettingsCapability, genericPoolSettingsDto } = await import("../../oauth/pool-settings-capability");
+      const prov = config.providers[provider];
+      if (!provider || !prov || poolSettingsCapability(provider, prov) !== "generic") {
+        return jsonResponse({ error: "pool config is only supported for anthropic and generic OAuth providers" }, 400);
+      }
+      return jsonResponse(genericPoolSettingsDto(provider, prov));
     }
-    if (provider === "cursor") {
-      const pool = config.cursorAccountPool ?? {};
-      return jsonResponse({
-        provider,
-        enabled: pool.enabled === true,
-        experimental: true,
-      });
-    }
-    return jsonResponse({ error: "pool config is only supported for anthropic or cursor" }, 400);
+    const pool = config.anthropicAccountPool ?? {};
+    return jsonResponse({
+      provider,
+      enabled: pool.enabled === true,
+      autoSwitchThreshold: typeof pool.autoSwitchThreshold === "number" ? pool.autoSwitchThreshold : 80,
+      strategy: normalizeAccountPoolStrategy(pool.strategy),
+      stickyLimit: normalizeAccountPoolStickyLimit(pool.stickyLimit),
+      quotaWindow: normalizeAccountPoolQuotaWindow(pool.quotaWindow),
+      experimental: true,
+    });
   }
   if (url.pathname === "/api/oauth/accounts/pool" && (req.method === "PUT" || req.method === "PATCH")) {
     const parsedBody = await readManagementJsonBodyOr(req, {});
@@ -393,33 +412,59 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       autoSwitchThreshold?: unknown;
       strategy?: unknown;
       stickyLimit?: unknown;
+      quotaWindow?: unknown;
     };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
-    if (provider !== "anthropic" && provider !== "cursor") {
-      return jsonResponse({ error: "pool config is only supported for anthropic or cursor" }, 400);
-    }
-    if (provider === "cursor") {
-      if (
-        body.autoSwitchThreshold !== undefined
-        || body.strategy !== undefined
-        || body.stickyLimit !== undefined
-      ) {
-        return jsonResponse({ error: "cursor pool only supports enabled" }, 400);
+    if (provider !== "anthropic") {
+      const {
+        poolSettingsCapability, genericPoolSettingsDto, parseGenericPoolStrategy, parseGenericAutoSwitchThreshold,
+      } = await import("../../oauth/pool-settings-capability");
+      const prov = config.providers[provider];
+      if (!provider || !prov || poolSettingsCapability(provider, prov) !== "generic") {
+        return jsonResponse({ error: "pool config is only supported for anthropic and generic OAuth providers" }, 400);
       }
-      let enabled = config.cursorAccountPool?.enabled === true;
+      if (body.stickyLimit !== undefined || body.quotaWindow !== undefined) {
+        return jsonResponse({ error: "stickyLimit and quotaWindow are not part of the generic pool contract yet" }, 400);
+      }
+      const next = { ...(prov.oauthAccountFailover ?? {}) };
       if (body.enabled !== undefined) {
         if (typeof body.enabled !== "boolean") return jsonResponse({ error: "enabled must be a boolean" }, 400);
-        enabled = body.enabled;
+        next.enabled = body.enabled;
       }
-      config.cursorAccountPool = { enabled };
-      saveManagementConfig(deps, config);
-      reconcileLiveStateStores();
-      return jsonResponse({
-        ok: true,
-        provider,
-        enabled,
-        experimental: true,
+      if (body.strategy !== undefined) {
+        if (body.strategy === null) delete next.strategy;
+        else {
+          const parsed = parseGenericPoolStrategy(body.strategy);
+          if (parsed === null) return jsonResponse({ error: "strategy must be one of: quota, round-robin, fill-first" }, 400);
+          next.strategy = parsed;
+        }
+      }
+      if (body.autoSwitchThreshold !== undefined) {
+        if (body.autoSwitchThreshold === null) delete next.autoSwitchThreshold;
+        else {
+          const parsed = parseGenericAutoSwitchThreshold(body.autoSwitchThreshold);
+          if (parsed === null) return jsonResponse({ error: "autoSwitchThreshold must be an integer 0-100" }, 400);
+          next.autoSwitchThreshold = parsed;
+        }
+      }
+      if (Object.keys(next).length > 0) prov.oauthAccountFailover = next;
+      else delete prov.oauthAccountFailover;
+      // Use guarded mutation so a stale disk edit does not erase the failover while
+      // still persisting through the claudeCode-preserving path.
+      const genericOutcome = mutateManagementConfig<{ provider: OcxProviderConfig } | { error: string }>(deps, fresh => {
+        const target = fresh.providers[provider];
+        if (!target) return { changed: false, value: { error: "provider not found" } };
+        if (Object.keys(next).length > 0) target.oauthAccountFailover = { ...next };
+        else delete target.oauthAccountFailover;
+        return { changed: true, value: { provider: target } };
       });
+      if (genericOutcome.status === "unavailable") {
+        return jsonResponse({ error: "config changed while applying this update; retry" }, 409);
+      }
+      // Mirror into live config for the immediate response.
+      if (Object.keys(next).length > 0) prov.oauthAccountFailover = { ...next };
+      else delete prov.oauthAccountFailover;
+      return jsonResponse({ ok: true, ...genericPoolSettingsDto(provider, prov) });
     }
     let enabled = config.anthropicAccountPool?.enabled === true;
     if (body.enabled !== undefined) {
@@ -454,11 +499,20 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       }
       stickyLimit = parsed;
     }
+    let quotaWindow = config.anthropicAccountPool?.quotaWindow;
+    if (body.quotaWindow !== undefined) {
+      const parsed = parseAccountPoolQuotaWindow(body.quotaWindow);
+      if (parsed === null) {
+        return jsonResponse({ error: "quotaWindow must be one of: five-hour, weekly, max-utilization" }, 400);
+      }
+      quotaWindow = parsed;
+    }
     config.anthropicAccountPool = {
       enabled,
       autoSwitchThreshold: threshold,
       ...(strategy !== undefined ? { strategy } : {}),
       ...(stickyLimit !== undefined ? { stickyLimit } : {}),
+      ...(quotaWindow !== undefined ? { quotaWindow } : {}),
     };
     saveManagementConfig(deps, config);
     reconcileLiveStateStores();
@@ -469,6 +523,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       autoSwitchThreshold: threshold,
       strategy: normalizeAccountPoolStrategy(strategy),
       stickyLimit: normalizeAccountPoolStickyLimit(stickyLimit),
+      quotaWindow: normalizeAccountPoolQuotaWindow(quotaWindow),
       experimental: true,
     });
   }
@@ -476,21 +531,23 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const body = await readManagementJsonBodyOr(req, {}) as { provider?: unknown; accountId?: unknown };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
     const accountId = typeof body.accountId === "string" ? body.accountId.trim() : "";
-    const supported = provider === "anthropic" || provider === "google-antigravity" || provider === "cursor" || provider === "command-code";
-    if (!supported) return jsonResponse({ error: "clear-cooldown is not supported for this provider" }, 400);
     if (!accountId) return jsonResponse({ error: "missing accountId" }, 400);
-    let cleared = false;
     if (provider === "anthropic") {
       const { clearAnthropicAccountCooldown } = await import("../../oauth/anthropic-routing");
-      cleared = clearAnthropicAccountCooldown(accountId);
-    } else if (provider === "google-antigravity") {
-      const { clearAntigravityAccountCooldown } = await import("../../oauth/antigravity-routing");
-      cleared = clearAntigravityAccountCooldown(accountId);
-    } else if (provider === "cursor" || provider === "command-code") {
-      const { clearPoolAccountCooldown } = await import("../../routing/account-pool");
-      cleared = clearPoolAccountCooldown(provider, accountId);
+      const cleared = clearAnthropicAccountCooldown(accountId);
+      return jsonResponse({ ok: true, cleared });
     }
-    return jsonResponse({ ok: true, cleared });
+    if (provider === "google-antigravity") {
+      const { clearAntigravityAccountCooldown } = await import("../../oauth/antigravity-routing");
+      const cleared = clearAntigravityAccountCooldown(accountId);
+      return jsonResponse({ ok: true, cleared });
+    }
+    if (provider === "cursor" || provider === "command-code") {
+      const { clearPoolAccountCooldown } = await import("../../routing/account-pool/cooldown");
+      const cleared = clearPoolAccountCooldown(provider, accountId);
+      return jsonResponse({ ok: true, cleared });
+    }
+    return jsonResponse({ error: "clear-cooldown is only supported for anthropic, google-antigravity, cursor, and command-code" }, 400);
   }
 
   if (url.pathname === "/api/oauth/accounts/import" && req.method === "POST") {
@@ -569,11 +626,6 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       clearAnthropicAccountCooldown(id);
       clearAnthropicSessionAffinityForAccount(id);
     }
-    if (provider === "google-antigravity") {
-      const { clearAntigravityAccountCooldown, clearAntigravitySessionAffinityForAccount } = await import("../../oauth/antigravity-routing");
-      clearAntigravityAccountCooldown(id);
-      clearAntigravitySessionAffinityForAccount(id);
-    }
     if (!getAccountSet(provider)) clearLoginState(provider);
     const { clearModelCache } = await import("../../codex/model-cache");
     const { clearGatherRoutedModelsInflight } = await import("../../codex/catalog");
@@ -591,7 +643,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   if (url.pathname === "/api/providers/keys" && req.method === "GET") {
     const name = (url.searchParams.get("name") ?? "").trim();
     if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
-    if (isAzureIdentityProvider(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
+    if (!providerUsesKeyAuth(config.providers[name]!)) return jsonResponse({ error: "provider does not use API-key auth" }, 400);
     const { listProviderApiKeys } = await import("../../providers/api-keys");
     return jsonResponse(listProviderApiKeys(config, name));
   }
@@ -627,6 +679,55 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
     const { clearKeyCooldowns } = await import("../../providers/key-failover");
     clearKeyCooldowns(name); // manual key management resets 429 cooldown state
     return jsonResponse({ ok: true, id: result.value.id }, 201);
+  }
+  // Opt-in OS keychain storage (#1221): move the active key and pool into the OS credential
+  // store (config keeps references), or restore plaintext. Store verifies the keychain before
+  // touching config so an unavailable store refuses instead of half-migrating.
+  if (url.pathname === "/api/providers/keychain" && req.method === "GET") {
+    const name = (url.searchParams.get("name") ?? "").trim();
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    const { probeProviderKeychain, providerKeyStoreKind } = await import("../../providers/key-store");
+    const probe = probeProviderKeychain();
+    return jsonResponse({
+      name,
+      store: providerKeyStoreKind(config.providers[name]),
+      keychainAvailable: probe.available,
+      ...(probe.available ? {} : { keychainUnavailableReason: probe.reason }),
+    });
+  }
+  if (url.pathname === "/api/providers/keychain" && req.method === "POST") {
+    const body = await readManagementJsonBodyOr(req, {}) as { name?: unknown; action?: unknown };
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name || !isValidProviderName(name) || !hasOwnProvider(config.providers, name)) return jsonResponse({ error: "unknown provider" }, 404);
+    if (body.action !== "store" && body.action !== "restore") return jsonResponse({ error: "action must be store or restore" }, 400);
+    const {
+      deleteProviderKeychainReferences,
+      storeProviderKeyInKeychain,
+      restoreProviderKeyFromKeychain,
+      providerKeyStoreKind,
+    } = await import("../../providers/key-store");
+    const referencesToDelete = body.action === "restore"
+      ? [config.providers[name]!.apiKey, ...(config.providers[name]!.apiKeyPool ?? []).map(entry => entry.key)]
+          .filter((value): value is string => typeof value === "string" && value.startsWith("keychain:"))
+      : [];
+    const outcome = mutateManagementConfig<KeychainMutationValue>(deps, fresh => {
+      const result = body.action === "store"
+        ? storeProviderKeyInKeychain(fresh, name)
+        : restoreProviderKeyFromKeychain(fresh, name, { deleteAfter: false });
+      return result.ok
+        ? { changed: true, value: { result, provider: structuredClone(fresh.providers[name]!) } satisfies KeychainMutationValue }
+        : { changed: false, value: { result } };
+    });
+    if (outcome.status === "unavailable") {
+      return jsonResponse({ error: outcome.reason === "conflict" ? "config changed; retry" : `config is ${outcome.reason}` }, outcome.reason === "conflict" ? 409 : 500);
+    }
+    const result = outcome.value.result;
+    if (!result.ok) return jsonResponse({ error: result.error }, result.status);
+    if (outcome.value.provider) config.providers[name] = outcome.value.provider;
+    if (body.action === "restore") deleteProviderKeychainReferences(referencesToDelete);
+    const { clearProviderQuotaCache } = await import("../../providers/quota");
+    clearProviderQuotaCache();
+    return jsonResponse({ ...result, name, store: providerKeyStoreKind(config.providers[name]) });
   }
   if (url.pathname === "/api/providers/keys/active" && req.method === "PUT") {
     const body = await readManagementJsonBodyOr(req, {}) as { name?: string; id?: string };
@@ -703,6 +804,10 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   // API Keys management
   // ---------------------------------------------------------------------------
   if (url.pathname === "/api/keys" && req.method === "GET") {
+    if (removeExpiredApiKeyRotations(config)) {
+      saveManagementConfig(deps, config);
+      reconcileLiveStateStores();
+    }
     const keys = config.apiKeys ?? [];
     const endpoints = buildApiAccessEndpoints(config, {
       requestUrl: req.url,
@@ -720,6 +825,11 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
         name: k.name,
         prefix: k.key.slice(0, 17) + "...",
         createdAt: k.createdAt,
+        ...(k.pendingRotation ? { pendingRotation: {
+          id: k.pendingRotation.id,
+          createdAt: k.pendingRotation.createdAt,
+          expiresAt: k.pendingRotation.expiresAt,
+        } } : {}),
         usage: rollup.get(k.id) ?? { requests7d: 0, totalRequests: 0 },
       })),
       // Dataset-level and singular: it describes the usage log, not any one key.
@@ -728,6 +838,50 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       authMatrix: AUTH_MATRIX,
       ...endpoints,
     }, 200, req, config);
+  }
+
+  if (url.pathname === "/api/keys/rotate" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    if (!body || Object.keys(body).length !== 1 || typeof body.id !== "string" || !body.id) {
+      return jsonResponse({ error: "invalid body" }, 400, req, config);
+    }
+    const result = startApiKeyRotation(config, body.id);
+    if ("error" in result) {
+      return jsonResponse({ error: result.error === "not-found" ? "key not found" : "rotation already pending" }, result.error === "not-found" ? 404 : 409, req, config);
+    }
+    saveManagementConfig(deps, config);
+    reconcileLiveStateStores();
+    return jsonResponse(result, 201, req, config);
+  }
+
+  if (url.pathname === "/api/keys/rotate/commit" && req.method === "POST") {
+    const body = await readJsonBody(req);
+    if (!body || Object.keys(body).length !== 2 || typeof body.id !== "string" || !body.id
+      || typeof body.rotationId !== "string" || !body.rotationId) {
+      return jsonResponse({ error: "invalid body" }, 400, req, config);
+    }
+    const result = commitApiKeyRotation(config, body.id, body.rotationId);
+    if ("error" in result) {
+      if (result.error === "expired") saveManagementConfig(deps, config);
+      return jsonResponse({ error: result.error === "not-found" ? "key rotation not found" : `rotation ${result.error}` }, result.error === "not-found" ? 404 : 409, req, config);
+    }
+    saveManagementConfig(deps, config);
+    reconcileLiveStateStores();
+    return jsonResponse({ ok: true }, 200, req, config);
+  }
+
+  if (url.pathname === "/api/keys/rotate" && req.method === "DELETE") {
+    const body = await readJsonBody(req);
+    if (!body || Object.keys(body).length !== 2 || typeof body.id !== "string" || !body.id
+      || typeof body.rotationId !== "string" || !body.rotationId) {
+      return jsonResponse({ error: "invalid body" }, 400, req, config);
+    }
+    if (!abortApiKeyRotation(config, body.id, body.rotationId)) {
+      return jsonResponse({ error: "key rotation not found or mismatched" }, 409, req, config);
+    }
+    saveManagementConfig(deps, config);
+    reconcileLiveStateStores();
+    return jsonResponse({ ok: true }, 200, req, config);
   }
 
   if (url.pathname === "/api/keys" && req.method === "POST") {

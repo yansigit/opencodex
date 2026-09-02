@@ -3,12 +3,13 @@
  * Invalid chain entries must 400 without mutating the previous config.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
 import { inMemoryManagementPersistence } from "./helpers/management-auth";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const savedHome = process.env.OPENCODEX_HOME;
 let tempHome: string | null = null;
@@ -17,7 +18,7 @@ afterEach(() => {
   if (savedHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = savedHome;
   if (tempHome) {
-    rmSync(tempHome, { recursive: true, force: true });
+    removeTreeWithRetry(tempHome);
     tempHome = null;
   }
 });

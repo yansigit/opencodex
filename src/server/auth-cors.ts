@@ -13,8 +13,11 @@ import {
 import {
   apiKeyTransportConfigError,
   azureCredentialConfigError,
+  modelDisplayNamesConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
+  providerEmptyToolOutputConfigError,
+  wsUpstreamConfigError,
   maxWsFrameBytesConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
@@ -23,22 +26,19 @@ import {
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   upstreamHttpVersionConfigError,
-  wsUpstreamConfigError,
-  isAzureIdentityProvider,
-  providerEmptyToolOutputConfigError,
 } from "../config/provider-validation";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { redactSecretString } from "../lib/redact";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../providers/registry";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 import { providerConfigSeed } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { openRouterRoutingConfigError } from "../providers/openrouter-routing";
-import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-routing";
 import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compact-budget";
+import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-routing";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
-import { antigravityOAuthDestinationConfigError, getProviderTlsProfileStatus, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
-import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -129,7 +129,29 @@ export function managementRequestOrigin(req: Request, config: OcxConfig): string
   const host = req.headers.get("Host");
   const parsedHost = parseHttpHost(host);
   if (!host || !parsedHost) return null;
-  if (!isApiAuthRequired(config) && !isLoopbackHostname(parsedHost.hostname)) return null;
+  if (isLoopbackHostname(parsedHost.hostname)) {
+    try {
+      const protocol = new URL(req.url).protocol;
+      if (protocol !== "http:" && protocol !== "https:") return null;
+      return new URL(`${protocol}//${host}`).origin;
+    } catch {
+      return null;
+    }
+  }
+  if (!isApiAuthRequired(config)) return null;
+  if (config.runtimeRole === "hub" && config.hub?.managementPublicOrigin) {
+    try {
+      const configured = new URL(config.hub.managementPublicOrigin);
+      if (
+        (configured.protocol === "http:" || configured.protocol === "https:")
+        && !configured.username
+        && !configured.password
+        && configured.pathname === "/"
+        && !configured.search
+        && !configured.hash
+      ) return configured.origin;
+    } catch { /* malformed direct fixture: fall through to observed origin */ }
+  }
   try {
     const protocol = new URL(req.url).protocol;
     if (protocol !== "http:" && protocol !== "https:") return null;
@@ -208,6 +230,7 @@ export function corsHeaders(req?: Request, config?: RequestPolicyView): Record<s
 
 export function managementCorsHeaders(req?: Request, config?: OcxConfig): Record<string, string> {
   const headers = corsHeaders();
+  headers["Access-Control-Allow-Headers"] = `${STATIC_ALLOWED_REQUEST_HEADERS}, X-OpenCodex-GUI-Origin, X-OpenCodex-CSRF-Token`;
   const origin = req?.headers.get("Origin");
   if (origin && req && config && isAllowedManagementOrigin(req, config)) {
     headers["Access-Control-Allow-Origin"] = origin;
@@ -368,6 +391,10 @@ export function resolveDataPlaneAdmissionSecret(
   if (secretEquals(actual, configuredApiAuthToken(config))) return { kind: "environment", source };
   for (const k of config.apiKeys ?? []) {
     if (secretEquals(actual, k.key)) return { kind: "configured", keyId: k.id, source };
+    const pending = k.pendingRotation;
+    if (pending && Date.parse(pending.expiresAt) > Date.now() && secretEquals(actual, pending.key)) {
+      return { kind: "configured", keyId: k.id, source };
+    }
   }
   return null;
 }
@@ -422,6 +449,10 @@ export const AUTH_MATRIX: readonly ApiAuthMatrixRow[] = [
   { endpoint: "/v1/chat/completions", bearer: "accepted", dedicated: "accepted", xApiKey: "rejected" },
   { endpoint: "/v1/messages", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
   { endpoint: "/v1/models", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
+  // #809: least-privilege catalog read for remote Codex clients. Same admission set as
+  // /v1/models and for the same reason — it forwards no caller credential upstream — so a
+  // remote client no longer needs an admin token just to read the model catalog.
+  { endpoint: "/v1/catalog", bearer: "accepted", dedicated: "accepted", xApiKey: "accepted" },
 ];
 
 /** Whether `token` is the environment-provided management secret. */
@@ -595,6 +626,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     delete canonicalCandidate.modelContextWindows;
     // User-owned soft compaction policy; it does not alter the canonical transport seed.
     delete canonicalCandidate.modelAutoCompactTokenLimits;
+    // Same category: annotating empty tool outputs is a user-owned request-shaping preference,
+    // not part of the canonical transport seed. Without this the field is accepted by
+    // validation and then rejected by the seed comparison, so canonical OpenAI could never
+    // set OR clear it — the value was admitted and then refused in the same request.
     delete canonicalCandidate.annotateEmptyToolOutputs;
     // Transport controls are user-owned overlays, not part of the immutable seed.
     delete canonicalCandidate.wsUpstream;
@@ -629,9 +664,6 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // it before it reaches the management API response.
     return `provider ${JSON.stringify(redactSecretString(name))} ${retryOn429Error}`;
   }
-  if (raw.replayTransientFailures !== undefined && typeof raw.replayTransientFailures !== "boolean") {
-    return `provider ${JSON.stringify(redactSecretString(name))} replayTransientFailures must be a boolean`;
-  }
   const requestPacingError = requestPacingConfigError(raw.requestPacing);
   if (requestPacingError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${requestPacingError}`;
@@ -644,6 +676,11 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (wsUpstreamError) return `provider ${name} ${wsUpstreamError}`;
   const maxWsFrameBytesError = maxWsFrameBytesConfigError(raw.maxWsFrameBytes);
   if (maxWsFrameBytesError) return `provider ${name} ${maxWsFrameBytesError}`;
+  const displayNamesError = modelDisplayNamesConfigError(raw.modelDisplayNames);
+  if (displayNamesError) return `provider ${name} ${displayNamesError}`;
+  if (raw.replayTransientFailures !== undefined && typeof raw.replayTransientFailures !== "boolean") {
+    return `provider ${JSON.stringify(redactSecretString(name))} replayTransientFailures must be a boolean`;
+  }
   const emptyToolOutputError = providerEmptyToolOutputConfigError(name, raw);
   if (emptyToolOutputError) return emptyToolOutputError;
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
@@ -696,6 +733,13 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     "noStructuredOutputModels",
   );
   if (structuredOutputOptOutError) return `provider ${name} ${structuredOutputOptOutError}`;
+  const retainModelsError = nonBlankStringArrayConfigError(raw.retainModels, "retainModels");
+  if (retainModelsError) return `provider ${name} ${retainModelsError}`;
+  const toolReasoningOptOutError = nonBlankStringArrayConfigError(
+    raw.omitReasoningEffortWithToolsModels,
+    "omitReasoningEffortWithToolsModels",
+  );
+  if (toolReasoningOptOutError) return `provider ${name} ${toolReasoningOptOutError}`;
   const openRouterError = openRouterRoutingConfigError(typed);
   if (openRouterError) return `provider ${name} ${openRouterError}`;
   const vercelError = vercelGatewayRoutingConfigError(typed);
@@ -752,8 +796,8 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       adapter: provider.adapter,
       baseUrl: publicProviderBaseUrl(provider.baseUrl),
       hasApiKey: !!provider.apiKey,
-      hasAzureCredential: isAzureIdentityProvider(provider),
       hasHeaders: !!provider.headers && Object.keys(provider.headers).length > 0,
+      hasAzureCredential: !!provider.azureCredential,
     };
     if (name === "xai") {
       dto.xaiResponsesOptInState = xaiResponsesOptInState(provider);
@@ -781,6 +825,7 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "modelAutoCompactTokenLimits",
       "wsUpstream",
       "maxWsFrameBytes",
+      "upstreamWebsocket",
       "defaultMaxOutputTokens",
       "modelMaxOutputTokens",
       "openRouterRouting",
@@ -796,6 +841,8 @@ export function safeConfigDTO(config: OcxConfig): unknown {
       "noTopPModels",
       "noPenaltyModels",
       "noStructuredOutputModels",
+      "retainModels",
+      "omitReasoningEffortWithToolsModels",
       "upstreamHttpVersion",
       "autoToolChoiceOnlyModels",
       "preserveReasoningContentModels",
@@ -804,7 +851,6 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     ] as const) {
       copyIfDefined(dto, provider, key);
     }
-    dto.tlsProfileStatus = provider.tlsProfile === undefined ? "disabled" : getProviderTlsProfileStatus(name, provider);
     const modelCosts = sanitizeModelCostsForDisplay(provider.modelCosts);
     if (modelCosts) dto.modelCosts = modelCosts;
     // Resolve the note by DESTINATION, not by name. A preset saved under a custom name is

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
@@ -69,7 +70,7 @@ describe("ocx provider", () => {
       expect(result.stdout).toContain("(default)");
       expect(result.stdout).toContain("Available from registry");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -84,7 +85,7 @@ describe("ocx provider", () => {
       expect(parsed.configured[0].isDefault).toBe(true);
       expect(parsed.registryCount).toBeGreaterThan(0);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -101,7 +102,7 @@ describe("ocx provider", () => {
       expect(config.providers.deepseek.adapter).toBe("openai-chat");
       expect(config.providers.deepseek.apiKey).toBe("sk-test");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -117,7 +118,7 @@ describe("ocx provider", () => {
       expect(result.stderr).toContain("must not collide with a configured Codex account namespace");
       expect(readFileSync(configPath, "utf8")).toBe(before);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -133,7 +134,7 @@ describe("ocx provider", () => {
       expect(result.stderr).toContain("must not collide with a configured Codex account namespace");
       expect(readFileSync(configPath, "utf8")).toBe(before);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -145,7 +146,7 @@ describe("ocx provider", () => {
       expect(result.stderr).toContain("--adapter");
       expect(result.stderr).toContain("--base-url");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -176,7 +177,7 @@ describe("ocx provider", () => {
         "deepseek-v4-flash": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
       });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -213,7 +214,7 @@ describe("ocx provider", () => {
         "deepseek-v4-flash": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
       });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -237,7 +238,7 @@ describe("ocx provider", () => {
       expect(config.providers["my-llm"].apiKey).toBe("test-key");
       expect(config.providers["my-llm"].defaultModel).toBe("my-model");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -248,7 +249,7 @@ describe("ocx provider", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("already exists");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -258,7 +259,7 @@ describe("ocx provider", () => {
       const result = runCli(["provider", "add", "openai", "--force"], { OPENCODEX_HOME: dir });
       expect(result.status).toBe(0);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -269,7 +270,7 @@ describe("ocx provider", () => {
       const config = readConfig(dir);
       expect(config.defaultProvider).toBe("deepseek");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -288,7 +289,7 @@ describe("ocx provider", () => {
       expect(config.providers.deepseek).toBeUndefined();
       expect(config.providers.openai).toBeDefined();
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -327,7 +328,7 @@ describe("ocx provider", () => {
         legacyOwnedSlugs: ["huggingface/DeepSeek-V4-Flash-0731", "openai/kept-model"],
       });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -359,7 +360,7 @@ describe("ocx provider", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("default provider");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -370,7 +371,7 @@ describe("ocx provider", () => {
       const result = runCli(["provider", "remove", "openai"], { OPENCODEX_HOME: dir });
       expect(result.status).toBe(1);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -389,7 +390,7 @@ describe("ocx provider", () => {
       expect(result.stdout).not.toContain("test-dummy-key-for-masking");
       expect(result.stdout).toContain("****");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -403,7 +404,7 @@ describe("ocx provider", () => {
       expect(parsed.isDefault).toBe(true);
       expect(parsed.adapter).toBe("openai-responses");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -449,7 +450,7 @@ describe("ocx provider", () => {
       const config = readConfig(dir);
       expect(config.defaultProvider).toBe("deepseek");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -460,7 +461,7 @@ describe("ocx provider", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("not configured");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -477,7 +478,7 @@ describe("ocx provider", () => {
       expect(result.status).toBe(0);
       expect(result.stderr).toContain("OAuth");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 });
@@ -490,7 +491,7 @@ describe("ocx provider strict args", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("Unknown flag");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -501,7 +502,7 @@ describe("ocx provider strict args", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("Unknown flag");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -512,7 +513,7 @@ describe("ocx provider strict args", () => {
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("Unknown flag");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 });
@@ -530,7 +531,7 @@ describe("ocx provider mutating --json", () => {
       expect(parsed.needsSync).toBe(true);
       expect(parsed.adapter).toBeDefined();
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -550,7 +551,7 @@ describe("ocx provider mutating --json", () => {
       expect(parsed.remainingProviders).toContain("openai");
       expect(parsed.needsSync).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 
@@ -569,7 +570,7 @@ describe("ocx provider mutating --json", () => {
       expect(parsed.defaultProvider).toBe("deepseek");
       expect(parsed.needsSync).toBe(true);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 });
@@ -583,7 +584,7 @@ describe("ocx provider add --sync", () => {
       expect(result.status).toBe(0);
       expect(result.stdout).toContain("deepseek");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   }, 15_000);
 
@@ -595,7 +596,7 @@ describe("ocx provider add --sync", () => {
       const parsed = JSON.parse(result.stdout);
       expect(parsed.needsSync).toBe(true); // JSON mode skips sync, always reports needsSync=true
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      removeTreeWithRetry(dir);
     }
   });
 });

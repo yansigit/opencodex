@@ -14,6 +14,7 @@ import {
 import { deriveXaiConvId } from "../src/providers/xai-transport";
 import { routeModel } from "../src/router";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let home: string;
 
@@ -50,7 +51,7 @@ beforeEach(() => {
 afterEach(() => {
   setPersistedConfigMutationBeforeCommitForTests(null);
   delete process.env.OPENCODEX_HOME;
-  rmSync(home, { recursive: true, force: true });
+  removeTreeWithRetry(home);
   clearKeyCooldowns();
 });
 

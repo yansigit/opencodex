@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { getAccountSet, getCredential, saveCredential } from "../src/oauth/store";
 import { getValidAccessTokenForAccount, getValidAccessTokenSnapshotForAccount } from "../src/oauth";
 import { ANTIGRAVITY_IDE_VERSION } from "../src/adapters/client-fingerprint";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; setAntigravityOnboardSleepForTests(undefined); });
@@ -193,7 +194,7 @@ describe("antigravity credential persistence (projectId survives the store)", ()
   afterEach(() => {
     if (origHome === undefined) delete process.env.HOME; else process.env.HOME = origHome;
     if (origOcxHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = origOcxHome;
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp) removeTreeWithRetry(tmp);
   });
 
   test("saveCredential + getCredential round-trips projectId (regression: was stripped by normalizeCredential)", async () => {

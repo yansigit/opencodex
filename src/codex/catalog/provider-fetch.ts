@@ -2,7 +2,8 @@ import { execFileSync } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { atomicWriteFile, expandUserPath, getConfigDir, resolveEnvValue, websocketsEnabled } from "../../config";
+import { atomicWriteFile, expandUserPath, getConfigDir, websocketsEnabled } from "../../config";
+import { resolveProviderApiKey } from "../../providers/key-store";
 import { CODEX_CONFIG_PATH, CODEX_MODELS_CACHE_PATH, DEFAULT_CATALOG_PATH, readRootTomlString, resolveCodexConfigPath } from "../paths";
 import {
   clearModelCache,
@@ -572,7 +573,9 @@ function providerCatalogFingerprint(name: string, prov: OcxProviderConfig): Reco
     base: prov.baseUrl ?? "",
     adapter: prov.adapter ?? "",
     models: [...(prov.models ?? [])].sort(),
+    retain: [...(prov.retainModels ?? [])].sort(),
     selected: [...(prov.selectedModels ?? [])].sort(),
+    displayNames: prov.modelDisplayNames ?? null,
     defaultModel: prov.defaultModel ?? null,
     ctx: prov.contextWindow ?? null,
     ctxW: prov.modelContextWindows ?? null,
@@ -628,6 +631,16 @@ export function configuredInputModalities(prov: OcxProviderConfig, id: string): 
   return Array.isArray(modalities) && modalities.length > 0 ? [...modalities] : undefined;
 }
 
+/** Exact display-only override for one provider-native model id. */
+export function configuredModelDisplayName(
+  prov: OcxProviderConfig,
+  id: string,
+): string | undefined {
+  if (!prov.modelDisplayNames || !Object.hasOwn(prov.modelDisplayNames, id)) return undefined;
+  const value = prov.modelDisplayNames[id];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 export function configuredMaxInputTokens(prov: OcxProviderConfig, id: string): number | undefined {
   const configured = modelRecordValue(prov.modelMaxInputTokens, id);
   return typeof configured === "number" && configured > 0 ? configured : undefined;
@@ -668,6 +681,7 @@ function configuredVerbositySupport(name: string, prov: OcxProviderConfig | unde
 }
 
 export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, model: CatalogModel, providerCap?: number): CatalogModel {
+  const displayName = configuredModelDisplayName(prov, model.id);
   const configuredCap = configuredContextWindow(prov, model.id);
   const configuredMaxInput = configuredMaxInputTokens(prov, model.id);
   const configuredAutoCompact = configuredAutoCompactTokenLimit(prov, model.id);
@@ -703,6 +717,7 @@ export function applyProviderConfigHints(name: string, prov: OcxProviderConfig, 
     : (configuredCap ?? (providerCap !== undefined ? resolveUnknownRoutedContextWindow(providerCap) : undefined));
   const hinted = {
     ...modelWithoutServiceTier,
+    ...(displayName !== undefined ? { displayName } : {}),
     ...(hintedWindow !== undefined ? { contextWindow: hintedWindow } : {}),
     ...(inputModalities ? { inputModalities } : {}),
     ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
@@ -1196,9 +1211,15 @@ export function catalogHintsFromModelsApiItem(providerName: string, item: Provid
   const metadata = plainRecord(item.metadata);
   const capabilityRecord = plainRecord(metadata?.capabilities) ?? plainRecord(item.capabilities);
   const limits = plainRecord(metadata?.limits);
+  const capabilityLimits = plainRecord(plainRecord(item.capabilities)?.limits);
   const contextWindow =
     positiveSafeInteger(
       limits?.max_context_length,
+      // GitHub Copilot reports the live context window here instead of in the metadata or
+      // top-level fields used by other OpenAI-compatible catalogs (#3156). Keep the existing
+      // metadata field authoritative when both are present: adding this provider-specific
+      // fallback must not change previously recognized providers.
+      capabilityLimits?.max_context_window_tokens,
       metadata?.context_length,
       item.context_length,
       item.context_size,
@@ -1281,7 +1302,7 @@ function observedModelsAuthResolver(
     resolve(name, provider) {
       if (provider.authMode === "forward") return { apiKey: undefined, observed: true };
       if (provider.authMode !== "oauth") {
-        return { apiKey: resolveEnvValue(provider.apiKey), observed: true };
+        return { apiKey: resolveProviderApiKey(provider.apiKey), observed: true };
       }
 
       const observation = observeActiveOAuthAccessToken(name, authStoreBuffer);
@@ -1317,7 +1338,14 @@ async function fetchProviderModelsWithAuth(
     && prov.googleMode === "vertex"
     && (prov.models?.length ?? 0) === 0
     && Boolean(prov.defaultModel);
-  const configuredIds = seedVertexDefault && prov.defaultModel ? [prov.defaultModel] : (prov.models ?? []);
+  // Ordered dedupe union: Vertex seed, then `models`, then `retainModels`. `configured` is the
+  // single seed for the static path, the degraded fallback, drop diagnostics, and provider hints,
+  // so a retain-only id must enter here or it never exists to be retained (#1690).
+  const configuredIds = [...new Set([
+    ...(seedVertexDefault && prov.defaultModel ? [prov.defaultModel] : []),
+    ...(prov.models ?? []),
+    ...(prov.retainModels ?? []),
+  ])];
   const configured: CatalogModel[] = configuredIds.map(id => ({
     id,
     provider: name,
@@ -1715,9 +1743,14 @@ export function shouldExposeProviderModel(providerName: string, modelId: string)
   return true;
 }
 
-export function shouldRetainConfiguredProviderModel(providerName: string, modelId: string): boolean {
+export function shouldRetainConfiguredProviderModel(
+  providerName: string,
+  modelId: string,
+  prov?: OcxProviderConfig,
+): boolean {
   if (CALLABLE_CONFIGURED_COMPATIBILITY_MODELS[providerName]?.has(modelId)) return true;
   if (providerName === "opencode-free") return modelId === "big-pickle" || modelId.endsWith("-free");
+  if (modelInList(prov?.retainModels, modelId)) return true;
   return false;
 }
 
@@ -1763,7 +1796,7 @@ export function mergeConfiguredModelsIntoLiveCatalog(opts: {
     }
     if (
       seedVertexDefault === true
-      || shouldRetainConfiguredProviderModel(name, candidate.id)
+      || shouldRetainConfiguredProviderModel(name, candidate.id, prov)
       || (retainComboTargets && retainConfiguredModelIds?.has(candidate.id) === true)
     ) {
       out.push(candidate);
