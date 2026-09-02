@@ -677,6 +677,8 @@ describe("GitHub Actions hardening", () => {
     expect(release.permissions).toEqual({});
     expect(workflow).toContain("repository_dispatch:\n    types: [fork-auto-release]");
     expect(workflow).toContain("github.event.client_payload.expected_sha");
+    expect(workflow).toContain("released-version: v${{ env.DISPATCH_VERSION }}");
+    expect(workflow).not.toContain("released-version: v${{ inputs.version }}");
     
     expect(release.jobs?.["validate-dispatch"]?.["runs-on"]).toBe("ubuntu-latest");
     expect(release.jobs?.["validate-dispatch"]?.permissions).toEqual({

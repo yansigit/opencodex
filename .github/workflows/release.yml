@@ -86,7 +86,7 @@ jobs:
       pull-requests: write
     uses: ./.github/workflows/dev-version-bump.yml
     with:
-      released-version: v${{ inputs.version }}
+      released-version: v${{ env.DISPATCH_VERSION }}
 
   validate-dispatch:
     runs-on: ubuntu-latest
