@@ -1,5 +1,5 @@
+import { lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
 import { getConfigDir } from "../config";
 
 export function serviceApiTokenFilePath(): string {
@@ -29,10 +29,14 @@ export function loadServiceTokenFromFile(env: Record<string, string | undefined>
  * this file as OPENCODEX_API_AUTH_TOKEN, so doctor and start must inspect it even
  * when the calling shell has no data-plane env var.
  * Returns the token or null — never throws, never logs the value.
+ * Hardened: rejects symlinks, directories, and oversize files to avoid unsafe reads.
  */
 export function readInstalledServiceToken(): string | null {
   try {
-    const token = readFileSync(serviceApiTokenFilePath(), "utf8").trim();
+    const path = serviceApiTokenFilePath();
+    const stat = lstatSync(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 512) return null;
+    const token = readFileSync(path, "utf8").trim();
     return token || null;
   } catch {
     return null;
