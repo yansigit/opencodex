@@ -62,37 +62,44 @@ export async function prepareSync(
   const conflicts = conflictedPaths(
     (await run(options.runner, ["diff", "--name-only", "--diff-filter=U"])).stdout,
   );
-  const hotspotPaths = conflicts.filter(path => classifyPath(path) === "shared-hotspot");
-  if (hotspotPaths.length > 0) {
+  // Fail-closed: only named recipe (package.json) may auto-resolve.
+  // All other conflicts require decision-handoff with preservation evidence.
+  const recipeConflicts = conflicts.filter(path => classifyPath(path) === "recipe");
+  const nonRecipeConflicts = conflicts.filter(path => classifyPath(path) !== "recipe");
+  if (nonRecipeConflicts.length > 0) {
     await run(options.runner, ["merge", "--abort"]);
+    const resolutions = nonRecipeConflicts.map(path => ({
+      path,
+      classification: classifyPath(path),
+      action: "decision-handoff: merge --abort" as const,
+    }));
     return {
-      status: "hotspot-handoff",
+      status: "decision-handoff",
+      handoffReason: "conflict",
       branch,
-      resolutions: hotspotPaths.map(path => ({
-        path,
-        classification: "shared-hotspot" as const,
-        action: "merge --abort",
-      })),
+      resolutions,
       unresolved: conflicts,
     };
   }
-
   const resolutions: PrepareResult["resolutions"] = [];
-  for (const path of conflicts) {
-    const classification = classifyPath(path);
-    if (classification === "recipe") {
-      const ours = await run(options.runner, ["show", `:2:${path}`]);
-      const theirs = await run(options.runner, ["show", `:3:${path}`]);
-      const merged = mergePackageJson(ours.stdout, theirs.stdout);
-      await run(options.runner, ["write-file", path, merged]);
-      resolutions.push({ path, classification, action: "merge package recipe" });
-    } else {
-      const side = classification === "fork-owned" ? "ours" : "theirs";
-      await run(options.runner, ["checkout", `--${side}`, "--", path]);
-      resolutions.push({ path, classification, action: `checkout --${side}` });
-    }
+  for (const path of recipeConflicts) {
+    const ours = await run(options.runner, ["show", ":2:" + path]);
+    const theirs = await run(options.runner, ["show", ":3:" + path]);
+    const merged = mergePackageJson(ours.stdout, theirs.stdout);
+    await run(options.runner, ["write-file", path, merged]);
+    resolutions.push({ path, classification: "recipe" as const, action: "merge package recipe" });
     await run(options.runner, ["add", "--", path]);
   }
-  await run(options.runner, ["commit", "--no-edit"]);
-  return { status: "merged", branch, resolutions, unresolved: [] };
+  if (recipeConflicts.length > 0) {
+    await run(options.runner, ["commit", "--no-edit"]);
+    return { status: "merged", branch, resolutions, unresolved: [] };
+  }
+  await run(options.runner, ["merge", "--abort"]);
+  return {
+    status: "decision-handoff",
+    handoffReason: "conflict",
+    branch,
+    resolutions: [],
+    unresolved: conflicts,
+  };
 }

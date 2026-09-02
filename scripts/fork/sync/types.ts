@@ -13,7 +13,8 @@ export type PathClass =
   | "recipe";
 
 export interface PrepareResult {
-  status: "merged" | "hotspot-handoff" | "history-diverged" | "skipped";
+  status: "merged" | "decision-handoff" | "history-diverged" | "skipped";
+  handoffReason?: "conflict" | "preservation";
   branch?: string;
   resolutions: Array<{
     path: string;
@@ -22,6 +23,7 @@ export interface PrepareResult {
   }>;
   unresolved: string[];
   pullRequestNumber?: number;
+  preservationReport?: PreservationReport;
 }
 
 export type PublishAction =
@@ -39,6 +41,47 @@ export interface PublishResult {
   containsVendorMain: boolean;
   handoffRequired: boolean;
   escalationRequired: boolean;
+  preservationReport?: PreservationReport;
+  registryHash?: string;
+  provenance?: Provenance;
+}
+
+export interface OverlapCandidate {
+  path: string;
+  baseBlob: string;
+  forkBlob: string;
+  upstreamBlob: string;
+  mergeBlob: string;
+  classification: string;
+  renameFrom?: string;
+  decision?: PreservationDecision;
+}
+
+export interface PreservationReport {
+  shas: {
+    base: string;
+    fork: string;
+    upstream: string;
+    merge: string;
+    dev: string;
+    tag: string;
+  };
+  registryHash: string;
+  decisionHash: string;
+  candidates: OverlapCandidate[];
+  decisions: Record<string, PreservationDecision>;
+  status: "passed" | "decision-required";
+}
+
+export type PreservationDecision = "preserve" | "upstream-equivalent" | "intentional-drop";
+
+export interface Provenance {
+  headSha: string;
+  tagSha: string;
+  baseSha: string;
+  registryHash: string;
+  decisionHash: string;
+  reportHash: string;
 }
 
 export interface SyncEvent {

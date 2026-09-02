@@ -45,7 +45,7 @@ describe("logs-filter", () => {
         tokPerSecond: { kind: "value" as const, value: 85.2, estimated: false },
         cost: { kind: "unavailable" as const, reason: "usage_missing" as const },
       },
-      shadowCallSource: "agent-helper",
+      shadowCallRewrittenFrom: "helper-model",
       attempts: [
         {
           ordinal: 0,
@@ -82,7 +82,7 @@ describe("logs-filter", () => {
 
     const byAttempt = filterLogs(sampleLogs as any, {
       ...DEFAULT_LOG_FILTER_STATE,
-      model: "gemini-1.5-flash",
+      model: "1.5-flash",
     });
     expect(byAttempt.map(l => l.id)).toEqual(["req_3"]);
   });
@@ -158,7 +158,8 @@ describe("logs-filter", () => {
   });
 
   test("filters by intercepted helpers only", () => {
-    const intercepted = filterLogs(sampleLogs as any, {
+    const helperWithoutRewrite = { id: "helper-only", shadowCallSource: "agent-helper" };
+    const intercepted = filterLogs([...sampleLogs, helperWithoutRewrite] as any, {
       ...DEFAULT_LOG_FILTER_STATE,
       interceptedHelpersOnly: true,
     });
@@ -182,5 +183,35 @@ describe("logs-filter", () => {
     expect(options.providers).toContain("openai");
     expect(options.providers).toContain("google");
   });
-});
 
+  test("filters every persisted agent kind and maps missing or invalid history to unknown", () => {
+    const rows = [
+      { id: "main", agentKind: "main" },
+      { id: "subagent", agentKind: "subagent" },
+      { id: "internal", agentKind: "internal" },
+      { id: "missing" },
+      { id: "invalid", agentKind: "surprise" },
+    ];
+
+    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, agentKind: "main" }).map(row => row.id)).toEqual(["main"]);
+    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, agentKind: "subagent" }).map(row => row.id)).toEqual(["subagent"]);
+    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, agentKind: "internal" }).map(row => row.id)).toEqual(["internal"]);
+    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, agentKind: "unknown" }).map(row => row.id)).toEqual(["missing", "invalid"]);
+  });
+
+  test("combines provider, agent, and status filters", () => {
+    const rows = [
+      { id: "match", provider: "anthropic", agentKind: "main", status: 200 },
+      { id: "wrong-agent", provider: "anthropic", agentKind: "subagent", status: 200 },
+      { id: "wrong-status", provider: "anthropic", agentKind: "main", status: 500 },
+      { id: "wrong-provider", provider: "openai", agentKind: "main", status: 200 },
+    ];
+    const filtered = filterLogs(rows, {
+      ...DEFAULT_LOG_FILTER_STATE,
+      provider: "anthropic",
+      agentKind: "main",
+      statusFilter: "success",
+    });
+    expect(filtered.map(row => row.id)).toEqual(["match"]);
+  });
+});

@@ -106,22 +106,22 @@ export function LogsFilterBar({
           </select>
         </label>
 
-        {/* Model dropdown */}
+        {/* Keep the fork's free-text model search: it matches requested, resolved, and
+            failover-attempt model ids, including partial queries. */}
         <label className="muted text-control logs-filter-field">
           {t("logs.filter.model.label")}
-          <select
+          <input
+            type="search"
             className="input select-sm"
             value={filters.model}
             aria-label={t("logs.filter.model.label")}
             onChange={e => onFilterChange({ ...filters, model: e.target.value })}
-          >
-            <option value="">{t("logs.filter.model.all")}</option>
-            {options.models.map(m => (
-              <option key={m} value={m}>
-                {m}
-              </option>
-            ))}
-          </select>
+            placeholder={t("logs.filter.model.placeholder")}
+            list="logs-filter-model-options"
+          />
+          <datalist id="logs-filter-model-options">
+            {options.models.map(model => <option key={model} value={model} />)}
+          </datalist>
         </label>
 
         {/* Time window dropdown */}

@@ -589,6 +589,12 @@ export function warnAgentTaskRecoveryStartup(config: {
   console.warn("   Recovered plaintext assignment data is retained only in a bounded, process-local in-memory cache; exact fidelity is not guaranteed and the path depends on undocumented backend behavior.");
 }
 
+export function remoteDashboardStartupHint(hostname: string | undefined): string | null {
+  return isLoopbackHostname(hostname)
+    ? "   Remote dashboard → SSH tunnel guide: https://opencodex.me/reference/configuration/server/#ssh-port-forwarding"
+    : null;
+}
+
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
   const managementApi: ManagementApiDeps = {
     saveConfigPreservingClaudeCode,
@@ -2194,6 +2200,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   console.log(`   GET  /healthz      → health check`);
   console.log(`   GET  /api/*        → management API`);
   console.log(`   GET  /             → GUI dashboard`);
+  const remoteDashboardHint = remoteDashboardStartupHint(config.hostname);
+  if (remoteDashboardHint) console.log(remoteDashboardHint);
 
   if (loopbackServer) {
     // Loud on every start, not once at enable time. An operator who inherits a config, or

@@ -1,0 +1,225 @@
+{
+  "version": 2,
+  "auditStart": "0ebbb7f41",
+  "baseline": {
+    "features": {
+      "logs-rich-client-filters": {
+        "decisionSource": "fork audit and operator decision 2026-09-02",
+        "ownedBehavior": "Logs filters the bounded 2,000-row client response by surface, provider, agent, model, time, speed, status, intercepted helper, and conversation; reset and visible counts remain available.",
+        "integrationPaths": ["gui/src/pages/Logs.tsx", "gui/src/pages/logs-filter.ts", "gui/src/pages/logs-filter-bar.tsx"],
+        "requiredTests": ["tests/logs-filter.test.ts", "gui/tests/logs-auto-refresh.test.tsx"]
+      },
+      "cursor-account-pool": {
+        "decisionSource": "fork audit and operator decision 2026-09-02",
+        "ownedBehavior": "Cursor OAuth pooling is experimental, default-off, enabled-only, requires two accounts, and rolls optimistic state back on persistence errors.",
+        "integrationPaths": ["src/server/management/oauth-account-routes.ts", "gui/src/components/provider-workspace/CursorAccountPoolSettings.tsx"],
+        "requiredTests": ["tests/cursor-account-pool.test.ts", "gui/tests/cursor-account-pool-settings.test.tsx"]
+      },
+      "antigravity-failover-only": {
+        "decisionSource": "fork audit and operator decision 2026-09-02",
+        "ownedBehavior": "Antigravity conversations remain sticky; account changes occur only after eligible 429 or authentication failures, with no new-session load balancing toggle.",
+        "integrationPaths": ["src/oauth/cursor-routing.ts", "gui/src/components/provider-workspace/AntigravityFailoverNote.tsx"],
+        "requiredTests": ["gui/tests/antigravity-failover-note.test.tsx", "tests/google-hardening.test.ts"]
+      },
+      "combo-catalog-provenance": {
+        "decisionSource": "fork audit and operator decision 2026-09-02",
+        "ownedBehavior": "Combo rows have derived provenance, minimum detected capacity, conservative tied-limiter cap state, and retain max-input and automatic-compaction ceilings.",
+        "integrationPaths": ["src/codex/catalog/aggregation.ts"],
+        "requiredTests": ["tests/codex-catalog.test.ts"]
+      },
+      "claude-code-always-sse": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Claude Code adapter responses retain the always-SSE transport contract.",
+        "integrationPaths": ["src/server/responses/core.ts", "src/adapters/openai-responses.ts"],
+        "requiredTests": ["tests/settings-stream-mode.test.ts", "tests/chat-completions-endpoint.test.ts"]
+      },
+      "cursor-composer-fast-false": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Cursor Composer requests explicitly carry fast=false where required by the Cursor wire contract.",
+        "integrationPaths": ["src/adapters/cursor.ts", "src/adapters/cursor/transport.ts"],
+        "requiredTests": ["tests/cursor-adapter.test.ts"]
+      },
+      "quota-capacity-aggregation": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Quota and capacity snapshots aggregate without inflating availability or losing limiting-window evidence.",
+        "integrationPaths": ["src/providers/quota.ts", "src/codex/catalog/aggregation.ts"],
+        "requiredTests": ["tests/provider-quota.test.ts", "tests/codex-quota.test.ts"]
+      },
+      "provider-request-pacing": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Provider request pacing remains enforced across retries and concurrent dispatch.",
+        "integrationPaths": ["src/providers/request-pacing.ts"],
+        "requiredTests": ["tests/request-pacing.test.ts"]
+      },
+      "subscription-credit-accounting": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Subscription-credit usage is classified and reported without treating it as ordinary API-key spend.",
+        "integrationPaths": ["src/usage/log.ts", "src/providers/quota.ts"],
+        "requiredTests": ["tests/usage-log.test.ts", "tests/quota-bars-rows.test.ts"]
+      },
+      "hosted-tool-handling": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Hosted tools are admitted, normalized, and guarded by provider capability instead of being silently stripped or executed locally.",
+        "integrationPaths": ["src/responses/hosted-tool-policy.ts", "src/responses/parser.ts"],
+        "requiredTests": ["tests/responses-tool-conformance.test.ts", "tests/responses-undeclared-tool-guard.test.ts"]
+      },
+      "cursor-schema-contracts": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Cursor request and response schemas retain accepted field shapes and reject malformed tool payloads.",
+        "integrationPaths": ["src/adapters/cursor.ts", "src/adapters/cursor/transport.ts"],
+        "requiredTests": ["tests/cursor-adapter.test.ts", "tests/cursor-sandbox-escalation.test.ts"]
+      },
+      "cursor-replay-remint": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Cursor continuation replay and credential reminting preserve the conversation and tool-continuation contract.",
+        "integrationPaths": ["src/adapters/cursor/thread-continuity.ts", "src/oauth/index.ts"],
+        "requiredTests": ["tests/cursor-adapter.test.ts", "tests/cursor-continuity-retention.test.ts"]
+      },
+      "cursor-affinity-thread-ownership": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Cursor accounts remain bound to the owning thread and do not leak affinity across conversations.",
+        "integrationPaths": ["src/adapters/cursor/thread-continuity.ts", "src/oauth/cursor-routing.ts"],
+        "requiredTests": ["tests/cursor-continuity-retention.test.ts", "tests/request-log-conversation.test.ts"]
+      },
+      "cursor-runtime-normalization": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Cursor runtime payloads normalize provider wire values without losing supported fields.",
+        "integrationPaths": ["src/adapters/cursor.ts", "src/adapters/cursor/transport.ts"],
+        "requiredTests": ["tests/cursor-adapter.test.ts"]
+      },
+      "cursor-blob-integrity": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Cursor replay blobs remain byte- and ownership-safe across persistence and continuation.",
+        "integrationPaths": ["src/adapters/cursor/thread-continuity.ts"],
+        "requiredTests": ["tests/cursor-continuity-retention.test.ts"]
+      },
+      "subagent-fallback": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Subagent candidate and role fallback remains synchronous where required and preserves configured ordering.",
+        "integrationPaths": ["src/server/responses/core.ts", "src/config.ts", "src/types/config.ts"],
+        "requiredTests": ["tests/subagent-fallback-handle-responses.test.ts", "tests/config.test.ts"]
+      },
+      "oauth-snapshot-compatibility": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "OAuth account snapshot aliases and persisted account shapes remain backward compatible.",
+        "integrationPaths": ["src/oauth/index.ts", "src/oauth/store.ts"],
+        "requiredTests": ["tests/oauth-refresh.test.ts", "tests/oauth-upsert-preserves-api-key.test.ts"]
+      },
+      "native-tls": {
+        "decisionSource": "fork history and operator lock 2026-09-02",
+        "ownedBehavior": "Native certificate, key, and public-origin validation; non-loopback authentication; TLS-aware status/liveness probes; and HTTPS fallback remain supported.",
+        "integrationPaths": ["src/lib/server-tls.ts", "src/server/index.ts", "src/config.ts", "src/types/config.ts"],
+        "requiredTests": ["tests/server-tls-config.test.ts", "tests/server-tls-live.test.ts", "tests/management-origin-tls.test.ts", "tests/proxy-liveness.test.ts"]
+      },
+      "provider-validation": {
+        "decisionSource": "fork history since 0ebbb7f41",
+        "ownedBehavior": "Provider credentials, WebSocket endpoints, and provider-specific configuration are validated before persistence or use.",
+        "integrationPaths": ["src/config/provider-validation.ts", "src/server/management/provider-routes.ts"],
+        "requiredTests": ["tests/management-provider-validation.test.ts"]
+      },
+      "atomic-api-key-rotation": {
+        "decisionSource": "fork history and operator lock 2026-09-02",
+        "ownedBehavior": "API-key rotation uses compare-and-swap persistence and concurrent 429 handlers rebase on the latest generation.",
+        "integrationPaths": ["src/config.ts", "src/providers/key-failover.ts"],
+        "requiredTests": ["tests/key-failover.test.ts", "tests/api-keys-routes.test.ts"]
+      }
+    }
+  },
+  "releases": {
+    "v2.40.0": {
+      "tag": "v2.40.0",
+      "tagSha": "35ff3a462e786bd5efc394dfb1a8a5cc946e454f",
+      "baseSha": "af6113a0381d6fff2e4dce587652825c7eeb6423",
+      "decisions": {
+        "gui/src/pages/Logs.tsx": {
+          "upstreamIntent": "Simplify the Logs toolbar during the v2.40 dashboard integration.",
+          "forkInvariant": "All rich filters remain wired to the bounded client-side dataset.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "LogsFilterBar and logs-filter are reconnected to Logs.tsx on protected dev.",
+          "exactTests": ["bun test tests/logs-filter.test.ts", "cd gui && bun test tests/logs-auto-refresh.test.tsx"]
+        },
+        "gui/src/components/provider-workspace/ProviderAuthPanel.tsx": {
+          "upstreamIntent": "Refit provider authentication UI for hub login and browser preferences.",
+          "forkInvariant": "Cursor pool controls and the Antigravity failover-only notice remain visible beside upstream controls.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Both fork components are composed alongside LoginHintView and OpenBrowserPrefToggle.",
+          "exactTests": ["cd gui && bun test tests/cursor-account-pool-settings.test.tsx tests/antigravity-failover-note.test.tsx"]
+        },
+        "src/codex/catalog/aggregation.ts": {
+          "upstreamIntent": "Add max-input and automatic-compaction soft-budget aggregation.",
+          "forkInvariant": "Derived provenance and detected/capped context evidence remain.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Fork provenance fields are ported onto upstream max-input and clampAutoCompactTokenLimit flow.",
+          "exactTests": ["bun test tests/codex-catalog.test.ts"]
+        },
+        "src/config.ts": {
+          "upstreamIntent": "Add hub configuration and candidate-selection persistence.",
+          "forkInvariant": "Atomic persistence, TLS/WebSocket, subagent candidates/roles, and Cursor pool exports remain.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Re-fit fork exports and atomic APIs alongside upstream hub fields; never replace CAS persistence with direct writes.",
+          "exactTests": ["bun test tests/config.test.ts tests/key-failover.test.ts tests/server-tls-config.test.ts"]
+        },
+        "src/types/config.ts": {
+          "upstreamIntent": "Extend configuration types with hub and remote-dashboard fields.",
+          "forkInvariant": "TLS, WebSocket, subagent role/candidate, OAuth pool, and persistence types remain represented.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Merge both type surfaces instead of restoring an obsolete whole-file snapshot.",
+          "exactTests": ["bun run typecheck", "bun test tests/config.test.ts"]
+        },
+        "src/lib/errors.ts": {
+          "upstreamIntent": "Refactor request error exports.",
+          "forkInvariant": "OcxRequestValidationError remains exported and classified.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Port the fork error class onto the current upstream error module.",
+          "exactTests": ["bun test tests/chat-completions-endpoint.test.ts"]
+        },
+        "src/oauth/index.ts": {
+          "upstreamIntent": "Refactor OAuth selection for hub authentication.",
+          "forkInvariant": "Account snapshot compatibility and aliases remain available to existing callers.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Retain getValidAccessTokenSnapshotForAccount and current snapshot shape while adding hub authorization.",
+          "exactTests": ["bun test tests/oauth-refresh.test.ts"]
+        },
+        "src/config/provider-validation.ts": {
+          "upstreamIntent": "Update provider configuration for new v2.40 providers.",
+          "forkInvariant": "Azure credential and WebSocket upstream validation remain enforced.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Port fork validators into the expanded upstream validation flow.",
+          "exactTests": ["bun test tests/management-provider-validation.test.ts"]
+        },
+        "src/lib/server-tls.ts": {
+          "upstreamIntent": "Remove the fork TLS surface while landing remote dashboard and hub authorization.",
+          "forkInvariant": "Native TLS and non-loopback authentication remain mandatory capabilities.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Retain certificate/key/public-origin validation and TLS-aware probes, then layer hub authorization on top.",
+          "exactTests": ["bun test tests/server-tls-config.test.ts tests/server-tls-live.test.ts tests/management-origin-tls.test.ts tests/proxy-liveness.test.ts"]
+        },
+        "src/providers/key-failover.ts": {
+          "upstreamIntent": "Improve candidate selection and transient retries.",
+          "forkInvariant": "API-key rotation remains atomic and concurrent 429 handlers rebase instead of overwriting newer state.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Keep compare-and-swap mutation and generation rebasing while porting upstream retry selection.",
+          "exactTests": ["bun test tests/key-failover.test.ts"]
+        },
+        "src/server/claude-messages.ts": {
+          "upstreamIntent": "Refactor Claude provider request envelopes.",
+          "forkInvariant": "Claude source-envelope exports remain available and preserve source attribution.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Re-export the source envelope on the current provider implementation.",
+          "exactTests": ["bun test tests/provider-outbound.test.ts"]
+        }
+      }
+    }
+  }
+}

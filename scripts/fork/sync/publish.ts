@@ -1,11 +1,7 @@
 import { isAncestor } from "./contained";
-import type {
-  CommandRunner,
-  PrepareResult,
-  PublishAction,
-  PublishResult,
-  SyncEvent,
-} from "./types";
+import { preservationReportHash } from "./overlap";
+import { decisionHash, loadRegistry, registryHash } from "./preservation";
+import type { CommandRunner, PrepareResult, PublishAction, PublishResult, SyncEvent } from "./types";
 
 interface PublishOptions {
   event: SyncEvent;
@@ -14,10 +10,7 @@ interface PublishOptions {
   runner: CommandRunner;
 }
 
-async function required(
-  runner: CommandRunner,
-  args: readonly string[],
-): Promise<string> {
+async function required(runner: CommandRunner, args: readonly string[]): Promise<string> {
   const result = await runner(args);
   if (result.exitCode !== 0) {
     throw new Error(result.stderr.trim() || `git ${args[0]} failed with exit code ${result.exitCode}`);
@@ -25,15 +18,16 @@ async function required(
   return result.stdout.trim();
 }
 
-function output(
+function buildResult(
   action: PublishAction,
   branch: string,
   containsDev: boolean,
   containsVendorMain: boolean,
-  status: PrepareResult["status"],
+  prepare: PrepareResult,
+  provenance: PublishResult["provenance"],
   remoteSha?: string,
 ): PublishResult {
-  const preserved = action === "unchanged"
+  const preservedRemote = action === "unchanged"
     || action === "preserved-advanced"
     || action === "preserved-diverged";
   return {
@@ -42,12 +36,13 @@ function output(
     ...(remoteSha ? { remoteSha } : {}),
     containsDev,
     containsVendorMain,
-    handoffRequired: (action === "created" || action === "fast-forwarded")
-      && (status === "hotspot-handoff" || status === "history-diverged"),
-    escalationRequired: preserved && (
-      status === "history-diverged"
-      || (status === "hotspot-handoff" ? !containsVendorMain : action === "preserved-diverged")
+    handoffRequired: prepare.status === "decision-handoff" || prepare.status === "history-diverged",
+    escalationRequired: preservedRemote && (
+      prepare.status !== "merged" || !containsDev || !containsVendorMain
     ),
+    ...(prepare.preservationReport ? { preservationReport: prepare.preservationReport } : {}),
+    registryHash: provenance.registryHash,
+    provenance,
   };
 }
 
@@ -60,11 +55,20 @@ export async function publishSyncBranch(options: PublishOptions): Promise<Publis
   const localSha = await required(runner, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
   const containsDev = await isAncestor(runner, devSha, localSha);
   const containsVendorMain = await isAncestor(runner, event.vendorMainSha, localSha);
+  const report = result.preservationReport;
+  const provenanceFor = (headSha: string): NonNullable<PublishResult["provenance"]> => ({
+    headSha,
+    tagSha: event.latestTagSha,
+    baseSha: report?.shas.base ?? devSha,
+    registryHash: registryHash(),
+    decisionHash: report?.decisionHash ?? decisionHash(loadRegistry(), event.latestTag),
+    reportHash: report ? preservationReportHash(report) : "",
+  });
   const remote = await runner(["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`]);
 
   if (remote.exitCode === 2) {
     await required(runner, ["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`]);
-    return output("created", branch, containsDev, containsVendorMain, result.status, localSha);
+    return buildResult("created", branch, containsDev, containsVendorMain, result, provenanceFor(localSha), localSha);
   }
   if (remote.exitCode !== 0) {
     throw new Error(remote.stderr.trim() || `git ls-remote failed with exit code ${remote.exitCode}`);
@@ -79,38 +83,17 @@ export async function publishSyncBranch(options: PublishOptions): Promise<Publis
   const remoteContainsVendorMain = await isAncestor(runner, event.vendorMainSha, remoteSha);
 
   if (remoteSha === localSha) {
-    return output("unchanged", branch, remoteContainsDev, remoteContainsVendorMain, result.status, remoteSha);
+    return buildResult("unchanged", branch, remoteContainsDev, remoteContainsVendorMain, result, provenanceFor(remoteSha), remoteSha);
   }
   if (result.status === "history-diverged") {
-    return output(
-      "preserved-diverged",
-      branch,
-      remoteContainsDev,
-      remoteContainsVendorMain,
-      result.status,
-      remoteSha,
-    );
+    return buildResult("preserved-diverged", branch, remoteContainsDev, remoteContainsVendorMain, result, provenanceFor(remoteSha), remoteSha);
   }
   if (await isAncestor(runner, remoteSha, localSha)) {
     await required(runner, ["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`]);
-    return output("fast-forwarded", branch, containsDev, containsVendorMain, result.status, localSha);
+    return buildResult("fast-forwarded", branch, containsDev, containsVendorMain, result, provenanceFor(localSha), localSha);
   }
   if (await isAncestor(runner, localSha, remoteSha)) {
-    return output(
-      "preserved-advanced",
-      branch,
-      remoteContainsDev,
-      remoteContainsVendorMain,
-      result.status,
-      remoteSha,
-    );
+    return buildResult("preserved-advanced", branch, remoteContainsDev, remoteContainsVendorMain, result, provenanceFor(remoteSha), remoteSha);
   }
-  return output(
-    "preserved-diverged",
-    branch,
-    remoteContainsDev,
-    remoteContainsVendorMain,
-    result.status,
-    remoteSha,
-  );
+  return buildResult("preserved-diverged", branch, remoteContainsDev, remoteContainsVendorMain, result, provenanceFor(remoteSha), remoteSha);
 }

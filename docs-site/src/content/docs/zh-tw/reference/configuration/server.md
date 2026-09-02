@@ -106,7 +106,7 @@ stream 開啟前以 `401` 失敗。
 遠端使用不需要遠端綁定。保持回送並轉發它：
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 you@remote
 ```
 
 任何本機連接埠皆可。Host 解析為 `localhost`、`127.0.0.1` 或 `::1` 的請求，不論連接埠皆保持回送，因此 `http://localhost:20100/v1` 可運作。在客戶端設定該 base URL；`ocx` 僅將預設的本機 `127.0.0.1` 位址寫入受管客戶端設定。
@@ -114,7 +114,7 @@ ssh -L 20100:localhost:10100 you@remote
 供應商 OAuth callback 在固定遠端連接埠監聽。在遠端機器上登入或也轉發該連接埠：
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@remote
 ```
 
 :::caution[轉發的回送未認證]

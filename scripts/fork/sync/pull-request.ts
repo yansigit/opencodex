@@ -6,6 +6,7 @@ import type {
   PublishResult,
   SyncEvent,
 } from "./types";
+import { preservationReportHash } from "./overlap";
 import { isAgentProtectedPath } from "../../../.github/scripts/pr-sponsored-surface.cjs";
 
 export interface DraftPullRequestOptions {
@@ -28,6 +29,14 @@ function autonomousSyncEligible(result: PrepareResult, publishResult?: PublishRe
   if (!/^[0-9a-f]{40}$/i.test(publishResult.remoteSha ?? "")) return false;
   if (!publishResult.containsDev || !publishResult.containsVendorMain
     || publishResult.handoffRequired || publishResult.escalationRequired) return false;
+  const report = publishResult.preservationReport;
+  const provenance = publishResult.provenance;
+  if (!report || report.status !== "passed" || report.candidates.length > 0 || !provenance) return false;
+  if (report.shas.merge !== publishResult.remoteSha
+    || provenance.headSha !== publishResult.remoteSha
+    || provenance.registryHash !== report.registryHash
+    || provenance.decisionHash !== report.decisionHash
+    || provenance.reportHash !== preservationReportHash(report)) return false;
   return result.resolutions.every(({ classification }) => classification !== "shared-hotspot");
 }
 
@@ -46,6 +55,10 @@ function bodyFor(event: SyncEvent, result: PrepareResult, publishResult?: Publis
     "## Verification",
     `Prepare status: ${result.status}`,
     `Branch: ${publicValue(result.branch ?? "unavailable")}`,
+    ...(result.preservationReport ? [
+      `Preservation status: ${result.preservationReport.status}`,
+      `Preservation candidates: ${result.preservationReport.candidates.length}`,
+    ] : []),
     "",
     "## Resolution table",
     "| Path | Classification | Action |",
@@ -60,8 +73,21 @@ function bodyFor(event: SyncEvent, result: PrepareResult, publishResult?: Publis
 }
 
 function provenanceBody(body: string, event: SyncEvent, publishResult: PublishResult): string {
-  const marker = `<!-- opencodex-fork-sync-provenance:{"producer":"fork-upstream-sync","headSha":"${publishResult.remoteSha}","tagSha":"${event.latestTagSha}"} -->`;
-  return body.includes("opencodex-fork-sync-provenance:") ? body : `${body}\n${marker}`;
+  const provenance = publishResult.provenance;
+  if (!provenance) return body;
+  const marker = `<!-- opencodex-fork-sync-provenance:${JSON.stringify({
+    producer: "fork-upstream-sync",
+    headSha: provenance.headSha,
+    tagSha: provenance.tagSha || event.latestTagSha,
+    baseSha: provenance.baseSha,
+    registryHash: provenance.registryHash,
+    decisionHash: provenance.decisionHash,
+    reportHash: provenance.reportHash,
+  })} -->`;
+  const withoutMarker = body
+    .replace(/\n*<!-- opencodex-fork-sync-provenance:[\s\S]*? -->/g, "")
+    .trimEnd();
+  return `${withoutMarker}\n${marker}`;
 }
 
 export function createDraftPullRequestClient(
@@ -106,8 +132,8 @@ export function createDraftPullRequestClient(
 
   return {
     async upsert({ event, result, publishResult }) {
-      if (result.status !== "merged") {
-        throw new Error("merged prepare result is required for a draft PR");
+      if (result.status !== "merged" && !(result.status === "decision-handoff" && result.handoffReason === "preservation")) {
+        throw new Error("merged or preservation-handoff prepare result is required for a draft PR");
       }
       const branch = result.branch;
       if (!branch) throw new Error("merged prepare result is missing a branch");
@@ -124,11 +150,14 @@ export function createDraftPullRequestClient(
       const eligible = autonomousSyncEligible(result, publishResult);
       if (matching && !publishResult) return matching.number;
       if (matching) {
-        const exactPublishedHead = eligible && matching.head.sha === publishResult?.remoteSha;
+        const exactPublishedHead = Boolean(publishResult?.remoteSha)
+          && matching.head.sha === publishResult?.remoteSha;
         const currentBody = matching.body || "";
         const safety = await liveSyncSafety(matching.number, publishResult?.remoteSha || "");
-        const exactSafe = exactPublishedHead && safety.safe;
-        const reconciledBody = exactSafe ? provenanceBody(currentBody, event, publishResult) : currentBody
+        const exactSafe = eligible && exactPublishedHead && safety.safe;
+        const reconciledBody = exactPublishedHead && publishResult
+          ? provenanceBody(currentBody, event, publishResult)
+          : currentBody
           .replace(/\n*<!-- opencodex-fork-sync-provenance:[\s\S]*? -->/g, "").trimEnd();
         if (reconciledBody !== currentBody) {
           await request(`/pulls/${matching.number}`, { method: "PATCH", body: JSON.stringify({ body: reconciledBody }) });
@@ -149,7 +178,7 @@ export function createDraftPullRequestClient(
         title,
         head: branch,
         base: "dev",
-        body,
+        body: publishResult ? provenanceBody(body, event, publishResult) : body,
         draft: true,
       };
       const created = await request("/pulls", {
@@ -160,7 +189,6 @@ export function createDraftPullRequestClient(
       if (eligible) {
         const safety = await liveSyncSafety(createdPullRequest.number, publishResult.remoteSha);
         if (!safety.safe) return createdPullRequest.number;
-        await request(`/pulls/${createdPullRequest.number}`, { method: "PATCH", body: JSON.stringify({ body: provenanceBody(body, event, publishResult) }) });
         await request(`/issues/${createdPullRequest.number}/labels`, {
           method: "POST",
           body: JSON.stringify({ labels: ["autonomous-sync"] }),

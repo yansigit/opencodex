@@ -398,7 +398,7 @@ describe("fork sync CLI", () => {
       detectedAt: "2026-08-24T12:00:00.000Z",
       recommendedLane: "daily-merge",
     };
-    const results = [result(""), result("")];
+    const results = [result(DEV_SHA), result(""), result(""), result("", 1, "no merge base")];
     await runCli(["prepare"], {
       env: {},
       stdin: JSON.stringify(prepareEvent),
@@ -410,12 +410,14 @@ describe("fork sync CLI", () => {
     });
 
     expect(JSON.parse(output[0]!)).toEqual({
-      status: "merged",
+      status: "decision-handoff",
+      handoffReason: "preservation",
       branch: "sync/upstream-v2.29.0-1111111",
       resolutions: [],
       unresolved: [],
     });
-    expect(calls).toEqual([
+    expect(calls.slice(0, 3)).toEqual([
+      ["rev-parse", "HEAD"],
       ["switch", "-C", "sync/upstream-v2.29.0-1111111"],
       ["merge", "--no-ff", "vendor/main"],
     ]);

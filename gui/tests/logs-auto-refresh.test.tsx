@@ -566,3 +566,74 @@ test("Logs: an intercepted helper row is badged and filterable", async () => {
 
   await act(async () => { root.unmount(); });
 });
+
+test("Logs: rich controls filter displayed rows and reset as one client-side contract", async () => {
+  const rows = [
+    { ...sampleLog, requestId: "req-main", model: "claude-main", provider: "anthropic", surface: "claude", agentKind: "main" },
+    { ...sampleLog, requestId: "req-sub", model: "gpt-sub", provider: "openai", surface: "codex", agentKind: "subagent", status: 500 },
+    { ...sampleLog, requestId: "req-internal", model: "gemini-internal", provider: "google", surface: "codex", agentKind: "internal" },
+    { ...sampleLog, requestId: "req-old", model: "gpt-history", provider: "openai", surface: "codex" },
+  ];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    if (url.includes("/api/settings")) return jsonResponse({ timeZone: "UTC" });
+    if (url.includes("/api/logs?limit=2000")) return jsonResponse(rows);
+    return new Response(null, { status: 404 });
+  }) as typeof fetch;
+
+  const { root, container } = await mountLogs();
+  await flushMicrotasks();
+
+  expect(container.querySelector('[role="radiogroup"][aria-label="Surface"]')).not.toBeNull();
+  for (const label of ["Provider", "Agent", "Model", "Time", "Speed", "Status", "Conversation"]) {
+    expect(container.querySelector(`[aria-label="${label}"]`)).not.toBeNull();
+  }
+  expect(container.textContent).toContain("Intercepted helpers only");
+
+  const tableText = () => container.querySelector("tbody")?.textContent ?? "";
+  expect(tableText()).toContain("claude-main");
+  expect(tableText()).toContain("gpt-sub");
+
+  const provider = container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!;
+  await act(async () => {
+    provider.value = "openai";
+    provider.dispatchEvent(new testWindow.Event("change", { bubbles: true }));
+  });
+  expect(tableText()).not.toContain("claude-main");
+  expect(tableText()).toContain("gpt-sub");
+  expect(container.textContent).toContain("Showing");
+
+  const reset = [...container.querySelectorAll("button")].find(button =>
+    button.textContent?.includes("Reset filters"),
+  );
+  expect(reset).toBeTruthy();
+  await act(async () => { reset!.click(); });
+  expect(tableText()).toContain("claude-main");
+  expect(tableText()).toContain("gemini-internal");
+
+  const model = container.querySelector<HTMLInputElement>('input[aria-label="Model"]')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(
+      testWindow.HTMLInputElement.prototype,
+      "value",
+    )!.set!.call(model, "internal");
+    model.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
+  });
+  expect(tableText()).toContain("gemini-internal");
+  expect(tableText()).not.toContain("claude-main");
+  const modelReset = [...container.querySelectorAll("button")].find(button =>
+    button.textContent?.includes("Reset filters"),
+  );
+  expect(modelReset).toBeTruthy();
+  await act(async () => { modelReset!.click(); });
+
+  const agent = container.querySelector<HTMLSelectElement>('select[aria-label="Agent"]')!;
+  await act(async () => {
+    agent.value = "main";
+    agent.dispatchEvent(new testWindow.Event("change", { bubbles: true }));
+  });
+  expect(tableText()).toContain("claude-main");
+  expect(tableText()).not.toContain("gpt-sub");
+
+  await act(async () => { root.unmount(); });
+});

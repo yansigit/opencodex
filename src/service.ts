@@ -18,7 +18,7 @@ import { isWslRuntime, resolveCodexHomeDir, type CodexHomeDeps } from "./codex/h
 import { BUN_RUNTIME_PATH_ENV, BUN_RUNTIME_SOURCE_ENV, durableBunRuntime } from "./lib/bun-runtime";
 import type { BunRuntimeSource, DurableBunRuntime } from "./lib/bun-runtime";
 import { isProcessAlive, stopProxy } from "./lib/process-control";
-import { serviceApiTokenFilePath } from "./lib/service-secrets";
+import { readInstalledServiceToken, serviceApiTokenFilePath } from "./lib/service-secrets";
 import { tokenCollidesWithAdmin } from "./lib/admin-secrets";
 import { PROXY_ENV_KEYS } from "./lib/proxy-env";
 import { randomUUID } from "node:crypto";
@@ -57,6 +57,7 @@ import { withWindowsServiceMutationLock } from "./lib/windows-service-mutation-l
 import { maybeShowStarPrompt } from "./cli/star-prompt";
 import { systemdProperty } from "./service-manager-probe";
 import { isTestHomeGuardArmed } from "./lib/test-home-guard";
+import type { OcxConfig } from "./types";
 
 const LABEL = "com.opencodex.proxy";
 const TASK = "opencodex-proxy";
@@ -455,10 +456,19 @@ export function assertServiceAuthEnvironment(): void {
   const config = loadConfig();
   // Check the collision before the loopback short-circuit: a loopback install writes
   // the token file too, so returning early here is what let the broken state through.
-  const present = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
+  let present = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
+  if (!present) {
+    const installed = readInstalledServiceToken();
+    if (installed) {
+      present = installed;
+      // Preserve env precedence (env wins), but export the recovered token so
+      // subsequent install/repair steps that read process.env see the same value.
+      process.env.OPENCODEX_API_AUTH_TOKEN = installed;
+    }
+  }
   if (present) assertNotAdminToken(present);
   if (isLoopbackHostname(config.hostname)) return;
-  if (process.env.OPENCODEX_API_AUTH_TOKEN?.trim()) return;
+  if (present) return;
   // Reached from `service repair` as well as `install`, so name a command that can
   // actually succeed (see serviceRetryCommand).
   const diag = diagnoseService();
@@ -679,20 +689,23 @@ export async function confirmServiceServing(
   deps: {
     port?: number;
     hostname?: string;
-    probe?: (port: number, hostname: string) => Promise<boolean>;
+    configFn?: () => Pick<OcxConfig, "hostname" | "tls">;
+    probe?: (port: number, hostname: string, scheme: "http" | "https") => Promise<boolean>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
     timeoutMs?: number;
   } = {},
 ): Promise<{ ok: true; port: number } | { ok: false; port: number }> {
+  const config = (deps.configFn ?? loadConfig)();
   const port = deps.port ?? installedServiceListenPort();
-  const hostname = deps.hostname ?? loadConfig().hostname ?? "127.0.0.1";
+  const hostname = deps.hostname ?? config.hostname ?? "127.0.0.1";
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
-  const probe = deps.probe ?? (async (p, h) => !!(await proxyIdentityAt(p, { hostname: h })));
+  const scheme: "http" | "https" = config.tls ? "https" : "http";
+  const probe = deps.probe ?? (async (p, h, s) => !!(await proxyIdentityAt(p, { hostname: h, scheme: s })));
   const deadline = now() + (deps.timeoutMs ?? SERVICE_INSTALL_HEALTH_MS);
   for (;;) {
-    if (await probe(port, hostname)) return { ok: true, port };
+    if (await probe(port, hostname, scheme)) return { ok: true, port };
     if (now() >= deadline) return { ok: false, port };
     await sleep(500);
   }
