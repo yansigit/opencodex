@@ -16,7 +16,7 @@ Add secret `JULES_API_KEY` for the single-key configuration, or replace it with
 ]
 ```
 
-The pool accepts at most three entries, requires one entry per explicitly
+The pool accepts at most four entries, requires one entry per explicitly
 identified account, and persists only the non-secret `id` with each Jules
 session. Raw keys are masked individually and never written to issue state.
 Priority selects the active credential; it is not a quota-sharding mechanism.
