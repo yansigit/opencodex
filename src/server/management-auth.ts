@@ -50,7 +50,7 @@ import {
   parseHttpHost,
 } from "./auth-cors";
 
-const GUI_SESSION_TTL_MS = 5 * 60_000;
+const GUI_SESSION_TTL_MS = 30 * 60_000;
 const GUI_SESSION_LIMIT = 128;
 const LOCAL_READ_REPLAY_LIMIT = 256;
 const consumedLocalReadCapabilities = new Map<string, number>();
@@ -474,6 +474,7 @@ export function requireManagementAuth(
       const safeMethod = req.method === "GET" || req.method === "HEAD";
       const csrf = req.headers.get("x-opencodex-csrf-token")?.trim();
       if (sameOrigin && (safeMethod || (browserOrigin === session.origin && !!csrf && equalSecret(csrf, session.csrfToken)))) {
+        session.expiresAt = Date.now() + GUI_SESSION_TTL_MS;
         return null;
       }
     }

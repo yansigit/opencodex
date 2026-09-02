@@ -1,6 +1,8 @@
 import { promptForAdminToken, type AdminTokenVerifier } from "./admin-token-dialog";
 import { createBoundedFetch } from "./bounded-fetch";
 
+const REMEMBER_KEY = "opencodex-remember-token";
+
 let installed = false;
 /** Shared 401 refresh gate — concurrent waiters join one prompt / token resolution. */
 let resolutionInFlight: Promise<string | null> | null = null;
@@ -144,7 +146,7 @@ async function reBootstrapSessionToken(): Promise<RebootstrapResult> {
   if (!rawFetch) return { kind: "failed" };
   const bounded = createBoundedFetch(rebootstrapTimeoutMs);
   try {
-    const response = await rawFetch(SESSION_REBOOTSTRAP_PATH, { cache: "no-store", signal: bounded.signal });
+    const response = await rawFetch(SESSION_REBOOTSTRAP_PATH, { credentials: "same-origin", cache: "no-store", signal: bounded.signal });
     if (!response.ok) {
       // Only a definitive refusal is "unavailable"; 5xx and everything else is transient.
       return response.status >= 400 && response.status < 500 ? { kind: "unavailable" } : { kind: "failed" };
@@ -168,7 +170,7 @@ async function reBootstrapSessionToken(): Promise<RebootstrapResult> {
 async function verifyAdminToken(token: string): ReturnType<AdminTokenVerifier> {
   if (!rawFetch) return "unavailable";
   try {
-    const [input, init] = withToken(ADMIN_TOKEN_VALIDATION_PATH, { cache: "no-store" }, token);
+    const [input, init] = withToken(ADMIN_TOKEN_VALIDATION_PATH, { credentials: "same-origin", cache: "no-store" }, token);
     const response = await rawFetch(input, init);
     if (response.status === 401) return "rejected";
     return response.ok ? "accepted" : "unavailable";
@@ -267,6 +269,7 @@ export function installApiAuthFetch(): void {
   installed = true;
   // Drop any leftover XSS-readable token; new tokens stay memory-only (no read/migrate).
   clearLegacySessionToken();
+  try { const r = localStorage.getItem(REMEMBER_KEY); if(r && !memoryToken) memoryToken = r; } catch { /* localStorage unavailable - ignore */ }
   loadInjectedSession();
   const originalFetch = window.fetch.bind(window);
   rawFetch = originalFetch;
