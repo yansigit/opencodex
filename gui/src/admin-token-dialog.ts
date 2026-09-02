@@ -66,7 +66,11 @@ export function promptForAdminToken(
     username.name = "username";
     username.autocomplete = "username";
     username.value = ADMIN_TOKEN_USERNAME;
-    username.readOnly = true;
+    // ponytail: keep editable for iCloud Keychain — readonly breaks credential matching
+    username.readOnly = false;
+    username.setAttribute("aria-readonly", "true");
+    username.autocapitalize = "none";
+    username.spellcheck = false;
     accountField.append(accountLabel, username);
 
     const tokenField = document.createElement("div");
@@ -185,6 +189,8 @@ export function promptForAdminToken(
     document.body.append(dialog);
     if (typeof dialog.showModal === "function") dialog.showModal();
     else dialog.setAttribute("open", "");
-    queueMicrotask(() => password.focus());
+    // ponytail: let WebKit scan the dialog before stealing focus — microtask races the autofill sheet
+    const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (cb: FrameRequestCallback) => setTimeout(cb, 16);
+    raf(() => password.focus());
   });
 }
