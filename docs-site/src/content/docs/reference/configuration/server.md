@@ -142,6 +142,15 @@ a page you visit can make your browser connect to `127.0.0.1`. The listener ther
 same `Host` and `Origin` checks as an ordinary loopback bind. Off by default.
 :::
 
+### Troubleshooting: invalid peer certificate UnknownIssuer
+
+If Codex shows `invalid peer certificate: UnknownIssuer`, the Codex client has not trusted the proxy certificate. A self-signed certificate is not trusted until its CA is installed on the Codex machine.
+
+- For a private network, select **Loopback + SSH** in the dashboard, save, restart the proxy, and use SSH forwarding. This avoids certificate trust setup.
+- For a direct remote bind, select **Remote TLS** and use a certificate whose CA is trusted on the Codex machine. Its SAN must include the hostname or IP used in `tls.publicOrigin`.
+
+The server-mode selector updates the saved listener configuration. Listener changes take effect after restarting the proxy.
+
 ### SSH port forwarding
 
 Remote use does not require a remote bind. Keep loopback and forward it:
