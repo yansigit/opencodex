@@ -401,6 +401,28 @@ jobs:
           git show "$EXPECTED_RELEASE_SHA:package.json" > "$version_dir/package.json"
           npm version patch --no-git-tag-version --ignore-scripts --prefix "$version_dir" >/dev/null
           next_version="$(node -p 'require(process.argv[1]).version' "$version_dir/package.json")"
+
+          # A registry outage must not be mistaken for an unused version. Query the
+          # complete version set and require a valid JSON string array before deciding.
+          published_versions_json="$(npm view "$package_name" versions --json)"
+          next_version_state="$(NEXT_VERSION="$next_version" node -e '
+            const fs = require("fs");
+            const versions = JSON.parse(fs.readFileSync(0, "utf8"));
+            if (!Array.isArray(versions) || !versions.every(value => typeof value === "string")) {
+              throw new Error("npm versions response is not a string array");
+            }
+            process.stdout.write(versions.includes(process.env.NEXT_VERSION) ? "used" : "free");
+          ' <<<"$published_versions_json")"
+          if [ "$next_version_state" != free ]; then
+            echo "::error::post-release successor ${package_name}@${next_version} is already published"
+            exit 1
+          fi
+          next_tag_refs="$(git ls-remote origin "refs/tags/v${next_version}" "refs/tags/v${next_version}^{}")"
+          if [ -n "$next_tag_refs" ]; then
+            echo "::error::post-release successor tag v${next_version} already exists"
+            exit 1
+          fi
+
           live_dev_sha="$(git rev-parse refs/remotes/origin/dev)"
           dev_is_ancestor=false
           trees_identical=false
