@@ -19,6 +19,10 @@ interface ConversationState {
   logicalCallsSinceToolCompletion: number;
   lastOutputDigest?: string;
   lastCommentaryDigest?: string;
+  lastPreToolDigest?: string;
+  lastPreToolTokenHashes?: ReadonlySet<string>;
+  lastNarratedToolName?: string;
+  lastNarratedToolOrdinal?: number;
   touchedAt: number;
 }
 
@@ -26,6 +30,42 @@ const conversations = new Map<string, ConversationState>();
 const outputHashes = new WeakMap<TurnProgressTelemetry, Hash>();
 const commentaryText = new WeakMap<TurnProgressTelemetry, string>();
 const MAX_COMMENTARY_FINGERPRINT_BYTES = 8_192;
+export const MAX_GENERIC_PRE_TOOL_NARRATION_BYTES = 512;
+export const MAX_PRE_TOOL_TEXT_GUARD_BYTES = MAX_GENERIC_PRE_TOOL_NARRATION_BYTES;
+const GENERIC_PRE_TOOL_NARRATION = /^\s*(?:i(?:['’](?:ll|m)| will| am going to)|let me)\b/i;
+const GENERIC_PRE_TOOL_PREFIXES = ["i'll", "i’ll", "i will", "i am going to", "i'm going to", "i’m going to", "let me"];
+const NARRATION_STOP_WORDS = new Set(["i", "ll", "will", "am", "going", "to", "let", "me", "now", "once", "the", "a", "an", "with", "that", "this", "path", "then", "please"]);
+const NARRATION_ACTION_WORDS = new Set(["call", "fetch", "read", "reader", "invoke", "use", "using"]);
+
+function normalizedTextDigest(value: string): string | undefined {
+  const normalized = value.toLocaleLowerCase("en-US")
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  return normalized ? createHash("sha256").update(normalized).digest("hex") : undefined;
+}
+
+function narrationTokenHashes(value: string): ReadonlySet<string> {
+  const tokens = value.toLocaleLowerCase("en-US").normalize("NFKC").match(/[\p{L}\p{N}]+/gu) ?? [];
+  return new Set(tokens
+    .filter(token => !NARRATION_STOP_WORDS.has(token))
+    .map(token => NARRATION_ACTION_WORDS.has(token) ? "tool-action" : token)
+    .map(token => createHash("sha256").update(token).digest("hex")));
+}
+
+function narrationsAreSimilar(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  if (left.size === 0 || right.size === 0) return false;
+  let shared = 0;
+  for (const token of left) if (right.has(token)) shared++;
+  const union = left.size + right.size - shared;
+  const smaller = Math.min(left.size, right.size);
+  return shared >= 2 && union > 0 && (shared / union >= 0.5 || shared / smaller >= 0.8);
+}
+
+function couldBeGenericNarration(value: string): boolean {
+  const normalized = value.trimStart().toLocaleLowerCase("en-US");
+  return GENERIC_PRE_TOOL_PREFIXES.some(prefix => prefix.startsWith(normalized) || normalized.startsWith(prefix));
+}
 
 function scopedKey(conversationId: string, provider: string, model: string): string {
   return createHmac("sha256", PROCESS_KEY)
@@ -97,6 +137,7 @@ export function beginConversationTurn(
       textBytes: 0,
       commentaryTextBytes: 0,
       finalTextBytes: 0,
+      preToolTextBytes: 0,
       thinkingDeltaCount: 0,
       toolCallsStarted: 0,
       toolCallsCompleted: 0,
@@ -115,6 +156,7 @@ export function observeTurnProgress(telemetry: TurnProgressTelemetry, event: Ada
       {
         const bytes = Buffer.byteLength(event.text);
         telemetry.textBytes += bytes;
+        if (telemetry.toolCallsStarted === 0) telemetry.preToolTextBytes += bytes;
         if (event.phase === "commentary") {
           telemetry.commentaryTextBytes += bytes;
           const prior = commentaryText.get(telemetry) ?? "";
@@ -154,6 +196,119 @@ export function observeTurnProgress(telemetry: TurnProgressTelemetry, event: Ada
   }
 }
 
+/**
+ * Cursor external models sometimes label tool preambles as ordinary final text. Hold only the
+ * bounded leading text until the first tool call proves that it is narration. A normalized repeat
+ * of the previous tool round is discarded; unique text and text-only answers remain byte-exact.
+ */
+export function guardRepeatedPreToolText(
+  events: AsyncIterable<AdapterEvent>,
+  key: string,
+  telemetry: TurnProgressTelemetry,
+): AsyncIterable<AdapterEvent> {
+  const state = conversations.get(key);
+  if (!state) return events;
+  return (async function* () {
+    let pending: AdapterEvent[] = [];
+    let pendingText = "";
+    let pendingTextBytes = 0;
+    let decided = false;
+    const priorNarrationIsRecent = state.lastNarratedToolOrdinal !== undefined
+      && telemetry.logicalCallOrdinal - state.lastNarratedToolOrdinal <= 2;
+    const buffering = priorNarrationIsRecent;
+    let observedLeadingText = "";
+    let observedLeadingBytes = 0;
+
+    const flushPending = function* (includeText: boolean): Generator<AdapterEvent> {
+      for (const event of pending) {
+        if (includeText || event.type !== "text_delta") yield event;
+      }
+      pending = [];
+      pendingText = "";
+      pendingTextBytes = 0;
+    };
+
+    for await (const event of events) {
+      if (decided) {
+        yield event;
+        continue;
+      }
+      if (event.type === "text_delta") {
+        const bytes = Buffer.byteLength(event.text);
+        if (!buffering) {
+          const candidate = observedLeadingText + event.text;
+          if (observedLeadingBytes + bytes <= MAX_PRE_TOOL_TEXT_GUARD_BYTES
+            && !candidate.includes("\n")
+            && couldBeGenericNarration(candidate)) {
+            observedLeadingText = candidate;
+            observedLeadingBytes += bytes;
+          } else {
+            observedLeadingText = "";
+            observedLeadingBytes = MAX_PRE_TOOL_TEXT_GUARD_BYTES + 1;
+          }
+          yield event;
+          continue;
+        }
+        const candidate = pendingText + event.text;
+        if (pendingTextBytes + bytes > MAX_PRE_TOOL_TEXT_GUARD_BYTES
+          || candidate.includes("\n")
+          || !couldBeGenericNarration(candidate)) {
+          yield* flushPending(true);
+          decided = true;
+          yield event;
+          continue;
+        }
+        pending.push(event);
+        pendingText += event.text;
+        pendingTextBytes += bytes;
+        continue;
+      }
+      if (event.type === "tool_call_start") {
+        const narration = buffering ? pendingText : observedLeadingText;
+        const narrationBytes = buffering ? pendingTextBytes : observedLeadingBytes;
+        if (narrationBytes > 0 && narrationBytes <= MAX_PRE_TOOL_TEXT_GUARD_BYTES) {
+          const digest = normalizedTextDigest(narration);
+          const normalizedRepeat = digest !== undefined && digest === state.lastPreToolDigest;
+          const genericNarration = !narration.includes("\n") && GENERIC_PRE_TOOL_NARRATION.test(narration);
+          const tokenHashes = narrationTokenHashes(narration);
+          const repeatedNarration = buffering
+            && genericNarration
+            && state.lastNarratedToolName === event.name
+            && !!state.lastPreToolTokenHashes
+            && narrationsAreSimilar(tokenHashes, state.lastPreToolTokenHashes);
+          const repeated = buffering && (normalizedRepeat || repeatedNarration);
+          telemetry.normalizedPreToolTextRepeat = normalizedRepeat;
+          telemetry.repeatedPreToolNarration = repeatedNarration;
+          if (genericNarration && digest) {
+            state.lastPreToolDigest = digest;
+            state.lastPreToolTokenHashes = tokenHashes;
+            state.lastNarratedToolName = event.name;
+            state.lastNarratedToolOrdinal = telemetry.logicalCallOrdinal;
+          }
+          if (repeated) telemetry.suppressedRepeatedPreToolText = true;
+          if (buffering) yield* flushPending(!repeated);
+        }
+        if (buffering && pending.length > 0) yield* flushPending(true);
+        decided = true;
+        yield event;
+        continue;
+      }
+      if (event.type === "heartbeat") {
+        if (buffering) pending.push(event);
+        else yield event;
+        continue;
+      }
+      if (pendingTextBytes > 0) {
+        yield* flushPending(true);
+        decided = true;
+      }
+      yield event;
+      if (event.type === "done" || event.type === "incomplete" || event.type === "error") decided = true;
+    }
+    if (pending.length > 0) yield* flushPending(true);
+  })();
+}
+
 export function finishConversationTurn(
   key: string,
   telemetry: TurnProgressTelemetry,
@@ -164,6 +319,7 @@ export function finishConversationTurn(
   if (!state) return;
   const now = options.now ?? Date.now();
   state.touchedAt = now;
+  if (telemetry.toolCallsStarted === 0) telemetry.preToolTextBytes = 0;
   if (telemetry.toolCallsCompleted > 0) state.logicalCallsSinceToolCompletion = 0;
   telemetry.commentaryOnlyRound = telemetry.commentaryTextBytes > 0
     && telemetry.finalTextBytes === 0
@@ -179,12 +335,8 @@ export function finishConversationTurn(
   const commentary = commentaryText.get(telemetry);
   if (commentary) {
     commentaryText.delete(telemetry);
-    const normalized = commentary.toLocaleLowerCase("en-US")
-      .normalize("NFKC")
-      .replace(/[^\p{L}\p{N}]+/gu, " ")
-      .trim();
-    if (normalized) {
-      const digest = createHash("sha256").update(normalized).digest("hex");
+    const digest = normalizedTextDigest(commentary);
+    if (digest) {
       telemetry.normalizedCommentaryRepeat = digest === state.lastCommentaryDigest;
       state.lastCommentaryDigest = digest;
     }

@@ -525,6 +525,15 @@ A non-429 result, a different conversation/model/provider route, or expiry reset
 Request logs include protocol-only turn counters (logical-call ordinal, text byte counts, completed
 tool calls, calls since the last completed tool step, and conservative repeat indicators). They do
 not store assistant text, tool arguments, or a digest that can be correlated across installations.
+Cursor models sometimes label a tool preamble as ordinary answer text. First occurrences stream
+normally. For a recent repeat candidate, OpenCodex holds at most 512 bytes and discards it only when
+it is a Unicode/case/punctuation-normalized repeat or has high token similarity to the prior short,
+single-line first-person announcement before the same tool. Different tools, warnings, multi-line
+explanations, dissimilar preambles, text-only answers, and over-limit text pass through unchanged.
+When an external model emits Cursor's textual `<tool_call>` JSON dialect, or a leading bare object
+with exactly `id`, `name`, and `arguments`, OpenCodex converts it only when the name resolves to a
+tool advertised on that request and `arguments` is a JSON object; unknown, ordinary, malformed, and
+oversized objects remain text.
 
 If a proxy cannot carry Cursor's default HTTP/2 stream, set `upstreamHttpVersion` to `"http1.1"`
 or its `"h1"` alias.

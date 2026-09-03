@@ -513,6 +513,7 @@ function normalizeTurnProgress(raw: unknown): TurnProgressTelemetry | undefined 
     textBytes: required.textBytes!,
     commentaryTextBytes: required.commentaryTextBytes!,
     finalTextBytes: required.finalTextBytes!,
+    preToolTextBytes: integer("preToolTextBytes") ?? 0,
     thinkingDeltaCount: required.thinkingDeltaCount!,
     toolCallsStarted: required.toolCallsStarted!,
     toolCallsCompleted: required.toolCallsCompleted!,
@@ -521,6 +522,15 @@ function normalizeTurnProgress(raw: unknown): TurnProgressTelemetry | undefined 
     ...(typeof value.exactOutputRepeat === "boolean" ? { exactOutputRepeat: value.exactOutputRepeat } : {}),
     ...(typeof value.normalizedCommentaryRepeat === "boolean"
       ? { normalizedCommentaryRepeat: value.normalizedCommentaryRepeat }
+      : {}),
+    ...(typeof value.normalizedPreToolTextRepeat === "boolean"
+      ? { normalizedPreToolTextRepeat: value.normalizedPreToolTextRepeat }
+      : {}),
+    ...(typeof value.repeatedPreToolNarration === "boolean"
+      ? { repeatedPreToolNarration: value.repeatedPreToolNarration }
+      : {}),
+    ...(typeof value.suppressedRepeatedPreToolText === "boolean"
+      ? { suppressedRepeatedPreToolText: value.suppressedRepeatedPreToolText }
       : {}),
     ...(typeof value.commentaryOnlyRound === "boolean" ? { commentaryOnlyRound: value.commentaryOnlyRound } : {}),
     ...(typeof value.emptyProtocolRound === "boolean" ? { emptyProtocolRound: value.emptyProtocolRound } : {}),

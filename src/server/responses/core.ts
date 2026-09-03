@@ -315,6 +315,7 @@ import {
 import type { AttemptRecoveryKind } from "../../usage/log";
 import {
   beginConversationTurn,
+  guardRepeatedPreToolText,
   observeTurnProgress,
 } from "../conversation-progress";
 import {
@@ -470,12 +471,30 @@ function observeProgressEvents(
   logCtx: RequestLogContext,
 ): AsyncIterable<AdapterEvent> {
   if (!logCtx.turnProgress) return events;
-  return (async function* () {
+  const observed = (async function* () {
     for await (const event of events) {
       observeTurnProgress(logCtx.turnProgress!, event);
       yield event;
     }
   })();
+  const guarded = logCtx.turnProgressTrackerKey
+    ? guardRepeatedPreToolText(observed, logCtx.turnProgressTrackerKey, logCtx.turnProgress)
+    : observed;
+  return (async function* () {
+    yield* guarded;
+  })();
+}
+
+async function collectProgressEvents(
+  events: AdapterEvent[],
+  logCtx: RequestLogContext,
+): Promise<AdapterEvent[]> {
+  const collected: AdapterEvent[] = [];
+  for await (const event of observeProgressEvents(
+    (async function* () { yield* events; })(),
+    logCtx,
+  )) collected.push(event);
+  return collected;
 }
 
 /**
@@ -5990,9 +6009,7 @@ async function handleResponsesInner(
     } else {
       events = runTurnEvents;
     }
-    if (logCtx.turnProgress) {
-      for (const event of events) observeTurnProgress(logCtx.turnProgress, event);
-    }
+    events = await collectProgressEvents(events, logCtx);
     if (options.comboAttempt) {
       const firstMeaningful = events.find(event => event.type !== "heartbeat");
       if (!firstMeaningful || firstMeaningful.type === "error") {
@@ -7433,9 +7450,7 @@ async function handleResponsesInner(
       } else {
         events = guardedEvents;
       }
-      if (logCtx.turnProgress) {
-        for (const event of events) observeTurnProgress(logCtx.turnProgress, event);
-      }
+      events = await collectProgressEvents(events, logCtx);
     } finally {
       cleanupUpstreamAbort();
     }

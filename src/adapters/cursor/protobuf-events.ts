@@ -1332,15 +1332,107 @@ export function mapCursorProtobufServerMessage(
 
 const TOOL_CALL_START_PREFIX = "[TOOL_CALL]";
 const TOOL_CALL_ARGS_MARKER = "[ARGS]";
+const XML_TOOL_CALL_START = "<tool_call>";
+const XML_TOOL_CALL_END = "</tool_call>";
+const MAX_XML_TOOL_CALL_BYTES = 256 * 1_024;
 
 function findPotentialMarkerPrefix(text: string): number {
-  for (let len = Math.min(TOOL_CALL_START_PREFIX.length - 1, text.length); len >= 1; len--) {
-    const candidate = text.slice(text.length - len);
-    if (TOOL_CALL_START_PREFIX.startsWith(candidate)) {
-      return text.length - len;
+  for (const marker of [TOOL_CALL_START_PREFIX, XML_TOOL_CALL_START]) {
+    for (let len = Math.min(marker.length - 1, text.length); len >= 1; len--) {
+      const candidate = text.slice(text.length - len);
+      if (marker.startsWith(candidate)) return text.length - len;
     }
   }
   return -1;
+}
+
+function cursorXmlToolName(rawName: string): string {
+  const trimmedName = rawName.trim();
+  const withoutFunctionNamespace = trimmedName.startsWith("functions.")
+    ? trimmedName.slice("functions.".length)
+    : trimmedName;
+  return normalizeCursorWireName(withoutFunctionNamespace);
+}
+
+function completeJsonObjectEnd(text: string, start: number): number {
+  if (text[start] !== "{") return -1;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (char === "{") depth++;
+    else if (char === "}" && --depth === 0) return i + 1;
+  }
+  return -1;
+}
+
+function parseCursorXmlToolCall(
+  candidate: string,
+  state: CursorProtobufEventState,
+): CursorServerMessage[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate.slice(XML_TOOL_CALL_START.length, -XML_TOOL_CALL_END.length).trim());
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  return commitCursorTextToolRecord(record, state);
+}
+
+function commitCursorTextToolRecord(
+  record: Record<string, unknown>,
+  state: CursorProtobufEventState,
+): CursorServerMessage[] | undefined {
+  if (typeof record.name !== "string" || !record.arguments || typeof record.arguments !== "object"
+    || Array.isArray(record.arguments)) return undefined;
+  const wireName = cursorXmlToolName(record.name);
+  const advertisedName = resolveAdvertisedClientToolName(state, wireName);
+  if (!advertisedName) return undefined;
+
+  const callId = `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const out = recordToolCall(state, callId, wireName);
+  if (out.some(event => event.type === "error")) return out;
+  const open = state.openToolCalls.get(callId);
+  if (!open) return undefined;
+  const argsJson = JSON.stringify(record.arguments);
+  open.args = argsJson;
+  out.push(...commitToolCall(state, callId, normalizeJsonText(argsJson, wireName, state)));
+  return out;
+}
+
+function parseCursorPlainJsonToolCall(
+  candidate: string,
+  state: CursorProtobufEventState,
+): CursorServerMessage[] | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(candidate);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (typeof record.id !== "string" || keys.some(key => key !== "id" && key !== "name" && key !== "arguments")) {
+    return undefined;
+  }
+  return commitCursorTextToolRecord(record, state);
 }
 
 function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState): CursorServerMessage[] {
@@ -1356,7 +1448,30 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
   const out: CursorServerMessage[] = [];
 
   while (remaining.length > 0) {
-    const startIndex = remaining.indexOf(TOOL_CALL_START_PREFIX);
+    const leadingWhitespace = remaining.search(/\S/);
+    if (leadingWhitespace >= 0 && remaining[leadingWhitespace] === "{") {
+      const jsonEnd = completeJsonObjectEnd(remaining, leadingWhitespace);
+      if (jsonEnd === -1) {
+        if (Buffer.byteLength(remaining) > MAX_XML_TOOL_CALL_BYTES) out.push({ type: "text", text: remaining });
+        else state.textToolCallBuffer = remaining;
+        break;
+      }
+      const parsedEvents = parseCursorPlainJsonToolCall(remaining.slice(leadingWhitespace, jsonEnd), state);
+      if (!parsedEvents) {
+        out.push({ type: "text", text: remaining });
+        break;
+      }
+      out.push(...parsedEvents);
+      let consumed = jsonEnd;
+      while (consumed < remaining.length && /\s/.test(remaining[consumed]!)) consumed++;
+      remaining = remaining.slice(consumed);
+      continue;
+    }
+    const markedStartIndex = remaining.indexOf(TOOL_CALL_START_PREFIX);
+    const xmlStartIndex = remaining.indexOf(XML_TOOL_CALL_START);
+    const startIndex = markedStartIndex === -1
+      ? xmlStartIndex
+      : xmlStartIndex === -1 ? markedStartIndex : Math.min(markedStartIndex, xmlStartIndex);
     if (startIndex === -1) {
       const partialIndex = findPotentialMarkerPrefix(remaining);
       if (partialIndex !== -1) {
@@ -1368,6 +1483,51 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
       }
       out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining) });
       break;
+    }
+
+    if (startIndex === xmlStartIndex) {
+      if (startIndex > 0) {
+        out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining.slice(0, startIndex)) });
+        remaining = remaining.slice(startIndex);
+        continue;
+      }
+      const bodyStart = XML_TOOL_CALL_START.length;
+      const nonWhitespaceOffset = remaining.slice(bodyStart).search(/\S/);
+      if (nonWhitespaceOffset === -1) {
+        if (Buffer.byteLength(remaining) > MAX_XML_TOOL_CALL_BYTES) out.push({ type: "text", text: remaining });
+        else state.textToolCallBuffer = remaining;
+        break;
+      }
+      const jsonStart = bodyStart + nonWhitespaceOffset;
+      if (remaining[jsonStart] !== "{") {
+        out.push({ type: "text", text: remaining });
+        break;
+      }
+      const jsonEnd = completeJsonObjectEnd(remaining, jsonStart);
+      if (jsonEnd === -1) {
+        if (Buffer.byteLength(remaining) > MAX_XML_TOOL_CALL_BYTES) out.push({ type: "text", text: remaining });
+        else state.textToolCallBuffer = remaining;
+        break;
+      }
+      let closingStart = jsonEnd;
+      while (closingStart < remaining.length && /\s/.test(remaining[closingStart]!)) closingStart++;
+      const closingCandidate = remaining.slice(closingStart);
+      if (closingCandidate.length < XML_TOOL_CALL_END.length
+        && XML_TOOL_CALL_END.startsWith(closingCandidate)) {
+        state.textToolCallBuffer = remaining;
+        break;
+      }
+      if (!closingCandidate.startsWith(XML_TOOL_CALL_END)) {
+        out.push({ type: "text", text: remaining });
+        break;
+      }
+      const candidateEnd = closingStart + XML_TOOL_CALL_END.length;
+      const candidate = remaining.slice(0, candidateEnd);
+      const parsedEvents = parseCursorXmlToolCall(candidate, state);
+      if (parsedEvents) out.push(...parsedEvents);
+      else out.push({ type: "text", text: candidate });
+      remaining = remaining.slice(candidateEnd);
+      continue;
     }
 
     // Check if the candidate at startIndex is actually a tool call
