@@ -308,6 +308,14 @@ function isolatedLauncherEnv(root: string, override: string): NodeJS.ProcessEnv 
     CODEX_HOME: codexHome,
     GROK_HOME: grokHome,
     OPENCODEX_BUN_PATH: override,
+    // Runtime-selection tests do not exercise management-token publication or
+    // Windows ACL performance. A generated file token can spend the production
+    // 30-second icacls budget before /healthz, and concurrent Windows pools have
+    // made that unrelated work exhaust this fixture's 90-second startup bound.
+    // Keep real hardening enabled but bounded; dedicated ACL suites cover its
+    // timeout and fail-closed behavior.
+    OPENCODEX_ADMIN_AUTH_TOKEN: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    OPENCODEX_ACL_TIMEOUT_MS: "1000",
   };
 }
 
