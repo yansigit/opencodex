@@ -518,6 +518,14 @@ replay remains opt-in: set `replayTransientFailures: true` to retry only pre-com
 and transient 5xx failures within the shared three-send budget. The global `emptyCompletionRetry`
 setting also remains off by default, and neither mechanism retries after a Cursor local side effect.
 
+For a stable client conversation and Cursor route, OpenCodex also bounds client-originated rate-limit
+storms. After three consecutive logical requests finish as `429` within 45 seconds, later requests
+receive a local `429` with `Retry-After` for a 30-second cooldown instead of reaching Cursor again.
+A non-429 result, a different conversation/model/provider route, or expiry resets the sequence.
+Request logs include protocol-only turn counters (logical-call ordinal, text byte counts, completed
+tool calls, calls since the last completed tool step, and conservative repeat indicators). They do
+not store assistant text, tool arguments, or a digest that can be correlated across installations.
+
 If a proxy cannot carry Cursor's default HTTP/2 stream, set `upstreamHttpVersion` to `"http1.1"`
 or its `"h1"` alias.
 This switches inference to Cursor's `RunSSE` + `BidiAppend` compatibility transport and uses

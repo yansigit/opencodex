@@ -314,6 +314,10 @@ import {
 } from "../request-log-conversation";
 import type { AttemptRecoveryKind } from "../../usage/log";
 import {
+  beginConversationTurn,
+  observeTurnProgress,
+} from "../conversation-progress";
+import {
   consumeForInspection,
   consumeForResponseLogMetadata,
   createSseInspector,
@@ -456,6 +460,19 @@ function diagnoseAdapterEvents(
         event.type,
         adapterEventDiagnosticDetails(event),
       );
+      yield event;
+    }
+  })();
+}
+
+function observeProgressEvents(
+  events: AsyncIterable<AdapterEvent>,
+  logCtx: RequestLogContext,
+): AsyncIterable<AdapterEvent> {
+  if (!logCtx.turnProgress) return events;
+  return (async function* () {
+    for await (const event of events) {
+      observeTurnProgress(logCtx.turnProgress!, event);
       yield event;
     }
   })();
@@ -3730,6 +3747,22 @@ async function handleResponsesInner(
     );
   }
   options.onRequestValidated?.();
+  if (adapter.name === "cursor" && logCtx.conversationId && !options.comboAttempt) {
+    const turn = beginConversationTurn(logCtx.conversationId, route.providerName, route.modelId);
+    logCtx.turnProgressTrackerKey = turn.key;
+    logCtx.turnProgress = turn.telemetry;
+    if (turn.retryAfterSeconds !== undefined) {
+      logCtx.turnProgressCircuitBlocked = true;
+      logCtx.localTerminalReason = "cursor-rate-limit-circuit";
+      logCtx.errorCode = "cursor_rate_limit_circuit_open";
+      return formatErrorResponse(
+        429,
+        "rate_limit_error",
+        "Cursor request paused after consecutive rate limits; retry after the indicated cooldown",
+        { retryAfter: String(turn.retryAfterSeconds) },
+      );
+    }
+  }
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
   if (!options.comboAttempt && !logCtx.activeAttempt) {
@@ -5886,7 +5919,7 @@ async function handleResponsesInner(
           );
         });
       const sseStream = bridgeToResponsesSSE(
-        guardedSource, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
+        observeProgressEvents(guardedSource, logCtx), parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
         () => {
           runTurnAbort.abort();
           queue.close();
@@ -5956,6 +5989,9 @@ async function handleResponsesInner(
       })) events.push(event);
     } else {
       events = runTurnEvents;
+    }
+    if (logCtx.turnProgress) {
+      for (const event of events) observeTurnProgress(logCtx.turnProgress, event);
     }
     if (options.comboAttempt) {
       const firstMeaningful = events.find(event => event.type !== "heartbeat");
@@ -7320,7 +7356,7 @@ async function handleResponsesInner(
       : eventStream;
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     const sseStream = bridgeToResponsesSSE(
-      guardedEventStream, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
+      observeProgressEvents(guardedEventStream, logCtx), parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
       () => upstream.abort(), 2_000,
       {
         translatorBudget,
@@ -7396,6 +7432,9 @@ async function handleResponsesInner(
         })) events.push(event);
       } else {
         events = guardedEvents;
+      }
+      if (logCtx.turnProgress) {
+        for (const event of events) observeTurnProgress(logCtx.turnProgress, event);
       }
     } finally {
       cleanupUpstreamAbort();

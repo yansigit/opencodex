@@ -12,7 +12,12 @@ import {
   CURSOR_VERIFIED_REQUEST_CONTEXT_MODE,
   CURSOR_VERIFIED_SCHEMA_FINGERPRINT,
 } from "../../adapters/cursor/protocol-profile";
-import type { CursorOracleObservationV1, CursorOracleRunRequest, CursorOracleRunResult } from "./types";
+import {
+  cursorOracleToolStepEfficiency,
+  type CursorOracleObservationV1,
+  type CursorOracleRunRequest,
+  type CursorOracleRunResult,
+} from "./types";
 
 const SAFE_SCENARIO_ID = /^[A-Za-z0-9_.:-]{1,200}$/;
 const RULE_CANARY = "OCX_CURSOR_ORACLE_RULE_CANARY_V1";
@@ -242,10 +247,18 @@ export async function runCursorOracle(
     diagnostics.push(...obs.diagnostics);
     if (obs.protocol.decodeFailures > 0) diagnostics.push({ code: "protocol_decode_failed" });
 
+    const toolStepEfficiency = cursorOracleToolStepEfficiency(
+      obs.protocol.runRequests,
+      obs.protocol.toolCalls.completed,
+    );
+    if (toolStepEfficiency.status === "fail") diagnostics.push({ code: "model_calls_per_tool_step_exceeded" });
+
     const completedAt = Date.now();
     let outcome: CursorOracleObservationV1["outcome"];
     if (exitCode === 124 || exitCode === 127 || exitCode === 130) outcome = "blocked";
-    else if (exitCode === 0) outcome = obs.responseStatus !== null && obs.responseStatus >= 200 && obs.responseStatus < 300 ? "pass" : obs.responseStatus === null ? "inconclusive" : "fail";
+    else if (exitCode === 0) outcome = obs.responseStatus !== null && obs.responseStatus >= 200 && obs.responseStatus < 300
+      ? toolStepEfficiency.status === "fail" ? "fail" : "pass"
+      : obs.responseStatus === null ? "inconclusive" : "fail";
     else outcome = "fail";
 
     let rawDir: string | undefined;
@@ -272,7 +285,10 @@ export async function runCursorOracle(
         observedClientVersions: obs.clientVersions,
         messages: obs.protocol,
       },
-      behavior: { instructionCanaryObserved },
+      behavior: {
+        instructionCanaryObserved,
+        toolStepEfficiency,
+      },
       scenario,
       model,
       startedAt,

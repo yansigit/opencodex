@@ -647,6 +647,7 @@ export async function handleLabCommand(argv: string[], deps: LabCliDeps = {}): P
             `Oracle ${result.observation.oracle} ${result.observation.scenario} model=${model} -> ${result.observation.outcome}`,
             `Oracle run ${result.observation.oracleRunId}`,
             `Protocol ${result.observation.protocolProfile.requestContextMode}; RunSSE=${result.observation.protocolProfile.runSseRequests} BidiAppend=${result.observation.protocolProfile.bidiAppendRequests}`,
+            `Tool-step efficiency ${result.observation.behavior.toolStepEfficiency.modelCallsPerCompletedToolStep ?? "n/a"} calls/step (max ${result.observation.behavior.toolStepEfficiency.maximum}; ${result.observation.behavior.toolStepEfficiency.status})`,
             ...(result.exitCode !== 0 ? ["Ensure the Cursor CLI is installed and authenticated, or pass --agent-bin."] : []),
             ...(result.rawDir ? [
               `Privacy warning: raw protocol frames are retained locally for 24 hours at ${result.rawDir}`,

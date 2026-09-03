@@ -49,6 +49,10 @@ then be attached to a matching Lab scenario and model using `ocx lab run ... --o
 `DEGRADED_PROTOCOL_PROFILE`; the command does not infer or reproduce Cursor's private server-side
 prompt.
 
+Oracle observations also report `toolStepEfficiency`. A scenario that completes tools fails this
+gate when it uses more than three observed model calls per completed tool step. Scenarios with no
+completed tool step report `not_applicable`; they are not failed by this metric.
+
 The reviewed `cursor-agent` 2026.08.25 profile uses legacy inline request context. OpenCodex keeps
 that verified mode as the fallback and reports newer or structurally different profiles as degraded;
 it does not send guessed `requestContextParts` fields.
