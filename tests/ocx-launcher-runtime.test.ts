@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { bundledBunPath } from "../src/lib/bun-runtime";
 import { killProxy } from "../src/lib/process-control";
+import { commandInvocation } from "../src/lib/win-exec";
 
 const BIN_OCX = join(import.meta.dir, "..", "bin", "ocx.mjs");
 const nodeAvailable = spawnSync("node", ["--version"], {
@@ -307,6 +308,14 @@ function isolatedLauncherEnv(root: string, override: string): NodeJS.ProcessEnv 
     CODEX_HOME: codexHome,
     GROK_HOME: grokHome,
     OPENCODEX_BUN_PATH: override,
+    // Runtime-selection tests do not exercise management-token publication or
+    // Windows ACL performance. A generated file token can spend the production
+    // 30-second icacls budget before /healthz, and concurrent Windows pools have
+    // made that unrelated work exhaust this fixture's 90-second startup bound.
+    // Keep real hardening enabled but bounded; dedicated ACL suites cover its
+    // timeout and fail-closed behavior.
+    OPENCODEX_ADMIN_AUTH_TOKEN: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    OPENCODEX_ACL_TIMEOUT_MS: "1000",
   };
 }
 
@@ -451,24 +460,27 @@ describe.skipIf(!nodeAvailable || process.env.OCX_TEST_NETWORK_ISOLATED === "1")
     try {
       mkdirSync(packDir);
       mkdirSync(installDir);
-      const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-      const packed = spawnSync(npm, ["pack", "--json", "--pack-destination", packDir], {
+      const packInvocation = commandInvocation("npm", ["pack", "--json", "--pack-destination", packDir]);
+      const packed = spawnSync(packInvocation.file, packInvocation.args, {
         cwd: join(import.meta.dir, ".."),
         encoding: "utf8",
         timeout: 120_000,
         windowsHide: true,
+        ...packInvocation.options,
       });
       expect(packed.status).toBe(0);
       const packResult = JSON.parse(packed.stdout) as { filename: string }[] | Record<string, { filename: string }>;
       const { filename } = Array.isArray(packResult) ? packResult[0]! : Object.values(packResult)[0]!;
-      const installed = spawnSync(npm, [
+      const installInvocation = commandInvocation("npm", [
         "install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false",
         join(packDir, filename),
-      ], {
+      ]);
+      const installed = spawnSync(installInvocation.file, installInvocation.args, {
         cwd: installDir,
         encoding: "utf8",
-        timeout: 120_000,
+        timeout: 240_000,
         windowsHide: true,
+        ...installInvocation.options,
       });
       expect(installed.status).toBe(0);
       const installedOcx = join(installDir, "node_modules", "@yansigit", "opencodex", "bin", "ocx.mjs");
@@ -511,7 +523,7 @@ describe.skipIf(!nodeAvailable || process.env.OCX_TEST_NETWORK_ISOLATED === "1")
     } finally {
       await cleanupFirstStartup(root, env.OPENCODEX_HOME!, launcher, health);
     }
-  }, 240_000);
+  }, 420_000);
 });
 
 describe.skipIf(!nodeAvailable)("ocx npm launcher relative Bun override", () => {
@@ -563,14 +575,17 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher relative Bun override", () => 
 
 describe.skipIf(!runnable)("ocx npm launcher effective Bun runtime", () => {
   test("uses a valid OPENCODEX_BUN_PATH for the actual proxy process", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-launcher-runtime-copy-"));
-    try {
-      const override = join(root, "override-bun.exe");
-      copyFileSync(process.execPath, override);
-      expect(sameWindowsPath(await effectiveRuntime(override), override)).toBe(true);
-    } finally {
-      removeTree(root);
-    }
+    // Use the already-installed project Bun as the distinct override. Copying
+    // its ~100 MiB executable into a fresh temp path made Windows Defender scan
+    // the new image before CreateProcess could start it; under full-suite load
+    // that scan has exceeded 90 seconds even though launcher selection was
+    // correct. The project Bun and npm-bundled Bun are separate installations,
+    // so this still proves override precedence and the child's executable path
+    // without adding an antivirus-timing dependency to the assertion.
+    const bundled = bundledBunPath();
+    expect(bundled).not.toBeNull();
+    expect(sameWindowsPath(process.execPath, bundled!)).toBe(false);
+    expect(sameWindowsPath(await effectiveRuntime(process.execPath), process.execPath)).toBe(true);
   }, EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS);
 
   test("falls back to bundled Bun for a sub-1MB override stub", async () => {

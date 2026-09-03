@@ -430,10 +430,10 @@ describe("Antigravity TLS transport gate", () => {
   });
 
   test("does not locally resolve proxied destinations", async () => {
-    process.env.HTTPS_PROXY = "http://proxy-user:proxy-secret@example.test:8080";
     delete process.env.https_proxy;
-    process.env.NO_PROXY = "";
+    process.env.HTTPS_PROXY = "http://proxy-user:proxy-secret@example.test:8080";
     delete process.env.no_proxy;
+    process.env.NO_PROXY = "";
     let resolverCalls = 0;
     let nativeCalls = 0;
     let transportProxy: string | undefined;

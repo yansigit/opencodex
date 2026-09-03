@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { join, dirname, resolve } from "node:path";
+import { join, dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CLAUDE_CODE_HEADERS } from "../src/adapters/client-fingerprint";
 
@@ -74,8 +74,8 @@ describe("anthropic sdk fingerprint", () => {
       "src/web-search/anthropic-executor.ts",
     ];
     for (const path of matches) {
-      const relative = path.slice(repoRoot.length + 1);
-      const isAllowed = allowedPrefixes.includes(relative);
+      const normalized = relative(repoRoot, path).split(sep).join("/");
+      const isAllowed = allowedPrefixes.includes(normalized);
       expect(isAllowed).toBe(true);
     }
   });

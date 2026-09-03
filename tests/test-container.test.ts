@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 
 const ROOT = join(import.meta.dir, "..");
@@ -12,8 +12,8 @@ function fakeContainer(system: "running" | "stopped" = "running", version = "1.3
   const dir = mkdtempSync(join(tmpdir(), "ocx-container-cli-"));
   dirs.push(dir);
   const record = join(dir, "calls.jsonl");
-  const executable = join(dir, "container");
-  writeFileSync(executable, `#!/usr/bin/env bun
+  const script = join(dir, "container.ts");
+  writeFileSync(script, `
 import { appendFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.OCX_CONTAINER_RECORD!, JSON.stringify(args) + "\\n");
@@ -26,14 +26,20 @@ if (args[0] === "builder" && args[1] === "status") {
 if (args[0] === process.env.OCX_FAKE_FAIL) process.exit(1);
 process.exit(0);
 `);
-  chmodSync(executable, 0o755);
+  if (process.platform === "win32") {
+    writeFileSync(join(dir, "container.cmd"), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  } else {
+    const executable = join(dir, "container");
+    writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    chmodSync(executable, 0o755);
+  }
   return { dir, record };
 }
 
 function run(system: "running" | "stopped" = "running", args: string[] = [], version = "1.3.0", env: Record<string, string> = {}) {
   const fake = fakeContainer(system, version);
   const result = Bun.spawnSync([process.execPath, "run", RUNNER, ...args], {
-    cwd: ROOT, env: { ...process.env, ...env, PATH: `${fake.dir}:${process.env.PATH}`, OCX_CONTAINER_RECORD: fake.record }, stdout: "pipe", stderr: "pipe",
+    cwd: ROOT, env: { ...process.env, ...env, PATH: `${fake.dir}${delimiter}${process.env.PATH}`, OCX_CONTAINER_RECORD: fake.record }, stdout: "pipe", stderr: "pipe",
   });
   const calls = existsSync(fake.record) ? readFileSync(fake.record, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) as string[][] : [];
   return { result, calls };

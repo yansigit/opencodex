@@ -979,7 +979,6 @@ describe("management and data-plane credential separation", () => {
 
   test("the live listener trusts Tailscale identity only on hub management ingress", async () => {
     const managementPort = await findAvailablePort(0, "127.0.0.1");
-    const publicPort = await findAvailablePort(0, "127.0.0.1", { reservedPort: managementPort });
     const config = hubConfig();
     config.hub = {
       ...config.hub,
@@ -988,7 +987,10 @@ describe("management and data-plane credential separation", () => {
     saveConfig(config);
     const state = initializeManagementAuthState(config);
     if (!state.available) throw new Error("expected management auth state");
-    const server = startServer(publicPort, { managementAuthState: state });
+    // The public listener's exact port is irrelevant to this contract. Let the
+    // kernel allocate it atomically instead of probing and releasing a port that
+    // another parallel test can claim before startServer binds it.
+    const server = startServer(0, { managementAuthState: state });
     const headers = { Host: "hub.example.test", "Tailscale-User-Login": "alice@example.test" };
     try {
       const spoofedPublic = await fetch(new URL("/opencodex-session", server.url), { headers });

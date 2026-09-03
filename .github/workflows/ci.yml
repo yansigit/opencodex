@@ -650,7 +650,9 @@ jobs:
       - name: CLI help smoke
         run: bun run src/cli/index.ts help
 
-  # Windows runs only when a maintainer asks for it by hand.
+  # Windows is a required shipping-platform gate on integration pushes and on
+  # pull requests that touch CI-relevant code. Documentation-only pull requests
+  # may skip it through the same `changes` decision used by the Linux shards.
   #
   # It left the PR lane first (16m23s against a 6-minute Linux critical path;
   # the ceiling was raised twice rather than the gap closed — #711 vs #653,
@@ -661,16 +663,14 @@ jobs:
   # version — gating the release on them blocks shipping fixes to the platforms
   # that pass, for a platform that has never shipped green.
   #
-  # The leg stays in the workflow, sharded and dispatchable, so the failure
-  # list can be burned down without losing the ability to measure progress.
-  # release.yml gates on a successful push-event run of this workflow, which
-  # now means Linux + macOS + the gates; Windows re-enters the gate when the
-  # tracked failures are fixed, not before.
+  # The tracked portability failures are fixed and the four hosted shards are
+  # green again. Keep the leg sharded and bounded: removing it from ordinary
+  # pushes is what allowed the Windows-only backlog to accumulate unnoticed.
   platform-windows:
     name: windows ${{ matrix.shard }}/4
-    needs: select-windows-runner
+    needs: [changes, select-windows-runner]
     if: >-
-      github.event_name == 'workflow_dispatch'
+      github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'
     runs-on: ${{ fromJSON(needs.select-windows-runner.outputs.runner) }}
     # Sharded like the Linux legs. The single-leg run reached 30 minutes on a
     # green suite and was killed in cleanup; four shards put each leg inside the
@@ -917,6 +917,8 @@ jobs:
         shell: bash
         env:
           RESULTS: ${{ toJSON(needs) }}
+          WINDOWS_REQUIRED: ${{ github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true' }}
+          WINDOWS_RESULT: ${{ needs.platform-windows.result }}
         run: |
           set -euo pipefail
           echo "$RESULTS" | jq .
@@ -934,9 +936,7 @@ jobs:
             echo "::error::needed job(s) did not pass: $bad"
             exit 1
           fi
-
-      # Windows is dispatch-only, so there is no event where a skipped Windows
-      # leg is a gate violation: on push events it is always skipped, and on
-      # dispatch a failed Windows leg already fails the allowlist above. The
-      # old "windows must have run on main/preview" assertion left with the
-      # condition it policed.
+          if [ "$WINDOWS_REQUIRED" = "true" ] && [ "$WINDOWS_RESULT" != "success" ]; then
+            echo "::error::Windows was required but reported: $WINDOWS_RESULT"
+            exit 1
+          fi
