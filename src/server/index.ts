@@ -1,4 +1,5 @@
 import { markActivity } from "../lib/sidecar-tracker";
+import { allowPlaintextRemoteForTests } from "../lib/test-server-start";
 import { knownModelIdsForProvider } from "../router";
 import {
   buildWarmupCompletionFrames,
@@ -649,7 +650,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
-  assertServerAuthConfig(config);
+  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: allowPlaintextRemoteForTests() });
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   const managementSessionControl = createManagementSessionControl(managementAuth);
   let userCostOverlayReconciler: { stop(): void } | null = null;
