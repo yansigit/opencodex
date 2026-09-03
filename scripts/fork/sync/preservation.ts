@@ -65,9 +65,10 @@ export function resolvedRegistryPath(
   return env.FORK_SYNC_TRUSTED_REGISTRY || REGISTRY_PATH;
 }
 
-export function registryHash(): string {
+export function registryHash(env: Record<string, string | undefined> = process.env): string {
   try {
-    const path = resolvedRegistryPath();
+    const currentPath = registryPath();
+    const path = existsSync(currentPath) ? currentPath : resolvedRegistryPath(env);
     if (!existsSync(path)) return "missing";
     const data = readFileSync(path, "utf8");
     return createHash("sha256").update(data).digest("hex");
@@ -76,13 +77,95 @@ export function registryHash(): string {
   }
 }
 
-export function loadRegistry(): PreservationRegistry {
+export function loadRegistry(env: Record<string, string | undefined> = process.env): PreservationRegistry {
+  const trustedPath = env.FORK_SYNC_TRUSTED_REGISTRY;
+  const currentPath = registryPath();
+
+  if (trustedPath && existsSync(trustedPath)) {
+    const trustedRaw = readFileSync(trustedPath, "utf8");
+    const trustedRegistry = JSON.parse(trustedRaw) as PreservationRegistry;
+    validateRegistry(trustedRegistry);
+
+    if (existsSync(currentPath)) {
+      const currentRaw = readFileSync(currentPath, "utf8");
+      const candidate = JSON.parse(currentRaw) as PreservationRegistry;
+      validateRegistryTransition(trustedRegistry, candidate);
+      return candidate;
+    }
+    return trustedRegistry;
+  }
+
   const path = resolvedRegistryPath();
   if (!existsSync(path)) throw new Error(`preservation registry missing at ${path}`);
   const raw = readFileSync(path, "utf8");
   const parsed = JSON.parse(raw) as PreservationRegistry;
   validateRegistry(parsed);
   return parsed;
+}
+
+export function validateRegistryTransition(
+  trustedBase: PreservationRegistry,
+  candidate: PreservationRegistry,
+  targetTag?: string,
+): void {
+  validateRegistry(candidate);
+
+  if (candidate.version !== trustedBase.version) {
+    throw new Error(`candidate registry version ${String(candidate.version)} does not match trusted base ${String(trustedBase.version)}`);
+  }
+  if (candidate.auditStart !== trustedBase.auditStart) {
+    throw new Error("candidate registry auditStart does not match trusted base");
+  }
+
+  // Baseline features must remain identical to trusted base
+  const trustedFeatures = trustedBase.baseline?.features ?? {};
+  const candidateFeatures = candidate.baseline?.features ?? {};
+  const trustedKeys = Object.keys(trustedFeatures).sort();
+  const candidateKeys = Object.keys(candidateFeatures).sort();
+  if (JSON.stringify(trustedKeys) !== JSON.stringify(candidateKeys)) {
+    throw new Error("candidate registry baseline features do not match trusted base");
+  }
+  for (const key of trustedKeys) {
+    if (JSON.stringify(trustedFeatures[key]) !== JSON.stringify(candidateFeatures[key])) {
+      throw new Error(`candidate registry modified trusted baseline feature: ${key}`);
+    }
+  }
+
+  // All historical releases in trusted base must remain identical
+  for (const [releaseTag, trustedEntry] of Object.entries(trustedBase.releases)) {
+    const candidateEntry = candidate.releases[releaseTag];
+    if (!candidateEntry) {
+      throw new Error(`candidate registry removed historical release: ${releaseTag}`);
+    }
+    if (JSON.stringify(trustedEntry) !== JSON.stringify(candidateEntry)) {
+      throw new Error(`candidate registry modified historical release: ${releaseTag}`);
+    }
+  }
+
+  // New releases introduced by sync PR: at most 1, matching targetTag if provided
+  const newReleases = Object.keys(candidate.releases)
+    .filter(rel => !(rel in trustedBase.releases));
+  if (newReleases.length > 1) {
+    throw new Error(`candidate registry introduces multiple new releases: ${newReleases.join(", ")}`);
+  }
+  if (newReleases.length === 1) {
+    const newTag = newReleases[0]!;
+    if (targetTag && newTag !== targetTag) {
+      throw new Error(`candidate registry introduces release ${newTag}, expected ${targetTag}`);
+    }
+    const entry = candidate.releases[newTag]!;
+    if (entry.tag !== newTag) {
+      throw new Error(`release tag ${entry.tag} does not match release key ${newTag}`);
+    }
+    if (!/^[0-9a-fA-F]{40}$/.test(entry.tagSha)) {
+      throw new Error(`release ${newTag} tagSha is malformed`);
+    }
+    if (!/^[0-9a-fA-F]{40}$/.test(entry.baseSha)) {
+      throw new Error(`release ${newTag} baseSha is malformed`);
+    }
+  } else if (targetTag && !(targetTag in trustedBase.releases)) {
+    throw new Error(`release ${targetTag} not found in candidate registry`);
+  }
 }
 
 export function validateRegistry(registry: PreservationRegistry): void {

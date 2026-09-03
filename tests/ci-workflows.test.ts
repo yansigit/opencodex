@@ -933,6 +933,7 @@ describe("GitHub Actions hardening", () => {
     "require",
     "require",
     "require",
+    "require",
   ] as const;
 
   /** Reads every allowed-base PR performs before any enforcement writes. */
@@ -947,6 +948,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.get",
       "pulls.listFiles",
       "pulls.get",
+      "pulls.listCommits",
       "checks.listForRef",
       ...tail,
     ];
@@ -963,6 +965,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.get",
       "pulls.listFiles",
       "pulls.get",
+      "pulls.listCommits",
       "checks.listForRef",
       ...tail,
     ];
@@ -984,6 +987,8 @@ describe("GitHub Actions hardening", () => {
       "pulls.listFiles",
       "pulls.listFiles",
       "pulls.get",
+      "pulls.listCommits",
+      "pulls.listCommits",
       "checks.listForRef",
       ...tail,
     ];
@@ -1398,7 +1403,8 @@ describe("GitHub Actions hardening", () => {
           name !== "github.rest.issues.listEvents" &&
           name !== "github.rest.checks.listForRef" &&
           // Hygiene reassessment reads the changed-file list; not a write.
-          name !== "github.rest.pulls.listFiles",
+          name !== "github.rest.pulls.listFiles" &&
+          name !== "github.rest.pulls.listCommits",
       );
     expect([...new Set(restWrites)].sort()).toEqual([
       "github.rest.issues.addLabels",

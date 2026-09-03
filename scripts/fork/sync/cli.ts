@@ -232,6 +232,10 @@ export async function runCli(
     const report = await analyzeOverlap({ runner, base, fork, upstream, merge, dev, tag });
     if (command === "verify") {
       if (!provenance) throw new Error("verify requires exact-head provenance");
+      const release = loadRegistry(env).releases[tag];
+      if (!release || release.tagSha !== upstream || release.baseSha !== base) {
+        throw new Error("preservation release ancestry does not match verification input");
+      }
       const headSha = await runOk(runner, ["rev-parse", "HEAD"]);
       const reportHash = preservationReportHash(report);
       if (headSha !== merge || provenance.headSha !== headSha) throw new Error("stale preservation head SHA");

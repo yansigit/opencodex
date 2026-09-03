@@ -2741,9 +2741,9 @@
         ".github/workflows/service-lifecycle.yml": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for .github/workflows/service-lifecycle.yml without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 8e0513b45980, fork da266b3699b3, upstream df37f6056185, result df37f6056185 (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores protected-branch service lifecycle coverage and verifies workflow invariants after the v2.41 sync merge.",
           "exactTests": [
             "bun test tests/ci-workflows.test.ts",
             "bun test tests/fork/sync-workflow.test.ts"
@@ -3133,9 +3133,9 @@
         "scripts/privacy-scan.ts": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for scripts/privacy-scan.ts without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base f6dbcc66184b, fork bfe23b2e0165, upstream 47bb733779d9, result 47bb733779d9 (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores untracked-file privacy coverage while retaining the upstream scanner changes.",
           "exactTests": [
             "bun run typecheck",
             "bun run check:hygiene"
@@ -3270,9 +3270,9 @@
         "src/codex/catalog/provider-fetch.ts": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for src/codex/catalog/provider-fetch.ts without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 66b7f63a883f, fork d39470cdff13, upstream f48edcd03cf2, result f48edcd03cf2 (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 retains fork OAuth catalog projection guarantees while adopting the v2.41 provider-fetch behavior.",
           "exactTests": [
             "bun test tests/codex-catalog.test.ts"
           ],
@@ -3297,9 +3297,9 @@
         "src/generated/model-metadata.ts": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for src/generated/model-metadata.ts without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base dea2a49baf4e, fork c260998863a6, upstream 73b9dee5d5ac, result 73b9dee5d5ac (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores the fork AI Studio model aliases on top of the v2.41 generated metadata.",
           "exactTests": [
             "bun run typecheck",
             "bun run check:hygiene"
@@ -3339,9 +3339,9 @@
         "src/providers/registry.ts": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for src/providers/registry.ts without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 3f71a1a8a788, fork 9d54e556027c, upstream cc692902d390, result cc692902d390 (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores the Command Code prompt-cache capability while retaining the v2.41 registry updates.",
           "exactTests": [
             "bun run typecheck",
             "bun run check:hygiene"
@@ -3353,9 +3353,9 @@
         "src/server/auth-cors.ts": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/auth-cors.ts without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 10516ca31c7b, fork 37daf4466cc5, upstream 8da10d5f44f4, result 8da10d5f44f4 (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores the fork management/auth DTO fields required by the v2.41 server composition.",
           "exactTests": [
             "bun run typecheck",
             "bun test tests/chat-completions-endpoint.test.ts"
@@ -3395,9 +3395,9 @@
         "src/server/claude-messages.ts": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/claude-messages.ts without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 8425395b1869, fork 13a0514f6a28, upstream 476ac34bc0fa, result 476ac34bc0fa (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 preserves Claude source envelopes, route callbacks, and session handling while integrating v2.41 effort-row routing.",
           "exactTests": [
             "bun run typecheck",
             "bun test tests/chat-completions-endpoint.test.ts"
@@ -3409,9 +3409,9 @@
         "src/server/index.ts": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/index.ts without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base eab0ba1d7f81, fork e6220b140a0a, upstream 92495a8b58bd, result 92495a8b58bd (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores the fork server composition seams while retaining the v2.41 startup changes.",
           "exactTests": [
             "bun run typecheck",
             "bun test tests/chat-completions-endpoint.test.ts"
@@ -3450,9 +3450,9 @@
         "src/server/management/provider-routes.ts": {
           "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/management/provider-routes.ts without bypassing fork sync trust boundaries.",
           "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
-          "equivalentOrBetter": true,
-          "disposition": "upstream-equivalent",
-          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 2eedb1d5e64b, fork d95dcb3d9bc0, upstream 8b9f8d0dd45c, result 8b9f8d0dd45c (exact-upstream-blob).",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 preserves atomic provider management, AI Studio probing, and Antigravity OAuth checks while adopting v2.41 provider editing.",
           "exactTests": [
             "bun run typecheck",
             "bun test tests/chat-completions-endpoint.test.ts"

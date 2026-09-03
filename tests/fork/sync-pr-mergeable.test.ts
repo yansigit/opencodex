@@ -76,4 +76,13 @@ describe("fork PR mergeable workflow", () => {
     expect(source).toContain('--arg merge "$HEAD_SHA"');
     expect(source).toContain('--argjson provenance "$provenance"');
   });
+
+  test("resolves upstream release tag from trusted base or upstream package.json when introduced by sync PR", () => {
+    const source = workflow();
+    expect(source).toContain('tag="$(jq -r --arg sha "$upstream" \'.releases | to_entries[] | select(.value.tagSha == $sha) | .value.tag\' "$trusted/docs/fork/PRESERVATION.json" | head -n 1)"');
+    expect(source).toContain('tag="$(git show "$upstream:package.json" 2>/dev/null | jq -r \'select(.version != null) | "v" + .version\' || true)"');
+    expect(source).toContain('if [ -z "$tag" ]; then');
+    expect(source).toContain('echo "::error::Preservation provenance does not identify a registered upstream release"');
+    expect(source).not.toMatch(/jq[^\n]+\sdocs\/fork\/PRESERVATION\.json/);
+  });
 });

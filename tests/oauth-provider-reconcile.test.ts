@@ -197,7 +197,7 @@ describe("OAuth provider reconciliation", () => {
       },
     } satisfies OcxConfig;
 
-    reconcileOAuthProviders(config);
+    reconcileOAuthProviders(config, false);
     const provider = config.providers["google-antigravity"];
 
     expect(provider.defaultModel).toBe("gemini-3.7-flash");

@@ -313,6 +313,9 @@ describe("OpenAI provider-option integration spine", () => {
       );
       const openai = seed("openai");
       delete openai.codexAccountMode;
+      // Exercise the optional upstream WebSocket lane explicitly. Its production default is
+      // HTTP/SSE, so this integration contract must not depend on a developer or CI env var.
+      openai.wsUpstream = true;
       const api = seed("openai-apikey");
       api.liveModels = false;
       api.apiKey = "fixture-api-key";

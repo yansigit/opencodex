@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { CommandResult, CommandRunner, SyncEvent } from "../../scripts/fork/sync/types";
 import { prepareSync } from "../../scripts/fork/sync/prepare";
+import { mergePackageJson } from "../../scripts/fork/sync/recipes/package-json";
 
 const ok = (stdout = ""): CommandResult => ({ exitCode: 0, stdout, stderr: "" });
 const conflict = (paths: string): CommandResult => ({
@@ -37,6 +38,45 @@ function queuedRunner(results: CommandResult[]) {
 }
 
 describe("fork sync daily preparation", () => {
+  test("package recipe retains fork CI commands and dependencies while taking upstream security overrides", () => {
+    const merged = JSON.parse(mergePackageJson(
+      JSON.stringify({
+        name: "@yansigit/opencodex",
+        version: "2.40.4",
+        scripts: {
+          prepush: "bun run check:hygiene && bun run lint:workflows && bun run test",
+          "test:container": "bun scripts/test-container.ts",
+          "check:hygiene": "node scripts/check-hygiene.mjs",
+          "lint:workflows": "bun scripts/ci/actionlint.ts",
+        },
+        devDependencies: { "@anthropic-ai/sdk": "0.122.0" },
+        optionalDependencies: { "wreq-js": "3.2.0" },
+        overrides: { "fast-uri": "^3.1.5", "ip-address": "^10.4.0" },
+      }),
+      JSON.stringify({
+        name: "@bitkyc08/opencodex",
+        version: "2.41.0",
+        scripts: { prepush: "bun run typecheck && bun run test" },
+        devDependencies: { typescript: "7.0.2" },
+        overrides: { "fast-uri": "^3.1.7", qs: "^6.16.0" },
+      }),
+    ));
+
+    expect(merged).toMatchObject({
+      name: "@yansigit/opencodex",
+      version: "2.41.0",
+      scripts: {
+        prepush: "bun run check:hygiene && bun run lint:workflows && bun run test",
+        "test:container": "bun scripts/test-container.ts",
+        "check:hygiene": "node scripts/check-hygiene.mjs",
+        "lint:workflows": "bun scripts/ci/actionlint.ts",
+      },
+      devDependencies: { "@anthropic-ai/sdk": "0.122.0", typescript: "7.0.2" },
+      optionalDependencies: { "wreq-js": "3.2.0" },
+      overrides: { "fast-uri": "^3.1.7", "ip-address": "^10.4.0", qs: "^6.16.0" },
+    });
+  });
+
   test("creates and merges an upstream-identified branch when there are no conflicts", async () => {
     const queued = queuedRunner([ok(), ok()]);
 
