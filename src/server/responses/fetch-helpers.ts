@@ -54,6 +54,14 @@ export interface PaceAwareFetch {
 
 export type ProviderFetch = typeof globalThis.fetch & PaceAwareFetch;
 
+export class UpstreamRedirectError extends Error {
+  override readonly name = "UpstreamRedirectError";
+
+  constructor(readonly status: number) {
+    super(`upstream returned ${status} redirect; configure the final upstream URL directly`);
+  }
+}
+
 export interface ProviderFetchOptions {
   providerName?: string;
   modelId?: string;
@@ -200,7 +208,7 @@ export async function fetchWithHeaderTimeout(
     });
     if (response.status >= 300 && response.status < 400) {
       try { await response.body?.cancel(); } catch { /* ignore cancellation failures */ }
-      throw new Error(`upstream returned ${response.status} redirect; configure the final upstream URL directly`);
+      throw new UpstreamRedirectError(response.status);
     }
     return response;
   } finally {

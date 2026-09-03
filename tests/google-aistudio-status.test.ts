@@ -12,6 +12,7 @@ import { startServer } from "../src/server";
 
 const TEST_DIR = join(tmpdir(), "ocx-aistudio-status-" + Date.now());
 const prevHome = process.env.OPENCODEX_HOME;
+const originalGlobalFetch = globalThis.fetch;
 const REAUTH_ERROR = "Session expired or missing — re-authentication required";
 
 beforeEach(() => {
@@ -22,6 +23,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setAiStudioProbeFetchForTests(undefined);
+  globalThis.fetch = originalGlobalFetch;
   if (prevHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = prevHome;
   rmSync(TEST_DIR, { recursive: true, force: true });
@@ -64,12 +66,12 @@ async function probe(config: OcxConfig): Promise<{ status: number; body: Record<
   return { status: res.status, body: await res.json() as Record<string, unknown> };
 }
 
-describe.skipIf(process.platform !== "darwin")("AI Studio status & re-auth", () => {
+describe("AI Studio status & re-auth", () => {
   test("safeConfigDTO exposes compatibility session state and needs-reauth auth state", () => {
     const dto = safeConfigDTO(cfg()) as any;
     const prov = dto.providers["google-aistudio"];
     expect(typeof prov.hasAiStudioSession).toBe("boolean");
-    expect(prov.aiStudioAuthState).toBe("needs_reauth");
+    expect(prov.aiStudioAuthState).toBe(process.platform === "darwin" ? "needs_reauth" : "unsupported");
     expect(prov.hasAiStudioSession).toBe(false);
     expect(prov).not.toHaveProperty("aiStudioRelayActive");
   });
@@ -86,7 +88,9 @@ describe.skipIf(process.platform !== "darwin")("AI Studio status & re-auth", () 
     c.providers["google-aistudio"]!.apiKey = "not-a-cookie";
     const dto = safeConfigDTO(c) as any;
     expect(dto.providers["google-aistudio"].hasAiStudioSession).toBe(false);
-    expect(dto.providers["google-aistudio"].aiStudioAuthState).toBe("needs_reauth");
+    expect(dto.providers["google-aistudio"].aiStudioAuthState).toBe(
+      process.platform === "darwin" ? "needs_reauth" : "unsupported",
+    );
     expect(JSON.stringify(dto)).not.toContain("not-a-cookie");
   });
 
@@ -139,8 +143,41 @@ describe.skipIf(process.platform !== "darwin")("AI Studio status & re-auth", () 
     saveAiStudioSession({ selectedProject: "p", windowId: "w", cookies: [{ name: "SAPISID", value: "valid" }] });
     const redirected = await probe(cfg());
     expect(redirected.body.ok).toBe(false);
-    expect(redirected.body.error).toBe("AI Studio connection probe failed");
+    expect(redirected.body.error).toBe(REAUTH_ERROR);
     expect(redirected.body.authState).not.toBe("connected");
+  });
+
+  test("inference reports a rejected sign-in redirect as an expired session", async () => {
+    const c = cfg();
+    c.providers["google-aistudio"]!.models = ["gemini-3.8-flash"];
+    saveConfig(c);
+    saveAiStudioSession({
+      selectedProject: "gen-lang-client-redirect-test",
+      windowId: "win-redirect-test",
+      cookies: [{ name: "SAPISID", value: "valid" }],
+    });
+    globalThis.fetch = (async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://accounts.google.com/v3/signin" },
+    })) as typeof fetch;
+    const server = startServer(0);
+    try {
+      const response = await originalGlobalFetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "google-aistudio/gemini-3.8-flash",
+          stream: false,
+          input: [{ role: "user", content: [{ type: "input_text", text: "Reply with OK" }] }],
+        }),
+      });
+      expect(response.status).toBe(502);
+      const body = await response.json() as { error?: { message?: string } };
+      expect(body.error?.message).toContain("session expired — re-authentication required");
+      expect(response.headers.get("location")).toBeNull();
+    } finally {
+      await server.stop(true);
+    }
   });
 
   test("POST /api/providers/test 5xx or network failure is not reauthentication", async () => {

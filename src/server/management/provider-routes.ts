@@ -276,15 +276,6 @@ async function probeAiStudioLiveSession(
   if (credentials.kind !== "ready") {
     return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
   }
-  if (process.platform !== "darwin") {
-    return {
-      ok: true,
-      latencyMs: 0,
-      authState: "unsupported",
-      message: "AI Studio credentials configured; native login is unsupported on this platform",
-    };
-  }
-
   const base = (prov.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
   const url = base + "/v1internal:generateContent";
   const jar = parseGoogleCookieJar(credentials.cookieHeader);
@@ -331,7 +322,10 @@ async function probeAiStudioLiveSession(
       authState: "connected",
       message: "AI Studio session verified",
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof ProviderOutboundPolicyError && /\breturned 3\d\d redirect\b/.test(error.message)) {
+      return { ok: false, latencyMs: Date.now() - started, error: AI_STUDIO_REAUTH_ERROR };
+    }
     return { ok: false, latencyMs: Date.now() - started, error: "AI Studio connection probe failed" };
   } finally {
     clearTimeout(timer);

@@ -163,7 +163,16 @@ of the HTTP retry loop.
 **Auth:** API key, Vertex ADC, Google Antigravity OAuth, or the local `ai-studio-web` direct session,
 selected by `googleMode`.
 
+API-key Gemini routes discover their callable catalog from Google's official `/v1beta/models`
+endpoint, including published input/output token limits, and keep only models that support
+`generateContent`. Cached or configured models remain the fallback when discovery fails.
+
 `googleMode: "ai-studio-web"` routes directly through Google's internal MakerSuite endpoints using authenticated session tokens and SHA-1 `SAPISIDHASH` credentials. On macOS, sessions are established interactively via native WebKit login (`ocx login` or Connect in the dashboard). Sessions can also be exported via the OpenCodex AI Studio Session Exporter extension for Brave and Chrome; configure the extension's exact `chrome-extension://<id>` origin in `corsAllowOrigins` and provide a data-plane API key before auto-sync. Inference uses direct authenticated HTTP transport rather than browser tabs or WebSocket relays.
+
+Saved AI Studio sessions are live-probed on every platform. A Google sign-in redirect is rejected
+without forwarding session credentials and is reported as requiring reauthentication. The static
+fallback catalog includes `gemini-3.8-flash`; an untouched older AI Studio seed is refreshed
+automatically, while operator-customized model lists are preserved.
 
 - System prompt → `systemInstruction`; messages → `contents[]` (assistant → `model`); tools →
   `functionDeclarations`. Data-URL images → `inline_data`.

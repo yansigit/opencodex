@@ -69,6 +69,7 @@ import { isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import { redactSecretString } from "../../lib/redact";
 import {
   extractProviderModelItems,
+  extractGoogleProviderModelItems,
   readBoundedDiscoveryJson,
   resolveProviderModelDiscovery,
   type ModelDiscoveryResponseFailure,
@@ -1625,7 +1626,9 @@ async function fetchProviderModelsWithAuth(
       markProviderDiscoveryOk(name, live.length);
       return observed(withConfiguredRetention(forCache, { warnDrops: true }), "authoritative");
     }
-    const extracted = extractProviderModelItems(bounded.value, discovery);
+    const extracted = effectiveGoogleMode(name, prov) === "ai-studio"
+      ? extractGoogleProviderModelItems(bounded.value, discovery)
+      : extractProviderModelItems(bounded.value, discovery);
     if (!extracted.ok) {
       const { models, fallback, shouldLog } = failedDiscoveryFallback({ reason: "invalid_response" });
       const diagnostic: Record<ModelDiscoveryResponseFailure, string> = {
