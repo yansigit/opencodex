@@ -29,4 +29,5 @@ change requires explicit security review under `MAINTAINERS.md`.
 - Run the local commands represented by changed workflow steps where possible.
 - Run `bun run prepush` for CI, release, dependency, packaging, or cross-platform workflow changes.
 - Upstream sync / promotion readiness: when workflow files changed, workflow lint must be clean; when dependency files changed, audit must be clean; verify exact-head/provenance (tag, base, published head, registry/decision/report hashes); `cancelled` or `skipped` runs are not evidence of green — only `success` counts.
+- A red `main` may be reconciled into exact-green `dev` only through the promotion backmerge helper's tree-preserving ancestry result. Never waive `main` CI for manual dispatch, a content-changing target, or a target that has not passed the helper's parent/tree postchecks.
 - Do not claim the workflow itself passed until GitHub Actions reports success for the exact commit.
