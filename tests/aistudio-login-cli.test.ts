@@ -9,6 +9,8 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as readline from "node:readline";
+import { enrichProviderFromRegistry } from "../src/providers/derive";
+import type { OcxProviderConfig } from "../src/types";
 
 describe("google-aistudio provider registration & instructions", () => {
   test("registry entry has clear label, description, and dashboard instructions", () => {
@@ -16,13 +18,14 @@ describe("google-aistudio provider registration & instructions", () => {
     expect(entry).toBeDefined();
     expect(entry?.label).toBe("Google AI Studio (Web)");
     expect(entry?.googleMode).toBe("ai-studio-web");
-    expect(entry?.note).toContain("/aistudio/bridge");
+    expect(entry?.note).toContain("direct HTTP transport");
     expect(entry?.baseUrl).toBe("https://alkalimakersuite-pa.clients6.google.com");
     expect(entry?.authKind).toBe("local");
     expect(entry?.keyOptional).toBe(true);
     expect(entry?.featured).toBe(true);
     expect(entry?.defaultModel).toBe("gemini-3.7-flash");
     expect(entry?.models).toEqual([
+      "gemini-3.8-flash",
       "gemini-3.7-flash",
       "gemini-3.1-pro-preview",
       "gemini-2.5-pro",
@@ -37,6 +40,24 @@ describe("google-aistudio provider registration & instructions", () => {
     });
     expect(entry?.extraMetadataAliases).toContain("aistudio");
     expect(entry?.extraMetadataAliases).toContain("gemini-aistudio");
+  });
+
+  test("refreshes only the untouched legacy static model seed", () => {
+    const legacy = {
+      adapter: "google",
+      baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+      authMode: "local",
+      googleMode: "ai-studio-web",
+      liveModels: false,
+      defaultModel: "gemini-3.7-flash",
+      models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
+    } satisfies OcxProviderConfig;
+    enrichProviderFromRegistry("google-aistudio", legacy);
+    expect(legacy.models[0]).toBe("gemini-3.8-flash");
+
+    const customized = { ...legacy, models: ["gemini-3.7-flash", "operator-model"] };
+    enrichProviderFromRegistry("google-aistudio", customized);
+    expect(customized.models).toEqual(["gemini-3.7-flash", "operator-model"]);
   });
 
   test("validates base64 session bundle exchange", () => {

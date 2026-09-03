@@ -1453,13 +1453,18 @@ describe("google provider hardening", () => {
     const vertex = PROVIDER_REGISTRY.find(entry => entry.id === "google-vertex");
 
     expect(google?.defaultModel).toBe("gemini-3.5-flash");
-    expect(google?.models).toEqual(["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.7-flash"]);
+    expect(google?.models).toEqual(["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"]);
+    expect(google?.modelContextWindows?.["gemini-3.8-flash"]).toBe(1_048_576);
     expect(google?.modelContextWindows?.["gemini-3.6-flash"]).toBe(1_048_576);
     expect(google?.modelContextWindows?.["gemini-3.5-flash"]).toBe(1_000_000);
     expect(google?.modelContextWindows?.["gemini-3.7-flash"]).toBe(1_048_576);
     expect(google?.modelContextWindows?.["gemini-3.1-pro-preview"]).toBeUndefined();
     expect(google?.modelInputModalities?.["gemini-3.6-flash"]).toEqual(["text", "image"]);
     expect(google?.modelInputModalities?.["gemini-3.7-flash"]).toEqual(["text", "image"]);
+    expect(google?.modelInputModalities?.["gemini-3.8-flash"]).toEqual(["text", "image"]);
+    expect(google?.modelReasoningEfforts?.["gemini-3.8-flash"]).toEqual([
+      "low", "medium", "high",
+    ]);
     expect(google?.modelReasoningEfforts?.["gemini-3.6-flash"]).toEqual([
       "minimal", "low", "medium", "high",
     ]);

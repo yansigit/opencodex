@@ -447,3 +447,24 @@ export function extractProviderModelItems(
   }
   return { ok: true, items, rawCount: data.length };
 }
+
+/** Normalize Google's documented `{ models: [...] }` envelope into the shared catalog shape. */
+export function extractGoogleProviderModelItems(
+  value: unknown,
+  discovery: ResolvedProviderModelDiscovery,
+): ProviderModelItemsResult {
+  const envelope = extractModelEnvelopeRows(value, discovery.maxModels, ["models"]);
+  if (!envelope.ok) return envelope;
+  const data = envelope.rows.map(raw => {
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return raw;
+    const row = raw as Record<string, unknown>;
+    return {
+      ...row,
+      id: row.name,
+      context_length: row.inputTokenLimit,
+      max_input_tokens: row.inputTokenLimit,
+      max_output_tokens: row.outputTokenLimit,
+    };
+  });
+  return extractProviderModelItems({ data }, discovery);
+}
