@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { validateRegistry, registryHash, registryPath, resolvedRegistryPath } from "../../scripts/fork/sync/preservation";
+import { validateRegistry, validateRegistryTransition, loadRegistry, registryHash, registryPath, resolvedRegistryPath } from "../../scripts/fork/sync/preservation";
 
 describe("preservation registry", () => {
   test("validates correct registry", async () => {
@@ -112,5 +112,129 @@ describe("preservation registry", () => {
       "subagent-fallback", "oauth-snapshot-compatibility", "native-tls", "provider-validation",
       "atomic-api-key-rotation",
     ]) expect(registry.baseline.features[feature]).toBeDefined();
+  });
+
+  test("validateRegistryTransition accepts valid new release addition", () => {
+    const trustedBase = {
+      version: 2,
+      auditStart: "2026-08-01",
+      baseline: {
+        features: {
+          tls: {
+            decisionSource: "policy",
+            ownedBehavior: "TLS",
+            integrationPaths: ["src/lib/server-tls.ts"],
+            requiredTests: ["tests/server-tls-config.test.ts"],
+          },
+        },
+      },
+      releases: {
+        "v2.40.0": {
+          tag: "v2.40.0",
+          tagSha: "a".repeat(40),
+          baseSha: "b".repeat(40),
+          decisions: {
+            "src/lib/server-tls.ts": {
+              disposition: "preserve",
+              upstreamIntent: "keep",
+              forkInvariant: "keep",
+              equivalentOrBetter: false,
+              implementationEvidence: "evidence",
+              exactTests: ["tests/server-tls-config.test.ts"],
+            },
+          },
+        },
+      },
+    };
+
+    const candidate = {
+      ...trustedBase,
+      releases: {
+        ...trustedBase.releases,
+        "v2.41.0": {
+          tag: "v2.41.0",
+          tagSha: "c".repeat(40),
+          baseSha: "d".repeat(40),
+          decisions: {
+            "src/lib/server-tls.ts": {
+              disposition: "preserve",
+              upstreamIntent: "v2.41 keep",
+              forkInvariant: "keep",
+              equivalentOrBetter: false,
+              implementationEvidence: "evidence",
+              exactTests: ["tests/server-tls-config.test.ts"],
+            },
+          },
+        },
+      },
+    };
+
+    expect(() => validateRegistryTransition(trustedBase as never, candidate as never, "v2.41.0")).not.toThrow();
+  });
+
+  test("validateRegistryTransition rejects modified or dropped baseline features", () => {
+    const trustedBase = {
+      version: 2,
+      baseline: {
+        features: {
+          f1: { decisionSource: "s", ownedBehavior: "b", integrationPaths: ["p1"], requiredTests: ["t1"] },
+        },
+      },
+      releases: {
+        "v2.40.0": { tag: "v2.40.0", tagSha: "a".repeat(40), baseSha: "b".repeat(40), decisions: {} },
+      },
+    };
+
+    const droppedBaseline = {
+      ...trustedBase,
+      baseline: { features: {} },
+    };
+    expect(() => validateRegistryTransition(trustedBase as never, droppedBaseline as never))
+      .toThrow(/baseline features do not match trusted base/);
+
+    const modifiedBaseline = {
+      ...trustedBase,
+      baseline: {
+        features: {
+          f1: { decisionSource: "tampered", ownedBehavior: "b", integrationPaths: ["p1"], requiredTests: ["t1"] },
+        },
+      },
+    };
+    expect(() => validateRegistryTransition(trustedBase as never, modifiedBaseline as never))
+      .toThrow(/modified trusted baseline feature/);
+  });
+
+  test("validateRegistryTransition rejects modified historical releases or multiple new releases", () => {
+    const trustedBase = {
+      version: 2,
+      baseline: {
+        features: {
+          f1: { decisionSource: "s", ownedBehavior: "b", integrationPaths: ["p1"], requiredTests: ["t1"] },
+        },
+      },
+      releases: {
+        "v2.40.0": { tag: "v2.40.0", tagSha: "a".repeat(40), baseSha: "b".repeat(40), decisions: {} },
+      },
+    };
+
+    const modifiedHistorical = {
+      ...trustedBase,
+      releases: {
+        "v2.40.0": { tag: "v2.40.0", tagSha: "f".repeat(40), baseSha: "b".repeat(40), decisions: {} },
+      },
+    };
+    expect(() => validateRegistryTransition(trustedBase as never, modifiedHistorical as never))
+      .toThrow(/modified historical release/);
+
+    const multipleNew = {
+      ...trustedBase,
+      releases: {
+        ...trustedBase.releases,
+        "v2.41.0": { tag: "v2.41.0", tagSha: "c".repeat(40), baseSha: "d".repeat(40), decisions: {} },
+        "v2.42.0": { tag: "v2.42.0", tagSha: "e".repeat(40), baseSha: "f".repeat(40), decisions: {} },
+      },
+    };
+    expect(() => validateRegistryTransition(trustedBase as never, multipleNew as never))
+      .toThrow(/introduces multiple new releases/);
   });
 });

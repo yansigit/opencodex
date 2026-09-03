@@ -69,7 +69,14 @@ export async function runGeminiWebSearch(
   const linkedSignal = signalWithTimeout(settings.timeoutMs, abortSignal);
   const sidecarExit = sidecarEnter("web-search");
   const t0 = Date.now();
-  const executor = providerFetch(provider, undefined, { providerName, modelId: settings.model });
+  // The sidecar destination is registry-pinned above. Normalize the transport
+  // contract to that same authority so a stale/malicious config base URL cannot
+  // either receive the bearer or make the TLS policy reject the safe request.
+  const executor = providerFetch({
+    ...provider,
+    baseUrl: base,
+    googleMode: "cloud-code-assist",
+  }, undefined, { providerName, modelId: settings.model });
   try {
     const res = await fetchWithResetRetry(
       recovery => executor(`${base}/v1internal:generateContent`, applyUpstreamRecoveryInit({

@@ -20,6 +20,7 @@ import { resolveClientRetryAfter } from "../lib/retry-after";
 import { isModelTextOnly } from "../vision";
 import {
   applyUpstreamRecoveryInit,
+  fetchWithResetRetry,
   fetchWithTransientRetry,
   prepareSameTarget429Wait,
   type UpstreamSendRecovery,
@@ -33,6 +34,7 @@ import {
   rateLimitRetryDelayMs,
   rateLimitRetryPolicyFor,
   rotateProviderTransportOn429,
+  transientRetryPolicyFor,
 } from "../providers/key-failover";
 import { fastPolicyForModel } from "../providers/service-tier";
 import type { RouteResult } from "../router";
@@ -202,10 +204,25 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     return fail(400, error instanceof Error ? error.message : String(error), "invalid_request_error");
   }
 
-  const replayBudget = activeProvider.replayTransientFailures ? { remaining: 2 } : undefined;
+  // One inbound request owns one transient send allowance. Capture the policy before any
+  // key rotation so recovery cannot replace the ceiling along with the active credential.
+  const requestTransientPolicy = transientRetryPolicyFor(activeProvider);
+  let transientSendsUsed = 0;
+  const remainingTransientSends = (): number => requestTransientPolicy
+    ? Math.max(0, requestTransientPolicy.attempts - transientSendsUsed)
+    : Number.POSITIVE_INFINITY;
+  const transientSendAvailable = (): boolean => remainingTransientSends() > 0;
+
   const send = async (request: AdapterRequest, recovery?: "rate-limit-429" | "key-429"): Promise<Response> => {
     try {
-      return await fetchWithTransientRetry(
+      // #2643: opted-in key-auth openai-chat providers retry pre-stream transient statuses on
+      // the native chat lane too; everyone else keeps reset-only semantics.
+      const remaining = remainingTransientSends();
+      if (requestTransientPolicy && remaining <= 0) {
+        throw new Error("native Chat transient send budget exhausted before recovery dispatch");
+      }
+      const fetchWithPolicy = requestTransientPolicy ? fetchWithTransientRetry : fetchWithResetRetry;
+      return await fetchWithPolicy(
         (transportRecovery?: UpstreamSendRecovery) => {
           noteAttemptSend(attempt, logCtx.usageLogInputTokens, transportRecovery ?? recovery);
           return fetchWithHeaderTimeout(
@@ -227,8 +244,12 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
         {
           abortSignal: upstream.signal,
           label: safeHostLabel(request.url),
-          replayTransientFailures: activeProvider.replayTransientFailures,
-          replayBudget,
+          ...(requestTransientPolicy
+            ? {
+              attempts: remaining,
+              onSendsConsumed: (sends: number) => { transientSendsUsed += Math.max(0, sends); },
+            }
+            : {}),
         },
       );
     } finally {
@@ -241,7 +262,12 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
     response = await send(activeRequest);
     const retryPolicy = rateLimitRetryPolicyFor(activeProvider);
     let retries = 0;
-    while (response.status === 429 && retryPolicy && retries < retryPolicy.attempts) {
+    while (
+      response.status === 429
+      && retryPolicy
+      && retries < retryPolicy.attempts
+      && transientSendAvailable()
+    ) {
       retries += 1;
       for await (const _ of prepareSameTarget429Wait({
         body: response.body,
@@ -259,6 +285,10 @@ export async function handleNativeChatCompletions(options: HandleNativeChatOptio
         promptCacheKey: typeof options.chatBody.prompt_cache_key === "string" ? options.chatBody.prompt_cache_key : undefined,
       });
       if (!rotated) break;
+      // Rotation also records the failed key's cooldown and persists the next healthy key.
+      // Keep that bookkeeping when this request has spent its final send, but preserve the
+      // terminal 429 body and do not dispatch with the replacement credential.
+      if (!transientSendAvailable()) break;
       try { void response.body?.cancel().catch(() => {}); } catch { /* already closed */ }
       activeProvider = rotated;
       activeAdapter = createOpenAIChatAdapter(activeProvider);

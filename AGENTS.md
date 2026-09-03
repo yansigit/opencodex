@@ -166,42 +166,17 @@ credential is equally reachable by both the browser and the agent, so no check
 inside this process can tell them apart. The real boundary is the rule above, and
 it binds you regardless of which mechanism is within reach.
 
-## Merge automation invariants
-
-Required merge checks are `ci`, `hygiene`, `enforce-target`, and `mergeable` from the trusted App. Autonomous upstream sync requires exact published-head provenance and no handoff, protected path, ownership conflict, or agent resolution. Jules controller base merges require parents `[previous Jules head, current dev]`; active editing blocks head advancement. `automation:hold` is summarized after 24 hours and never removed by automation.
-
 ## Commands
 
 ```bash
 bun install
 bun run typecheck      # bun x tsc --noEmit (strict)
-bun run test           # full tests/ suite
-bun run check:hygiene  # local hygiene gate (same as CI hygiene/enforce-target)
-bun run test:container # macOS with Apple Container: isolated container suite
-bun scripts/test.ts --shard=1/4  # supported isolated manual shard
+bun run test:changed   # import-graph tests against the resolved `dev` merge base
+bun run test           # full tests/ suite (PR-ready / explicit ask only)
 bun run lint:gui       # GUI eslint
-bun run lint:workflows  # actionlint semantic validation for .github/workflows
-bun run audit:high      # high-severity audit (root + gui)
 bun run privacy:scan   # credential/privacy scan used by CI
 bun run build:gui      # Vite GUI build
 ```
-
-## CI hardening
-
-- Workflow edits (`.github/workflows/**`, actionlint config): run `bun run lint:workflows` and the matching workflow tests (e.g. `bun test tests/ci-workflows.test.ts`) plus `bun run prepush` for CI/release/dependency/packaging changes. Do not claim the workflow passed until GitHub Actions reports success for the exact commit.
-- Dependency or lock changes (`package.json`, `bun.lock`, `gui/package.json`, `gui/bun.lock`, overrides): run `bun run audit:high` (covers root and gui) and `bun run typecheck` plus relevant tests.
-- Reusable workflow calls (`uses: ./.github/workflows/*.yml` with `with:`): expressions in `with:` must not use `env` or `secrets` contexts. Use contexts GitHub permits there, such as `github`, `inputs`, `needs`, `strategy`, `matrix`, and `vars`. Caller `permissions:` must cover every callee job's needs.
-- Release workflows (`release.yml`, `dev-version-bump.yml`): must validate `workflow_dispatch.inputs` and `repository_dispatch.client_payload` shapes in a dedicated `validate-dispatch` job before use; never trust relayed env/secrets for version or SHA.
-- Upstream sync / promotion readiness: when workflow files changed, workflow lint must be clean; when dependency files changed, audit must be clean; exact-head/provenance checks (tag, base, published head) are required; `cancelled` or `skipped` runs are not evidence of green — only `success` counts.
-- A test that persists config or credentials on a Windows path but is not testing ACL behavior must stub both the synchronous and asynchronous `icacls` runners, flush config-directory hardening before teardown, and exercise the Windows platform seam locally. Do not spend a semantic test timeout on real permission-hardening subprocesses.
-- Subprocess integration tests must give a fresh Windows Bun child an explicit startup/marker budget separate from the behavior timeout, and both budgets must fit inside the enclosing test timeout. Do not treat a 3–5 second child startup observed on an unloaded host as a cross-platform deadline.
-- Capture each child `stdout`/`stderr` stream exactly once. A diagnostic attached to `child.exited` remains subscribed after losing `Promise.race`, so its stream promises must be created once and shared with the success path rather than constructing a second `Response` later.
-- Every full-suite platform lane, including sharded Windows, must derive both its
-  general and serial work from `scripts/ci/test-lanes.ts`. A raw Bun `--shard`
-  over `tests/` bypasses the serial quarantine and recreates the process/timer
-  contention it exists to prevent. Serial subsets run with `--parallel=1` and
-  remain covered on the same platform; do not make stability by silently
-  dropping their Windows execution.
 
 `skills/ocx/` is the operating reference for the CLI — what an agent reads to *drive* a running
 proxy, as opposed to [`AGENTS_INSTALL.md`](./AGENTS_INSTALL.md) (installing and operating consent)
@@ -231,21 +206,9 @@ ambiguous focused result, an explicit user request, or the PR-ready gate below.
 
 Before creating or updating a non-trivial PR as review-ready, or before
 approving such a PR, run `bun run typecheck` and `bun run test`. CI runs these
-on Linux, Windows, and macOS. On a Mac with Apple Container available, also run
-`bun run test:container` as a non-trivial pre-PR gate. Start the service with
-`container system start` first if needed. Ordinary `bun run prepush` remains
-host-native and does not include this suite; it is not a GitHub-hosted CI job.
+on Linux, Windows, and macOS.
 
 Do not rerun passing checks on unchanged code merely for additional confidence.
-
-Tests that call the project `startServer()` wrapper must `await server.stop(true)`
-before restoring environment variables or deleting fixture directories. Its stop
-method drains asynchronous lifecycle and Windows ACL work; treating it like the
-synchronous `Bun.serve()` stop leaks file handles and causes intermittent Windows
-`EBUSY`/`EPERM` teardown failures.
-Tests that exercise config-loading or management persistence without a server and
-then delete `OPENCODEX_HOME` must similarly await `flushConfigDirHardening(home)`
-before restoring the environment and removing the fixture.
 
 ## Minimal containers and agent sandboxes
 
@@ -300,17 +263,17 @@ than nudged.
   `Closes #<number>` to link it. GitHub auto-closes the linked issue only
   when the PR merges into the default branch (`main`); PRs here target
   `dev`, so close the issue manually once the change is on `dev`.
-- **Target repository (fork vs. upstream):** when working in a cloned fork
-  (where `origin` is the user's fork and `upstream` is the parent repository),
-  **NEVER** create a PR targeting `upstream` (`lidge-jun/opencodex`) unless the
-  user explicitly requests an upstream submission. Always specify the user's fork
-  explicitly: `gh pr create --repo yansigit/opencodex --base dev --head <branch>`.
-  Upstream PR creation is an external action requiring explicit user direction.
-- **Fork-owner authority:** `@yansigit` owns and administers this fork. Their
-  explicit request authorizes self-merge or direct push within the requested
-  scope. Do not seek approval from upstream maintainers unless `@yansigit`
-  explicitly asks for upstream review or submission. Required CI and the
-  security-review rules in `MAINTAINERS.md` still apply.
+- **Landing another author's work:** reimplementing, superseding, carrying, or
+  rebasing someone else's pull request requires a `Co-authored-by` trailer
+  naming that author, in the description or in a branch commit so it survives
+  the squash. Saying it in prose is not equivalent — the trailer is what GitHub
+  reads for the contributor graph, and a sentence in a commit body is read by
+  nothing. This repository did it both ways for months: `53c09a247` says "Clean
+  reimplementation of #3193" and names the author in a trailer, `5734a1caf` says
+  "Reimplements #2797 by @rrmlima" and names nobody, so that contribution is
+  invisible on its author's profile. The 27 landings already in that state are
+  recorded in [`CREDITS.md`](./CREDITS.md); `missing_coauthor_credit` in
+  `.github/scripts/pr-carry-attribution.cjs` is why the list should not grow.
 
 ## Branch policy
 
@@ -352,8 +315,12 @@ local-CI box is an author attestation only — fork contributors cannot start
 repository CI; a maintainer has to — so the gate never disproves it; a new
 push still resets every box. A disproved claim unticks the matching box and
 keeps the PR a draft.
-Authors with repository push permission skip the contributor-readiness
-checklist. Branch and quality failures still apply.
+Authors with repository push permission skip the ancestry heuristic only. As with approval requirements in
+[`MAINTAINERS.md`](./MAINTAINERS.md), the ancestry heuristic is a CI check
+rather than a branch rule. The branches themselves are protected: `dev`,
+`main`, and `preview` each carry an active ruleset requiring a reviewed pull
+request and blocking force-pushes and deletion, so a direct push to `dev` is
+rejected regardless of `--no-verify`.
 
 [`MAINTAINERS.md`](./MAINTAINERS.md) is authoritative for review and merge
 policy (approvals, CI requirements, security review, promotion). This file
