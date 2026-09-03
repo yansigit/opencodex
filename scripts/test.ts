@@ -328,6 +328,10 @@ export const SERIAL_FULL_SUITE_FILES = SERIAL_TEST_FILES.map(
 );
 
 const SERIAL_LANE_TIMEOUT_MS: Partial<Record<SerialFullSuiteFile, number>> = {
+  // The packaged first-start case has its own 4-minute budget and performs npm
+  // pack/install plus a real proxy lifecycle. Keep the outer lane able to
+  // contain that bounded work on cold runners.
+  "ocx-launcher-runtime.test.ts": 5 * 60 * 1000,
   // This file intentionally exercises 33 complete release-script subprocess trees.
   // It is ~90s on an idle machine and measured at ~170s under unrelated host load.
   "release-helper.test.ts": 5 * 60 * 1000,

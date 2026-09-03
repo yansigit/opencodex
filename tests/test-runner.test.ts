@@ -222,6 +222,7 @@ describe("bun test argv", () => {
       ]);
     }
     expect(plan.find(lane => lane.label === "release-helper.test.ts")?.timeoutMs).toBe(5 * 60 * 1000);
+    expect(plan.find(lane => lane.label === "ocx-launcher-runtime.test.ts")?.timeoutMs).toBe(5 * 60 * 1000);
     expect(plan.find(lane => lane.label === "codex-shim.test.ts")?.timeoutMs).toBe(3 * 60 * 1000);
   });
 

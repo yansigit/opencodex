@@ -19,6 +19,7 @@ export const SERIAL_TEST_FILES = [
   "tests/issue-452-empty-503.test.ts",
   "tests/kiro-images.test.ts",
   "tests/openai-provider-option-e2e.test.ts",
+  "tests/ocx-launcher-runtime.test.ts",
   "tests/release-helper.test.ts",
   "tests/request-decompress.test.ts",
   "tests/responses-stateless-dangling-call-repair.test.ts",

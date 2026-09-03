@@ -31,6 +31,7 @@ describe("CI lane manifest", () => {
       "tests/aistudio-native-webkit.test.ts",
       "tests/claude-native-passthrough.test.ts",
       "tests/codex-app-server-processes.test.ts",
+      "tests/ocx-launcher-runtime.test.ts",
       "tests/server-auth.test.ts",
       "tests/shutdown-launcher.test.ts",
       "tests/storage-policy-job-responsive.test.ts",
