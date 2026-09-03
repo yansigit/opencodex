@@ -46,6 +46,11 @@ describe("CI lane manifest", () => {
       .toThrow(/outside tests/);
   });
 
+  test("never drops a nested test that shares a quarantined basename", () => {
+    const inventory = [...discoverTestFiles(process.cwd()), "tests/nested/codex-shim.test.ts"];
+    expect(() => validateLaneManifest(inventory)).toThrow(/collides with serial basename/);
+  });
+
   test("ignores a scratch directory that vanishes during inventory", () => {
     const root = join(tmpdir(), `opencodex-ci-lanes-${process.pid}-${Date.now()}`);
     const testsRoot = join(root, "tests");

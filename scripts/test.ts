@@ -321,9 +321,13 @@ export function resolveBunTestArgs(
   return args;
 }
 
-export const SERIAL_FULL_SUITE_FILES = SERIAL_TEST_FILES.map(file => file.slice("tests/".length));
+type SerialFullSuiteFile = (typeof SERIAL_TEST_FILES)[number] extends `tests/${infer File}` ? File : never;
 
-const SERIAL_LANE_TIMEOUT_MS: Partial<Record<string, number>> = {
+export const SERIAL_FULL_SUITE_FILES = SERIAL_TEST_FILES.map(
+  (file): SerialFullSuiteFile => file.slice("tests/".length) as SerialFullSuiteFile,
+);
+
+const SERIAL_LANE_TIMEOUT_MS: Partial<Record<SerialFullSuiteFile, number>> = {
   // This file intentionally exercises 33 complete release-script subprocess trees.
   // It is ~90s on an idle machine and measured at ~170s under unrelated host load.
   "release-helper.test.ts": 5 * 60 * 1000,

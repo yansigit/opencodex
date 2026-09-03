@@ -101,6 +101,15 @@ export function validateLaneManifest(inventory: string[]): {
   for (const path of reserved) {
     if (!normalized.includes(path)) throw new Error(`lane manifest path is missing: ${path}`);
   }
+  const serialByBasename = new Map(
+    serial.map(path => [path.slice(path.lastIndexOf("/") + 1), path]),
+  );
+  for (const path of normalized) {
+    const serialPath = serialByBasename.get(path.slice(path.lastIndexOf("/") + 1));
+    if (serialPath && path !== serialPath) {
+      throw new Error(`lane manifest path collides with serial basename: ${path} and ${serialPath}`);
+    }
+  }
   return {
     general: normalized.filter(path => !reserved.has(path)),
     serial,
