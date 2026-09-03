@@ -59,7 +59,7 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
   test("writes session credentials with owner-only permissions", () => {
     const dest = join(mkdtempSync(join(tmpdir(), "aistudio-session-")), "aistudio-session.json");
     saveAiStudioSession(sampleData, dest);
-    expect(statSync(dest).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") expect(statSync(dest).mode & 0o777).toBe(0o600);
   });
 
   test("saveAiStudioSessionFromToken decodes base64 bundle and writes session file", () => {

@@ -490,7 +490,12 @@ describe("WP13 composed toggle acceptance", () => {
         hold = true;
         // This request is intentionally held open while a second real HTTP
         // mutation crosses the Windows process-backed identity path.
-        const stale = fx.request(server.runtime, "/api/sync", { method: "POST" }, SERVER_BUDGET_MS);
+        // This request is deliberately held until the competing mutation
+        // finishes, so its deadline must outlive that mutation. Giving both
+        // requests the same fixed budget lets the older held request expire
+        // first under Windows process/ACL contention. The case timeout remains
+        // the outer bound if the release protocol itself is broken.
+        const stale = fx.request(server.runtime, "/api/sync", { method: "POST" }, CASE_TIMEOUT_MS);
         await Promise.race([
           enteredGather,
           stale.then(result => Promise.reject(new Error(
@@ -499,7 +504,7 @@ describe("WP13 composed toggle acceptance", () => {
         ]);
         const off = await fx.request(server.runtime, "/api/native-integrations/codex", {
           method: "PUT", body: JSON.stringify({ enabled: false }),
-        }, SERVER_BUDGET_MS);
+        }, watchdogMs(SERVER_BUDGET_MS));
         expect(off.status).toBe(200);
         const afterOff = manifest(fx.codex);
         release();

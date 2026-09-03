@@ -371,7 +371,7 @@ import {
 } from "./v2-routed-delegation-bridge";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { hasUnreadableEncryptedAgentTask, looksLikeBackendCiphertext, sanitizeEncryptedContentInPlace } from "./encrypted-payload";
-import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier } from "./fetch-helpers";
+import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier, UpstreamRedirectError } from "./fetch-helpers";
 import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upstream-reachability";
 import {
   acquireUpstreamHostAdmission,
@@ -6174,7 +6174,9 @@ async function handleResponsesInner(
     cleanupUpstreamAbort();
     upstream.abort();
     if (options.abortSignal?.aborted) return clientCancelledResponse();
-    const msg = describeUpstreamConnectFailure(err, connectMs);
+    const msg = route.provider.googleMode === "ai-studio-web" && err instanceof UpstreamRedirectError
+      ? "Google AI Studio session expired — re-authentication required"
+      : describeUpstreamConnectFailure(err, connectMs);
     return formatErrorResponse(502, "upstream_error", msg);
   } finally {
     builtInitialRequest.releaseBodyObservation?.();

@@ -12,6 +12,8 @@ import type { OcxConfig, OcxProviderConfig } from "../types";
 import { configuredAdminToken } from "../lib/admin-secrets";
 import { codexAccountNamespaceProviderCollisionError } from "../codex/account-namespace-match";
 import { apiKeyPoolEntryId } from "../providers/api-keys";
+import { getProviderRegistryEntry } from "../providers/registry";
+import { providerConfigSeed } from "../providers/derive";
 
 const LIVE_RELOAD_PROVIDERS = new Set<string>([
   ...listOAuthProviders(),
@@ -122,15 +124,9 @@ async function handleAiStudioLogin(): Promise<void> {
 
   const config = loadConfig();
   if (!config.providers["google-aistudio"]) {
-    await commitKeyLoginProvider(config, "google-aistudio", {
-      adapter: "google",
-      googleMode: "ai-studio-web",
-      baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
-      authMode: "local",
-      liveModels: false,
-      defaultModel: "gemini-3.7-flash",
-      models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
-    });
+    const entry = getProviderRegistryEntry("google-aistudio");
+    if (!entry) throw new Error("Google AI Studio provider registry entry is missing");
+    await commitKeyLoginProvider(config, "google-aistudio", providerConfigSeed(entry));
     console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
   }
 

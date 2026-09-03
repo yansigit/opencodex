@@ -210,6 +210,9 @@ describe("GitHub Actions hardening", () => {
     const ungated = new Set(["ci"]);
     expect([...(gate?.needs ?? [])].sort())
       .toEqual(Object.keys(ci.jobs ?? {}).filter(name => !ungated.has(name)).sort());
+    expect(workflow).toContain("WINDOWS_REQUIRED: ${{ github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true' }}");
+    expect(workflow).toContain("WINDOWS_RESULT: ${{ needs.platform-windows.result }}");
+    expect(workflow).toContain('if [ "$WINDOWS_REQUIRED" = "true" ] && [ "$WINDOWS_RESULT" != "success" ]; then');
 
     // The focused doctor contract config is ADDITIVE evidence. It must never
     // replace the repository-wide strict typecheck: doing so made the aggregate
@@ -258,18 +261,13 @@ describe("GitHub Actions hardening", () => {
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
       .toBe("github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'");
 
-    // Windows is dispatch-only: it gates nothing, not even the shipping
-    // boundary. The sharded promotion run surfaced ~207 Windows-only failures
-    // that pre-date every released version, so the leg became a measurement
-    // tool a maintainer runs by hand, not a gate. Assert the positive
-    // condition and the absence of every automatic trigger — a stray
-    // `|| github.ref == ...` would restore a red leg to the release path.
-    const windowsIf = String((ci.jobs?.["platform-windows"] as { if?: string })?.if ?? "");
-    expect(windowsIf).toContain("github.event_name == 'workflow_dispatch'");
-    expect(windowsIf).not.toContain("refs/heads/main");
-    expect(windowsIf).not.toContain("refs/heads/preview");
-    expect(windowsIf).not.toContain("refs/heads/dev");
-    expect(windowsIf).not.toContain("pull_request");
+    // Windows is required for every integration push and CI-relevant PR. The
+    // changes dependency keeps documentation-only PRs cheap without letting a
+    // code change or shipping-boundary push silently lose Windows coverage.
+    const windowsJob = ci.jobs?.["platform-windows"] as { if?: string; needs?: string[] } | undefined;
+    expect(windowsJob?.needs).toEqual(["changes", "select-windows-runner"]);
+    expect(windowsJob?.if)
+      .toBe("github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'");
 
     // Windows runs the same suite, sharded like the Linux legs, and keeps the
     // self-hosted workspace wipe. Without the wipe a deleted file survives on

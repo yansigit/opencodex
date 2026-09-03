@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
   setIcaclsRunnerForTests,
 } from "../src/lib/windows-secret-acl";
 import {
@@ -52,10 +53,17 @@ describe("multi-account auth store", () => {
       timedOut: false,
       stdout: "",
     }));
+    setAsyncIcaclsRunnerForTests(async () => ({
+      success: true,
+      exitCode: 0,
+      timedOut: false,
+      stdout: "",
+    }));
   });
 
   afterEach(() => {
     setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     resetHardenedStateForTests();
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;

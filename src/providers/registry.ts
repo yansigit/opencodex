@@ -1737,14 +1737,21 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
   // devlog/_plan/260710_provider_hardening/001_research_frontier.md.
   {
     id: "google", label: "Google Gemini", adapter: "google", baseUrl: "https://generativelanguage.googleapis.com", authKind: "key", featured: true,
-    dashboardUrl: "https://aistudio.google.com/apikey", defaultModel: "gemini-3.5-flash", models: ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview", "gemini-3.7-flash"],
-    modelContextWindows: { "gemini-3.6-flash": 1_048_576, "gemini-3.5-flash": 1_000_000, "gemini-3.5-flash-lite": 1_048_576, "gemini-3.7-flash": 1_048_576 },
-    modelInputModalities: { "gemini-3.6-flash": ["text", "image"], "gemini-3.5-flash-lite": ["text", "image"], "gemini-3.7-flash": ["text", "image"] },
+    dashboardUrl: "https://aistudio.google.com/apikey", defaultModel: "gemini-3.5-flash", models: ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro-preview"],
+    modelContextWindows: { "gemini-3.8-flash": 1_048_576, "gemini-3.6-flash": 1_048_576, "gemini-3.5-flash": 1_000_000, "gemini-3.5-flash-lite": 1_048_576, "gemini-3.7-flash": 1_048_576 },
+    modelInputModalities: { "gemini-3.8-flash": ["text", "image"], "gemini-3.6-flash": ["text", "image"], "gemini-3.5-flash-lite": ["text", "image"], "gemini-3.7-flash": ["text", "image"] },
     modelReasoningEfforts: {
       "gemini-3.6-flash": ["minimal", "low", "medium", "high"],
       "gemini-3.5-flash": ["minimal", "low", "medium", "high"],
       "gemini-3.7-flash": ["minimal", "low", "medium", "high"],
+      "gemini-3.8-flash": ["low", "medium", "high"],
       "gemini-3.1-pro-preview": ["low", "medium", "high"],
+    },
+    modelDiscovery: {
+      stripIdPrefix: "models/",
+      filter: {
+        allOf: [{ path: ["supportedGenerationMethods"], containsAny: ["generateContent"] }],
+      },
     },
     jawcodeBundle: "google", extraMetadataAliases: ["gemini"],
   },
@@ -1763,7 +1770,7 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     dashboardPreset: true,
     dashboardUrl: "https://aistudio.google.com",
     defaultModel: "gemini-3.7-flash",
-    models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
+    models: ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
     liveModels: false,
     // Conservative pacing for a browser-backed subscription session: avoid bursts while
     // keeping interactive coding-agent requests usable. Jitter reduces synchronized retries.
@@ -1771,7 +1778,7 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
     googleMode: "ai-studio-web",
     jawcodeBundle: "google",
     extraMetadataAliases: ["aistudio", "gemini-aistudio"],
-    note: "Relays prompts through your active Google AI Studio / Google AI Pro browser session at /aistudio/bridge (default proxy port 10100).",
+    note: "Uses an authenticated Google AI Studio / Google AI Pro session through direct HTTP transport. Reauthenticate when the saved browser session expires.",
   },
   { id: "azure-openai", label: "Azure OpenAI", adapter: "azure-openai", baseUrl: "https://{resource}.openai.azure.com/openai", authKind: "key", featured: true, dashboardUrl: "https://portal.azure.com" },
   { id: "ollama", label: "Ollama (local)", adapter: "openai-chat", baseUrl: "http://localhost:11434/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — key usually blank" },

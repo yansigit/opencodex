@@ -866,9 +866,9 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     if (effectiveGoogleMode(name, provider) === "ai-studio-web" || name === "google-aistudio") {
       const credentials = resolveAiStudioCredentials(provider);
       dto.hasAiStudioSession = credentials.kind === "ready";
-      dto.aiStudioAuthState = process.platform !== "darwin"
-        ? "unsupported"
-        : credentials.kind === "ready" ? "checking" : "needs_reauth";
+      dto.aiStudioAuthState = credentials.kind === "ready"
+        ? "checking"
+        : process.platform !== "darwin" ? "unsupported" : "needs_reauth";
     }
     providers[name] = dto;
   }
