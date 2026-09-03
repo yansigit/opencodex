@@ -5,6 +5,7 @@ import { delimiter, dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { autoRestoreCodexShim, buildUnixCodexShim, buildWindowsCodexShim, buildWindowsPowerShellCodexShim, diagnoseCodexShim, findCodexOnPath, inspectCodexShimBackingForCommand, installCodexShim, isLocalAbsoluteInspectionPath, isVersionManagerOwnedCodexPath, isWindowsInteropDir, lastCodexDiscoveryError, setCodexShimFreshWriteHookForTests, setCodexShimGuardedWriteHookForTests, setCodexShimProbeHookForTests, setCodexShimProbeObservationMsForTests, setCodexShimProbeShellForTests, setCodexShimRollbackRestoreHookForTests, uninstallCodexShim } from "../src/codex/shim";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const SHIM_MARKER = "opencodex codex autostart shim";
 const UNIX_SHIM_REVISION_MARKER = "opencodex unix codex shim revision 2";
@@ -1686,9 +1687,15 @@ exit 127
         stdout: "pipe",
         stderr: "pipe",
       });
-      const deadline = Date.now() + 5_000;
+      // A cold Bun child importing the shim graph exceeded the old 5s marker
+      // deadline on a loaded Windows shard. This wait proves process ownership,
+      // so give startup the shared bounded child-process deadline; the aged-lock
+      // assertions below remain unchanged.
+      const deadline = Date.now() + INTERNAL_DEADLINE_MS;
       while (!existsSync(readyPath) && Date.now() < deadline) await Bun.sleep(5);
-      expect(existsSync(readyPath)).toBe(true);
+      if (!existsSync(readyPath)) {
+        throw new Error(`Timed out waiting ${INTERNAL_DEADLINE_MS}ms for aged-lock holder startup`);
+      }
 
       const second = spawnSync(process.execPath, ["-e", secondScript], {
         cwd: join(import.meta.dir, ".."),
@@ -1717,7 +1724,7 @@ exit 127
       removeTreeWithRetry(binDir);
       removeTreeWithRetry(home);
     }
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("stale-lock compare-and-delete never unlinks a successor lock", () => {
     withInstalledShim(({ home, wrappers, backups }) => {

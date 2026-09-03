@@ -7,6 +7,7 @@ import { CodexCredentialRefreshLockTimeoutError, getCodexAccountCredential, save
 import type { OcxConfig } from "../src/types";
 import { ManagementRequest, managementHeaders } from "./helpers/management-auth";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 let testRoot = "";
 let previousOpencodexHome: string | undefined;
@@ -15,23 +16,37 @@ function config(port = 10100): OcxConfig {
   return { port, providers: {}, defaultProvider: "openai" };
 }
 
-async function waitForPath(path: string): Promise<void> {
-  for (let attempt = 0; attempt < 500; attempt += 1) {
-    if (existsSync(path)) return;
+// A cold `bun -e` child that imports the full src/config.ts graph took longer than
+// the old flat 5s caps to even start on a loaded Windows shard (main CI run
+// 33721627451, attempt 1: three fails, one of them masked to "exited 143"). These
+// deadlines bound startup latency, not contention: the fail-fast <1s assertion
+// below still proves contention, and the budgets stay 3x under SPAWN_BUDGET_MS so
+// a genuine hang fails here with the child's stderr rather than as a lane timeout.
+async function waitForPath(path: string, timeoutMs = INTERNAL_DEADLINE_MS): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for child marker ${path} after ${timeoutMs}ms`);
+    }
     await Bun.sleep(10);
   }
-  throw new Error(`Timed out waiting for child marker ${path}`);
 }
 
-async function waitForOwnedChild(child: ReturnType<typeof Bun.spawn>): Promise<number> {
+async function waitForOwnedChild(
+  child: ReturnType<typeof Bun.spawn>,
+  timeoutMs = INTERNAL_DEADLINE_MS,
+): Promise<number> {
   const result = await Promise.race([
     child.exited.then(exitCode => ({ exitCode })),
-    Bun.sleep(5_000).then(() => null),
+    Bun.sleep(timeoutMs).then(() => null),
   ]);
   if (result) return result.exitCode;
   child.kill();
   await child.exited;
-  throw new Error("Timed out waiting for owned config-lock child");
+  const stderr = await new Response(child.stderr).text().catch(() => "");
+  throw new Error(
+    `Timed out waiting for owned config-lock child after ${timeoutMs}ms\nchild stderr: ${stderr}`,
+  );
 }
 
 beforeEach(() => {
@@ -101,7 +116,7 @@ test("a live cross-process holder is not stolen and runtime writers fail immedia
   });
   expect(loadConfig().port).toBe(20200);
   expect(getCodexAccountCredential("busy-account")?.accessToken).toBe("fresh-access");
-});
+}, SPAWN_BUDGET_MS);
 
 test("an abruptly exited holder releases the OS-backed transaction without stale recovery", async () => {
   saveConfig(config());
@@ -127,7 +142,7 @@ test("an abruptly exited holder releases the OS-backed transaction without stale
   expect(existsSync(enteredPath)).toBe(true);
   expect(() => saveConfig(config(30300))).not.toThrow();
   expect(loadConfig().port).toBe(30300);
-});
+}, SPAWN_BUDGET_MS);
 
 test("a throwing mutation releases the lock and leaves writers available", () => {
   saveConfig(config());
@@ -181,4 +196,4 @@ test("management API maps config mutation lock contention to retryable 503", asy
     writeFileSync(releasePath, "release");
     expect(await waitForOwnedChild(child)).toBe(0);
   }
-});
+}, SPAWN_BUDGET_MS);

@@ -1,9 +1,10 @@
-import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 /**
@@ -19,6 +20,13 @@ import { removeTreeWithRetry } from "./helpers/remove-tree";
  */
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
+
+// Every case here spawns a real Bun subprocess (runScript); on a loaded Windows
+// shard the flat 15s ceilings timed out (F-03) while the child was doing exactly
+// the work it claims. Same convention as codex-inject-integration/codex-journal:
+// the test budget is SPAWN_BUDGET_MS and the spawn gets an internal deadline
+// 5s under it, so a hung child fails as a subprocess error, not a runner timeout.
+setDefaultTimeout(SPAWN_BUDGET_MS);
 
 /** Inject, simulate the app's comment-dropping rewrite, then restore. */
 const INJECT_REWRITE_RESTORE = [
@@ -134,6 +142,7 @@ function runScript(codexHome: string, script: string): { stdout: string; stderr:
     cwd: repoRoot,
     env: { ...process.env, CODEX_HOME: codexHome },
     encoding: "utf8",
+    timeout: SPAWN_BUDGET_MS - 5_000,
   });
   return { stdout: result.stdout?.trim() ?? "", stderr: result.stderr?.trim() ?? "", status: result.status ?? 1 };
 }
@@ -161,7 +170,7 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     expect(restored).not.toContain("127.0.0.1:10100");
     // The user's own pre-injection content is still theirs.
     expect(restored).toContain("gpt-5.5");
-  }, 15_000);
+  });
 
   test("a user's own openai_base_url written before injection is preserved", () => {
     // Force a byte mismatch so exact journal restore cannot hide a fallback ownership bug.
@@ -179,7 +188,7 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     const restored = readFileSync(join(testDir, "config.toml"), "utf8");
     expect(restored).toContain("https://my-own-gateway.example/v1");
     expect(restored).not.toContain("127.0.0.1:10100");
-  }, 15_000);
+  });
 
   test("reinjection refreshes the owned route and catalog recorded for restore", () => {
     writeFileSync(join(testDir, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
@@ -190,7 +199,7 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     const recorded = JSON.parse(r.stdout) as { url: string; catalog: string };
     expect(recorded.url).toBe("http://127.0.0.1:10200/v1");
     expect(recorded.catalog).toBe(join(testDir, "second-catalog.json"));
-  }, 20_000);
+  });
 
   test("a user setting added after first injection survives reinjection and restore", () => {
     writeFileSync(join(testDir, "config.toml"), 'model = "gpt-5.5"\n', "utf8");
@@ -214,7 +223,7 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     expect(result.afterRestore).not.toContain("openai_base_url");
     expect(result.afterRestore).not.toContain("127.0.0.1:10200");
     expect(result.profileExistsAfterRestore).toBe(false);
-  }, 20_000);
+  });
 
   test("the routed catalog we wrote is restored even when the rewrite dropped model_catalog_json", () => {
     // The catalog half of #1798. Restore used to re-resolve its target from the CURRENT
@@ -230,5 +239,5 @@ describe("#1798 restore after the Codex app rewrites the config", () => {
     const routed = (cache.models ?? []).filter((m: { slug?: string }) => typeof m.slug === "string" && m.slug.includes("/"));
     expect(routed).toEqual([]);
     expect(JSON.parse(r.stdout).catalog).toBe(cachePath);
-  }, 15_000);
+  });
 });
