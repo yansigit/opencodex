@@ -60,14 +60,14 @@ describe("actionlint runner", () => {
   it("derives cache dir safely under .tmp", () => {
     const dir = getCacheDir("/tmp/myroot");
     expect(dir).toBe(resolve("/tmp/myroot", ".tmp", "actionlint", "v1.7.12"));
-    expect(getCacheDir()).toContain(".tmp/actionlint/v1.7.12");
+    expect(getCacheDir()).toContain(join(".tmp", "actionlint", "v1.7.12"));
   });
 
   it("derives binary path with platform suffix and .exe on windows", () => {
     expect(getBinaryPath("/root", "darwin", "arm64")).toBe(join(resolve("/root", ".tmp/actionlint/v1.7.12"), "darwin-arm64", "actionlint"));
-    expect(getBinaryPath("/root", "linux", "x64")).toContain("linux-amd64/actionlint");
-    expect(getBinaryPath("/root", "win32", "x64")).toContain("windows-amd64/actionlint.exe");
-    expect(getBinaryPath("/root", "win32", "arm64")).toContain("windows-arm64/actionlint.exe");
+    expect(getBinaryPath("/root", "linux", "x64")).toContain(join("linux-amd64", "actionlint"));
+    expect(getBinaryPath("/root", "win32", "x64")).toContain(join("windows-amd64", "actionlint.exe"));
+    expect(getBinaryPath("/root", "win32", "arm64")).toContain(join("windows-arm64", "actionlint.exe"));
   });
 
   it("verifies SHA-256 correctly", () => {
