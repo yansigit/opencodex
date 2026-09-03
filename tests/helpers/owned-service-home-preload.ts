@@ -9,10 +9,6 @@
  */
 import { mock } from "bun:test";
 import childProcess from "node:child_process";
-import {
-  setAsyncIcaclsRunnerForTests,
-  setIcaclsRunnerForTests,
-} from "../../src/lib/windows-secret-acl";
 
 const ENABLED = process.platform === "win32" && process.env.OCX_TEST_SERVICE_HOME_PROBE === "1";
 
@@ -72,6 +68,12 @@ if (ENABLED) {
   // exceed the readiness budget under a loaded Windows shard, masking the
   // ownership assertions. ACL-specific suites exercise the real runner and its
   // timeout policy separately.
+  const aclModuleUrl = process.env.OCX_TEST_WINDOWS_ACL_MODULE;
+  if (!aclModuleUrl) throw new Error("owned-service-home preload requires the ACL module URL");
+  const {
+    setAsyncIcaclsRunnerForTests,
+    setIcaclsRunnerForTests,
+  } = await import(aclModuleUrl) as typeof import("../../src/lib/windows-secret-acl");
   setIcaclsRunnerForTests(() => ({
     success: true,
     exitCode: 0,
