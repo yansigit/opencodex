@@ -7,6 +7,11 @@ import { getCredential, listAccounts, saveCredential } from "../src/oauth/store"
 import type { OAuthController } from "../src/oauth/types";
 import * as configModule from "../src/config";
 import { BOUNDED_BODY_MAX_BYTES } from "../src/lib/bounded-body";
+import {
+  resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+} from "../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-nous-oauth-test");
@@ -15,10 +20,20 @@ const realSetTimeout = globalThis.setTimeout;
 const realDateNow = Date.now;
 let previousOpencodexHome: string | undefined;
 let previousPortalBase: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" } as const;
+
+beforeEach(() => {
+  resetHardenedStateForTests();
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+});
 
 afterEach(() => {
   globalThis.setTimeout = realSetTimeout;
   Date.now = realDateNow;
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  resetHardenedStateForTests();
 });
 
 function jwtWithClaims(claims: Record<string, unknown>): string {
