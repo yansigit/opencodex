@@ -69,6 +69,22 @@ describe("empty-completion guard kill switch", () => {
 });
 
 describe("empty-completion guard retry", () => {
+  test("does not retry an empty turn after a local side effect", async () => {
+    let continuations = 0;
+    const events = await collect(guardEmptyCompletionEventStream({
+      firstEvents: eventsOf(
+        { type: "heartbeat", replayUnsafe: true },
+        { type: "done" },
+      ),
+      continuation: () => {
+        continuations += 1;
+        return eventsOf({ type: "done" });
+      },
+    }));
+    expect(continuations).toBe(0);
+    expect(events.at(-1)).toMatchObject({ code: "empty_completion_replay_unsafe" });
+  });
+
   test("buffers pre-content events and releases them on first content", async () => {
     let continuations = 0;
     const events = await collect(guardEmptyCompletionEventStream({

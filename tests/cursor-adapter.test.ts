@@ -334,6 +334,12 @@ describe("Cursor adapter live transport", () => {
       { role: "toolResult", toolName: "exec", content: "output from command", toolCallId: "c2", timestamp: 2 },
     ]);
     expect(textNormal).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
+
+    const withShortInstructions = externalToolContinuationText(undefined, ["Reply exactly FINAL."]);
+    expect(withShortInstructions).toContain("Active instructions:\nReply exactly FINAL.");
+
+    const withOversizedInstructions = externalToolContinuationText(undefined, ["x".repeat(2_049)]);
+    expect(withOversizedInstructions).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
   });
 
   test("does not retry external tool-result invalid_argument with a fresh conversation id", async () => {

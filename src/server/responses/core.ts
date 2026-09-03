@@ -5663,6 +5663,7 @@ async function handleResponsesInner(
       queue.close();
       throw error;
     }
+    const replayBudget = route.provider.replayTransientFailures ? { remaining: 2 } : undefined;
     // One attempt of the runTurn transport, against an explicit queue. The
     // empty-completion guard re-invokes the IDENTICAL turn (same parsed request,
     // same forwarded headers, same abort signal) through a fresh queue, so the
@@ -5701,6 +5702,11 @@ async function handleResponsesInner(
             abortSignal: runTurnAbort.signal,
             translatorBudget,
             providerFetch: runTurnProviderFetch,
+            replayBudget,
+            replayTransientFailures: route.provider.replayTransientFailures,
+            onAdapterRetry: (adapterRecovery: AttemptRecoveryKind) => {
+              noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, adapterRecovery, adapter.name);
+            },
           },
           targetQueue.push,
         );
@@ -5818,7 +5824,7 @@ async function handleResponsesInner(
       let source = firstSource;
       while (true) {
         const preflight = await preflightAdapterEvents(source);
-        if (!preflight.error) return preflight.stream;
+        if (!preflight.error || preflight.replayUnsafe) return preflight.stream;
         const refreshed = await refreshRunTurnAdapterOnPreflight401(preflight.error);
         const rotated = refreshed ? false : await rotateRunTurnAdapterOnPreflight429(preflight.error);
         if (!refreshed && !rotated) return preflight.stream;

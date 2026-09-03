@@ -295,7 +295,9 @@ describe("363-A: turn-1 termination for Responses client tool via exec mcpArgs",
   });
 
   test("external tool continuation prompt instructs model to proceed without chatter", () => {
-    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("without repeating status summaries or greetings");
+    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("without repeating status summaries, greetings");
+    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("a tool invocation that already completed successfully");
+    expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("active system and developer instructions exactly");
     expect(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT).toContain("Answer the user request or proceed with the next step directly");
   });
 });

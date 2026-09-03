@@ -675,6 +675,37 @@ describe("Cursor blob handshake", () => {
 
   });
 
+  test("external tool continuations repeat bounded active instructions in the action text", () => {
+    const rawMessages = [
+      { role: "user" as const, content: "Run lookup.", timestamp: 1 },
+      {
+        role: "assistant" as const,
+        content: [{ type: "toolCall" as const, id: "call_1", name: "lookup", arguments: { q: "x" } }],
+        timestamp: 2,
+      },
+      {
+        role: "toolResult" as const,
+        toolCallId: "call_1",
+        toolName: "lookup",
+        content: "VALUE=x",
+        isError: false,
+        timestamp: 3,
+      },
+    ];
+    const request = {
+      modelId: "cursor-grok-4.6-xhigh",
+      conversationId: "c-instruction-reminder",
+      messages: [{ role: "tool" as const, content: "VALUE=x" }],
+      rawMessages,
+    };
+
+    const bounded = encodeCursorRunRequest({ ...request, system: ["Reply exactly FINAL=x."] });
+    expect(actionText(bounded)).toContain("Active instructions:\nReply exactly FINAL=x.");
+
+    const oversized = encodeCursorRunRequest({ ...request, system: ["x".repeat(2_049)] });
+    expect(actionText(oversized)).not.toContain("Active instructions:");
+  });
+
   test("keeps exec_command guidance in the system prompt without mutating the user request", () => {
     const prompt = "Run: echo OCX via your shell tool, report stdout.";
     const bytes = encodeCursorRunRequest({
@@ -838,7 +869,7 @@ describe("Cursor blob handshake", () => {
     }
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
+    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
   });
 
   test("native protobuf replay leaves an opaque escape lookalike byte-identical", () => {
@@ -1026,7 +1057,7 @@ describe("Cursor blob handshake", () => {
 
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
+    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
     const roots = decodeRootMessages(bytes) as Array<{ role?: string }>;
     expect(JSON.stringify(roots)).toContain("contents");
   });
@@ -1055,7 +1086,7 @@ describe("Cursor blob handshake", () => {
 
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
+    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
     // Tool results are still replayed via history blobs.
     const roots = decodeRootMessages(bytes) as Array<{ role?: string }>;
     expect(JSON.stringify(roots)).toContain("contents");
