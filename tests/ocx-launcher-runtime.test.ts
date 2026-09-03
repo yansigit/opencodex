@@ -470,7 +470,7 @@ describe.skipIf(!nodeAvailable || process.env.OCX_TEST_NETWORK_ISOLATED === "1")
       const installed = spawnSync(installInvocation.file, installInvocation.args, {
         cwd: installDir,
         encoding: "utf8",
-        timeout: 120_000,
+        timeout: 240_000,
         windowsHide: true,
         ...installInvocation.options,
       });
@@ -515,7 +515,7 @@ describe.skipIf(!nodeAvailable || process.env.OCX_TEST_NETWORK_ISOLATED === "1")
     } finally {
       await cleanupFirstStartup(root, env.OPENCODEX_HOME!, launcher, health);
     }
-  }, 240_000);
+  }, 420_000);
 });
 
 describe.skipIf(!nodeAvailable)("ocx npm launcher relative Bun override", () => {

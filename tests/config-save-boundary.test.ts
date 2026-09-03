@@ -257,7 +257,10 @@ test("full config replacement is limited to explicit import and init", async () 
       const fixtureSource = await fixtureProject?.program.getSourceFile(fixture);
       expect(fixtureSource && configReplacementReferences(fixtureSource, "replacePersistedConfig")).toHaveLength(17);
       expect(fixtureSource && configReplacementReferences(fixtureSource, "initializePersistedConfigIfMissing")).toHaveLength(5);
-      expect(fixtureSource && localRuntimeImports(fixtureSource)).toContain(helper);
+      const runtimeImports = fixtureSource ? localRuntimeImports(fixtureSource) : [];
+      expect(runtimeImports.some(path => process.platform === "win32"
+        ? path.toLowerCase() === helper.toLowerCase()
+        : path === helper)).toBe(true);
 
       const project = snapshot.getProject(join(SRC, "..", "tsconfig.json"));
       if (!project) throw new Error("TypeScript did not load the repository project");

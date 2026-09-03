@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomBytes, createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { createIsolatedOracleEnv, ensureOracleRawDir, purgeExpiredRaw, readOracl
 import { createLoopbackProxy } from "./loopback";
 import { CURSOR_ORACLE_DEFAULT_TIMEOUT_MS, CURSOR_ORACLE_UPSTREAM, CURSOR_ORACLE_RAW_TTL_MS } from "./constants";
 import { commandInvocation } from "../../lib/win-exec";
+import { resolveTrustedWindowsTaskkillExe } from "../../lib/windows-elevation";
 import {
   CURSOR_VERIFIED_CLIENT_VERSION,
   CURSOR_VERIFIED_REQUEST_CONTEXT_MODE,
@@ -15,6 +16,23 @@ import type { CursorOracleObservationV1, CursorOracleRunRequest, CursorOracleRun
 
 const SAFE_SCENARIO_ID = /^[A-Za-z0-9_.:-]{1,200}$/;
 const RULE_CANARY = "OCX_CURSOR_ORACLE_RULE_CANARY_V1";
+
+/** Windows signals terminate only the cmd shim, so explicitly reap its agent tree. */
+function terminateOracleChild(child: ChildProcess, force = false): void {
+  if (process.platform === "win32" && child.pid) {
+    try {
+      execFileSync(resolveTrustedWindowsTaskkillExe(), ["/PID", String(child.pid), "/T", "/F"], {
+        stdio: "ignore",
+        timeout: 5_000,
+        windowsHide: true,
+      });
+      return;
+    } catch {
+      // Fall through to the existing single-process termination as a last resort.
+    }
+  }
+  child.kill(force ? "SIGKILL" : "SIGTERM");
+}
 
 function resolveAgentBin(explicit?: string): string {
   if (explicit) {
@@ -185,9 +203,9 @@ export async function runCursorOracle(
         if (terminationCode !== undefined) return;
         terminationCode = code;
         diagnostics.push({ code: diagnostic });
-        try { child.kill("SIGTERM"); } catch { diagnostics.push({ code: "agent_terminate_failed" }); }
+        try { terminateOracleChild(child); } catch { diagnostics.push({ code: "agent_terminate_failed" }); }
         forceKillTimer = setTimeout(() => {
-          try { child.kill("SIGKILL"); } catch { diagnostics.push({ code: "agent_force_kill_failed" }); }
+          try { terminateOracleChild(child, true); } catch { diagnostics.push({ code: "agent_force_kill_failed" }); }
         }, 1_000);
         forceKillTimer.unref?.();
         settleTimer = setTimeout(() => finish(code), 2_000);
