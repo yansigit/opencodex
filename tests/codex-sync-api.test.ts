@@ -9,12 +9,15 @@ import type { OcxConfig } from "../src/types";
 import type { OrcaCodexHomeDiagnostic } from "../src/codex/home";
 import { claimOwnedServiceHome, withOwnedServiceHomePreload } from "./helpers/owned-service-home";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const TEST_DIR = join(import.meta.dir, ".tmp-codex-sync-api");
 const TEST_CODEX_HOME = join(TEST_DIR, "codex");
 const TEST_OCX_HOME = join(TEST_DIR, "ocx");
 const TEST_HOME = join(TEST_DIR, "home");
 const repoRoot = join(import.meta.dir, "..");
+const CHILD_TIMEOUT_MS = SPAWN_BUDGET_MS - 5_000;
+const NESTED_CHILD_TIMEOUT_MS = 30_000;
 let prevCodexHome: string | undefined;
 let prevOpenCodexHome: string | undefined;
 let prevHome: string | undefined;
@@ -198,6 +201,8 @@ describe("GUI/CLI Codex sync backend", () => {
         OPENCODEX_HOME: TEST_OCX_HOME,
       }),
       encoding: "utf8",
+      timeout: CHILD_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
 
     expect(child.status).toBe(0);
@@ -205,7 +210,7 @@ describe("GUI/CLI Codex sync backend", () => {
     expect(readFileSync(configPath, "utf8")).toBe(before);
     expect(existsSync(profilePath)).toBe(false);
     expect(existsSync(journalPath)).toBe(false);
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("returns a policy skip without touching the catalog or config", async () => {
     let refreshed = false;
@@ -353,7 +358,7 @@ describe("GUI/CLI Codex sync backend", () => {
         '        \'const { setIntegrationEnabled } = require("./src/codex/desired-state");\'',
         '        + \'const r = setIntegrationEnabled("codex", false);\'',
         '        + \'if (!r.ok) { console.error(JSON.stringify(r)); process.exit(1); }\',',
-        '      ], { cwd: process.cwd(), env: flipEnv, encoding: "utf8" });',
+        `      ], { cwd: process.cwd(), env: flipEnv, encoding: "utf8", timeout: ${NESTED_CHILD_TIMEOUT_MS}, killSignal: "SIGKILL" });`,
         '      if (flip.status !== 0) throw new Error("flip failed: " + flip.stderr);',
         '      return { added: 0, path: "/tmp/none.json", catalogExists: false, catalogWritten: false, cacheSynced: false, comboOmissions: [] };',
         '    },',
@@ -372,6 +377,8 @@ describe("GUI/CLI Codex sync backend", () => {
           OPENCODEX_HOME: raceOcxHome,
         }),
         encoding: "utf8",
+        timeout: CHILD_TIMEOUT_MS,
+        killSignal: "SIGKILL",
       });
       expect(child.status).toBe(0);
       const line = child.stdout.trim().split("\n").filter(Boolean).pop() ?? "{}";
@@ -381,7 +388,7 @@ describe("GUI/CLI Codex sync backend", () => {
     } finally {
       removeTreeWithRetry(raceRoot);
     }
-  }, 15_000);
+  }, SPAWN_BUDGET_MS);
 
   test("surfaces combo catalog omissions in sync result and CLI stderr (#484)", async () => {
     const logs: string[] = [];
@@ -517,6 +524,8 @@ describe("GUI/CLI Codex sync backend", () => {
       cwd: join(import.meta.dir, ".."),
       env: childEnv({ CODEX_HOME: TEST_CODEX_HOME, OPENCODEX_HOME: ocxHome }),
       encoding: "utf8",
+      timeout: CHILD_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     });
 
     expect(child.status).toBe(0);
@@ -529,7 +538,7 @@ describe("GUI/CLI Codex sync backend", () => {
     expect(payload.body.error).toBe(payload.body.message);
     expect(payload.body.error).toContain("inspect");
     expect(payload.body.error).toContain(join(TEST_CODEX_HOME, "config.toml"));
-  });
+  }, SPAWN_BUDGET_MS);
 
   test("skips catalog refresh before preserving an external provider", async () => {
     let refreshed = false;
