@@ -743,6 +743,18 @@ jobs:
           cd gui
           bun run build
 
+      - name: Restore canonical test timings
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: .bun-timings.json
+          key: ocx-test-timings-dev-${{ github.sha }}
+          restore-keys: |
+            ocx-test-timings-dev-
+
+      - name: Validate restored timing data
+        if: hashFiles('.bun-timings.json') != ''
+        run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
+
       - name: Test
         # --timeout: the Linux batches and the macOS control both pass 60000; this leg was
         # the only one left on Bun's 5s default, and it is the slowest hardware on the board.
@@ -759,9 +771,35 @@ jobs:
           set +e
           set -uo pipefail
           suite_log="$(mktemp -t ocx-windows-suite.XXXXXX)"
+          timing_args=()
+          if [ -f .bun-timings.json ]; then
+            timing_args=(--timings .bun-timings.json)
+          fi
+          general_list="$(mktemp -t ocx-windows-general.XXXXXX)"
+          serial_list="$(mktemp -t ocx-windows-serial.XXXXXX)"
+          if ! bun scripts/ci/test-lanes.ts --lane general "${timing_args[@]}" --shard ${{ matrix.shard }}/4 > "$general_list"; then
+            echo "::error::Windows general lane selection failed."
+            exit 1
+          fi
+          if ! bun scripts/ci/test-lanes.ts --lane serial "${timing_args[@]}" --shard ${{ matrix.shard }}/4 > "$serial_list"; then
+            echo "::error::Windows serial lane selection failed."
+            exit 1
+          fi
+          mapfile -t general_files < "$general_list"
+          mapfile -t serial_files < "$serial_list"
+          rm -f "$general_list" "$serial_list"
+          if [ "${#general_files[@]}" -eq 0 ] || [ "${#serial_files[@]}" -eq 0 ]; then
+            echo "::error::Windows lane selection returned an empty shard."
+            exit 1
+          fi
           for attempt in 1 2; do
-            bun scripts/test.ts --isolate --timeout 60000 tests --shard=${{ matrix.shard }}/4 2>&1 | tee "$suite_log"
+            : > "$suite_log"
+            bun scripts/test.ts --isolate --timeout 60000 "${general_files[@]}" 2>&1 | tee "$suite_log"
             suite_status="${PIPESTATUS[0]}"
+            if [ "$suite_status" -eq 0 ]; then
+              bun scripts/test.ts --isolate --parallel=1 --timeout 60000 "${serial_files[@]}" 2>&1 | tee -a "$suite_log"
+              suite_status="${PIPESTATUS[0]}"
+            fi
             if [ "$suite_status" -eq 0 ]; then
               exit 0
             fi

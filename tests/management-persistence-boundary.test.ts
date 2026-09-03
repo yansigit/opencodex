@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, mutatePersistedConfig } from "../src/config";
+import { flushConfigDirHardening } from "../src/config/paths";
 import { handleManagementAPI, type ManagementApiDeps } from "../src/server/management-api";
 import type { OcxConfig } from "../src/types";
 import { ManagementRequest as Request } from "./helpers/management-auth";
@@ -45,7 +46,8 @@ beforeEach(() => {
   process.env.OPENCODEX_HOME = home;
   writeFileSync(getConfigPath(), JSON.stringify(richOnDisk, null, 2));
 });
-afterEach(() => {
+afterEach(async () => {
+  await flushConfigDirHardening(home);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   rmSync(home, { recursive: true, force: true });

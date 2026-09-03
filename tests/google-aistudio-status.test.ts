@@ -199,7 +199,7 @@ describe("AI Studio status & re-auth", () => {
       const res = await fetch(new URL("/api/aistudio/login/native", server.url), { method: "POST" });
       expect([200, 400, 500].includes(res.status)).toBe(true);
       expect(res.status).not.toBe(404);
-    } finally { server.stop(true); }
+    } finally { await server.stop(true); }
   });
 
   test("native login waits for completion and returns the validated session", async () => {
@@ -216,7 +216,7 @@ describe("AI Studio status & re-auth", () => {
       const res = await responsePromise;
       expect(res.status).toBe(200);
       expect((await res.json()).ok).toBe(true);
-    } finally { server.stop(true); }
+    } finally { await server.stop(true); }
   });
 
   test("native login returns 502 when login succeeds but the live probe fails", async () => {
@@ -232,7 +232,7 @@ describe("AI Studio status & re-auth", () => {
       const body = await res.json() as { ok?: boolean; error?: string };
       expect(body.ok).toBe(false);
       expect(String(body.error)).not.toContain("re-authentication required");
-    } finally { server.stop(true); }
+    } finally { await server.stop(true); }
   });
 
   test("native login aborts the injected login when the request is cancelled", async () => {
@@ -269,7 +269,7 @@ describe("AI Studio status & re-auth", () => {
         expect(res.status).toBe(499);
         expect((await res.json()).ok).toBe(false);
       }
-    } finally { server.stop(true); }
+    } finally { await server.stop(true); }
   });
 
   test("native login does not trust a forged loopback Host on a remote bind", async () => {
@@ -284,7 +284,7 @@ describe("AI Studio status & re-auth", () => {
         headers: { Host: "127.0.0.1" },
       });
       expect(res.status).toBe(401);
-    } finally { server.stop(true); }
+    } finally { await server.stop(true); }
   });
 
   test("native login rejects a cross-origin request even with valid admission", async () => {
@@ -303,6 +303,6 @@ describe("AI Studio status & re-auth", () => {
         },
       });
       expect(res.status).toBe(403);
-    } finally { server.stop(true); }
+    } finally { await server.stop(true); }
   });
 });

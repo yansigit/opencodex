@@ -50,7 +50,7 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
       expect(html).toContain("AI Studio Browser Relay Deprecated");
       expect(html).toContain("ocx login");
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 
@@ -64,7 +64,7 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
       expect(text).toContain("410 Gone");
       expect(text).toContain("deprecated");
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 
@@ -82,7 +82,7 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
       const altWsRes = await fetch(new URL("/aistudio/ws", server.url));
       expect(altWsRes.status).toBe(410);
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 
@@ -113,7 +113,7 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
       });
       expect(rejected.status).toBe(403);
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 
@@ -131,7 +131,7 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
       expect(res.status).toBe(204);
       expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://aistudio.google.com");
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 
@@ -171,7 +171,7 @@ describe("aistudio legacy routes and session ingest endpoint", () => {
       });
       expect(bearer.status).toBe(401);
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 });

@@ -176,7 +176,7 @@ describe("GitHub Actions hardening", () => {
     const linuxShards = (ci.jobs?.test as { strategy?: { matrix?: { shard?: number[] } } })
       ?.strategy?.matrix?.shard ?? [];
     expect(linuxShards).toEqual([1, 2, 3, 4]);
-    expect(workflow).toContain(`--shard=\${{ matrix.shard }}/${linuxShards.length}`);
+    expect(workflow).toContain(`--shard \${{ matrix.shard }}/${linuxShards.length}`);
 
     // Every job that runs tests/ must fetch tags, because one of those tests reads
     // them. tests/release-version-line.test.ts compares package.json against the
@@ -285,7 +285,7 @@ describe("GitHub Actions hardening", () => {
     // while Linux and macOS both pass 60000, and it is the slowest hardware on the board.
     // Three composed-acceptance failures were that default firing on tests still working
     // at 41s. Pin the flag so the leg cannot silently drift back to the default.
-    const windowsTestCommand = `bun scripts/test.ts --isolate --timeout 60000 tests --shard=\${{ matrix.shard }}/${windowsShards.length}`;
+    const windowsTestCommand = 'bun scripts/test.ts --isolate --timeout 60000 "${general_files[@]}"';
     expect(hasShellCommandHead(`echo ${windowsTestCommand}`, windowsTestCommand)).toBe(false);
     // Binding the assertion to an executable line is only half the guarantee: a
     // step carrying the exact command still runs nothing under `if: false`, and
@@ -294,6 +294,13 @@ describe("GitHub Actions hardening", () => {
     const windowsTestSteps = winSteps.filter(step => hasShellCommandHead(step.run, windowsTestCommand));
     expect(windowsTestSteps.length).toBeGreaterThan(0);
     expect(windowsTestSteps.every(step => step.if === undefined)).toBe(true);
+    const windowsTestRun = windowsTestSteps[0]?.run ?? "";
+    expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane general');
+    expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane serial');
+    expect(windowsTestRun).toContain('Windows lane selection returned an empty shard');
+    expect(windowsTestRun).not.toContain('mapfile -t general_files < <(');
+    expect(windowsTestRun).toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
+    expect(windowsTestRun).not.toContain(`tests --shard=\${{ matrix.shard }}/${windowsShards.length}`);
     expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"
       && step.run?.includes("git clean -xffd"))).toBe(true);
 
@@ -313,7 +320,6 @@ describe("GitHub Actions hardening", () => {
       "Illegal instruction",
       "Bus error",
     ];
-    const windowsTestRun = windowsTestSteps[0]?.run ?? "";
     const batchScript = await readText("scripts/ci/run-bun-test-batches.sh");
     const crashRetryScript = await readText("scripts/ci/run-bun-with-crash-retry.sh");
     for (const signature of crashSignatures) {

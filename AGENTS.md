@@ -193,6 +193,12 @@ bun run build:gui      # Vite GUI build
 - Reusable workflow calls (`uses: ./.github/workflows/*.yml` with `with:`): expressions in `with:` must not use `env` or `secrets` contexts. Use contexts GitHub permits there, such as `github`, `inputs`, `needs`, `strategy`, `matrix`, and `vars`. Caller `permissions:` must cover every callee job's needs.
 - Release workflows (`release.yml`, `dev-version-bump.yml`): must validate `workflow_dispatch.inputs` and `repository_dispatch.client_payload` shapes in a dedicated `validate-dispatch` job before use; never trust relayed env/secrets for version or SHA.
 - Upstream sync / promotion readiness: when workflow files changed, workflow lint must be clean; when dependency files changed, audit must be clean; exact-head/provenance checks (tag, base, published head) are required; `cancelled` or `skipped` runs are not evidence of green — only `success` counts.
+- Every full-suite platform lane, including sharded Windows, must derive both its
+  general and serial work from `scripts/ci/test-lanes.ts`. A raw Bun `--shard`
+  over `tests/` bypasses the serial quarantine and recreates the process/timer
+  contention it exists to prevent. Serial subsets run with `--parallel=1` and
+  remain covered on the same platform; do not make stability by silently
+  dropping their Windows execution.
 
 `skills/ocx/` is the operating reference for the CLI — what an agent reads to *drive* a running
 proxy, as opposed to [`AGENTS_INSTALL.md`](./AGENTS_INSTALL.md) (installing and operating consent)
@@ -228,6 +234,15 @@ on Linux, Windows, and macOS. On a Mac with Apple Container available, also run
 host-native and does not include this suite; it is not a GitHub-hosted CI job.
 
 Do not rerun passing checks on unchanged code merely for additional confidence.
+
+Tests that call the project `startServer()` wrapper must `await server.stop(true)`
+before restoring environment variables or deleting fixture directories. Its stop
+method drains asynchronous lifecycle and Windows ACL work; treating it like the
+synchronous `Bun.serve()` stop leaks file handles and causes intermittent Windows
+`EBUSY`/`EPERM` teardown failures.
+Tests that exercise config-loading or management persistence without a server and
+then delete `OPENCODEX_HOME` must similarly await `flushConfigDirHardening(home)`
+before restoring the environment and removing the fixture.
 
 ## Minimal containers and agent sandboxes
 
