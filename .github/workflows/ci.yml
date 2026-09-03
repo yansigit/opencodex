@@ -207,6 +207,7 @@ jobs:
               - 'integrations/aistudio-daemon/**'
               - 'tests/aistudio-native-webkit.test.ts'
               - 'tests/codex-app-server-processes.test.ts'
+              - 'tests/codex-prompt-text-probe.test.ts'
               - 'tests/cursor-native-exec-shell.test.ts'
               - 'tests/preload.ts'
               - 'tests/process-state.test.ts'
@@ -562,7 +563,8 @@ jobs:
     name: macos
     needs: changes
     if: >-
-      github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'
+      github.event_name != 'pull_request' || github.base_ref == 'main' ||
+      needs.changes.outputs.macos == 'true'
     runs-on: macos-latest
     # The unsharded control for the sharded Linux lane: the only place the whole
     # suite runs in one pool, so it is the place that catches what sharding
@@ -631,6 +633,7 @@ jobs:
           bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 \
             --timings .bun-timings.json --update-timings \
             tests/codex-app-server-processes.test.ts \
+            tests/codex-prompt-text-probe.test.ts \
             tests/cursor-native-exec-shell.test.ts \
             tests/process-control.test.ts \
             tests/process-state.test.ts \
@@ -643,6 +646,7 @@ jobs:
       - name: Full macOS suite
         if: >-
           github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'pull_request' && github.base_ref == 'main') ||
           (github.event_name == 'push' &&
            (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/preview'))
         run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --timeout 60000

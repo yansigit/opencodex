@@ -237,11 +237,18 @@ describe("GitHub Actions hardening", () => {
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test tests")).toBe(false);
 
     // macOS is focused on dev and relevant PRs; main/preview keep full control.
-    const macosSteps = (ci.jobs?.["platform-macos"] as { steps?: { run?: string }[] })?.steps ?? [];
+    const macosSteps = (ci.jobs?.["platform-macos"] as {
+      steps?: { name?: string; if?: string; run?: string }[];
+    })?.steps ?? [];
     // The 60s per-test ceiling is part of the pinned shape: dropping it silently
     // restores the timing-flake class this lane kept surfacing.
     expect(macosSteps.some(step => step.run?.includes("run-bun-with-crash-retry.sh"))).toBe(true);
     expect(macosSteps.some(step => step.run?.includes("--shard"))).toBe(false);
+    const focusedMacos = macosSteps.find(step => step.name === "Focused Darwin/process lifecycle tests");
+    expect(focusedMacos?.run).toContain("tests/codex-prompt-text-probe.test.ts");
+    const fullMacos = macosSteps.find(step => step.name === "Full macOS suite");
+    expect(fullMacos?.if).toContain("github.event_name == 'pull_request' && github.base_ref == 'main'");
+    expect(workflow).toMatch(/macos:\s+[\s\S]*?- 'tests\/codex-prompt-text-probe\.test\.ts'/);
 
     // The macOS leg retries ONLY a Bun runtime crash, and only once. Bun 1.3.14
     // segfaults reclaiming a Worker at an `--isolate` file boundary with
@@ -259,7 +266,7 @@ describe("GitHub Actions hardening", () => {
     expect(crashRetry).not.toContain("while true");
     expect((ci.jobs?.["platform-macos"] as { needs?: string; if?: string })?.needs).toBe("changes");
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
-      .toBe("github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'");
+      .toBe("github.event_name != 'pull_request' || github.base_ref == 'main' || needs.changes.outputs.macos == 'true'");
 
     // Windows is required for every integration push and CI-relevant PR. The
     // changes dependency keeps documentation-only PRs cheap without letting a
@@ -506,7 +513,7 @@ describe("GitHub Actions hardening", () => {
     }
     const macosJob = ci.jobs?.["platform-macos"] as { needs?: string; if?: string } | undefined;
     expect(`platform-macos:${macosJob?.needs}`).toBe("platform-macos:changes");
-    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'");
+    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:github.event_name != 'pull_request' || github.base_ref == 'main' || needs.changes.outputs.macos == 'true'");
   });
 
   test("cross-platform CI keeps the GUI lint and build gates", async () => {
