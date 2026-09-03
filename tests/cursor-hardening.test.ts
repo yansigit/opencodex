@@ -667,6 +667,51 @@ describe("Cursor live transport unexpected EOF", () => {
       expect(messages.at(-1)).toMatchObject({ type: "done" });
     });
   });
+
+  test("flushes an incomplete textual XML tool call on clean EOF", async () => {
+    const incomplete = '<tool_call>{"name":"functions.ocx_client_get_time","arguments":{';
+    const textFrame = encodeConnectFrame(toBinary(AgentServerMessageSchema, create(AgentServerMessageSchema, {
+      message: {
+        case: "interactionUpdate",
+        value: create(InteractionUpdateSchema, {
+          message: {
+            case: "textDelta",
+            value: create(TextDeltaUpdateSchema, { text: incomplete }),
+          },
+        }),
+      },
+    })));
+    const connectEnd = encodeConnectFrame(new TextEncoder().encode("{}"), {
+      flags: CONNECT_FLAG_END_STREAM,
+    });
+
+    await withDiscoveryServer(stream => {
+      stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+      stream.end(Buffer.from(new Uint8Array([...textFrame, ...connectEnd])));
+    }, async baseUrl => {
+      const transport = createLiveCursorTransport({
+        provider: { adapter: "cursor", baseUrl, apiKey: "test-token" },
+        translatorBudget: createTestTranslatorBudget(),
+        firstFrameTimeoutMs: 2_000,
+      });
+      const messages: Array<{ type: string; text?: string }> = [];
+      try {
+        for await (const message of transport.run({
+          modelId: "composer-2",
+          conversationId: "cursor_xml_eof_test",
+          system: [],
+          messages: [{ role: "user", content: "hello" }],
+          tools: [{ name: "get_time", description: "t", parameters: { type: "object", properties: {} } }],
+        })) messages.push(message);
+      } finally {
+        await transport.close?.();
+      }
+
+      expect(messages.filter(message => message.type === "text").map(message => message.text).join(""))
+        .toBe(incomplete);
+      expect(messages.at(-1)).toMatchObject({ type: "done" });
+    });
+  });
   test("sends the injected session id as Connect x-session-id", async () => {
     let seenSessionId: string | undefined;
     await withDiscoveryServer((stream, headers) => {
