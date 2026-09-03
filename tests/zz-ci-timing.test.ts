@@ -27,8 +27,16 @@ describe("CI lane manifest", () => {
     expect(new Set(lanes.general).intersection(new Set(lanes.dedicated)).size).toBe(0);
     expect(new Set(lanes.serial).intersection(new Set(lanes.dedicated)).size).toBe(0);
     expect(lanes.serial).toEqual(SERIAL_TEST_FILES);
-    expect(lanes.serial).toContain("tests/server-auth.test.ts");
-    expect(lanes.serial).toContain("tests/shutdown-launcher.test.ts");
+    for (const historicallyLoadSensitive of [
+      "tests/aistudio-native-webkit.test.ts",
+      "tests/claude-native-passthrough.test.ts",
+      "tests/codex-app-server-processes.test.ts",
+      "tests/server-auth.test.ts",
+      "tests/shutdown-launcher.test.ts",
+      "tests/storage-policy-job-responsive.test.ts",
+      "tests/storage-restore-job-responsive.test.ts",
+      "tests/test-runner.test.ts",
+    ]) expect(lanes.serial).toContain(historicallyLoadSensitive);
     expect(lanes.dedicated).toEqual(DEDICATED_TEST_FILES);
     expect(laneFiles("general", process.cwd())).toEqual(lanes.general);
   });
@@ -206,6 +214,7 @@ test("nightly macOS is timed at 08:17 UTC and names its timing file", async () =
     .toBeLessThan(steps.findIndex(step => step.name === "Full macOS suite"));
   expect(steps.find(step => step.run?.includes("validate-timings.ts"))?.run)
     .toContain("--discard-invalid");
-  expect(text).toContain("--timings .bun-timings.json --update-timings");
+  expect(text).toContain("--timings .bun-timings.json");
+  expect(text).not.toContain("--update-timings");
   expect(text).toContain("ocx-test-timings-dev-");
 });

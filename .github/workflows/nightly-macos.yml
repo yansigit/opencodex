@@ -51,4 +51,7 @@ jobs:
         run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
 
       - name: Full macOS suite
-        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 --timings .bun-timings.json --update-timings tests
+        # This job never publishes timing updates. An option-only full-suite invocation
+        # lets scripts/test.ts quarantine load-sensitive files into its one-worker lanes,
+        # matching the main/preview shipping gate.
+        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 --timings .bun-timings.json

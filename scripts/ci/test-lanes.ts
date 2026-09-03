@@ -3,13 +3,30 @@ import type { Dirent } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
 export const SERIAL_TEST_FILES = [
+  // This is the single source of truth for tests that must not share a parallel
+  // worker pool. The normal CI serial job and scripts/test.ts full-suite planner
+  // both consume it, so promotion/nightly runs cannot silently lose quarantine.
+  "tests/aistudio-native-webkit.test.ts",
+  "tests/anthropic-image-normalize.test.ts",
+  "tests/claude-native-passthrough.test.ts",
+  "tests/codex-app-server-processes.test.ts",
+  "tests/codex-journal.test.ts",
+  "tests/codex-prompt-route.test.ts",
   "tests/codex-shim.test.ts",
+  "tests/config-save-boundary.test.ts",
+  "tests/cursor-images.test.ts",
   "tests/cursor-native-exec-shell.test.ts",
   "tests/issue-452-empty-503.test.ts",
+  "tests/kiro-images.test.ts",
   "tests/openai-provider-option-e2e.test.ts",
   "tests/release-helper.test.ts",
+  "tests/request-decompress.test.ts",
+  "tests/responses-stateless-dangling-call-repair.test.ts",
   "tests/server-auth.test.ts",
   "tests/shutdown-launcher.test.ts",
+  "tests/storage-policy-job-responsive.test.ts",
+  "tests/storage-restore-job-responsive.test.ts",
+  "tests/test-runner.test.ts",
   "tests/update-stop-first.test.ts",
 ] as const;
 
