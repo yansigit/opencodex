@@ -198,7 +198,7 @@ describe("chat-surface recursion fence (full path)", () => {
       // upstream count increment, no recursion either way).
       expect(forwarded.length).toBe(2);
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 
@@ -281,7 +281,7 @@ describe("chat-surface recursion fence (full path)", () => {
       expect(mainBodies[0]).toContain(CAPTION.slice(0, 20));
       expect(mainBodies[0]).not.toContain("aGVsbG8taW1hZ2UtYnl0ZXM=");
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 });

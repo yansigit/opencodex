@@ -229,6 +229,15 @@ host-native and does not include this suite; it is not a GitHub-hosted CI job.
 
 Do not rerun passing checks on unchanged code merely for additional confidence.
 
+Tests that call the project `startServer()` wrapper must `await server.stop(true)`
+before restoring environment variables or deleting fixture directories. Its stop
+method drains asynchronous lifecycle and Windows ACL work; treating it like the
+synchronous `Bun.serve()` stop leaks file handles and causes intermittent Windows
+`EBUSY`/`EPERM` teardown failures.
+Tests that exercise config-loading or management persistence without a server and
+then delete `OPENCODEX_HOME` must similarly await `flushConfigDirHardening(home)`
+before restoring the environment and removing the fixture.
+
 ## Minimal containers and agent sandboxes
 
 Fresh dev containers and agent sandboxes (Cursor Cloud, devcontainers, CI
