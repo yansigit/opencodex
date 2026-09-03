@@ -30,9 +30,13 @@ describe("CI lane manifest", () => {
     for (const historicallyLoadSensitive of [
       "tests/aistudio-native-webkit.test.ts",
       "tests/claude-native-passthrough.test.ts",
+      "tests/claude-management-api.test.ts",
       "tests/codex-app-server-processes.test.ts",
+      "tests/codex-transition-state-race.test.ts",
+      "tests/native-main-owner-lifetime.test.ts",
       "tests/ocx-launcher-runtime.test.ts",
       "tests/server-auth.test.ts",
+      "tests/server-search.test.ts",
       "tests/shutdown-launcher.test.ts",
       "tests/storage-policy-job-responsive.test.ts",
       "tests/storage-restore-job-responsive.test.ts",
@@ -191,6 +195,12 @@ test("only trusted dev shards publish the canonical timing cache", async () => {
     step.uses === "actions/cache/save@caa296126883cff596d87d8935842f9db880ef25",
   )).toBe(true);
   expect(ci.jobs["platform-macos"].steps?.some(step => step.uses?.startsWith("actions/cache/save@"))).toBe(false);
+  const windows = ci.jobs["platform-windows"];
+  const windowsRestore = windows.steps?.find(step => step.uses?.startsWith("actions/cache/restore@"));
+  expect(windowsRestore?.with?.key).toContain("ocx-test-timings-dev-");
+  expect(windowsRestore?.with?.["restore-keys"]?.trim()).toBe("ocx-test-timings-dev-");
+  expect(windows.steps?.find(step => step.run?.includes("validate-timings.ts"))?.run)
+    .toContain("--discard-invalid");
   const swift = ci.jobs["platform-macos"].steps?.find(step =>
     step.run?.includes("tests/aistudio-native-webkit.test.ts"),
   );
