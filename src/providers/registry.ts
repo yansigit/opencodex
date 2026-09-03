@@ -163,6 +163,7 @@ export interface ProviderRegistryEntry {
   note?: string;
   dashboardUrl?: string;
   defaultModel?: string;
+  requestPacing?: OcxProviderConfig["requestPacing"];
   models?: string[];
   liveModels?: boolean;
   /**
@@ -324,7 +325,7 @@ export interface ProviderRegistryEntry {
   jawcodeBundle?: string;
   extraMetadataAliases?: string[];
   metadataModelIdNormalize?: MetadataModelIdNormalize;
-  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
+  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web";
   project?: string;
   location?: string;
 }
@@ -1858,7 +1859,26 @@ export const PROVIDER_REGISTRY: readonly ProviderRegistryEntry[] = [
   // 2026-07-10: defaultModel is frozen pending Vertex-specific Tier-2 evidence; Gemini API
   // evidence from ai.google.dev does not establish Vertex publisher availability.
   { id: "google-vertex", label: "Google Vertex AI", adapter: "google", baseUrl: "https://aiplatform.googleapis.com", authKind: "key", dashboardUrl: "https://console.cloud.google.com/vertex-ai", defaultModel: "gemini-3-pro", googleMode: "vertex", jawcodeBundle: "google", extraMetadataAliases: ["gemini-vertex"] },
-  { id: "google-antigravity", label: "Google Antigravity", adapter: "google", baseUrl: "https://daily-cloudcode-pa.googleapis.com", authKind: "oauth", allowBaseUrlOverride: true, dashboardUrl: "https://antigravity.google", models: ANTIGRAVITY_MODELS, liveModels: true, defaultModel: "gemini-3.8-flash", modelContextWindows: ANTIGRAVITY_MODEL_CONTEXT_WINDOWS, modelInputModalities: ANTIGRAVITY_MODEL_INPUT_MODALITIES, modelReasoningEfforts: ANTIGRAVITY_MODEL_EFFORTS, googleMode: "cloud-code-assist", jawcodeBundle: "google", extraMetadataAliases: ["antigravity", "gemini-antigravity"] },
+  { id: "google-antigravity", label: "Google Antigravity", adapter: "google", baseUrl: "https://daily-cloudcode-pa.googleapis.com", authKind: "oauth", allowBaseUrlOverride: true, dashboardUrl: "https://antigravity.google", models: ANTIGRAVITY_MODELS, liveModels: true, defaultModel: "gemini-3.8-flash", requestPacing: { enabled: true, requestsPerMinute: 30, minIntervalMs: 2_000, jitterMs: 500 }, modelContextWindows: ANTIGRAVITY_MODEL_CONTEXT_WINDOWS, modelInputModalities: ANTIGRAVITY_MODEL_INPUT_MODALITIES, modelReasoningEfforts: ANTIGRAVITY_MODEL_EFFORTS, googleMode: "cloud-code-assist", jawcodeBundle: "google", extraMetadataAliases: ["antigravity", "gemini-antigravity"] },
+  {
+    id: "google-aistudio",
+    label: "Google AI Studio (Web)",
+    adapter: "google",
+    baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+    authKind: "local",
+    keyOptional: true,
+    featured: true,
+    dashboardPreset: true,
+    dashboardUrl: "https://aistudio.google.com",
+    defaultModel: "gemini-3.7-flash",
+    models: ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
+    liveModels: false,
+    requestPacing: { enabled: true, requestsPerMinute: 8, minIntervalMs: 7_500, jitterMs: 1_500 },
+    googleMode: "ai-studio-web",
+    jawcodeBundle: "google",
+    extraMetadataAliases: ["aistudio", "gemini-aistudio"],
+    note: "Uses an authenticated Google AI Studio / Google AI Pro session through direct HTTP transport. Reauthenticate when the saved browser session expires.",
+  },
   { id: "azure-openai", label: "Azure OpenAI", adapter: "azure-openai", baseUrl: "https://{resource}.openai.azure.com/openai", authKind: "key", featured: true, dashboardUrl: "https://portal.azure.com" },
   { id: "ollama", label: "Ollama (local)", adapter: "openai-chat", baseUrl: "http://localhost:11434/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — key usually blank" },
   { id: "vllm", label: "vLLM (local)", adapter: "openai-chat", baseUrl: "http://localhost:8000/v1", authKind: "local", allowPrivateNetworkByDefault: true, allowBaseUrlOverride: true, featured: true, note: "Local — key usually blank" },
@@ -3201,8 +3221,8 @@ export function providerCodexAccountMode(id: string, provider?: OcxProviderConfi
  */
 export function effectiveGoogleMode(
   providerId: string,
-  prov: { adapter?: string; googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" },
-): "ai-studio" | "vertex" | "cloud-code-assist" | null {
+  prov: { adapter?: string; googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" },
+): "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" | null {
   if (prov.adapter !== "google") return null;
   return prov.googleMode ?? getProviderRegistryEntry(providerId)?.googleMode ?? "ai-studio";
 }

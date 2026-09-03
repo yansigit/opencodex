@@ -31,6 +31,7 @@ import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compac
 import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-routing";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -777,6 +778,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   baseUrl: "editor",
   responsesPath: "editor",
   commandCodeVersion: "editor",
+  projectContext: "editor",
   statelessResponses: "editor",
   requiresAdjacentResponsesToolResults: "editor",
   annotateEmptyToolOutputs: "editor",
@@ -785,12 +787,15 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   preserveResponsesReasoningContent: "editor",
   decodesNativeCompactionBlobs: "editor",
   allowPrivateNetwork: "editor",
+  wsUpstream: "editor",
+  maxWsFrameBytes: "editor",
   upstreamHttpVersion: "editor",
   upstreamWebsocket: "editor",
   directGeminiWireRenames: "editor",
   disabled: "editor",
   codexAccountMode: "editor",
   apiKey: "redacted",
+  azureCredential: "redacted",
   apiKeyTransport: "editor",
   apiKeyPool: "redacted",
   defaultModel: "editor",
@@ -852,6 +857,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   preserveReasoningContentModels: "editor",
   requiresReasoningPlaceholderModels: "editor",
   retryOn429: "editor",
+  replayTransientFailures: "editor",
   transientRetryOn5xx: "editor",
   reasoningSplitModels: "editor",
   reasoningDetailsModels: "editor",
@@ -867,6 +873,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   desktopExecutor: "redacted",
   unsafeAllowNativeLocalExec: "editor",
   nativeLocalExec: "editor",
+  tlsProfile: "editor",
 } as const satisfies Record<keyof OcxProviderConfig, ProviderConfigFieldPolicy>;
 
 type ProviderFieldWithPolicy<Policy extends ProviderConfigFieldPolicy> = {
@@ -1000,6 +1007,13 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     };
     if (name === "xai") {
       dto.xaiResponsesOptInState = xaiResponsesOptInState(provider);
+    }
+    if (effectiveGoogleMode(name, provider) === "ai-studio-web" || name === "google-aistudio") {
+      const credentials = resolveAiStudioCredentials(provider);
+      dto.hasAiStudioSession = credentials.kind === "ready";
+      dto.aiStudioAuthState = credentials.kind === "ready"
+        ? "checking"
+        : process.platform !== "darwin" ? "unsupported" : "needs_reauth";
     }
     providers[name] = dto;
   }

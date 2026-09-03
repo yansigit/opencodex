@@ -118,6 +118,19 @@ export interface CatalogModel {
   autoCompactTokenLimit?: number;
   contextCap?: number;
   contextCapped?: boolean;
+  /** Pre-cap discovered window for Models UI copy when a cap lowered it. */
+  detectedContextWindow?: number;
+  metadataSource?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+  metadataObservedAt?: string;
+  metadataStale?: boolean;
+  metadataFieldSources?: {
+    contextWindow?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+    maxInputTokens?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+    maxOutputTokens?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+    inputModalities?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+    reasoningEfforts?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+    capabilities?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+  };
   inputModalities?: string[];
   /** Provider opted into parallel tool calls (OcxProviderConfig.parallelToolCalls). */
   parallelToolCalls?: boolean;

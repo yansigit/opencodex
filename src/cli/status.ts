@@ -1,5 +1,5 @@
 import { durableBunRuntime } from "../lib/bun-runtime";
-import { codexAutoStartEnabled, getConfigPath, readConfigDiagnostics } from "../config";
+import { codexAutoStartEnabled, getConfigPath, loadConfig, readConfigDiagnostics } from "../config";
 import { getPidPath, readPid, readPidFileValue, readRuntimePort, type RuntimePortState } from "../config/process-state";
 import { diagnoseCodexBundledPlugins, type CodexPluginsDiagnostic } from "../codex/plugins-doctor";
 import { findLiveProxy, isOpencodexHealthz, probeHostname } from "../server/proxy-liveness";
@@ -13,6 +13,7 @@ import { diagnoseCodexShim } from "../codex/shim";
 import { displayCodexRuntimePath, effortClampAppliesToRuntime, loadLastEffortClamp, resolveCodexRuntime } from "../codex/runtime";
 import { packageVersion } from "./help";
 import { computeVersionSkew, type VersionSkew } from "./version-skew";
+import { canonicalServerOrigin } from "../lib/server-tls";
 import { redactSecretString, redactUserPath } from "../lib/redact";
 import { collectOrcaCodexHomeDiagnostic, type OrcaCodexHomeDiagnostic } from "../codex/home";
 import { grokFenceEndpointDrift, readGrokStatus } from "../grok/status";
@@ -120,9 +121,10 @@ export type ListenTarget = {
   dashboardUrl: string;
 };
 
-type StatusListenConfig = Pick<OcxConfig, "port" | "hostname" | "runtimeRole" | "hub">;
+type StatusListenConfig = Pick<OcxConfig, "port" | "hostname" | "runtimeRole" | "hub" | "tls">;
 
 function statusDashboardUrl(config: StatusListenConfig, hostname: string | undefined, port: number): string {
+  if (config.tls) return canonicalServerOrigin(config, port);
   const managementOrigin = config.runtimeRole === "hub" ? config.hub?.managementPublicOrigin : undefined;
   if (managementOrigin) return managementOrigin.endsWith("/") ? managementOrigin : `${managementOrigin}/`;
 
@@ -143,11 +145,13 @@ export function selectListenTarget(
   const currentRuntimePort = pid && runtimePort?.pid === pid ? runtimePort : null;
   const port = currentRuntimePort ? currentRuntimePort.port : config.port ?? 10100;
   const hostname = currentRuntimePort?.hostname ?? config.hostname;
+  const host = probeHostname(hostname);
+  const protocol = config.tls ? "https" : "http";
   return {
     port,
     hostname,
     source: currentRuntimePort ? "runtime" : "config",
-    healthUrl: `http://${probeHostname(hostname)}:${port}/healthz`,
+    healthUrl: `${protocol}://${host}:${port}/healthz`,
     dashboardUrl: statusDashboardUrl(config, hostname, port),
   };
 }
@@ -296,6 +300,7 @@ export async function probeUncleanExitState(input: {
   live: boolean;
   port?: number;
   hostname?: string | null;
+  tls?: OcxConfig["tls"];
 }): Promise<boolean> {
   if (input.live) return false;
   const pidRecordBefore = readPidFileValue();
@@ -308,12 +313,18 @@ export async function probeUncleanExitState(input: {
   // no runtime record exists, which is the pid-file-only case.
   const port = runtimeBefore?.port ?? input.port ?? 10100;
   const hostname = runtimeBefore?.hostname ?? input.hostname ?? undefined;
+  const tls = (() => {
+    if (input.tls !== undefined) return input.tls;
+    try { return loadConfig().tls; } catch { return undefined; }
+  })();
+  const protocol = tls ? "https" : "http";
+  const host = probeHostname(hostname);
   const health = await checkProxyHealth({
     port,
     hostname,
     source: runtimeBefore ? "runtime" : "config",
-    healthUrl: `http://${probeHostname(hostname)}:${port}/healthz`,
-    dashboardUrl: `http://localhost:${port}/`,
+    healthUrl: `${protocol}://${host}:${port}/healthz`,
+    dashboardUrl: tls ? canonicalServerOrigin({ hostname, tls }, port) : statusDashboardUrl({ port, hostname, tls }, hostname, port),
   });
   const pidRecordAfter = readPidFileValue();
   const runtimePidAfter = readRuntimePort()?.pid ?? null;
@@ -342,7 +353,7 @@ export async function collectStatus(): Promise<CliStatusView> {
   // Pass the already-resolved diagnostics config so findLiveProxy does not re-load and
   // warn on malformed config.json (status --json must stay stderr-clean).
   const live = await findLiveProxy({
-    configFn: () => ({ port: config.port, hostname: config.hostname }),
+    configFn: () => ({ port: config.port, hostname: config.hostname, tls: config.tls }),
   });
   const pidFile = readPid();
   // Preserve an authoritative null from orphan/legacy liveness — do not restore pidFile.
@@ -351,13 +362,17 @@ export async function collectStatus(): Promise<CliStatusView> {
   // healthz body, so the version came back with the liveness result.
   const versionSkew = computeVersionSkew(packageVersion(), live?.version);
   const listen = live
-    ? {
-      port: live.port,
-      hostname: live.hostname,
-      source: live.source,
-      healthUrl: `http://${probeHostname(live.hostname)}:${live.port}/healthz`,
-      dashboardUrl: statusDashboardUrl(config, live.hostname, live.port),
-    }
+    ? (() => {
+      const liveHost = probeHostname(live.hostname);
+      const liveProtocol = config.tls ? "https" : "http";
+      return {
+        port: live.port,
+        hostname: live.hostname,
+        source: live.source,
+        healthUrl: `${liveProtocol}://${liveHost}:${live.port}/healthz`,
+        dashboardUrl: statusDashboardUrl(config, live.hostname, live.port),
+      };
+    })()
     : selectListenTarget(config, pidFile, pidFile ? readRuntimePort(pidFile) : null);
   // findLiveProxy already identity-probed /healthz; avoid a second fetch that can race.
   const health = live
@@ -374,6 +389,7 @@ export async function collectStatus(): Promise<CliStatusView> {
     live: Boolean(live),
     port: config.port,
     hostname: config.hostname,
+    tls: config.tls,
   });
   const bunRuntime = durableBunRuntime();
   const service = diagnoseService();

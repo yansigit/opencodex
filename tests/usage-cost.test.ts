@@ -297,8 +297,8 @@ describe("resolveMatchedPrice", () => {
     expect(resolveMatchedPrice("openrouter", "anthropic-claude-3.5-sonnet")).toBeNull();
   });
 
-  test("16. shipped overlay membership: 68 keys, including canonical Fable 5.1, Opus 5 and compatibility prices", () => {
-    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(68);
+  test("16. shipped overlay membership: 77 keys, including canonical Fable 5.1, Opus 5, Cursor, and compatibility prices", () => {
+    expect(EXPECTED_PRICE_OVERLAYS.length).toBe(77);
     expect(EXPECTED_PRICE_OVERLAYS.some(row => row.status === "unverified")).toBe(false);
     const keys = new Set(EXPECTED_PRICE_OVERLAYS.map(row => `${row.provider}/${row.modelId}`));
     for (const expected of [
@@ -687,7 +687,7 @@ describe("xAI Priority Processing pricing", () => {
     expect(resolveMatchedPrice("cursor", "grok-4.6")?.cost4).toEqual({
       input: 2,
       output: 6,
-      cacheRead: 0.3,
+      cacheRead: 0.5,
       cacheWrite: 0,
     });
   });
