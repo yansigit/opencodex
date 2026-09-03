@@ -18,9 +18,12 @@ import {
 } from "../src/codex/user-identity";
 import { claimOwnedServiceHome, withOwnedServiceHomePreload } from "./helpers/owned-service-home";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const sandboxes: Sandbox[] = [];
+const CHILD_MARKER_BUDGET_MS = SPAWN_BUDGET_MS - 5_000;
+const TWO_CHILD_TEST_BUDGET_MS = 2 * SPAWN_BUDGET_MS + 10_000;
 
 interface Sandbox {
   readonly root: string;
@@ -149,7 +152,7 @@ async function holdCatalogLock(sandbox: Sandbox): Promise<{
     stdout: "pipe",
     stderr: "pipe",
   });
-  await waitForPath(ready, 12_000);
+  await waitForPath(ready, CHILD_MARKER_BUDGET_MS);
   return { release: () => writeFileSync(release, "release"), child };
 }
 
@@ -215,7 +218,7 @@ test("startup and CLI sync-cache cannot write models_cache while another process
     holder.release();
     expect(await holder.child.exited).toBe(0);
   }
-}, 15_000);
+}, TWO_CHILD_TEST_BUDGET_MS);
 
 test("native restore cannot read-transform-write the catalog while another process owns K", async () => {
   const sandbox = makeSandbox("ocx-retained-restore-");
@@ -238,7 +241,7 @@ test("native restore cannot read-transform-write the catalog while another proce
     holder.release();
     expect(await holder.child.exited).toBe(0);
   }
-});
+}, TWO_CHILD_TEST_BUDGET_MS);
 
 async function runPublisher(
   sandbox: Sandbox,
@@ -313,7 +316,7 @@ for (const publisher of ["convergence", "retained"] as const) {
       const syncStderr = new Response(sync.stderr).text();
 
       await Promise.race([
-        waitForPath(requested, 16_000),
+        waitForPath(requested, CHILD_MARKER_BUDGET_MS),
         sync.exited.then(async exitCode => {
           const [stdout, stderr] = await Promise.all([syncStdout, syncStderr]);
           throw new Error(`sync exited before provider barrier (${exitCode})\nstdout=${stdout}\nstderr=${stderr}`);
@@ -337,7 +340,7 @@ for (const publisher of ["convergence", "retained"] as const) {
     } finally {
       provider.stop(true);
     }
-  }, 20_000);
+  }, TWO_CHILD_TEST_BUDGET_MS);
 }
 
 /**
@@ -398,7 +401,7 @@ test("a persisted runtime selection moved by another process during the await bl
   const syncStderr = new Response(sync.stderr).text();
 
   await Promise.race([
-    waitForPath(requested, 16_000),
+    waitForPath(requested, CHILD_MARKER_BUDGET_MS),
     sync.exited.then(async exitCode => {
       const [stdout, stderr] = await Promise.all([syncStdout, syncStderr]);
       throw new Error(`sync exited before provider barrier (${exitCode})\nstdout=${stdout}\nstderr=${stderr}`);
@@ -423,7 +426,7 @@ test("a persisted runtime selection moved by another process during the await bl
   expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 });
   expect(JSON.parse(stdout.trim())).toMatchObject({ catalogWritten: false });
   expect(readFileSync(catalogPath, "utf8")).toBe(initial);
-}, 20_000);
+}, TWO_CHILD_TEST_BUDGET_MS);
 
 /**
  * The post-approval seam, raced by two real processes through a real route.
@@ -615,4 +618,4 @@ test("two processes at the post-approval management seam serialize instead of in
   const fromA = slugs.some(s => s.includes("seam-model-a"));
   const fromB = slugs.some(s => s.includes("seam-model-b"));
   expect(fromA && fromB).toBe(false);
-}, 30_000);
+}, TWO_CHILD_TEST_BUDGET_MS);

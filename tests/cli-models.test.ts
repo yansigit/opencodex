@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "./helpers/test-budget";
+import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
 import { configuredReasoningEfforts } from "../src/reasoning-effort";
 import { isModelTextOnly } from "../src/vision";
 import type { OcxProviderConfig } from "../src/types";
@@ -12,6 +12,7 @@ import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
+const CLI_CHILD_TIMEOUT_MS = SPAWN_BUDGET_MS - 5_000;
 
 setDefaultTimeout(SPAWN_BUDGET_MS);
 
@@ -20,7 +21,7 @@ function runCli(args: string[], env: Record<string, string> = {}) {
     cwd: repoRoot,
     env: { ...process.env, ...env },
     encoding: "utf8",
-    timeout: INTERNAL_DEADLINE_MS,
+    timeout: CLI_CHILD_TIMEOUT_MS,
     killSignal: "SIGKILL",
   });
   if (result.error) throw result.error;

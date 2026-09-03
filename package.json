@@ -1,7 +1,7 @@
 {
   "name": "@yansigit/opencodex",
   "version": "2.41.0",
-  "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
+  "description": "Universal provider proxy for OpenAI Codex & Claude Code \u2014 use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
   "exports": {
@@ -40,6 +40,7 @@
     "start": "bun run src/cli/index.ts start",
     "test": "bun scripts/test.ts",
     "test:changed": "bun scripts/test.ts --changed=dev",
+    "test:container": "bun scripts/test-container.ts",
     "typecheck": "bun x tsc --noEmit",
     "audit:high": "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
     "privacy:scan": "bun scripts/privacy-scan.ts",
@@ -52,14 +53,16 @@
     "prepublishOnly": "bun run audit:high && bun run typecheck && bun run build:gui",
     "release": "bun scripts/release.ts",
     "release:watch": "bun scripts/release.ts watch",
-    "prepush": "bun run typecheck && bun run lint:gui:if-changed && bun run test && bun run privacy:scan && bun run doctor:gui:if-changed",
+    "prepush": "bun run check:hygiene && bun run lint:workflows && bun run audit:high && bun run typecheck && bun run lint:gui:if-changed && bun run test && bun run privacy:scan && bun run doctor:gui:if-changed",
     "lint:gui": "cd gui && bun run lint",
     "lint:gui:if-changed": "bun scripts/lint-gui-if-changed.ts",
     "postmerge": "bun scripts/build-gui-if-changed.ts",
     "doctor:gui": "cd gui && bun run doctor",
     "doctor:gui:full": "cd gui && bun run doctor:full",
     "doctor:gui:if-changed": "bun scripts/doctor-gui-if-changed.ts",
-    "setup:hooks": "bun scripts/setup-hooks.ts"
+    "setup:hooks": "bun scripts/setup-hooks.ts",
+    "check:hygiene": "node scripts/check-hygiene.mjs",
+    "lint:workflows": "bun scripts/ci/actionlint.ts"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.14.0",
@@ -69,6 +72,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "0.122.0",
     "@types/bun": "1.4.0",
     "typescript": "7.0.2"
   },
