@@ -221,21 +221,27 @@ jobs:
             echo "::error::dev moved after CI completed; waiting for the newer CI run"
             exit 1
           fi
-          ci_runs="$(gh run list --workflow ci.yml --commit "$verified_main_sha" --event push --limit 20 --json conclusion,status,headBranch,headSha,event)"
-          if ! jq -e --arg sha "$verified_main_sha" \
-            'any(.[]; .headSha == $sha and .headBranch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")' \
-            <<<"$ci_runs" >/dev/null; then
-            if [ "$EVENT_BRANCH" = dev ]; then
-              echo "::notice::main CI is not green yet; its workflow_run will retry reconciliation"
-              echo "eligible=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "::error::no successful Cross-platform CI push run exists for verified main"
-            exit 1
-          fi
           reconciliation="$(node .github/scripts/fork-promotion-backmerge.cjs "$verified_main_sha" "$live_dev_sha" --json)"
           action="$(jq -r .action <<<"$reconciliation")"
           target_sha="$(jq -r .targetSha <<<"$reconciliation")"
+          ci_runs="$(gh run list --workflow ci.yml --commit "$verified_main_sha" --event push --limit 20 --json conclusion,status,headBranch,headSha,event)"
+          main_ci_green=false
+          if jq -e --arg sha "$verified_main_sha" \
+            'any(.[]; .headSha == $sha and .headBranch == "main" and .event == "push" and .status == "completed" and .conclusion == "success")' \
+            <<<"$ci_runs" >/dev/null; then
+            main_ci_green=true
+          fi
+          if [ "$main_ci_green" != true ] && [ "$action" != unchanged ]; then
+            if [ "$EVENT_BRANCH" = dev ]; then
+              # This job can only receive a dev workflow_run after exact-head push CI
+              # succeeds. The helper above additionally proves that target_sha keeps
+              # the verified dev tree byte-for-byte and adds only main ancestry.
+              echo "::notice::recovering red main ancestry from exact green dev without changing the verified dev tree"
+            else
+              echo "::error::no successful Cross-platform CI push run exists for verified main"
+              exit 1
+            fi
+          fi
           eligible=true
           [ "$action" = unchanged ] && eligible=false
           {
