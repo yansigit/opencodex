@@ -36,7 +36,9 @@ function spawnTransportOwnedShell(sessionId: string) {
   let killCalls = 0;
   setBackgroundShellRuntimeForTests({
     spawn: (() => child as unknown as ChildProcessWithoutNullStreams) as typeof import("node:child_process").spawn,
+    platform: "win32",
     kill: () => { killCalls++; return true; },
+    killTree: () => { killCalls++; return true; },
   });
   backgroundShellSpawnExec(create(ExecServerMessageSchema, {
     id: 1,
