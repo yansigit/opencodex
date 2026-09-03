@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { bundledBunPath } from "../src/lib/bun-runtime";
 import { killProxy } from "../src/lib/process-control";
+import { commandInvocation } from "../src/lib/win-exec";
 
 const BIN_OCX = join(import.meta.dir, "..", "bin", "ocx.mjs");
 const nodeAvailable = spawnSync("node", ["--version"], {
@@ -451,24 +452,27 @@ describe.skipIf(!nodeAvailable || process.env.OCX_TEST_NETWORK_ISOLATED === "1")
     try {
       mkdirSync(packDir);
       mkdirSync(installDir);
-      const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-      const packed = spawnSync(npm, ["pack", "--json", "--pack-destination", packDir], {
+      const packInvocation = commandInvocation("npm", ["pack", "--json", "--pack-destination", packDir]);
+      const packed = spawnSync(packInvocation.file, packInvocation.args, {
         cwd: join(import.meta.dir, ".."),
         encoding: "utf8",
         timeout: 120_000,
         windowsHide: true,
+        ...packInvocation.options,
       });
       expect(packed.status).toBe(0);
       const packResult = JSON.parse(packed.stdout) as { filename: string }[] | Record<string, { filename: string }>;
       const { filename } = Array.isArray(packResult) ? packResult[0]! : Object.values(packResult)[0]!;
-      const installed = spawnSync(npm, [
+      const installInvocation = commandInvocation("npm", [
         "install", "--ignore-scripts", "--no-audit", "--no-fund", "--package-lock=false",
         join(packDir, filename),
-      ], {
+      ]);
+      const installed = spawnSync(installInvocation.file, installInvocation.args, {
         cwd: installDir,
         encoding: "utf8",
         timeout: 120_000,
         windowsHide: true,
+        ...installInvocation.options,
       });
       expect(installed.status).toBe(0);
       const installedOcx = join(installDir, "node_modules", "@yansigit", "opencodex", "bin", "ocx.mjs");
