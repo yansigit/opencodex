@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { fileURLToPath } from "node:url";
 import { testProviderFetch } from "../src/lib/test-provider-fetch";
 
 test("provider-object fetch fixtures are inert outside the repository test preload", () => {
@@ -7,7 +8,7 @@ test("provider-object fetch fixtures are inert outside the repository test prelo
   const child = Bun.spawnSync([
     process.execPath,
     "-e",
-    `import { testProviderFetch } from ${JSON.stringify(new URL("../src/lib/test-provider-fetch.ts", import.meta.url).pathname)}; console.log(testProviderFetch({ fetch: () => null }) === undefined);`,
+    `import { testProviderFetch } from ${JSON.stringify(fileURLToPath(new URL("../src/lib/test-provider-fetch.ts", import.meta.url)))}; console.log(testProviderFetch({ fetch: () => null }) === undefined);`,
   ], {
     env: { ...process.env, OCX_TEST_HOME_GUARD: "" },
     stdout: "pipe",

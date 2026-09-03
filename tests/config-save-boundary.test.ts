@@ -221,6 +221,7 @@ test("full config replacement is limited to explicit import and init", async () 
   const fixture = join(fixtureDir, "fixture.ts");
   const helper = join(fixtureDir, "helper.ts");
   const configModule = join(SRC, "config");
+  const configModuleTemplate = JSON.stringify(configModule).slice(1, -1);
   writeFileSync(helper, "export {};\n");
   writeFileSync(fixture, [
     `import "./helper.js";`,
@@ -232,7 +233,7 @@ test("full config replacement is limited to explicit import and init", async () 
     `const loaded = (await import(${JSON.stringify(configModule)})); loaded.replacePersistedConfig(value);`,
     `let assigned; assigned = (await import(${JSON.stringify(configModule)})); assigned.replacePersistedConfig(value);`,
     `const { replacePersistedConfig: destructured } = await import(${JSON.stringify(configModule)}); destructured(value);`,
-    `import(\`${configModule}\`).then(({ replacePersistedConfig }) => replacePersistedConfig(value));`,
+    `import(\`${configModuleTemplate}\`).then(({ replacePersistedConfig }) => replacePersistedConfig(value));`,
     `const promised = import(${JSON.stringify(configModule)}); promised.then(config => config.replacePersistedConfig(value));`,
     `const required = require(${JSON.stringify(configModule)}); required.replacePersistedConfig(value);`,
     "config[`replacePersistedConfig`](value);",
