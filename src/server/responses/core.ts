@@ -314,6 +314,11 @@ import {
 } from "../request-log-conversation";
 import type { AttemptRecoveryKind } from "../../usage/log";
 import {
+  beginConversationTurn,
+  guardRepeatedPreToolText,
+  observeTurnProgress,
+} from "../conversation-progress";
+import {
   consumeForInspection,
   consumeForResponseLogMetadata,
   createSseInspector,
@@ -459,6 +464,37 @@ function diagnoseAdapterEvents(
       yield event;
     }
   })();
+}
+
+function observeProgressEvents(
+  events: AsyncIterable<AdapterEvent>,
+  logCtx: RequestLogContext,
+): AsyncIterable<AdapterEvent> {
+  if (!logCtx.turnProgress) return events;
+  const observed = (async function* () {
+    for await (const event of events) {
+      observeTurnProgress(logCtx.turnProgress!, event);
+      yield event;
+    }
+  })();
+  const guarded = logCtx.turnProgressTrackerKey
+    ? guardRepeatedPreToolText(observed, logCtx.turnProgressTrackerKey, logCtx.turnProgress)
+    : observed;
+  return (async function* () {
+    yield* guarded;
+  })();
+}
+
+async function collectProgressEvents(
+  events: AdapterEvent[],
+  logCtx: RequestLogContext,
+): Promise<AdapterEvent[]> {
+  const collected: AdapterEvent[] = [];
+  for await (const event of observeProgressEvents(
+    (async function* () { yield* events; })(),
+    logCtx,
+  )) collected.push(event);
+  return collected;
 }
 
 /**
@@ -3730,6 +3766,22 @@ async function handleResponsesInner(
     );
   }
   options.onRequestValidated?.();
+  if (adapter.name === "cursor" && logCtx.conversationId && !options.comboAttempt) {
+    const turn = beginConversationTurn(logCtx.conversationId, route.providerName, route.modelId);
+    logCtx.turnProgressTrackerKey = turn.key;
+    logCtx.turnProgress = turn.telemetry;
+    if (turn.retryAfterSeconds !== undefined) {
+      logCtx.turnProgressCircuitBlocked = true;
+      logCtx.localTerminalReason = "cursor-rate-limit-circuit";
+      logCtx.errorCode = "cursor_rate_limit_circuit_open";
+      return formatErrorResponse(
+        429,
+        "rate_limit_error",
+        "Cursor request paused after consecutive rate limits; retry after the indicated cooldown",
+        { retryAfter: String(turn.retryAfterSeconds) },
+      );
+    }
+  }
   // Ordinary requests receive one durable attempt only after their final initial
   // adapter is resolved. Combo children own their attempt and retries keep it.
   if (!options.comboAttempt && !logCtx.activeAttempt) {
@@ -5886,7 +5938,7 @@ async function handleResponsesInner(
           );
         });
       const sseStream = bridgeToResponsesSSE(
-        guardedSource, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
+        observeProgressEvents(guardedSource, logCtx), parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
         () => {
           runTurnAbort.abort();
           queue.close();
@@ -5957,6 +6009,7 @@ async function handleResponsesInner(
     } else {
       events = runTurnEvents;
     }
+    events = await collectProgressEvents(events, logCtx);
     if (options.comboAttempt) {
       const firstMeaningful = events.find(event => event.type !== "heartbeat");
       if (!firstMeaningful || firstMeaningful.type === "error") {
@@ -7320,7 +7373,7 @@ async function handleResponsesInner(
       : eventStream;
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     const sseStream = bridgeToResponsesSSE(
-      guardedEventStream, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
+      observeProgressEvents(guardedEventStream, logCtx), parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
       () => upstream.abort(), 2_000,
       {
         translatorBudget,
@@ -7397,6 +7450,7 @@ async function handleResponsesInner(
       } else {
         events = guardedEvents;
       }
+      events = await collectProgressEvents(events, logCtx);
     } finally {
       cleanupUpstreamAbort();
     }

@@ -10,6 +10,7 @@ import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
 import type { AgentKind } from "../server/effort-policy";
+import type { TurnProgressTelemetry } from "../types/progress";
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
 export type UsageAccountLogLabel = "main" | `p${string}` | `o${string}`;
@@ -116,6 +117,8 @@ export interface PersistedUsageEntry {
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
+  /** Protocol-only per-call progress counters; contains no text, arguments, or identifiers. */
+  turnProgress?: TurnProgressTelemetry;
   resolvedModel?: string;
   requestedModel?: string;
   /** Original bare helper model when the opt-in shadow-call route rewrote this request. */
@@ -478,6 +481,63 @@ function normalizedAttempts(raw: unknown): PersistedUsageAttempt[] {
     .filter((attempt): attempt is PersistedUsageAttempt => attempt !== null);
 }
 
+function normalizeTurnProgress(raw: unknown): TurnProgressTelemetry | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const integer = (key: keyof TurnProgressTelemetry): number | undefined => {
+    const candidate = value[key];
+    return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
+      ? candidate
+      : undefined;
+  };
+  const required = {
+    logicalCallOrdinal: integer("logicalCallOrdinal"),
+    consecutive429sBeforeCall: integer("consecutive429sBeforeCall"),
+    logicalCallsSinceToolCompletion: integer("logicalCallsSinceToolCompletion"),
+    textDeltaCount: integer("textDeltaCount"),
+    textBytes: integer("textBytes"),
+    commentaryTextBytes: integer("commentaryTextBytes"),
+    finalTextBytes: integer("finalTextBytes"),
+    thinkingDeltaCount: integer("thinkingDeltaCount"),
+    toolCallsStarted: integer("toolCallsStarted"),
+    toolCallsCompleted: integer("toolCallsCompleted"),
+    assistantBoundaries: integer("assistantBoundaries"),
+    terminalEvents: integer("terminalEvents"),
+  };
+  if (Object.values(required).some(candidate => candidate === undefined)) return undefined;
+  return {
+    logicalCallOrdinal: required.logicalCallOrdinal!,
+    consecutive429sBeforeCall: required.consecutive429sBeforeCall!,
+    logicalCallsSinceToolCompletion: required.logicalCallsSinceToolCompletion!,
+    textDeltaCount: required.textDeltaCount!,
+    textBytes: required.textBytes!,
+    commentaryTextBytes: required.commentaryTextBytes!,
+    finalTextBytes: required.finalTextBytes!,
+    preToolTextBytes: integer("preToolTextBytes") ?? 0,
+    thinkingDeltaCount: required.thinkingDeltaCount!,
+    toolCallsStarted: required.toolCallsStarted!,
+    toolCallsCompleted: required.toolCallsCompleted!,
+    assistantBoundaries: required.assistantBoundaries!,
+    terminalEvents: required.terminalEvents!,
+    ...(typeof value.exactOutputRepeat === "boolean" ? { exactOutputRepeat: value.exactOutputRepeat } : {}),
+    ...(typeof value.normalizedCommentaryRepeat === "boolean"
+      ? { normalizedCommentaryRepeat: value.normalizedCommentaryRepeat }
+      : {}),
+    ...(typeof value.normalizedPreToolTextRepeat === "boolean"
+      ? { normalizedPreToolTextRepeat: value.normalizedPreToolTextRepeat }
+      : {}),
+    ...(typeof value.repeatedPreToolNarration === "boolean"
+      ? { repeatedPreToolNarration: value.repeatedPreToolNarration }
+      : {}),
+    ...(typeof value.suppressedRepeatedPreToolText === "boolean"
+      ? { suppressedRepeatedPreToolText: value.suppressedRepeatedPreToolText }
+      : {}),
+    ...(typeof value.commentaryOnlyRound === "boolean" ? { commentaryOnlyRound: value.commentaryOnlyRound } : {}),
+    ...(typeof value.emptyProtocolRound === "boolean" ? { emptyProtocolRound: value.emptyProtocolRound } : {}),
+    ...(typeof value.rateLimitCircuitOpen === "boolean" ? { rateLimitCircuitOpen: value.rateLimitCircuitOpen } : {}),
+  };
+}
+
 const MAX_METADATA_STRING_LEN = 64;
 function capMetadataString(s: string): string {
   return s.length > MAX_METADATA_STRING_LEN ? s.slice(0, MAX_METADATA_STRING_LEN) : s;
@@ -497,6 +557,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
   const routeDecision = entry.routeDecision
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
+  const turnProgress = normalizeTurnProgress(entry.turnProgress);
   return {
     requestId: entry.requestId,
     timestamp: entry.timestamp,
@@ -519,6 +580,7 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()
       ? { conversationId: entry.conversationId.trim().slice(0, 128) }
       : {}),
+    ...(turnProgress ? { turnProgress } : {}),
     ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),

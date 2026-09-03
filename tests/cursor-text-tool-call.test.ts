@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { create } from "@bufbuild/protobuf";
 import {
   createCursorProtobufEventState,
+  finalizeTurnEvents,
   mapCursorProtobufServerMessage,
 } from "../src/adapters/cursor/protobuf-events";
 import {
@@ -114,6 +115,96 @@ describe("Cursor textual pseudo tool call parsing", () => {
     const delta = all.find(e => e.type === "tool_call_delta") as { arguments: string };
     expect(delta).toBeDefined();
     expect(delta.arguments).toBe('{"cmd":"ls -la"}');
+  });
+
+  test("parses Kimi XML tool calls into structured events across every chunk boundary", () => {
+    const xml = '<tool_call>\n{"name":"functions.ocx_client_read_workflow","arguments":{"path":"gsd-core/workflows/plan-phase.md"}}\n</tool_call>';
+    for (let split = 0; split <= xml.length; split++) {
+      const state = createCursorProtobufEventState({ clientToolNames: ["ocx_client_read_workflow"] });
+      const events = [
+        ...mapCursorProtobufServerMessage(textDeltaMsg(xml.slice(0, split)), state),
+        ...mapCursorProtobufServerMessage(textDeltaMsg(xml.slice(split)), state),
+      ];
+      expect(events.map(event => event.type)).toEqual([
+        "tool_call_start",
+        "tool_call_delta",
+        "tool_call_end",
+      ]);
+      expect(events[0]).toMatchObject({ type: "tool_call_start", name: "ocx_client_read_workflow" });
+      expect(events[1]).toEqual({
+        type: "tool_call_delta",
+        arguments: '{"path":"gsd-core/workflows/plan-phase.md"}',
+      });
+    }
+  });
+
+  test("leaves malformed, unknown, and explanatory XML tool-call text unchanged", () => {
+    const values = [
+      '<tool_call>{"name":"functions.unknown","arguments":{}}</tool_call>',
+      '<tool_call>{"name":"functions.ocx_client_read_workflow","arguments":"not-an-object"}</tool_call>',
+      "Documentation can mention <tool_call> without forming a call.",
+    ];
+    for (const value of values) {
+      const state = createCursorProtobufEventState({ clientToolNames: ["ocx_client_read_workflow"] });
+      const events = [
+        ...mapCursorProtobufServerMessage(textDeltaMsg(value), state),
+        ...finalizeTurnEvents(state),
+      ];
+      expect(events.filter(event => event.type === "text").map(event => event.text).join(""))
+        .toBe(value);
+      expect(events.some(event => event.type === "tool_call_start")).toBe(false);
+    }
+  });
+
+  test("uses the JSON object boundary instead of a closing tag inside an argument string", () => {
+    const state = createCursorProtobufEventState({ clientToolNames: ["ocx_client_read_workflow"] });
+    const xml = '<tool_call>{"name":"functions.ocx_client_read_workflow","arguments":{"path":"contains </tool_call> text"}}</tool_call>';
+    const events = mapCursorProtobufServerMessage(textDeltaMsg(xml), state);
+    expect(events.map(event => event.type)).toEqual(["tool_call_start", "tool_call_delta", "tool_call_end"]);
+    expect(events[1]).toEqual({
+      type: "tool_call_delta",
+      arguments: '{"path":"contains </tool_call> text"}',
+    });
+  });
+
+  test("bounds an unclosed XML tool call and releases it as text", () => {
+    const state = createCursorProtobufEventState({ clientToolNames: ["ocx_client_read_workflow"] });
+    const value = '<tool_call>{"name":"functions.ocx_client_read_workflow","arguments":{"path":"'
+      + "x".repeat(256 * 1_024)
+      + '"';
+    const events = mapCursorProtobufServerMessage(textDeltaMsg(value), state);
+    expect(events.filter(event => event.type === "text").map(event => event.text).join(""))
+      .toBe(value);
+    expect(state.textToolCallBuffer).toBeUndefined();
+  });
+
+  test("parses Grok bare JSON tool objects across every chunk boundary", () => {
+    const json = '{"id":"call_plan_phase_001","name":"mcp_opencodex-responses_ocx_client_read_workflow","arguments":{"path":"gsd-core/workflows/plan-phase.md"}}';
+    for (let split = 0; split <= json.length; split++) {
+      const state = createCursorProtobufEventState({ clientToolNames: ["ocx_client_read_workflow"] });
+      const events = [
+        ...mapCursorProtobufServerMessage(textDeltaMsg(json.slice(0, split)), state),
+        ...mapCursorProtobufServerMessage(textDeltaMsg(json.slice(split)), state),
+      ];
+      expect(events.map(event => event.type)).toEqual(["tool_call_start", "tool_call_delta", "tool_call_end"]);
+      expect(events[1]).toEqual({
+        type: "tool_call_delta",
+        arguments: '{"path":"gsd-core/workflows/plan-phase.md"}',
+      });
+    }
+  });
+
+  test("leaves ordinary and unknown bare JSON objects as text", () => {
+    const values = [
+      '{"answer":42}',
+      '{"id":"call","name":"functions.unknown","arguments":{}}',
+      '{"name":"functions.ocx_client_read_workflow","arguments":{}}',
+    ];
+    for (const value of values) {
+      const state = createCursorProtobufEventState({ clientToolNames: ["ocx_client_read_workflow"] });
+      const events = mapCursorProtobufServerMessage(textDeltaMsg(value), state);
+      expect(events).toEqual([{ type: "text", text: value }]);
+    }
   });
 
   test("translates structured edit tools via textual tool call to apply_patch", () => {

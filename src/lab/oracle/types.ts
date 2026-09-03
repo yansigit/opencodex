@@ -1,6 +1,26 @@
 import type { CursorOracleProtocolObservation } from "./protocol-observer";
 
 export type CursorOracleScenarioId = string;
+export const CURSOR_ORACLE_MAX_MODEL_CALLS_PER_TOOL_STEP = 3;
+
+export function cursorOracleToolStepEfficiency(modelCalls: number, completedToolSteps: number): {
+  modelCalls: number;
+  completedToolSteps: number;
+  modelCallsPerCompletedToolStep: number | null;
+  maximum: number;
+  status: "pass" | "fail" | "not_applicable";
+} {
+  const ratio = completedToolSteps > 0 ? modelCalls / completedToolSteps : null;
+  return {
+    modelCalls,
+    completedToolSteps,
+    modelCallsPerCompletedToolStep: ratio,
+    maximum: CURSOR_ORACLE_MAX_MODEL_CALLS_PER_TOOL_STEP,
+    status: ratio === null
+      ? "not_applicable"
+      : ratio <= CURSOR_ORACLE_MAX_MODEL_CALLS_PER_TOOL_STEP ? "pass" : "fail",
+  };
+}
 
 export interface CursorOracleRunRequest {
   scenario: CursorOracleScenarioId;
@@ -33,6 +53,7 @@ export interface CursorOracleObservationV1 {
   };
   behavior: {
     instructionCanaryObserved: boolean;
+    toolStepEfficiency: ReturnType<typeof cursorOracleToolStepEfficiency>;
   };
   scenario: CursorOracleScenarioId;
   model: string | null;
