@@ -12,6 +12,7 @@ const {
   CHECK_INTERVAL_MS,
   HEALTH_CHECK_DEADLINE_MS,
   MISSED_WINDOWS,
+  PROMOTION_RECONCILIATION_GRACE_MS,
   UPSTREAM_BACKSTOP_MS,
   UPSTREAM_DETECTION_MS,
   WORKFLOW_SPECS,
@@ -368,6 +369,71 @@ describe("automation health SLO checker", () => {
     assert.equal(evaluateRepositoryState({
       relation: { status: "diverged" },
       prs: result,
+    }).status, "alert");
+  });
+
+  it("warns only during a bounded exact-head promotion reconciliation window", () => {
+    const prs = { promotion: { count: 0, prs: [] }, sync: { count: 0, prs: [] } };
+    const relation = {
+      status: "behind",
+      dev: SHA_DEV,
+      main: SHA_MAIN,
+      aheadBy: 0,
+      behindBy: 1,
+      mergeBaseSha: SHA_DEV,
+    };
+    const mainCiSignal = {
+      status: "warning",
+      matchesTip: true,
+      latestRun: {
+        status: "in_progress",
+        conclusion: null,
+        headSha: SHA_MAIN,
+        createdAt: NOW,
+        updatedAt: NOW,
+      },
+    };
+
+    assert.deepEqual(evaluateRepositoryState({ relation, prs, mainCiSignal, now: NOW }), {
+      status: "warning",
+      reason: "main promotion is awaiting protected dev reconciliation",
+    });
+
+    const recentlySuccessful = {
+      ...mainCiSignal,
+      status: "healthy",
+      latestRun: { ...mainCiSignal.latestRun, status: "completed", conclusion: "success" },
+    };
+    assert.equal(evaluateRepositoryState({
+      relation,
+      prs,
+      mainCiSignal: recentlySuccessful,
+      now: new Date(Date.parse(NOW) + PROMOTION_RECONCILIATION_GRACE_MS).toISOString(),
+    }).status, "warning");
+    assert.equal(evaluateRepositoryState({
+      relation,
+      prs,
+      mainCiSignal: recentlySuccessful,
+      now: new Date(Date.parse(NOW) + PROMOTION_RECONCILIATION_GRACE_MS + 1).toISOString(),
+    }).status, "alert");
+
+    for (const unsafeRelation of [
+      { ...relation, behindBy: 2 },
+      { ...relation, aheadBy: 1 },
+      { ...relation, mergeBaseSha: "x".repeat(40) },
+    ]) {
+      assert.equal(evaluateRepositoryState({
+        relation: unsafeRelation,
+        prs,
+        mainCiSignal,
+        now: NOW,
+      }).status, "alert");
+    }
+    assert.equal(evaluateRepositoryState({
+      relation,
+      prs: { ...prs, sync: { count: 2, prs: [{}, {}] } },
+      mainCiSignal,
+      now: NOW,
     }).status, "alert");
   });
 

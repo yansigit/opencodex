@@ -10,6 +10,7 @@ const API_RETRY_BASE_MS = 250;
 const API_RETRY_MAX_MS = 60 * 1000;
 const API_REQUEST_TIMEOUT_MS = 15 * 1000;
 const HEALTH_CHECK_DEADLINE_MS = 4 * 60 * 1000;
+const PROMOTION_RECONCILIATION_GRACE_MS = HOUR_MS;
 
 // The extra checker interval is deliberate: a six-hour checker can observe a
 // missed cron window only on its next tick. The two-window portion is the SLO;
@@ -295,13 +296,40 @@ function openPromotionSyncPrs({ pullRequests, repository }) {
   };
 }
 
-function evaluateRepositoryState({ relation, prs }) {
+function promotionReconciliationPending({ relation, mainCiSignal, now }) {
+  const nowMs = asTime(now);
+  const latest = mainCiSignal?.latestRun;
+  if (
+    nowMs === null ||
+    relation.status !== "behind" ||
+    relation.aheadBy !== 0 ||
+    relation.behindBy !== 1 ||
+    relation.mergeBaseSha !== relation.dev ||
+    mainCiSignal?.matchesTip !== true ||
+    latest?.headSha !== relation.main
+  ) {
+    return false;
+  }
+  if (latest.status !== "completed") return mainCiSignal.status !== "alert";
+  if (latest.conclusion !== "success") return false;
+  const observedAt = asTime(latest.updatedAt) ?? asTime(latest.createdAt);
+  return observedAt !== null && nowMs - observedAt <= PROMOTION_RECONCILIATION_GRACE_MS;
+}
+
+function evaluateRepositoryState({ relation, prs, mainCiSignal = null, now = null }) {
   const relationHealthy = relation.status === "ahead" || relation.status === "identical";
   const duplicatePrs = prs.promotion.count > 1 || prs.sync.count > 1;
+  const reconciliationPending = promotionReconciliationPending({ relation, mainCiSignal, now });
   return {
-    status: relationHealthy && !duplicatePrs ? "healthy" : "alert",
+    status: relationHealthy && !duplicatePrs
+      ? "healthy"
+      : reconciliationPending && !duplicatePrs
+        ? "warning"
+        : "alert",
     reason: !relationHealthy
-      ? `dev/main relation is ${relation.status}; dev must contain main`
+      ? reconciliationPending
+        ? "main promotion is awaiting protected dev reconciliation"
+        : `dev/main relation is ${relation.status}; dev must contain main`
       : duplicatePrs
         ? "multiple open promotion or sync PRs violate controller uniqueness"
         : "branch relation and controller PR uniqueness are healthy",
@@ -336,7 +364,12 @@ function evaluateHealth({ now, workflowRuns, ciRuns, branchShas, compare, pullRe
 
   const relation = shaRelation({ branchShas, compare });
   const prs = openPromotionSyncPrs({ pullRequests, repository });
-  const repositoryState = evaluateRepositoryState({ relation, prs });
+  const repositoryState = evaluateRepositoryState({
+    relation,
+    prs,
+    mainCiSignal: workflowSignals["ci.yml"].branches.main,
+    now: atMs,
+  });
   const upstreamSync = upstream ? evaluateUpstreamSync({ ...upstream, now: atMs }) : null;
   return {
     status: overallStatus({ ...workflowSignals, repositoryState, ...(upstreamSync ? { upstreamSync } : {}) }),
@@ -557,6 +590,7 @@ module.exports = {
   CHECK_INTERVAL_MS,
   HEALTH_CHECK_DEADLINE_MS,
   MISSED_WINDOWS,
+  PROMOTION_RECONCILIATION_GRACE_MS,
   UPSTREAM_BACKSTOP_MS,
   UPSTREAM_DETECTION_MS,
   SYNC_BRANCH_RE,
@@ -565,6 +599,7 @@ module.exports = {
   evaluateCiFreshness,
   evaluateHealth,
   evaluateRepositoryState,
+  promotionReconciliationPending,
   evaluateUpstreamSync,
   evaluateWorkflowSignal,
   listOpenPullRequests,
