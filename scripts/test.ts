@@ -10,6 +10,7 @@ import {
   TEST_RUN_LOCK_TOKEN_ENV,
 } from "./test-run-lock";
 import { resolveTrustedWindowsTaskkillExe } from "../src/lib/windows-elevation";
+import { SERIAL_TEST_FILES } from "./ci/test-lanes";
 
 export interface IsolatedTestEnvironment {
   root: string;
@@ -320,29 +321,17 @@ export function resolveBunTestArgs(
   return args;
 }
 
-export const SERIAL_FULL_SUITE_FILES = [
-  "codex-shim.test.ts",
-  "cursor-native-exec-shell.test.ts",
-  "issue-452-empty-503.test.ts",
-  "openai-provider-option-e2e.test.ts",
-  "release-helper.test.ts",
-  "update-stop-first.test.ts",
-  // These suites create subprocesses or large buffers and have proven unstable in
-  // the shared parallel lane on CI/container hosts.
-  "anthropic-image-normalize.test.ts",
-  "cursor-images.test.ts",
-  "kiro-images.test.ts",
-  "codex-journal.test.ts",
-  "request-decompress.test.ts",
-  // These suites perform whole-graph scans or deliberately large linear repairs. They
-  // remain fast in isolation but can cross Bun's fixed five-second test deadline when
-  // four unrelated compiler-heavy files are competing for the same host.
-  "codex-prompt-route.test.ts",
-  "config-save-boundary.test.ts",
-  "responses-stateless-dangling-call-repair.test.ts",
-] as const;
+type SerialFullSuiteFile = (typeof SERIAL_TEST_FILES)[number] extends `tests/${infer File}` ? File : never;
 
-const SERIAL_LANE_TIMEOUT_MS: Partial<Record<(typeof SERIAL_FULL_SUITE_FILES)[number], number>> = {
+export const SERIAL_FULL_SUITE_FILES = SERIAL_TEST_FILES.map(
+  (file): SerialFullSuiteFile => file.slice("tests/".length) as SerialFullSuiteFile,
+);
+
+const SERIAL_LANE_TIMEOUT_MS: Partial<Record<SerialFullSuiteFile, number>> = {
+  // The packaged first-start case has its own 4-minute budget and performs npm
+  // pack/install plus a real proxy lifecycle. Keep the outer lane able to
+  // contain that bounded work on cold runners.
+  "ocx-launcher-runtime.test.ts": 5 * 60 * 1000,
   // This file intentionally exercises 33 complete release-script subprocess trees.
   // It is ~90s on an idle machine and measured at ~170s under unrelated host load.
   "release-helper.test.ts": 5 * 60 * 1000,
