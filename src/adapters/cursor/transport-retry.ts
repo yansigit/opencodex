@@ -1,6 +1,6 @@
 import type { CursorRunRequest, CursorServerMessage } from "./types";
 import type { CursorTransport, CursorTransportFactory, CursorTransportFactoryInput } from "./transport";
-import { abortError, retryBackoffDelayMs, sleepWithAbort } from "../../lib/upstream-retry";
+import { abortError, isTransientUpstreamStatus, retryBackoffDelayMs, sleepWithAbort } from "../../lib/upstream-retry";
 import { debugProviderDiagnostic } from "../../lib/debug";
 import { isCursorRootEnvelopeError, safeCursorErrorMessage } from "./cursor-errors";
 
@@ -23,6 +23,10 @@ export function isRetryableCursorError(err: unknown): boolean {
   // wording.
   if (isCursorRootEnvelopeError(err)) return false;
   const code = typeof err === "object" && err && "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+  const status = typeof err === "object" && err && "status" in err
+    ? Number((err as { status?: unknown }).status)
+    : Number.NaN;
+  if (Number.isInteger(status)) return isTransientUpstreamStatus(status);
   const message = err instanceof Error ? err.message : typeof err === "string" ? err : "";
   const haystack = `${code} ${message}`.toLowerCase();
   if (/auth|unauthor|forbidden|invalid|permission|denied|not found|unsupported/.test(haystack)) return false;
@@ -73,7 +77,15 @@ export async function runCursorTurnWithRetry(
   request: CursorRunRequest,
   signal: AbortSignal | undefined,
   onEvent: (message: CursorServerMessage, transport: CursorTransport) => void,
+  options: {
+    enabled?: boolean;
+    replayBudget?: { remaining: number };
+    onRetry?: (recovery: "connection-reset" | "transient-5xx") => void;
+  } = {},
 ): Promise<void> {
+  const maxAttempts = options.enabled
+    ? Math.min(CURSOR_RETRY_ATTEMPTS, Math.max(1, (options.replayBudget?.remaining ?? CURSOR_RETRY_ATTEMPTS - 1) + 1))
+    : 1;
   for (let attempt = 0; ; attempt++) {
     if (signal?.aborted) throw abortError(signal);
     const transport = makeTransport(input);
@@ -102,7 +114,7 @@ export async function runCursorTurnWithRetry(
     } catch (err) {
       const canRetry =
         !emittedAny &&
-        attempt < CURSOR_RETRY_ATTEMPTS - 1 &&
+        attempt < maxAttempts - 1 &&
         !signal?.aborted &&
         requestUncommitted(transport) &&
         isRetryableCursorError(err);
@@ -117,6 +129,14 @@ export async function runCursorTurnWithRetry(
         throw err;
       }
       const backoffMs = cursorRetryDelayMs(attempt);
+      const status = typeof err === "object" && err && "status" in err
+        ? Number((err as { status?: unknown }).status)
+        : Number.NaN;
+      const recovery = Number.isInteger(status) && isTransientUpstreamStatus(status)
+        ? "transient-5xx"
+        : "connection-reset";
+      if (options.replayBudget) options.replayBudget.remaining -= 1;
+      options.onRetry?.(recovery);
       debugProviderDiagnostic("cursor", "retry", {
         attempt,
         reason: safeCursorErrorMessage(err instanceof Error ? err.message : String(err)),

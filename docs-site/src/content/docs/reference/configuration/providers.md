@@ -513,6 +513,11 @@ so passthrough stays byte-for-byte identical.
 
 The Cursor bridge is experimental. After `ocx login cursor`, add or edit `providers.cursor`.
 
+Protocol-corruption guards are always active for Cursor-hosted external models. Billable transport
+replay remains opt-in: set `replayTransientFailures: true` to retry only pre-commit connection resets
+and transient 5xx failures within the shared three-send budget. The global `emptyCompletionRetry`
+setting also remains off by default, and neither mechanism retries after a Cursor local side effect.
+
 If a proxy cannot carry Cursor's default HTTP/2 stream, set `upstreamHttpVersion` to `"http1.1"`
 or its `"h1"` alias.
 This switches inference to Cursor's `RunSSE` + `BidiAppend` compatibility transport and uses

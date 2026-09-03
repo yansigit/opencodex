@@ -48,6 +48,8 @@ describe("isRetryableCursorError", () => {
   test("does not retry rate limits or expected client-tool cancels", () => {
     expect(isRetryableCursorError(new Error("Cursor rate limit exceeded: resource_exhausted"))).toBe(false);
     expect(isRetryableCursorError(Object.assign(new Error("Stream closed with error code NGHTTP2_CANCEL"), { code: "ERR_HTTP2_STREAM_ERROR" }))).toBe(false);
+    expect(isRetryableCursorError(Object.assign(new Error("HTTP 429"), { status: 429 }))).toBe(false);
+    expect(isRetryableCursorError(Object.assign(new Error("HTTP 502"), { status: 502 }))).toBe(true);
   });
 });
 
@@ -64,6 +66,18 @@ describe("cursorRetryDelayMs", () => {
 });
 
 describe("runCursorTurnWithRetry", () => {
+  test("does not replay transient failures unless explicitly enabled", async () => {
+    let calls = 0;
+    await expect(runCursorTurnWithRetry(
+      () => { calls++; return transport({ throwAfter: 0, error: new Error("connect ECONNREFUSED"), committed: false }); },
+      { provider: { adapter: "cursor" } },
+      request,
+      undefined,
+      () => {},
+    )).rejects.toThrow("ECONNREFUSED");
+    expect(calls).toBe(1);
+  });
+
   test("retries a transient pre-commit failure and succeeds on the next attempt", async () => {
     let calls = 0;
     const events: CursorServerMessage[] = [];
@@ -77,9 +91,34 @@ describe("runCursorTurnWithRetry", () => {
       request,
       undefined,
       message => events.push(message),
+      { enabled: true },
     );
     expect(calls).toBe(2);
     expect(events).toEqual([{ type: "text", text: "ok" }]);
+  });
+
+  test("shares the replay budget and reports every transport resend", async () => {
+    let calls = 0;
+    const replayBudget = { remaining: 1 };
+    const recoveries: string[] = [];
+    await expect(runCursorTurnWithRetry(
+      () => {
+        calls += 1;
+        return transport({
+          throwAfter: 0,
+          error: Object.assign(new Error("HTTP 502"), { status: 502 }),
+          committed: false,
+        });
+      },
+      { provider: { adapter: "cursor" } },
+      request,
+      undefined,
+      () => {},
+      { enabled: true, replayBudget, onRetry: recovery => recoveries.push(recovery) },
+    )).rejects.toThrow("HTTP 502");
+    expect(calls).toBe(2);
+    expect(replayBudget.remaining).toBe(0);
+    expect(recoveries).toEqual(["transient-5xx"]);
   });
 
   test("does NOT retry once an event was emitted (no duplicate turn)", async () => {
@@ -108,6 +147,7 @@ describe("runCursorTurnWithRetry", () => {
       request,
       undefined,
       () => {},
+      { enabled: true },
     )).rejects.toThrow("ECONNREFUSED");
     expect(calls).toBe(1);
   });
@@ -175,6 +215,7 @@ describe("runCursorTurnWithRetry — transport close ordering (WP180)", () => {
       request,
       undefined,
       () => {},
+      { enabled: true },
     );
     expect(log).toEqual(["make1", "run1", "close1", "make2", "run2", "close2"]);
   });
@@ -194,6 +235,7 @@ describe("runCursorTurnWithRetry — transport close ordering (WP180)", () => {
       request,
       undefined,
       message => events.push(message),
+      { enabled: true },
     );
     // Retry proceeded despite close1 throwing, and the turn succeeded.
     expect(log).toEqual(["make1", "run1", "close1", "make2", "run2", "close2"]);
@@ -226,6 +268,7 @@ describe("runCursorTurnWithRetry — transport close ordering (WP180)", () => {
       request,
       undefined,
       () => {},
+      { enabled: true },
     )).rejects.toThrow("ECONNREFUSED");
 
     const closes = log.filter(entry => entry.startsWith("close"));
@@ -253,6 +296,7 @@ describe("runCursorTurnWithRetry — transport close ordering (WP180)", () => {
       request,
       ac.signal,
       () => {},
+      { enabled: true },
     );
     // Let attempt 1 fail and enter the backoff, then abort mid-sleep.
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -299,6 +343,7 @@ describe("runCursorTurnWithRetry — transport close ordering (WP180)", () => {
         request,
         undefined,
         () => {},
+        { enabled: true },
       );
     } finally {
       globalThis.setTimeout = realSetTimeout;

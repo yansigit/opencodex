@@ -110,6 +110,11 @@ type AttemptRecoveryKind =
   | "rate-limit-429"
   | "anthropic-oauth-429"
   | "image-413"
+  | "cursor-envelope-echo"
+  | "cursor-routing-commentary"
+  | "cursor-duplicate-tool-call"
+  | "cursor-overflow-remint"
+  | "cursor-invalid-argument"
   | "empty-completion";
 
 interface LogAttempt {
@@ -311,6 +316,11 @@ const RECOVERY_KIND_KEYS = {
   "rate-limit-429": "logs.detail.attempt.recovery.rateLimit429",
   "anthropic-oauth-429": "logs.detail.attempt.recovery.anthropicOauth429",
   "image-413": "logs.detail.attempt.recovery.image413",
+  "cursor-envelope-echo": "logs.detail.attempt.recovery.cursorEnvelopeEcho",
+  "cursor-routing-commentary": "logs.detail.attempt.recovery.cursorRoutingCommentary",
+  "cursor-duplicate-tool-call": "logs.detail.attempt.recovery.cursorDuplicateToolCall",
+  "cursor-overflow-remint": "logs.detail.attempt.recovery.cursorOverflowRemint",
+  "cursor-invalid-argument": "logs.detail.attempt.recovery.cursorInvalidArgument",
   "empty-completion": "logs.detail.attempt.recovery.emptyCompletion",
 } as const satisfies Record<AttemptRecoveryKind, string>;
 

@@ -1,6 +1,7 @@
 import type { AdapterEvent, OcxParsedRequest } from "../types";
 import type { TranslatorBudget } from "../lib/translator-budget";
 import type { AdapterTierMetadata } from "../providers/fastwire";
+import type { AttemptRecoveryKind } from "../usage/log";
 
 /** Metadata about the caller's incoming request, for auth-forwarding adapters. */
 export interface IncomingMeta {
@@ -21,6 +22,12 @@ export interface IncomingMeta {
   imageTierBias?: number;
   /** Provider-scoped structured error observation; never receives ordinary model payloads. */
   onProviderError?: (error: { code?: string; status?: number; message?: string }) => void;
+  /** Shared transient replay allowance for one logical generation. */
+  replayBudget?: { remaining: number };
+  /** Opt in to replaying transient failures across transports. */
+  replayTransientFailures?: boolean;
+  /** Privacy-safe adapter retry callback to record recovery evidence and count attempts. */
+  onAdapterRetry?: (recovery: AttemptRecoveryKind) => void;
 }
 
 export interface ProviderAdapter {

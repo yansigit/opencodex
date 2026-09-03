@@ -48,7 +48,12 @@ export type AttemptRecoveryKind =
   | "oauth-account-429"
   | "image-413"
   | "opaque-blob-rejection"
-  | "empty-completion";
+  | "empty-completion"
+  | "cursor-envelope-echo"
+  | "cursor-routing-commentary"
+  | "cursor-duplicate-tool-call"
+  | "cursor-overflow-remint"
+  | "cursor-invalid-argument";
 
 export interface PersistedUsageAttempt {
   ordinal: number;
@@ -269,6 +274,11 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "image-413",
   "opaque-blob-rejection",
   "empty-completion",
+  "cursor-envelope-echo",
+  "cursor-routing-commentary",
+  "cursor-duplicate-tool-call",
+  "cursor-overflow-remint",
+  "cursor-invalid-argument",
 ]);
 const USAGE_STATUSES = new Set<UsageStatus>([
   "reported",
