@@ -194,6 +194,7 @@ bun run build:gui      # Vite GUI build
 - Release workflows (`release.yml`, `dev-version-bump.yml`): must validate `workflow_dispatch.inputs` and `repository_dispatch.client_payload` shapes in a dedicated `validate-dispatch` job before use; never trust relayed env/secrets for version or SHA.
 - Upstream sync / promotion readiness: when workflow files changed, workflow lint must be clean; when dependency files changed, audit must be clean; exact-head/provenance checks (tag, base, published head) are required; `cancelled` or `skipped` runs are not evidence of green — only `success` counts.
 - A test that persists config or credentials on a Windows path but is not testing ACL behavior must stub both the synchronous and asynchronous `icacls` runners, flush config-directory hardening before teardown, and exercise the Windows platform seam locally. Do not spend a semantic test timeout on real permission-hardening subprocesses.
+- Subprocess integration tests must give a fresh Windows Bun child an explicit startup/marker budget separate from the behavior timeout, and both budgets must fit inside the enclosing test timeout. Do not treat a 3–5 second child startup observed on an unloaded host as a cross-platform deadline.
 - Every full-suite platform lane, including sharded Windows, must derive both its
   general and serial work from `scripts/ci/test-lanes.ts`. A raw Bun `--shard`
   over `tests/` bypasses the serial quarantine and recreates the process/timer
