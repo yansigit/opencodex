@@ -42,7 +42,7 @@
     "test:changed": "bun scripts/test.ts --changed=dev",
     "test:container": "bun scripts/test-container.ts",
     "typecheck": "bun x tsc --noEmit",
-    "audit:high": "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
+    "audit:high": "bun run scripts/ci/audit-high.ts",
     "privacy:scan": "bun scripts/privacy-scan.ts",
     "skill:surface": "bun scripts/generate-ocx-skill-surface.ts",
     "skill:surface:check": "bun scripts/generate-ocx-skill-surface.ts --check",
