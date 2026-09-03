@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createIsolatedOracleEnv, ensureOracleRawDir, purgeExpiredRaw, readOracleObservation, writeOracleObservation } from "./isolate";
 import { createLoopbackProxy } from "./loopback";
 import { CURSOR_ORACLE_DEFAULT_TIMEOUT_MS, CURSOR_ORACLE_UPSTREAM, CURSOR_ORACLE_RAW_TTL_MS } from "./constants";
+import { commandInvocation } from "../../lib/win-exec";
 import {
   CURSOR_VERIFIED_CLIENT_VERSION,
   CURSOR_VERIFIED_REQUEST_CONTEXT_MODE,
@@ -28,13 +29,14 @@ function resolveAgentBin(explicit?: string): string {
     "agent",
   ].filter(Boolean) as string[];
   for (const c of candidates) {
-    if (c.includes("/") && existsSync(c)) return c;
+    if ((c.includes("/") || c.includes("\\")) && existsSync(c)) return c;
   }
-  return candidates.find((c) => !c.includes("/")) ?? "cursor-agent";
+  return candidates.find((c) => !c.includes("/") && !c.includes("\\")) ?? "cursor-agent";
 }
 
 function readAgentVersion(agentBin: string): string | null {
-  const result = spawnSync(agentBin, ["--version"], { encoding: "utf8", timeout: 5_000 });
+  const inv = commandInvocation(agentBin, ["--version"]);
+  const result = spawnSync(inv.file, inv.args, { encoding: "utf8", timeout: 5_000, ...inv.options });
   const match = `${result.stdout ?? ""}\n${result.stderr ?? ""}`.match(/\b\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?\b/);
   return match?.[0] ?? null;
 }
@@ -152,13 +154,15 @@ export async function runCursorOracle(
     ];
 
     diagnostics.push({ code: "agent_spawned" });
+    const inv = commandInvocation(agentBin, args);
 
     const timeoutMs = opts.timeoutMs ?? CURSOR_ORACLE_DEFAULT_TIMEOUT_MS;
     exitCode = await new Promise<number>((resolve) => {
-      const child = spawn(agentBin, args, {
+      const child = spawn(inv.file, inv.args, {
         env,
         cwd: isolated.workspaceDir,
         stdio: ["ignore", "pipe", "pipe"],
+        ...inv.options,
       });
       let sawStderr = false;
       let sawStdout = false;
