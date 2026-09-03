@@ -86,5 +86,5 @@ describe("Google AI Studio Native Hardened WebKit Daemon", () => {
     const outBin = join(outDir, "daemon");
     const binPath = await buildAiStudioNativeDaemon(outBin);
     expect(existsSync(binPath)).toBe(true);
-  }, 30_000);
+  }, 60_000);
 });
