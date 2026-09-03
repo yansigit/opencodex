@@ -250,7 +250,7 @@
       "decisions": {
         ".github/workflows/dev-version-bump.yml": {
           "upstreamIntent": "Adopt the v2.40 release-trigger, version-bump, and workflow reliability fixes without bypassing the fork sync trust boundary.",
-          "forkInvariant": "Release and sync automation remains least-privilege, exact-head bound, and unable to autonomously overwrite fork-owned behavior.",
+          "forkInvariant": "Release and sync automation remains least-privilege and exact-head bound; promote-dev.yml alone advances to the immediate next stable patch only while it is unused, and this next-minor PR fallback must stay dormant.",
           "equivalentOrBetter": false,
           "disposition": "preserve",
           "implementationEvidence": "The replacement v2.40 reconciliation preserves this path on upstream control flow after reviewing base 45ecd4ae3fbac2f5454b6f8ec55a3f989ee727a8, fork 7739b3dc510fefd2d3b6d07385455175aeb5ce93, upstream b884b04ace6f42b9f62919e47cd01861c8685730, and result e815f82c0aa26e8511d2b874c0a832c10e84c33c; the listed checks bind the retained behavior.",
@@ -260,7 +260,7 @@
         },
         ".github/workflows/release.yml": {
           "upstreamIntent": "Adopt the v2.40 release-trigger, version-bump, and workflow reliability fixes without bypassing the fork sync trust boundary.",
-          "forkInvariant": "Release and sync automation remains least-privilege, exact-head bound, and unable to autonomously overwrite fork-owned behavior.",
+          "forkInvariant": "Release and sync automation remains least-privilege and exact-head bound, and release.yml must not create a second post-release dev-version writer beside promote-dev.yml's verified immediate-patch policy.",
           "equivalentOrBetter": false,
           "disposition": "preserve",
           "implementationEvidence": "The replacement v2.40 reconciliation preserves this path on upstream control flow after reviewing base 31ede9ab9d3b0396a6067b6da9ee91d67a95c0b0, fork b6506719f6f73d939a8f074c5e3efc2be60d12fd, upstream 261aece1d180cdebe9384a75e5e359f6078cf866, and result 36ef54d2d6aa5b4ff67532fcac67294b0e7503d8; the listed checks bind the retained behavior.",

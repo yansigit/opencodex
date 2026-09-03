@@ -21,6 +21,7 @@ const WORKFLOW = readFileSync(
   new URL("../.github/workflows/dev-version-bump.yml", import.meta.url),
   "utf8",
 );
+const WORKFLOWS_DIR = fileURLToPath(new URL("../.github/workflows/", import.meta.url));
 
 function runCli(...args: string[]) {
   const proc = Bun.spawnSync([process.execPath, CLI, ...args]);
@@ -178,12 +179,20 @@ describe("dev version bump rule", () => {
 });
 
 describe("dev version bump workflow safety", () => {
-  test("is callable only by the release workflow, least-privilege, and uses immutable external actions", () => {
+  test("remains a dormant least-privilege fallback with immutable external actions", () => {
     expect(WORKFLOW).toContain("permissions: {}");
     expect(WORKFLOW).toContain("workflow_call:");
     expect(WORKFLOW).toContain("released-version:");
     expect(WORKFLOW).not.toContain("release:\n    types: [published]");
     expect(WORKFLOW).not.toMatch(/^\s+workflow_dispatch:/m);
+    const callers = readdirSync(WORKFLOWS_DIR)
+      .filter(file => /\.ya?ml$/.test(file) && file !== "dev-version-bump.yml")
+      .filter(file =>
+        readFileSync(join(WORKFLOWS_DIR, file), "utf8").includes(
+          "uses: ./.github/workflows/dev-version-bump.yml",
+        ),
+      );
+    expect(callers).toEqual([]);
     for (const match of WORKFLOW.matchAll(/^\s+uses:\s+([^\s#]+)/gm)) {
       const action = match[1];
       if (action.startsWith("./")) continue;

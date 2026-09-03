@@ -1,6 +1,12 @@
-name: Dev version bump
+name: Dev version bump (dormant fallback)
 
-# When a release publishes, open a pull request that moves `dev` past the published
+# Dormant upstream fallback for manually prepared recovery. The fork's live release
+# path must not call this workflow: `promote-dev.yml` is the sole post-release writer
+# and advances `dev` through an exact-SHA, tag-verified App update. Keeping two callers
+# produced both a direct 2.40.1 bump and a conflicting 2.41.0 PR after v2.40.0.
+#
+# If explicitly restored as the sole authority in a future design, open a pull request
+# that moves `dev` past the published
 # version. Without this, `dev` keeps carrying a version that is at or behind a released
 # one, and `tests/release-version-line.test.ts` fails on `dev` and on every pull request
 # opened against it - inherited red a contributor cannot fix from their own diff.
@@ -22,15 +28,13 @@ name: Dev version bump
 # raised by the default `GITHUB_TOKEN`. A `release: published` listener therefore cannot
 # observe a release this repository publishes itself, no matter which branch it sits on.
 #
-# The fix keeps the credential surface unchanged: no PAT, no app token, no
-# `contents: write` on the release job. `release.yml` CALLS this workflow directly after
-# a successful publish, so the run is a child of the release run instead of a reaction to
-# an event that is never delivered.
+# The historical upstream fix kept the credential surface unchanged: no PAT or app
+# token. It called this workflow from `release.yml`; the fork deliberately does not,
+# because its verified promotion controller already owns that mutation.
 #
-# A `workflow_call` body resolves from the CALLER's ref, and `release.yml` only ever runs
-# on `main` or `preview` (its own branch gate). So this file must be on `main` to take
-# effect - the same promotion requirement the old comment described, now for a different
-# reason.
+# A `workflow_call` body resolves from the CALLER's ref. This file would have to exist on
+# whichever release branch deliberately restored it as the sole authority before it
+# could take effect.
 #
 # There is deliberately no `workflow_dispatch`: a branch-selected manual run executes
 # THAT branch body with `contents: write`. Re-drive a missed run by running

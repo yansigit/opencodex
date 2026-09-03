@@ -217,6 +217,10 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("EXPECTED_RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}");
     expect(workflowSource).toContain("git merge-base --is-ancestor");
     expect(workflowSource).toContain("npm version patch --no-git-tag-version");
+    expect(workflowSource).toContain('npm view "$package_name" versions --json');
+    expect(workflowSource).toContain('versions.includes(process.env.NEXT_VERSION) ? "used" : "free"');
+    expect(workflowSource).toContain('git ls-remote origin "refs/tags/v${next_version}"');
+    expect(workflowSource).toContain("post-release successor tag v${next_version} already exists");
     expect(workflowSource).toContain("git config user.name");
     expect(workflowSource).toContain("git push origin");
     expect(workflowSource).not.toContain('--force-with-lease="refs/heads/dev:');
