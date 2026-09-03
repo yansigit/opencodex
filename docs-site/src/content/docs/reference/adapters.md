@@ -318,8 +318,19 @@ compatibility pair: `agent.v1.AgentService/RunSSE` for server output and
   usage checkpoints, and client replies are encoded with `@bufbuild/protobuf` schemas in
   `cursor/gen/agent_pb.ts` and framed as Connect messages.
 - Replays conversation state through content-addressed blobs, maps server tool calls back to Codex,
-  discovers live Cursor models through the protobuf `GetUsableModels` RPC, and retries only before a
-  run request is committed to the wire.
+  and discovers live Cursor models through the protobuf `GetUsableModels` RPC. Pre-commit connection
+  reset and transient-5xx replay is disabled by default and follows `replayTransientFailures` when
+  explicitly enabled.
+- External-model output is guarded against marked and neutral tool-result replay envelopes at every
+  line boundary. A turn-start echo gets one safe fresh-conversation correction; a mid-stream echo is
+  withheld and fails explicitly rather than leaking the replayed tool payload. Terminal-only special
+  tokens such as `<eos>` and `<|eot_id|>` are removed without changing tool arguments.
+- On an external-model tool continuation, an exact repeat of any successful invocation in the
+  immediately completed tool batch is quarantined before its call events reach Codex and receives
+  one corrective continuation. The recovery is recorded as `cursor-duplicate-tool-call`; a second
+  repeat fails explicitly instead of executing the tool twice.
+- Once Cursor reports a local side effect, the turn cannot be transparently retried by transport,
+  account failover, or the optional empty-completion guard.
 - After a successful no-tool turn, the adapter keeps Cursor's returned ConversationStateStructure
   in a process-local store and reuses that checkpoint on the next validated linear continuation
   instead of rebuilding the full root history. Tool-result turns reuse the last completed-turn

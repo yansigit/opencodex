@@ -705,7 +705,7 @@ describe("server local API auth", () => {
     expect(() => assertServerAuthConfig(config("0.0.0.0"))).toThrow("Native TLS is required");
   });
 
-  test("the test home guard cannot bypass native TLS for a remote start", () => {
+  test("the test home guard cannot bypass native TLS for a remote start", async () => {
     if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -723,7 +723,7 @@ describe("server local API auth", () => {
         server = startServer(0);
       }).toThrow("Native TLS is required");
     } finally {
-      server?.stop(true);
+      if (server) await server.stop(true);
       if (hadSeam) globalTestState[seam] = previousSeam;
       else delete globalTestState[seam];
     }

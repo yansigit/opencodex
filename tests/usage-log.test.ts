@@ -130,6 +130,32 @@ describe("usage log", () => {
     expect(readUsageEntries()[0]?.attempts?.[0]?.recoveryKinds).toEqual(["rate-limit-429"]);
   });
 
+  test("persists the Cursor duplicate-tool recovery kind on attempts", () => {
+    const entry: PersistedUsageEntry = {
+      requestId: "ocx-cursor-duplicate-tool-kind",
+      timestamp: 1,
+      provider: "cursor",
+      model: "cursor/grok-4.6",
+      status: 200,
+      durationMs: 4,
+      usageStatus: "reported",
+      attempts: [{
+        ordinal: 1,
+        provider: "cursor",
+        model: "cursor/grok-4.6",
+        adapter: "cursor",
+        status: 200,
+        durationMs: 4,
+        sendCount: 2,
+        recoveryKinds: ["cursor-duplicate-tool-call"],
+        usageStatus: "reported",
+      }],
+    };
+    appendUsageEntry(entry);
+    expect(readUsageEntries()[0]?.attempts?.[0]?.recoveryKinds)
+      .toEqual(["cursor-duplicate-tool-call"]);
+  });
+
   test("persists the empty-completion recovery kind on attempts", () => {
     const entry: PersistedUsageEntry = {
       requestId: "ocx-empty-completion-kind",

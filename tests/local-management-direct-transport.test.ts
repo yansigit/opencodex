@@ -337,10 +337,14 @@ describe("local management direct transport", () => {
         stderr: "pipe",
       });
       let childTimedOut = false;
+      // A fresh Bun process took longer than 3s to boot on a loaded hosted
+      // Windows shard (promotion run 33743291747). Keep the child deadline
+      // inside the enclosing test budget while leaving each transport probe's
+      // own 2s semantic timeout unchanged.
       const childWatchdog = setTimeout(() => {
         childTimedOut = true;
         child.kill();
-      }, 3_000);
+      }, 20_000);
       const [exitCode, stdout, stderr] = await Promise.all([
         child.exited,
         new Response(child.stdout).text(),
@@ -374,7 +378,7 @@ describe("local management direct transport", () => {
       if (proxyPort !== 0) await close(proxy);
       if (targetPort !== 0) await close(target);
     }
-  });
+  }, 30_000);
 });
 
 describe("direct local HTTPS transport", () => {

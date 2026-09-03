@@ -87,9 +87,19 @@ export const CURSOR_INVOCATION_ARGUMENTS_BYTE_LIMIT = 2 * 1024;
  * results already stored in history blobs are visible without a ResumeAction.
  */
 export const CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT =
-  "Continue: the requested tool results are provided in the conversation history above. Answer the user request or proceed with the next step directly without repeating status summaries or greetings.";
+  "Continue: the requested tool results are provided in the conversation history above. Follow the active system and developer instructions exactly, including any required output format. Answer the user request or proceed with the next step directly without repeating status summaries, greetings, or a tool invocation that already completed successfully.";
 
-export function externalToolContinuationText(rawMessages?: readonly OcxMessage[]): string {
+const CURSOR_EXTERNAL_INSTRUCTION_REMINDER_BYTE_LIMIT = 2 * 1024;
+
+export function externalToolContinuationText(
+  rawMessages?: readonly OcxMessage[],
+  system?: readonly string[],
+): string {
+  const joinedInstructions = system?.join("\n\n").trim() ?? "";
+  const instructionReminder = joinedInstructions
+    && encoder.encode(joinedInstructions).byteLength <= CURSOR_EXTERNAL_INSTRUCTION_REMINDER_BYTE_LIMIT
+      ? `\n\nActive instructions:\n${joinedInstructions}`
+      : "";
   const last = rawMessages?.at(-1);
   if (last?.role === "toolResult") {
     const raw = typeof last.content === "string" ? last.content : JSON.stringify(last.content ?? "");
@@ -98,10 +108,10 @@ export function externalToolContinuationText(rawMessages?: readonly OcxMessage[]
       (last.toolName?.includes("list_agents") || last.toolName?.includes("search"))
       && (trimmed === "[]" || trimmed === "" || trimmed === "{}" || trimmed === "null")
     ) {
-      return `${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT} If a prior discovery or list tool returned empty results (e.g. no sub-agents currently active), proceed directly with your next concrete action using available tools.`;
+      return `${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT} If a prior discovery or list tool returned empty results (e.g. no sub-agents currently active), proceed directly with your next concrete action using available tools.${instructionReminder}`;
     }
   }
-  return CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT;
+  return CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT + instructionReminder;
 }
 
 function jsonBlob(value: unknown): { data: Uint8Array; serialized: string } {
@@ -1059,13 +1069,17 @@ function externalToolResultToText(
   const normalized = normalizedToolResult(message, contentToText(message.content));
   if (protocolEnvelope) {
     const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
-    return `${prefix}\n${toolResultToText(message, call)}`;
+    const completion = normalized.isError
+      ? ""
+      : "\n[completed: this tool invocation already ran successfully; do not repeat it]";
+    return `${prefix}\n${toolResultToText(message, call)}${completion}`;
   }
   const label = normalized.isError ? "Tool error" : "Tool output";
   return [
     `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${decodeCursorCallId(message.toolCallId)}, is_error: ${normalized.isError}):`,
     ...(call ? [toolInvocationLine(call)] : []),
     normalized.text,
+    ...(!normalized.isError ? ["[completed: this tool invocation already ran successfully; do not repeat it]"] : []),
   ].join("\n");
 }
 
@@ -1395,7 +1409,7 @@ function buildPreparedCursorRunRequest(
     ? "userMessageAction"
     : "resumeAction";
   const actionText = externalToolContinuation
-    ? (request.echoRetryContinuationText ?? externalToolContinuationText(request.rawMessages))
+    ? (request.echoRetryContinuationText ?? externalToolContinuationText(request.rawMessages, request.system))
     : request.echoRetryContinuationText
       ? `${text}\n\n[correction] ${request.echoRetryContinuationText}`
       : text;

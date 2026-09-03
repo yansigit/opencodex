@@ -22,6 +22,7 @@ export interface AdapterEventPreflight {
   stream: AsyncIterable<AdapterEvent>;
   error?: Extract<AdapterEvent, { type: "error" }>;
   empty: boolean;
+  replayUnsafe?: boolean;
 }
 
 async function* replay(
@@ -45,20 +46,26 @@ export async function preflightAdapterEvents(
 ): Promise<AdapterEventPreflight> {
   const iterator = source[Symbol.asyncIterator]();
   const buffered: AdapterEvent[] = [];
+  let replayUnsafe = false;
   while (true) {
     const next = await iterator.next();
-    if (next.done) return { stream: replay(buffered, iterator), empty: true };
+    if (next.done) return { stream: replay(buffered, iterator), empty: true, replayUnsafe };
     if (next.value.type === "heartbeat") {
+      if (next.value.replayUnsafe) replayUnsafe = true;
       buffered.push(next.value);
+      // A local side effect commits the turn even though heartbeats are otherwise preflight-only.
+      // Return immediately so later 401/429/error events cannot trigger a transparent replay and
+      // so the sticky marker cannot be shifted out by the heartbeat retention cap.
+      if (replayUnsafe) return { stream: replay(buffered, iterator), empty: false, replayUnsafe: true };
       if (buffered.length > PREFLIGHT_HEARTBEAT_RETAIN_LIMIT) buffered.shift();
       continue;
     }
     buffered.push(next.value);
     if (next.value.type === "error") {
       await iterator.return?.();
-      return { stream: replay(buffered, iterator), error: next.value, empty: false };
+      return { stream: replay(buffered, iterator), error: next.value, empty: false, replayUnsafe };
     }
-    return { stream: replay(buffered, iterator), empty: false };
+    return { stream: replay(buffered, iterator), empty: false, replayUnsafe };
   }
 }
 
@@ -84,7 +91,13 @@ export function createAdapterEventQueue(opts?: {
   const coalesceIntoTail = (event: AdapterEvent): boolean => {
     const tail = queued[queued.length - 1];
     if (!tail) return false;
-    if (event.type === "heartbeat") return tail.type === "heartbeat";
+    if (event.type === "heartbeat") {
+      if (tail.type !== "heartbeat") return false;
+      if (event.replayUnsafe || tail.replayUnsafe) {
+        queued[queued.length - 1] = { type: "heartbeat", replayUnsafe: true };
+      }
+      return true;
+    }
     if (event.type === "text_delta" && tail.type === "text_delta" && tail.phase === event.phase) {
       if (tail.text.length + event.text.length > COALESCE_MAX_CHUNK_LENGTH) return false;
       queued[queued.length - 1] = { type: "text_delta", text: tail.text + event.text, phase: tail.phase };

@@ -49,6 +49,8 @@ import { capEstimateAtContextWindow } from "../lib/token-estimate";
 import { inferCursorContextWindow } from "../adapters/cursor/discovery";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { modelRecordValue } from "../reasoning-effort";
+import type { TurnProgressTelemetry } from "../types/progress";
+import { finishConversationTurn } from "./conversation-progress";
 
 export interface RequestLogContext {
   model: string;
@@ -57,6 +59,11 @@ export interface RequestLogContext {
   firstOutputMs?: number;
   /** Best-effort chat/session correlation for Logs grouping (#330). Opaque; omit when unknown. */
   conversationId?: string;
+  turnProgress?: TurnProgressTelemetry;
+  /** Process-local HMAC key for conversation progress state; never persisted. */
+  turnProgressTrackerKey?: string;
+  /** Internal marker preventing a locally blocked 429 from extending its own circuit. */
+  turnProgressCircuitBlocked?: boolean;
   surface?: "claude" | "claude-desktop" | "grok";
   /** The matched configured key's id. Set ONLY for admissionKind "configured" —
    *  never a sentinel, so a hand-edited entry whose id happens to be "loopback"
@@ -172,6 +179,7 @@ export interface RequestLogEntry {
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
+  turnProgress?: TurnProgressTelemetry;
   requestedModel?: string;
   requestedAlias?: string;
   /** Original bare helper model when the opt-in shadow-call route rewrote this request. */
@@ -283,6 +291,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     provider: entry.provider,
     ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
+    ...(entry.turnProgress ? { turnProgress: { ...entry.turnProgress } } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
@@ -409,6 +418,7 @@ export function addRequestLog(entry: RequestLogEntry) {
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
+      ...(entry.turnProgress ? { turnProgress: { ...entry.turnProgress } } : {}),
       ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
       ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
       ...(entry.requestedAlias ? { requestedAlias: entry.requestedAlias } : {}),
@@ -951,6 +961,11 @@ export function addFinalRequestLog(
   const closeReason = effectiveStatus === 499
     ? "client_cancel"
     : meta?.closeReason;
+  if (logCtx.turnProgressTrackerKey && logCtx.turnProgress) {
+    finishConversationTurn(logCtx.turnProgressTrackerKey, logCtx.turnProgress, effectiveStatus, {
+      circuitBlocked: logCtx.turnProgressCircuitBlocked,
+    });
+  }
   if (logCtx.activeAttempt) {
     finishRequestAttempt(
       logCtx.activeAttempt,
@@ -1004,6 +1019,7 @@ export function addFinalRequestLog(
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
+    ...(logCtx.turnProgress ? { turnProgress: { ...logCtx.turnProgress } } : {}),
     ...(logCtx.requestedModel ? { requestedModel: logCtx.requestedModel } : {}),
     ...(logCtx.requestedAlias ? { requestedAlias: logCtx.requestedAlias } : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),

@@ -176,7 +176,7 @@ describe("GitHub Actions hardening", () => {
     const linuxShards = (ci.jobs?.test as { strategy?: { matrix?: { shard?: number[] } } })
       ?.strategy?.matrix?.shard ?? [];
     expect(linuxShards).toEqual([1, 2, 3, 4]);
-    expect(workflow).toContain(`--shard=\${{ matrix.shard }}/${linuxShards.length}`);
+    expect(workflow).toContain(`--shard \${{ matrix.shard }}/${linuxShards.length}`);
 
     // Every job that runs tests/ must fetch tags, because one of those tests reads
     // them. tests/release-version-line.test.ts compares package.json against the
@@ -237,11 +237,18 @@ describe("GitHub Actions hardening", () => {
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test tests")).toBe(false);
 
     // macOS is focused on dev and relevant PRs; main/preview keep full control.
-    const macosSteps = (ci.jobs?.["platform-macos"] as { steps?: { run?: string }[] })?.steps ?? [];
+    const macosSteps = (ci.jobs?.["platform-macos"] as {
+      steps?: { name?: string; if?: string; run?: string }[];
+    })?.steps ?? [];
     // The 60s per-test ceiling is part of the pinned shape: dropping it silently
     // restores the timing-flake class this lane kept surfacing.
     expect(macosSteps.some(step => step.run?.includes("run-bun-with-crash-retry.sh"))).toBe(true);
     expect(macosSteps.some(step => step.run?.includes("--shard"))).toBe(false);
+    const focusedMacos = macosSteps.find(step => step.name === "Focused Darwin/process lifecycle tests");
+    expect(focusedMacos?.run).toContain("tests/codex-prompt-text-probe.test.ts");
+    const fullMacos = macosSteps.find(step => step.name === "Full macOS suite");
+    expect(fullMacos?.if).toContain("github.event_name == 'pull_request' && github.base_ref == 'main'");
+    expect(workflow).toMatch(/macos:\s+[\s\S]*?- 'tests\/codex-prompt-text-probe\.test\.ts'/);
 
     // The macOS leg retries ONLY a Bun runtime crash, and only once. Bun 1.3.14
     // segfaults reclaiming a Worker at an `--isolate` file boundary with
@@ -259,7 +266,7 @@ describe("GitHub Actions hardening", () => {
     expect(crashRetry).not.toContain("while true");
     expect((ci.jobs?.["platform-macos"] as { needs?: string; if?: string })?.needs).toBe("changes");
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
-      .toBe("github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'");
+      .toBe("github.event_name != 'pull_request' || github.base_ref == 'main' || needs.changes.outputs.macos == 'true'");
 
     // Windows is required for every integration push and CI-relevant PR. The
     // changes dependency keeps documentation-only PRs cheap without letting a
@@ -278,7 +285,7 @@ describe("GitHub Actions hardening", () => {
     // while Linux and macOS both pass 60000, and it is the slowest hardware on the board.
     // Three composed-acceptance failures were that default firing on tests still working
     // at 41s. Pin the flag so the leg cannot silently drift back to the default.
-    const windowsTestCommand = `bun scripts/test.ts --isolate --timeout 60000 tests --shard=\${{ matrix.shard }}/${windowsShards.length}`;
+    const windowsTestCommand = 'bun scripts/test.ts --isolate --timeout 60000 "${general_files[@]}"';
     expect(hasShellCommandHead(`echo ${windowsTestCommand}`, windowsTestCommand)).toBe(false);
     // Binding the assertion to an executable line is only half the guarantee: a
     // step carrying the exact command still runs nothing under `if: false`, and
@@ -287,6 +294,13 @@ describe("GitHub Actions hardening", () => {
     const windowsTestSteps = winSteps.filter(step => hasShellCommandHead(step.run, windowsTestCommand));
     expect(windowsTestSteps.length).toBeGreaterThan(0);
     expect(windowsTestSteps.every(step => step.if === undefined)).toBe(true);
+    const windowsTestRun = windowsTestSteps[0]?.run ?? "";
+    expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane general');
+    expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane serial');
+    expect(windowsTestRun).toContain('Windows lane selection returned an empty shard');
+    expect(windowsTestRun).not.toContain('mapfile -t general_files < <(');
+    expect(windowsTestRun).toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
+    expect(windowsTestRun).not.toContain(`tests --shard=\${{ matrix.shard }}/${windowsShards.length}`);
     expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"
       && step.run?.includes("git clean -xffd"))).toBe(true);
 
@@ -306,7 +320,6 @@ describe("GitHub Actions hardening", () => {
       "Illegal instruction",
       "Bus error",
     ];
-    const windowsTestRun = windowsTestSteps[0]?.run ?? "";
     const batchScript = await readText("scripts/ci/run-bun-test-batches.sh");
     const crashRetryScript = await readText("scripts/ci/run-bun-with-crash-retry.sh");
     for (const signature of crashSignatures) {
@@ -506,7 +519,7 @@ describe("GitHub Actions hardening", () => {
     }
     const macosJob = ci.jobs?.["platform-macos"] as { needs?: string; if?: string } | undefined;
     expect(`platform-macos:${macosJob?.needs}`).toBe("platform-macos:changes");
-    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:github.event_name != 'pull_request' || needs.changes.outputs.macos == 'true'");
+    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:github.event_name != 'pull_request' || github.base_ref == 'main' || needs.changes.outputs.macos == 'true'");
   });
 
   test("cross-platform CI keeps the GUI lint and build gates", async () => {

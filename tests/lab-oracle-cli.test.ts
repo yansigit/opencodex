@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleLabCommand } from "../src/cli/lab";
 import { CURSOR_ORACLE_UPSTREAM } from "../src/lab/oracle/constants";
+import { cursorOracleToolStepEfficiency } from "../src/lab/oracle/types";
 const ROOTS: string[] = [];
 function tempConfigDir(){ const d=mkdtempSync(join(tmpdir(),"ocx-test-oracle-cli-")); ROOTS.push(d); return d; }
 function createStubAgent(
@@ -28,6 +29,16 @@ afterEach(()=>{ for(const d of ROOTS.splice(0)) rmSync(d,{recursive:true,force:t
 let origLog: typeof console.log;
 beforeEach(()=>{ origLog=console.log; console.log=()=>{}; });
 afterEach(()=>{ console.log=origLog; });
+
+test("Cursor oracle enforces model calls per completed tool step", () => {
+  expect(cursorOracleToolStepEfficiency(3, 1).status).toBe("pass");
+  expect(cursorOracleToolStepEfficiency(4, 1)).toMatchObject({
+    modelCallsPerCompletedToolStep: 4,
+    maximum: 3,
+    status: "fail",
+  });
+  expect(cursorOracleToolStepEfficiency(8, 0).status).toBe("not_applicable");
+});
 
 describe("lab oracle cursor validation",()=>{
   test("rejects malformed scenario", async()=>{
@@ -168,7 +179,16 @@ console.log(JSON.stringify({type:"assistant",text:"OCX_CURSOR_ORACLE_RULE_CANARY
 `);
     const {runCursorOracle}=await import("../src/lab/oracle/runner");
     const res=await runCursorOracle({scenario:"cursor_smoke",model:"m",agentBin:stub},{configDir:cfg,timeoutMs:1000});
-    expect(res.observation.behavior).toEqual({instructionCanaryObserved:true});
+    expect(res.observation.behavior).toEqual({
+      instructionCanaryObserved:true,
+      toolStepEfficiency: {
+        modelCalls: 0,
+        completedToolSteps: 0,
+        modelCallsPerCompletedToolStep: null,
+        maximum: 3,
+        status: "not_applicable",
+      },
+    });
     expect(JSON.stringify(res.observation)).not.toContain("OCX_CURSOR_ORACLE_RULE_CANARY_V1");
   });
   test("abort terminates the child and returns a blocked observation", async()=>{

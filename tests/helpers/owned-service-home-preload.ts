@@ -62,4 +62,28 @@ if (ENABLED) {
   // `mock.module` replaces the module before production imports its named
   // `spawnSync` binding. Preserve every other child_process API verbatim.
   mock.module("node:child_process", () => ({ ...childProcess, spawnSync: fakeSpawnSync }));
+
+  // These cross-process ownership fixtures persist config and credentials but
+  // do not verify NTFS ACL behavior. Real icacls calls made every child startup
+  // exceed the readiness budget under a loaded Windows shard, masking the
+  // ownership assertions. ACL-specific suites exercise the real runner and its
+  // timeout policy separately.
+  const aclModuleUrl = process.env.OCX_TEST_WINDOWS_ACL_MODULE;
+  if (!aclModuleUrl) throw new Error("owned-service-home preload requires the ACL module URL");
+  const {
+    setAsyncIcaclsRunnerForTests,
+    setIcaclsRunnerForTests,
+  } = await import(aclModuleUrl) as typeof import("../../src/lib/windows-secret-acl");
+  setIcaclsRunnerForTests(() => ({
+    success: true,
+    exitCode: 0,
+    timedOut: false,
+    stdout: "",
+  }));
+  setAsyncIcaclsRunnerForTests(async () => ({
+    success: true,
+    exitCode: 0,
+    timedOut: false,
+    stdout: "",
+  }));
 }

@@ -50,6 +50,7 @@ export function emptyCompletionRetryEnabled(
 
 /** Surfaced when the single retry was also empty or failed upstream. */
 export const EMPTY_COMPLETION_RETRY_FAILED_CODE = "empty_completion_retry_failed";
+export const EMPTY_COMPLETION_REPLAY_UNSAFE_CODE = "empty_completion_replay_unsafe";
 
 /**
  * Observe an event stream for the empty-completion shape WITHOUT changing it (#2472).
@@ -151,6 +152,19 @@ export function emptyCompletionRetryFailedEvent(
   };
 }
 
+export function emptyCompletionReplayUnsafeEvent(
+  usage?: OcxUsage,
+): Extract<AdapterEvent, { type: "error" }> {
+  return {
+    type: "error",
+    status: 502,
+    errorType: "upstream_error",
+    code: EMPTY_COMPLETION_REPLAY_UNSAFE_CODE,
+    message: "The model returned an empty completion after a local side effect; retrying this turn is unsafe.",
+    ...(usage ? { usage } : {}),
+  };
+}
+
 /**
  * Sum two usage snapshots. Same semantics as terminal-guard's mergeUsage and
  * request-log's aggregateAttemptUsage: token totals add across the attempts;
@@ -224,6 +238,7 @@ export async function* guardEmptyCompletionEventStream(
   let passthrough = false;
   let retries = 0;
   let usage: OcxUsage | undefined;
+  let replayUnsafe = false;
 
   const withUsage = (event: AdapterEvent & { usage?: OcxUsage }): AdapterEvent => {
     const merged = mergeUsage(usage, event.usage);
@@ -240,6 +255,7 @@ export async function* guardEmptyCompletionEventStream(
     let terminalSeen = false;
     for await (const event of source) {
       if (event.type === "heartbeat") {
+        if (event.replayUnsafe) replayUnsafe = true;
         yield event;
         continue;
       }
@@ -269,6 +285,10 @@ export async function* guardEmptyCompletionEventStream(
           return;
         }
         if (retries < maxRetries) {
+          if (replayUnsafe) {
+            yield emptyCompletionReplayUnsafeEvent(usage);
+            return;
+          }
           // Suppress the terminal: the client must never see a completed event
           // for a turn that produced nothing. Retry the identical turn.
           retries += 1;
@@ -334,6 +354,10 @@ export async function* guardEmptyCompletionEventStream(
       // actionable reached the client. Retry once, then surface a stated error
       // instead of letting the bridge reduce the turn to adapter_eof.
       if (!sawContent && !passthrough && retries < maxRetries) {
+        if (replayUnsafe) {
+          yield emptyCompletionReplayUnsafeEvent(usage);
+          return;
+        }
         retries += 1;
         try {
           source = await options.continuation();

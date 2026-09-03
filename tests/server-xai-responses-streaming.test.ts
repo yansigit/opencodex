@@ -3,6 +3,12 @@ import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import {
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+  setPlatformForTests,
+} from "../src/lib/windows-secret-acl";
 import { saveCredential } from "../src/oauth/store";
 import {
   XAI_GROK_CLI_BASE_URL,
@@ -15,6 +21,7 @@ import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const RESPONSES_ENDPOINT = `${XAI_GROK_CLI_BASE_URL}/responses`;
 const encoder = new TextEncoder();
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 let testDir = "";
 let previousHome: string | undefined;
@@ -22,6 +29,12 @@ let isolatedCodexHome: IsolatedCodexHome | null = null;
 let originalFetch: typeof fetch;
 
 beforeEach(async () => {
+  // This suite exercises xAI request translation, not Windows ACLs. Real icacls
+  // processes made each fixture startup consume seconds on loaded Windows shards
+  // and could outlive the test's semantic deadline (run 33740052356 shard 2).
+  setPlatformForTests("win32");
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   originalFetch = globalThis.fetch;
   previousHome = process.env.OPENCODEX_HOME;
   isolatedCodexHome = installIsolatedCodexHome("ocx-xai-responses-codex-");
@@ -36,8 +49,12 @@ beforeEach(async () => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
   globalThis.fetch = originalFetch;
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  setPlatformForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();
@@ -319,6 +336,8 @@ describe("xAI OAuth Responses streaming opt-in", () => {
         tools?: Array<{ type: string; name?: string }>;
       }> | undefined;
       const outboundTools = outboundInput?.find(item => item.type === "additional_tools")?.tools;
+      expect(outboundBody).toBeDefined();
+      expect(outboundTools).toBeArray();
       expect(outboundTools?.some(tool => tool.type === "namespace")).toBe(false);
       expect(outboundTools?.find(tool => tool.name === "exec")?.type).toBe("function");
       expect(outboundTools?.find(tool => tool.name === "collaboration__spawn_agent")?.type).toBe("function");

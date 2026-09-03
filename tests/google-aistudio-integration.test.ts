@@ -107,7 +107,7 @@ describe("Google AI Studio Direct Session Integration Tests", () => {
       expect(data.output).toBeDefined();
       expect(data.output[0]?.content?.some((c: any) => c.text?.includes("Hello from direct Google AI Studio inference!"))).toBe(true);
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
   test("routes streaming Responses API request with direct SSE chunks", async () => {
@@ -167,7 +167,7 @@ describe("Google AI Studio Direct Session Integration Tests", () => {
       expect(text).toContain("Streamed chunk 1");
       expect(text).toContain("Streamed chunk 2");
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
   test("routes Chat Completions format with direct session transport", async () => {
@@ -207,7 +207,7 @@ describe("Google AI Studio Direct Session Integration Tests", () => {
       const data = (await res.json()) as any;
       expect(data.choices[0]?.message?.content).toBe("Hello from Chat Completions direct transport!");
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
   test("handles complex coding agent tool call invocation, function_call_output, and multi-turn execution loop", async () => {
@@ -330,7 +330,7 @@ describe("Google AI Studio Direct Session Integration Tests", () => {
       expect(lastRequestBody.contents).toBeDefined();
       expect(lastRequestBody.contents.some((c: any) => c.parts.some((p: any) => p.functionResponse))).toBe(true);
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
   test("handles subagent delegation and tool orchestration", async () => {
@@ -410,7 +410,7 @@ describe("Google AI Studio Direct Session Integration Tests", () => {
       expect(interceptedBody.tools).toBeDefined();
       expect(interceptedBody.tools[0].functionDeclarations.some((f: any) => f.name === "collaboration__spawn_agent")).toBe(true);
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 });

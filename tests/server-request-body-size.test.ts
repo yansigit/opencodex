@@ -47,7 +47,7 @@ describe("server maxRequestBodySize (Issue #1601)", () => {
       // Drain the response so the connection closes cleanly.
       await res.text();
     } finally {
-      void server.stop(true);
+      await server.stop(true);
     }
   });
 });
