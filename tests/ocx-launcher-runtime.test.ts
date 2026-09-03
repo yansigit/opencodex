@@ -567,14 +567,17 @@ describe.skipIf(!nodeAvailable)("ocx npm launcher relative Bun override", () => 
 
 describe.skipIf(!runnable)("ocx npm launcher effective Bun runtime", () => {
   test("uses a valid OPENCODEX_BUN_PATH for the actual proxy process", async () => {
-    const root = mkdtempSync(join(tmpdir(), "ocx-launcher-runtime-copy-"));
-    try {
-      const override = join(root, "override-bun.exe");
-      copyFileSync(process.execPath, override);
-      expect(sameWindowsPath(await effectiveRuntime(override), override)).toBe(true);
-    } finally {
-      removeTree(root);
-    }
+    // Use the already-installed project Bun as the distinct override. Copying
+    // its ~100 MiB executable into a fresh temp path made Windows Defender scan
+    // the new image before CreateProcess could start it; under full-suite load
+    // that scan has exceeded 90 seconds even though launcher selection was
+    // correct. The project Bun and npm-bundled Bun are separate installations,
+    // so this still proves override precedence and the child's executable path
+    // without adding an antivirus-timing dependency to the assertion.
+    const bundled = bundledBunPath();
+    expect(bundled).not.toBeNull();
+    expect(sameWindowsPath(process.execPath, bundled!)).toBe(false);
+    expect(sameWindowsPath(await effectiveRuntime(process.execPath), process.execPath)).toBe(true);
   }, EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS);
 
   test("falls back to bundled Bun for a sub-1MB override stub", async () => {
