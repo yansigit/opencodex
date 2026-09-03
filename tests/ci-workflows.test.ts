@@ -660,10 +660,6 @@ describe("GitHub Actions hardening", () => {
     const release = Bun.YAML.parse(workflow) as {
       permissions?: Record<string, string>;
       jobs?: {
-        "bump-dev-version"?: {
-          permissions?: Record<string, string>;
-          with?: Record<string, string>;
-        };
         "validate-dispatch"?: {
           "runs-on"?: string;
           permissions?: Record<string, string>;
@@ -681,17 +677,8 @@ describe("GitHub Actions hardening", () => {
     expect(release.permissions).toEqual({});
     expect(workflow).toContain("repository_dispatch:\n    types: [fork-auto-release]");
     expect(workflow).toContain("github.event.client_payload.expected_sha");
-    expect(release.jobs?.["bump-dev-version"]?.with?.["released-version"]).toBe(
-      "v${{ github.event_name == 'repository_dispatch' && github.event.client_payload.version || inputs.version }}",
-    );
-    expect(release.jobs?.["bump-dev-version"]?.with?.["released-version"]).not.toContain(
-      "env.",
-    );
-    expect(release.jobs?.["bump-dev-version"]?.permissions).toEqual({
-      contents: "write",
-      issues: "write",
-      "pull-requests": "write",
-    });
+    expect(release.jobs).not.toHaveProperty("bump-dev-version");
+    expect(workflow).not.toContain("uses: ./.github/workflows/dev-version-bump.yml");
     
     expect(release.jobs?.["validate-dispatch"]?.["runs-on"]).toBe("ubuntu-latest");
     expect(release.jobs?.["validate-dispatch"]?.permissions).toEqual({
@@ -5327,7 +5314,6 @@ describe("GitHub Actions hardening", () => {
     const workflowDir = new URL("../.github/workflows/", import.meta.url);
     const files = await readdir(workflowDir);
     const yamlFiles = files.filter(f => f.endsWith(".yml") || f.endsWith(".yaml"));
-    let checkedCalls = 0;
     for (const file of yamlFiles) {
       const text = await readText(`.github/workflows/${file}`);
       const parsed = Bun.YAML.parse(text) as {
@@ -5337,7 +5323,6 @@ describe("GitHub Actions hardening", () => {
       const callerPerms = parsed.permissions;
       for (const [jobName, job] of Object.entries(parsed.jobs ?? {})) {
         if (!job.uses || !job.uses.startsWith("./.github/workflows/")) continue;
-        checkedCalls++;
         const withText = JSON.stringify(job.with ?? {});
         expect(withText).not.toMatch(/\b(?:env|secrets)\s*\./);
         const calleePath = String(job.uses).split("#")[0]!.replace(/^\.\//, "");
@@ -5374,7 +5359,8 @@ describe("GitHub Actions hardening", () => {
         }
       }
     }
-    expect(checkedCalls).toBeGreaterThan(0);
+    // Zero calls is valid: tests/bump-dev-version.test.ts explicitly protects the
+    // dormant bump workflow from being wired back into this fork's live release path.
   });
 });
 

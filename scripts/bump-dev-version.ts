@@ -19,9 +19,10 @@
  *
  * This decides a version. It does no git and no network work, which is what makes it
  * unit-testable and what keeps the credential surface in the workflow that calls it.
- * It does not merge anything: `.github/workflows/dev-version-bump.yml` uses the
- * output to open a pull request, and a human still merges that. Until they do, the
- * red persists. This is a prepared repair, not an automatic one.
+ * It does not merge anything. The dormant `.github/workflows/dev-version-bump.yml`
+ * fallback can use the output to open a pull request if maintainers deliberately make
+ * it the sole post-release authority again. The fork's live release path instead uses
+ * the exact-SHA promotion controller; the two mechanisms must never run together.
  *
  * THE RULE
  *
