@@ -12073,10 +12073,6 @@
 				"text",
 				"image"
 			],
-			"cost": {
-				"input": 0.75,
-				"output": 3.75
-			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
 			"thinking": {
