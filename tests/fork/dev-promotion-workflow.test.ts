@@ -56,7 +56,14 @@ describe("dev promotion workflow contract", () => {
     expect(workflowSource).toContain("dev back-merge postcheck failed");
     expect(workflowSource).toContain("back-merge push remained uncertain after 3 attempts");
     expect(workflowSource).toContain("back-merge refs moved during retry");
-    expect(workflowSource).toContain("main CI is not green yet; its workflow_run will retry reconciliation");
+    expect(workflowSource).toContain("recovering red main ancestry from exact green dev without changing the verified dev tree");
+    expect(workflowSource).toContain('if [ "$main_ci_green" != true ] && [ "$action" != unchanged ]; then');
+    expect(workflowSource).toContain('if [ "$EVENT_BRANCH" = dev ]; then');
+    expect(workflowSource).toContain("This job can only receive a dev workflow_run after exact-head push CI");
+    expect(workflowSource).toContain("The helper above additionally proves that target_sha keeps");
+    expect(workflowSource.indexOf("fork-promotion-backmerge.cjs")).toBeLessThan(
+      workflowSource.indexOf('ci_runs="$(gh run list --workflow ci.yml --commit "$verified_main_sha"'),
+    );
     expect(workflowSource).not.toContain("gh api --method PATCH");
     expect(workflowSource).toContain("main moved before the dev back-merge");
     expect(workflowSource).toContain("dev moved before the dev back-merge");

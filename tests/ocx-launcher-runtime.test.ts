@@ -16,11 +16,11 @@ const runnable = process.platform === "win32" && nodeAvailable;
 
 // /healthz is the launcher's first trustworthy end-to-end startup signal: a
 // live Node parent or Bun child does not prove that the proxy is serving. The
-// old 25s budget expired on a loaded Windows runner, and equivalent real-proxy
-// starts elsewhere in this suite have taken 46-47s. 90s is more than twice the
-// measured high-water mark while still turning a hung launch into a bounded
-// failure. Keep the case budget derived so process inspection and cleanup have
-// their own headroom after readiness settles.
+// old 25s budget expired on loaded Windows and macOS runners, and equivalent
+// real-proxy starts elsewhere in this suite have taken 46-47s. 90s is more than
+// twice the measured high-water mark while still turning a hung launch into a
+// bounded failure. Keep the Windows case budget derived so process inspection
+// and cleanup have their own headroom after readiness settles.
 const PROXY_HEALTH_TIMEOUT_MS = 90_000;
 const EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS = PROXY_HEALTH_TIMEOUT_MS + 30_000;
 
@@ -484,7 +484,7 @@ describe.skipIf(!nodeAvailable || process.env.OCX_TEST_NETWORK_ISOLATED === "1")
         stdio: "ignore",
         windowsHide: true,
       });
-      health = await waitForHealth(port, 25_000, launcher);
+      health = await waitForHealth(port, PROXY_HEALTH_TIMEOUT_MS, launcher);
       if (!health) throw new Error("proxy did not become healthy through bin/ocx.mjs");
 
       const during = JSON.parse(readFileSync(configPath, "utf8")) as Record<string, unknown>;

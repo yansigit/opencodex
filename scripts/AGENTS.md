@@ -17,6 +17,9 @@ This file applies to `scripts/` and inherits the repository-wide rules in `/AGEN
 - Do not log secrets, tokens, request bodies, account identifiers, private paths, or personal data.
 - Do not weaken dry-run, exact-commit, CI-success, or explicit-confirmation gates.
 - Generated package assets must be produced by the owning preparation command, not edited manually.
+- `scripts/ci/test-lanes.ts` is the single source of truth for load-sensitive test
+  quarantine. Full-suite planning must derive from `SERIAL_TEST_FILES`; do not add
+  a second serial-test manifest to a workflow or runner.
 
 ## Required validation
 

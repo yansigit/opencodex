@@ -15,6 +15,7 @@ import {
   terminateTestProcessForTests,
   waitWithMonotonicTimeout,
 } from "../scripts/test";
+import { SERIAL_TEST_FILES } from "../scripts/ci/test-lanes";
 import {
   acquireTestRunLock,
   resolveBareTestRunIdentity,
@@ -206,6 +207,8 @@ describe("bun test argv", () => {
 
   test("the default full suite quarantines load-sensitive files into one-worker lanes", () => {
     const plan = resolveBunTestPlan([]);
+    expect(SERIAL_FULL_SUITE_FILES)
+      .toEqual(SERIAL_TEST_FILES.map(file => file.slice("tests/".length)));
     expect(plan).toHaveLength(SERIAL_FULL_SUITE_FILES.length + 1);
     expect(plan[0]?.label).toBe("parallel suite");
     expect(plan[0]?.args).toContain("--parallel=4");
@@ -219,7 +222,15 @@ describe("bun test argv", () => {
       ]);
     }
     expect(plan.find(lane => lane.label === "release-helper.test.ts")?.timeoutMs).toBe(5 * 60 * 1000);
+    expect(plan.find(lane => lane.label === "ocx-launcher-runtime.test.ts")?.timeoutMs).toBe(5 * 60 * 1000);
     expect(plan.find(lane => lane.label === "codex-shim.test.ts")?.timeoutMs).toBe(3 * 60 * 1000);
+  });
+
+  test("a timed full suite keeps load-sensitive files in serial lanes", () => {
+    const plan = resolveBunTestPlan(["--timings", ".bun-timings.json"]);
+    expect(plan).toHaveLength(SERIAL_TEST_FILES.length + 1);
+    expect(plan[0]?.label).toBe("parallel suite");
+    expect(plan.slice(1).map(lane => lane.label)).toEqual(SERIAL_FULL_SUITE_FILES);
   });
 
   test("serial lanes override caller parallelism without changing the main lane", () => {
