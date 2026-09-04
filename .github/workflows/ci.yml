@@ -854,8 +854,16 @@ jobs:
             bun scripts/test.ts --isolate --timeout 60000 "${general_files[@]}" 2>&1 | tee "$suite_log"
             suite_status="${PIPESTATUS[0]}"
             if [ "$suite_status" -eq 0 ]; then
-              bun scripts/test.ts --isolate --parallel=1 --timeout 60000 "${serial_files[@]}" 2>&1 | tee -a "$suite_log"
-              suite_status="${PIPESTATUS[0]}"
+              # Each process-heavy serial file gets a fresh Bun runner. `--isolate`
+              # resets test globals, but one multi-file Bun process can still retain
+              # runtime/handle pressure before the next file spawns its own children.
+              for serial_file in "${serial_files[@]}"; do
+                bun scripts/test.ts --isolate --parallel=1 --timeout 60000 "$serial_file" 2>&1 | tee -a "$suite_log"
+                suite_status="${PIPESTATUS[0]}"
+                if [ "$suite_status" -ne 0 ]; then
+                  break
+                fi
+              done
             fi
             if [ "$suite_status" -eq 0 ]; then
               exit 0

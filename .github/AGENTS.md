@@ -18,6 +18,10 @@ change requires explicit security review under `MAINTAINERS.md`.
 - Release workflows (`release.yml`, `dev-version-bump.yml`): validate `workflow_dispatch.inputs` and `repository_dispatch.client_payload` shapes in a dedicated `validate-dispatch` job before using version or SHA.
 - Do not broaden triggers, write permissions, token exposure, release eligibility, or publish capability without an explicit task requirement.
 - Preserve cross-platform coverage where the workflow currently promises Linux, macOS, and Windows behavior.
+- On Windows, keep the manifest-selected serial files covered but run each in a
+  fresh Bun process. Test-file isolation resets globals; it does not guarantee
+  that a multi-file runtime releases process and handle pressure before the next
+  load-sensitive file starts children.
 - Keep branch-enforcement text synchronized with `AGENTS.md`, `MAINTAINERS.md`, and the public contributing guide.
 - Required merge checks are `ci`, `hygiene`, `enforce-target`, and `mergeable` from the trusted App. `autonomous-sync` requires exact published-head provenance; never label handoff or agent-resolved syncs. Jules controller advances require parents `[previous Jules head, current dev]`, and active editing blocks them. Report `automation:hold` after 24 hours but never remove it automatically.
 
