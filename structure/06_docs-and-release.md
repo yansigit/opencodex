@@ -189,9 +189,11 @@ Invariants:
 Package release is npm-focused. Stable automation follows one provenance chain:
 `Cross-platform CI` → `Build release candidate` → `Fork auto-release` → `Release`. The candidate
 workflow packages once; the publisher verifies the run, artifact, manifest, source tree, inputs,
-version, and tarball digests before publishing that same file. `scripts/release.ts` and dev/preview
-manual dispatch remain a transition path until a real stable candidate release proves the chain and
-maintainers authorize retirement. Docs publishing is separate from npm release publishing.
+version, and tarball digests before publishing that same file. `scripts/release.ts` suppresses the
+competing automatic dispatcher for helper-created stable commits, waits for that same immutable
+candidate, and passes its run and artifact IDs to the publisher. Dev/preview manual dispatch remains
+a transition path until a real stable candidate release proves the chain and maintainers authorize
+retirement. Docs publishing is separate from npm release publishing.
 
 ### Release notes
 
