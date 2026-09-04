@@ -58,6 +58,27 @@ describe("dependency audit retry classification", () => {
     expect(warnings).toHaveLength(1);
   });
 
+  test("retries a timed-out attempt once and then accepts a clean audit", async () => {
+    const attempts: AuditAttempt[] = [
+      { exitCode: 1, output: "", timedOut: true },
+      { exitCode: 0, output: "No vulnerabilities found\n", timedOut: false },
+    ];
+    const warnings: string[] = [];
+
+    await auditWithRetries({
+      label: "root",
+      cwd: "/workspace",
+      run: async () => attempts.shift()!,
+      sleep: async () => {},
+      write: () => {},
+      warn: (message) => warnings.push(message),
+      maxAttempts: 2,
+    });
+
+    expect(attempts).toHaveLength(0);
+    expect(warnings).toHaveLength(1);
+  });
+
   test("fails a vulnerability result immediately without retrying", async () => {
     let attemptCount = 0;
 

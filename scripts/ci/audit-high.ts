@@ -37,7 +37,7 @@ async function runAttempt(cwd: string): Promise<AuditAttempt> {
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill();
+    child.kill(9);
   }, ATTEMPT_TIMEOUT_MS);
 
   try {
