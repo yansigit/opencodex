@@ -1,0 +1,69 @@
+# Shared path policy for Cross-platform CI.
+#
+# This file is consumed directly by dorny/paths-filter and validated by
+# scripts/ci/check-workflow-policy.ts. Keep it data-only: moving the filters out
+# of ci.yml prevents pull-request and merge-queue coverage from drifting apart.
+ci:
+  - 'src/**'
+  - 'bin/**'
+  - 'tests/**'
+  - 'scripts/**'
+  - 'gui/**'
+  - 'integrations/replit-gateway/**'
+  - 'assets/**'
+  - '.gitattributes'
+  - '.npmignore'
+  - 'package.json'
+  - 'bun.lock'
+  - 'tsconfig.json'
+  - 'README.md'
+  - 'LICENSE'
+  - '.github/workflows/**'
+  - '.github/policies/**'
+
+dependencies:
+  - 'bun.lock'
+  - 'gui/bun.lock'
+
+gui:
+  - 'gui/**'
+
+packaging:
+  - 'package.json'
+  - 'bun.lock'
+  - 'src/**'
+  - 'bin/**'
+  - 'gui/**'
+  - 'assets/**'
+  - '.npmignore'
+  - '.gitattributes'
+  - 'README.md'
+  - 'LICENSE'
+  - 'scripts/prepare-package.ts'
+
+macos:
+  - '.github/workflows/**'
+  - '.github/actions/**'
+  - '.github/policies/**'
+  - 'scripts/ci/**'
+  - 'scripts/test.ts'
+  - 'src/adapters/cursor/native-exec-shell.ts'
+  - 'src/lib/machine-test-lock.ts'
+  - 'src/oauth/**'
+  - 'src/service.ts'
+  - 'integrations/aistudio-daemon/**'
+  - 'tests/aistudio-native-webkit.test.ts'
+  - 'tests/codex-app-server-processes.test.ts'
+  - 'tests/codex-prompt-text-probe.test.ts'
+  - 'tests/cursor-native-exec-shell.test.ts'
+  - 'tests/preload.ts'
+  - 'tests/process-state.test.ts'
+  - 'tests/process-control*.test.ts'
+  - 'tests/service*.test.ts'
+  - 'tests/storage-worker*.test.ts'
+  - 'tests/test-runner.test.ts'
+
+swift:
+  - 'integrations/aistudio-daemon/**'
+  - 'tests/aistudio-native-webkit.test.ts'
+  - 'src/oauth/aistudio-native-daemon.ts'
