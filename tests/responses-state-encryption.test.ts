@@ -326,6 +326,16 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(getResponseStateDurability(ordinaryBody)).toBeUndefined();
   });
 
+  test("delegation-history scanning fails closed when traversal budgets are exceeded", () => {
+    let deeplyNested: Record<string, unknown> = { role: "user", content: "ordinary" };
+    for (let depth = 0; depth < 10_000; depth += 1) deeplyNested = { item: deeplyNested };
+
+    expect(hasPlaintextDelegationHistory(deeplyNested)).toBe(true);
+    expect(hasPlaintextDelegationHistory(
+      Array.from({ length: 20_000 }, () => ({ role: "user", content: "ordinary" })),
+    )).toBe(true);
+  });
+
   test("taint propagation: turn 2 inherits durability from replayed turn 1", async () => {
     const memoryKeyring = new Map<string, Uint8Array>();
     setResponseContinuationKeyringFactoryForTests({

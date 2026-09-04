@@ -555,55 +555,66 @@ export function decryptResponseContinuation(
 }
 
 const DELEGATION_MESSAGE_OPS = new Set(["spawn_agent", "send_message", "followup_task"]);
+const MAX_DELEGATION_HISTORY_SCAN_DEPTH = 128;
+const MAX_DELEGATION_HISTORY_SCAN_NODES = 10_000;
 
 export function hasPlaintextDelegationHistory(value: unknown): boolean {
-  if (!value) return false;
-  if (Array.isArray(value)) {
-    return value.some(hasPlaintextDelegationHistory);
-  }
-  if (typeof value !== "object") return false;
-  const rec = value as Record<string, unknown>;
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  let visited = 0;
 
-  if (rec.type === "agent_message") return true;
-  if (rec.namespace === "ocx_agents") return true;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current.depth > MAX_DELEGATION_HISTORY_SCAN_DEPTH) return true;
+    if (visited++ >= MAX_DELEGATION_HISTORY_SCAN_NODES) return true;
+    if (!current.value || typeof current.value !== "object") continue;
 
-  if (typeof rec.name === "string") {
-    if (rec.name.startsWith("ocx_agents:") || rec.name.startsWith("ocx_agents.")) return true;
-    if (rec.name === "ocx_agents") return true;
-    const nameWithoutNs = rec.name.includes(":")
-      ? rec.name.slice(rec.name.lastIndexOf(":") + 1)
-      : rec.name.includes(".")
-        ? rec.name.slice(rec.name.lastIndexOf(".") + 1)
-        : rec.name;
-    const isCallRecord = rec.type === "function_call"
-      || typeof rec.arguments === "string"
-      || typeof rec.call_id === "string";
-    const isCollabOp = isCallRecord && DELEGATION_MESSAGE_OPS.has(nameWithoutNs) && (
-      rec.namespace === "collaboration"
-      || rec.name.startsWith("collaboration:")
-      || rec.name.startsWith("collaboration.")
-      || rec.namespace === undefined
-    );
-    // Treat every recognized message-operation call as sensitive. The
-    // `encrypted_function_args` marker is client-controlled and cannot prove
-    // that the sibling `arguments` string contains no plaintext task data.
-    if (isCollabOp) return true;
-  }
+    if (Array.isArray(current.value)) {
+      if (visited + pending.length + current.value.length > MAX_DELEGATION_HISTORY_SCAN_NODES) return true;
+      for (const item of current.value) pending.push({ value: item, depth: current.depth + 1 });
+      continue;
+    }
 
-  if (Array.isArray(rec.tools) && rec.tools.some(hasPlaintextDelegationHistory)) return true;
-  if (Array.isArray(rec.input) && rec.input.some(hasPlaintextDelegationHistory)) return true;
-  if (Array.isArray(rec.content) && rec.content.some(hasPlaintextDelegationHistory)) return true;
-  if (Array.isArray(rec.output) && rec.output.some(hasPlaintextDelegationHistory)) return true;
-  if (rec.item && typeof rec.item === "object" && hasPlaintextDelegationHistory(rec.item)) return true;
+    const rec = current.value as Record<string, unknown>;
+    if (rec.type === "agent_message") return true;
+    if (rec.namespace === "ocx_agents") return true;
 
-  if (typeof rec.arguments === "string" && rec.arguments.includes("encrypted_function_args")) {
-    try {
-      const parsedArgs = JSON.parse(rec.arguments) as unknown;
-      if (hasPlaintextDelegationHistory(parsedArgs)) return true;
-    } catch {
-      // not JSON
+    if (typeof rec.name === "string") {
+      if (rec.name.startsWith("ocx_agents:") || rec.name.startsWith("ocx_agents.")) return true;
+      if (rec.name === "ocx_agents") return true;
+      const nameWithoutNs = rec.name.includes(":")
+        ? rec.name.slice(rec.name.lastIndexOf(":") + 1)
+        : rec.name.includes(".")
+          ? rec.name.slice(rec.name.lastIndexOf(".") + 1)
+          : rec.name;
+      const isCallRecord = rec.type === "function_call"
+        || typeof rec.arguments === "string"
+        || typeof rec.call_id === "string";
+      const isCollabOp = isCallRecord && DELEGATION_MESSAGE_OPS.has(nameWithoutNs) && (
+        rec.namespace === "collaboration"
+        || rec.name.startsWith("collaboration:")
+        || rec.name.startsWith("collaboration.")
+        || rec.namespace === undefined
+      );
+      // Treat every recognized message-operation call as sensitive. The
+      // `encrypted_function_args` marker is client-controlled and cannot prove
+      // that the sibling `arguments` string contains no plaintext task data.
+      if (isCollabOp) return true;
+    }
+
+    for (const key of ["tools", "input", "content", "output"] as const) {
+      if (Array.isArray(rec[key])) pending.push({ value: rec[key], depth: current.depth + 1 });
+    }
+    if (rec.item && typeof rec.item === "object") {
+      pending.push({ value: rec.item, depth: current.depth + 1 });
+    }
+
+    if (typeof rec.arguments === "string" && rec.arguments.includes("encrypted_function_args")) {
+      try {
+        pending.push({ value: JSON.parse(rec.arguments), depth: current.depth + 1 });
+      } catch {
+        // not JSON
+      }
     }
   }
-
   return false;
 }
