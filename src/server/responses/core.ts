@@ -430,7 +430,7 @@ import { responsesJsonToSseStream } from "../responses-json-events";
 import { streamingContextOverflowResponse } from "./context-overflow";
 import { guardTerminalEventStream } from "./terminal-guard";
 import {
-  emptyCompletionRetryEnabled,
+  emptyCompletionPolicy,
   observeEmptyCompletion,
   guardEmptyCompletionEventStream,
 } from "./empty-completion-guard";
@@ -3824,6 +3824,15 @@ async function handleResponsesInner(
     const turn = beginConversationTurn(logCtx.conversationId, route.providerName, route.modelId);
     logCtx.turnProgressTrackerKey = turn.key;
     logCtx.turnProgress = turn.telemetry;
+    if (turn.telemetry.repetitionCircuitOpen === true) {
+      logCtx.localTerminalReason = "cursor-repetition-circuit";
+      logCtx.errorCode = "cursor_repetition_circuit_open";
+      return formatErrorResponse(
+        502,
+        "upstream_error",
+        "Cursor repeated the same tool-bearing output across multiple turns; this request was stopped to break the loop",
+      );
+    }
     if (turn.retryAfterSeconds !== undefined) {
       logCtx.turnProgressCircuitBlocked = true;
       logCtx.localTerminalReason = "cursor-rate-limit-circuit";
@@ -5743,16 +5752,18 @@ async function handleResponsesInner(
   // Empty-completion guard (codex-router PR #145 port): a 200 that completes with no output
   // text and no tool call is a failure the client cannot see — it silently records the turn as
   // done. The guard holds pre-content adapter events, suppresses the terminal of an empty
-  // turn, retries the IDENTICAL request once, and surfaces a stated error when the retry is
-  // empty or fails. This is a top-level config opt-in; OCX_EMPTY_COMPLETION_RETRY=0 is a
-  // disable-only emergency override. Compaction turns and combo attempts keep their own
+  // turn, and surfaces a stated error. An explicit top-level opt-in retries the IDENTICAL
+  // request once; known-broken Composer 2.5 empty turns fail statedly without an automatic
+  // replay. OCX_EMPTY_COMPLETION_RETRY=0 is a disable-only replay override. Compaction turns
+  // and combo attempts keep their own
   // machinery (the combo preflight already handles empty streams). Native Chat-to-Chat
   // requests return from handleChatCompletions before entering Responses core, so they are
   // intentionally outside this guard and retain their existing one-send wire behavior.
-  const emptyCompletionGuardEnabled =
-    emptyCompletionRetryEnabled(config)
+  const selectedEmptyCompletionPolicy = emptyCompletionPolicy(config, adapter.name, route.modelId);
+  const emptyCompletionGuardEnabled = selectedEmptyCompletionPolicy !== "observe"
     && !options.comboAttempt
     && !routedCompaction;
+  const emptyCompletionMaxRetries = selectedEmptyCompletionPolicy === "retry" ? 1 : 0;
 
   if (adapter.runTurn) {
     const runTurnAbort = new AbortController();
@@ -5977,6 +5988,7 @@ async function handleResponsesInner(
       const guardedSource = emptyCompletionGuardEnabled
         ? guardEmptyCompletionEventStream({
             firstEvents: eventSource,
+            maxRetries: emptyCompletionMaxRetries,
             // Identical-turn retry: same parsed request, same headers, same
             // signal — run the adapter transport again against a fresh queue.
             continuation: runTurnRetrySource,
@@ -6058,6 +6070,7 @@ async function handleResponsesInner(
       events = [];
       for await (const event of guardEmptyCompletionEventStream({
         firstEvents: (async function* () { yield* runTurnEvents; })(),
+        maxRetries: emptyCompletionMaxRetries,
         continuation: runTurnRetrySource,
       })) events.push(event);
     } else {
@@ -7422,6 +7435,7 @@ async function handleResponsesInner(
     const guardedEventStream = emptyCompletionGuardEnabled
       ? guardEmptyCompletionEventStream({
           firstEvents: eventStream,
+          maxRetries: emptyCompletionMaxRetries,
           continuation: fetchGuardedEmptyCompletionRetry,
         })
       : eventStream;
@@ -7499,6 +7513,7 @@ async function handleResponsesInner(
         events = [];
         for await (const event of guardEmptyCompletionEventStream({
           firstEvents: (async function* () { yield* guardedEvents; })(),
+          maxRetries: emptyCompletionMaxRetries,
           continuation: fetchGuardedEmptyCompletionRetry,
         })) events.push(event);
       } else {

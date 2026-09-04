@@ -22,4 +22,5 @@ export interface TurnProgressTelemetry {
   commentaryOnlyRound?: boolean;
   emptyProtocolRound?: boolean;
   rateLimitCircuitOpen?: boolean;
+  repetitionCircuitOpen?: boolean;
 }

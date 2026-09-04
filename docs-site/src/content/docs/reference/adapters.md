@@ -331,6 +331,9 @@ compatibility pair: `agent.v1.AgentService/RunSSE` for server output and
   repeat fails explicitly instead of executing the tool twice.
 - Once Cursor reports a local side effect, the turn cannot be transparently retried by transport,
   account failover, or the optional empty-completion guard.
+- Composer 2.5 empty successful turns fail explicitly as `empty_completion` even when the optional
+  replay is disabled. Repeated identical tool-bearing turns are interrupted after three repeats so
+  an upstream loop cannot continue indefinitely; tool calls with different arguments remain valid.
 - After a successful no-tool turn, the adapter keeps Cursor's returned ConversationStateStructure
   in a process-local store and reuses that checkpoint on the next validated linear continuation
   instead of rebuilding the full root history. Tool-result turns reuse the last completed-turn

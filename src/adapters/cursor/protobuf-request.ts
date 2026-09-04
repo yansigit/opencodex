@@ -317,7 +317,7 @@ function rootPromptMessages(
     opts: { messageIndex: number; text?: string },
     normalized: string,
   ): void => {
-    if (externalModel && lastReplayText !== undefined && normalized === lastReplayText && lastReplayEntry) {
+    if (echoToolResultInRoot && lastReplayText !== undefined && normalized === lastReplayText && lastReplayEntry) {
       collapsedRepeats++;
       currentRun++;
       if (currentRun > maxRunLength) maxRunLength = currentRun;
@@ -390,7 +390,7 @@ function rootPromptMessages(
     }
   }
   // Severe repetition: tell the model ONCE, imperatively, to change strategy.
-  if (externalModel && maxRunLength >= 3) {
+  if (echoToolResultInRoot && maxRunLength >= 3) {
     entries.push(rootBlobCandidate({
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same output repeated ${maxRunLength} times in a row. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
