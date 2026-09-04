@@ -289,10 +289,23 @@ These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx clau
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | inherit | Effort written to generated `~/.claude/agents/ocx-*.md`; separate from Codex guidance and proxy caps. Restart through `ocx claude` to regenerate. |
 | `claudeCode.compatibility?` | `"shadow" \| "enforce"` | `enforce` | Compatibility gate for routed Claude ingress: `enforce` rejects unsupported requests before upstream activity with `400 invalid_request_error`; `shadow` records ordinary incompatibilities without rejecting, but signed-thinking ownership and other safety invariants still fail closed. |
 
+
 Auto auth selects subscription when stored Claude auth is found, proxy when none is found, and
 subscription with a warning when detection is inconclusive. See
 [Claude Code auth mode](/guides/claude-code/#auth-mode).
 
+Generated roster definitions (`~/.claude/agents/ocx-*.md`) carry signed
+`<!-- ocx-route -->` / `<!-- ocx-effort -->` directives that the proxy verifies before dispatch:
+an invalid signed directive fails closed with `400 invalid_request_error`, and unsigned
+directives are honored only for exact active OpenCodex-owned roster entries.
+`ocx doctor` reports the Claude directive signing key presence and permissions under your
+OpenCodex config directory without printing key material.
+
+`POST /v1/messages` and `POST /v1/messages/count_tokens` are also the only Claude routes
+admitted on the opt-in `unauthenticatedLoopbackListener` (a server-level key; the port is
+required and must differ from the proxy port). Public-listener authentication is unchanged by
+that listener. See
+[Local clients that cannot receive the token](#local-clients-that-cannot-receive-the-token).
 ## Shadow calls
 
 Codex uses small helper models for tasks such as titles and commit messages. Enable

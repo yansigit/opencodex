@@ -610,3 +610,27 @@ The probe is advisory: a below-floor, missing, timed-out, or unrecognized client
 launch** — the warning prints and `ocx claude` proceeds. `ocx doctor` and `ocx status --json`
 surface the same client state. This floor is separate from the **2.1.129** native `/model`
 gateway-picker capability.
+
+### Token-count benchmark (opt-in, may incur charges)
+
+The routed-path token approximation can be measured against real provider counts with
+`bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`.
+The command **is** the consent: without `--confirm-live-provider-charges` it performs argument
+validation only and sends nothing. When confirmed, it sends real requests and **can incur
+provider charges**. Never automate or unattended-script it — run it deliberately, with an eye on
+the account.
+
+What it does:
+
+- Targets Anthropic-adapter provider/model pairs only (the provider must be key-authed and list
+  the model), so the upstream reports authoritative `input_tokens`.
+- Sends a deterministic, sanitized fixture set — no customer text is read or embedded.
+- Sends fixtures one at a time; failures are typed and never retried, with no concurrency and no
+  fallback.
+- Emits a closed, non-persistent report: fixture ids, digests, states, metrics, and the provider
+  kind + model id only. No request bodies, credentials, or account identifiers are ever written.
+- Applies a per-fixture tolerance of max(32 tokens, 20%) and passes only when the weighted
+  aggregate absolute error stays within 10%.
+
+Routed `/v1/messages/count_tokens` behavior itself is unchanged by the benchmark: it stays
+local for routed models and passes through to Anthropic only for native `sk-ant-` credentials.
