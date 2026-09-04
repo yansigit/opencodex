@@ -7,12 +7,15 @@ import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
 import type { OcxProviderContinuationState } from "../types";
 import {
   cleanupSupersededResponseSpillPublication,
+  closeResponseSpillRetirementScan,
+  createResponseSpillRetirementScan,
   createResponseSpillPublicationControl,
   deleteResponseSpill,
   MAX_RESPONSE_SPILL_PAYLOAD_BYTES,
   noteStubSwapForTest,
   readResponseSpill,
   recoverOrphanedResponseSpills,
+  retirePreexistingResponseSpills,
   responseSpillDirectory,
   responseSpillPayloadCap,
   markResponseSpillPublicationSuperseded,
@@ -20,6 +23,7 @@ import {
   type ResponseSpillStateInput,
   type ResponseSpillPublicationControl,
   type ResponseSpillRef,
+  type ResponseSpillRetirementScan,
   writeResponseSpillDurably,
   writeResponseSpillDurablyAsync,
 } from "./spill-store";
@@ -179,6 +183,10 @@ interface LegacySnapshotRetirement {
   linkPath?: string;
   linkDev?: number;
   linkIno?: number;
+  /** Oversized snapshots cannot be parsed for refs; retain the bounded scan
+   * cursor until every pre-existing owned spill candidate is retired. */
+  spillScan?: ResponseSpillRetirementScan;
+  spillScanComplete?: boolean;
 }
 let legacySnapshotAwaitingRetirement: LegacySnapshotRetirement | null = null;
 let legacyRetirementRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1663,6 +1671,11 @@ function retryLegacySpillRetirement(): void {
       legacySpillsAwaitingRetirement.delete(fileName);
     }
   }
+  const snapshot = legacySnapshotAwaitingRetirement;
+  if (snapshot?.spillScan && !snapshot.spillScanComplete) {
+    const result = retirePreexistingResponseSpills(snapshot.spillScan);
+    if (result.complete) snapshot.spillScanComplete = true;
+  }
 }
 
 function unlinkLegacyEntryIfUnchanged(path: string, dev: number, ino: number): boolean {
@@ -1679,7 +1692,13 @@ function unlinkLegacyEntryIfUnchanged(path: string, dev: number, ino: number): b
 function retryLegacySnapshotRetirement(): void {
   const pending = legacySnapshotAwaitingRetirement;
   if (!pending || legacySpillsAwaitingRetirement.size > 0) return;
-  if (!unlinkLegacyEntryIfUnchanged(pending.targetPath, pending.targetDev, pending.targetIno)) return;
+  if (pending.spillScan && !pending.spillScanComplete) return;
+  if (!unlinkLegacyEntryIfUnchanged(pending.targetPath, pending.targetDev, pending.targetIno)) {
+    // The marker is still live, so another writer can add a candidate before
+    // the next unlink attempt. Require another clean scan first.
+    if (pending.spillScan) pending.spillScanComplete = false;
+    return;
+  }
 
   // A snapshot symlink is a second directory entry. Remove it only after its
   // captured target is gone, and only if it is still the link we inspected.
@@ -1776,6 +1795,8 @@ function ensureLoaded(): void {
           targetPath,
           targetDev: stat.dev,
           targetIno: stat.ino,
+          spillScan: createResponseSpillRetirementScan(),
+          spillScanComplete: false,
           ...(literal.isSymbolicLink()
             ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino }
             : {}),
@@ -2867,6 +2888,9 @@ export function clearResponseStateMemoryForTests(): void {
   legacyRetirementRetryTimer = null;
   legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
   legacySpillsAwaitingRetirement.clear();
+  if (legacySnapshotAwaitingRetirement?.spillScan) {
+    closeResponseSpillRetirementScan(legacySnapshotAwaitingRetirement.spillScan);
+  }
   legacySnapshotAwaitingRetirement = null;
   sensitiveStorageWarnings.clear();
   releaseResponseContinuationKey();

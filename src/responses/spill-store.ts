@@ -109,6 +109,18 @@ export interface ResponseSpillCleanupResult {
   bytesRemoved: number;
 }
 
+export interface ResponseSpillRetirementResult extends ResponseSpillCleanupResult {
+  /** True only after an error-free end-of-directory pass. */
+  complete: boolean;
+}
+
+export interface ResponseSpillRetirementScan {
+  readonly dir: string;
+  handle: ReturnType<typeof opendirSync> | null;
+  opened: boolean;
+  injected: boolean;
+}
+
 export interface ResponseSpillIoForTest {
   write?: (fd: number, bytes: Uint8Array) => void;
   fsync?: (fd: number) => void;
@@ -125,6 +137,8 @@ export interface ResponseSpillIoForTest {
    *  null for end-of-directory. Lets tests prove the scan cap binds without
    *  materializing thousands of real files. */
   readdirEntry?: () => string | null;
+  /** Legacy-retirement stat seam for bounded scan/failure coverage. */
+  inspect?: (path: string) => { isFile: boolean; isSymbolicLink: boolean; mtimeMs: number; size: number };
   record?: (event: "write" | "fsync" | "close" | "harden" | "publish" | "dir-fsync" | "stub-swap") => void;
 }
 
@@ -792,6 +806,106 @@ export function deleteResponseSpill(ref: ResponseSpillRef): void {
     unlink(join(dir, ref.fileName));
     fsyncDirectoryBestEffort(dir);
   } catch { /* best effort */ }
+}
+
+export function createResponseSpillRetirementScan(
+  dir = responseSpillDirectory(),
+): ResponseSpillRetirementScan {
+  return { dir, handle: null, opened: false, injected: !!spillIoForTest?.readdirEntry };
+}
+
+export function closeResponseSpillRetirementScan(scan: ResponseSpillRetirementScan): void {
+  try { scan.handle?.closeSync(); } catch { /* best effort */ }
+  scan.handle = null;
+  scan.opened = false;
+}
+
+/** Retire one bounded batch from the candidate set present when this scan opens. */
+export function retirePreexistingResponseSpills(
+  scan: ResponseSpillRetirementScan,
+): ResponseSpillRetirementResult {
+  const result: ResponseSpillRetirementResult = {
+    scanned: 0,
+    removed: 0,
+    failed: 0,
+    bytesRemoved: 0,
+    complete: false,
+  };
+  if (!scan.opened) {
+    scan.injected = !!spillIoForTest?.readdirEntry;
+    scan.opened = true;
+  }
+  if (!scan.injected && !scan.handle) {
+    try {
+      scan.handle = opendirSync(scan.dir);
+    } catch (error) {
+      result.complete = isErrno(error, "ENOENT");
+      if (!result.complete) result.failed += 1;
+      closeResponseSpillRetirementScan(scan);
+      return result;
+    }
+  }
+  const nextName = (): string | null => {
+    if (scan.injected) {
+      const injected = spillIoForTest?.readdirEntry;
+      if (!injected) throw new Error("Response spill retirement scan seam disappeared");
+      return injected();
+    }
+    const entry = scan.handle!.readSync();
+    return entry ? entry.name : null;
+  };
+  while (
+    result.scanned < RESPONSE_SPILL_SCAN_MAX
+    && result.removed < RESPONSE_SPILL_CLEANUP_MAX
+  ) {
+    let name: string | null;
+    try {
+      name = nextName();
+    } catch {
+      result.failed += 1;
+      closeResponseSpillRetirementScan(scan);
+      return result;
+    }
+    if (name === null) {
+      // Deleting while iterating can perturb directory enumeration, and a
+      // concurrent publisher can add a name behind the cursor. Only an empty
+      // follow-up pass proves the candidate set is drained.
+      result.complete = result.removed === 0;
+      closeResponseSpillRetirementScan(scan);
+      if (result.removed > 0) fsyncDirectoryBestEffort(scan.dir);
+      return result;
+    }
+    result.scanned += 1;
+    if (!OWNED_SPILL_NAME.test(name) && !OWNED_SPILL_TEMP_NAME.test(name)) continue;
+    const path = join(scan.dir, name);
+    let size: number;
+    try {
+      size = spillIoForTest?.inspect
+        ? spillIoForTest.inspect(path).size
+        : lstatSync(path).size;
+    } catch {
+      result.failed += 1;
+      closeResponseSpillRetirementScan(scan);
+      return result;
+    }
+    try {
+      // unlink never follows a symlink. Non-regular same-name entries also
+      // stay fail-closed if the platform refuses to unlink them.
+      const unlink = spillIoForTest?.unlink ?? unlinkSync;
+      unlink(path);
+      result.removed += 1;
+      result.bytesRemoved += size;
+    } catch (error) {
+      if (isErrno(error, "ENOENT")) result.removed += 1;
+      else result.failed += 1;
+      if (result.failed > 0) {
+        closeResponseSpillRetirementScan(scan);
+        return result;
+      }
+    }
+  }
+  if (result.removed > 0) fsyncDirectoryBestEffort(scan.dir);
+  return result;
 }
 
 export function recoverOrphanedResponseSpills(

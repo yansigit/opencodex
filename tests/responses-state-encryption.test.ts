@@ -44,8 +44,11 @@ import {
 } from "../src/responses/state";
 import {
   readResponseSpill,
+  RESPONSE_SPILL_CLEANUP_MAX,
+  RESPONSE_SPILL_SCAN_MAX,
   responseSpillDirectory,
   setSpillIoForTest,
+  writeResponseSpillDurably,
 } from "../src/responses/spill-store";
 
 const canSymlink = (() => {
@@ -65,6 +68,20 @@ import { wipeResponseContinuationKeyCopy } from "../src/responses/continuation-c
 describe("Selective encrypted continuation state for Routed V2", () => {
   let home: string;
   const savedHome = process.env.OPENCODEX_HOME;
+
+  function writeOversizedLegacySnapshot(): string {
+    const path = join(home, "responses-state.json");
+    writeFileSync(path, `{"version":2,"states":[${" ".repeat(33 * 1024 * 1024)}]}`);
+    return path;
+  }
+
+  function useMemoryKeyring(): void {
+    const memoryKeyring = new Map<string, Uint8Array>();
+    setResponseContinuationKeyringFactoryForTests({
+      getSecret: account => memoryKeyring.get(account) ?? null,
+      setSecret: (account, secret) => { memoryKeyring.set(account, Uint8Array.from(secret)); },
+    });
+  }
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "ocx-state-enc-test-"));
@@ -709,6 +726,142 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(existsSync(targetPath)).toBe(false);
     expect(() => lstatSync(snapshotPath)).toThrow();
   });
+
+  test("oversized legacy retirement removes a fresh referenced spill before its unreadable marker", async () => {
+    const ref = writeResponseSpillDurably("resp_fresh_legacy", {
+      createdAt: Date.now(),
+      items: [{ secret: "fresh legacy plaintext" }],
+    });
+    const spillPath = join(responseSpillDirectory(home), ref.fileName);
+    const snapshotPath = writeOversizedLegacySnapshot();
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(spillPath)).toBe(false);
+    expect(existsSync(snapshotPath)).toBe(true);
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
+  test("oversized legacy retirement stays blocked across scan-cap exhaustion", async () => {
+    const snapshotPath = writeOversizedLegacySnapshot();
+    const spillDir = responseSpillDirectory(home);
+    mkdirSync(spillDir, { recursive: true });
+    let served = 0;
+    let removed = 0;
+    setSpillIoForTest({
+      readdirEntry() {
+        served += 1;
+        if (served <= RESPONSE_SPILL_SCAN_MAX) return `not-owned-${served}.txt`;
+        if (served === RESPONSE_SPILL_SCAN_MAX + 1) {
+          return "legacy-scan.aaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbb.1.1.spill.json";
+        }
+        return null;
+      },
+      inspect: () => ({ isFile: true, isSymbolicLink: false, mtimeMs: 0, size: 1 }),
+      unlink: () => { removed += 1; },
+    });
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(snapshotPath)).toBe(true);
+    expect(removed).toBe(0);
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(removed).toBe(1);
+    expect(existsSync(snapshotPath)).toBe(true);
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
+  test("oversized legacy retirement stays blocked across cleanup-cap exhaustion", async () => {
+    const snapshotPath = writeOversizedLegacySnapshot();
+    const spillDir = responseSpillDirectory(home);
+    mkdirSync(spillDir, { recursive: true });
+    let served = 0;
+    let removed = 0;
+    setSpillIoForTest({
+      readdirEntry() {
+        if (served > RESPONSE_SPILL_CLEANUP_MAX) return null;
+        served += 1;
+        return `legacy-${served}.aaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbb.1.1.spill.json`;
+      },
+      inspect: () => ({ isFile: true, isSymbolicLink: false, mtimeMs: 0, size: 1 }),
+      unlink: () => { removed += 1; },
+    });
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(removed).toBe(RESPONSE_SPILL_CLEANUP_MAX);
+    expect(existsSync(snapshotPath)).toBe(true);
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(removed).toBe(RESPONSE_SPILL_CLEANUP_MAX + 1);
+    expect(existsSync(snapshotPath)).toBe(true);
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
+  test.each(["enumeration", "stat", "unlink"] as const)(
+    "oversized legacy retirement retries a transient %s failure before clearing its block",
+    async failure => {
+      const ref = writeResponseSpillDurably(`resp_transient_${failure}`, {
+        createdAt: Date.now(),
+        items: [{ secret: `legacy ${failure} plaintext` }],
+      });
+      const spillPath = join(responseSpillDirectory(home), ref.fileName);
+      const snapshotPath = writeOversizedLegacySnapshot();
+      let failed = false;
+      setSpillIoForTest({
+        readdirEntry() {
+          if (failure === "enumeration" && !failed) {
+            failed = true;
+            throw new Error("transient enumeration failure");
+          }
+          return existsSync(spillPath) ? ref.fileName : null;
+        },
+        inspect(path) {
+          if (failure === "stat" && !failed) {
+            failed = true;
+            throw new Error("transient stat failure");
+          }
+          const stat = lstatSync(path);
+          return {
+            isFile: stat.isFile(),
+            isSymbolicLink: stat.isSymbolicLink(),
+            mtimeMs: stat.mtimeMs,
+            size: stat.size,
+          };
+        },
+        unlink(path) {
+          if (failure === "unlink" && !failed) {
+            failed = true;
+            throw new Error("transient unlink failure");
+          }
+          unlinkSync(path);
+        },
+      });
+      useMemoryKeyring();
+      clearResponseStateMemoryForTests();
+
+      expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+      expect(existsSync(spillPath)).toBe(true);
+      expect(existsSync(snapshotPath)).toBe(true);
+
+      runPendingLegacyResponseStateRetirementForTests();
+      expect(existsSync(spillPath)).toBe(false);
+      expect(existsSync(snapshotPath)).toBe(true);
+      runPendingLegacyResponseStateRetirementForTests();
+      expect(existsSync(snapshotPath)).toBe(false);
+      expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+    },
+  );
 
   test("an ordinary snapshot write stays blocked while a legacy spill cannot be deleted", async () => {
     const spillDir = responseSpillDirectory(home);
