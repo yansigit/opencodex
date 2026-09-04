@@ -858,7 +858,16 @@ jobs:
               # resets test globals, but one multi-file Bun process can still retain
               # runtime/handle pressure before the next file spawns its own children.
               for serial_file in "${serial_files[@]}"; do
-                bun scripts/test.ts --isolate --parallel=1 --timeout 60000 "$serial_file" 2>&1 | tee -a "$suite_log"
+                serial_timeout=60000
+                if [[ "$serial_file" == "tests/codex-composed-acceptance.test.ts" ]]; then
+                  # Case E starts two real lock children. Each resolves its
+                  # effective-token namespace through bounded PowerShell calls,
+                  # so the file's 240s case budget must not be preempted by the
+                  # general 60s per-test ceiling. The extra minute lets the test
+                  # report its own deadline instead of racing Bun's outer kill.
+                  serial_timeout=300000
+                fi
+                bun scripts/test.ts --isolate --parallel=1 --timeout "$serial_timeout" "$serial_file" 2>&1 | tee -a "$suite_log"
                 suite_status="${PIPESTATUS[0]}"
                 if [ "$suite_status" -ne 0 ]; then
                   break

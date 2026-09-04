@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { getMainAccountPlan, setMainAccountPlan } from "../src/codex/main-account";
@@ -9,13 +10,17 @@ import {
   resetJwtPlanNotesForTests,
 } from "../src/codex/plan-from-token";
 import { loadConfig, saveConfig } from "../src/config";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../src/types";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-codex-plan-test");
-const TEST_CODEX_HOME = join(TEST_DIR, "codex");
+let TEST_DIR = "";
+let TEST_CODEX_HOME = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function chatgptPlanJwt(plan: string, accountId = "acct"): string {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
@@ -30,7 +35,12 @@ function chatgptPlanJwt(plan: string, accountId = "acct"): string {
 beforeEach(() => {
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  // These tests exercise plan persistence, not Windows ACL behavior. Stub both runners because
+  // config hardening uses the async seam while some paths still use the synchronous one.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-plan-"));
+  TEST_CODEX_HOME = mkdtempSync(join(tmpdir(), "ocx-codex-plan-codex-"));
   mkdirSync(TEST_CODEX_HOME, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
   process.env.CODEX_HOME = TEST_CODEX_HOME;
@@ -38,14 +48,20 @@ beforeEach(() => {
   resetJwtPlanNotesForTests();
 });
 
-afterEach(() => {
+afterEach(async () => {
   setMainAccountPlan(null);
   resetJwtPlanNotesForTests();
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  if (TEST_DIR && existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  if (TEST_CODEX_HOME && existsSync(TEST_CODEX_HOME)) removeTreeWithRetry(TEST_CODEX_HOME);
+  TEST_DIR = "";
+  TEST_CODEX_HOME = "";
 });
 
 describe("extractChatgptPlanType", () => {
