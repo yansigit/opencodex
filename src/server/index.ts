@@ -858,6 +858,17 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (path === "/v1/responses/compact") return req.method === "POST";
     if (path === "/v1/alpha/search") return req.method === "POST";
     if (path === "/v1/models") return req.method === "GET";
+    // Anthropic Messages (Claude Code) inbound. A directly-spawned Claude Code session
+    // posts these against the listener's base_url with no API key available, so admitting
+    // them here is what makes the loopback socket usable for local Claude integration.
+    // The exact-path + POST-only constraints are load-bearing: trailing-slash and
+    // percent-encoded variants never match, and every other method is refused by the
+    // handler's own admission (resolveApiAuth on the loopback policy view admits only the
+    // loopback bind itself). Handlers run the same admission/origin gates the public
+    // listener applies, so this entry widens nothing beyond the unauthenticated socket.
+    if (path === "/v1/messages" || path === "/v1/messages/count_tokens") {
+      return req.method === "POST";
+    }
     // Standalone realtime voice sessions (codex-rs thread/realtime/start, WebSocket
     // transport) — a directly-spawned `codex app-server` needs these for desktop
     // voice the same way it needs /v1/responses. WebSocket upgrades only; plain
