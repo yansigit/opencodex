@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 import {
+  awaitResponseSpillPublicationTailForTests,
   buildResponseContinuationAAD,
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
@@ -104,6 +105,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       // ignore
     }
     clearResponseStateForTests();
+    setResponseStateByteCapForTests(null);
     resetResponseContinuationKeyForTests();
     setSpillIoForTest(null);
     if (savedHome !== undefined) process.env.OPENCODEX_HOME = savedHome;
@@ -253,6 +255,9 @@ describe("Selective encrypted continuation state for Routed V2", () => {
 
     setResponseStateByteCapForTests(liveBytes - 1);
     rememberResponseState(request, { ...response, id: "resp_enc_2" }, undefined, { durability: "encrypted" });
+    // Windows publishes demotions through the async ACL queue; wait before
+    // inspecting the in-memory kind. POSIX completes this synchronously.
+    await awaitResponseSpillPublicationTailForTests();
     expect(responseStateMetrics().spillStubCount).toBeGreaterThan(0);
     setResponseStateByteCapForTests(null);
   });
@@ -668,6 +673,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       status: "completed",
       output: [{ type: "message", role: "assistant", content: "ok" }],
     });
+    await awaitResponseSpillPublicationTailForTests();
 
     // Check spill directory
     const spillDir = responseSpillDirectory(home);
