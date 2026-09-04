@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   symlinkSync,
   unlinkSync,
@@ -83,6 +84,10 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       getSecret: account => memoryKeyring.get(account) ?? null,
       setSecret: (account, secret) => { memoryKeyring.set(account, Uint8Array.from(secret)); },
     });
+  }
+
+  function expectSafeV3Marker(path = join(home, "responses-state.json")): void {
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: 3, states: [] });
   }
 
   beforeEach(() => {
@@ -204,6 +209,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     const entry = parsedSnapshot.states.find(([id]) => id === "resp_enc_1")?.[1];
     expect(entry).toBeDefined();
     expect(entry?.kind).toBe("encrypted-resident");
+    const persistedEnvelope = structuredClone(entry?.envelope);
     expect(entry?.envelope).toMatchObject({
       version: 1,
       cipher: "aes-256-gcm",
@@ -213,16 +219,41 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       ciphertext: expect.any(String),
     });
 
+    const liveBytes = Buffer.byteLength(JSON.stringify({
+      responseId: "resp_enc_1",
+      kind: "resident",
+      createdAt: entry?.createdAt,
+      items: [...request.input, ...response.output],
+      providerOutputStart: 1,
+      durability: "encrypted",
+      envelope: persistedEnvelope,
+    }));
+    expect(responseStateMetrics()).toMatchObject({ totalBytes: liveBytes, largestBytes: liveBytes });
+
     // Simulate process restart
     clearResponseStateMemoryForTests();
 
     // Replay after restart: prepareResponseStateReplay preloads key and expandPreviousResponseInput decrypts successfully
     const replayReq = { previous_response_id: "resp_enc_1", input: [{ role: "user", content: "hello" }] };
     await prepareResponseStateReplay(replayReq);
+    const restartedBytes = Buffer.byteLength(JSON.stringify({
+      responseId: "resp_enc_1",
+      kind: "encrypted-resident",
+      createdAt: entry?.createdAt,
+      providerOutputStart: 1,
+      envelope: persistedEnvelope,
+      durability: "encrypted",
+    }));
+    expect(responseStateMetrics()).toMatchObject({ totalBytes: restartedBytes, largestBytes: restartedBytes });
     const decryptedReplay = expandPreviousResponseInput(replayReq) as { input: Array<Record<string, unknown>> };
 
     expect(JSON.stringify(decryptedReplay)).toContain(sensitivePayload);
     expect(previousResponseReplayFailure(replayReq)).toBeUndefined();
+
+    setResponseStateByteCapForTests(liveBytes - 1);
+    rememberResponseState(request, { ...response, id: "resp_enc_2" }, undefined, { durability: "encrypted" });
+    expect(responseStateMetrics().spillStubCount).toBeGreaterThan(0);
+    setResponseStateByteCapForTests(null);
   });
 
   test("ordinary standard replay does not access keyring", async () => {
@@ -710,7 +741,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expandPreviousResponseInput({ previous_response_id: "resp_legacy_standard", input: "test" });
 
     // Legacy snapshot file and legacy spill file must be unlinked/retired!
-    expect(existsSync(snapshotPath)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
     expect(existsSync(legacySpillPath)).toBe(false);
   });
 
@@ -744,7 +775,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(existsSync(snapshotPath)).toBe(true);
 
     runPendingLegacyResponseStateRetirementForTests();
-    expect(existsSync(snapshotPath)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
   });
 
@@ -760,7 +791,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expandPreviousResponseInput({ previous_response_id: "missing", input: "test" });
 
     expect(existsSync(targetPath)).toBe(false);
-    expect(() => lstatSync(snapshotPath)).toThrow();
+    expectSafeV3Marker(snapshotPath);
   });
 
   test.skipIf(!canSymlink)("dangling snapshot symlink drains young spills before unlinking its captured inode", async () => {
@@ -779,7 +810,26 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(() => lstatSync(snapshotPath)).not.toThrow();
 
     runPendingLegacyResponseStateRetirementForTests();
-    expect(() => lstatSync(snapshotPath)).toThrow();
+    expectSafeV3Marker(snapshotPath);
+    expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
+  test("an absent snapshot drains a young legacy spill before encrypted persistence starts", async () => {
+    const ref = writeResponseSpillDurably("resp_absent_snapshot_legacy", {
+      createdAt: Date.now(),
+      items: [{ secret: "orphaned legacy plaintext" }],
+    });
+    const spillPath = join(responseSpillDirectory(home), ref.fileName);
+    const snapshotPath = join(home, "responses-state.json");
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(existsSync(spillPath)).toBe(false);
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expectSafeV3Marker(snapshotPath);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
   });
 
@@ -821,7 +871,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       expect(existsSync(spillPath)).toBe(false);
       expect(existsSync(snapshotPath)).toBe(true);
       runPendingLegacyResponseStateRetirementForTests();
-      expect(existsSync(snapshotPath)).toBe(false);
+      expectSafeV3Marker(snapshotPath);
       expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
     },
   );
@@ -840,7 +890,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(existsSync(spillPath)).toBe(false);
     expect(existsSync(snapshotPath)).toBe(true);
     runPendingLegacyResponseStateRetirementForTests();
-    expect(existsSync(snapshotPath)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
   });
 
@@ -860,7 +910,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(existsSync(snapshotPath)).toBe(true);
 
     runPendingLegacyResponseStateRetirementForTests();
-    expect(existsSync(snapshotPath)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
   });
 
@@ -883,7 +933,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(existsSync(snapshotPath)).toBe(true);
 
     runPendingLegacyResponseStateRetirementForTests();
-    expect(existsSync(snapshotPath)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
   });
 
@@ -916,19 +966,17 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(removed).toBe(1);
     expect(existsSync(snapshotPath)).toBe(true);
     runPendingLegacyResponseStateRetirementForTests();
-    expect(existsSync(snapshotPath)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
   });
 
-  test("retirement skips an ordinary live spill published between capped passes", async () => {
+  test("retirement defers ordinary spill publication between capped passes", async () => {
     const snapshotPath = writeOversizedLegacySnapshot();
     let served = 0;
-    let liveFileName: string | undefined;
     setSpillIoForTest({
       readdirEntry() {
         served += 1;
         if (served <= RESPONSE_SPILL_SCAN_MAX) return `not-owned-${served}.txt`;
-        if (served === RESPONSE_SPILL_SCAN_MAX + 1 && liveFileName) return liveFileName;
         return null;
       },
     });
@@ -945,16 +993,147 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       status: "completed",
       output: [{ type: "message", role: "assistant", content: liveContent }],
     });
-    liveFileName = readdirSync(responseSpillDirectory(home))
-      .find(name => name.endsWith(".spill.json"));
-    expect(liveFileName).toBeDefined();
-    expect(responseStateMetrics()).toMatchObject({ count: 1, spillStubCount: 1, tombstoneCount: 0 });
+    expect(existsSync(responseSpillDirectory(home))).toBe(false);
+    expect(responseStateMetrics()).toMatchObject({ count: 1, residentCount: 1, spillStubCount: 0, tombstoneCount: 0 });
 
     runPendingLegacyResponseStateRetirementForTests();
-    expect(existsSync(snapshotPath)).toBe(false);
-    expect(existsSync(join(responseSpillDirectory(home), liveFileName!))).toBe(true);
+    expectSafeV3Marker(snapshotPath);
     const replay = { previous_response_id: "resp_interleaved_live", input: "next" };
     expect(JSON.stringify(expandPreviousResponseInput(replay))).toContain(liveContent);
+  });
+
+  test("a stale retiree reclassifies a concurrently installed v3 snapshot before deleting its spill", () => {
+    const snapshotPath = writeOversizedLegacySnapshot();
+    let served = 0;
+    setSpillIoForTest({
+      readdirEntry() {
+        served += 1;
+        return served <= RESPONSE_SPILL_SCAN_MAX ? `not-owned-${served}.txt` : null;
+      },
+    });
+    clearResponseStateMemoryForTests();
+    expandPreviousResponseInput({ previous_response_id: "missing", input: "start" });
+
+    setSpillIoForTest(null);
+    const ref = writeResponseSpillDurably("resp_concurrent_v3", {
+      createdAt: Date.now(),
+      items: [{ role: "user", content: "concurrent-live" }],
+    });
+    const spillPath = join(responseSpillDirectory(home), ref.fileName);
+    const replacement = `${snapshotPath}.replacement`;
+    writeFileSync(replacement, JSON.stringify({
+      version: 3,
+      states: [["resp_concurrent_v3", { kind: "spill", createdAt: Date.now(), spill: ref }]],
+    }));
+    renameSync(replacement, snapshotPath);
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(spillPath)).toBe(true);
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(spillPath)).toBe(true);
+    expect(JSON.parse(readFileSync(snapshotPath, "utf8")).version).toBe(3);
+
+    clearResponseStateMemoryForTests();
+    const replay = expandPreviousResponseInput({ previous_response_id: "resp_concurrent_v3", input: "next" });
+    expect(JSON.stringify(replay)).toContain("concurrent-live");
+  });
+
+  test.skipIf(!canSymlink)("a replacement snapshot symlink remains blocked and is reclassified", async () => {
+    const firstTarget = join(home, "legacy-first.json");
+    const secondTarget = join(home, "legacy-second.json");
+    const snapshotPath = join(home, "responses-state.json");
+    writeFileSync(firstTarget, JSON.stringify({ version: 2, states: [] }));
+    writeFileSync(secondTarget, JSON.stringify({ version: 2, states: [] }));
+    symlinkSync(firstTarget, snapshotPath);
+    let served = 0;
+    setSpillIoForTest({
+      readdirEntry() {
+        served += 1;
+        return served <= RESPONSE_SPILL_SCAN_MAX ? `not-owned-${served}.txt` : null;
+      },
+    });
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+
+    unlinkSync(snapshotPath);
+    symlinkSync(secondTarget, snapshotPath);
+    setSpillIoForTest(null);
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(secondTarget)).toBe(true);
+    expect(await prepareSensitiveResponsePersistence({ input: "still blocked" })).toBe("memory-only");
+
+    runPendingLegacyResponseStateRetirementForTests();
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(secondTarget)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
+  });
+
+  test("legacy snapshot references share the bounded scan budget and reject traversal names", async () => {
+    const spillDir = responseSpillDirectory(home);
+    mkdirSync(spillDir, { recursive: true });
+    const ownedName = "legacy-bounded.aaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbb.1.1.spill.json";
+    const ownedPath = join(spillDir, ownedName);
+    writeFileSync(ownedPath, "x");
+    const outsideName = "outside.aaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbb.1.1.spill.json";
+    const outsidePath = join(home, outsideName);
+    writeFileSync(outsidePath, "x");
+    const inert = Array.from({ length: RESPONSE_SPILL_SCAN_MAX }, (_, index) => [
+      `ignored-${index}`,
+      { createdAt: Date.now(), kind: "resident", items: [] },
+    ]);
+    const snapshotPath = join(home, "responses-state.json");
+    writeFileSync(snapshotPath, JSON.stringify({
+      version: 2,
+      states: [
+        ...inert,
+        ["bounded", { createdAt: Date.now(), kind: "spill", spill: {
+          version: 1, fileName: ownedName, digest: "b".repeat(64), payloadBytes: 1,
+        } }],
+        ["traversal", { createdAt: Date.now(), kind: "spill", spill: {
+          version: 1, fileName: `../${outsideName}`, digest: "b".repeat(64), payloadBytes: 1,
+        } }],
+      ],
+    }));
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(ownedPath)).toBe(true);
+    expect(existsSync(outsidePath)).toBe(true);
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(ownedPath)).toBe(false);
+    expect(existsSync(outsidePath)).toBe(true);
+    expectSafeV3Marker(snapshotPath);
+  });
+
+  test("legacy referenced-spill cleanup resumes after the per-pass cleanup cap", async () => {
+    const spillDir = responseSpillDirectory(home);
+    mkdirSync(spillDir, { recursive: true });
+    const states: unknown[] = [];
+    const paths: string[] = [];
+    for (let index = 0; index <= RESPONSE_SPILL_CLEANUP_MAX; index += 1) {
+      const name = `legacy-${index}.aaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbb.${index + 1}.1.spill.json`;
+      const path = join(spillDir, name);
+      writeFileSync(path, "x");
+      paths.push(path);
+      states.push([`legacy-${index}`, { createdAt: Date.now(), kind: "spill", spill: {
+        version: 1, fileName: name, digest: "b".repeat(64), payloadBytes: 1,
+      } }]);
+    }
+    const snapshotPath = join(home, "responses-state.json");
+    writeFileSync(snapshotPath, JSON.stringify({ version: 2, states }));
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(paths.filter(existsSync)).toHaveLength(1);
+    expect(existsSync(snapshotPath)).toBe(true);
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(paths.filter(existsSync)).toHaveLength(0);
+    expectSafeV3Marker(snapshotPath);
   });
 
   test("oversized legacy retirement stays blocked across cleanup-cap exhaustion", async () => {
@@ -983,7 +1162,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(removed).toBe(RESPONSE_SPILL_CLEANUP_MAX + 1);
     expect(existsSync(snapshotPath)).toBe(true);
     runPendingLegacyResponseStateRetirementForTests();
-    expect(existsSync(snapshotPath)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
   });
 
@@ -1037,7 +1216,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       expect(existsSync(spillPath)).toBe(false);
       expect(existsSync(snapshotPath)).toBe(true);
       runPendingLegacyResponseStateRetirementForTests();
-      expect(existsSync(snapshotPath)).toBe(false);
+      expectSafeV3Marker(snapshotPath);
       expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
     },
   );

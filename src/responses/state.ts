@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, type Stats, unlinkSync } from "node:fs";
 import { uptime } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../config";
+import { atomicWriteFile, atomicWriteFileAsync, getConfigDir, resolveWriteTarget, withConfigMutationLockSync } from "../config";
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
 import type { OcxProviderContinuationState } from "../types";
@@ -11,10 +11,13 @@ import {
   createResponseSpillRetirementScan,
   createResponseSpillPublicationControl,
   deleteResponseSpill,
+  isOwnedResponseSpillFileName,
   MAX_RESPONSE_SPILL_PAYLOAD_BYTES,
   noteStubSwapForTest,
   readResponseSpill,
   recoverOrphanedResponseSpills,
+  RESPONSE_SPILL_CLEANUP_MAX,
+  RESPONSE_SPILL_SCAN_MAX,
   retirePreexistingResponseSpills,
   responseSpillDirectory,
   responseSpillPayloadCap,
@@ -175,7 +178,6 @@ const states = new Map<string, StoredResponseState>();
 const replayScopeMismatches = new WeakSet<object>();
 const responseStateDurabilityByBody = new WeakMap<object, ResponseStateDurability>();
 let legacyRetirementBlocked = false;
-const legacySpillsAwaitingRetirement = new Map<string, ResponseSpillRef>();
 interface LegacySnapshotRetirement {
   targetPath?: string;
   targetDev?: number;
@@ -188,6 +190,8 @@ interface LegacySnapshotRetirement {
    * scan cursor until every pre-existing owned spill candidate is retired. */
   spillScan?: ResponseSpillRetirementScan;
   spillScanComplete?: boolean;
+  legacyStates?: unknown[];
+  legacyStateIndex?: number;
 }
 let legacySnapshotAwaitingRetirement: LegacySnapshotRetirement | null = null;
 let legacySnapshotInspectionPending: string | null = null;
@@ -521,6 +525,12 @@ function isAclTimeout(error: unknown): boolean {
     && String((error as { code?: unknown }).code) === "ETIMEDOUT";
 }
 
+function isRetryableSpillPublicationError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  const code = String((error as { code?: unknown }).code);
+  return code === "CONFIG_MUTATION_LOCK_UNAVAILABLE" || code === "ECANCELED" || code === "EAGAIN";
+}
+
 function spillPayloadForResident(id: string, candidate: ResidentResponseState | EncryptedResidentResponseState): ResponseSpillStateInput {
   if (candidate.durability === "encrypted" || candidate.envelope) {
     let envelope = candidate.envelope;
@@ -567,12 +577,30 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
   job.running = true;
   const candidate = job.candidate;
   let ref: ResponseSpillRef | null = null;
+  let committed = false;
+  let rejectedOversized = false;
   try {
+    if (legacyRetirementBlocked) return;
     const state = spillPayloadForResident(job.id, candidate);
+    const commitUnderLock = (published: ResponseSpillRef): boolean => {
+      if (published.payloadBytes > responseSpillPayloadCap()) {
+        rejectedOversized = true;
+        return false;
+      }
+      if (legacyRetirementBlocked || states.get(job.id) !== candidate || job.cancelled) return false;
+      committed = swapResidentForSpill(job.id, candidate, published);
+      if (committed) {
+        spillCounters.writes += 1;
+        if (job.directAdmission) admissionCounters.directSpills += 1;
+        deferSupersededSpill(job.supersededSpill);
+      }
+      return committed;
+    };
     try {
       ref = await writeResponseSpillDurablyAsync(job.id, state, {
         aclBudgetMs: responseSpillAsyncAclAttemptBudgetMs(),
         publicationControl: job.publicationControl,
+        commitUnderLock,
       });
     } catch (error) {
       if (!isAclTimeout(error)) throw error;
@@ -582,27 +610,14 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
         aclBudgetMs: responseSpillAsyncAclAttemptBudgetMs(),
         retryTimedOutOnce: true,
         publicationControl: job.publicationControl,
+        commitUnderLock,
       });
     }
-    if (ref.payloadBytes > responseSpillPayloadCap()) {
-      deleteResponseSpill(ref);
-      ref = null;
-      if (job.directAdmission) admissionCounters.oversizedDrops += 1;
-      throw Object.assign(new Error("Response spill payload exceeds replay ceiling"), { code: "EFBIG" });
-    }
-    if (states.get(job.id) !== candidate || job.cancelled) {
-      deleteResponseSpill(ref);
-      ref = null;
-      return;
-    }
-    if (swapResidentForSpill(job.id, candidate, ref)) {
-      ref = null;
-      spillCounters.writes += 1;
-      if (job.directAdmission) admissionCounters.directSpills += 1;
-      deferSupersededSpill(job.supersededSpill);
-    }
-  } catch {
+    if (committed) ref = null;
+  } catch (error) {
     if (ref) deleteResponseSpill(ref);
+    if (rejectedOversized && job.directAdmission) admissionCounters.oversizedDrops += 1;
+    if (isRetryableSpillPublicationError(error) && !rejectedOversized) return;
     if (states.get(job.id) === candidate && !job.cancelled) {
       spillCounters.writeFailures += 1;
       replaceWithSpillFailure(job.id, candidate);
@@ -625,6 +640,7 @@ function queuePendingResponseSpill(
   candidate: ResidentResponseState | EncryptedResidentResponseState,
   options: { supersededSpill?: ResponseSpillRef; directAdmission?: boolean } = {},
 ): void {
+  if (legacyRetirementBlocked) return;
   const inheritedSpill = cancelPendingResponseSpill(id) ?? options.supersededSpill;
   if (pendingResponseSpillBytes + candidate.sizeBytes > MAX_PENDING_RESPONSE_SPILL_BYTES) {
     spillCounters.writeFailures += 1;
@@ -758,6 +774,8 @@ function installShutdownFallbackSpill(
   aclBudgetMs: number,
 ): void {
   let ref: ResponseSpillRef | null = null;
+  let installed = false;
+  let rejectedOversized = false;
   // Supersession released this job's reservation, but the synchronous write below is the
   // largest publication of the shutdown path and has its own link-then-copy fallback
   // holding a temp and a destination at once. Re-reserve for its duration so the cap is
@@ -788,19 +806,19 @@ function installShutdownFallbackSpill(
         throw Object.assign(new Error("Response spill shutdown fallback exceeds the durable disk cap"), { code: "ENOSPC" });
       }
     }
-    ref = writeResponseSpillDurably(job.id, spillPayloadForResident(job.id, candidate), { aclBudgetMs });
-    if (ref.payloadBytes > responseSpillPayloadCap()) {
-      deleteResponseSpill(ref);
-      ref = null;
-      if (job.directAdmission) admissionCounters.oversizedDrops += 1;
-      throw Object.assign(new Error("Response spill payload exceeds replay ceiling"), { code: "EFBIG" });
-    }
-    if (states.get(job.id) !== candidate) {
-      deleteResponseSpill(ref);
-      ref = null;
-      return;
-    }
-    if (swapResidentForSpill(job.id, candidate, ref)) {
+    ref = writeResponseSpillDurably(job.id, spillPayloadForResident(job.id, candidate), {
+      aclBudgetMs,
+      commitUnderLock: published => {
+        if (published.payloadBytes > responseSpillPayloadCap()) {
+          rejectedOversized = true;
+          return false;
+        }
+        if (legacyRetirementBlocked || states.get(job.id) !== candidate) return false;
+        installed = swapResidentForSpill(job.id, candidate, published);
+        return installed;
+      },
+    });
+    if (installed) {
       ref = null;
       spillCounters.writes += 1;
       if (job.directAdmission) admissionCounters.directSpills += 1;
@@ -808,6 +826,8 @@ function installShutdownFallbackSpill(
     }
   } catch (error) {
     if (ref) deleteResponseSpill(ref);
+    if (rejectedOversized && job.directAdmission) admissionCounters.oversizedDrops += 1;
+    if (isRetryableSpillPublicationError(error) && !rejectedOversized) throw error;
     if (states.get(job.id) === candidate) {
       spillCounters.writeFailures += 1;
       replaceWithSpillFailure(job.id, candidate);
@@ -1060,14 +1080,7 @@ function serializedBytes(value: unknown): number | null {
 }
 
 function measureResidentEntry(id: string, entry: ResidentInput): ResidentResponseState | null {
-  const sizeBytes = serializedBytes({
-    responseId: id,
-    createdAt: entry.createdAt,
-    ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-    items: entry.items,
-    ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-    ...(entry.providers ? { providers: entry.providers } : {}),
-  });
+  const sizeBytes = serializedBytes({ responseId: id, kind: "resident", ...entry });
   return sizeBytes === null ? null : { kind: "resident", ...entry, sizeBytes };
 }
 
@@ -1190,25 +1203,34 @@ function replaceSpillEntryAtomically(
   expected: SpilledResponseState,
   candidate: ResidentResponseState,
 ): void {
+  if (legacyRetirementBlocked) {
+    replaceMapEntry(id, candidate, expected);
+    deferSupersededSpill(expected.spill);
+    return;
+  }
   try {
     const payload = spillPayloadForResident(id, candidate);
-    const ref = writeResponseSpillDurably(id, payload);
-    const base: Omit<SpilledResponseState, "sizeBytes"> = {
-      kind: "spill",
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.durability !== "encrypted" && candidate.providers ? { providers: candidate.providers } : {}),
-      spill: ref,
-      ...(candidate.durability ? { durability: candidate.durability } : {}),
-    };
-    const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
-    if (!replaceMapEntry(id, next, expected)) {
-      deleteResponseSpill(ref);
-      return;
-    }
+    let installed = false;
+    writeResponseSpillDurably(id, payload, {
+      commitUnderLock: ref => {
+        if (legacyRetirementBlocked) return false;
+        const base: Omit<SpilledResponseState, "sizeBytes"> = {
+          kind: "spill",
+          createdAt: candidate.createdAt,
+          ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
+          ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
+          ...(candidate.durability !== "encrypted" && candidate.providers ? { providers: candidate.providers } : {}),
+          spill: ref,
+          ...(candidate.durability ? { durability: candidate.durability } : {}),
+        };
+        const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
+        installed = replaceMapEntry(id, next, expected);
+        if (installed) noteStubSwapForTest();
+        return installed;
+      },
+    });
+    if (!installed) return;
     spillCounters.writes += 1;
-    noteStubSwapForTest();
     // The old generation is NOT unlinked here (review C1-1): the new stub is
     // only durable once the debounced snapshot flushes — a crash before that
     // reloads the OLD stub, which must still find its file. Queue the unlink;
@@ -1217,7 +1239,11 @@ function replaceSpillEntryAtomically(
     while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
       deleteResponseSpill(pendingSpillUnlinks.shift()!);
     }
-  } catch {
+  } catch (error) {
+    if (isRetryableSpillPublicationError(error)) {
+      if (replaceMapEntry(id, candidate, expected)) deferSupersededSpill(expected.spill);
+      return;
+    }
     spillCounters.writeFailures += 1;
     // deferSpillUnlink: the durable snapshot may still reference the old
     // generation; deleting it now would strand the old stub after a crash.
@@ -1290,43 +1316,44 @@ function admitOversizedCandidate(
     if (expected) deleteEntry(id);
     return;
   }
-  if (candidate.sizeBytes > responseSpillPayloadCap()) {
-    admissionCounters.oversizedDrops += 1;
-    replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
+  if (legacyRetirementBlocked) {
+    replaceMapEntry(id, candidate, expected);
     return;
   }
   if (windowsSecretAclApplies()) {
     replaceWithPendingResponseSpill(id, candidate, expected, { directAdmission: true });
     return;
   }
+  let rejectedOversized = false;
   try {
     const payload = spillPayloadForResident(id, candidate);
-    const ref = writeResponseSpillDurably(id, payload);
-    // Enforce the ceiling against the REAL envelope: the spill payload adds
-    // the {version, responseId, ...} wrapper, so a candidate within the
-    // wrapper's size of the cap would otherwise be retained unreadably.
-    if (ref.payloadBytes > responseSpillPayloadCap()) {
-      deleteResponseSpill(ref);
-      admissionCounters.oversizedDrops += 1;
-      replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
-      return;
-    }
-    const base: Omit<SpilledResponseState, "sizeBytes"> = {
-      kind: "spill",
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      ...(candidate.durability !== "encrypted" && candidate.providers ? { providers: candidate.providers } : {}),
-      spill: ref,
-      ...(candidate.durability ? { durability: candidate.durability } : {}),
-    };
-    const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
-    if (!replaceMapEntry(id, next, expected)) {
-      deleteResponseSpill(ref);
-      return;
-    }
+    let installed = false;
+    writeResponseSpillDurably(id, payload, {
+      commitUnderLock: ref => {
+        // Enforce the ceiling against the REAL envelope: the spill payload adds
+        // the {version, responseId, ...} wrapper.
+        if (ref.payloadBytes > responseSpillPayloadCap()) {
+          rejectedOversized = true;
+          return false;
+        }
+        if (legacyRetirementBlocked) return false;
+        const base: Omit<SpilledResponseState, "sizeBytes"> = {
+          kind: "spill",
+          createdAt: candidate.createdAt,
+          ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
+          ...(candidate.durability !== "encrypted" && candidate.providers ? { providers: candidate.providers } : {}),
+          spill: ref,
+          ...(candidate.durability ? { durability: candidate.durability } : {}),
+        };
+        const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
+        installed = replaceMapEntry(id, next, expected);
+        if (installed) noteStubSwapForTest();
+        return installed;
+      },
+    });
+    if (!installed) return;
     spillCounters.writes += 1;
     admissionCounters.directSpills += 1;
-    noteStubSwapForTest();
     if (expected?.kind === "spill") {
       // Same deferred-unlink rule as replaceSpillEntryAtomically: the new stub
       // is durable only after the debounced snapshot, so the old generation
@@ -1336,7 +1363,12 @@ function admitOversizedCandidate(
         deleteResponseSpill(pendingSpillUnlinks.shift()!);
       }
     }
-  } catch {
+  } catch (error) {
+    if (isRetryableSpillPublicationError(error) && !rejectedOversized) {
+      replaceMapEntry(id, candidate, expected);
+      return;
+    }
+    if (rejectedOversized) admissionCounters.oversizedDrops += 1;
     spillCounters.writeFailures += 1;
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
   }
@@ -1378,6 +1410,7 @@ function isSpillRef(value: unknown): value is ResponseSpillRef {
   const ref = value as ResponseSpillRef;
   return (ref.version === 1 || ref.version === 2)
     && typeof ref.fileName === "string"
+    && isOwnedResponseSpillFileName(ref.fileName)
     && /^[0-9a-f]{64}$/.test(ref.digest)
     && Number.isSafeInteger(ref.payloadBytes)
     && ref.payloadBytes >= 0;
@@ -1695,15 +1728,41 @@ function liveResponseSpillFileNames(): Set<string> {
 }
 
 function retryLegacySpillRetirement(): void {
-  for (const [fileName, ref] of legacySpillsAwaitingRetirement) {
-    try { deleteResponseSpill(ref); } catch { /* best effort */ }
-    if (!pathEntryExists(join(responseSpillDirectory(), fileName))) {
-      legacySpillsAwaitingRetirement.delete(fileName);
-    }
-  }
   const snapshot = legacySnapshotAwaitingRetirement;
+  if (!snapshot) return;
+  let scanned = 0;
+  let removed = 0;
+  const legacyStates = snapshot.legacyStates;
+  if (legacyStates && (snapshot.legacyStateIndex ?? 0) < legacyStates.length) {
+    while (
+      (snapshot.legacyStateIndex ?? 0) < legacyStates.length
+      && scanned < RESPONSE_SPILL_SCAN_MAX
+      && removed < RESPONSE_SPILL_CLEANUP_MAX
+    ) {
+      const index = snapshot.legacyStateIndex ?? 0;
+      const entry = legacyStates[index];
+      scanned += 1;
+      if (Array.isArray(entry) && entry.length === 2 && entry[1] && typeof entry[1] === "object") {
+        const item = entry[1] as { kind?: unknown; spill?: unknown };
+        if (item.kind === "spill" && isSpillRef(item.spill)) {
+          const spillPath = join(responseSpillDirectory(), item.spill.fileName);
+          const existed = pathEntryExists(spillPath);
+          deleteResponseSpill(item.spill);
+          if (pathEntryExists(spillPath)) return;
+          if (existed) removed += 1;
+        }
+      }
+      snapshot.legacyStateIndex = index + 1;
+    }
+    if ((snapshot.legacyStateIndex ?? 0) < legacyStates.length) return;
+    delete snapshot.legacyStates;
+    delete snapshot.legacyStateIndex;
+  }
   if (snapshot?.spillScan && !snapshot.spillScanComplete) {
-    const result = retirePreexistingResponseSpills(snapshot.spillScan, liveResponseSpillFileNames());
+    const result = retirePreexistingResponseSpills(snapshot.spillScan, liveResponseSpillFileNames(), {
+      maxScanned: RESPONSE_SPILL_SCAN_MAX - scanned,
+      maxRemoved: RESPONSE_SPILL_CLEANUP_MAX - removed,
+    });
     if (result.complete) snapshot.spillScanComplete = true;
   }
 }
@@ -1719,9 +1778,50 @@ function unlinkLegacyEntryIfUnchanged(path: string, dev: number, ino: number): b
   return !pathEntryExists(path);
 }
 
+function reclassifyLegacySnapshot(pending: LegacySnapshotRetirement): void {
+  if (pending.spillScan) closeResponseSpillRetirementScan(pending.spillScan);
+  legacySnapshotAwaitingRetirement = null;
+  legacySnapshotInspectionPending = pending.linkPath ?? pending.targetPath ?? pending.absentPath ?? snapshotPath();
+}
+
+function retirementMarkerStillCurrent(pending: LegacySnapshotRetirement): boolean | null {
+  try {
+    if (pending.absentPath) {
+      snapshotLstat(pending.absentPath);
+      return false;
+    }
+    if (
+      pending.targetPath === undefined
+      || pending.targetDev === undefined
+      || pending.targetIno === undefined
+    ) return false;
+    const target = lstatSync(pending.targetPath);
+    if (target.dev !== pending.targetDev || target.ino !== pending.targetIno) return false;
+    if (pending.linkPath && pending.linkDev !== undefined && pending.linkIno !== undefined) {
+      const link = lstatSync(pending.linkPath);
+      if (link.dev !== pending.linkDev || link.ino !== pending.linkIno) return false;
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return pending.absentPath !== undefined;
+    }
+    return null;
+  }
+}
+
+function publishRetirementCompletionMarker(): boolean {
+  try {
+    atomicWriteFile(snapshotPath(), JSON.stringify({ version: 3, states: [] }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function retryLegacySnapshotRetirement(): void {
   const pending = legacySnapshotAwaitingRetirement;
-  if (!pending || legacySpillsAwaitingRetirement.size > 0) return;
+  if (!pending || (pending.legacyStates && (pending.legacyStateIndex ?? 0) < pending.legacyStates.length)) return;
   if (pending.spillScan && !pending.spillScanComplete) return;
   if (pending.absentPath) {
     try {
@@ -1731,7 +1831,8 @@ function retryLegacySnapshotRetirement(): void {
       legacySnapshotInspectionPending = pending.absentPath;
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
-        legacySnapshotAwaitingRetirement = null;
+        if (publishRetirementCompletionMarker()) legacySnapshotAwaitingRetirement = null;
+        else if (pending.spillScan) pending.spillScanComplete = false;
       } else if (pending.spillScan) {
         pending.spillScanComplete = false;
       }
@@ -1744,9 +1845,7 @@ function retryLegacySnapshotRetirement(): void {
     || pending.targetIno === undefined
     || !unlinkLegacyEntryIfUnchanged(pending.targetPath, pending.targetDev, pending.targetIno)
   ) {
-    // The marker is still live, so another writer can add a candidate before
-    // the next unlink attempt. Require another clean scan first.
-    if (pending.spillScan) pending.spillScanComplete = false;
+    reclassifyLegacySnapshot(pending);
     return;
   }
 
@@ -1759,7 +1858,14 @@ function retryLegacySnapshotRetirement(): void {
     && pending.linkDev !== undefined
     && pending.linkIno !== undefined
   ) {
-    unlinkLegacyEntryIfUnchanged(pending.linkPath, pending.linkDev, pending.linkIno);
+    if (!unlinkLegacyEntryIfUnchanged(pending.linkPath, pending.linkDev, pending.linkIno)) {
+      reclassifyLegacySnapshot(pending);
+      return;
+    }
+  }
+  if (!publishRetirementCompletionMarker()) {
+    if (pending.spillScan) pending.spillScanComplete = false;
+    return;
   }
   legacySnapshotAwaitingRetirement = null;
 }
@@ -1777,8 +1883,7 @@ function scheduleLegacyRetirementRetry(): void {
 
 function refreshLegacyRetirementBlock(): void {
   legacyRetirementBlocked = legacySnapshotAwaitingRetirement !== null
-    || legacySnapshotInspectionPending !== null
-    || legacySpillsAwaitingRetirement.size > 0;
+    || legacySnapshotInspectionPending !== null;
   if (legacyRetirementBlocked) {
     warnSensitiveStorageMemoryOnly("legacy_retirement");
     scheduleLegacyRetirementRetry();
@@ -1845,15 +1950,39 @@ function retryLegacySnapshotInspection(): void {
   const inspection = inspectSnapshotTarget(path, literal);
   if (inspection.kind === "retry") return;
   legacySnapshotInspectionPending = null;
+  if (inspection.kind === "target" && inspection.target.size <= SNAPSHOT_FILE_MAX_BYTES) {
+    try {
+      const raw = JSON.parse(readFileSync(inspection.targetPath, "utf8")) as { version?: unknown; states?: unknown };
+      if (raw?.version === 3 && Array.isArray(raw.states)) return;
+    } catch {
+      // Unreadable/malformed replacements stay on the retirement path.
+    }
+  }
   legacySnapshotAwaitingRetirement = inspection.kind === "literal"
     ? snapshotRetirementMarker(path, literal, path, literal)
     : snapshotRetirementMarker(path, literal, inspection.targetPath, inspection.target);
 }
 
 function retryLegacyRetirement(): void {
-  retryLegacySnapshotInspection();
-  retryLegacySpillRetirement();
-  retryLegacySnapshotRetirement();
+  try {
+    withConfigMutationLockSync(() => {
+      retryLegacySnapshotInspection();
+      const pending = legacySnapshotAwaitingRetirement;
+      if (pending) {
+        const current = retirementMarkerStillCurrent(pending);
+        if (current === null) return;
+        if (!current) {
+          reclassifyLegacySnapshot(pending);
+          return;
+        }
+      }
+      retryLegacySpillRetirement();
+      retryLegacySnapshotRetirement();
+    });
+  } catch {
+    // Shared-home writer contention and lock failures remain fail-closed; the
+    // bounded retry timer will attempt the whole retirement transaction again.
+  }
   refreshLegacyRetirementBlock();
 }
 
@@ -1923,7 +2052,10 @@ function ensureLoaded(): void {
   try {
     literal = snapshotLstat(path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      legacySnapshotAwaitingRetirement = absentSnapshotRetirementMarker(path);
+      retryLegacyRetirement();
+    } else {
       beginSnapshotInspectionRetry(path);
     }
   }
@@ -1968,14 +2100,8 @@ function ensureLoaded(): void {
             }
           } else if (raw && (raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
             legacySnapshotAwaitingRetirement = snapshotRetirementMarker(path, literal, targetPath, stat);
-            for (const entry of raw.states) {
-              if (Array.isArray(entry) && entry.length === 2 && entry[1] && typeof entry[1] === "object") {
-                const item = entry[1] as { kind?: unknown; spill?: unknown };
-                if (item.kind === "spill" && isSpillRef(item.spill)) {
-                  legacySpillsAwaitingRetirement.set(item.spill.fileName, item.spill);
-                }
-              }
-            }
+            legacySnapshotAwaitingRetirement.legacyStates = raw.states;
+            legacySnapshotAwaitingRetirement.legacyStateIndex = 0;
             retryLegacyRetirement();
           } else if (parsedOk) {
             beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
@@ -2371,6 +2497,7 @@ function pruneResponses(at = now()): void {
   // Unconditional RAM cap. Resident payloads demote durably; stubs/tombstones are
   // deleted only when even their bounded metadata cannot fit the override.
   while (storedResponseBytes > byteCap() && states.size > 0) {
+    if (legacyRetirementBlocked) break;
     const oldestResident = [...states].find(([id, entry]) => (entry.kind === "resident" || entry.kind === "encrypted-resident")
       && pendingResponseSpillById.get(id)?.candidate !== entry);
     const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => (entry.kind === "resident" || entry.kind === "encrypted-resident")
@@ -2401,9 +2528,17 @@ function pruneResponses(at = now()): void {
             envelope: entry.envelope,
           }
         : spillPayloadForResident(oldestId, entry);
-      const ref = writeResponseSpillDurably(oldestId, payload);
-      if (swapResidentForSpill(oldestId, entry, ref)) spillCounters.writes += 1;
-    } catch {
+      let installed = false;
+      writeResponseSpillDurably(oldestId, payload, {
+        commitUnderLock: ref => {
+          if (legacyRetirementBlocked) return false;
+          installed = swapResidentForSpill(oldestId, entry, ref);
+          return installed;
+        },
+      });
+      if (installed) spillCounters.writes += 1;
+    } catch (error) {
+      if (isRetryableSpillPublicationError(error)) break;
       spillCounters.writeFailures += 1;
       replaceWithSpillFailure(oldestId, entry);
     }
@@ -2502,6 +2637,7 @@ export function responseContinuationRetainedStoreSnapshot(): RetainedStoreSnapsh
 }
 
 export function evictOldestResponseContinuationForBudget(): number {
+  if (legacyRetirementBlocked) return 0;
   if (oldestResidentId === undefined) return 0;
   const id = oldestResidentId;
   const entry = states.get(id);
@@ -2526,9 +2662,17 @@ export function evictOldestResponseContinuationForBudget(): number {
           envelope: entry.envelope,
         }
       : spillPayloadForResident(id, entry);
-    const ref = writeResponseSpillDurably(id, payload);
-    if (swapResidentForSpill(id, entry, ref)) spillCounters.writes += 1;
-  } catch {
+    let installed = false;
+    writeResponseSpillDurably(id, payload, {
+      commitUnderLock: ref => {
+        if (legacyRetirementBlocked) return false;
+        installed = swapResidentForSpill(id, entry, ref);
+        return installed;
+      },
+    });
+    if (installed) spillCounters.writes += 1;
+  } catch (error) {
+    if (isRetryableSpillPublicationError(error)) return 0;
     spillCounters.writeFailures += 1;
     replaceWithSpillFailure(id, entry);
   }
@@ -3043,7 +3187,6 @@ export function clearResponseStateMemoryForTests(): void {
   if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
   legacyRetirementRetryTimer = null;
   legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
-  legacySpillsAwaitingRetirement.clear();
   if (legacySnapshotAwaitingRetirement?.spillScan) {
     closeResponseSpillRetirementScan(legacySnapshotAwaitingRetirement.spillScan);
   }

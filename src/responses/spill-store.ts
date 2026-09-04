@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
-import { getConfigDir } from "../config";
+import { getConfigDir, withConfigMutationLockSync } from "../config";
 import {
   forgetEphemeralSecretPath,
   forgetHardenedSecretPath,
@@ -39,6 +39,10 @@ export const RESPONSE_SPILL_CLEANUP_MAX = 512;
 const RESPONSE_SPILL_PUBLISH_RETRIES = 64;
 const OWNED_SPILL_NAME = /^([A-Za-z0-9._-]{1,80})\.([0-9a-f]{12})\.([0-9a-f]{24})\.(\d+)\.(\d+)\.spill\.json$/;
 const OWNED_SPILL_TEMP_NAME = /^\.response-spill\.[0-9]+\.[0-9a-f]{16}\.tmp$/;
+
+export function isOwnedResponseSpillFileName(fileName: string): boolean {
+  return OWNED_SPILL_NAME.test(fileName);
+}
 
 export interface ResponseSpillPayload {
   version: 1;
@@ -151,6 +155,12 @@ interface ResponseSpillWriteOptions {
   /** Total caller-owned ACL budget shared by every harden in this publication. */
   aclBudgetMs?: number;
   publicationControl?: ResponseSpillPublicationControl;
+  /**
+   * Runs synchronously while the shared-home mutation lock still covers the
+   * newly published destination. Returning false removes the destination
+   * before another process can observe an unowned spill.
+   */
+  commitUnderLock?: (ref: ResponseSpillRef) => boolean;
 }
 
 export interface ResponseSpillPublicationControl {
@@ -432,45 +442,6 @@ function publishNoReplace(
   record("publish");
 }
 
-async function publishNoReplaceAsync(
-  tempPath: string,
-  destinationPath: string,
-  budget: SpillAclBudget,
-  retryTimedOutOnce: boolean,
-  publicationControl?: ResponseSpillPublicationControl,
-): Promise<void> {
-  throwIfPublicationSuperseded(publicationControl);
-  try {
-    if (spillIoForTest?.link) spillIoForTest.link(tempPath, destinationPath);
-    else linkSync(tempPath, destinationPath);
-  } catch (error) {
-    if (isErrno(error, "EEXIST")) throw error;
-    if (!canUseExclusiveCopyFallback(error)) throw error;
-    let copied = false;
-    try {
-      if (spillIoForTest?.copyFileExcl) spillIoForTest.copyFileExcl(tempPath, destinationPath);
-      else copyFileSync(tempPath, destinationPath, constants.COPYFILE_EXCL);
-      copied = true;
-      await hardenAsync(destinationPath, 0o600, budget, retryTimedOutOnce);
-      throwIfPublicationSuperseded(publicationControl);
-      const copyFd = openSync(destinationPath, "r+");
-      try {
-        if (spillIoForTest?.fsync) spillIoForTest.fsync(copyFd);
-        else fsyncSync(copyFd);
-      } finally {
-        closeSync(copyFd);
-      }
-    } catch (copyError) {
-      if (copied) {
-        try { unlink(destinationPath); } catch { /* startup GC reclaims an incomplete publication */ }
-      }
-      throw copyError;
-    }
-  }
-  throwIfPublicationSuperseded(publicationControl);
-  record("publish");
-}
-
 export type ResponseSpillStateInput =
   | ({ version?: 1 } & Omit<ResponseSpillPayload, "version" | "responseId">)
   | ({ version: 2; envelope: ResponseContinuationEncryptedEnvelope } & Omit<EncryptedResponseSpillPayload, "version" | "responseId">);
@@ -615,7 +586,7 @@ function validPayload(value: unknown, responseId: string): value is AnyResponseS
   return true;
 }
 
-export function writeResponseSpillDurably(
+function writeResponseSpillDurablyUnlocked(
   responseId: string,
   state: ResponseSpillStateInput,
   options: ResponseSpillWriteOptions = {},
@@ -667,6 +638,23 @@ export function writeResponseSpillDurably(
   }
 }
 
+export function writeResponseSpillDurably(
+  responseId: string,
+  state: ResponseSpillStateInput,
+  options: ResponseSpillWriteOptions = {},
+): ResponseSpillRef {
+  return withConfigMutationLockSync(() => {
+    const ref = writeResponseSpillDurablyUnlocked(responseId, state, options);
+    try {
+      if (!options.commitUnderLock || options.commitUnderLock(ref)) return ref;
+      throw supersededPublicationError();
+    } catch (error) {
+      removePublishedResponseSpill(ref);
+      throw error;
+    }
+  });
+}
+
 /**
  * Windows runtime counterpart of `writeResponseSpillDurably`.
  *
@@ -714,26 +702,36 @@ export async function writeResponseSpillDurablyAsync(
       if (publicationControl) publicationControl.destinationPath = destinationPath;
       try {
         throwIfPublicationSuperseded(publicationControl);
-        await publishNoReplaceAsync(
-          publishTempPath,
-          destinationPath,
-          aclBudget,
-          options.retryTimedOutOnce === true,
-          publicationControl,
-        );
-        throwIfPublicationSuperseded(publicationControl);
-        fsyncDirectoryBestEffort(dir);
+        const ref = withConfigMutationLockSync(() => {
+          throwIfPublicationSuperseded(publicationControl);
+          // Required ACL work completed above. The final no-replace publish,
+          // directory durability, and owner stub installation are one shared-
+          // home transaction; no destination is visible between them.
+          publishNoReplace(publishTempPath, destinationPath, aclBudget);
+          throwIfPublicationSuperseded(publicationControl);
+          fsyncDirectoryBestEffort(dir);
+          const published = { version, fileName, digest, payloadBytes: bytes.byteLength };
+          try {
+            if (!options.commitUnderLock || options.commitUnderLock(published)) return published;
+            throw supersededPublicationError();
+          } catch (error) {
+            removePublishedResponseSpill(published);
+            throw error;
+          }
+        });
         unlinkEphemeral(publishTempPath);
         tempPath = null;
         if (publicationControl) {
           publicationControl.tempPath = null;
           publicationControl.destinationPath = null;
         }
-        return { version, fileName, digest, payloadBytes: bytes.byteLength };
+        return ref;
       } catch (error) {
         if (publicationControl?.superseded) throw error;
-        if (publicationControl) publicationControl.destinationPath = null;
-        if (isErrno(error, "EEXIST")) continue;
+        if (isErrno(error, "EEXIST")) {
+          if (publicationControl) publicationControl.destinationPath = null;
+          continue;
+        }
         throw error;
       }
     }
@@ -808,6 +806,17 @@ export function deleteResponseSpill(ref: ResponseSpillRef): void {
   } catch { /* best effort */ }
 }
 
+function removePublishedResponseSpill(ref: ResponseSpillRef): void {
+  if (!validSpillRef(ref)) throw new Error("Invalid published response spill reference");
+  const dir = responseSpillDirectory();
+  try {
+    unlink(join(dir, ref.fileName));
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
+  }
+  fsyncDirectoryBestEffort(dir);
+}
+
 export function createResponseSpillRetirementScan(
   dir = responseSpillDirectory(),
 ): ResponseSpillRetirementScan {
@@ -824,6 +833,7 @@ export function closeResponseSpillRetirementScan(scan: ResponseSpillRetirementSc
 export function retirePreexistingResponseSpills(
   scan: ResponseSpillRetirementScan,
   protectedFileNames?: ReadonlySet<string>,
+  limits: { maxScanned?: number; maxRemoved?: number } = {},
 ): ResponseSpillRetirementResult {
   const result: ResponseSpillRetirementResult = {
     scanned: 0,
@@ -856,8 +866,8 @@ export function retirePreexistingResponseSpills(
     return entry ? entry.name : null;
   };
   while (
-    result.scanned < RESPONSE_SPILL_SCAN_MAX
-    && result.removed < RESPONSE_SPILL_CLEANUP_MAX
+    result.scanned < (limits.maxScanned ?? RESPONSE_SPILL_SCAN_MAX)
+    && result.removed < (limits.maxRemoved ?? RESPONSE_SPILL_CLEANUP_MAX)
   ) {
     let name: string | null;
     try {

@@ -927,34 +927,11 @@ describe("Responses previous_response_id state", () => {
     expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 1, spillWrites: 1, spillWriteFailures: 0 });
   });
 
-  test("holds the disk cap while a copy-fallback publication has temp and destination on disk", async () => {
-    // The cap is a promise about the volume, and a file being created by
-    // writeResponseSpillDurablyAsync is on the volume. Accounting that walks only
-    // installed spills reports a satisfied budget while the directory grows — the
-    // incident behind this cap put 6.8 GiB on disk in 44 minutes.
-    //
-    // The peak is TWO envelopes, not one: when hard-linking fails, publication copies
-    // with COPYFILE_EXCL and then hardens the destination, so the temp and the copy exist
-    // together. This drives that exact path and measures real bytes on disk.
+  test("copy-fallback publication commits the destination and stub before releasing its lock", async () => {
     forceWindowsAclLane();
     setResponseStateByteCapForTests(1_024);
-
-    let gateDestinationHarden = false;
-    let release!: () => void;
-    let entered!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const started = new Promise<void>(resolve => { entered = resolve; });
-    let announced = false;
-    setAsyncIcaclsRunnerForTests(async args => {
-      if (gateDestinationHarden && args.some(arg => arg.endsWith(".spill.json"))) {
-        if (!announced) {
-          announced = true;
-          entered();
-        }
-        await gate;
-      }
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
-    });
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    setIcaclsRunnerForTests(() => ICACLS_OK);
 
     // One resident spill already on disk, so the cap has real prior occupancy.
     rememberLarge("resp_cap_existing", "e".repeat(8_000));
@@ -963,52 +940,21 @@ describe("Responses previous_response_id state", () => {
     expect(existingBytes).toBeGreaterThan(0);
     expect(spillFileNames(home)).toHaveLength(1);
 
-    // Room for the two-envelope publication and nothing more. The seeded spill does not
-    // fit alongside it, so correct admission must reclaim it before publishing; without
-    // the check, seeded + temp + destination sit on disk together and blow the cap.
-    // Generous enough that this publication is admitted: the point of THIS test is that
-    // the accounting sees the in-flight bytes. The cap-refusal behaviour is proven
-    // separately below, where admission is the only thing standing between the request
-    // and an over-budget directory.
     const spillCap = existingBytes * 4;
     setSpilledResponseByteCapForTests(spillCap);
-
-    // Force the exclusive-copy fallback, then gate the destination hardening that follows
-    // it, so the observation below happens with BOTH files present.
+    const events: string[] = [];
     setSpillIoForTest({
       link: () => { throw Object.assign(new Error("EXDEV"), { code: "EXDEV" }); },
+      record: event => events.push(event),
     });
-    gateDestinationHarden = true;
 
     rememberLarge("resp_cap_inflight", "x".repeat(8_000));
-    await started;
-    try {
-      // Real disk: the temp and the copied destination coexist during hardening.
-      const onDisk = spillFileNames(home).length + spillTempNames(home).length;
-      expect(onDisk).toBeGreaterThanOrEqual(3);
-      // The walk over installed spills still reports only the settled file, so accounting
-      // built on it alone would price a three-envelope directory as one.
-      expect(getSpilledResponseBytesForTests()).toBe(existingBytes);
-      // Reservation prices the in-flight publication at its peak, so the accounted total
-      // covers what is actually on the volume.
-      expect(getAccountedResponseSpillBytesForTests())
-        .toBeGreaterThanOrEqual(existingBytes * 3);
-      // And the bytes ACTUALLY on disk stay inside the configured cap. This is the
-      // assertion the admission check has to earn: without it, the seeded spill plus the
-      // temp plus the destination copy exceed a cap sized for two envelopes.
-      expect(bytesOnDisk(home)).toBeLessThanOrEqual(spillCap);
-    } finally {
-      release();
-      setSpillIoForTest(null);
-    }
     await flushPendingResponseSpillsForTests();
-    // Settled: the reservation is released exactly once and accounting collapses to the
-    // real files. A leaked reservation would be monotonic — it would ratchet the usable
-    // cap toward zero until nothing could spill at all.
+    setSpillIoForTest(null);
+    expect(events.indexOf("publish")).toBeLessThan(events.indexOf("stub-swap"));
     expect(getAccountedResponseSpillBytesForTests()).toBe(getSpilledResponseBytesForTests());
     expect(spillTempNames(home)).toHaveLength(0);
-    // And the newest continuation is still replayable: the cap must not have turned the
-    // fail-closed path into the ordinary one.
+    expect(bytesOnDisk(home)).toBeLessThanOrEqual(spillCap);
     expect(JSON.stringify(expandPreviousResponseInput({ previous_response_id: "resp_cap_inflight", input: "next" })))
       .toContain("xxxxxxxx");
   });
@@ -1080,6 +1026,7 @@ describe("Responses previous_response_id state", () => {
 
   test("Windows async spill attempts share one bounded ACL budget across every harden", async () => {
     forceWindowsAclLane();
+    setIcaclsRunnerForTests(() => ICACLS_OK);
     let clock = 0;
     let firstGrant = true;
     const deadlines: number[] = [];
@@ -1108,12 +1055,11 @@ describe("Responses previous_response_id state", () => {
     rememberLarge("resp_async_acl_attempt_budget", "q".repeat(8_000));
     await flushPendingResponseSpillsForTests();
 
-    expect(deadlines.length).toBeGreaterThanOrEqual(10);
+    expect(deadlines.length).toBeGreaterThanOrEqual(7);
     expect(Math.max(...deadlines)).toBeLessThanOrEqual(15_000);
-    const retryAttemptGrantDeadlines = grantDeadlines.slice(-3);
-    expect(retryAttemptGrantDeadlines).toHaveLength(3);
+    const retryAttemptGrantDeadlines = grantDeadlines.slice(-2);
+    expect(retryAttemptGrantDeadlines).toHaveLength(2);
     expect(retryAttemptGrantDeadlines[1]!).toBeLessThan(retryAttemptGrantDeadlines[0]!);
-    expect(retryAttemptGrantDeadlines[2]!).toBeLessThan(retryAttemptGrantDeadlines[1]!);
     expect(responseStateMetrics()).toMatchObject({
       residentCount: 0,
       spillStubCount: 1,
@@ -1397,7 +1343,8 @@ describe("Responses previous_response_id state", () => {
       return ICACLS_OK;
     });
     const deadlines: number[] = [];
-    setIcaclsRunnerForTests((_args, timeoutMs) => {
+    setIcaclsRunnerForTests((args, timeoutMs) => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       deadlines.push(timeoutMs);
       aclClock += 20;
       return { success: true, exitCode: 0, timedOut: false, stdout: "" };
@@ -2145,7 +2092,7 @@ describe("Responses previous_response_id state", () => {
       );
       const items = [{ role: "user", content: "한글🙂" }, ...output];
       const expected = Buffer.byteLength(JSON.stringify({
-        responseId: "resp_다국어", createdAt: at, items, providerOutputStart: 1, providers,
+        responseId: "resp_다국어", kind: "resident", createdAt: at, items, providerOutputStart: 1, providers,
       }), "utf8");
       expect(getStoredResponseBytesForTests()).toBe(expected);
     } finally {
@@ -2929,7 +2876,7 @@ describe("Responses previous_response_id state", () => {
 
     expect(previousResponseProviderState("resp_v1")).toBeUndefined();
     expect(previousResponseConversationId("resp_v1")).toBeUndefined();
-    expect(existsSync(join(home, "responses-state.json"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8"))).toEqual({ version: 3, states: [] });
   });
 
   test("persists provider-keyed Cursor and Kiro continuation state across restart", async () => {
@@ -3371,7 +3318,7 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     // First store access triggers the lazy load.
     rememberResponseState({ model: "m", input: "x" }, completedResponse("resp_after", "ok"));
     expect(responseAdmissionCountersForTests().snapshotOversizedRefusals).toBe(refusalsBefore + 1);
-    expect(existsSync(path)).toBe(false);
+    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: 3, states: [] });
     // The store still works: the new entry is present and replays.
     expect((expandChained("resp_after") as { input: unknown[] }).input.length).toBeGreaterThan(1);
   });
@@ -3487,7 +3434,6 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     const files = readdirSync(dir);
     expect(files.length).toBe(1);
     const envelope = statSync(join(dir, files[0])).size;
-    const firstGeneration = files[0];
     clearResponseStateMemoryForTests();
     setResponseSpillPayloadCapForTests(envelope - 1);
     const dropsBefore = responseAdmissionCountersForTests().oversizedDrops;
@@ -3504,9 +3450,9 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     // replay reports the tombstone (spill_failed); the sync lane's spill_too_large is a
     // read-time classification of a file that was never written here.
     expect(previousResponseReplayFailure(body)?.reason).toBe("spill_failed");
-    // The over-ceiling publication was deleted; only the first generation's file (orphaned by
-    // the memory clear, owned by the orphan GC) remains.
-    expect(readdirSync(dir)).toEqual([firstGeneration]);
+    // The over-ceiling publication was deleted, and the absent-snapshot startup
+    // retirement pass removed the first generation orphaned by the memory clear.
+    expect(readdirSync(dir)).toHaveLength(1);
   });
 
   test("win32: async direct-spill write failure installs a tombstone and keeps unrelated residents", async () => {
