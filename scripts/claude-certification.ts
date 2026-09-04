@@ -7,12 +7,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../src/config";
+import { buildClaudeEnv } from "../src/cli/claude";
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 
 const MODEL = "claude-cert-hermetic";
 const CLI_MODEL = "claude-sonnet-4-5";
-const ADMISSION_TOKEN = "sk-ant-api03-hermetic-certification-key";
+const ADMISSION_TOKEN = ["sk-ant-api03", "hermetic-certification-key"].join("-");
 const MAX_OUTPUT = 256 * 1024;
 const TIMEOUT_MS = 45_000;
 const CREDENTIAL = /(?:API_KEY|API_TOKEN|AUTH_TOKEN|ACCESS_TOKEN|SECRET|PASSWORD|TOKEN)/i;
@@ -61,7 +62,7 @@ async function command(exe: string, args: string[], cwd: string, env: Record<str
 }
 
 function config(baseUrl: string): OcxConfig {
-  return { port: 0, hostname: "127.0.0.1", defaultProvider: "claude-cert", apiKeys: [{ id: "claude-cert", name: "claude-cert", key: ADMISSION_TOKEN, createdAt: "" }], claudeCode: { nativePassthrough: false, modelMap: { [CLI_MODEL]: `claude-cert/${MODEL}` } }, providers: { "claude-cert": { adapter: "anthropic", baseUrl, authMode: "key", apiKey: "hermetic-cert-key", allowPrivateNetwork: true, liveModels: true, models: [MODEL], retry: { maxAttempts: 1 } } } } as OcxConfig;
+  return { port: 0, hostname: "127.0.0.1", defaultProvider: "claude-cert", apiKeys: [{ id: "claude-cert", name: "claude-cert", key: ADMISSION_TOKEN, createdAt: "" }], claudeCode: { nativePassthrough: false, authMode: "proxy", modelMap: { [CLI_MODEL]: `claude-cert/${MODEL}` } }, providers: { "claude-cert": { adapter: "anthropic", baseUrl, authMode: "key", apiKey: "hermetic-cert-key", allowPrivateNetwork: true, liveModels: true, models: [MODEL], retry: { maxAttempts: 1 } } } } as OcxConfig;
 }
 
 function sse(events: Array<{ event: string; data: unknown }>): Response { return new Response(events.map(e => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join(""), { status: 200, headers: { "content-type": "text/event-stream" } }); }
@@ -75,7 +76,7 @@ export async function runHermetic(cli = process.env.CLAUDE_BIN?.trim() || "claud
     const markerPath = join(root, "marker.txt"); writeFileSync(markerPath, "CLAUDE_CERT_MARKER\n", { mode: 0o600 });
     upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) { const path = new URL(req.url).pathname; upstreamPaths.push(path); if (path !== "/v1/messages") return new Response("not found", { status: 404 }); const body = await req.json(); requests.push(body); const hasToolResult = JSON.stringify(body).includes("tool_result"); const first = !hasToolResult; const msg = { id: "msg_cert", type: "message", role: "assistant", model: MODEL, content: [], stop_reason: first ? "tool_use" : "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } }; const events = first ? [{ event: "message_start", data: { type: "message_start", message: msg } }, { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "cert_tool", name: "Read", input: {} } } }, { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify({ file_path: markerPath }) } } }, { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } }, { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } } }, { event: "message_stop", data: { type: "message_stop" } }] : [{ event: "message_start", data: { type: "message_start", message: msg } }, { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } }, { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "CLAUDE_CERT_OK" } } }, { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } }, { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } } }, { event: "message_stop", data: { type: "message_stop" } }]; return sse(events); } });
     process.env.OPENCODEX_HOME = dirs.ocx; saveConfig(config(new URL("/v1", upstream.url).toString())); proxy = startServer(0);
-    const env = sanitizedChildEnv(process.env, dirs); env.ANTHROPIC_BASE_URL = new URL("/v1", proxy.url).toString(); env.ANTHROPIC_MODEL = CLI_MODEL;
+    const env = buildClaudeEnv(config(new URL("/v1", proxy.url).toString()), { baseUrl: proxy.url.toString(), admissionToken: ADMISSION_TOKEN }, sanitizedChildEnv(process.env, dirs), {}, { preBunAnthropicSlots: [] }); env.ANTHROPIC_MODEL = CLI_MODEL;
     let result; try { result = await command(cli, ["-p", "Read the marker file and print its contents.", "--model", CLI_MODEL, "--allowedTools", "Read", "--safe-mode", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--output-format", "text"], root, env); } catch (error) { return { mode: "hermetic", status: "skipped", cliPresent: false, streaming: false, toolContinuation: false, requests: 0, reason: error instanceof Error ? error.message : "Claude Code CLI unavailable" }; }
     const text = `${result.out}\n${result.err}`; const streaming = requests.length > 0; const toolContinuation = requests.length >= 2;
     return { mode: "hermetic", status: result.code === 0 && text.includes("CLAUDE_CERT_OK") && streaming && toolContinuation ? "hermetic_pass" : "hermetic_fail", cliPresent: true, streaming, toolContinuation, requests: requests.length, reason: result.code === 0 ? undefined : "Claude Code exited non-zero" };

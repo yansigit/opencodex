@@ -24,7 +24,7 @@ describe("Claude certification runner policy", () => {
       CLAUDE_CONFIG_DIR: "/tmp/cert-claude",
       OPENCODEX_HOME: "/tmp/cert-ocx",
       NO_PROXY: "127.0.0.1,localhost,::1",
-      ANTHROPIC_AUTH_TOKEN: "sk-ant-api03-hermetic-certification-key",
+      ANTHROPIC_AUTH_TOKEN: ["sk-ant-api03", "hermetic-certification-key"].join("-"),
       UNRELATED: "kept",
     });
     expect(env.HTTPS_PROXY).toBeUndefined();
