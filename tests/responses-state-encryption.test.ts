@@ -982,7 +982,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     });
     useMemoryKeyring();
     clearResponseStateMemoryForTests();
-    setResponseStateByteCapForTests(4 * 1024);
+    setResponseStateByteCapForTests(64 * 1024);
 
     expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
     expect(existsSync(snapshotPath)).toBe(true);
@@ -1282,6 +1282,47 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     });
     await flushResponseState();
     expect(JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")).version).toBe(3);
+  });
+
+  test("legacy retirement blocking still enforces resident caps and app-owned eviction", () => {
+    const spillDir = responseSpillDirectory(home);
+    mkdirSync(spillDir, { recursive: true });
+    const legacyName = "resp_locked_memory.1234567890ab.cdef12345678901234567890.1.1.spill.json";
+    const legacyPath = join(spillDir, legacyName);
+    writeFileSync(legacyPath, "x");
+    writeFileSync(join(home, "responses-state.json"), JSON.stringify({
+      version: 2,
+      states: [["resp_locked_memory", { createdAt: Date.now(), kind: "spill", spill: {
+        version: 1, fileName: legacyName, digest: "0".repeat(64), payloadBytes: 1,
+      } }]],
+    }));
+    setSpillIoForTest({
+      unlink(path) {
+        if (path === legacyPath) throw Object.assign(new Error("locked"), { code: "EACCES" });
+        unlinkSync(path);
+      },
+    });
+    clearResponseStateMemoryForTests();
+    expandPreviousResponseInput({ previous_response_id: "missing", input: "load" });
+    setResponseStateByteCapForTests(1_024);
+
+    rememberResponseState({ input: "ordinary" }, {
+      id: "resp_blocked_oversized",
+      status: "completed",
+      output: [{ role: "assistant", content: "x".repeat(20_000) }],
+    });
+    expect(responseStateMetrics()).toMatchObject({ count: 0, totalBytes: 0 });
+    expect(readdirSync(spillDir)).toEqual([legacyName]);
+
+    rememberResponseState({ input: "ordinary" }, {
+      id: "resp_blocked_evictable",
+      status: "completed",
+      output: [{ role: "assistant", content: "small" }],
+    });
+    expect(responseStateMetrics()).toMatchObject({ residentCount: 1, spillStubCount: 0 });
+    expect(evictOldestResponseContinuationForBudget()).toBeGreaterThan(0);
+    expect(responseStateMetrics()).toMatchObject({ count: 0, totalBytes: 0 });
+    expect(readdirSync(spillDir)).toEqual([legacyName]);
   });
 
   test("keyring release drops the cache without mutating caller-owned copies", async () => {

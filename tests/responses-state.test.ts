@@ -3,6 +3,7 @@ import { BULK_DURABLE_IO_BUDGET_MS, STORE_BUDGET_MS } from "./helpers/test-budge
 import { findDeadPid } from "./helpers/dead-pid";
 import {
   closeSync,
+  copyFileSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -18,6 +19,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { buildResponseJSON } from "../src/bridge";
 import { createCursorRequest } from "../src/adapters/cursor/request-builder";
 import { createCursorContextUsageTracker } from "../src/adapters/cursor/protobuf-events";
@@ -58,14 +60,17 @@ import {
 } from "../src/responses/state";
 import {
   RESPONSE_SPILL_DIR_NAME,
+  createResponseSpillPublicationControl,
   readResponseSpill,
   deleteResponseSpill,
   recoverOrphanedResponseSpills,
   responseSpillDirectory,
+  setAfterSpillOwnershipTransferForTests,
   setResponseSpillNowForTests,
   setResponseSpillPayloadCapForTests,
   setSpillIoForTest,
   writeResponseSpillDurably,
+  writeResponseSpillDurablyAsync,
 } from "../src/responses/spill-store";
 import { adapterNeedsForcedContinuation, injectDeveloperMessage } from "../src/server/responses";
 import { watchdogMs } from "./helpers/ci-watchdog";
@@ -318,6 +323,7 @@ describe("Responses previous_response_id state", () => {
   });
 
   afterEach(() => {
+    setAfterSpillOwnershipTransferForTests(null);
     setSpillIoForTest(null);
     setResponseSpillNowForTests(null);
     setAsyncIcaclsRunnerForTests(null);
@@ -925,6 +931,92 @@ describe("Responses previous_response_id state", () => {
     await flushPendingResponseSpillsForTests();
     expect(pendingResponseSpillMetricsForTests()).toEqual({ count: 0, bytes: 0 });
     expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 1, spillWrites: 1, spillWriteFailures: 0 });
+  });
+
+  test("lock contention never cleans a colliding destination this attempt did not publish", async () => {
+    const payload = { createdAt: Date.now(), items: [{ role: "user", content: "collision" }] };
+    const first = writeResponseSpillDurably("resp_lock_collision", payload);
+    const match = /\.(\d+)\.(\d+)\.spill\.json$/.exec(first.fileName)!;
+    const collisionName = first.fileName.replace(
+      /\.(\d+)\.(\d+)\.spill\.json$/,
+      `.${Number(match[1]) + 1}.${match[2]}.spill.json`,
+    );
+    const dir = responseSpillDirectory(home);
+    const collisionPath = join(dir, collisionName);
+    copyFileSync(join(dir, first.fileName), collisionPath);
+
+    const readyPath = join(home, "spill-lock-ready");
+    const releasePath = join(home, "spill-lock-release");
+    const configUrl = pathToFileURL(join(import.meta.dir, "../src/config.ts")).href;
+    const child = Bun.spawn([process.execPath, "-e", `
+      import { existsSync, writeFileSync } from "node:fs";
+      import { withConfigMutationLockSync } from ${JSON.stringify(configUrl)};
+      withConfigMutationLockSync(() => {
+        writeFileSync(${JSON.stringify(readyPath)}, "ready");
+        while (!existsSync(${JSON.stringify(releasePath)})) Bun.sleepSync(10);
+      });
+    `], {
+      cwd: join(import.meta.dir, ".."),
+      env: { ...process.env, OPENCODEX_HOME: home },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+
+    try {
+      const deadline = Date.now() + watchdogMs(3_000);
+      while (!existsSync(readyPath) && Date.now() < deadline) await Bun.sleep(10);
+      expect(existsSync(readyPath)).toBe(true);
+      const control = createResponseSpillPublicationControl();
+      await expect(writeResponseSpillDurablyAsync("resp_lock_collision", payload, {
+        aclBudgetMs: 1_000,
+        publicationControl: control,
+      })).rejects.toThrow();
+      expect(existsSync(collisionPath)).toBe(true);
+      expect(readFileSync(collisionPath)).toEqual(readFileSync(join(dir, first.fileName)));
+    } finally {
+      writeFileSync(releasePath, "release");
+      expect(await child.exited).toBe(0);
+    }
+  });
+
+  test("a committed async spill survives redundant temp cleanup failure", async () => {
+    forceWindowsAclLane();
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    setSpillIoForTest({
+      unlink(path) {
+        if (path.endsWith(".tmp")) throw Object.assign(new Error("locked temp"), { code: "EACCES" });
+        unlinkSync(path);
+      },
+    });
+    setResponseStateByteCapForTests(1_024);
+
+    rememberLarge("resp_temp_cleanup", "t".repeat(8_000));
+    await flushPendingResponseSpillsForTests();
+
+    expect(responseStateMetrics()).toMatchObject({ spillStubCount: 1, tombstoneCount: 0, spillWriteFailures: 0 });
+    expect(spillFileNames(home)).toHaveLength(1);
+    expect(spillTempNames(home)).toHaveLength(1);
+    expect(JSON.stringify(expandPreviousResponseInput({ previous_response_id: "resp_temp_cleanup", input: "next" })))
+      .toContain("tttttttt");
+  });
+
+  test("a committed async spill survives shared-lock commit failure", async () => {
+    forceWindowsAclLane();
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    setAfterSpillOwnershipTransferForTests(() => {
+      throw new Error("injected lock commit failure");
+    });
+    setResponseStateByteCapForTests(1_024);
+
+    rememberLarge("resp_lock_commit", "c".repeat(8_000));
+    await flushPendingResponseSpillsForTests();
+
+    expect(responseStateMetrics()).toMatchObject({ spillStubCount: 1, tombstoneCount: 0, spillWriteFailures: 0 });
+    expect(spillFileNames(home)).toHaveLength(1);
+    expect(JSON.stringify(expandPreviousResponseInput({ previous_response_id: "resp_lock_commit", input: "next" })))
+      .toContain("cccccccc");
   });
 
   test("copy-fallback publication commits the destination and stub before releasing its lock", async () => {

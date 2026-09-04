@@ -92,10 +92,16 @@ export interface ResponseSpillRef {
 export const MAX_RESPONSE_SPILL_PAYLOAD_BYTES = 256 * 1024 * 1024;
 
 let spillPayloadCapOverride: number | null = null;
+let afterSpillOwnershipTransferForTest: (() => void) | null = null;
 
 /** Test-only: lower/restore the single-spill payload ceiling (null restores). */
 export function setResponseSpillPayloadCapForTests(bytes: number | null): void {
   spillPayloadCapOverride = bytes;
+}
+
+/** Test-only: simulate shared-lock commit failure after a stub accepts ownership. */
+export function setAfterSpillOwnershipTransferForTests(hook: (() => void) | null): void {
+  afterSpillOwnershipTransferForTest = hook;
 }
 
 export function responseSpillPayloadCap(): number {
@@ -167,6 +173,7 @@ export interface ResponseSpillPublicationControl {
   superseded: boolean;
   tempPath: string | null;
   destinationPath: string | null;
+  destinationOwned: boolean;
 }
 
 interface SpillAclBudget {
@@ -175,7 +182,7 @@ interface SpillAclBudget {
 }
 
 export function createResponseSpillPublicationControl(): ResponseSpillPublicationControl {
-  return { superseded: false, tempPath: null, destinationPath: null };
+  return { superseded: false, tempPath: null, destinationPath: null, destinationOwned: false };
 }
 
 export function markResponseSpillPublicationSuperseded(control: ResponseSpillPublicationControl): void {
@@ -376,14 +383,20 @@ function clearOwnedPath(
 ): unknown {
   const path = control[key];
   if (!path) return null;
+  if (key === "destinationPath" && !control.destinationOwned) {
+    control.destinationPath = null;
+    return null;
+  }
   try {
     if (ephemeral) unlinkEphemeral(path);
     else unlink(path);
     control[key] = null;
+    if (key === "destinationPath") control.destinationOwned = false;
     return null;
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
       control[key] = null;
+      if (key === "destinationPath") control.destinationOwned = false;
       return null;
     }
     return error;
@@ -643,16 +656,32 @@ export function writeResponseSpillDurably(
   state: ResponseSpillStateInput,
   options: ResponseSpillWriteOptions = {},
 ): ResponseSpillRef {
-  return withConfigMutationLockSync(() => {
-    const ref = writeResponseSpillDurablyUnlocked(responseId, state, options);
-    try {
-      if (!options.commitUnderLock || options.commitUnderLock(ref)) return ref;
-      throw supersededPublicationError();
-    } catch (error) {
-      removePublishedResponseSpill(ref);
-      throw error;
-    }
-  });
+  let transferred: ResponseSpillRef | null = null;
+  try {
+    return withConfigMutationLockSync(() => {
+      const ref = writeResponseSpillDurablyUnlocked(responseId, state, options);
+      let accepted: boolean;
+      try {
+        accepted = !options.commitUnderLock || options.commitUnderLock(ref);
+      } catch (error) {
+        removePublishedResponseSpill(ref);
+        throw error;
+      }
+      if (!accepted) {
+        removePublishedResponseSpill(ref);
+        throw supersededPublicationError();
+      }
+      transferred = ref;
+      afterSpillOwnershipTransferForTest?.();
+      return ref;
+    });
+  } catch (error) {
+    // The shared database is only the mutex. Once the callback installed the
+    // stub, a later SQLite COMMIT failure cannot safely roll back filesystem
+    // ownership; the continuation is already live and remains valid.
+    if (transferred) return transferred;
+    throw error;
+  }
 }
 
 /**
@@ -673,6 +702,7 @@ export async function writeResponseSpillDurablyAsync(
   if (!aclBudget) throw new Error("Response spill async ACL budget is required");
   let tempPath: string | null = null;
   let fd: number | null = null;
+  let transferred: ResponseSpillRef | null = null;
   try {
     throwIfPublicationSuperseded(publicationControl);
     const { bytes, digest, idDigest, contentDigest, version } = serializedSpill(responseId, state);
@@ -699,7 +729,10 @@ export async function writeResponseSpillDurablyAsync(
       const fileName = `${sanitizeResponseId(responseId)}.${idDigest}.${contentDigest}.${spillGeneration}.${bytes.byteLength}.spill.json`;
       if (!OWNED_SPILL_NAME.test(fileName)) throw new Error("Response spill name allocation failed");
       const destinationPath = join(dir, fileName);
-      if (publicationControl) publicationControl.destinationPath = destinationPath;
+      if (publicationControl) {
+        publicationControl.destinationPath = destinationPath;
+        publicationControl.destinationOwned = false;
+      }
       try {
         throwIfPublicationSuperseded(publicationControl);
         const ref = withConfigMutationLockSync(() => {
@@ -708,28 +741,48 @@ export async function writeResponseSpillDurablyAsync(
           // directory durability, and owner stub installation are one shared-
           // home transaction; no destination is visible between them.
           publishNoReplace(publishTempPath, destinationPath, aclBudget);
+          if (publicationControl) publicationControl.destinationOwned = true;
           throwIfPublicationSuperseded(publicationControl);
           fsyncDirectoryBestEffort(dir);
           const published = { version, fileName, digest, payloadBytes: bytes.byteLength };
+          let accepted: boolean;
           try {
-            if (!options.commitUnderLock || options.commitUnderLock(published)) return published;
-            throw supersededPublicationError();
+            accepted = !options.commitUnderLock || options.commitUnderLock(published);
           } catch (error) {
             removePublishedResponseSpill(published);
             throw error;
           }
+          if (!accepted) {
+            removePublishedResponseSpill(published);
+            throw supersededPublicationError();
+          }
+          transferred = published;
+          if (publicationControl) {
+            publicationControl.destinationPath = null;
+            publicationControl.destinationOwned = false;
+          }
+          afterSpillOwnershipTransferForTest?.();
+          return published;
         });
-        unlinkEphemeral(publishTempPath);
-        tempPath = null;
+        try {
+          unlinkEphemeral(publishTempPath);
+          tempPath = null;
+        } catch {
+          // The committed destination has a live stub. Its redundant temp is
+          // reclaimed by startup GC; cleanup must never invalidate the stub.
+        }
         if (publicationControl) {
-          publicationControl.tempPath = null;
-          publicationControl.destinationPath = null;
+          if (tempPath === null) publicationControl.tempPath = null;
         }
         return ref;
       } catch (error) {
+        if (transferred) return transferred;
         if (publicationControl?.superseded) throw error;
         if (isErrno(error, "EEXIST")) {
-          if (publicationControl) publicationControl.destinationPath = null;
+          if (publicationControl) {
+            publicationControl.destinationPath = null;
+            publicationControl.destinationOwned = false;
+          }
           continue;
         }
         throw error;
@@ -752,13 +805,19 @@ export async function writeResponseSpillDurablyAsync(
     }
     if (publicationControl) {
       const destinationPath = publicationControl.destinationPath;
-      if (destinationPath) {
+      if (destinationPath && publicationControl.destinationOwned) {
         try {
           unlink(destinationPath);
           publicationControl.destinationPath = null;
+          publicationControl.destinationOwned = false;
         } catch (error) {
-          if (isErrno(error, "ENOENT")) publicationControl.destinationPath = null;
+          if (isErrno(error, "ENOENT")) {
+            publicationControl.destinationPath = null;
+            publicationControl.destinationOwned = false;
+          }
         }
+      } else if (destinationPath) {
+        publicationControl.destinationPath = null;
       }
     }
     throw responseSpillWriteError(cause);

@@ -1317,7 +1317,8 @@ function admitOversizedCandidate(
     return;
   }
   if (legacyRetirementBlocked) {
-    replaceMapEntry(id, candidate, expected);
+    admissionCounters.oversizedDrops += 1;
+    if (expected) deleteEntry(id);
     return;
   }
   if (windowsSecretAclApplies()) {
@@ -2497,7 +2498,6 @@ function pruneResponses(at = now()): void {
   // Unconditional RAM cap. Resident payloads demote durably; stubs/tombstones are
   // deleted only when even their bounded metadata cannot fit the override.
   while (storedResponseBytes > byteCap() && states.size > 0) {
-    if (legacyRetirementBlocked) break;
     const oldestResident = [...states].find(([id, entry]) => (entry.kind === "resident" || entry.kind === "encrypted-resident")
       && pendingResponseSpillById.get(id)?.candidate !== entry);
     const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => (entry.kind === "resident" || entry.kind === "encrypted-resident")
@@ -2506,6 +2506,10 @@ function pruneResponses(at = now()): void {
     const oldestId = oldestResident?.[0] ?? states.keys().next().value as string | undefined;
     if (!oldestId) break;
     const entry = states.get(oldestId)!;
+    if (legacyRetirementBlocked) {
+      deleteEntry(oldestId);
+      continue;
+    }
     if (entry.kind !== "resident" && entry.kind !== "encrypted-resident") {
       deleteEntry(oldestId);
       continue;
@@ -2637,11 +2641,15 @@ export function responseContinuationRetainedStoreSnapshot(): RetainedStoreSnapsh
 }
 
 export function evictOldestResponseContinuationForBudget(): number {
-  if (legacyRetirementBlocked) return 0;
   if (oldestResidentId === undefined) return 0;
   const id = oldestResidentId;
   const entry = states.get(id);
   if (!entry || (entry.kind !== "resident" && entry.kind !== "encrypted-resident")) return 0;
+  if (legacyRetirementBlocked) {
+    const freedBytes = entry.sizeBytes;
+    deleteEntry(id);
+    return freedBytes;
+  }
   if (entry.durability === "memory-only") {
     const freedBytes = entry.sizeBytes;
     deleteEntry(id);
