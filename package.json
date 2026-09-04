@@ -53,7 +53,7 @@
     "prepublishOnly": "bun run audit:high && bun run typecheck && bun run build:gui",
     "release": "bun scripts/release.ts",
     "release:watch": "bun scripts/release.ts watch",
-    "prepush": "bun run check:hygiene && bun run lint:workflows && bun run audit:high && bun run typecheck && bun run lint:gui:if-changed && bun run test && bun run privacy:scan && bun run doctor:gui:if-changed",
+    "prepush": "bun run check:hygiene && bun run check:workflow-policy && bun run lint:workflows && bun run audit:high && bun run typecheck && bun run lint:gui:if-changed && bun run test && bun run privacy:scan && bun run doctor:gui:if-changed",
     "lint:gui": "cd gui && bun run lint",
     "lint:gui:if-changed": "bun scripts/lint-gui-if-changed.ts",
     "postmerge": "bun scripts/build-gui-if-changed.ts",
@@ -62,6 +62,7 @@
     "doctor:gui:if-changed": "bun scripts/doctor-gui-if-changed.ts",
     "setup:hooks": "bun scripts/setup-hooks.ts",
     "check:hygiene": "node scripts/check-hygiene.mjs",
+    "check:workflow-policy": "bun scripts/ci/check-workflow-policy.ts",
     "lint:workflows": "bun scripts/ci/actionlint.ts"
   },
   "dependencies": {

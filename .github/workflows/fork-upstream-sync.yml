@@ -30,7 +30,7 @@ jobs:
       - name: Checkout trusted fork scripts
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -156,15 +156,14 @@ jobs:
           fi
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
 
-      - name: Assert pin preserved checked-out branch HEAD
+      - name: Assert pin preserved trusted checkout
         env:
-          EXPECTED_BRANCH: ${{ github.ref_name }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -eu
-          current_branch="$(git rev-parse --abbrev-ref HEAD)"
-          expected_branch="$EXPECTED_BRANCH"
-          if [ "$current_branch" != "$expected_branch" ]; then
-            echo "Pinning moved HEAD from $expected_branch to $current_branch"
+          current_sha="$(git rev-parse HEAD)"
+          if [ "$current_sha" != "$EXPECTED_SHA" ]; then
+            echo "Pinning moved trusted checkout HEAD from $EXPECTED_SHA to $current_sha"
             exit 1
           fi
 
@@ -181,13 +180,21 @@ jobs:
           dev_sha="$(git rev-parse HEAD)"
           bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" prepare < "$event_file" > "$result_file"
           status="$(jq -r '.status' "$result_file")"
+          # Carry the immutable candidate identity into every downstream event.
+          if jq -e '.candidate' "$result_file" >/dev/null 2>&1; then
+            jq --slurpfile result "$result_file" '. + {
+              upstreamTag: ($result[0].candidate.upstreamTag),
+              upstreamSha: ($result[0].candidate.upstreamSha),
+              baseRef: ($result[0].candidate.baseRef),
+              baseSha: ($result[0].candidate.baseSha),
+              candidate: ($result[0].candidate)
+            }' "$event_file" > "$event_file.tmp"
+            mv "$event_file.tmp" "$event_file"
+          fi
           {
             echo "status=$status"
           } >> "$GITHUB_OUTPUT"
-          if [ "$status" = "history-diverged" ]; then
-            branch="$(jq -r '.branch' "$result_file")"
-            git switch -C "$branch"
-          fi
+          # prepare creates every candidate exactly once, anchored at baseSha.
           if [ "$status" = "merged" ] || [ "$status" = "decision-handoff" ] || [ "$status" = "history-diverged" ]; then
             publish_input="$RUNNER_TEMP/fork-sync-publish-input.json"
             publish_result="$RUNNER_TEMP/fork-sync-publish.json"
@@ -198,6 +205,11 @@ jobs:
               '{event: $event[0], result: $result[0], devSha: $devSha}' \
               > "$publish_input"
             bun "$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts" publish < "$publish_input" > "$publish_result"
+            action="$(jq -r '.action' "$publish_result")"
+            if [ "$action" != "created" ] && [ "$action" != "unchanged" ]; then
+              echo "Unexpected publish action: $action"
+              exit 1
+            fi
             {
               echo "publish_action=$(jq -r '.action' "$publish_result")"
               echo "handoff_required=$(jq -r '.handoffRequired' "$publish_result")"

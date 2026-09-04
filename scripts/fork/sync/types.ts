@@ -24,14 +24,26 @@ export interface PrepareResult {
   unresolved: string[];
   pullRequestNumber?: number;
   preservationReport?: PreservationReport;
+  /** Immutable identity of the upstream candidate, when available. */
+  candidate?: CandidateIdentity;
+}
+
+/**
+ * The inputs that identify one upstream sync candidate.  These fields are
+ * deliberately readonly: a candidate branch/PR must never be retargeted to
+ * another upstream tag or base snapshot in place.
+ */
+export interface CandidateIdentity {
+  readonly upstreamRepo: string;
+  readonly upstreamTag: string;
+  readonly upstreamSha: string;
+  readonly baseRef: string;
+  readonly baseSha: string;
 }
 
 export type PublishAction =
   | "created"
-  | "fast-forwarded"
-  | "unchanged"
-  | "preserved-advanced"
-  | "preserved-diverged";
+  | "unchanged";
 
 export interface PublishResult {
   action: PublishAction;
@@ -89,6 +101,9 @@ export interface SyncEvent {
   upstreamRepo: string;
   latestTag: string;
   latestTagSha: string;
+  /** Canonical candidate names; latestTag/latestTagSha remain wire aliases. */
+  upstreamTag?: string;
+  upstreamSha?: string;
   vendorMainSha: string;
   vendorDevSha: string;
   vendorContainedInMain?: boolean;
@@ -100,6 +115,11 @@ export interface SyncEvent {
   headSha?: string;
   /** All merge bases found between headSha and vendorMainSha. */
   mergeBaseShas?: string[];
+  /** Ref and exact SHA from which this candidate was prepared. */
+  baseRef?: string;
+  baseSha?: string;
+  /** Explicit immutable identity, preferred over the legacy event fields. */
+  candidate?: CandidateIdentity;
   detectedAt: string;
   error?: string;
 }

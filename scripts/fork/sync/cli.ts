@@ -281,7 +281,35 @@ export async function runCli(
     const event = JSON.parse(input) as SyncEvent;
     const forkSha = await runOk(runner, ["rev-parse", "HEAD"]);
     if (!forkSha) throw new Error("prepare could not resolve the fork head");
-    const result = await prepareSync(event, { runner });
+    const suppliedBaseSha = event.candidate?.baseSha ?? event.baseSha;
+    if (suppliedBaseSha && suppliedBaseSha !== forkSha) {
+      throw new Error(`sync candidate base SHA ${suppliedBaseSha} does not match checked-out dev ${forkSha}`);
+    }
+    const suppliedBaseRef = event.candidate?.baseRef ?? event.baseRef;
+    if (suppliedBaseRef && suppliedBaseRef !== "refs/heads/dev") {
+      throw new Error(`sync candidate base ref must be refs/heads/dev; got ${suppliedBaseRef}`);
+    }
+    // Candidates are immutable snapshots: bind the event to the exact dev
+    // commit checked out in this worktree before creating any branch.
+    const preparedEvent: SyncEvent = (event.kind === "pin-updated"
+      || event.kind === "main-behind"
+      || event.kind === "history-diverged")
+      ? {
+        ...event,
+        baseRef: "refs/heads/dev",
+        baseSha: forkSha,
+        upstreamTag: event.upstreamTag ?? event.candidate?.upstreamTag ?? event.latestTag,
+        upstreamSha: event.upstreamSha ?? event.candidate?.upstreamSha ?? event.latestTagSha,
+        candidate: event.candidate ?? {
+          upstreamRepo: event.upstreamRepo,
+          upstreamTag: event.upstreamTag ?? event.candidate?.upstreamTag ?? event.latestTag,
+          upstreamSha: event.upstreamSha ?? event.candidate?.upstreamSha ?? event.latestTagSha,
+          baseRef: "refs/heads/dev",
+          baseSha: forkSha,
+        },
+      }
+      : event;
+    const result = await prepareSync(preparedEvent, { runner });
     // Attempt overlap analysis for provenance; fail-closed on error or candidates.
     try {
       const bases = (await runOk(runner, ["merge-base", "--all", forkSha, event.vendorMainSha]))

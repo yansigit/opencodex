@@ -5,7 +5,8 @@
  * Usage:
  *   bun scripts/release.ts <version> [--tag latest|preview] [--publish]
  *       Preflight (clean tree + dependency audit + typecheck + tests + privacy scan) → bump package.json → commit → push →
- *       wait for Cross-platform CI → dispatch the Release workflow → watch it.
+ *       wait for Cross-platform CI (and, for main/latest, the immutable Build release candidate
+ *       plus its artifact) → dispatch the Release workflow → watch it.
  *       The version bump commit/push is real; the Release workflow publish step is dry-run by default.
  *       Pass --publish to publish.
  *   bun scripts/release.ts watch
@@ -33,6 +34,9 @@ interface GhRun {
   headSha: string;
   status: string;
   url: string;
+  event?: string;
+  headBranch?: string;
+  name?: string;
 }
 
 interface CommandResult {
@@ -45,6 +49,12 @@ const CI_WORKFLOW = "ci.yml";
 const SERVICE_WORKFLOW = "service-lifecycle.yml";
 const CI_WAIT_TIMEOUT_MS = 20 * 60 * 1000;
 const CI_POLL_MS = 10 * 1000;
+const CANDIDATE_WAIT_TIMEOUT_MS = 60 * 60 * 1000;
+
+interface ReleaseCandidateRef {
+  runId: number;
+  artifactId: number;
+}
 
 async function runQuiet(command: string[]): Promise<CommandResult> {
   // Windows exposes npm and gh as `.cmd` shims. A shell-less spawn of a bare
@@ -481,6 +491,63 @@ async function waitForSuccessfulCi(sha: string, workflow: string = CI_WORKFLOW, 
   process.exit(1);
 }
 
+async function waitForReleaseCandidate(sha: string): Promise<ReleaseCandidateRef> {
+  const repository = process.env.GITHUB_REPOSITORY || await (async () => {
+    const origin = await capture(["git", "remote", "get-url", "origin"]);
+    const match = /(?:https?:\/\/[^/]+\/|git@[^:]+:|ssh:\/\/[^/]+\/)([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(origin.trim());
+    if (!match?.[1]) {
+      console.error("✗ could not derive repository name for candidate artifact lookup");
+      process.exit(1);
+    }
+    return match[1];
+  })();
+  const deadline = Date.now() + CANDIDATE_WAIT_TIMEOUT_MS;
+  let attempt = 1;
+  while (Date.now() < deadline) {
+    const raw = await capture(["gh", "run", "list", "--workflow", "release-candidate.yml", "--commit", sha,
+      "--limit", "20", "--json", "conclusion,databaseId,event,headBranch,headSha,name,status,url"]);
+    const runs = (JSON.parse(raw) as GhRun[]).filter(run =>
+      run.headSha === sha && run.event === "workflow_run" && run.headBranch === "main" &&
+      run.name === "Build release candidate",
+    );
+    const successfulRuns = runs.filter(run => run.status === "completed" && run.conclusion === "success");
+    if (successfulRuns.length > 1) {
+      console.error(`✗ multiple successful Build release candidate runs found for ${sha}; refusing ambiguous provenance`);
+      process.exit(1);
+    }
+    const failed = runs.find(run => run.status === "completed" && run.conclusion && run.conclusion !== "success");
+    if (successfulRuns.length === 0 && failed) {
+      console.error(`✗ Build release candidate failed for ${sha}: ${failed.url}`);
+      process.exit(1);
+    }
+    for (const run of successfulRuns) {
+      const artifactsRaw = await capture(["gh", "api", `/repos/${repository}/actions/runs/${run.databaseId}/artifacts?per_page=100`]);
+      const artifacts = JSON.parse(artifactsRaw) as { total_count?: number; artifacts?: Array<{ id?: number; name?: string; expired?: boolean }> };
+      const matching = (artifacts.artifacts ?? []).filter(artifact =>
+        artifact.name === `release-candidate-${sha}` && artifact.expired === false &&
+        typeof artifact.id === "number" && Number.isInteger(artifact.id) && artifact.id > 0,
+      );
+      if (artifacts.total_count !== undefined && artifacts.total_count !== (artifacts.artifacts ?? []).length) {
+        console.error("✗ candidate artifact listing was truncated; refusing ambiguous provenance");
+        process.exit(1);
+      }
+      if (matching.length === 1) {
+        console.log(`→ Build release candidate passed: ${run.url}`);
+        return { runId: run.databaseId, artifactId: matching[0]!.id! };
+      }
+      if (matching.length > 1) {
+        console.error(`✗ multiple unexpired release candidate artifacts found for ${sha}`);
+        process.exit(1);
+      }
+    }
+    console.log(`→ waiting for immutable Build release candidate (${sha.slice(0, 7)}) attempt ${attempt}`);
+    attempt += 1;
+    await Bun.sleep(CI_POLL_MS);
+  }
+  console.error(`✗ timed out waiting for immutable Build release candidate on ${sha}`);
+  process.exit(1);
+}
+
 async function _remoteMainSha(): Promise<string> {
   const out = await capture(["git", "ls-remote", "origin", "refs/heads/main"]);
   const [sha] = out.split(/\s+/);
@@ -589,9 +656,21 @@ if (currentVersion === version) {
 const pendingBump = (await capture(["git", "status", "--porcelain", "package.json"])).trim() !== "";
 if (pendingBump) {
   await runLoud(["git", "add", "package.json"]);
-  await runLoud(["git", "commit", "-m", `release: v${version}`]);
+  const commitArgs = ["git", "commit", "-m", `release: v${version}`];
+  if (branch === "main" && tag === "latest") commitArgs.push("-m", "Auto-Release: skip");
+  await runLoud(commitArgs);
 }
 const releaseSha = await capture(["git", "rev-parse", "HEAD"]);
+if (branch === "main" && tag === "latest") {
+  const autoReleaseTrailers = await capture(["git", "log", "-1", "--format=%(trailers:key=Auto-Release,valueonly)", "HEAD"]);
+  const suppressesAutomaticDispatch = autoReleaseTrailers
+    .split(/\r?\n/)
+    .some(value => value.trim() === "skip");
+  if (!suppressesAutomaticDispatch) {
+    console.error("✗ stable helper releases require an 'Auto-Release: skip' commit trailer to prevent competing automatic and manual dispatches.");
+    process.exit(1);
+  }
+}
 if (pendingBump) {
   console.log(`→ push origin ${branch}`);
   const push = await releasePushCommand(branch);
@@ -611,6 +690,12 @@ await waitForSuccessfulCi(releaseSha);
 console.log(`→ wait for Service lifecycle (${releaseSha})`);
 await waitForSuccessfulCi(releaseSha, SERVICE_WORKFLOW, "Service lifecycle");
 
+let candidate: ReleaseCandidateRef | undefined;
+if (branch === "main" && tag === "latest") {
+  console.log(`→ wait for immutable Build release candidate (${releaseSha})`);
+  candidate = await waitForReleaseCandidate(releaseSha);
+}
+
 // Live-remote guard: re-read the actual remote head over the network immediately
 // before dispatch. The local remote-tracking ref can be minutes stale, and the
 // workflow_dispatch below resolves a mutable branch — so this is the last chance
@@ -623,7 +708,9 @@ if (!remoteHeadMatches(releaseSha, liveOriginSha)) {
 
 console.log(`→ dispatch Release (tag=${tag}, dry-run=${dryRun})`);
 const dispatchStartedAt = new Date(Date.now() - 5_000).toISOString();
-await runLoud(["gh", "workflow", "run", "release.yml", "--ref", branch, "-f", `version=${version}`, "-f", `tag=${tag}`, "-f", `expected-sha=${releaseSha}`, "-f", `dry-run=${String(dryRun)}`]);
+const dispatchArgs = ["gh", "workflow", "run", "release.yml", "--ref", branch, "-f", `version=${version}`, "-f", `tag=${tag}`, "-f", `expected-sha=${releaseSha}`, "-f", `dry-run=${String(dryRun)}`];
+if (candidate) dispatchArgs.push("-f", `candidate-run-id=${candidate.runId}`, "-f", `candidate-artifact-id=${candidate.artifactId}`);
+await runLoud(dispatchArgs);
 
 // 5. Watch it.
 const releaseRun = await waitForReleaseWorkflowRun(releaseSha, branch, dispatchStartedAt);

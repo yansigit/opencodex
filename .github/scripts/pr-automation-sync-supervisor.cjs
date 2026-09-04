@@ -134,7 +134,7 @@ function buildSyncRepairIssue({ pr, disposition }) {
       `Trusted CI check run: ${disposition.checkRunId}`,
       `Failure: ${disposition.reason}`,
       "",
-      "Action: reproduce the exact-head CI failure, fix only regressions introduced by the upstream integration, and push the fix to the existing sync branch. Follow AGENTS.md and docs/fork/OWNED.md. Do not weaken required checks, sponsorship rules, protected-path review, or merge policy. Run the smallest focused checks first, then the required pre-PR validation.",
+      "Action: immutable sync candidates must not be edited, force-pushed, or updated in place. Reproduce the exact-head CI failure, fix the underlying regression on trunk (dev), and then let fork-upstream-sync generate a new successor candidate. Do not ask Jules, Cursor, or any agent to push to this branch or call update-branch. Follow AGENTS.md and docs/fork/OWNED.md. Do not weaken required checks, sponsorship rules, protected-path review, or merge policy. Run the smallest focused checks first, then the required pre-PR validation.",
     ].join("\n"),
   };
 }

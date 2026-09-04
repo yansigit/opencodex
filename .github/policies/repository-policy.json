@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "repository": "yansigit/opencodex",
+  "defaultBranch": "main",
+  "integrationBranches": ["dev", "main", "preview"],
+  "candidateEvents": ["merge_group", "pull_request"],
+  "ci": {
+    "workflow": ".github/workflows/ci.yml",
+    "name": "Cross-platform CI",
+    "aggregateJob": "ci",
+    "paths": ".github/policies/ci-paths.yml",
+    "mergeGroupTypes": ["checks_requested"]
+  },
+  "release": {
+    "workflow": ".github/workflows/fork-auto-release.yml",
+    "sourceWorkflow": "Build release candidate",
+    "sourceEvent": "workflow_run",
+    "branch": "main"
+  }
+}

@@ -49,6 +49,10 @@ function decideForkAutoRelease({
   packageVersion,
   rawCommitMessage,
   versionOnNpm,
+  workflowEvent,
+  workflowPath,
+  workflowRepository,
+  repository,
 }) {
   requiredString(eventName, "eventName");
   requiredString(workflowName, "workflowName");
@@ -73,8 +77,18 @@ function decideForkAutoRelease({
   if (eventName !== "workflow_run") {
     return { action: "skip", reason: `event must be workflow_run; got ${eventName}.` };
   }
-  if (workflowName !== "Cross-platform CI") {
-    return { action: "skip", reason: `triggering workflow must be Cross-platform CI; got ${workflowName}.` };
+  if (workflowName !== "Build release candidate") {
+    return { action: "skip", reason: `triggering workflow must be Build release candidate (from Cross-platform CI); got ${workflowName}.` };
+  }
+  requiredString(workflowEvent, "workflowEvent");
+  requiredString(workflowPath, "workflowPath");
+  requiredString(workflowRepository, "workflowRepository");
+  requiredString(repository, "repository");
+  if (workflowEvent !== "workflow_run" || workflowPath !== ".github/workflows/release-candidate.yml") {
+    return { action: "skip", reason: "candidate run provenance is not the trusted workflow_run release-candidate workflow." };
+  }
+  if (workflowRepository !== repository) {
+    return { action: "skip", reason: `candidate run repository must match ${repository}; got ${workflowRepository}.` };
   }
   if (conclusion !== "success") {
     return { action: "skip", reason: `CI conclusion must be success; got ${conclusion}.` };
@@ -127,6 +141,10 @@ function decideFromEnv(env = process.env) {
     packageName: env.PACKAGE_NAME,
     packageVersion: env.PACKAGE_VERSION,
     rawCommitMessage: env.RAW_COMMIT_MESSAGE,
+    workflowEvent: env.WORKFLOW_EVENT,
+    workflowPath: env.WORKFLOW_PATH,
+    workflowRepository: env.WORKFLOW_REPOSITORY,
+    repository: env.GITHUB_REPOSITORY,
   };
   if (Object.prototype.hasOwnProperty.call(env, "VERSION_ON_NPM")) {
     input.versionOnNpm = env.VERSION_ON_NPM;

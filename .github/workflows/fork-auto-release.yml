@@ -1,31 +1,40 @@
 name: Fork auto-release
 
-# After a human merge to main, dispatch the existing Release workflow only
-# after the promotion CI and its service gate are green. npm Trusted Publishing
-# must be bound to yansigit/opencodex's release.yml workflow; this dispatcher
-# never changes package.json or carries publish credentials.
+# After the immutable release-candidate build completes, dispatch Release with
+# the exact candidate run and artifact IDs. npm Trusted Publishing remains
+# bound to release.yml; this dispatcher never carries publish credentials.
 on:
   workflow_run:
-    workflows: ["Cross-platform CI"]
+    workflows: ["Build release candidate"]
     types: [completed]
     branches: [main]
 
 permissions: {}
 
 concurrency:
+  # Publication remains globally serialized even though CI is candidate-SHA
+  # keyed. Only one release writer may make an eligibility decision at a time.
   group: fork-auto-release
   cancel-in-progress: false
 
 jobs:
   auto-release:
-    if: github.event.workflow_run.conclusion == 'success'
+    # Only a successful candidate produced by the trusted Cross-platform CI
+    # workflow_run chain on this repository's main branch may release.
+    if: >-
+      github.event.workflow_run.event == 'workflow_run' &&
+      github.event.workflow_run.name == 'Build release candidate' &&
+      github.event.workflow_run.path == '.github/workflows/release-candidate.yml' &&
+      github.event.workflow_run.repository.full_name == github.repository &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
       contents: read
       actions: read
     steps:
-      - name: Checkout CI head
+      - name: Checkout candidate head
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -37,6 +46,9 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          WORKFLOW_REPOSITORY: ${{ github.event.workflow_run.repository.full_name }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -84,6 +96,32 @@ jobs:
           echo "head-sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
           echo "package-name=$PACKAGE_NAME" >> "$GITHUB_OUTPUT"
           echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve immutable candidate artifact
+        id: candidate-artifact
+        if: steps.decide.outputs.dispatch == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_RUN_ID: ${{ github.event.workflow_run.id }}
+          EXPECTED_SHA: ${{ steps.decide.outputs.head-sha }}
+        run: |
+          set -euo pipefail
+          run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}")"
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$EXPECTED_SHA" \
+            '(.repository.full_name == $repo) and (.name == "Build release candidate") and (.path == ".github/workflows/release-candidate.yml") and (.event == "workflow_run") and (.head_branch == "main") and (.head_sha == $sha) and (.status == "completed") and (.conclusion == "success")' \
+            <<<"$run_json" >/dev/null || { echo "::error::candidate run provenance, branch, SHA, or conclusion is not trusted"; exit 1; }
+          artifacts="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}/artifacts?per_page=100")"
+          artifact_count="$(jq --arg name "release-candidate-${EXPECTED_SHA}" '[.artifacts[] | select(.name == $name and .expired == false)] | length' <<<"$artifacts")"
+          if [ "$artifact_count" != 1 ]; then
+            echo "::error::expected exactly one unexpired release candidate artifact, found $artifact_count"
+            exit 1
+          fi
+          artifact_id="$(jq -r --arg name "release-candidate-${EXPECTED_SHA}" '[.artifacts[] | select(.name == $name and .expired == false)][0].id // empty' <<<"$artifacts")"
+          if ! printf '%s' "$artifact_id" | grep -Eq '^[1-9][0-9]*$'; then
+            echo "::error::no unexpired release candidate artifact found for run $CANDIDATE_RUN_ID and SHA $EXPECTED_SHA"
+            exit 1
+          fi
+          echo "id=$artifact_id" >> "$GITHUB_OUTPUT"
 
       - name: Wait for Service lifecycle
         if: steps.decide.outputs.dispatch == 'true'
@@ -188,10 +226,14 @@ jobs:
           GH_TOKEN: ${{ steps.release-dispatch-app-token.outputs.token }}
           HEAD_SHA: ${{ steps.decide.outputs.head-sha }}
           VERSION: ${{ steps.decide.outputs.version }}
+          CANDIDATE_RUN_ID: ${{ github.event.workflow_run.id }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.candidate-artifact.outputs.id }}
         run: |
           set -euo pipefail
           jq -n \
             --arg version "$VERSION" \
             --arg expected_sha "$HEAD_SHA" \
-            '{event_type:"fork-auto-release",client_payload:{version:$version,tag:"latest",expected_sha:$expected_sha}}' |
+            --arg candidate_run_id "$CANDIDATE_RUN_ID" \
+            --arg candidate_artifact_id "$CANDIDATE_ARTIFACT_ID" \
+            '{event_type:"fork-auto-release",client_payload:{version:$version,tag:"latest",expected_sha:$expected_sha,candidate_run_id:$candidate_run_id,candidate_artifact_id:$candidate_artifact_id}}' |
             gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" --input -
