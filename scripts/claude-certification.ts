@@ -12,6 +12,7 @@ import type { OcxConfig } from "../src/types";
 
 const MODEL = "claude-cert-hermetic";
 const CLI_MODEL = "claude-sonnet-4-5";
+const ADMISSION_TOKEN = "ocx_data_claude_cert";
 const MAX_OUTPUT = 256 * 1024;
 const TIMEOUT_MS = 45_000;
 const CREDENTIAL = /(?:API_KEY|API_TOKEN|AUTH_TOKEN|ACCESS_TOKEN|SECRET|PASSWORD|TOKEN)/i;
@@ -37,8 +38,7 @@ export function sanitizedChildEnv(base: Record<string, string | undefined>, dirs
   out.CLAUDE_CONFIG_DIR = dirs.claude;
   out.OPENCODEX_HOME = dirs.ocx;
   out.NO_PROXY = "127.0.0.1,localhost,::1";
-  out.ANTHROPIC_API_KEY = "sk-ant-api03-hermetic-certification-key";
-  out.ANTHROPIC_AUTH_TOKEN = out.ANTHROPIC_API_KEY;
+  out.ANTHROPIC_AUTH_TOKEN = ADMISSION_TOKEN;
   out.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   return out;
 }
@@ -61,7 +61,7 @@ async function command(exe: string, args: string[], cwd: string, env: Record<str
 }
 
 function config(baseUrl: string): OcxConfig {
-  return { port: 0, hostname: "127.0.0.1", defaultProvider: "claude-cert", claudeCode: { nativePassthrough: false, modelMap: { [CLI_MODEL]: `claude-cert/${MODEL}` } }, providers: { "claude-cert": { adapter: "anthropic", baseUrl, authMode: "key", apiKey: "hermetic-cert-key", allowPrivateNetwork: true, liveModels: true, models: [MODEL], retry: { maxAttempts: 1 } } } } as OcxConfig;
+  return { port: 0, hostname: "127.0.0.1", defaultProvider: "claude-cert", apiKeys: [{ id: "claude-cert", name: "claude-cert", key: ADMISSION_TOKEN, createdAt: "" }], claudeCode: { nativePassthrough: false, modelMap: { [CLI_MODEL]: `claude-cert/${MODEL}` } }, providers: { "claude-cert": { adapter: "anthropic", baseUrl, authMode: "key", apiKey: "hermetic-cert-key", allowPrivateNetwork: true, liveModels: true, models: [MODEL], retry: { maxAttempts: 1 } } } } as OcxConfig;
 }
 
 function sse(events: Array<{ event: string; data: unknown }>): Response { return new Response(events.map(e => `event: ${e.event}\ndata: ${JSON.stringify(e.data)}\n\n`).join(""), { status: 200, headers: { "content-type": "text/event-stream" } }); }
