@@ -29,6 +29,7 @@ import { collectOrcaCodexHomeDiagnostic, resolveCodexHomeDir as resolveCodexHome
 import { scanCodexAgentRolesWithTomlModelFallback } from "../codex/subagent-model-fallback";
 import { lstatSync } from "node:fs";
 import { DIRECTIVE_KEY_FILE, getDirectiveKeyPath } from "../claude/directive-key";
+import { hardenSecretPath } from "../lib/windows-secret-acl";
 import { diagnoseCodexShim, findCodexOnPath, isWindowsInteropDir, type CodexShimDiagnostic } from "../codex/shim";
 import { providerTableString, rootTomlString } from "../codex/injected-marker";
 import { countPendingOpencodexHistory } from "../codex/history-provider";
@@ -1324,7 +1325,16 @@ export async function runDoctor(args: string[] = []): Promise<void> {
         console.log("        Action: replace the symlink with a regular file, then let the proxy recreate or reuse the key");
       } else if (!st.isFile()) {
         console.log(`  --     ${DIRECTIVE_KEY_FILE} is not a regular file`);
-      } else if (process.platform === "win32" || (st.mode & 0o777) === 0o600) {
+      } else if (process.platform === "win32") {
+        const hardened = hardenSecretPath(keyPath, { required: false });
+        if (hardened.ok) {
+          console.log(`  ok     ${DIRECTIVE_KEY_FILE} present (Windows ACL hardened)`);
+        } else {
+          console.log(`  !!     ${DIRECTIVE_KEY_FILE} present but Windows ACL hardening could not be verified`);
+          if (hardened.diagnostics) console.log(`        Detail: ${hardened.diagnostics}`);
+          console.log("        Action: repair the key file ACL, then rerun doctor");
+        }
+      } else if ((st.mode & 0o777) === 0o600) {
         console.log(`  ok     ${DIRECTIVE_KEY_FILE} present (0600, owner-only)`);
       } else {
         console.log(`  !!     ${DIRECTIVE_KEY_FILE} present but permissions are 0${(st.mode & 0o777).toString(8)} (expected 0600)`);

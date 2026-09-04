@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import { AnthropicRequestError, extractSignedDirective, verifyAndExtractDirectiv
 import { handleClaudeMessages, handleClaudeCountTokens } from "../src/server/claude-messages";
 import type { OcxConfig, RequestLogContext } from "../src/types";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
+import * as windowsAcl from "../src/lib/windows-secret-acl";
 
 const dirs: string[] = [];
 function tempDir(): string {
@@ -57,6 +58,25 @@ describe("directive signing key management (src/claude/directive-key.ts)", () =>
     const readKey = getOrCreateDirectiveSigningKey(dir);
     expect(readKey).toBe(key);
     expect(lstatSync(keyPath).mode & 0o777).toBe(0o600);
+  });
+
+  test("fails closed when an existing Windows key ACL cannot be verified", () => {
+    const dir = tempDir();
+    const key = getOrCreateDirectiveSigningKey(dir);
+    const originalPlatform = process.platform;
+    const hardenSpy = spyOn(windowsAcl, "hardenSecretPath").mockReturnValue({
+      ok: false,
+      diagnostics: "ACL unavailable",
+    });
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      expect(() => getOrCreateDirectiveSigningKey(dir)).toThrow(/ACL hardening could not be verified/);
+      expect(hardenSpy).toHaveBeenCalledWith(getDirectiveKeyPath(dir), { required: false });
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+      hardenSpy.mockRestore();
+    }
+    expect(key).toMatch(/^[0-9a-f]{64}$/);
   });
 
   test("refuses symlinked key files", () => {

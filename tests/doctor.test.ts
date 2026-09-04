@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,6 +25,7 @@ import {
 import type { ClaudeClientVersion } from "../src/claude/client-version";
 import { collectOrcaCodexHomeDiagnostic } from "../src/codex/home";
 import { NativeProfileError } from "../src/codex/native-profile-types";
+import * as windowsAcl from "../src/lib/windows-secret-acl";
 import {
   LOCAL_MANAGEMENT_CAPABILITY_HEADER,
   LOCAL_MANAGEMENT_CAPABILITY_EXPIRES_AT_HEADER,
@@ -98,6 +99,27 @@ describe("doctor", () => {
     rows = collectPaths();
     expect(auth().exists).toBe(true);
     expect(cfg().exists).toBe(true);
+  });
+
+  test("reports unverifiable Windows directive-key ACLs without claiming 0600", async () => {
+    writeFileSync(join(TEST_OPENCODEX_HOME, "claude-agent-directive-key"), "a".repeat(64) + "\n");
+    const originalPlatform = process.platform;
+    const hardenSpy = spyOn(windowsAcl, "hardenSecretPath").mockReturnValue({ ok: false, diagnostics: "ACL unavailable" });
+    const originalLog = console.log;
+    const lines: string[] = [];
+    console.log = (...parts: unknown[]) => lines.push(parts.join(" "));
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      await runDoctor([]);
+      const report = lines.join("\n");
+      expect(report).toContain("Windows ACL hardening could not be verified");
+      expect(report).not.toContain("present (0600, owner-only)");
+      expect(hardenSpy).toHaveBeenCalledWith(join(TEST_OPENCODEX_HOME, "claude-agent-directive-key"), { required: false });
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+      hardenSpy.mockRestore();
+      console.log = originalLog;
+    }
   });
 
   test("resolveCodexHomeDir expands ~ like the hardened runtime paths", () => {

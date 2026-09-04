@@ -5,6 +5,7 @@ import { ConfigMutationLockError, withConfigMutationLockSync } from "../config";
 import { atomicWriteFile } from "../config/atomic-write";
 import { getConfigDir } from "../config/paths";
 import { tokenCollidesWithAdmin } from "../lib/admin-secrets";
+import { hardenSecretPath } from "../lib/windows-secret-acl";
 
 export const DIRECTIVE_KEY_FILE = "claude-agent-directive-key";
 const KEY_LOCK_WAIT_MS = 5_000;
@@ -64,6 +65,12 @@ function readExistingDirectiveKey(keyPath: string, configDir: string): string {
     }
     if ((lstatSync(keyPath).mode & 0o777) !== 0o600) {
       throw new Error(`directive key file permissions are not owner-only (0600): ${keyPath}`);
+    }
+  }
+  if (process.platform === "win32") {
+    const hardened = hardenSecretPath(keyPath, { required: false });
+    if (!hardened.ok) {
+      throw new Error(`directive key file ACL hardening could not be verified: ${hardened.diagnostics ?? "unknown error"}`);
     }
   }
   const key = validateKeyFormat(readFileSync(keyPath, "utf8"), keyPath);
