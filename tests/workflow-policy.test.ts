@@ -56,7 +56,7 @@ describe("repository workflow policy", () => {
     delete filter!.with!.ref;
 
     expect(validateWorkflowPolicy(input)).toEqual([
-      "CI concurrency must cancel only duplicate runs for the immutable candidate SHA",
+      "CI concurrency must use event-appropriate identities and cancel only stale pull-request or push runs",
       "CI paths-filter must use explicit merge_group base/head SHAs with safe fallbacks",
     ]);
   });
@@ -99,5 +99,10 @@ describe("repository workflow policy", () => {
     expect(validateWorkflowPolicy(input)).toContain(
       "ci path policy must include .github/policies/**",
     );
+  });
+
+  test("includes composite actions in the shared CI path scope", async () => {
+    const input = await loadInput();
+    expect(input.paths.ci).toContain(".github/actions/**");
   });
 });

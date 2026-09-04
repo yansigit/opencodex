@@ -51,8 +51,10 @@ export type WorkflowPolicyInput = {
 
 const CANDIDATE_SCOPE =
   "(github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.ci == 'true'";
-const CONCURRENCY_SHA =
-  "cross-platform-ci-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}";
+const CONCURRENCY_GROUP =
+  "cross-platform-ci-${{ github.event_name }}-${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.event_name == 'workflow_dispatch' && github.run_id || github.run_id }}";
+const CONCURRENCY_CANCEL =
+  "${{ github.event_name == 'pull_request' || github.event_name == 'push' }}";
 const MERGE_BASE = "${{ github.event.merge_group.base_sha }}";
 const MERGE_HEAD = "${{ github.event.merge_group.head_sha }}";
 
@@ -118,8 +120,9 @@ export function validateWorkflowPolicy(input: WorkflowPolicyInput): string[] {
   if (!sameMembers(ci.on?.push?.branches, policy.integrationBranches)) {
     fail("CI push branches must match repository integrationBranches");
   }
-  if (ci.concurrency?.group !== CONCURRENCY_SHA || ci.concurrency?.["cancel-in-progress"] !== true) {
-    fail("CI concurrency must cancel only duplicate runs for the immutable candidate SHA");
+  if (ci.concurrency?.group !== CONCURRENCY_GROUP ||
+      ci.concurrency?.["cancel-in-progress"] !== CONCURRENCY_CANCEL) {
+    fail("CI concurrency must use event-appropriate identities and cancel only stale pull-request or push runs");
   }
 
   const filterSteps = Object.values(ci.jobs ?? {})

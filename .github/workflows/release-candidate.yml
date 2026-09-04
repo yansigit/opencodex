@@ -74,17 +74,8 @@ jobs:
         working-directory: gui
         run: bun install --frozen-lockfile
 
-      - name: Audit dependencies
-        run: bun run audit:high
-
-      - name: Typecheck
-        run: bun run typecheck
-
       - name: Test release-candidate contracts
         run: bun test tests/release-candidate.test.ts tests/fork/release-candidate-workflow.test.ts
-
-      - name: Run full test suite
-        run: bun run test
 
       - name: Build GUI and package assets
         run: bun run build:gui

@@ -13,9 +13,8 @@ const workflow = Bun.YAML.parse(workflowText) as {
 };
 
 describe("release PR workflow contract", () => {
-  test("runs only for main updates or a main-branch manual dispatch", () => {
-    expect(workflow.on?.push).toEqual({ branches: ["main"] });
-    expect(workflow.on).toHaveProperty("workflow_dispatch");
+  test("runs only for a main-branch manual dispatch", () => {
+    expect(Object.keys(workflow.on ?? {})).toEqual(["workflow_dispatch"]);
     expect(workflow.jobs?.["release-pr"]?.if).toBe("github.ref == 'refs/heads/main'");
     expect(workflowText).not.toContain("dev-version-bump");
     expect(workflowText).not.toContain("npm publish");

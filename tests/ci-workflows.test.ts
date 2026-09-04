@@ -108,8 +108,16 @@ describe("GitHub Actions hardening", () => {
     const workflow = await readText(".github/workflows/ci.yml");
     const ci = Bun.YAML.parse(workflow) as {
       permissions?: Record<string, string>;
+      concurrency?: { group?: string; "cancel-in-progress"?: string };
       jobs?: Record<string, { "timeout-minutes"?: number } | undefined>;
     };
+
+    expect(ci.concurrency?.group).toBe(
+      "cross-platform-ci-${{ github.event_name }}-${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.event_name == 'workflow_dispatch' && github.run_id || github.run_id }}",
+    );
+    expect(ci.concurrency?.["cancel-in-progress"]).toBe(
+      "${{ github.event_name == 'pull_request' || github.event_name == 'push' }}",
+    );
 
     // Job-scoped: a global count still passes if values are swapped between jobs.
     // Pin ownership explicitly. The Windows leg is sharded like the Linux ones
@@ -458,6 +466,7 @@ describe("GitHub Actions hardening", () => {
     // whether the costly jobs run.
     const ciPaths = [
       ".gitattributes",
+      ".github/actions/**",
       ".github/policies/**",
       ".github/workflows/**",
       ".npmignore",

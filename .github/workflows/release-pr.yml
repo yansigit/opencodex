@@ -1,11 +1,10 @@
 name: Release PR
 
-# Release Please maintains a reviewable version/changelog pull request on main.
+# Release Please maintains a reviewable version/changelog pull request on main
+# when explicitly dispatched during the candidate-artifact rollout.
 # Publishing and promotion are deliberately owned by the existing release and
 # promotion workflows; this workflow never runs on dev or preview.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions: {}

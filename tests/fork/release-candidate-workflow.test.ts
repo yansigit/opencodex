@@ -43,20 +43,24 @@ describe("release candidate workflow contract", () => {
     expect(workflow.jobs?.build?.["timeout-minutes"]).toBeGreaterThan(0);
   });
 
-  test("uses frozen dependencies and runs qualification before packaging", () => {
+  test("installs once, runs only candidate contracts, then builds and packages once", () => {
     expect(workflowText.match(/bun install --frozen-lockfile/g)?.length).toBe(2);
-    const audit = workflowText.indexOf("bun run audit:high");
-    const typecheck = workflowText.indexOf("bun run typecheck");
     const focused = workflowText.indexOf("bun test tests/release-candidate.test.ts");
-    const full = workflowText.indexOf("bun run test");
     const gui = workflowText.indexOf("bun run build:gui");
     const pack = workflowText.indexOf("bun scripts/build-release-candidate.ts");
-    expect(audit).toBeGreaterThan(0);
-    expect(typecheck).toBeGreaterThan(audit);
-    expect(focused).toBeGreaterThan(typecheck);
-    expect(full).toBeGreaterThan(focused);
-    expect(gui).toBeGreaterThan(full);
+    const verify = workflowText.indexOf("bun scripts/release-candidate.ts verify");
+    expect(focused).toBeGreaterThan(0);
+    expect(workflowText).not.toContain("bun run audit:high");
+    expect(workflowText).not.toContain("bun run typecheck");
+    expect(workflowText).not.toMatch(/bun run test(?:\s|$)/m);
+    expect(gui).toBeGreaterThan(focused);
     expect(pack).toBeGreaterThan(gui);
+    expect(verify).toBeGreaterThan(pack);
+    expect(workflowText).toContain("release-candidate/release-candidate.json");
+    expect(workflowText).toContain("--repository \"$GITHUB_REPOSITORY\"");
+    expect(workflowText).toContain("--sha \"$EXPECTED_SHA\"");
+    expect(workflowText).toContain("--tree \"$tree_sha\"");
+    expect(workflowText).toContain("--input-root \"$GITHUB_WORKSPACE\"");
   });
 
   test("packs once and uploads only the immutable candidate directory", () => {

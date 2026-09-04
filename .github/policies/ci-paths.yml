@@ -19,6 +19,7 @@ ci:
   - 'README.md'
   - 'LICENSE'
   - '.github/workflows/**'
+  - '.github/actions/**'
   - '.github/policies/**'
 
 dependencies:

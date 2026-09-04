@@ -37,11 +37,14 @@ permissions:
 
 # Retrigger CI after dir-fsync / oauth deadline follow-ups (tip 34a1ac46).
 concurrency:
-  # Key candidate runs by the immutable commit being tested. A queue ref moves
-  # as candidates enter and leave, so ref-keyed concurrency can cancel evidence
-  # for an unrelated synthetic commit.
-  group: cross-platform-ci-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
-  cancel-in-progress: true
+  # Keep identities distinct by event. Merge-queue candidates use their
+  # immutable synthetic SHA; pull requests share a number so a new commit
+  # supersedes the obsolete run; pushes share a branch ref; manual dispatches
+  # get an independent run identity.
+  group: cross-platform-ci-${{ github.event_name }}-${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.event_name == 'workflow_dispatch' && github.run_id || github.run_id }}
+  # Candidate evidence must finish. New PR commits and pushes supersede stale
+  # runs, while merge-queue and manually dispatched runs are never cancelled.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
   # Which areas this push actually touches.
