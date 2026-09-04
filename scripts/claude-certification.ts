@@ -10,7 +10,7 @@ import { saveConfig } from "../src/config";
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 
-const MODEL = "claude-cert-hermetic";
+const MODEL = "claude-3-5-sonnet-20241022";
 const MAX_OUTPUT = 256 * 1024;
 const TIMEOUT_MS = 45_000;
 const CREDENTIAL = /(?:API_KEY|API_TOKEN|AUTH_TOKEN|ACCESS_TOKEN|SECRET|PASSWORD|TOKEN)/i;
@@ -36,8 +36,8 @@ export function sanitizedChildEnv(base: Record<string, string | undefined>, dirs
   out.CLAUDE_CONFIG_DIR = dirs.claude;
   out.OPENCODEX_HOME = dirs.ocx;
   out.NO_PROXY = "127.0.0.1,localhost,::1";
-  out.ANTHROPIC_API_KEY = "hermetic-cert-key";
-  out.ANTHROPIC_AUTH_TOKEN = "hermetic-cert-key";
+  out.ANTHROPIC_API_KEY = "sk-ant-api03-hermetic-certification-key";
+  out.ANTHROPIC_AUTH_TOKEN = out.ANTHROPIC_API_KEY;
   out.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
   return out;
 }
@@ -74,7 +74,7 @@ export async function runHermetic(cli = process.env.CLAUDE_BIN?.trim() || "claud
     upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) { if (new URL(req.url).pathname !== "/v1/messages") return new Response("not found", { status: 404 }); requests.push(await req.json()); const first = requests.length === 1; return sse(first ? [{ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "cert_tool", name: "cert_marker", input: {} } }, { type: "content_block_stop", index: 0 }, { type: "message_stop", stop_reason: "tool_use" }] : [{ type: "content_block_start", index: 0, content_block: { type: "text", text: "CLAUDE_CERT_OK" } }, { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "CLAUDE_CERT_OK" } }, { type: "content_block_stop", index: 0 }, { type: "message_stop", stop_reason: "end_turn" }]); } });
     process.env.OPENCODEX_HOME = dirs.ocx; saveConfig(config(new URL("/v1", upstream.url).toString())); proxy = startServer(0);
     const env = sanitizedChildEnv(process.env, dirs); env.ANTHROPIC_BASE_URL = new URL("/v1", proxy.url).toString(); env.ANTHROPIC_MODEL = MODEL;
-    let result; try { result = await command(cli, ["-p", "Use cert_marker, then print the marker.", "--output-format", "text"], root, env); } catch (error) { return { mode: "hermetic", status: "skipped", cliPresent: false, streaming: false, toolContinuation: false, requests: 0, reason: error instanceof Error ? error.message : "Claude Code CLI unavailable" }; }
+    let result; try { result = await command(cli, ["-p", "Use cert_marker, then print the marker.", "--model", MODEL, "--output-format", "text"], root, env); } catch (error) { return { mode: "hermetic", status: "skipped", cliPresent: false, streaming: false, toolContinuation: false, requests: 0, reason: error instanceof Error ? error.message : "Claude Code CLI unavailable" }; }
     const text = `${result.out}\n${result.err}`; const streaming = requests.length > 0; const toolContinuation = requests.length >= 2;
     return { mode: "hermetic", status: result.code === 0 && text.includes("CLAUDE_CERT_OK") && streaming && toolContinuation ? "hermetic_pass" : "hermetic_fail", cliPresent: true, streaming, toolContinuation, requests: requests.length, reason: result.code === 0 ? undefined : "Claude Code exited non-zero" };
   } finally { if (proxy) await proxy.stop(true); upstream?.stop(true); if (previousOcxHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousOcxHome; rmSync(root, { recursive: true, force: true }); }
