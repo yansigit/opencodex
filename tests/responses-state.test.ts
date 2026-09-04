@@ -2109,6 +2109,32 @@ describe("Responses previous_response_id state", () => {
     }
   });
 
+  test("spill eviction keeps failed unlink bytes charged until the file disappears", () => {
+    setResponseStateByteCapForTests(1_024);
+    rememberLarge("resp_eviction_unlink_debt", "e".repeat(8_000));
+    const spillPath = join(responseSpillDirectory(home), spillFileNames(home)[0]!);
+    const payloadBytes = getSpilledResponseBytesForTests();
+    expect(payloadBytes).toBeGreaterThan(0);
+
+    setSpillIoForTest({
+      unlink(path) {
+        if (path === spillPath) throw Object.assign(new Error("locked spill"), { code: "EACCES" });
+        unlinkSync(path);
+      },
+    });
+    setSpilledResponseByteCapForTests(0);
+    sweepExpiredResponseStates();
+
+    expect(existsSync(spillPath)).toBe(true);
+    expect(getSpilledResponseBytesForTests()).toBe(0);
+    expect(getAccountedResponseSpillBytesForTests()).toBe(payloadBytes);
+
+    setSpillIoForTest(null);
+    sweepExpiredResponseStates();
+    expect(existsSync(spillPath)).toBe(false);
+    expect(getAccountedResponseSpillBytesForTests()).toBe(0);
+  });
+
   test("startup orphan cleanup removes only old unreferenced regular spill files", async () => {
     setResponseStateByteCapForTests(1_024);
     rememberLarge("resp_live_orphan_gc", "l".repeat(8_000));

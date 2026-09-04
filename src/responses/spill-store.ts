@@ -881,13 +881,19 @@ export function readResponseSpill(responseId: string, ref: ResponseSpillRef): Re
   }
 }
 
-export function deleteResponseSpill(ref: ResponseSpillRef): void {
+export function deleteResponseSpill(
+  ref: ResponseSpillRef,
+  onCleanupResidual?: (path: string, bytes: number) => void,
+): void {
   if (!validSpillRef(ref)) return;
   const dir = responseSpillDirectory();
+  const path = join(dir, ref.fileName);
   try {
-    unlink(join(dir, ref.fileName));
+    unlink(path);
     fsyncDirectoryBestEffort(dir);
-  } catch { /* best effort */ }
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) onCleanupResidual?.(path, ref.payloadBytes);
+  }
 }
 
 function removePublishedResponseSpill(

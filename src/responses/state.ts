@@ -466,6 +466,20 @@ function reconcileUnreclaimableSpillPaths(): number {
   return total;
 }
 
+/** Retry cleanup-resistant state-owned paths on the next budget pass. */
+function retryUnreclaimableSpillPaths(): void {
+  for (const path of [...unreclaimableSpillPaths.keys()]) {
+    try {
+      unlinkSync(path);
+      unreclaimableSpillPaths.delete(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        unreclaimableSpillPaths.delete(path);
+      }
+    }
+  }
+}
+
 /**
  * Peak on-disk footprint of publishing this candidate: temp plus destination copy.
  *
@@ -488,7 +502,7 @@ function deferSupersededSpill(ref: ResponseSpillRef | undefined): void {
   if (!ref) return;
   pendingSpillUnlinks.push(ref);
   while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-    deleteResponseSpill(pendingSpillUnlinks.shift()!);
+    deleteResponseSpill(pendingSpillUnlinks.shift()!, chargeUnreclaimableSpillPath);
   }
 }
 
@@ -615,7 +629,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
     }
     if (committed) ref = null;
   } catch (error) {
-    if (ref) deleteResponseSpill(ref);
+    if (ref) deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
     if (rejectedOversized && job.directAdmission) admissionCounters.oversizedDrops += 1;
     if (isRetryableSpillPublicationError(error) && !rejectedOversized) return;
     if (states.get(job.id) === candidate && !job.cancelled) {
@@ -829,7 +843,7 @@ function installShutdownFallbackSpill(
       deferSupersededSpill(job.supersededSpill);
     }
   } catch (error) {
-    if (ref) deleteResponseSpill(ref);
+    if (ref) deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
     if (rejectedOversized && job.directAdmission) admissionCounters.oversizedDrops += 1;
     if (isRetryableSpillPublicationError(error) && !rejectedOversized) throw error;
     if (states.get(job.id) === candidate) {
@@ -1135,7 +1149,7 @@ function tombstone(id: string, createdAt: number): SpillFailedResponseState {
 }
 
 function deleteOwnedSpills(entry: StoredResponseState): void {
-  if (entry.kind === "spill") deleteResponseSpill(entry.spill);
+  if (entry.kind === "spill") deleteResponseSpill(entry.spill, chargeUnreclaimableSpillPath);
 }
 
 /** The ONLY deletion point: TTL, count, byte, and explicit deletes all route here. */
@@ -1153,7 +1167,9 @@ function deleteEntry(id: string, options: { deleteSpill?: boolean } = {}): void 
   if (oldestResidentId === id) recomputeOldestResident();
   stateRevision += 1;
   if (options.deleteSpill !== false) deleteOwnedSpills(existing);
-  if (options.deleteSpill !== false && supersededSpill) deleteResponseSpill(supersededSpill);
+  if (options.deleteSpill !== false && supersededSpill) {
+    deleteResponseSpill(supersededSpill, chargeUnreclaimableSpillPath);
+  }
 }
 
 function replaceWithSpillFailure(
@@ -1172,7 +1188,7 @@ function replaceWithSpillFailure(
         // itself is durable — queue the unlink for the next stable persist.
         pendingSpillUnlinks.push(existing.spill);
         while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-          deleteResponseSpill(pendingSpillUnlinks.shift()!);
+          deleteResponseSpill(pendingSpillUnlinks.shift()!, chargeUnreclaimableSpillPath);
         }
       } else {
         deleteOwnedSpills(existing);
@@ -1195,7 +1211,7 @@ function swapResidentForSpill(id: string, expected: ResidentResponseState | Encr
   };
   const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
   if (!replaceMapEntry(id, next, expected)) {
-    deleteResponseSpill(ref);
+    deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
     return false;
   }
   noteStubSwapForTest();
@@ -1242,7 +1258,7 @@ function replaceSpillEntryAtomically(
     // persistNow() drains the queue only after the snapshot write succeeds.
     pendingSpillUnlinks.push(expected.spill);
     while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-      deleteResponseSpill(pendingSpillUnlinks.shift()!);
+      deleteResponseSpill(pendingSpillUnlinks.shift()!, chargeUnreclaimableSpillPath);
     }
   } catch (error) {
     if (isRetryableSpillPublicationError(error)) {
@@ -1367,7 +1383,7 @@ function admitOversizedCandidate(
       // stays until a stable persist drains the queue.
       pendingSpillUnlinks.push(expected.spill);
       while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-        deleteResponseSpill(pendingSpillUnlinks.shift()!);
+        deleteResponseSpill(pendingSpillUnlinks.shift()!, chargeUnreclaimableSpillPath);
       }
     }
   } catch (error) {
@@ -1754,7 +1770,7 @@ function retryLegacySpillRetirement(): void {
         if (item.kind === "spill" && isSpillRef(item.spill)) {
           const spillPath = join(responseSpillDirectory(), item.spill.fileName);
           const existed = pathEntryExists(spillPath);
-          deleteResponseSpill(item.spill);
+          deleteResponseSpill(item.spill, chargeUnreclaimableSpillPath);
           if (pathEntryExists(spillPath)) return;
           if (existed) removed += 1;
         }
@@ -2257,7 +2273,7 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
 function drainPendingSpillUnlinks(): void {
   while (pendingSpillUnlinks.length > 0) {
     const ref = pendingSpillUnlinks.shift()!;
-    deleteResponseSpill(ref);
+    deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
   }
 }
 
@@ -2467,8 +2483,13 @@ function enforceSpilledResponseBudget(): number {
   // live continuation to make room for a dead file would be the wrong order.
   while (spilledBytes > spillByteCap() && pendingSpillUnlinks.length > 0) {
     const ref = pendingSpillUnlinks.shift()!;
-    spilledBytes -= ref.payloadBytes;
-    deleteResponseSpill(ref);
+    const beforeDelete = spilledBytes;
+    deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
+    spilledBytes = accountedResponseSpillBytes();
+    // A persistent unlink failure is now represented by the residual-path ledger.
+    // Stop this pass rather than evicting live continuations against a stale
+    // optimistic subtraction; the next pass can retry after the path disappears.
+    if (spilledBytes >= beforeDelete) break;
   }
   // Ordered by createdAt, not by map order. `states` is not an age index:
   // demotion and spill replacement delete and reinsert entries, and
@@ -2486,8 +2507,10 @@ function enforceSpilledResponseBudget(): number {
       || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
   for (const [id, entry] of spilled) {
     if (spilledBytes <= spillByteCap()) break;
-    spilledBytes -= entry.spill.payloadBytes;
+    const beforeDelete = spilledBytes;
     deleteEntry(id);
+    spilledBytes = accountedResponseSpillBytes();
+    if (spilledBytes >= beforeDelete) break;
   }
   return before - spilledBytes;
 }
@@ -2565,6 +2588,7 @@ export function sweepExpiredResponseStates(at = now()): number {
     deleteEntry(id);
     removed += 1;
   }
+  retryUnreclaimableSpillPaths();
   // The disk ceiling needs a caller that does not depend on traffic. The return
   // value stays the TTL count so this function's existing contract is unchanged.
   const reclaimed = enforceSpilledResponseBudget();
