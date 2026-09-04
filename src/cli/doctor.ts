@@ -90,6 +90,7 @@ export type OAuthDoctorCheck = { level: "OK" | "WARN" | "FAIL"; message: string 
  * times in one process; a sticky flag would make the second call fail because the first did.
  */
 let doctorSawFailure = false;
+let doctorClaudeClientProbeDeps: ClaudeClientProbeDeps | undefined;
 
 function recordDoctorFailure(): void {
   doctorSawFailure = true;
@@ -98,6 +99,11 @@ function recordDoctorFailure(): void {
 /** True when the last `runDoctor` pass saw a FAIL-level condition. */
 export function doctorFailed(): boolean {
   return doctorSawFailure;
+}
+
+/** Test-only injection keeps ordinary doctor calls on the production probe. */
+export function setDoctorClaudeClientProbeDepsForTests(deps: ClaudeClientProbeDeps | undefined): void {
+  doctorClaudeClientProbeDeps = deps;
 }
 
 /** Privacy-safe Claude Code client diagnostic lines, shared by doctor tests and output. */
@@ -1086,7 +1092,7 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   doctorSawFailure = false;
 
   // Independent advisory probe; a missing or bad client never stops doctor.
-  reportClaudeClientDoctor();
+  reportClaudeClientDoctor(doctorClaudeClientProbeDeps);
 
   // Ordering note: the memory/runtime section renders after "Running proxy
   // process proxy env" below; helpers live above runDoctor for testability.

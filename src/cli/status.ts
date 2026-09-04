@@ -99,7 +99,7 @@ export type CliStatusJson = {
     policy: ClaudeDesktopPolicyHealth;
   };
   /** Advisory local Claude Code client evidence; deliberately contains no process details. */
-  claudeClient: ClaudeClientVersion;
+  claudeClient?: ClaudeClientVersion;
   /**
    * This CLI's version against the running proxy's (#2701).
    *

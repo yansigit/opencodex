@@ -4,8 +4,9 @@
  * This module deliberately owns only advisory evidence. Launchers remain the
  * authority on whether Claude can actually start.
  */
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { commandInvocation, type SpawnInvocation } from "../lib/win-exec";
+import { resolveTrustedWindowsTaskkillExe } from "../lib/windows-elevation";
 
 export const CLAUDE_CODE_COMPATIBILITY_FLOOR = "2.1.201";
 
@@ -29,6 +30,8 @@ export interface ClaudeVersionProbeOutput {
   readonly status?: number | null;
   readonly signal?: NodeJS.Signals | null;
   readonly error?: Error | { readonly code?: unknown } | null;
+  /** The direct shim pid returned by spawnSync, used only for Windows timeout cleanup. */
+  readonly pid?: number | null;
 }
 
 export interface ClaudeVersionProbeOptions {
@@ -51,6 +54,8 @@ export interface ClaudeClientProbeDeps {
     args: readonly string[],
     platform?: NodeJS.Platform,
   ) => SpawnInvocation;
+  /** Test seam for best-effort Windows cmd.exe descendant cleanup after a timeout. */
+  readonly terminateProcessTree?: (pid: number) => void;
 }
 
 /** Accept a Claude version only when it begins the version banner. */
@@ -116,6 +121,23 @@ function productionVersionProbe(
   return spawnSync(file, [...args], options);
 }
 
+function probeTimedOut(output: ClaudeVersionProbeOutput): boolean {
+  return errorCode(output) === "ETIMEDOUT";
+}
+
+/** Windows signals kill only cmd.exe; taskkill /T also reaps its Claude descendants. */
+function terminateWindowsProbeTree(pid: number): void {
+  try {
+    execFileSync(resolveTrustedWindowsTaskkillExe(), ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      timeout: 1_000,
+      windowsHide: true,
+    });
+  } catch {
+    // The process may already be gone. Diagnostics must remain nonthrowing.
+  }
+}
+
 /**
  * Probe the Claude executable once, synchronously, and degrade to a typed
  * diagnostic on every failure. The result is advisory and contains no raw
@@ -138,6 +160,12 @@ export function probeClaudeClientVersion(deps: ClaudeClientProbeDeps = {}): Clau
       windowsHide: true,
       ...invocation.options,
     });
+    // spawnSync reports the direct cmd.exe pid even when its timeout kills that shim.
+    // On Windows that does not imply descendants died, so reap only a confirmed timeout
+    // tree, best-effort, without retaining any executable/output details.
+    if (platform === "win32" && probeTimedOut(output) && typeof output.pid === "number" && output.pid > 0) {
+      (deps.terminateProcessTree ?? terminateWindowsProbeTree)(output.pid);
+    }
     return classifyClaudeClientVersion(output, source);
   } catch {
     return { state: "timed-out", version: null, source };

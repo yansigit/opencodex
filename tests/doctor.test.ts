@@ -19,6 +19,7 @@ import {
   proxyDownRestartHint,
   resolveCodexHomeDir,
   runDoctor,
+  setDoctorClaudeClientProbeDepsForTests,
   type ServiceMemoryData,
 } from "../src/cli/doctor";
 import type { ClaudeClientVersion } from "../src/claude/client-version";
@@ -45,6 +46,11 @@ let prevLowerHttpsProxy: string | undefined;
 let prevProxyRef: string | undefined;
 let prevAdminToken: string | undefined;
 
+// No doctor test should discover or execute the workstation's real Claude binary.
+beforeEach(() => {
+  setDoctorClaudeClientProbeDepsForTests({ versionProbe: () => ({ stdout: "2.1.201\n", status: 0 }) });
+});
+
 describe("doctor", () => {
   beforeEach(() => {
     prevOpencodexHome = process.env.OPENCODEX_HOME;
@@ -64,6 +70,7 @@ describe("doctor", () => {
   });
 
   afterEach(() => {
+    setDoctorClaudeClientProbeDepsForTests(undefined);
     if (prevOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = prevOpencodexHome;
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -428,6 +435,22 @@ describe("Claude Code client doctor formatter", () => {
     expect(outdated).toContain("npm install -g @anthropic-ai/claude-code");
     for (const state of ["missing", "timed-out", "unparseable"] as const) {
       expect(formatClaudeClientDoctorLines(result(state)).join("\n")).toContain("Action:");
+    }
+  });
+
+  test("runDoctor renders the injected Claude client report without invoking Claude", async () => {
+    const original = console.log;
+    const lines: string[] = [];
+    console.log = (...parts: unknown[]) => lines.push(parts.join(" "));
+    setDoctorClaudeClientProbeDepsForTests({ versionProbe: () => ({ stdout: "2.1.200\n", status: 0 }) });
+    try {
+      await runDoctor([]);
+      const report = lines.join("\n");
+      expect(report).toContain("Claude Code client");
+      expect(report).toContain("2.1.200");
+      expect(report).toContain("npm install -g @anthropic-ai/claude-code");
+    } finally {
+      console.log = original;
     }
   });
 });
