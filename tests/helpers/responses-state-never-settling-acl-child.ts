@@ -1,20 +1,6 @@
-import { mkdtempSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  clearResponseStateMemoryForTests,
-  awaitResponseSpillPublicationTailForTests,
-  pendingResponseSpillMetricsForTests,
-  rememberResponseState,
-  responseStateMetrics,
-  setResponseSpillAsyncAclAttemptBudgetForTests,
-  setResponseStateByteCapForTests,
-} from "../../src/responses/state";
-import {
-  setAsyncIcaclsRunnerForTests,
-  setPlatformForTests,
-} from "../../src/lib/windows-secret-acl";
-import { setAsyncWindowsPrincipalRunnerForTests } from "../../src/lib/windows-user-principal";
 import { removeTreeWithRetry } from "./remove-tree";
 
 type Mode = "principal" | "icacls";
@@ -36,16 +22,57 @@ if (mode !== "principal" && mode !== "icacls") {
 
 const home = mkdtempSync(join(tmpdir(), "ocx-never-settling-acl-child-"));
 process.env.OPENCODEX_HOME = home;
+
+// Import state and ACL modules only after assigning the isolated home. This child is
+// intentionally a fresh process: loading them first can prime path-sensitive lazy state
+// from the parent's inherited OPENCODEX_HOME on Windows before the seam is installed.
+const {
+  clearResponseStateMemoryForTests,
+  awaitResponseSpillPublicationTailForTests,
+  pendingResponseSpillMetricsForTests,
+  rememberResponseState,
+  responseStateMetrics,
+  setResponseSpillAsyncAclAttemptBudgetForTests,
+  setResponseStateByteCapForTests,
+} = await import("../../src/responses/state");
+const {
+  setAsyncIcaclsRunnerForTests,
+  setPlatformForTests,
+  windowsSecretAclApplies,
+} = await import("../../src/lib/windows-secret-acl");
+const { setAsyncWindowsPrincipalRunnerForTests } = await import("../../src/lib/windows-user-principal");
+
 clearResponseStateMemoryForTests();
 setPlatformForTests("win32");
+if (!windowsSecretAclApplies()) throw new Error("Windows ACL test lane was not activated");
 setResponseSpillAsyncAclAttemptBudgetForTests(100);
 setResponseStateByteCapForTests(1_024);
 
+let principalCalls = 0;
+let icaclsCalls = 0;
 if (mode === "principal") {
-  setAsyncWindowsPrincipalRunnerForTests(() => new Promise(() => {}));
-  setAsyncIcaclsRunnerForTests(async () => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
+  setAsyncWindowsPrincipalRunnerForTests(() => {
+    principalCalls += 1;
+    return new Promise(() => {});
+  });
+  setAsyncIcaclsRunnerForTests(async () => {
+    icaclsCalls += 1;
+    return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+  });
 } else {
-  setAsyncIcaclsRunnerForTests(() => new Promise(() => {}));
+  setAsyncWindowsPrincipalRunnerForTests(async () => {
+    principalCalls += 1;
+    return {
+      success: true,
+      exitCode: 0,
+      timedOut: false,
+      stdout: "S-1-5-21-1-2-3-1001\nocx-test\n",
+    };
+  });
+  setAsyncIcaclsRunnerForTests(() => {
+    icaclsCalls += 1;
+    return new Promise(() => {});
+  });
 }
 
 rememberLarge(`resp_never_settling_${mode}_first`);
@@ -56,5 +83,6 @@ console.log(JSON.stringify({
   settled: true,
   pending: pendingResponseSpillMetricsForTests(),
   metrics: responseStateMetrics(),
+  seamCalls: { principal: principalCalls, icacls: icaclsCalls },
 }));
 removeTreeWithRetry(home);

@@ -194,6 +194,7 @@ interface NeverSettlingAclChildResult {
   settled: boolean;
   pending: { count: number; bytes: number };
   metrics: { tombstoneCount: number };
+  seamCalls: { principal: number; icacls: number };
 }
 
 async function runShutdownBudgetChild(
@@ -1207,6 +1208,9 @@ describe("Responses previous_response_id state", () => {
         pending: { count: 0, bytes: 0 },
         metrics: { tombstoneCount: 2 },
       });
+      expect(result.seamCalls.principal).toBeGreaterThan(0);
+      if (mode === "principal") expect(result.seamCalls.icacls).toBe(0);
+      else expect(result.seamCalls.icacls).toBeGreaterThan(0);
     }
   }, { timeout: (2 * watchdogMs(1_500)) + 2_000 });
 
