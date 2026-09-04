@@ -584,12 +584,10 @@ export function hasPlaintextDelegationHistory(value: unknown): boolean {
       || rec.name.startsWith("collaboration.")
       || rec.namespace === undefined
     );
-    if (isCollabOp && (
-      rec.encrypted_function_args === undefined
-      || (Array.isArray(rec.encrypted_function_args) && rec.encrypted_function_args.length === 0)
-    )) {
-      return true;
-    }
+    // Treat every recognized message-operation call as sensitive. The
+    // `encrypted_function_args` marker is client-controlled and cannot prove
+    // that the sibling `arguments` string contains no plaintext task data.
+    if (isCollabOp) return true;
   }
 
   if (Array.isArray(rec.tools) && rec.tools.some(hasPlaintextDelegationHistory)) return true;

@@ -33,6 +33,7 @@ import {
   releaseResponseContinuationKey,
   resetResponseContinuationKeyForTests,
   responseContinuationHomeId,
+  wipeResponseContinuationKeyCopy,
   type ResponseContinuationEncryptedEnvelope,
 } from "./continuation-crypto";
 
@@ -217,8 +218,12 @@ export async function prepareResponseStateReplay(body: unknown): Promise<void> {
   ensureLoaded();
   if (carriesSensitiveHistory) {
     const key = legacyRetirementBlocked ? null : await getResponseContinuationKey();
-    responseStateDurabilityByBody.set(request, key ? "encrypted" : "memory-only");
-    if (!key) warnSensitiveStorageMemoryOnly(legacyRetirementBlocked ? "legacy_retirement" : "credential_store");
+    try {
+      responseStateDurabilityByBody.set(request, key ? "encrypted" : "memory-only");
+      if (!key) warnSensitiveStorageMemoryOnly(legacyRetirementBlocked ? "legacy_retirement" : "credential_store");
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
+    }
   }
 
   if (!previousId) {
@@ -236,8 +241,12 @@ export async function prepareResponseStateReplay(body: unknown): Promise<void> {
 
   if (isEncrypted) {
     const key = legacyRetirementBlocked ? null : await getResponseContinuationKey();
-    if (!responseStateDurabilityByBody.has(request)) {
-      responseStateDurabilityByBody.set(request, key ? "encrypted" : "memory-only");
+    try {
+      if (!responseStateDurabilityByBody.has(request)) {
+        responseStateDurabilityByBody.set(request, key ? "encrypted" : "memory-only");
+      }
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
     }
   } else if (previous.kind === "resident" && previous.durability === "memory-only") {
     if (!responseStateDurabilityByBody.has(request)) {
@@ -261,18 +270,22 @@ export async function prepareSensitiveResponsePersistence(body?: unknown): Promi
   }
 
   const key = await getResponseContinuationKey();
-  if (!key) {
-    if (body && typeof body === "object") {
-      responseStateDurabilityByBody.set(body as object, "memory-only");
+  try {
+    if (!key) {
+      if (body && typeof body === "object") {
+        responseStateDurabilityByBody.set(body as object, "memory-only");
+      }
+      warnSensitiveStorageMemoryOnly("credential_store");
+      return "memory-only";
     }
-    warnSensitiveStorageMemoryOnly("credential_store");
-    return "memory-only";
-  }
 
-  if (body && typeof body === "object") {
-    responseStateDurabilityByBody.set(body as object, "encrypted");
+    if (body && typeof body === "object") {
+      responseStateDurabilityByBody.set(body as object, "encrypted");
+    }
+    return "encrypted";
+  } finally {
+    wipeResponseContinuationKeyCopy(key);
   }
-  return "encrypted";
 }
 let storedResponseBytes = 0;
 let residentResponseBytes = 0;
@@ -484,15 +497,19 @@ function spillPayloadForResident(id: string, candidate: ResidentResponseState | 
     let envelope = candidate.envelope;
     if (!envelope && candidate.kind === "resident") {
       const key = getResponseContinuationKeySync();
-      if (key) {
-        const homeId = responseContinuationHomeId();
-        const aad = buildResponseContinuationAAD(homeId, id, candidate.createdAt, candidate.clientThreadId, candidate.providerOutputStart);
-        envelope = encryptResponseContinuation(
-          { items: candidate.items, ...(candidate.providers ? { providers: candidate.providers } : {}) },
-          aad,
-          key,
-        );
-        candidate.envelope = envelope;
+      try {
+        if (key) {
+          const homeId = responseContinuationHomeId();
+          const aad = buildResponseContinuationAAD(homeId, id, candidate.createdAt, candidate.clientThreadId, candidate.providerOutputStart);
+          envelope = encryptResponseContinuation(
+            { items: candidate.items, ...(candidate.providers ? { providers: candidate.providers } : {}) },
+            aad,
+            key,
+          );
+          candidate.envelope = envelope;
+        }
+      } finally {
+        wipeResponseContinuationKeyCopy(key);
       }
     }
     if (!envelope) {
@@ -1811,15 +1828,19 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
           let env = state.envelope;
           if (!env) {
             const key = getResponseContinuationKeySync();
-            if (key) {
-              const homeId = responseContinuationHomeId();
-              const aad = buildResponseContinuationAAD(homeId, id, state.createdAt, state.clientThreadId, state.providerOutputStart);
-              env = encryptResponseContinuation(
-                { items: state.items, ...(state.providers ? { providers: state.providers } : {}) },
-                aad,
-                key,
-              );
-              state.envelope = env;
+            try {
+              if (key) {
+                const homeId = responseContinuationHomeId();
+                const aad = buildResponseContinuationAAD(homeId, id, state.createdAt, state.clientThreadId, state.providerOutputStart);
+                env = encryptResponseContinuation(
+                  { items: state.items, ...(state.providers ? { providers: state.providers } : {}) },
+                  aad,
+                  key,
+                );
+                state.envelope = env;
+              }
+            } finally {
+              wipeResponseContinuationKeyCopy(key);
             }
           }
           if (!env) continue;
@@ -2323,7 +2344,12 @@ function materializeEntry(
     }
     const homeId = responseContinuationHomeId();
     const aad = buildResponseContinuationAAD(homeId, id, entry.createdAt, entry.clientThreadId, entry.providerOutputStart);
-    const decrypted = decryptResponseContinuation(entry.envelope, aad, key);
+    let decrypted: ReturnType<typeof decryptResponseContinuation>;
+    try {
+      decrypted = decryptResponseContinuation(entry.envelope, aad, key);
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
+    }
     if (!decrypted || (entry.providerOutputStart !== undefined && entry.providerOutputStart > decrypted.items.length)) {
       spillCounters.readFailures += 1;
       replaceWithSpillFailure(id, entry);
@@ -2378,7 +2404,12 @@ function materializeEntry(
       result.payload.clientThreadId,
       result.payload.providerOutputStart,
     );
-    const decrypted = decryptResponseContinuation(result.payload.envelope, aad, key);
+    let decrypted: ReturnType<typeof decryptResponseContinuation>;
+    try {
+      decrypted = decryptResponseContinuation(result.payload.envelope, aad, key);
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
+    }
     if (!decrypted || (
       result.payload.providerOutputStart !== undefined
       && result.payload.providerOutputStart > decrypted.items.length
@@ -2702,26 +2733,30 @@ export function rememberResponseState(
   let envelope: ResponseContinuationEncryptedEnvelope | undefined;
   if (durability === "encrypted") {
     const key = legacyRetirementBlocked ? null : getResponseContinuationKeySync();
-    if (!key) {
-      durability = "memory-only";
-      warnSensitiveStorageMemoryOnly(legacyRetirementBlocked ? "legacy_retirement" : "credential_store");
-    } else {
-      const homeId = responseContinuationHomeId();
-      const aad = buildResponseContinuationAAD(
-        homeId,
-        response.id,
-        createdAt,
-        clientThreadId,
-        providerOutputStart,
-      );
-      envelope = encryptResponseContinuation(
-        {
-          items: [...requestItems, ...response.output],
-          ...(Object.keys(normalizedProviderState).length > 0 ? { providers: normalizedProviderState } : {}),
-        },
-        aad,
-        key,
-      );
+    try {
+      if (!key) {
+        durability = "memory-only";
+        warnSensitiveStorageMemoryOnly(legacyRetirementBlocked ? "legacy_retirement" : "credential_store");
+      } else {
+        const homeId = responseContinuationHomeId();
+        const aad = buildResponseContinuationAAD(
+          homeId,
+          response.id,
+          createdAt,
+          clientThreadId,
+          providerOutputStart,
+        );
+        envelope = encryptResponseContinuation(
+          {
+            items: [...requestItems, ...response.output],
+            ...(Object.keys(normalizedProviderState).length > 0 ? { providers: normalizedProviderState } : {}),
+          },
+          aad,
+          key,
+        );
+      }
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
     }
   }
 

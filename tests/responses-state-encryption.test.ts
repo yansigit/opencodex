@@ -297,6 +297,13 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       arguments: JSON.stringify({ message: "unencrypted by omission" }),
     }])).toBe(true);
     expect(hasPlaintextDelegationHistory([{
+      type: "function_call",
+      namespace: "collaboration",
+      name: "followup_task",
+      arguments: JSON.stringify({ message: "client-controlled marker cannot declassify this" }),
+      encrypted_function_args: ["message"],
+    }])).toBe(true);
+    expect(hasPlaintextDelegationHistory([{
       type: "agent_message",
       author: "/root",
       recipient: "/root/child",
