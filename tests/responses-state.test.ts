@@ -3364,12 +3364,14 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     expect(previousResponseReplayFailure(body)?.reason).toBe("spill_failed");
   });
 
-  test("externally oversized snapshot file is refused before parse", () => {
+  test("externally oversized legacy snapshot is retired without parsing", () => {
     const refusalsBefore = responseAdmissionCountersForTests().snapshotOversizedRefusals;
-    writeFileSync(join(home, "responses-state.json"), `{"version":2,"states":[${" ".repeat(33 * 1024 * 1024)}]}`);
+    const path = join(home, "responses-state.json");
+    writeFileSync(path, `{"version":2,"states":[${" ".repeat(33 * 1024 * 1024)}]}`);
     // First store access triggers the lazy load.
     rememberResponseState({ model: "m", input: "x" }, completedResponse("resp_after", "ok"));
     expect(responseAdmissionCountersForTests().snapshotOversizedRefusals).toBe(refusalsBefore + 1);
+    expect(existsSync(path)).toBe(false);
     // The store still works: the new entry is present and replays.
     expect((expandChained("resp_after") as { input: unknown[] }).input.length).toBeGreaterThan(1);
   });

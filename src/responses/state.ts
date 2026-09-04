@@ -101,6 +101,8 @@ const RESPONSE_SPILL_SHUTDOWN_BUDGET_MS = 5_000;
 const RESPONSE_SPILL_SHUTDOWN_FALLBACK_RESERVE_MS = 4_000;
 const RESPONSE_SPILL_ASYNC_ACL_ATTEMPT_BUDGET_MS = 30_000;
 const RESPONSE_SPILL_SHUTDOWN_TERMINALIZATION_MAX_PASSES = MAX_STORED_RESPONSES + 1;
+const LEGACY_RETIREMENT_RETRY_INITIAL_MS = 1_000;
+const LEGACY_RETIREMENT_RETRY_MAX_MS = 30_000;
 
 export type ResponseStateDurability = "standard" | "encrypted" | "memory-only";
 export type ResponseDurability = ResponseStateDurability;
@@ -179,6 +181,8 @@ interface LegacySnapshotRetirement {
   linkIno?: number;
 }
 let legacySnapshotAwaitingRetirement: LegacySnapshotRetirement | null = null;
+let legacyRetirementRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
 const sensitiveStorageWarnings = new Set<string>();
 
 function warnSensitiveStorageMemoryOnly(reason: "credential_store" | "legacy_retirement"): void {
@@ -1691,10 +1695,34 @@ function retryLegacySnapshotRetirement(): void {
   legacySnapshotAwaitingRetirement = null;
 }
 
+function scheduleLegacyRetirementRetry(): void {
+  if (legacyRetirementRetryTimer || !legacyRetirementBlocked) return;
+  const delay = legacyRetirementRetryDelayMs;
+  legacyRetirementRetryDelayMs = Math.min(delay * 2, LEGACY_RETIREMENT_RETRY_MAX_MS);
+  legacyRetirementRetryTimer = setTimeout(() => {
+    legacyRetirementRetryTimer = null;
+    retryLegacyRetirement();
+  }, delay);
+  (legacyRetirementRetryTimer as { unref?: () => void }).unref?.();
+}
+
 function refreshLegacyRetirementBlock(): void {
   legacyRetirementBlocked = legacySnapshotAwaitingRetirement !== null
     || legacySpillsAwaitingRetirement.size > 0;
-  if (legacyRetirementBlocked) warnSensitiveStorageMemoryOnly("legacy_retirement");
+  if (legacyRetirementBlocked) {
+    warnSensitiveStorageMemoryOnly("legacy_retirement");
+    scheduleLegacyRetirementRetry();
+  } else {
+    if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
+    legacyRetirementRetryTimer = null;
+    legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
+  }
+}
+
+function retryLegacyRetirement(): void {
+  retryLegacySpillRetirement();
+  retryLegacySnapshotRetirement();
+  refreshLegacyRetirementBlock();
 }
 
 /**
@@ -1740,6 +1768,19 @@ function ensureLoaded(): void {
         // return unbounded input. Only regular files are ever parsed.
       } else if (stat.size > SNAPSHOT_FILE_MAX_BYTES) {
         admissionCounters.snapshotOversizedRefusals += 1;
+        // No snapshot this process writes can exceed this bound. Treat an older
+        // or externally planted oversized regular file as untrusted plaintext:
+        // retire the inode without reading it, and block encrypted persistence
+        // until that inode (and a symlink entry, if present) is really gone.
+        legacySnapshotAwaitingRetirement = {
+          targetPath,
+          targetDev: stat.dev,
+          targetIno: stat.ino,
+          ...(literal.isSymbolicLink()
+            ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino }
+            : {}),
+        };
+        retryLegacyRetirement();
       } else {
         const raw = JSON.parse(readFileSync(targetPath, "utf-8")) as { version?: unknown; states?: unknown };
         if ((raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
@@ -1759,9 +1800,7 @@ function ensureLoaded(): void {
               }
             }
           }
-          retryLegacySpillRetirement();
-          retryLegacySnapshotRetirement();
-          refreshLegacyRetirementBlock();
+          retryLegacyRetirement();
         } else if (raw.version === 3 && Array.isArray(raw.states)) {
           for (const entry of raw.states) {
             if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
@@ -1796,9 +1835,7 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
       // The legacy snapshot is the durable retry marker for every plaintext
       // spill it references. Never replace that marker with v3 until all of
       // those spills and the snapshot itself have been retired successfully.
-      retryLegacySpillRetirement();
-      retryLegacySnapshotRetirement();
-      refreshLegacyRetirementBlock();
+      retryLegacyRetirement();
       if (legacyRetirementBlocked) return "failed";
     }
     for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
@@ -2338,8 +2375,6 @@ function materializeEntry(
     const key = getResponseContinuationKeySync();
     if (!key) {
       spillCounters.readFailures += 1;
-      replaceWithSpillFailure(id, entry);
-      schedulePersist();
       return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
     }
     const homeId = responseContinuationHomeId();
@@ -2373,8 +2408,16 @@ function materializeEntry(
     }
     return { ok: true, state };
   }
+  // Load the key before judging an encrypted spill. Credential-store outages
+  // are transient and must leave both its stub and file intact for a later turn.
+  const encryptedSpillKey = entry.spill.version === 2 ? getResponseContinuationKeySync() : null;
+  if (entry.spill.version === 2 && !encryptedSpillKey) {
+    spillCounters.readFailures += 1;
+    return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+  }
   const result = readResponseSpill(id, entry.spill);
   if (!result.ok) {
+    wipeResponseContinuationKeyCopy(encryptedSpillKey);
     spillCounters.readFailures += 1;
     const failure: PreviousResponseReplayFailure = {
       code: "previous_response_not_found",
@@ -2389,13 +2432,7 @@ function materializeEntry(
     return { ok: false, failure };
   }
   if (result.payload.version === 2) {
-    const key = getResponseContinuationKeySync();
-    if (!key) {
-      spillCounters.readFailures += 1;
-      replaceWithSpillFailure(id, entry);
-      schedulePersist();
-      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
-    }
+    const key = encryptedSpillKey!;
     const homeId = responseContinuationHomeId();
     const aad = buildResponseContinuationAAD(
       homeId,
@@ -2826,6 +2863,9 @@ export function clearResponseStateMemoryForTests(): void {
   lastSnapshotTarget = null;
   loaded = false;
   legacyRetirementBlocked = false;
+  if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
+  legacyRetirementRetryTimer = null;
+  legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
   legacySpillsAwaitingRetirement.clear();
   legacySnapshotAwaitingRetirement = null;
   sensitiveStorageWarnings.clear();
@@ -2844,6 +2884,13 @@ export function clearResponseStateForTests(): void {
     /* no snapshot on disk */
   }
   try { rmSync(responseSpillDirectory(), { recursive: true, force: true }); } catch { /* no spill directory */ }
+}
+
+/** Test-only: run a scheduled legacy retirement retry without waiting for its backoff. */
+export function runPendingLegacyResponseStateRetirementForTests(): void {
+  if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
+  legacyRetirementRetryTimer = null;
+  if (legacyRetirementBlocked) retryLegacyRetirement();
 }
 
 export {

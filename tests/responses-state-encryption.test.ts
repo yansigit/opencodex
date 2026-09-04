@@ -38,6 +38,7 @@ import {
   responseContinuationHomeId,
   responseContinuationKeyringAccount,
   responseStateMetrics,
+  runPendingLegacyResponseStateRetirementForTests,
   setResponseContinuationKeyringFactoryForTests,
   setResponseStateByteCapForTests,
 } from "../src/responses/state";
@@ -432,6 +433,91 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     });
   });
 
+  test("temporary keyring failure preserves an encrypted resident across restart for retry", async () => {
+    const memoryKeyring = new Map<string, Uint8Array>();
+    setResponseContinuationKeyringFactoryForTests({
+      getSecret: account => memoryKeyring.get(account) ?? null,
+      setSecret: (account, secret) => { memoryKeyring.set(account, Uint8Array.from(secret)); },
+    });
+    const secret = "resident survives a transient keyring outage";
+    const request = { input: "first" };
+    expect(await prepareSensitiveResponsePersistence(request)).toBe("encrypted");
+    rememberResponseState(request, {
+      id: "resp_transient_resident",
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: secret }],
+    }, undefined, { durability: "encrypted" });
+    await flushResponseState();
+    clearResponseStateMemoryForTests();
+
+    setResponseContinuationKeyringFactoryForTests({
+      getSecret: () => { throw new Error("keyring temporarily unavailable"); },
+      setSecret: () => { throw new Error("keyring temporarily unavailable"); },
+    });
+    const unavailable = { previous_response_id: "resp_transient_resident", input: "retry" };
+    await prepareResponseStateReplay(unavailable);
+    expandPreviousResponseInput(unavailable);
+    expect(previousResponseReplayFailure(unavailable)?.reason).toBe("spill_corrupt");
+    await flushResponseState();
+    expect(JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")).states[0][1].kind)
+      .toBe("encrypted-resident");
+
+    setResponseContinuationKeyringFactoryForTests({
+      getSecret: account => memoryKeyring.get(account) ?? null,
+      setSecret: (account, value) => { memoryKeyring.set(account, Uint8Array.from(value)); },
+    });
+    const recovered = { previous_response_id: "resp_transient_resident", input: "retry" };
+    await prepareResponseStateReplay(recovered);
+    expect(JSON.stringify(expandPreviousResponseInput(recovered))).toContain(secret);
+    expect(previousResponseReplayFailure(recovered)).toBeUndefined();
+  });
+
+  test("temporary keyring failure preserves an encrypted spill and its stub for retry", async () => {
+    const memoryKeyring = new Map<string, Uint8Array>();
+    setResponseContinuationKeyringFactoryForTests({
+      getSecret: account => memoryKeyring.get(account) ?? null,
+      setSecret: (account, secret) => { memoryKeyring.set(account, Uint8Array.from(secret)); },
+    });
+    const secret = "spilled secret survives keyring outage ".repeat(400);
+    const request = { input: "first" };
+    expect(await prepareSensitiveResponsePersistence(request)).toBe("encrypted");
+    rememberResponseState(request, {
+      id: "resp_transient_spill",
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: secret }],
+    }, undefined, { durability: "encrypted" });
+    setResponseStateByteCapForTests(1_024);
+    evictOldestResponseContinuationForBudget();
+    await flushResponseState();
+    const spillDir = responseSpillDirectory(home);
+    const spillFile = readdirSync(spillDir)[0]!;
+    clearResponseStateMemoryForTests();
+
+    setResponseContinuationKeyringFactoryForTests({
+      getSecret: () => { throw new Error("keyring temporarily unavailable"); },
+      setSecret: () => { throw new Error("keyring temporarily unavailable"); },
+    });
+    const unavailable = { previous_response_id: "resp_transient_spill", input: "retry" };
+    await prepareResponseStateReplay(unavailable);
+    expandPreviousResponseInput(unavailable);
+    expect(previousResponseReplayFailure(unavailable)?.reason).toBe("spill_corrupt");
+    await flushResponseState();
+    expect(existsSync(join(spillDir, spillFile))).toBe(true);
+    const snapshot = JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")) as {
+      states: Array<[string, { kind: string }]>;
+    };
+    expect(snapshot.states.find(([id]) => id === "resp_transient_spill")?.[1].kind).toBe("spill");
+
+    setResponseContinuationKeyringFactoryForTests({
+      getSecret: account => memoryKeyring.get(account) ?? null,
+      setSecret: (account, value) => { memoryKeyring.set(account, Uint8Array.from(value)); },
+    });
+    const recovered = { previous_response_id: "resp_transient_spill", input: "retry" };
+    await prepareResponseStateReplay(recovered);
+    expect(JSON.stringify(expandPreviousResponseInput(recovered))).toContain(secret);
+    expect(previousResponseReplayFailure(recovered)).toBeUndefined();
+  });
+
   test("AES-GCM authenticates every continuation identity and envelope field", () => {
     const key = Buffer.alloc(32, 0x5a);
     const identity = {
@@ -673,10 +759,9 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
 
     setSpillIoForTest(null);
-    clearResponseStateMemoryForTests();
-    // On the next process-shaped load, the retained v2 snapshot supplies the
-    // spill reference again. Once deletion succeeds, durable sensitive state
-    // may resume.
+    runPendingLegacyResponseStateRetirementForTests();
+    // The bounded retry retires the retained v2 marker in this process even
+    // when every request is sensitive and schedules no ordinary snapshot write.
     expect(await prepareSensitiveResponsePersistence({ input: "sensitive retry" })).toBe("encrypted");
     expect(existsSync(legacySpillPath)).toBe(false);
     rememberResponseState({ input: "ordinary retry" }, {
