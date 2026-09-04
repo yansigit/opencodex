@@ -296,6 +296,32 @@ Proxy startup/ensure, `ocx claude`, and relevant dashboard saves sync your featu
 
 Dispatch: `subagent_type: "ocx-gpt-5-6-sol"`. 1M-capable targets carry `[1m]` automatically.
 
+**Directive trust:** the generated definitions are signed. Each `ocx-*` agent body carries
+`<!-- ocx-route: ... -->` (plus `<!-- ocx-effort: ... -->` when an effort is configured) together
+with a matching `<!-- ocx-sig: ... -->` signature that OpenCodex creates with a local signing key
+it manages automatically. `ocx doctor` reports that key's presence and permissions without ever
+printing the key itself. The proxy verifies the signature on every request **before any provider
+dispatch**: a missing, altered, corrupted, or otherwise invalid signed directive rejects the
+request with a `400 invalid_request_error` — it is never routed to another provider and it is
+never reprocessed as if it were unsigned. Unsigned compatibility directives (for example from an
+older hand-edited definition) are honored only when they exactly match an active OpenCodex-owned
+roster entry; a failed signed check never falls back to that roster path.
+
+## Unauthenticated loopback listener (opt-in)
+
+When the proxy listens on a non-loopback address that requires a credential, a local client that
+never receives that credential would be refused. For that exact case OpenCodex can open a second
+listener bound to `127.0.0.1`: set `unauthenticatedLoopbackListener` in the configuration
+(**off by default**; the port is required, must differ from the proxy port, and is never
+OS-assigned). See
+[Local clients that cannot receive the token](/reference/configuration/#local-clients-that-cannot-receive-the-token).
+
+When enabled, the listener for Claude Code admits exactly two routes: `POST /v1/messages` and
+`POST /v1/messages/count_tokens` (both POST-only). Every other method and path — including
+`/api/*` and the dashboard — returns `404`. Public-listener authentication is unchanged:
+enabling this listener never relaxes the main listener. Codex-specific routes on this listener
+are described in the configuration reference.
+
 ## Bundled-skill elision (blockedSkills)
 
 Claude Code's bundled `claude-api` skill injects ~840KB (~136k tokens) of Anthropic documentation
@@ -569,4 +595,18 @@ route. Pass `"haiku"` as the model placeholder.
 
 ## Client compatibility diagnostics
 
-Before `ocx claude` launches, a version below **2.1.201** produces an advisory warning but does not block launch. Upgrade with `npm install -g @anthropic-ai/claude-code`; `ocx doctor` and `ocx status --json` show the same client state. This is separate from the **2.1.129** native `/model` gateway-picker capability.
+Before `ocx claude` launches, opencodex checks the Claude Code version against the **2.1.201**
+compatibility floor. The probe resolves to one of five states, each with actionable guidance:
+
+| State | Meaning | What to do |
+| --- | --- | --- |
+| `compatible` | Version is at or above the floor | Nothing |
+| `outdated` | Version is below the floor | `npm install -g @anthropic-ai/claude-code` |
+| `missing` | Claude Code is not installed | Install it with `npm install -g @anthropic-ai/claude-code` |
+| `timed out` | The version check timed out | Retry; repair or upgrade Claude Code if it persists |
+| `unparseable` | The version could not be recognized | Repair or upgrade Claude Code, then retry |
+
+The probe is advisory: a below-floor, missing, timed-out, or unrecognized client **never blocks
+launch** — the warning prints and `ocx claude` proceeds. `ocx doctor` and `ocx status --json`
+surface the same client state. This floor is separate from the **2.1.129** native `/model`
+gateway-picker capability.
