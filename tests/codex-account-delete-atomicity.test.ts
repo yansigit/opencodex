@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as accountStoreModule from "../src/codex/account-store";
 import {
@@ -21,12 +22,15 @@ import {
 } from "../src/codex/quota";
 import { getConfigPath, loadConfig, saveConfig } from "../src/config";
 import * as configModule from "../src/config";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../src/types";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-codex-account-delete-atomicity");
+let testDir = "";
 const ACCOUNT_ID = "delete-atomicity";
 let previousHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function seededConfig(): OcxConfig {
   const config = loadConfig();
@@ -53,18 +57,33 @@ function seededConfig(): OcxConfig {
   return config;
 }
 
-beforeEach(() => {
-  previousHome = process.env.OPENCODEX_HOME;
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-  mkdirSync(TEST_DIR, { recursive: true });
-  process.env.OPENCODEX_HOME = TEST_DIR;
-});
+function installScratchHome(): void {
+  // These tests exercise account-delete ordering, not Windows ACL behavior. Stub BOTH runners
+  // so asynchronous hardening never spawns a real icacls.exe child that can hold the fixture open.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  testDir = mkdtempSync(join(tmpdir(), "ocx-codex-account-delete-atomicity-"));
+  process.env.OPENCODEX_HOME = testDir;
+}
 
-afterEach(() => {
+async function removeScratchHome(): Promise<void> {
+  // Settle queued ACL work before restoring env/removing the directory. Windows can hold the
+  // fixture open until a child exits, and a failed teardown otherwise poisons later tests.
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  if (testDir) removeTreeWithRetry(testDir);
+  testDir = "";
+}
+
+beforeEach(() => {
+  previousHome = process.env.OPENCODEX_HOME;
+  installScratchHome();
 });
+
+afterEach(async () => { await removeScratchHome(); });
 
 describe("Codex account delete persistence ordering", () => {
   test("a config persistence failure leaves the account and destructive state intact", () => {

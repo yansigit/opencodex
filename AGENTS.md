@@ -208,6 +208,15 @@ Before creating or updating a non-trivial PR as review-ready, or before
 approving such a PR, run `bun run typecheck` and `bun run test`. CI runs these
 on Linux, Windows, and macOS.
 
+Tests that persist config, credentials, tokens, or other ACL-hardened state must
+use a unique `mkdtempSync(...)` home, not a fixed path under `tests/`. When the
+test is about higher-level behavior rather than ACLs, stub both the synchronous
+and asynchronous `icacls` runners. Always flush config-directory hardening
+before removing the scratch home; cleanup retries do not replace ownership of
+the child process lifecycle. This is required even when a test passes locally:
+Windows holds the directory open and turns one missed teardown into a cascade of
+later `beforeEach`/`afterEach` failures.
+
 Do not rerun passing checks on unchanged code merely for additional confidence.
 
 ## Minimal containers and agent sandboxes

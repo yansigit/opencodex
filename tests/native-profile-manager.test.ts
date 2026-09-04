@@ -15,6 +15,7 @@ import {
 } from "../src/codex/native-profile-store";
 import { NativeProfileError, type NativeProfileKey, type NativeProfileKeyProvider } from "../src/codex/native-profile-types";
 import { codexCredentialMutationEpoch } from "../src/codex/credential-mutation-epoch";
+import { watchdogMs } from "./helpers/ci-watchdog";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const roots: string[] = [];
@@ -133,8 +134,8 @@ async function leavePendingJournal(f: Awaited<ReturnType<typeof enrolledFixture>
  * The first Bun child a busy windows-latest shard spawns can take several seconds just to
  * boot the TS helper; on run 33595585136 that alone burned a private 5 s wait while the
  * child was healthy. The crash case, which is the first spawn in the file, gets a wait
- * sized inside its 15 s test budget. On timeout the child's stderr is part of the error so
- * a real crash is not mistaken for a slow start.
+ * scaled by the shared CI watchdog budget. On timeout the child's stderr is part of the
+ * error so a real crash is not mistaken for a slow start.
  */
 async function waitForPath(path: string, child?: ReturnType<typeof Bun.spawn>, waitMs = 5_000): Promise<void> {
   const deadline = Date.now() + waitMs;
@@ -195,12 +196,13 @@ describe("native main profile transactions", () => {
     const f = fixture();
     const readyPath = join(f.root, "crash-ready");
     const child = spawnLockHolder(f, readyPath, join(f.root, "unused-release"), { crash: true });
-    await waitForPath(readyPath, child, 12_000);
+    const markerWaitMs = watchdogMs(12_000);
+    await waitForPath(readyPath, child, markerWaitMs);
     expect(await child.exited).toBe(87);
 
     const successor = new NativeProfileManager({ ...f.options, lockWaitMs: 250 });
     expect((await successor.recover(false)).recovered).toBe(false);
-  }, 15_000);
+  }, watchdogMs(12_000) + 3_000);
 
   test("a losing same-process contender cannot release another transaction's POSIX lock", async () => {
     if (process.platform === "win32") return;
