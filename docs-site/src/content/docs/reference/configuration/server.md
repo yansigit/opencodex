@@ -301,11 +301,30 @@ directives are honored only for exact active OpenCodex-owned roster entries.
 `ocx doctor` reports the Claude directive signing key presence and permissions under your
 OpenCodex config directory without printing key material.
 
-`POST /v1/messages` and `POST /v1/messages/count_tokens` are also the only Claude routes
-admitted on the opt-in `unauthenticatedLoopbackListener` (a server-level key; the port is
-required and must differ from the proxy port). Public-listener authentication is unchanged by
-that listener. See
+When `unauthenticatedLoopbackListener.enabled` is explicitly `true`, its Claude compatibility
+surface admits exactly `POST /v1/messages` and `POST /v1/messages/count_tokens` (POST only).
+No other Claude path is admitted there; the listener is off by default, its `port` is required,
+and that port must differ from the proxy port. Public-listener authentication is unchanged by
+the secondary listener. See
 [Local clients that cannot receive the token](#local-clients-that-cannot-receive-the-token).
+
+### Claude directive trust and token benchmark
+
+Generated `~/.claude/agents/ocx-*.md` definitions carry signed route and optional effort
+directives. OpenCodex verifies them before provider dispatch; an invalid or altered signed
+directive fails closed with `400 invalid_request_error`. Unsigned compatibility directives are
+honored only for an exact active OpenCodex-owned roster entry. Diagnostics never show key material.
+
+To compare routed token estimates with authoritative Anthropic counts, run
+`bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`
+deliberately. The confirmation flag is explicit consent: confirmed runs send real requests and
+may incur provider charges, so do not automate or run them unattended. The benchmark uses a
+deterministic sanitized fixture set, sends fixtures sequentially without retries or fallback,
+and emits only a non-persistent allowlist of fixture ids/digests, states, metrics, provider kind,
+and model id (never request bodies, credentials, or account identifiers). A fixture passes when
+its absolute error is within `max(32 tokens, 20%)`; the weighted aggregate must remain within
+10%. Routed `/v1/messages/count_tokens` remains a local approximation for routed models; only
+native Anthropic requests with an `sk-ant-` credential pass through to Anthropic.
 ## Shadow calls
 
 Codex uses small helper models for tasks such as titles and commit messages. Enable
