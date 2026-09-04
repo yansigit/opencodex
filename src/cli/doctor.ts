@@ -62,6 +62,12 @@ import {
   fetchBoundLocalManagementRead,
   type LocalManagementReadDeps,
 } from "../server/local-management-read-client";
+import {
+  CLAUDE_CODE_COMPATIBILITY_FLOOR,
+  probeClaudeClientVersion,
+  type ClaudeClientProbeDeps,
+  type ClaudeClientVersion,
+} from "../claude/client-version";
 export { resolveCodexHomeDir } from "../codex/home";
 
 /**
@@ -92,6 +98,30 @@ function recordDoctorFailure(): void {
 /** True when the last `runDoctor` pass saw a FAIL-level condition. */
 export function doctorFailed(): boolean {
   return doctorSawFailure;
+}
+
+/** Privacy-safe Claude Code client diagnostic lines, shared by doctor tests and output. */
+export function formatClaudeClientDoctorLines(client: ClaudeClientVersion): string[] {
+  switch (client.state) {
+    case "compatible":
+      return [`  ok     Claude Code ${client.version} is compatible (floor ${CLAUDE_CODE_COMPATIBILITY_FLOOR})`];
+    case "outdated":
+      return [
+        `  !!     Claude Code ${client.version} is below required floor ${CLAUDE_CODE_COMPATIBILITY_FLOOR}`,
+        "         Action: npm install -g @anthropic-ai/claude-code",
+      ];
+    case "missing":
+      return ["  --     Claude Code client is not installed", "         Action: npm install -g @anthropic-ai/claude-code"];
+    case "timed-out":
+      return ["  --     Claude Code client version check timed out", "         Action: retry the check; repair or upgrade Claude Code if it continues"];
+    case "unparseable":
+      return ["  --     Claude Code client version could not be recognized", "         Action: repair or upgrade Claude Code, then retry"];
+  }
+}
+
+export function reportClaudeClientDoctor(deps: ClaudeClientProbeDeps = {}): void {
+  console.log("\nClaude Code client");
+  for (const line of formatClaudeClientDoctorLines(probeClaudeClientVersion(deps))) console.log(line);
 }
 
 function pathIsWritable(path: string): boolean {
@@ -1054,6 +1084,9 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   // Reset per pass: the suite drives runDoctor several times in one process, and a sticky
   // flag would fail the second call because the first saw a problem.
   doctorSawFailure = false;
+
+  // Independent advisory probe; a missing or bad client never stops doctor.
+  reportClaudeClientDoctor();
 
   // Ordering note: the memory/runtime section renders after "Running proxy
   // process proxy env" below; helpers live above runDoctor for testability.

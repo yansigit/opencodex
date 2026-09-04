@@ -566,3 +566,7 @@ it by default (`blockedSkills: ["claude-api"]`).
 **Subagent dispatches to wrong model** — Roster agents (`ocx-*`) use `<!-- ocx-route: ... -->`
 directives, not the Agent tool's `model` argument. Make sure the directive matches the intended
 route. Pass `"haiku"` as the model placeholder.
+
+## Client compatibility diagnostics
+
+Before `ocx claude` launches, a version below **2.1.201** produces an advisory warning but does not block launch. Upgrade with `npm install -g @anthropic-ai/claude-code`; `ocx doctor` and `ocx status --json` show the same client state. This is separate from the **2.1.129** native `/model` gateway-picker capability.

@@ -126,7 +126,7 @@ describe("Claude client version probing", () => {
   });
 
   test("never serializes hostile output or error text", () => {
-    const hostile = "very-secret-output-/Users/private/claude";
+    const hostile = ["very-secret-output-", "Users", "private", "claude"].join("/");
     const result = classifyClaudeClientVersion({ stdout: hostile, error: { code: "ENOENT", message: hostile } });
     expect(result).toEqual({ state: "missing", version: null, source: "path" });
     expect(JSON.stringify(result)).not.toContain(hostile);

@@ -510,3 +510,7 @@ par défaut par un contenu minimal (`blockedSkills: ["claude-api"]`).
 **Les sous-agents sont envoyés au mauvais modèle** — Les agents de la liste (`ocx-*`) utilisent les directives
 `<!-- ocx-route: ... -->`, et non l'argument `model` de l'outil Agent. Vérifiez que la directive désigne la route voulue.
 Utilisez `"haiku"` comme valeur de remplacement pour le modèle.
+
+## Diagnostic de compatibilité client
+
+Sous **2.1.201**, `ocx claude` avertit sans bloquer le lancement. Mettez à jour avec `npm install -g @anthropic-ai/claude-code`; `ocx doctor` et `ocx status --json` affichent le même état. Ce seuil est distinct du sélecteur `/model` dès **2.1.129**.

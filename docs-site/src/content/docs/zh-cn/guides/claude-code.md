@@ -375,3 +375,7 @@ Claude 模型时自动加载。对于原生透传，这是正常现象；对于�
 
 **子代理派发到错误模型**——名册代理（`ocx-*`）使用 `<!-- ocx-route: ... -->` 指令，
 而不是 Agent 工具的 `model` 参数。请确保指令与预期路由一致。传入 `"haiku"` 作为模型占位符。
+
+## 客户端兼容性诊断
+
+低于 **2.1.201** 时，`ocx claude` 只会警告，仍会启动。请用 `npm install -g @anthropic-ai/claude-code` 更新；`ocx doctor` 和 `ocx status --json` 会显示状态。这不同于 **2.1.129** 的 `/model` 选择器功能。

@@ -362,3 +362,7 @@ and are never classified as managed.
 
 Inspect and safely modify validated OpenCodex configuration. `show` and `get` mask secrets. Import
 validates before writing and requires `--yes`.
+
+#### Claude Code compatibility diagnostics
+
+`ocx claude` warns but does not block launch below **2.1.201**. Upgrade with `npm install -g @anthropic-ai/claude-code`; the same state is available in `ocx doctor` and `ocx status --json`. This advisory floor is separate from the **2.1.129** `/model` picker capability.

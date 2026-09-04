@@ -611,3 +611,7 @@ modellerde opencodex varsayılan olarak bunu taslakla değiştirir (`blockedSkil
 aracının `model` argümanını değil, `<!-- ocx-route: ... -->` yönergelerini
 kullanır. Yönergenin hedeflenen rotayla eşleştiğinden emin olun. Model yer
 tutucusu olarak `"haiku"` iletin.
+
+## İstemci uyumluluk tanılama
+
+**2.1.201** altında `ocx claude` yalnızca uyarır ve başlatmayı engellemez. `npm install -g @anthropic-ai/claude-code` ile güncelleyin; durum `ocx doctor` ve `ocx status --json` içinde de görünür. Bu, **2.1.129** `/model` seçici özelliğinden ayrıdır.

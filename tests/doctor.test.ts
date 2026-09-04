@@ -13,6 +13,7 @@ import {
   fetchServiceMemory,
   formatResponseTempLines,
   formatServiceMemoryLines,
+  formatClaudeClientDoctorLines,
   parseProcessEnvBlock,
   probeWham,
   proxyDownRestartHint,
@@ -20,6 +21,7 @@ import {
   runDoctor,
   type ServiceMemoryData,
 } from "../src/cli/doctor";
+import type { ClaudeClientVersion } from "../src/claude/client-version";
 import { collectOrcaCodexHomeDiagnostic } from "../src/codex/home";
 import { NativeProfileError } from "../src/codex/native-profile-types";
 import {
@@ -413,6 +415,20 @@ describe("doctor", () => {
       classification: "native_main_recovery_manual",
       authenticated: false,
     });
+  });
+});
+
+describe("Claude Code client doctor formatter", () => {
+  const result = (state: ClaudeClientVersion["state"], version: string | null = null): ClaudeClientVersion => ({ state, version, source: "path" });
+
+  test("renders every canonical state with safe actionable guidance", () => {
+    expect(formatClaudeClientDoctorLines(result("compatible", "2.1.201")).join("\n")).toContain("compatible");
+    const outdated = formatClaudeClientDoctorLines(result("outdated", "2.1.200")).join("\n");
+    expect(outdated).toContain("2.1.201");
+    expect(outdated).toContain("npm install -g @anthropic-ai/claude-code");
+    for (const state of ["missing", "timed-out", "unparseable"] as const) {
+      expect(formatClaudeClientDoctorLines(result(state)).join("\n")).toContain("Action:");
+    }
   });
 });
 
