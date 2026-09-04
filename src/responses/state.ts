@@ -168,6 +168,16 @@ const states = new Map<string, StoredResponseState>();
 const replayScopeMismatches = new WeakSet<object>();
 const responseStateDurabilityByBody = new WeakMap<object, ResponseStateDurability>();
 let legacyRetirementBlocked = false;
+const legacySpillsAwaitingRetirement = new Map<string, ResponseSpillRef>();
+interface LegacySnapshotRetirement {
+  targetPath: string;
+  targetDev: number;
+  targetIno: number;
+  linkPath?: string;
+  linkDev?: number;
+  linkIno?: number;
+}
+let legacySnapshotAwaitingRetirement: LegacySnapshotRetirement | null = null;
 const sensitiveStorageWarnings = new Set<string>();
 
 function warnSensitiveStorageMemoryOnly(reason: "credential_store" | "legacy_retirement"): void {
@@ -1616,6 +1626,60 @@ function responseStateSweepDirectories(): Set<string> {
   return new Set([dirname(path), resolvedDir]);
 }
 
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ENOENT";
+  }
+}
+
+function retryLegacySpillRetirement(): void {
+  for (const [fileName, ref] of legacySpillsAwaitingRetirement) {
+    try { deleteResponseSpill(ref); } catch { /* best effort */ }
+    if (!pathEntryExists(join(responseSpillDirectory(), fileName))) {
+      legacySpillsAwaitingRetirement.delete(fileName);
+    }
+  }
+}
+
+function unlinkLegacyEntryIfUnchanged(path: string, dev: number, ino: number): boolean {
+  try {
+    const current = lstatSync(path);
+    if (current.dev !== dev || current.ino !== ino) return false;
+    unlinkSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
+  }
+  return !pathEntryExists(path);
+}
+
+function retryLegacySnapshotRetirement(): void {
+  const pending = legacySnapshotAwaitingRetirement;
+  if (!pending || legacySpillsAwaitingRetirement.size > 0) return;
+  if (!unlinkLegacyEntryIfUnchanged(pending.targetPath, pending.targetDev, pending.targetIno)) return;
+
+  // A snapshot symlink is a second directory entry. Remove it only after its
+  // captured target is gone, and only if it is still the link we inspected.
+  // Leaving a dangling link is harmless to confidentiality; deleting a link
+  // that was concurrently replaced would not be.
+  if (
+    pending.linkPath
+    && pending.linkDev !== undefined
+    && pending.linkIno !== undefined
+  ) {
+    unlinkLegacyEntryIfUnchanged(pending.linkPath, pending.linkDev, pending.linkIno);
+  }
+  legacySnapshotAwaitingRetirement = null;
+}
+
+function refreshLegacyRetirementBlock(): void {
+  legacyRetirementBlocked = legacySnapshotAwaitingRetirement !== null
+    || legacySpillsAwaitingRetirement.size > 0;
+  if (legacyRetirementBlocked) warnSensitiveStorageMemoryOnly("legacy_retirement");
+}
+
 /**
  * Best-effort disk snapshot so previous_response_id chains survive a proxy restart (the
  * dominant expansion-miss cause: an in-memory-only store dies with the process, and the next
@@ -1651,29 +1715,36 @@ function ensureLoaded(): void {
       // this process wrote, not a pre-existing oversized file. statSync follows
       // symlinks deliberately — readFileSync below follows them too, so the
       // size gate must measure the same target the read would.
-      const stat = statSync(path);
+      const literal = lstatSync(path);
+      const targetPath = resolveWriteTarget(path);
+      const stat = statSync(targetPath);
       if (!stat.isFile()) {
         // Symlink to a FIFO/device (e.g. /dev/zero): reading would block or
         // return unbounded input. Only regular files are ever parsed.
       } else if (stat.size > SNAPSHOT_FILE_MAX_BYTES) {
         admissionCounters.snapshotOversizedRefusals += 1;
       } else {
-        const raw = JSON.parse(readFileSync(path, "utf-8")) as { version?: unknown; states?: unknown };
+        const raw = JSON.parse(readFileSync(targetPath, "utf-8")) as { version?: unknown; states?: unknown };
         if ((raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
-          let retirementFailed = false;
+          legacySnapshotAwaitingRetirement = {
+            targetPath,
+            targetDev: stat.dev,
+            targetIno: stat.ino,
+            ...(literal.isSymbolicLink()
+              ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino }
+              : {}),
+          };
           for (const entry of raw.states) {
             if (Array.isArray(entry) && entry.length === 2 && entry[1] && typeof entry[1] === "object") {
               const item = entry[1] as { kind?: unknown; spill?: unknown };
               if (item.kind === "spill" && isSpillRef(item.spill)) {
-                try { deleteResponseSpill(item.spill); } catch { /* best effort */ }
-                if (existsSync(join(responseSpillDirectory(), item.spill.fileName))) retirementFailed = true;
+                legacySpillsAwaitingRetirement.set(item.spill.fileName, item.spill);
               }
             }
           }
-          try { unlinkSync(path); } catch { /* best effort */ }
-          if (existsSync(path)) retirementFailed = true;
-          legacyRetirementBlocked = retirementFailed;
-          if (retirementFailed) warnSensitiveStorageMemoryOnly("legacy_retirement");
+          retryLegacySpillRetirement();
+          retryLegacySnapshotRetirement();
+          refreshLegacyRetirementBlock();
         } else if (raw.version === 3 && Array.isArray(raw.states)) {
           for (const entry of raw.states) {
             if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
@@ -1704,6 +1775,15 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
   persistGate = new Promise<void>(resolve => { release = resolve; });
   await previous;
   try {
+    if (legacyRetirementBlocked) {
+      // The legacy snapshot is the durable retry marker for every plaintext
+      // spill it references. Never replace that marker with v3 until all of
+      // those spills and the snapshot itself have been retired successfully.
+      retryLegacySpillRetirement();
+      retryLegacySnapshotRetirement();
+      refreshLegacyRetirementBlock();
+      if (legacyRetirementBlocked) return "failed";
+    }
     for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
       const revision = stateRevision;
       const entries: Array<[string, unknown]> = [];
@@ -1792,9 +1872,6 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
         try { chmodSync(dirname(path), 0o700); } catch { /* best-effort (e.g. Windows) */ }
         await atomicWriteFileAsync(path, payload);
-        // A successful v3 replacement proves a legacy snapshot that could not be
-        // unlinked has now been retired. Future sensitive turns may persist again.
-        legacyRetirementBlocked = false;
         lastSnapshotDigest = payloadDigest;
         lastSnapshotBytes = payloadBytes;
         lastSnapshotTarget = resolveWriteTarget(path);
@@ -2714,6 +2791,8 @@ export function clearResponseStateMemoryForTests(): void {
   lastSnapshotTarget = null;
   loaded = false;
   legacyRetirementBlocked = false;
+  legacySpillsAwaitingRetirement.clear();
+  legacySnapshotAwaitingRetirement = null;
   sensitiveStorageWarnings.clear();
   releaseResponseContinuationKey();
 }

@@ -607,7 +607,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(() => lstatSync(snapshotPath)).toThrow();
   });
 
-  test("a v3 snapshot write keeps sensitive persistence blocked while a legacy spill cannot be deleted", async () => {
+  test("an ordinary snapshot write stays blocked while a legacy spill cannot be deleted", async () => {
     const spillDir = responseSpillDirectory(home);
     mkdirSync(spillDir, { recursive: true });
     const legacySpillFile = "resp_locked_legacy.1234567890ab.cdef12345678901234567890.1.100.spill.json";
@@ -643,7 +643,9 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       output: [{ type: "message", role: "assistant", content: "ordinary" }],
     });
     await flushResponseState();
-    expect(JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")).version).toBe(3);
+    // The v2 snapshot remains the durable retry marker; replacing it with v3
+    // would lose the only restart-stable reference to the plaintext spill.
+    expect(JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")).version).toBe(2);
     expect(existsSync(legacySpillPath)).toBe(true);
 
     const memoryKeyring = new Map<string, Uint8Array>();
@@ -654,14 +656,19 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
 
     setSpillIoForTest(null);
+    clearResponseStateMemoryForTests();
+    // On the next process-shaped load, the retained v2 snapshot supplies the
+    // spill reference again. Once deletion succeeds, durable sensitive state
+    // may resume.
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive retry" })).toBe("encrypted");
+    expect(existsSync(legacySpillPath)).toBe(false);
     rememberResponseState({ input: "ordinary retry" }, {
       id: "resp_ordinary_retry",
       status: "completed",
       output: [{ type: "message", role: "assistant", content: "ordinary retry" }],
     });
     await flushResponseState();
-    expect(existsSync(legacySpillPath)).toBe(false);
-    expect(await prepareSensitiveResponsePersistence({ input: "sensitive retry" })).toBe("encrypted");
+    expect(JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")).version).toBe(3);
   });
 
   test("keyring release drops the cache without mutating caller-owned copies", async () => {
