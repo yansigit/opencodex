@@ -4,7 +4,6 @@
   "defaultBranch": "main",
   "integrationBranches": ["dev", "main", "preview"],
   "candidateEvents": ["merge_group", "pull_request"],
-  "trustedRunnerEvents": ["push", "workflow_dispatch"],
   "ci": {
     "workflow": ".github/workflows/ci.yml",
     "name": "Cross-platform CI",

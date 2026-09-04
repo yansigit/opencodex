@@ -44,73 +44,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Which Windows runner this run is allowed to use.
-  #
-  # READ THIS BEFORE TREATING IT AS A SECURITY BOUNDARY: it is not one.
-  #
-  # On candidate events this workflow is loaded from untrusted proposed code, so the `case`
-  # below is owned by the proposed patch exactly like an `if:` guard would be.
-  # A hostile PR can delete the branch and hardcode the self-hosted labels into
-  # `$GITHUB_OUTPUT`, and `runs-on` will honour it. That this job runs on
-  # `ubuntu-latest` changes nothing — the untrusted part is its OUTPUT, not its
-  # host. `.github/workflows/ci.yml` is in the `changes` job's `ci` filter, so
-  # such an edit triggers every expensive verification job.
-  #
-  # What actually keeps untrusted code off a self-hosted runner lives OUTSIDE
-  # this file, where a PR cannot reach it: the fork-PR approval policy
-  # (`all_external_contributors`) and the judgement of whoever clicks approve.
-  # Runner groups would be the other lever, but they are an organisation
-  # feature and this repository is user-owned, so the approval policy is the
-  # only one available here. GitHub's own guidance is to avoid self-hosted
-  # runners on public repositories for this reason.
-  #
-  # So read the routing below as a STABILITY/OPERATIONS control that keeps
-  # honest pull requests on GitHub-hosted runners and lets trusted branch runs
-  # avoid the hosted-Windows Bun crashes. It is not the security boundary.
-  #
-  # `push` on dev/main/preview requires the push permission, and
-  # `workflow_dispatch` requires write access, so both carry a trusted author.
-  # `pull_request` and `merge_group` always stay on GitHub-hosted Windows.
-  # A trusted author is not audited code: merging a contributor PR into `dev`
-  # fires `push`, and its dependencies and postinstall hooks then run here.
-  select-windows-runner:
-    name: select windows runner
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    outputs:
-      runner: ${{ steps.pick.outputs.runner }}
-      label: ${{ steps.pick.outputs.label }}
-    steps:
-      - name: Pick runner
-        id: pick
-        env:
-          # Read through env rather than interpolating directly into the script:
-          # `github.event_name` is a fixed vocabulary, but keeping the habit means
-          # no future edit here can grow a script-injection sink.
-          EVENT_NAME: ${{ github.event_name }}
-          USE_SELF_HOSTED: ${{ vars.OCX_SELF_HOSTED_WINDOWS }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          trusted=no
-          case "$EVENT_NAME" in
-            push|workflow_dispatch) trusted=yes ;;
-          esac
-
-          # Repository variable OCX_SELF_HOSTED_WINDOWS is an OPERATIONAL switch,
-          # not a security control: a PR that rewrites this script ignores it for
-          # the same reason it ignores the event check above. Its job is to keep CI
-          # working when the box is off or busy. Anything other than `1` —
-          # including unset, the state before a runner exists — falls back to
-          # windows-latest.
-          if [ "$trusted" = "yes" ] && [ "${USE_SELF_HOSTED:-}" = "1" ]; then
-            echo 'runner=["self-hosted","Windows","X64","ocx-home"]' >> "$GITHUB_OUTPUT"
-            echo 'label=self-hosted (ocx-home)' >> "$GITHUB_OUTPUT"
-          else
-            echo 'runner="windows-latest"' >> "$GITHUB_OUTPUT"
-            echo 'label=windows-latest' >> "$GITHUB_OUTPUT"
-          fi
-
   # Which areas this push actually touches.
   #
   # Deliberately a job-level filter rather than a wider workflow-level `paths:`
@@ -146,9 +79,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          # No job here pushes, and the self-hosted box keeps its checkout
-          # between jobs, so leaving a usable token in .git/config is avoidable
-          # residue. Matches the convention already used by the other workflows.
+          # No job here pushes, so leaving a usable token in .git/config is
+          # avoidable residue. Matches the other workflows.
           persist-credentials: false
           # The promotion audit verifier needs both parents of the main merge.
           fetch-depth: 2
@@ -247,9 +179,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          # No job here pushes, and the self-hosted box keeps its checkout
-          # between jobs, so leaving a usable token in .git/config is avoidable
-          # residue. Matches the convention already used by the other workflows.
+          # No job here pushes, so leaving a usable token in .git/config is
+          # avoidable residue. Matches the other workflows.
           persist-credentials: false
           # tests/release-version-line.test.ts compares package.json against the
           # newest release tag. actions/checkout fetches no tags by default, so
@@ -482,9 +413,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          # No job here pushes, and the self-hosted box keeps its checkout
-          # between jobs, so leaving a usable token in .git/config is avoidable
-          # residue. Matches the convention already used by the other workflows.
+          # No job here pushes, so leaving a usable token in .git/config is
+          # avoidable residue. Matches the other workflows.
           persist-credentials: false
 
       - name: Setup project Bun
@@ -604,9 +534,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          # No job here pushes, and the self-hosted box keeps its checkout
-          # between jobs, so leaving a usable token in .git/config is avoidable
-          # residue. Matches the convention already used by the other workflows.
+          # No job here pushes, so leaving a usable token in .git/config is
+          # avoidable residue. Matches the other workflows.
           persist-credentials: false
           # tests/release-version-line.test.ts compares package.json against the
           # newest release tag. actions/checkout fetches no tags by default, so
@@ -703,11 +632,15 @@ jobs:
   # pushes is what allowed the Windows-only backlog to accumulate unnoticed.
   platform-windows:
     name: windows ${{ matrix.shard }}/4
-    needs: [changes, select-windows-runner]
+    needs: [changes]
     if: >-
       (github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
       needs.changes.outputs.ci == 'true'
-    runs-on: ${{ fromJSON(needs.select-windows-runner.outputs.runner) }}
+    # Public pull-request code must never reach a persistent self-hosted host.
+    # Keep the complete Windows lane on an ephemeral GitHub-hosted runner for
+    # every event, including trusted pushes, so event-routing drift cannot turn
+    # a repository workflow edit into host access.
+    runs-on: windows-latest
     # Sharded like the Linux legs. The single-leg run reached 30 minutes on a
     # green suite and was killed in cleanup; four shards put each leg inside the
     # same budget the Linux shards already hold.
@@ -726,34 +659,11 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - name: Show selected runner
-        shell: bash
-        run: echo "windows leg on ${{ needs.select-windows-runner.outputs.label }}"
-
-      # A self-hosted runner keeps its working directory between jobs. Without an
-      # explicit wipe, a file deleted in the commit under test survives on disk
-      # and the suite passes against a tree that no longer exists in git.
-      # `--ephemeral` registration de-registers the runner after each job but does
-      # not clean the workspace, so this step is what makes the checkout honest.
-      - name: Clean workspace (self-hosted only)
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        # `|| true` used to swallow this, which defeats the point: a clean that
-        # fails on permissions leaves the deleted files in place and the checkout
-        # below then validates a tree that no longer exists in git. Only the
-        # not-a-repository case is tolerated — that is the first run on a fresh
-        # box, where there is nothing to clean.
-        run: |
-          if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            git clean -xffd .
-          fi
-
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          # No job here pushes, and the self-hosted box keeps its checkout
-          # between jobs, so leaving a usable token in .git/config is avoidable
-          # residue. Matches the convention already used by the other workflows.
+          # No job here pushes, so leaving a usable token in .git/config is
+          # avoidable residue. Matches the other workflows.
           persist-credentials: false
           # Same reason as the Linux shards and the macOS control: this leg runs the
           # whole suite, and tests/release-version-line.test.ts reads release tags.
@@ -866,7 +776,7 @@ jobs:
 
   # Keep every OS credential-store check on a disposable GitHub-hosted machine.
   # A force-cancelled process cannot run its in-process finally cleanup, so no
-  # keyring matrix leg may use the persistent self-hosted Windows runner.
+  # keyring matrix leg may use a persistent runner.
   keyring-smoke:
     name: keyring ${{ matrix.name }}
     needs: changes
@@ -939,18 +849,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Deliberately NOT routed to the self-hosted box. This job runs
-        # `npm install -g`, which writes into the machine's global prefix and
-        # would leave an `ocx` on a maintainer's personal PATH. It is an
-        # 8-minute job, so there is nothing to win by moving it.
+        # Keep global-install smoke on disposable hosted machines: it writes
+        # into the machine's global prefix and must not leave state behind.
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          # No job here pushes, and the self-hosted box keeps its checkout
-          # between jobs, so leaving a usable token in .git/config is avoidable
-          # residue. Matches the convention already used by the other workflows.
+          # No job here pushes, so leaving a usable token in .git/config is
+          # avoidable residue. Matches the other workflows.
           persist-credentials: false
 
       # Deliberately NO setup-bun: prove `npm install -g` works without a
@@ -998,11 +905,8 @@ jobs:
   ci:
     name: ci
     if: always()
-    # Every producer, including the ones that only feed other jobs. `needs` holds
-    # direct dependencies only, so a failing `select-windows-runner` would
-    # otherwise reach this gate as nothing at all while its dependents report
-    # `skipped` — which the gate is required to read as a deliberate skip.
-    needs: [changes, select-windows-runner, test, storage-policy, api-usage, serial-load-sensitive, publish-test-timings, gates, platform-macos, platform-windows, keyring-smoke, npm-global-smoke]
+    # Every producer, including the ones that only feed other jobs.
+    needs: [changes, test, storage-policy, api-usage, serial-load-sensitive, publish-test-timings, gates, platform-macos, platform-windows, keyring-smoke, npm-global-smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

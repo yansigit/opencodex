@@ -61,13 +61,11 @@ describe("repository workflow policy", () => {
     ]);
   });
 
-  test("rejects candidate routing to a self-hosted runner", async () => {
+  test("rejects routing the Windows lane to a persistent runner", async () => {
     const input = clone(await loadInput());
-    const pick = input.ci.jobs?.["select-windows-runner"]?.steps
-      ?.find(step => step.name === "Pick runner");
-    pick!.run = `${pick!.run}\nmerge_group) trusted=yes ;;`;
+    input.ci.jobs!["platform-windows"]!["runs-on"] = ["self-hosted", "Windows", "X64", "ocx-home"];
     expect(validateWorkflowPolicy(input)).toContain(
-      "candidate events must never select the self-hosted Windows runner",
+      "the Windows CI lane must use only the ephemeral GitHub-hosted runner",
     );
   });
 
@@ -85,15 +83,13 @@ describe("repository workflow policy", () => {
 
   test("rejects weakened runner selection and aggregate shell gates", async () => {
     const input = clone(await loadInput());
-    const pick = input.ci.jobs?.["select-windows-runner"]?.steps
-      ?.find(step => step.name === "Pick runner");
-    pick!.run = pick!.run!.replace('runner="windows-latest"', 'runner=["self-hosted"]');
+    input.ci.jobs!["platform-windows"]!["runs-on"] = "self-hosted";
     const aggregate = input.ci.jobs?.ci?.steps
       ?.find(step => step.name === "Assert every needed job succeeded or was skipped");
     aggregate!.run = "set -euo pipefail\ntrue";
     expect(validateWorkflowPolicy(input)).toEqual([
       "CI aggregate job must fail closed on every non-success/non-skipped producer and required Windows result",
-      "self-hosted Windows routing must trust only push and workflow_dispatch",
+      "the Windows CI lane must use only the ephemeral GitHub-hosted runner",
     ]);
   });
 

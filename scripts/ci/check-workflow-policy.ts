@@ -9,6 +9,7 @@ type Workflow = {
     name?: string;
     if?: string;
     needs?: string | string[];
+    "runs-on"?: unknown;
     steps?: Array<{
       id?: string;
       name?: string;
@@ -26,7 +27,6 @@ export type RepositoryWorkflowPolicy = {
   defaultBranch: string;
   integrationBranches: string[];
   candidateEvents: string[];
-  trustedRunnerEvents: string[];
   ci: {
     workflow: string;
     name: string;
@@ -81,16 +81,12 @@ export function validateWorkflowPolicy(input: WorkflowPolicyInput): string[] {
   for (const [name, values] of [
     ["integrationBranches", policy.integrationBranches],
     ["candidateEvents", policy.candidateEvents],
-    ["trustedRunnerEvents", policy.trustedRunnerEvents],
   ] as const) {
     const repeated = duplicates(values);
     if (repeated.length > 0) fail(`${name} contains duplicate values: ${repeated.join(", ")}`);
   }
   if (!sameMembers(policy.candidateEvents, ["pull_request", "merge_group"])) {
     fail("candidateEvents must be pull_request and merge_group");
-  }
-  if (!sameMembers(policy.trustedRunnerEvents, ["push", "workflow_dispatch"])) {
-    fail("trustedRunnerEvents must be push and workflow_dispatch");
   }
 
   const requiredPathGroups = ["ci", "dependencies", "gui", "packaging", "macos", "swift"];
@@ -154,19 +150,9 @@ export function validateWorkflowPolicy(input: WorkflowPolicyInput): string[] {
     fail("scope assertion must select the event-specific filter and fail closed on invalid output");
   }
 
-  const runnerScript = ci.jobs?.["select-windows-runner"]?.steps
-    ?.find(step => step.name === "Pick runner")?.run ?? "";
-  if (!runnerScript.includes("set -euo pipefail") ||
-      !runnerScript.includes("trusted=no") ||
-      !runnerScript.includes("push|workflow_dispatch) trusted=yes") ||
-      !runnerScript.includes('if [ "$trusted" = "yes" ] && [ "${USE_SELF_HOSTED:-}" = "1" ]; then') ||
-      !runnerScript.includes("else") ||
-      !runnerScript.includes("runner=\"windows-latest\"")) {
-    fail("self-hosted Windows routing must trust only push and workflow_dispatch");
-  }
-  if ((runnerScript.match(/trusted=yes/g) ?? []).length !== 1 ||
-      /merge_group\).*trusted=yes|pull_request\).*trusted=yes/.test(runnerScript)) {
-    fail("candidate events must never select the self-hosted Windows runner");
+  if (ci.jobs?.["select-windows-runner"] !== undefined ||
+      ci.jobs?.["platform-windows"]?.["runs-on"] !== "windows-latest") {
+    fail("the Windows CI lane must use only the ephemeral GitHub-hosted runner");
   }
 
   for (const jobName of [

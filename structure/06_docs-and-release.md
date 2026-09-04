@@ -87,14 +87,11 @@ authenticated catalog access, and a real routed response themselves.
 branch, not from `dev`. Landing a change to one of them on `dev` does not change live behavior until
 it is promoted, so those files follow the promotion model rather than ordinary integration.
 
-The Windows selector is an operational stability control, not a security boundary. A pull request
-controls the `pull_request` workflow body and can rewrite an event-name check, repository variable,
-or selector output. Because this is a public user-owned repository and runner groups are unavailable,
-the repository setting **Fork pull request workflows from outside collaborators: Require approval
-for all outside collaborators** (`all_external_contributors`) must remain enabled before any self-
-hosted runner is registered. Maintainers must inspect workflow changes before approving an external
-run. If that setting cannot be verified, unset `OCX_SELF_HOSTED_WINDOWS` and deregister the runner;
-the workflow then fails back to `windows-latest` rather than exposing a persistent maintainer host.
+Every Windows CI lane uses `windows-latest`. Pull-request workflows execute proposed workflow code,
+so an event-name selector inside the same file cannot safely protect a persistent self-hosted host.
+Do not register a repository-level self-hosted runner for this public user-owned repository. If a
+future organization migration introduces isolated ephemeral runner groups, access must be restricted
+outside candidate-controlled YAML and security-reviewed before any workflow starts using them.
 
 Docs-only changes intentionally route through the docs workflow instead of the runtime CI gate. If a
 docs change also edits runtime/package/release files, run the relevant local runtime checks before

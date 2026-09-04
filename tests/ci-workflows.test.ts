@@ -116,7 +116,7 @@ describe("GitHub Actions hardening", () => {
     // since 8034cd7c0 — a single leg reached 30m on a green suite and was killed
     // in cleanup, so each shard now holds the same 15m a Linux shard holds. A
     // shard that needs longer is wedged, not slow.
-    expect(ci.jobs?.["select-windows-runner"]?.["timeout-minutes"]).toBe(2);
+    expect(ci.jobs?.["select-windows-runner"]).toBeUndefined();
     expect(ci.jobs?.test?.["timeout-minutes"]).toBe(15);
     expect(ci.jobs?.gates?.["timeout-minutes"]).toBe(15);
     expect(ci.jobs?.["platform-macos"]?.["timeout-minutes"]).toBe(30);
@@ -272,15 +272,15 @@ describe("GitHub Actions hardening", () => {
     // Windows is required for every integration push and CI-relevant PR. The
     // changes dependency keeps documentation-only PRs cheap without letting a
     // code change or shipping-boundary push silently lose Windows coverage.
-    const windowsJob = ci.jobs?.["platform-windows"] as { if?: string; needs?: string[] } | undefined;
-    expect(windowsJob?.needs).toEqual(["changes", "select-windows-runner"]);
+    const windowsJob = ci.jobs?.["platform-windows"] as { if?: string; needs?: string[]; "runs-on"?: string } | undefined;
+    expect(windowsJob?.needs).toEqual(["changes"]);
+    expect(windowsJob?.["runs-on"]).toBe("windows-latest");
     expect(windowsJob?.if)
       .toBe("(github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.ci == 'true'");
 
-    // Windows runs the same suite, sharded like the Linux legs, and keeps the
-    // self-hosted workspace wipe. Without the wipe a deleted file survives on
-    // the runner's disk and the suite passes against a tree that no longer
-    // exists in git.
+    // Windows runs the same suite, sharded like the Linux legs, on an ephemeral
+    // GitHub-hosted runner. Public pull-request code must never reach a
+    // persistent self-hosted host.
     const winSteps = (ci.jobs?.["platform-windows"] as { steps?: { if?: string; run?: string }[] })?.steps ?? [];
     // --timeout is part of the contract, not incidental: this leg ran on Bun's 5s default
     // while Linux and macOS both pass 60000, and it is the slowest hardware on the board.
@@ -307,8 +307,7 @@ describe("GitHub Actions hardening", () => {
     expect(windowsTestRun).toContain('--parallel=1 --timeout "$serial_timeout" "$serial_file"');
     expect(windowsTestRun).not.toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
     expect(windowsTestRun).not.toContain(`tests --shard=\${{ matrix.shard }}/${windowsShards.length}`);
-    expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"
-      && step.run?.includes("git clean -xffd"))).toBe(true);
+    expect(workflow).not.toContain("ocx-home");
 
     // The three crash-signature lists must stay identical, and they must not key on
     // `panic(thread`.
@@ -359,9 +358,7 @@ describe("GitHub Actions hardening", () => {
       expect(`${jobName}:${build?.if ?? "unconditional"}`).toBe(`${jobName}:unconditional`);
     }
 
-    // No job in this workflow pushes, and the self-hosted runner keeps its
-    // checkout between jobs, so a persisted token is avoidable residue. The
-    // other workflows in this repository already set this; ci.yml was the gap.
+    // No job in this workflow pushes, so a persisted token is avoidable residue.
     const checkouts = Object.values(ci.jobs ?? {})
       .flatMap(job => (job as { steps?: { uses?: string; with?: Record<string, unknown> }[] })?.steps ?? [])
       .filter(step => step.uses?.startsWith("actions/checkout@"));
@@ -370,13 +367,6 @@ describe("GitHub Actions hardening", () => {
       expect(`checkout[${index}]:${step.with?.["persist-credentials"]}`).toBe(`checkout[${index}]:false`);
     }
 
-    // The self-hosted workspace wipe must not swallow its own failure. A clean
-    // that fails on permissions leaves deleted files on disk, and the checkout
-    // after it then validates a tree that no longer exists in git.
-    const wipe = ((ci.jobs?.["platform-windows"] as { steps?: { if?: string; run?: string }[] })?.steps ?? [])
-      .find(step => step.run?.includes("git clean -xffd"));
-    expect(wipe?.run).not.toContain("|| true");
-    expect(wipe?.run).toContain("git rev-parse --is-inside-work-tree");
   });
 
   test("PR checks reach every branch the target gate accepts", async () => {
