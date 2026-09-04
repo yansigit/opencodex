@@ -32,6 +32,7 @@ describe("CI lane manifest", () => {
       "tests/claude-native-passthrough.test.ts",
       "tests/claude-management-api.test.ts",
       "tests/codex-app-server-processes.test.ts",
+      "tests/codex-composed-acceptance.test.ts",
       "tests/codex-transition-state-race.test.ts",
       "tests/native-main-owner-lifetime.test.ts",
       "tests/ocx-launcher-runtime.test.ts",
