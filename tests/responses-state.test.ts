@@ -1032,6 +1032,7 @@ describe("Responses previous_response_id state", () => {
     expect(responseStateMetrics()).toMatchObject({ spillStubCount: 1, tombstoneCount: 0, spillWriteFailures: 0 });
     expect(spillFileNames(home)).toHaveLength(1);
     expect(spillTempNames(home)).toHaveLength(1);
+    expect(getAccountedResponseSpillBytesForTests()).toBeGreaterThan(getSpilledResponseBytesForTests());
     expect(JSON.stringify(expandPreviousResponseInput({ previous_response_id: "resp_temp_cleanup", input: "next" })))
       .toContain("tttttttt");
   });
@@ -1050,6 +1051,8 @@ describe("Responses previous_response_id state", () => {
 
     expect(responseStateMetrics()).toMatchObject({ spillStubCount: 1, tombstoneCount: 0, spillWriteFailures: 0 });
     expect(spillFileNames(home)).toHaveLength(1);
+    expect(spillTempNames(home)).toHaveLength(0);
+    expect(getAccountedResponseSpillBytesForTests()).toBe(getSpilledResponseBytesForTests());
     expect(JSON.stringify(expandPreviousResponseInput({ previous_response_id: "resp_lock_commit", input: "next" })))
       .toContain("cccccccc");
   });

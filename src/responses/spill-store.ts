@@ -787,7 +787,17 @@ export async function writeResponseSpillDurablyAsync(
         }
         return ref;
       } catch (error) {
-        if (transferred) return transferred;
+        if (transferred) {
+          try {
+            unlinkEphemeral(publishTempPath);
+            tempPath = null;
+          } catch {
+            // The committed destination has a live stub. Its redundant temp is
+            // reclaimed by startup GC; cleanup must never invalidate the stub.
+          }
+          if (publicationControl && tempPath === null) publicationControl.tempPath = null;
+          return transferred;
+        }
         if (publicationControl?.superseded) throw error;
         if (isErrno(error, "EEXIST")) {
           if (publicationControl) {

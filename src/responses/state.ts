@@ -625,6 +625,9 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
     }
   } finally {
     const cancelled = job.cancelled;
+    const perPath = Math.max(1, Math.floor(job.reservedBytes / 2));
+    chargeUnreclaimableSpillPath(job.publicationControl.tempPath, perPath);
+    chargeUnreclaimableSpillPath(job.publicationControl.destinationPath, perPath);
     releasePendingResponseSpill(job);
     recomputeOldestResident();
     if (!cancelled) {
