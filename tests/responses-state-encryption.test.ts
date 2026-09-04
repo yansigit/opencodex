@@ -712,6 +712,40 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(existsSync(legacySpillPath)).toBe(false);
   });
 
+  test("valid legacy retirement drains an unreferenced young spill before encrypted persistence resumes", async () => {
+    const referenced = writeResponseSpillDurably("resp_valid_legacy", {
+      createdAt: Date.now(),
+      items: [{ secret: "referenced legacy plaintext" }],
+    });
+    const orphan = writeResponseSpillDurably("resp_valid_legacy_orphan", {
+      createdAt: Date.now(),
+      items: [{ secret: "unreferenced young legacy plaintext" }],
+    });
+    const spillDir = responseSpillDirectory(home);
+    const referencedPath = join(spillDir, referenced.fileName);
+    const orphanPath = join(spillDir, orphan.fileName);
+    const snapshotPath = join(home, "responses-state.json");
+    writeFileSync(snapshotPath, JSON.stringify({
+      version: 2,
+      states: [["resp_valid_legacy", {
+        createdAt: Date.now(),
+        kind: "spill",
+        spill: referenced,
+      }]],
+    }));
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(referencedPath)).toBe(false);
+    expect(existsSync(orphanPath)).toBe(false);
+    expect(existsSync(snapshotPath)).toBe(true);
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
   test.skipIf(!canSymlink)("legacy snapshot retirement removes both a symlink and its plaintext target", () => {
     const targetDir = join(home, "managed-state");
     mkdirSync(targetDir, { recursive: true });
@@ -740,6 +774,49 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
     expect(existsSync(spillPath)).toBe(false);
     expect(existsSync(snapshotPath)).toBe(true);
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
+  test("malformed legacy retirement drains a young spill before encrypted persistence resumes", async () => {
+    const ref = writeResponseSpillDurably("resp_malformed_legacy", {
+      createdAt: Date.now(),
+      items: [{ secret: "young malformed legacy plaintext" }],
+    });
+    const spillPath = join(responseSpillDirectory(home), ref.fileName);
+    const snapshotPath = join(home, "responses-state.json");
+    writeFileSync(snapshotPath, `{"version":2,"states":[["resp_malformed_legacy"`);
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(spillPath)).toBe(false);
+    expect(existsSync(snapshotPath)).toBe(true);
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
+  test.each([
+    ["unknown version", { version: 99, states: [] }],
+    ["invalid v3 shape", { version: 3, states: {} }],
+  ] as const)("%s snapshot drains a young spill before retirement", async (_name, snapshot) => {
+    const ref = writeResponseSpillDurably("resp_invalid_snapshot", {
+      createdAt: Date.now(),
+      items: [{ secret: "young invalid snapshot plaintext" }],
+    });
+    const spillPath = join(responseSpillDirectory(home), ref.fileName);
+    const snapshotPath = join(home, "responses-state.json");
+    writeFileSync(snapshotPath, JSON.stringify(snapshot));
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(spillPath)).toBe(false);
+    expect(existsSync(snapshotPath)).toBe(true);
+
     runPendingLegacyResponseStateRetirementForTests();
     expect(existsSync(snapshotPath)).toBe(false);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");

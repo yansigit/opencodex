@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, type Stats, unlinkSync } from "node:fs";
 import { uptime } from "node:os";
 import { dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../config";
@@ -183,8 +183,8 @@ interface LegacySnapshotRetirement {
   linkPath?: string;
   linkDev?: number;
   linkIno?: number;
-  /** Oversized snapshots cannot be parsed for refs; retain the bounded scan
-   * cursor until every pre-existing owned spill candidate is retired. */
+  /** Non-v3 snapshots are untrusted retirement markers. Retain the bounded
+   * scan cursor until every pre-existing owned spill candidate is retired. */
   spillScan?: ResponseSpillRetirementScan;
   spillScanComplete?: boolean;
 }
@@ -1744,6 +1744,34 @@ function retryLegacyRetirement(): void {
   refreshLegacyRetirementBlock();
 }
 
+function snapshotRetirementMarker(
+  path: string,
+  literal: Stats,
+  targetPath: string,
+  target: Stats,
+): LegacySnapshotRetirement {
+  return {
+    targetPath,
+    targetDev: target.dev,
+    targetIno: target.ino,
+    spillScan: createResponseSpillRetirementScan(),
+    spillScanComplete: false,
+    ...(literal.isSymbolicLink()
+      ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino }
+      : {}),
+  };
+}
+
+function beginUntrustedSnapshotRetirement(
+  path: string,
+  literal: Stats,
+  targetPath: string,
+  target: Stats,
+): void {
+  legacySnapshotAwaitingRetirement = snapshotRetirementMarker(path, literal, targetPath, target);
+  retryLegacyRetirement();
+}
+
 /**
  * Best-effort disk snapshot so previous_response_id chains survive a proxy restart (the
  * dominant expansion-miss cause: an in-memory-only store dies with the process, and the next
@@ -1784,35 +1812,35 @@ function ensureLoaded(): void {
       const stat = statSync(targetPath);
       if (!stat.isFile()) {
         // Symlink to a FIFO/device (e.g. /dev/zero): reading would block or
-        // return unbounded input. Only regular files are ever parsed.
+        // return unbounded input. Retire only the literal entry, never the
+        // external target, while draining spills under the durable marker.
+        beginUntrustedSnapshotRetirement(path, literal, path, literal);
       } else if (stat.size > SNAPSHOT_FILE_MAX_BYTES) {
         admissionCounters.snapshotOversizedRefusals += 1;
         // No snapshot this process writes can exceed this bound. Treat an older
         // or externally planted oversized regular file as untrusted plaintext:
         // retire the inode without reading it, and block encrypted persistence
         // until that inode (and a symlink entry, if present) is really gone.
-        legacySnapshotAwaitingRetirement = {
-          targetPath,
-          targetDev: stat.dev,
-          targetIno: stat.ino,
-          spillScan: createResponseSpillRetirementScan(),
-          spillScanComplete: false,
-          ...(literal.isSymbolicLink()
-            ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino }
-            : {}),
-        };
-        retryLegacyRetirement();
+        beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
       } else {
-        const raw = JSON.parse(readFileSync(targetPath, "utf-8")) as { version?: unknown; states?: unknown };
-        if ((raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
-          legacySnapshotAwaitingRetirement = {
-            targetPath,
-            targetDev: stat.dev,
-            targetIno: stat.ino,
-            ...(literal.isSymbolicLink()
-              ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino }
-              : {}),
-          };
+        let parsed: unknown;
+        let parsedOk = false;
+        try {
+          parsed = JSON.parse(readFileSync(targetPath, "utf-8"));
+          parsedOk = true;
+        } catch {
+          beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
+        }
+        const raw = parsedOk && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? parsed as { version?: unknown; states?: unknown }
+          : undefined;
+        if (raw?.version === 3 && Array.isArray(raw.states)) {
+          for (const entry of raw.states) {
+            if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
+            loadSnapshotEntry(entry[0], entry[1]);
+          }
+        } else if (raw && (raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
+          legacySnapshotAwaitingRetirement = snapshotRetirementMarker(path, literal, targetPath, stat);
           for (const entry of raw.states) {
             if (Array.isArray(entry) && entry.length === 2 && entry[1] && typeof entry[1] === "object") {
               const item = entry[1] as { kind?: unknown; spill?: unknown };
@@ -1822,11 +1850,8 @@ function ensureLoaded(): void {
             }
           }
           retryLegacyRetirement();
-        } else if (raw.version === 3 && Array.isArray(raw.states)) {
-          for (const entry of raw.states) {
-            if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
-            loadSnapshotEntry(entry[0], entry[1]);
-          }
+        } else if (parsedOk) {
+          beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
         }
       }
     }
