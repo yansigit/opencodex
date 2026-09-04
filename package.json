@@ -1,7 +1,7 @@
 {
   "name": "@yansigit/opencodex",
-  "version": "2.41.0",
-  "description": "Universal provider proxy for OpenAI Codex & Claude Code \u2014 use any LLM with Codex CLI/App/SDK and Claude Code",
+  "version": "2.41.1",
+  "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
   "exports": {
