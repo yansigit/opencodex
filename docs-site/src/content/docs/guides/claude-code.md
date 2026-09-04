@@ -3,9 +3,16 @@ title: Claude Code
 description: Use any routed model from Claude Code — opencodex serves the Anthropic Messages API and gateway model discovery on the same port.
 ---
 
-opencodex serves `POST /v1/messages` (plus `count_tokens`) alongside `/v1/responses`, so Claude
+opencodex serves `POST /v1/messages` and `POST /v1/messages/count_tokens` alongside `/v1/responses`, so Claude
 Code can use every routed provider — OAuth logins, account pools, key failover and sidecars
 included — with zero extra auth work.
+
+Generated OpenCodex roster definitions carry signed route and (when configured) effort directives.
+The proxy verifies those directives before dispatching a provider request: an invalid or altered
+signed directive fails closed with `400 invalid_request_error`. For compatibility with older,
+unsigned definitions, a directive is honored only when it exactly matches an active
+OpenCodex-owned roster entry; arbitrary unsigned text is ignored. See [Roster agents](#roster-agents-injectagents)
+for operational details.
 
 ## Claude OAuth account pool (experimental)
 
