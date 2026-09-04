@@ -15,6 +15,10 @@ describe("Claude certification runner policy", () => {
       HTTPS_PROXY: "http://proxy.invalid",
       OPENAI_API_KEY: "must-not-leak",
       AWS_SECRET_ACCESS_KEY: "must-not-leak",
+      AWS_ACCESS_KEY_ID: "must-not-leak",
+      AWS_PROFILE: "must-not-leak",
+      USERPROFILE: "/operator",
+      XDG_CONFIG_HOME: "/operator/config",
       UNRELATED: "kept",
     }, { home: "/tmp/cert-home", claude: "/tmp/cert-claude", ocx: "/tmp/cert-ocx" });
 

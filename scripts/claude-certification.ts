@@ -33,7 +33,7 @@ export interface CertificationReport {
 export function sanitizedChildEnv(base: Record<string, string | undefined>, dirs: { home: string; claude: string; ocx: string }): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(base)) {
-    if (value !== undefined && !CREDENTIAL.test(key) && !PROXY.test(key) && key !== "OPENCODEX_HOME" && key !== "CLAUDE_CONFIG_DIR") out[key] = value;
+    if (value !== undefined && !CREDENTIAL.test(key) && !PROXY.test(key) && !/^(?:AWS_ACCESS_KEY_ID|AWS_PROFILE|AWS_SESSION_TOKEN|USERPROFILE|APPDATA|LOCALAPPDATA|XDG_[A-Z0-9_]+)$/i.test(key) && key !== "OPENCODEX_HOME" && key !== "CLAUDE_CONFIG_DIR") out[key] = value;
   }
   out.HOME = dirs.home;
   out.CLAUDE_CONFIG_DIR = dirs.claude;
@@ -55,9 +55,9 @@ async function readBounded(stream: ReadableStream<Uint8Array>): Promise<string> 
 async function command(exe: string, args: string[], cwd: string, env: Record<string, string>): Promise<{ code: number; out: string; err: string }> {
   let child: ReturnType<typeof Bun.spawn>;
   try { child = Bun.spawn([exe, ...args], { cwd, env, stdin: "ignore", stdout: "pipe", stderr: "pipe" }); }
-  catch { throw new Error("Claude Code CLI is not installed"); }
+  catch { const error = new Error("missing executable"); error.name = "MissingExecutable"; throw error; }
   let timedOut = false; const timer = setTimeout(() => { timedOut = true; child.kill(); }, TIMEOUT_MS);
-  try { const [code, out, err] = await Promise.all([child.exited, readBounded(child.stdout), readBounded(child.stderr)]); if (timedOut) throw new Error("Claude Code CLI timed out"); return { code, out, err }; }
+  try { const [code, out, err] = await Promise.all([child.exited, readBounded(child.stdout), readBounded(child.stderr)]); if (timedOut) throw new Error("timeout"); return { code, out, err }; }
   finally { clearTimeout(timer); }
 }
 
@@ -77,9 +77,10 @@ export async function runHermetic(cli = process.env.CLAUDE_BIN?.trim() || "claud
     upstream = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(req) { const path = new URL(req.url).pathname; upstreamPaths.push(path); if (path !== "/v1/messages") return new Response("not found", { status: 404 }); const body = await req.json(); requests.push(body); const hasToolResult = JSON.stringify(body).includes("tool_result"); const first = !hasToolResult; const msg = { id: "msg_cert", type: "message", role: "assistant", model: MODEL, content: [], stop_reason: first ? "tool_use" : "end_turn", stop_sequence: null, usage: { input_tokens: 1, output_tokens: 1 } }; const events = first ? [{ event: "message_start", data: { type: "message_start", message: msg } }, { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "cert_tool", name: "Read", input: {} } } }, { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify({ file_path: markerPath }) } } }, { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } }, { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "tool_use" }, usage: { output_tokens: 1 } } }, { event: "message_stop", data: { type: "message_stop" } }] : [{ event: "message_start", data: { type: "message_start", message: msg } }, { event: "content_block_start", data: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } } }, { event: "content_block_delta", data: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "CLAUDE_CERT_OK" } } }, { event: "content_block_stop", data: { type: "content_block_stop", index: 0 } }, { event: "message_delta", data: { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } } }, { event: "message_stop", data: { type: "message_stop" } }]; return sse(events); } });
     process.env.OPENCODEX_HOME = dirs.ocx; saveConfig(config(new URL("/v1", upstream.url).toString())); proxy = startServer(0);
     const env = buildClaudeEnv(config(new URL("/v1", proxy.url).toString()), { baseUrl: proxy.url.toString(), admissionToken: ADMISSION_TOKEN }, sanitizedChildEnv(process.env, dirs), {}, { preBunAnthropicSlots: [] }); env.ANTHROPIC_MODEL = CLI_MODEL;
-    let result; try { result = await command(cli, ["-p", "Read the marker file and print its contents.", "--model", CLI_MODEL, "--allowedTools", "Read", "--safe-mode", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--output-format", "text"], root, env); } catch (error) { return { mode: "hermetic", status: "skipped", cliPresent: false, streaming: false, toolContinuation: false, requests: 0, reason: error instanceof Error ? error.message : "Claude Code CLI unavailable" }; }
-    const text = `${result.out}\n${result.err}`; const streaming = requests.length > 0; const toolContinuation = requests.length >= 2;
-    return { mode: "hermetic", status: result.code === 0 && text.includes("CLAUDE_CERT_OK") && streaming && toolContinuation ? "hermetic_pass" : "hermetic_fail", cliPresent: true, streaming, toolContinuation, requests: requests.length, reason: result.code === 0 ? undefined : "Claude Code exited non-zero" };
+    let result; try { result = await command(cli, ["-p", "Read the marker file and print its contents.", "--model", CLI_MODEL, "--allowedTools", "Read", "--permission-mode", "dontAsk", "--output-format", "text"], root, env); } catch (error) { const missing = error instanceof Error && error.name === "MissingExecutable"; return { mode: "hermetic", status: missing ? "skipped" : "hermetic_fail", cliPresent: !missing, streaming: false, toolContinuation: false, requests: 0, reason: missing ? "Claude Code CLI unavailable" : (error instanceof Error ? error.message : "hermetic subprocess failure") }; }
+    const text = `${result.out}\n${result.err}`; const first = requests[0] as { stream?: unknown } | undefined; const second = requests[1] as { messages?: unknown } | undefined; const streaming = first?.stream === true; const toolContinuation = typeof second?.messages === "object" && JSON.stringify(second.messages).includes("tool_result");
+    const passed = result.code === 0 && text.includes("CLAUDE_CERT_OK") && streaming && toolContinuation && upstreamPaths.every(path => path === "/v1/messages");
+    return { mode: "hermetic", status: passed ? "hermetic_pass" : "hermetic_fail", cliPresent: true, streaming, toolContinuation, requests: requests.length, reason: passed ? undefined : (result.code !== 0 ? "Claude Code exited non-zero" : "hermetic protocol validation failed") };
   } finally { if (proxy) await proxy.stop(true); upstream?.stop(true); if (previousOcxHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = previousOcxHome; rmSync(root, { recursive: true, force: true }); }
 }
 
