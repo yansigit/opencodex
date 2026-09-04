@@ -17,6 +17,8 @@ describe("dependency audit retry classification", () => {
 
   test("retries transport errors and explicit attempt timeouts", () => {
     expect(isTransientAuditFailure("error: ETIMEDOUT fetching advisories")).toBe(true);
+    expect(isTransientAuditFailure("error: registry request - DNSResolveFailed")).toBe(true);
+    expect(isTransientAuditFailure("error: getaddrinfo ENOTFOUND registry.npmjs.org")).toBe(true);
     expect(isTransientAuditFailure("", true)).toBe(true);
   });
 

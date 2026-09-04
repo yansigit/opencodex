@@ -29,6 +29,12 @@ change requires explicit security review under `MAINTAINERS.md`.
 - Run the local commands represented by changed workflow steps where possible.
 - Run `bun run prepush` for CI, release, dependency, packaging, or cross-platform workflow changes.
 - Upstream sync / promotion readiness: when workflow files changed, workflow lint must be clean; when dependency files changed, audit must be clean; verify exact-head/provenance (tag, base, published head, registry/decision/report hashes); `cancelled` or `skipped` runs are not evidence of green — only `success` counts.
+- A `main` push may reuse a promotion PR's dependency-audit result only when the
+  read-only verifier proves the exact two-parent, tree-identical `dev` promotion,
+  the same-repository merged PR, and a fresh successful `gates` audit step. The
+  surrounding run may have been cancelled after merge, but that does not make it
+  green: only the completed audit step is reused, and every missing, stale,
+  ambiguous, changed-proof, or unavailable signal falls back to a live audit.
 - A red `main` may be reconciled into exact-green `dev` only through the promotion backmerge helper's tree-preserving ancestry result. Never waive `main` CI for manual dispatch, a content-changing target, or a target that has not passed the helper's parent/tree postchecks.
 - Automation health may report the one-commit `dev`-behind-`main` promotion window as a warning only while exact-tip `main` CI is active or within the bounded post-success reconciliation grace. Multi-commit, diverged, stale, failed-CI, or duplicate-controller states remain alerts.
 - Post-release version advancement has one writer: `promote-dev.yml` verifies the published tag and exact release SHA, proves the next stable patch is unused in npm and remote tags, then makes the forward-only package-version commit through the repository App. `release.yml` must not also call `dev-version-bump.yml`; parallel bump authorities race, choose different successor policies, and leave a conflicting red PR.

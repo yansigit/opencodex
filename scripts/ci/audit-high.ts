@@ -3,7 +3,7 @@ const ATTEMPT_TIMEOUT_MS = 90_000;
 const RETRY_DELAY_MS = 2_000;
 
 const TRANSIENT_ERROR =
-  /(?:\b(?:408|429|5\d\d)\b|eai_again|econnreset|etimedout|enetunreach|econnrefused|und_err_connect_timeout|fetch failed|socket hang up|network timeout|tls handshake timeout)/i;
+  /(?:\b(?:408|429|5\d\d)\b|dnsresolvefailed|eai_again|econnreset|enotfound|etimedout|enetunreach|econnrefused|und_err_connect_timeout|fetch failed|socket hang up|network timeout|tls handshake timeout)/i;
 
 export function isTransientAuditFailure(
   output: string,
