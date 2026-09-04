@@ -241,6 +241,29 @@ They are not regressions; do not re-investigate them:
 
 Everything else passes (15480 pass / 16 skip / 5 fail as of 2.35.0).
 
+## Live inference testing
+
+Treat `127.0.0.1:10100` as the production local-usage proxy — the instance
+running agents (including Codex) on this machine. Do not restart, reconfigure,
+or run destructive smoke against it while developing or verifying changes.
+
+Real inference and provider smoke tests must use an isolated runtime instead:
+
+- **Container:** `bun run test:container` (Apple Container on macOS).
+- **Separate instance:** a fresh `OPENCODEX_HOME` under a temp directory and an
+  alternate listen port, e.g. `bun run src/cli/index.ts start --port <port>`.
+- **Isolated smoke harness:** follow
+  [`scripts/openai-provider-option-runtime-smoke.ts`](./scripts/openai-provider-option-runtime-smoke.ts)
+  — it refuses to bind `10100`, snapshots live `10100` listener identity, and
+  verifies real user config/credential hashes are unchanged.
+
+When targeting a live proxy for inference smoke, pass an explicit URL; never
+assume `10100` is disposable test infrastructure:
+
+```bash
+bun scripts/live-smoke.ts --url http://127.0.0.1:<port>/v1/responses
+```
+
 ## Issues and pull requests (agents)
 
 Agent-created issues and PRs must use the repository templates. The gates
