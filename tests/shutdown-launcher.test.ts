@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +44,18 @@ afterAll(() => {
   }
 });
 
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      srv.close(() => (port ? resolve(port) : reject(new Error("no port"))));
+    });
+  });
+}
+
 async function healthy(port: number): Promise<boolean> {
   try {
     const res = await fetch(`http://127.0.0.1:${port}/healthz`, {
@@ -55,32 +67,29 @@ async function healthy(port: number): Promise<boolean> {
   }
 }
 
+/**
+ * Startup budget for the proxy, generous on CI and tight locally.
+ *
+ * The subject of this test is signal forwarding, not startup latency, so the
+ * budget only has to be long enough that a slow machine does not read as an
+ * orphaned proxy. Locally the spawn is healthy in ~800ms; a shared CI runner
+ * building four shards plus a macOS suite in parallel is a different machine
+ * entirely, and 20s was not enough for it twice on 2026-09-03.
+ *
+ * Raising this cannot hide the regression the test guards: an orphaned proxy
+ * fails at step 4 (the port never frees), which has its own deadline. What a
+ * too-short startup budget DOES hide is that distinction — it fails before the
+ * shutdown path runs at all.
+ */
+const STARTUP_BUDGET_MS = process.env.CI ? 60_000 : 20_000;
+
 async function waitUntil(fn: () => Promise<boolean>, deadlineMs: number): Promise<boolean> {
-  const end = performance.now() + deadlineMs;
-  while (performance.now() < end) {
+  const end = Date.now() + deadlineMs;
+  while (Date.now() < end) {
     if (await fn()) return true;
     await Bun.sleep(250);
   }
   return false;
-}
-
-function publishedPort(home: string): number | null {
-  try {
-    const parsed = JSON.parse(readFileSync(join(home, "runtime-port.json"), "utf8")) as { port?: unknown };
-    return Number.isInteger(parsed.port) && Number(parsed.port) > 0 ? Number(parsed.port) : null;
-  } catch {
-    return null;
-  }
-}
-
-function captureOutput(child: ChildProcess): () => string {
-  let output = "";
-  const append = (chunk: Buffer | string) => {
-    output = (output + chunk.toString()).slice(-16_384);
-  };
-  child.stdout?.on("data", append);
-  child.stderr?.on("data", append);
-  return () => output.trim();
 }
 
 describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
@@ -90,19 +99,24 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
       async () => {
         const home = mkdtempSync(join(tmpdir(), "ocx-shutdown-"));
         tmpHomes.push(home);
+        const port = await freePort();
         const identity = claimTempHome(home);
-
-        // Let the runtime ask the OS for an ephemeral port and publish the concrete
-        // selection. Reserving and releasing a port in the test creates a check-then-bind
-        // race with both the runtime and the readiness probes on loaded CI hosts.
-        writeFileSync(join(home, "config.json"), JSON.stringify({ port: 0, codexAutoStart: false }));
 
         // Seed a native Codex config so the proxy actually injects on start (injectCodexConfig
         // no-ops when no config.toml exists) — this lets us prove the config is RESTORED.
         const codexConfig = join(home, "config.toml");
         writeFileSync(codexConfig, 'model = "gpt-5.1"\n');
 
-        const child = spawn("node", [BIN_OCX, "start"], {
+        // stdout/stderr are CAPTURED, not discarded.
+        //
+        // This test failed twice on the v2.41.0 promotion at exactly 20s -- the
+        // startup deadline below, not the shutdown path this test is named for.
+        // With `stdio: "ignore"` the failure said only `expect(up).toBe(true)`:
+        // no proxy log, no exit code, no way to tell a slow runner from a real
+        // startup regression. Locally the same spawn is healthy in ~800ms, so a
+        // 25x margin is already generous and the missing evidence was the actual
+        // problem.
+        const child = spawn("node", [BIN_OCX, "start", "--port", String(port)], {
           stdio: ["ignore", "pipe", "pipe"],
           env: {
             ...process.env,
@@ -115,25 +129,25 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
           },
         });
         spawned.push(child);
-        const childOutput = captureOutput(child);
 
         let exited = false;
-        let exitDetail = "still running";
-        child.on("exit", (code, signal) => {
-          exited = true;
-          exitDetail = signal ? `signal ${signal}` : `exit ${code ?? "unknown"}`;
-        });
+        let exitCode: number | null = null;
+        let exitSignal: NodeJS.Signals | null = null;
+        child.on("exit", () => { exited = true; });
+        child.on("exit", (code, sig) => { exitCode = code; exitSignal = sig; });
+
+        let output = "";
+        child.stdout?.on("data", chunk => { output += String(chunk); });
+        child.stderr?.on("data", chunk => { output += String(chunk); });
 
         // 1. Proxy comes up + injected the Codex config (Design B root override on loopback).
-        let port: number | null = null;
-        const up = await waitUntil(async () => {
-          port = publishedPort(home);
-          return port !== null && await healthy(port);
-        }, 30_000);
-        if (!up || port === null) {
+        const up = await waitUntil(() => healthy(port), STARTUP_BUDGET_MS);
+        if (!up) {
+          // Name what actually went wrong instead of asserting a bare boolean.
+          const died = exited ? ` The launcher EXITED (code ${exitCode}, signal ${exitSignal}).` : " The launcher was still running.";
           throw new Error(
-            `launcher did not publish a healthy runtime within 30s (${exitDetail})`
-            + (childOutput() ? `\n${childOutput()}` : ""),
+            `The proxy never answered /healthz on port ${port} within ${STARTUP_BUDGET_MS}ms.${died}`
+            + ` Launcher output:\n${output.trim() || "(none)"}`,
           );
         }
         expect(existsSync(join(home, "ocx.pid"))).toBe(true);
@@ -158,7 +172,7 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
         expect(existsSync(join(home, "runtime-port.json"))).toBe(false);
         expect(readFileSync(codexConfig, "utf8")).not.toContain("opencodex");
       },
-      60_000,
+      STARTUP_BUDGET_MS + 40_000,
     );
   }
 });

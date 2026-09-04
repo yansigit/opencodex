@@ -7,8 +7,9 @@
  * holds guidance preferences and the native omitted-model synchronization setting.
  */
 import { useState } from "react";
-import { Select, Switch } from "../../ui";
-import { useT } from "../../i18n/shared";
+import { Select, Switch, Tooltip } from "../../ui";
+import { IconInfo } from "../../icons";
+import { useT, type TKey } from "../../i18n/shared";
 import { formatNamespacedModelId } from "../../provider-icons";
 import type { DelegationPatch, DelegationModelOption, NativeDefaultState } from "../../pages/use-subagent-delegation";
 import type { UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState, V2RoutedDelegationBridgeState } from "../../pages/use-subagent-delegation";
@@ -167,6 +168,52 @@ export default function SubagentDelegationSection({
         </button>
       </div>
 
+      {/*
+        Prompt-injection guidance, ultra mode and its editor are policy tuning, not daily
+        decisions: one closed disclosure keeps them reachable under the two settings that are.
+      */}
+      <details className="swi-advanced">
+        <summary className="muted text-label">{t("sub.advanced")}</summary>
+      {/*
+        The multi-agent surface switch (v1 / base / v2). It lived on Models and on the
+        dashboard; both were editors for the same /api/v2 value. It is a delegation
+        setting, so it sits above the model that gets delegated to. The long help text
+        stays reachable from the focusable info button.
+      */}
+      <div className="swi-delegation-row">
+        <div className="setting-copy">
+          <div className="font-semibold" style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+            {t("models.v2Label")}
+            <Tooltip content={t("models.v2Help")} side="top" maxWidth={380}>
+              <IconInfo width={13} height={13} aria-hidden="true" />
+              <span className="sr-only">{t("models.v2Label")}</span>
+            </Tooltip>
+          </div>
+          <div className="muted setting-hint">
+            <a className="text-control" href="https://opencodex.me/guides/sub-agent-surface/" target="_blank" rel="noreferrer" style={{ color: "var(--accent)" }}>
+              {t("models.v2DocsLink")}
+            </a>
+          </div>
+        </div>
+        <div className="swi-delegation-controls">
+          <div className="segmented models-segmented" role="radiogroup" aria-label={t("models.v2Label")}>
+            {(["v1", "default", "v2"] as const).map(mode => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={ultraMode.multiAgentMode === mode}
+                className={`btn btn-sm${ultraMode.multiAgentMode === mode ? " btn-primary" : " btn-ghost"}`}
+                style={{ background: ultraMode.multiAgentMode === mode ? undefined : "transparent", color: ultraMode.multiAgentMode === mode ? undefined : "var(--muted)" }}
+                disabled={ultraSaving || ultraLoadFailed}
+                onClick={() => { if (ultraMode.multiAgentMode !== mode) onUltraModeSave({ multiAgentMode: mode }); }}
+              >
+                {t(`models.v2Mode_${mode}` as TKey)}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
       <div className="swi-delegation-row">
         <div className="setting-copy">
           <div className="font-semibold">{t("dash.multiAgentGuidance")}</div>
@@ -333,6 +380,7 @@ export default function SubagentDelegationSection({
           onSave={value => onChildInstructionsSave(value.trim() ? value : null)}
         />
       </div>
+      </details>
     </div>
   );
 }
