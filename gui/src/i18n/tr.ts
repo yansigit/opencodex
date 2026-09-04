@@ -680,10 +680,10 @@ export const tr: Record<TKey, string> = {
 
   // subagents
   "sub.subtitle": "Codex'in {cmd} komutu, geçersiz kılma olarak yalnızca ilk 5 modeli (önceliğe göre) sunar. Buradan 5 taneye kadar seçin (yerel gpt veya yönlendirilen) ve opencodex bunların katalog önceliğini tam olarak bunların liderlik edeceği şekilde ayarlar. Diğer herhangi bir model tam adıyla çağrılabilir kalır; bu yalnızca neyin gösterileceğini kontrol eder.",
-  "sub.orderHint": "Burada gösterilen sıralama, Codex model seçicisinin üst kısmındaki 1-5 pozisyonlarını ve {cmd} için varsayılan model adaylarını belirler.",
+  "sub.orderHint": "Sıralama yalnızca {cmd} tarafından gösterilen modelleri belirler; varsayılan veya geri dönüş sırasını belirlemez.",
   "sub.orderHintAria": "Bu sıra nasıl kullanılır",
   "sub.advanced": "Gelişmiş",
-  "sub.featured": "Öne Çıkarılanlar",
+  "sub.featured": "Duyurulan geçersiz kılmalar",
   "sub.noneSelected": "Hiçbiri seçilmedi — aşağıdaki listeden seçin.",
   "sub.models": "Modeller",
   "sub.search": "Modellerde ara…",

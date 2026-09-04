@@ -632,10 +632,10 @@ export const ja: Record<TKey, string> = {
 
   // subagents
   "sub.subtitle": "Codex の {cmd} は最初の 5 モデル(優先度順)のみをオーバーライドとして通知します。ここで最大 5 つを選んでください — ネイティブ gpt またはルーティング — opencodex がカタログ優先度を設定し、これらが先頭に来るようにします。他のモデルも正確な名前で呼び出し可能です; これは表示のみを制御します。",
-  "sub.orderHint": "ここでの表示順が Codex モデルピッカーの上位 1〜5 番目の位置と {cmd} のデフォルトモデル候補を決定します。",
+  "sub.orderHint": "順序は {cmd} に表示するモデルだけを制御し、既定値やフォールバック順は設定しません。",
   "sub.orderHintAria": "この順序の使われ方",
   "sub.advanced": "詳細設定",
-  "sub.featured": "おすすめ",
+  "sub.featured": "広告するオーバーライド",
   "sub.noneSelected": "未選択 — 以下のリストから選んでください。",
   "sub.models": "モデル",
   "sub.search": "モデルを検索(ネイティブ gpt + ルーティング)…",
