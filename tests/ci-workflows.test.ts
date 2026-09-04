@@ -536,6 +536,10 @@ describe("GitHub Actions hardening", () => {
     expect(promotionAuditStep?.run).toBe(
       "node .github/scripts/promotion-audit-reuse.cjs",
     );
+    expect(promotionAuditStep?.if).toBe(
+      "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+    );
+    expect(promotionAuditStep?.env?.GITHUB_TOKEN).toBe("${{ github.token }}");
 
     expect((ci.jobs?.changes as { permissions?: Record<string, string> })?.permissions)
       .toEqual({ actions: "read", contents: "read", "pull-requests": "read" });

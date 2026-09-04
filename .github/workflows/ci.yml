@@ -256,6 +256,7 @@ jobs:
 
       - name: Verify reusable promotion audit evidence
         id: promotion-audit
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           BEFORE_SHA: ${{ github.event.before }}
           DEPENDENCIES_CHANGED: ${{ steps.scope.outputs.dependencies }}
