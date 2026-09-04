@@ -14,8 +14,8 @@
   },
   "release": {
     "workflow": ".github/workflows/fork-auto-release.yml",
-    "sourceWorkflow": "Cross-platform CI",
-    "sourceEvent": "push",
+    "sourceWorkflow": "Build release candidate",
+    "sourceEvent": "workflow_run",
     "branch": "main"
   }
 }

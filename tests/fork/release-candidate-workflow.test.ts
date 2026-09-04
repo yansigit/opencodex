@@ -6,6 +6,7 @@ const workflowPath = resolve(import.meta.dir, "../../.github/workflows/release-c
 const workflowText = readFileSync(workflowPath, "utf8");
 const workflow = Bun.YAML.parse(workflowText) as {
   on?: {
+    workflow_run?: { workflows?: string[]; types?: string[]; branches?: string[] };
     workflow_dispatch?: {
       inputs?: Record<string, { required?: boolean; type?: string }>;
     };
@@ -31,7 +32,7 @@ describe("release candidate workflow contract", () => {
       type: "string",
     });
     expect(workflowText).toContain('^[0-9a-f]{40}$');
-    expect(workflowText).toContain("ref: ${{ inputs.expected-sha }}");
+    expect(workflowText).toContain("ref: ${{ inputs.expected-sha || github.event.workflow_run.head_sha }}");
     expect(workflowText).toContain('actual_sha="$(git rev-parse HEAD)"');
   });
 
@@ -67,7 +68,7 @@ describe("release candidate workflow contract", () => {
     expect(upload).toMatchObject({
       uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
       with: {
-        name: "release-candidate-${{ inputs.expected-sha }}",
+        name: "release-candidate-${{ inputs.expected-sha || github.event.workflow_run.head_sha }}",
         path: "release-candidate/",
         "if-no-files-found": "error",
         overwrite: false,

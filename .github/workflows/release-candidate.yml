@@ -1,6 +1,10 @@
 name: Build release candidate
 
 on:
+  workflow_run:
+    workflows: ["Cross-platform CI"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       expected-sha:
@@ -12,18 +16,25 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-candidate-${{ inputs.expected-sha }}
+  group: release-candidate-${{ inputs.expected-sha || github.event.workflow_run.head_sha }}
   cancel-in-progress: false
 
 jobs:
   build:
     name: immutable release candidate
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.name == 'Cross-platform CI' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - name: Validate candidate SHA
         env:
-          EXPECTED_SHA: ${{ inputs.expected-sha }}
+          EXPECTED_SHA: ${{ inputs.expected-sha || github.event.workflow_run.head_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -35,13 +46,13 @@ jobs:
       - name: Checkout exact candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: ${{ inputs.expected-sha }}
+          ref: ${{ inputs.expected-sha || github.event.workflow_run.head_sha }}
           fetch-depth: 1
           persist-credentials: false
 
       - name: Verify exact checkout
         env:
-          EXPECTED_SHA: ${{ inputs.expected-sha }}
+          EXPECTED_SHA: ${{ inputs.expected-sha || github.event.workflow_run.head_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -80,7 +91,7 @@ jobs:
 
       - name: Build candidate tarball once
         env:
-          EXPECTED_SHA: ${{ inputs.expected-sha }}
+          EXPECTED_SHA: ${{ inputs.expected-sha || github.event.workflow_run.head_sha }}
         run: >-
           bun scripts/build-release-candidate.ts
           --sha "$EXPECTED_SHA"
@@ -92,7 +103,7 @@ jobs:
 
       - name: Verify candidate manifest and tarball
         env:
-          EXPECTED_SHA: ${{ inputs.expected-sha }}
+          EXPECTED_SHA: ${{ inputs.expected-sha || github.event.workflow_run.head_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -114,7 +125,7 @@ jobs:
       - name: Upload immutable candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-candidate-${{ inputs.expected-sha }}
+          name: release-candidate-${{ inputs.expected-sha || github.event.workflow_run.head_sha }}
           path: release-candidate/
           if-no-files-found: error
           compression-level: 0
