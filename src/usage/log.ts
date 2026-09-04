@@ -535,6 +535,7 @@ function normalizeTurnProgress(raw: unknown): TurnProgressTelemetry | undefined 
     ...(typeof value.commentaryOnlyRound === "boolean" ? { commentaryOnlyRound: value.commentaryOnlyRound } : {}),
     ...(typeof value.emptyProtocolRound === "boolean" ? { emptyProtocolRound: value.emptyProtocolRound } : {}),
     ...(typeof value.rateLimitCircuitOpen === "boolean" ? { rateLimitCircuitOpen: value.rateLimitCircuitOpen } : {}),
+    ...(typeof value.repetitionCircuitOpen === "boolean" ? { repetitionCircuitOpen: value.repetitionCircuitOpen } : {}),
   };
 }
 

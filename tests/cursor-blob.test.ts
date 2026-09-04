@@ -935,6 +935,26 @@ describe("Cursor blob handshake", () => {
     expect(JSON.stringify(roots)).toContain("hidden reasoning");
   });
 
+  test("composer-2.5 hybrid replay collapses repeated roots and adds a strategy-change note", () => {
+    const bytes = encodeCursorRunRequest({
+      modelId: "composer-2.5",
+      conversationId: "c-composer-repetition",
+      system: ["You are helpful."],
+      messages: [{ role: "user", content: "continue" }],
+      rawMessages: [
+        { role: "user", content: "work through it", timestamp: 1 },
+        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 2 },
+        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 3 },
+        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 4 },
+        { role: "user", content: "continue", timestamp: 5 },
+      ],
+    });
+    const serialized = JSON.stringify(decodeRootMessages(bytes));
+    expect(serialized.match(/Still working on it\./g)).toHaveLength(1);
+    expect(serialized).toContain("this exact output was produced 3 times in a row");
+    expect(serialized).toContain("Take a DIFFERENT action now");
+  });
+
   test("external Cursor replay uses text history instead of native tool/thinking structures", () => {
     const bytes = encodeCursorRunRequest({
       modelId: "gpt-5.6-sol-xhigh",

@@ -623,6 +623,15 @@ caps and emits liveness heartbeats while held. A second empty result or retry fa
 502 `empty_completion_retry_failed`; usage is merged across sends, and the Logs attempt records
 recovery kind `empty-completion`.
 
+Cursor Composer 2.5 is a narrower exception to the default observe-only policy. Live traffic has
+verified that this model can end a tool continuation with an empty successful stop. Such a turn is
+therefore converted to typed 502 `empty_completion` even when automatic retry is disabled. It is
+not replayed unless `emptyCompletionRetry: true` explicitly accepts the existing billing and
+side-effect tradeoff. Cursor conversation progress also fingerprints tool-bearing output without
+including volatile call ids; after three consecutive exact repeats, the next request receives one
+typed `cursor_repetition_circuit_open` failure and the one-shot circuit resets. Different tool names
+or arguments do not trip it.
+
 The web-search loop requests `stream: true` for every routed-model iteration, but buffers the events
 needed to decide whether to intercept a synthetic search call. Text explicitly phased as
 `commentary` is safe to forward live because it cannot terminate the turn; this keeps Kiro's
@@ -868,6 +877,8 @@ before Cursor emits a new checkpoint; those turns carry forward the last observe
 Cursor conversation instead of reporting only the tiny current-turn output delta. The carry-forward
 cache is process-local, numeric-only, bounded, and keyed by Cursor conversation id. Compaction
 boundaries clear the carry so pre-compaction totals are not reused after Codex replaces history.
+When Cursor reports a lower authoritative checkpoint itself, that latest value replaces the prior
+carry and a material drop is emitted as a numeric-only `context-compacted` diagnostic.
 Historical compaction markers restored by `previous_response_id` expansion are acknowledged as a
 replayed prefix and do not clear a fresh post-compaction checkpoint again on every later turn.
 Compaction summarizer turns may still report their own checkpoint for that response, but their
@@ -880,7 +891,7 @@ pre-compaction checkpoint is not persisted for later carry-forward.
 - 검토한 주요 대안: Add a longer wait for late checkpoints; infer prior+output totals; store full prompt/history state; carry forward only the last numeric checkpoint per Cursor conversation.
 - 선택한 방식: Carry forward the last numeric absolute checkpoint per Cursor conversation with bounded LRU/TTL storage, update it only from live checkpoint frames, and clear/suppress it once when a newly appended compaction boundary starts an epoch; previous_response replay provenance acknowledges historical markers without serializing private metadata upstream.
 - 다른 대안 대신 이 방식을 선택한 이유: It fixes the UI regression without delaying tool turns, fabricating token growth, storing prompt/tool content, or repeatedly clearing valid post-compaction usage when historical markers replay; one-time compaction resets still prevent stale over-report when history is replaced.
-- 장점, 단점 및 영향: Active-context reporting stays monotonic within an uncompacted Cursor conversation; no-checkpoint turns remain estimated; a process restart loses the numeric cache, and when neither a checkpoint nor a carry-forward is available the turn reports a request-local estimate derived from the same pruned payload sent to Cursor (#373 — reporting output-only usage made Codex read the context as nearly empty). Estimates are never persisted or promoted into checkpoint carry-forward; only live checkpoint frames update the cache.
+- 장점, 단점 및 영향: Active-context reporting follows the latest authoritative checkpoint and can decrease when Cursor compacts; no-checkpoint turns remain estimated; a process restart loses the numeric cache, and when neither a checkpoint nor a carry-forward is available the turn reports a request-local estimate derived from the same pruned payload sent to Cursor (#373 — reporting output-only usage made Codex read the context as nearly empty). Estimates are never persisted or promoted into checkpoint carry-forward; only live checkpoint frames update the cache.
 ```
 
 ## Cursor conversation checkpoint reuse

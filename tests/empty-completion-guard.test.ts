@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   EMPTY_COMPLETION_RETRY_ENV,
   EMPTY_COMPLETION_RETRY_FAILED_CODE,
+  EMPTY_COMPLETION_FAILED_CODE,
+  emptyCompletionPolicy,
   emptyCompletionRetryEnabled,
   emptyCompletionNotice,
   guardEmptyCompletionEventStream,
@@ -66,9 +68,38 @@ describe("empty-completion guard kill switch", () => {
       { [EMPTY_COMPLETION_RETRY_ENV]: "0" },
     )).toBe(false);
   });
+
+  test("fails Composer 2.5 statedly by default and retries only with explicit opt-in", () => {
+    expect(emptyCompletionPolicy({}, "cursor", "composer-2.5", {})).toBe("fail");
+    expect(emptyCompletionPolicy({}, "cursor", "composer-2.5-fast", {})).toBe("observe");
+    expect(emptyCompletionPolicy({ emptyCompletionRetry: true }, "cursor", "composer-2.5", {})).toBe("retry");
+    expect(emptyCompletionPolicy(
+      { emptyCompletionRetry: true },
+      "cursor",
+      "composer-2.5",
+      { [EMPTY_COMPLETION_RETRY_ENV]: "0" },
+    )).toBe("fail");
+  });
 });
 
 describe("empty-completion guard retry", () => {
+  test("maxRetries zero turns an empty success into a stated failure without replay", async () => {
+    let continuations = 0;
+    const events = await collect(guardEmptyCompletionEventStream({
+      firstEvents: eventsOf({ type: "done", usage: { inputTokens: 10, outputTokens: 0 } }),
+      maxRetries: 0,
+      continuation: () => {
+        continuations += 1;
+        return eventsOf({ type: "done" });
+      },
+    }));
+    expect(continuations).toBe(0);
+    expect(events).toEqual([expect.objectContaining({
+      type: "error",
+      code: EMPTY_COMPLETION_FAILED_CODE,
+    })]);
+  });
+
   test("does not retry an empty turn after a local side effect", async () => {
     let continuations = 0;
     const events = await collect(guardEmptyCompletionEventStream({
@@ -317,7 +348,7 @@ describe("empty-completion guard retry", () => {
     expect(continuations).toBe(0);
     const meaningful = withoutHeartbeats(events);
     expect(meaningful).toHaveLength(1);
-    expect(meaningful[0]).toMatchObject({ type: "error", code: EMPTY_COMPLETION_RETRY_FAILED_CODE });
+    expect(meaningful[0]).toMatchObject({ type: "error", code: EMPTY_COMPLETION_FAILED_CODE });
   });
 
   test("heartbeats pass through immediately even before content", async () => {
