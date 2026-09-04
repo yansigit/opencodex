@@ -10,7 +10,8 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { sseFieldValue } from "../lib/sse-decoder";
 import { enforceAnthropicImageLimits, sniffImageDimensions } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
-import { AnthropicRequestError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { AnthropicRequestError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, verifyAndExtractDirectives, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { getOrCreateDirectiveSigningKey } from "../claude/directive-key";
 import { resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
@@ -761,15 +762,17 @@ async function handleClaudeMessagesWithBudget(
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
       anthropicBody.model = stripOneMillionMarker(anthropicBody.model);
     }
-    // ocx-route override (devlog 072): injected agent bodies pin their model via a
+    // ocx-route override (devlog 072 + TRUST-01..05): injected agent bodies pin their model via a
     // system-prompt directive because 2.1.207 ignores custom ids in agent
     // frontmatter. Must run BEFORE the native-passthrough branch — the CLI sends
     // these subagent turns under a fallback claude model id.
     if (isRec(anthropicBody)) {
-      const routeOverride = extractOcxRouteDirective(anthropicBody);
-      if (routeOverride && typeof anthropicBody.model === "string") {
-        anthropicBody.model = stripOneMillionMarker(routeOverride);
-        effortOverride = extractOcxEffortDirective(anthropicBody);
+      const directives = verifyAndExtractDirectives(anthropicBody, getOrCreateDirectiveSigningKey(), config);
+      if (directives.route && typeof anthropicBody.model === "string") {
+        anthropicBody.model = stripOneMillionMarker(directives.route);
+        if (directives.effort) {
+          effortOverride = directives.effort;
+        }
       }
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
@@ -1184,10 +1187,18 @@ export async function handleClaudeCountTokens(
     model = stripped;
     raw.model = model;
   }
-  // ocx-route override (devlog 072): keep count_tokens consistent with messages.
-  const countRoute = extractOcxRouteDirective(raw);
-  if (countRoute) {
-    model = stripOneMillionMarker(countRoute);
+  // ocx-route override (devlog 072 + TRUST-01..05): keep count_tokens consistent with messages.
+  let directives;
+  try {
+    directives = verifyAndExtractDirectives(raw, getOrCreateDirectiveSigningKey(), config);
+  } catch (err) {
+    if (err instanceof AnthropicRequestError) {
+      return anthropicErrorResponse(400, err.message, "invalid_request_error");
+    }
+    throw err;
+  }
+  if (directives.route) {
+    model = stripOneMillionMarker(directives.route);
     raw.model = model;
   }
   const ctHeaderSessionId = claudeSessionIdFromRequest(req, raw);

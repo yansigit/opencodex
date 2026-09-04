@@ -11,13 +11,14 @@
  *  - thinking.budget_tokens is NEVER forwarded raw; it maps to an effort tier.
  *  - top_k is accepted and silently dropped (no Responses equivalent, CCR parity).
  */
-import type { OcxClaudeCodeConfig } from "../types";
+import type { OcxClaudeCodeConfig, OcxConfig } from "../types";
 import { isAnthropicOutputSchema } from "../adapters/anthropic-output-schema";
 import { resolveAlias } from "./alias";
 import { stripOneMillionMarker } from "./context-windows";
 import { resolveDesktop3pAlias } from "./desktop-3p";
 import { isClaudeWebSearchToolName } from "./outbound";
 import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
+import { verifyDirectiveSignature } from "./directive-sign";
 import { createHash } from "node:crypto";
 
 export class AnthropicRequestError extends Error {}
@@ -296,6 +297,133 @@ export function extractOcxEffortDirective(body: unknown): NonNullable<OcxClaudeC
   if (!text) return null;
   const match = OCX_EFFORT_RE.exec(text);
   return match ? match[1] as NonNullable<OcxClaudeCodeConfig["subagentEffort"]> : null;
+}
+
+interface ScannedDirectives {
+  routes: string[];
+  efforts: string[];
+  sigs: string[];
+}
+
+function getSystemBlocks(body: unknown): string[] {
+  if (!isRec(body)) return [];
+  const system = body.system;
+  if (typeof system === "string") return [system];
+  if (Array.isArray(system)) {
+    return system
+      .filter((b): b is Rec => isRec(b) && b.type === "text" && typeof b.text === "string")
+      .map(b => b.text as string);
+  }
+  return [];
+}
+
+function scanSystemDirectives(body: unknown): ScannedDirectives {
+  const blocks = getSystemBlocks(body);
+  const routes: string[] = [];
+  const efforts: string[] = [];
+  const sigs: string[] = [];
+  const re = /<!--\s*ocx-(route|effort|sig):\s*([^>]*?)\s*-->/g;
+
+  for (const block of blocks) {
+    re.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(block)) !== null) {
+      const kind = match[1];
+      const val = match[2]?.trim() ?? "";
+      if (kind === "route") routes.push(val);
+      else if (kind === "effort") efforts.push(val);
+      else if (kind === "sig") sigs.push(val);
+    }
+  }
+  return { routes, efforts, sigs };
+}
+
+export function extractSignedDirective(body: unknown): {
+  route: string | null;
+  effort: string | null;
+  signature: string | null;
+  version: string | null;
+} {
+  const scanned = scanSystemDirectives(body);
+  const route = scanned.routes.length > 0 && scanned.routes[0] ? scanned.routes[0] : null;
+  const effort = scanned.efforts.length > 0 && scanned.efforts[0] ? scanned.efforts[0] : null;
+  let signature: string | null = null;
+  let version: string | null = null;
+  if (scanned.sigs.length > 0) {
+    const m = /^(v[0-9]+):([0-9a-fA-F]+)$/.exec(scanned.sigs[0].trim());
+    if (m) {
+      version = m[1] ?? null;
+      signature = m[2] ?? null;
+    }
+  }
+  return { route, effort, signature, version };
+}
+
+export function verifyAndExtractDirectives(
+  body: unknown,
+  key: string,
+  config?: OcxConfig | OcxClaudeCodeConfig,
+): {
+  route: string | null;
+  effort: NonNullable<OcxClaudeCodeConfig["subagentEffort"]> | null;
+  isSigned: boolean;
+  isLegacyMatch?: boolean;
+} {
+  const scanned = scanSystemDirectives(body);
+  if (scanned.routes.length > 1 || scanned.efforts.length > 1 || scanned.sigs.length > 1) {
+    throw new AnthropicRequestError("conflicting subagent directives in system prompt");
+  }
+
+  if (scanned.sigs.length === 1) {
+    const rawSig = scanned.sigs[0].trim();
+    const sigMatch = /^(v[0-9]+):([0-9a-fA-F]+)$/.exec(rawSig);
+    if (!sigMatch) {
+      throw new AnthropicRequestError("malformed signed subagent directive: invalid format");
+    }
+    const version = sigMatch[1];
+    const signature = sigMatch[2];
+    if (version !== "v1") {
+      throw new AnthropicRequestError(`unsupported signed subagent directive version: ${version}`);
+    }
+    if (signature.length !== 64 || !/^[0-9a-f]{64}$/i.test(signature)) {
+      throw new AnthropicRequestError("malformed signed subagent directive: invalid signature length or encoding");
+    }
+    if (scanned.routes.length === 0 || !scanned.routes[0].trim()) {
+      throw new AnthropicRequestError("malformed signed subagent directive: missing route");
+    }
+    const route = scanned.routes[0].trim();
+    const effort = scanned.efforts.length > 0 && scanned.efforts[0].trim() ? scanned.efforts[0].trim() : null;
+    const valid = verifyDirectiveSignature(route, effort, signature, key);
+    if (!valid) {
+      throw new AnthropicRequestError("invalid signed subagent directive: signature verification failed");
+    }
+    const validEffort = effort && ["low", "medium", "high", "xhigh", "max"].includes(effort)
+      ? (effort as NonNullable<OcxClaudeCodeConfig["subagentEffort"]>)
+      : null;
+    return {
+      route,
+      effort: validEffort,
+      isSigned: true,
+    };
+  }
+
+  // Unsigned path
+  // If unsigned ocx-effort is present without ocx-route: it is ignored and does not override effort or routing.
+  if (scanned.routes.length === 0 || !scanned.routes[0].trim()) {
+    return { route: null, effort: null, isSigned: false };
+  }
+
+  const route = scanned.routes[0].trim();
+  const rawEffort = scanned.efforts.length > 0 && scanned.efforts[0].trim() ? scanned.efforts[0].trim() : null;
+  const effort = rawEffort && ["low", "medium", "high", "xhigh", "max"].includes(rawEffort)
+    ? (rawEffort as NonNullable<OcxClaudeCodeConfig["subagentEffort"]>)
+    : null;
+
+  return {
+    route,
+    effort,
+    isSigned: false,
+  };
 }
 
 /** Injected-skill payloads below this size are never stubbed (not worth it). */

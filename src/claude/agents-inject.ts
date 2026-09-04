@@ -15,6 +15,8 @@ import { lstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileS
 import { join } from "node:path";
 import type { OcxConfig } from "../types";
 import { renameAtomicFile } from "../lib/windows-atomic-replace";
+import { getOrCreateDirectiveSigningKey } from "./directive-key";
+import { signDirective } from "./directive-sign";
 import { claudeCodeAlias, claudeCodeNativeAlias } from "./alias";
 import { AUTO_CONTEXT_OFF, shouldMarkOneMillion, stripOneMillionMarker, withOneMillionMarker } from "./context-windows";
 import { claudeConfigDir } from "./gateway-cache";
@@ -163,7 +165,7 @@ function skillNameLiteral(name: string): string {
     .replaceAll(">", "\\u003e");
 }
 
-function renderAgentDef(def: ClaudeAgentDef): string {
+export function renderAgentDef(def: ClaudeAgentDef, key: string): string {
   const blockedSkillGuard = def.blockedSkills.length === 0 ? [] : [
     "",
     `Do not invoke blocked Claude Code skills: ${def.blockedSkills.map(skillNameLiteral).join(", ")}.`,
@@ -185,6 +187,7 @@ function renderAgentDef(def: ClaudeAgentDef): string {
     // directive and overrides the request model before routing/passthrough.
     `<!-- ocx-route: ${def.model} -->`,
     ...(def.effort ? [`<!-- ocx-effort: ${def.effort} -->`] : []),
+    `<!-- ocx-sig: v1:${signDirective(def.model, def.effort, key)} -->`,
     "",
     `You are a delegated worker running on \`${def.model}\` through the local opencodex proxy.`,
     `IDENTITY: your ACTUAL underlying model is \`${def.model}\` — the opencodex proxy routes this`,
@@ -215,8 +218,14 @@ function isOwnedFile(path: string): boolean {
  * never touch anything else. Ownership requires the generated marker; writes are
  * atomic (tmp + rename). Best-effort — returns null on any failure.
  */
-export function syncClaudeAgentDefs(defs: readonly ClaudeAgentDef[], configDir = claudeConfigDir()): string[] | null {
+export function syncClaudeAgentDefs(
+  defs: readonly ClaudeAgentDef[],
+  configDir = claudeConfigDir(),
+  ocxConfigDir?: string,
+  key?: string,
+): string[] | null {
   try {
+    const signingKey = key ?? getOrCreateDirectiveSigningKey(ocxConfigDir);
     const dir = join(configDir, "agents");
     if (defs.length === 0) {
       try { lstatSync(dir); } catch (error) {
@@ -242,7 +251,7 @@ export function syncClaudeAgentDefs(defs: readonly ClaudeAgentDef[], configDir =
         if (!isOwnedFile(target)) continue;
       } catch { /* does not exist: ours to create */ }
       const tmp = `${target}.tmp-${process.pid}`;
-      writeFileSync(tmp, renderAgentDef(def), { encoding: "utf8", mode: 0o644 });
+      writeFileSync(tmp, renderAgentDef(def, signingKey), { encoding: "utf8", mode: 0o644 });
       renameAtomicFile(tmp, target, undefined, "claude-agents");
       written.push(def.file);
     }
@@ -253,13 +262,19 @@ export function syncClaudeAgentDefs(defs: readonly ClaudeAgentDef[], configDir =
 }
 
 /** Launch-time hook: gate + build + sync in one call (used by ocx claude and systemEnv). */
-export function injectClaudeAgentDefs(config: OcxConfig, windows: Record<string, number>, configDir?: string): string[] | null {
+export function injectClaudeAgentDefs(
+  config: OcxConfig,
+  windows: Record<string, number>,
+  configDir?: string,
+  ocxConfigDir?: string,
+  key?: string,
+): string[] | null {
   if (config.claudeCode?.enabled === false || config.claudeCode?.injectAgents === false) {
     // Disabled: prune verified-owned files so stale definitions stop loading
     // in future sessions (audit 071 #3).
-    return syncClaudeAgentDefs([], configDir);
+    return syncClaudeAgentDefs([], configDir, ocxConfigDir, key);
   }
-  return syncClaudeAgentDefs(buildClaudeAgentDefs(config, windows, configDir), configDir);
+  return syncClaudeAgentDefs(buildClaudeAgentDefs(config, windows, configDir), configDir, ocxConfigDir, key);
 }
 /**
  * Dispatcher directive appended to every ocx-* description. The ocx-route body
