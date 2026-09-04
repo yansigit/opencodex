@@ -30,6 +30,7 @@ const {
   clearResponseStateMemoryForTests,
   awaitResponseSpillPublicationTailForTests,
   pendingResponseSpillMetricsForTests,
+  prepareResponseStateReplay,
   rememberResponseState,
   responseStateMetrics,
   setResponseSpillAsyncAclAttemptBudgetForTests,
@@ -45,6 +46,11 @@ const { setAsyncWindowsPrincipalRunnerForTests } = await import("../../src/lib/w
 clearResponseStateMemoryForTests();
 setPlatformForTests("win32");
 if (!windowsSecretAclApplies()) throw new Error("Windows ACL test lane was not activated");
+// Complete lazy snapshot/config-lock setup before installing a principal seam that is
+// deliberately unable to settle. On real Windows that setup may resolve and cache the
+// effective SID synchronously; installing the async seam afterwards clears that cache so
+// the spill publication must exercise the injected runner.
+await prepareResponseStateReplay({ previous_response_id: "resp_missing_acl_probe", input: [] });
 setResponseSpillAsyncAclAttemptBudgetForTests(100);
 setResponseStateByteCapForTests(1_024);
 
