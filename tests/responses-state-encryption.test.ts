@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   renameSync,
   statSync,
@@ -1082,6 +1083,43 @@ describe("Selective encrypted continuation state for Routed V2", () => {
       runPendingLegacyResponseStateRetirementForTests();
     }
     expect(existsSync(secondTarget)).toBe(false);
+    expectSafeV3Marker(snapshotPath);
+  });
+
+  test.skipIf(!canSymlink)("a replacement dangling snapshot link is never unlinked by a reused inode", async () => {
+    const firstTarget = join(home, "missing-first.json");
+    const secondTarget = join(home, "missing-second.json");
+    const snapshotPath = join(home, "responses-state.json");
+    const ref = writeResponseSpillDurably("resp_dangling_replacement", {
+      createdAt: Date.now(),
+      items: [{ secret: "dangling replacement plaintext" }],
+    });
+    symlinkSync(firstTarget, snapshotPath);
+    const firstLinkIdentity = lstatSync(snapshotPath);
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(join(responseSpillDirectory(home), ref.fileName))).toBe(false);
+
+    unlinkSync(snapshotPath);
+    symlinkSync(secondTarget, snapshotPath);
+    let reusedIdentityReads = 3;
+    setResponseSnapshotInspectionIoForTests({
+      lstat(path) {
+        if (path === snapshotPath && reusedIdentityReads > 0) {
+          reusedIdentityReads -= 1;
+          return firstLinkIdentity;
+        }
+        return lstatSync(path);
+      },
+    });
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(readlinkSync(snapshotPath)).toBe(secondTarget);
+    expect(await prepareSensitiveResponsePersistence({ input: "still blocked" })).toBe("memory-only");
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      runPendingLegacyResponseStateRetirementForTests();
+    }
     expectSafeV3Marker(snapshotPath);
   });
 

@@ -1823,10 +1823,22 @@ function retireCapturedTargetBeforeReclassify(pending: LegacySnapshotRetirement)
   try {
     const current = snapshotLstat(pending.targetPath);
     if (current.dev !== pending.targetDev || current.ino !== pending.targetIno) return true;
+    const capturedTargetIsLink = pending.linkPath === pending.targetPath;
+    if (capturedTargetIsLink) {
+      if (pending.linkTarget === undefined) return false;
+      try {
+        if (readlinkSync(pending.targetPath) !== pending.linkTarget) return true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code === "ENOENT" || code === "EINVAL") return true;
+        return false;
+      }
+    }
     return unlinkLegacyEntryIfUnchanged(
       pending.targetPath,
       pending.targetDev,
       pending.targetIno,
+      capturedTargetIsLink ? pending.linkTarget : undefined,
     );
   } catch (error) {
     return (error as NodeJS.ErrnoException)?.code === "ENOENT";
@@ -1844,7 +1856,7 @@ function retirementMarkerStillCurrent(pending: LegacySnapshotRetirement): boolea
       || pending.targetDev === undefined
       || pending.targetIno === undefined
     ) return false;
-    const target = lstatSync(pending.targetPath);
+    const target = snapshotLstat(pending.targetPath);
     if (target.dev !== pending.targetDev || target.ino !== pending.targetIno) return false;
     if (pending.linkPath && pending.linkDev !== undefined && pending.linkIno !== undefined) {
       const link = snapshotLstat(pending.linkPath);
