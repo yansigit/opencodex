@@ -1045,6 +1045,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     writeFileSync(firstTarget, JSON.stringify({ version: 2, states: [] }));
     writeFileSync(secondTarget, JSON.stringify({ version: 2, states: [] }));
     symlinkSync(firstTarget, snapshotPath);
+    const firstLinkIdentity = lstatSync(snapshotPath);
     let served = 0;
     setSpillIoForTest({
       readdirEntry() {
@@ -1058,8 +1059,22 @@ describe("Selective encrypted continuation state for Routed V2", () => {
 
     unlinkSync(snapshotPath);
     symlinkSync(secondTarget, snapshotPath);
+    // Model immediate inode reuse deterministically. Linux can assign the new
+    // symlink the same (dev, ino) pair, so link identity must also bind its
+    // destination text before the old retirement marker may delete it.
+    let reuseOldLinkIdentity = true;
+    setResponseSnapshotInspectionIoForTests({
+      lstat(path) {
+        if (path === snapshotPath && reuseOldLinkIdentity) {
+          reuseOldLinkIdentity = false;
+          return firstLinkIdentity;
+        }
+        return lstatSync(path);
+      },
+    });
     setSpillIoForTest(null);
     runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(firstTarget)).toBe(false);
     expect(existsSync(secondTarget)).toBe(true);
     expect(await prepareSensitiveResponsePersistence({ input: "still blocked" })).toBe("memory-only");
 

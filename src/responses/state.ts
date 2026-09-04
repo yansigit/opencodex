@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, truncateSync, type Stats, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, readlinkSync, rmSync, statSync, truncateSync, type Stats, unlinkSync, writeFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { atomicWriteFile, atomicWriteFileAsync, getConfigDir, renameAtomicFile, resolveWriteTarget, withConfigMutationLockSync } from "../config";
@@ -186,6 +186,7 @@ interface LegacySnapshotRetirement {
   linkPath?: string;
   linkDev?: number;
   linkIno?: number;
+  linkTarget?: string;
   /** Non-v3 snapshots are untrusted retirement markers. Retain the bounded
    * scan cursor until every pre-existing owned spill candidate is retired. */
   spillScan?: ResponseSpillRetirementScan;
@@ -1790,10 +1791,16 @@ function retryLegacySpillRetirement(): void {
   }
 }
 
-function unlinkLegacyEntryIfUnchanged(path: string, dev: number, ino: number): boolean {
+function unlinkLegacyEntryIfUnchanged(
+  path: string,
+  dev: number,
+  ino: number,
+  expectedLinkTarget?: string,
+): boolean {
   try {
-    const current = lstatSync(path);
+    const current = snapshotLstat(path);
     if (current.dev !== dev || current.ino !== ino) return false;
+    if (expectedLinkTarget !== undefined && readlinkSync(path) !== expectedLinkTarget) return false;
     unlinkSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
@@ -1805,6 +1812,25 @@ function reclassifyLegacySnapshot(pending: LegacySnapshotRetirement): void {
   if (pending.spillScan) closeResponseSpillRetirementScan(pending.spillScan);
   legacySnapshotAwaitingRetirement = null;
   legacySnapshotInspectionPending = pending.linkPath ?? pending.targetPath ?? pending.absentPath ?? snapshotPath();
+}
+
+function retireCapturedTargetBeforeReclassify(pending: LegacySnapshotRetirement): boolean {
+  if (
+    pending.targetPath === undefined
+    || pending.targetDev === undefined
+    || pending.targetIno === undefined
+  ) return true;
+  try {
+    const current = snapshotLstat(pending.targetPath);
+    if (current.dev !== pending.targetDev || current.ino !== pending.targetIno) return true;
+    return unlinkLegacyEntryIfUnchanged(
+      pending.targetPath,
+      pending.targetDev,
+      pending.targetIno,
+    );
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT";
+  }
 }
 
 function retirementMarkerStillCurrent(pending: LegacySnapshotRetirement): boolean | null {
@@ -1821,8 +1847,13 @@ function retirementMarkerStillCurrent(pending: LegacySnapshotRetirement): boolea
     const target = lstatSync(pending.targetPath);
     if (target.dev !== pending.targetDev || target.ino !== pending.targetIno) return false;
     if (pending.linkPath && pending.linkDev !== undefined && pending.linkIno !== undefined) {
-      const link = lstatSync(pending.linkPath);
+      const link = snapshotLstat(pending.linkPath);
       if (link.dev !== pending.linkDev || link.ino !== pending.linkIno) return false;
+      if (pending.linkTarget === undefined || readlinkSync(pending.linkPath) !== pending.linkTarget) return false;
+      if (
+        pending.linkPath !== pending.targetPath
+        && resolveWriteTarget(pending.linkPath) !== pending.targetPath
+      ) return false;
     }
     return true;
   } catch (error) {
@@ -1891,7 +1922,12 @@ function retryLegacySnapshotRetirement(): void {
     && pending.linkDev !== undefined
     && pending.linkIno !== undefined
   ) {
-    if (!unlinkLegacyEntryIfUnchanged(pending.linkPath, pending.linkDev, pending.linkIno)) {
+    if (!unlinkLegacyEntryIfUnchanged(
+      pending.linkPath,
+      pending.linkDev,
+      pending.linkIno,
+      pending.linkTarget,
+    )) {
       reclassifyLegacySnapshot(pending);
       return;
     }
@@ -2005,6 +2041,11 @@ function retryLegacyRetirement(): void {
         const current = retirementMarkerStillCurrent(pending);
         if (current === null) return;
         if (!current) {
+          // A replaced link no longer authorizes unlinking that directory
+          // entry, but its separately captured legacy target can still hold
+          // plaintext. Retire only the exact target inode we classified;
+          // failures remain blocked and retry instead of dropping ownership.
+          if (!retireCapturedTargetBeforeReclassify(pending)) return;
           reclassifyLegacySnapshot(pending);
           return;
         }
@@ -2025,6 +2066,15 @@ function snapshotRetirementMarker(
   targetPath: string,
   target: Stats,
 ): LegacySnapshotRetirement {
+  let linkTarget: string | undefined;
+  if (literal.isSymbolicLink()) {
+    try {
+      linkTarget = readlinkSync(path);
+    } catch {
+      // Missing identity data must never authorize deletion. The retry path
+      // will reclassify the current directory entry before trying again.
+    }
+  }
   return {
     targetPath,
     targetDev: target.dev,
@@ -2032,7 +2082,7 @@ function snapshotRetirementMarker(
     spillScan: createResponseSpillRetirementScan(),
     spillScanComplete: false,
     ...(literal.isSymbolicLink()
-      ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino }
+      ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino, linkTarget }
       : {}),
   };
 }
