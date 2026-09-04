@@ -300,7 +300,10 @@ describe("GitHub Actions hardening", () => {
     expect(windowsTestRun).toContain('Windows lane selection returned an empty shard');
     expect(windowsTestRun).not.toContain('mapfile -t general_files < <(');
     expect(windowsTestRun).toContain('for serial_file in "${serial_files[@]}"');
-    expect(windowsTestRun).toContain('--parallel=1 --timeout 60000 "$serial_file"');
+    expect(windowsTestRun).toContain('serial_timeout=60000');
+    expect(windowsTestRun).toContain('serial_timeout=300000');
+    expect(windowsTestRun).toContain('[[ "$serial_file" == "tests/codex-composed-acceptance.test.ts" ]]');
+    expect(windowsTestRun).toContain('--parallel=1 --timeout "$serial_timeout" "$serial_file"');
     expect(windowsTestRun).not.toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
     expect(windowsTestRun).not.toContain(`tests --shard=\${{ matrix.shard }}/${windowsShards.length}`);
     expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"

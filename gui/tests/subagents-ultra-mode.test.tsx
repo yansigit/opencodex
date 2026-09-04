@@ -187,7 +187,7 @@ test("shows armed-but-inactive guidance outside explicit V2", async () => {
   v2Responses = [{ ok: true, body: { enabled: false, multiAgentMode: "default" } }];
   await mount();
 
-  expect(container.textContent).toContain("Armed; activates only for eligible native V2 roots");
+  expect(container.textContent).toContain("Armed; activates for eligible native V2 roots");
 });
 
 function nativeParentPuts(): Array<{ enabled: boolean; model: string | null }> {
