@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -42,7 +44,22 @@ import {
 import {
   readResponseSpill,
   responseSpillDirectory,
+  setSpillIoForTest,
 } from "../src/responses/spill-store";
+
+const canSymlink = (() => {
+  const probeDir = mkdtempSync(join(tmpdir(), "ocx-state-enc-symlink-probe-"));
+  try {
+    symlinkSync(join(probeDir, "target"), join(probeDir, "link"));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EPERM") return false;
+    throw error;
+  } finally {
+    removeTreeWithRetry(probeDir);
+  }
+})();
+import { wipeResponseContinuationKeyCopy } from "../src/responses/continuation-crypto";
 
 describe("Selective encrypted continuation state for Routed V2", () => {
   let home: string;
@@ -62,6 +79,7 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     }
     clearResponseStateForTests();
     resetResponseContinuationKeyForTests();
+    setSpillIoForTest(null);
     if (savedHome !== undefined) process.env.OPENCODEX_HOME = savedHome;
     else delete process.env.OPENCODEX_HOME;
     removeTreeWithRetry(home);
@@ -574,6 +592,78 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(existsSync(legacySpillPath)).toBe(false);
   });
 
+  test.skipIf(!canSymlink)("legacy snapshot retirement removes both a symlink and its plaintext target", () => {
+    const targetDir = join(home, "managed-state");
+    mkdirSync(targetDir, { recursive: true });
+    const targetPath = join(targetDir, "responses-state-target.json");
+    const snapshotPath = join(home, "responses-state.json");
+    writeFileSync(targetPath, JSON.stringify({ version: 2, states: [] }));
+    symlinkSync(targetPath, snapshotPath);
+
+    clearResponseStateMemoryForTests();
+    expandPreviousResponseInput({ previous_response_id: "missing", input: "test" });
+
+    expect(existsSync(targetPath)).toBe(false);
+    expect(() => lstatSync(snapshotPath)).toThrow();
+  });
+
+  test("a v3 snapshot write keeps sensitive persistence blocked while a legacy spill cannot be deleted", async () => {
+    const spillDir = responseSpillDirectory(home);
+    mkdirSync(spillDir, { recursive: true });
+    const legacySpillFile = "resp_locked_legacy.1234567890ab.cdef12345678901234567890.1.100.spill.json";
+    const legacySpillPath = join(spillDir, legacySpillFile);
+    writeFileSync(legacySpillPath, JSON.stringify({
+      version: 1,
+      responseId: "resp_locked_legacy",
+      createdAt: Date.now(),
+      items: [{ secret: "legacy-plaintext" }],
+    }));
+    writeFileSync(join(home, "responses-state.json"), JSON.stringify({
+      version: 2,
+      states: [["resp_locked_legacy", {
+        createdAt: Date.now(),
+        kind: "spill",
+        spill: { version: 1, fileName: legacySpillFile, digest: "0".repeat(64), payloadBytes: 100 },
+      }]],
+    }));
+
+    setSpillIoForTest({
+      unlink(path) {
+        if (path === legacySpillPath) throw Object.assign(new Error("locked"), { code: "EACCES" });
+        unlinkSync(path);
+      },
+    });
+    clearResponseStateMemoryForTests();
+    expandPreviousResponseInput({ previous_response_id: "resp_locked_legacy", input: "test" });
+    expect(existsSync(legacySpillPath)).toBe(true);
+
+    rememberResponseState({ input: "ordinary" }, {
+      id: "resp_ordinary_after_legacy",
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: "ordinary" }],
+    });
+    await flushResponseState();
+    expect(JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")).version).toBe(3);
+    expect(existsSync(legacySpillPath)).toBe(true);
+
+    const memoryKeyring = new Map<string, Uint8Array>();
+    setResponseContinuationKeyringFactoryForTests({
+      getSecret: account => memoryKeyring.get(account) ?? null,
+      setSecret: (account, secret) => { memoryKeyring.set(account, Uint8Array.from(secret)); },
+    });
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+
+    setSpillIoForTest(null);
+    rememberResponseState({ input: "ordinary retry" }, {
+      id: "resp_ordinary_retry",
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: "ordinary retry" }],
+    });
+    await flushResponseState();
+    expect(existsSync(legacySpillPath)).toBe(false);
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive retry" })).toBe("encrypted");
+  });
+
   test("keyring release drops the cache without mutating caller-owned copies", async () => {
     const memoryKeyring = new Map<string, Uint8Array>();
     setResponseContinuationKeyringFactoryForTests({
@@ -589,6 +679,49 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     releaseResponseContinuationKey();
     expect(key1).toEqual(beforeRelease);
     expect(getResponseContinuationKeySync()).toBeNull();
+  });
+
+  test("release cancels an in-flight key load without letting stale work replace a newer cache", async () => {
+    const staleSecret = new Uint8Array(32).fill(0x11);
+    const currentSecret = new Uint8Array(32).fill(0x22);
+    let resolveStaleRead: ((secret: Uint8Array) => void) | undefined;
+    let reads = 0;
+
+    setResponseContinuationKeyringFactoryForTests({
+      async: () => ({
+        getSecret() {
+          reads += 1;
+          if (reads === 1) {
+            return new Promise<Uint8Array>(resolve => { resolveStaleRead = resolve; });
+          }
+          return Promise.resolve(Uint8Array.from(currentSecret));
+        },
+        async setSecret() {},
+      }),
+      sync: () => ({
+        getSecret: () => Uint8Array.from(currentSecret),
+        setSecret() {},
+      }),
+    });
+
+    const staleLoad = getResponseContinuationKey();
+    await Promise.resolve();
+    expect(resolveStaleRead).toBeDefined();
+
+    releaseResponseContinuationKey();
+    const currentLoad = await getResponseContinuationKey();
+    expect(currentLoad).toEqual(Buffer.from(currentSecret));
+
+    resolveStaleRead!(staleSecret);
+    expect(await staleLoad).toBeNull();
+    expect(staleSecret.every(byte => byte === 0)).toBe(true);
+    expect(getResponseContinuationKeySync()).toEqual(Buffer.from(currentSecret));
+  });
+
+  test("caller-owned continuation key copies can be explicitly wiped", () => {
+    const key = Buffer.alloc(32, 0x5a);
+    wipeResponseContinuationKeyCopy(key);
+    expect(key.equals(Buffer.alloc(32))).toBe(true);
   });
 
   test("concurrent key preparation creates and verifies one installation key", async () => {

@@ -55,6 +55,25 @@ const cachedKeysByHomeId = new Map<string, Buffer>();
 const KEYRING_RETRY_AFTER_MS = 30_000;
 const keyUnavailableUntilByHomeId = new Map<string, number>();
 const keyFlightsByHomeId = new Map<string, Promise<Buffer | null>>();
+let keyLifecycleGeneration = 0;
+const keyGenerationByHomeId = new Map<string, number>();
+
+interface KeyLifecycleToken {
+  global: number;
+  home: number;
+}
+
+function captureKeyLifecycleToken(homeId: string): KeyLifecycleToken {
+  return {
+    global: keyLifecycleGeneration,
+    home: keyGenerationByHomeId.get(homeId) ?? 0,
+  };
+}
+
+function isCurrentKeyLifecycleToken(homeId: string, token: KeyLifecycleToken): boolean {
+  return token.global === keyLifecycleGeneration
+    && token.home === (keyGenerationByHomeId.get(homeId) ?? 0);
+}
 
 function keyringTemporarilyUnavailable(homeId: string): boolean {
   const until = keyUnavailableUntilByHomeId.get(homeId);
@@ -145,6 +164,7 @@ export function setResponseContinuationKeyringFactoryForTests(factory: KeyringTe
 
 export function releaseResponseContinuationKey(homeId?: string): void {
   if (homeId !== undefined) {
+    keyGenerationByHomeId.set(homeId, (keyGenerationByHomeId.get(homeId) ?? 0) + 1);
     const key = cachedKeysByHomeId.get(homeId);
     if (key) {
       try { key.fill(0); } catch { /* best-effort */ }
@@ -152,6 +172,8 @@ export function releaseResponseContinuationKey(homeId?: string): void {
     }
     keyFlightsByHomeId.delete(homeId);
   } else {
+    keyLifecycleGeneration += 1;
+    keyGenerationByHomeId.clear();
     for (const key of cachedKeysByHomeId.values()) {
       try { key.fill(0); } catch { /* best-effort */ }
     }
@@ -178,6 +200,11 @@ function wipeBuffer(buf: KeySecret): void {
   try { buf.fill(0); } catch { /* best-effort */ }
 }
 
+/** Zero a caller-owned continuation-key copy once its cryptographic operation completes. */
+export function wipeResponseContinuationKeyCopy(key: Uint8Array | null | undefined): void {
+  wipeBuffer(key);
+}
+
 /** `@napi-rs/keyring` reports an absent credential as an exception, not only `null`. */
 function isKeyringNoEntry(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
@@ -202,8 +229,9 @@ function copyKeySecret(secret: KeySecret): Buffer | null {
   return key;
 }
 
-function loadOrCreateKeySync(configDir = getConfigDir()): Buffer | null {
+function loadOrCreateKeySync(configDir: string, lifecycleToken: KeyLifecycleToken): Buffer | null {
   const homeId = responseContinuationHomeId(configDir);
+  if (!isCurrentKeyLifecycleToken(homeId, lifecycleToken)) return null;
   const cached = cachedKeysByHomeId.get(homeId);
   if (cached) return cached;
   if (keyringTemporarilyUnavailable(homeId)) return null;
@@ -234,6 +262,10 @@ function loadOrCreateKeySync(configDir = getConfigDir()): Buffer | null {
 
   const existingKey = copyKeySecret(existingSecret);
   if (existingKey) {
+    if (!isCurrentKeyLifecycleToken(homeId, lifecycleToken)) {
+      wipeBuffer(existingKey);
+      return null;
+    }
     cachedKeysByHomeId.set(homeId, existingKey);
     return existingKey;
   }
@@ -290,6 +322,10 @@ function loadOrCreateKeySync(configDir = getConfigDir()): Buffer | null {
       return freshKey;
     });
 
+    if (!isCurrentKeyLifecycleToken(homeId, lifecycleToken)) {
+      wipeBuffer(key);
+      return null;
+    }
     cachedKeysByHomeId.set(homeId, key);
     return key;
   } catch (error) {
@@ -309,8 +345,10 @@ export async function getResponseContinuationKey(configDir = getConfigDir()): Pr
   const existingFlight = keyFlightsByHomeId.get(homeId);
   if (existingFlight) return existingFlight.then(key => key ? Buffer.from(key) : null);
 
-  const flight = (async () => {
+  const lifecycleToken = captureKeyLifecycleToken(homeId);
+  const operation = Promise.resolve().then(async () => {
     try {
+      if (!isCurrentKeyLifecycleToken(homeId, lifecycleToken)) return null;
       const account = responseContinuationKeyringAccount(configDir);
       let asyncEntry: ResponseContinuationAsyncKeyringEntry;
       try {
@@ -324,6 +362,7 @@ export async function getResponseContinuationKey(configDir = getConfigDir()): Pr
       try {
         secret = await asyncEntry.getSecret(AbortSignal.timeout(KEYRING_READ_TIMEOUT_MS));
       } catch (error) {
+        if (!isCurrentKeyLifecycleToken(homeId, lifecycleToken)) return null;
         if (!isKeyringNoEntry(error)) {
           // timeout or keyring error: mark unavailable and degrade to memory-only
           noteKeyringUnavailable(homeId);
@@ -331,9 +370,18 @@ export async function getResponseContinuationKey(configDir = getConfigDir()): Pr
         }
       }
 
+      if (!isCurrentKeyLifecycleToken(homeId, lifecycleToken)) {
+        wipeBuffer(secret);
+        return null;
+      }
+
       if (secret) {
         const key = copyKeySecret(secret);
         if (key) {
+          if (!isCurrentKeyLifecycleToken(homeId, lifecycleToken)) {
+            wipeBuffer(key);
+            return null;
+          }
           cachedKeysByHomeId.set(homeId, key);
           return key;
         }
@@ -342,11 +390,16 @@ export async function getResponseContinuationKey(configDir = getConfigDir()): Pr
       }
 
       // Only clean null (key not found) enters sync locked creation
-      return loadOrCreateKeySync(configDir);
-    } finally {
-      keyFlightsByHomeId.delete(homeId);
+      return loadOrCreateKeySync(configDir, lifecycleToken);
+    } catch (error) {
+      if (!isCurrentKeyLifecycleToken(homeId, lifecycleToken)) return null;
+      throw error;
     }
-  })();
+  });
+
+  const flight = operation.finally(() => {
+    if (keyFlightsByHomeId.get(homeId) === flight) keyFlightsByHomeId.delete(homeId);
+  });
 
   keyFlightsByHomeId.set(homeId, flight);
   return flight.then(key => key ? Buffer.from(key) : null);
