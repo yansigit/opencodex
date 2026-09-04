@@ -7,6 +7,7 @@ import { join, resolve } from "node:path";
 import { bundledBunPath } from "../src/lib/bun-runtime";
 import { killProxy } from "../src/lib/process-control";
 import { commandInvocation } from "../src/lib/win-exec";
+import { SERVER_BUDGET_MS, SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const BIN_OCX = join(import.meta.dir, "..", "bin", "ocx.mjs");
 const nodeAvailable = spawnSync("node", ["--version"], {
@@ -18,12 +19,14 @@ const runnable = process.platform === "win32" && nodeAvailable;
 // /healthz is the launcher's first trustworthy end-to-end startup signal: a
 // live Node parent or Bun child does not prove that the proxy is serving. The
 // old 25s budget expired on loaded Windows and macOS runners, and equivalent
-// real-proxy starts elsewhere in this suite have taken 46-47s. 90s is more than
-// twice the measured high-water mark while still turning a hung launch into a
-// bounded failure. Keep the Windows case budget derived so process inspection
-// and cleanup have their own headroom after readiness settles.
-const PROXY_HEALTH_TIMEOUT_MS = 90_000;
-const EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS = PROXY_HEALTH_TIMEOUT_MS + 30_000;
+// real-proxy starts elsewhere in this suite have taken 46-47s. A loaded hosted
+// Windows fallback start has also crossed the former standalone 90s ceiling.
+// Compose the repository budgets for the Node launcher, its Bun child, and the
+// server bind instead of maintaining another drifting wall-clock constant.
+// Keep the case budget derived so process inspection and cleanup have their own
+// child-process envelope after readiness settles.
+const PROXY_HEALTH_TIMEOUT_MS = 2 * SPAWN_BUDGET_MS + SERVER_BUDGET_MS;
+const EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS = PROXY_HEALTH_TIMEOUT_MS + SPAWN_BUDGET_MS;
 
 type Health = {
   status: string;

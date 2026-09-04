@@ -2676,6 +2676,1165 @@
           ]
         }
       }
+    },
+    "v2.41.0": {
+      "tag": "v2.41.0",
+      "tagSha": "4600f80198c8eb6cef1b9cf1338d51906100007e",
+      "baseSha": "35ff3a462e786bd5efc394dfb1a8a5cc946e454f",
+      "decisions": {
+        ".github/scripts/pr-hygiene.cjs": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for .github/scripts/pr-hygiene.cjs without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 738e0af535cb, fork a3ee75fd1b9c, upstream 6a4989ae739e, result 850da05bf259 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/ci-workflows.test.ts",
+            "bun test tests/fork/sync-workflow.test.ts"
+          ],
+          "baseBlob": "738e0af535cbfc0baad068acd0c13fe5fa905f4f",
+          "forkBlob": "a3ee75fd1b9c9dcd14ff0d984a9969bc48db8804",
+          "upstreamBlob": "6a4989ae739e42f604de4ee81911ac814f85971a"
+        },
+        ".github/workflows/enforce-pr-target.yml": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for .github/workflows/enforce-pr-target.yml without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base a26ff0227309, fork 161b18cf8f21, upstream 6743730206ea, result f449b555478e (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/ci-workflows.test.ts",
+            "bun test tests/fork/sync-workflow.test.ts"
+          ],
+          "baseBlob": "a26ff0227309d2a0077816ab983ca0e3ada79ef3",
+          "forkBlob": "161b18cf8f210882418683ea27a4c25f57856864",
+          "upstreamBlob": "6743730206ea1fb9ddf5b19e6542bcdce917e7a4"
+        },
+        ".github/workflows/pr-hygiene.yml": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for .github/workflows/pr-hygiene.yml without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 8d6cb3b1a4c3, fork 1e22ec918af3, upstream b60943b93a47, result cfb3fdbb9a07 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/ci-workflows.test.ts",
+            "bun test tests/fork/sync-workflow.test.ts"
+          ],
+          "baseBlob": "8d6cb3b1a4c3c96e9e4d7162e733ee742de0c964",
+          "forkBlob": "1e22ec918af3a346f7cf1fc3e55c0aab7531e9f6",
+          "upstreamBlob": "b60943b93a47bf85ce90727571a2ed3e3eff7471"
+        },
+        ".github/workflows/release.yml": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for .github/workflows/release.yml without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 261aece1d180, fork b6506719f6f7, upstream f05357429503, result 4fd07d84e110 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/ci-workflows.test.ts",
+            "bun test tests/fork/sync-workflow.test.ts"
+          ],
+          "baseBlob": "261aece1d180cdebe9384a75e5e359f6078cf866",
+          "forkBlob": "b6506719f6f73d939a8f074c5e3efc2be60d12fd",
+          "upstreamBlob": "f053574295033f2db763d9db639d8385f8220ef0"
+        },
+        ".github/workflows/service-lifecycle.yml": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for .github/workflows/service-lifecycle.yml without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores protected-branch service lifecycle coverage and verifies workflow invariants after the v2.41 sync merge.",
+          "exactTests": [
+            "bun test tests/ci-workflows.test.ts",
+            "bun test tests/fork/sync-workflow.test.ts"
+          ],
+          "baseBlob": "8e0513b4598088426f9bb113a1b4d8de693bd5df",
+          "forkBlob": "da266b3699b32f570cdf091d66b38022889c7a7b",
+          "upstreamBlob": "df37f60561858852b988da03bc2102cf77a59bd2"
+        },
+        "AGENTS.md": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for AGENTS.md without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 128e09122303, fork eac960cce71b, upstream 8d07b948ef71, result 8d07b948ef71 (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "128e0912230340aa288bd3c079628d985c489270",
+          "forkBlob": "eac960cce71bbaf0b2013065547904951e9ea964",
+          "upstreamBlob": "8d07b948ef710159958260609f6604e96bc8a8c3"
+        },
+        "bun.lock": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for bun.lock without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 329084661e8e, fork abc16f0b5062, upstream c4619c286665, result c4619c286665 (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "329084661e8ec37c1f9d48ec4e0902a04f2f9b53",
+          "forkBlob": "abc16f0b50624de370a1195357169e81c7f983c9",
+          "upstreamBlob": "c4619c286665c703362fa450e7ea90fe3451dede"
+        },
+        "docs-site/src/content/docs/guides/providers.md": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for docs-site/src/content/docs/guides/providers.md without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 3a3276c60240, fork 80b9e824a40f, upstream 73f7f2062030, result 4434408934ab (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "3a3276c602407ee652341b80e980a767b691b9c2",
+          "forkBlob": "80b9e824a40fdae275fb4bf5fee878b6f15da741",
+          "upstreamBlob": "73f7f206203072ab394164ad8ff5fb4721f33fb1"
+        },
+        "docs-site/src/content/docs/guides/sidecars.md": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for docs-site/src/content/docs/guides/sidecars.md without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 0606129f390b, fork a51c06ce55e2, upstream d0c79d272ebc, result e0828ae273a7 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "0606129f390bb11d7de40ffde7cf9f646a077a18",
+          "forkBlob": "a51c06ce55e28e67d239ca7cdeefd37c1f208911",
+          "upstreamBlob": "d0c79d272ebc8cce902f3adb981fa87c2f5809bb"
+        },
+        "docs-site/src/content/docs/reference/management-api.md": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for docs-site/src/content/docs/reference/management-api.md without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base ffc26dbc90f7, fork 96a5b628da4a, upstream 716636bfdc24, result 4a33b2d6eeae (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "ffc26dbc90f7de44c2ff5dc6fba9a1a722b8038c",
+          "forkBlob": "96a5b628da4a145bc677c053461dbdfcf453fbc1",
+          "upstreamBlob": "716636bfdc2449bb263a205a240a4628e8a945f9"
+        },
+        "gui/src/i18n/de.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/de.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 888bfac8ea8f, fork 8674ee4e2121, upstream f0eb85fceef9, result 532dd59e3882 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "888bfac8ea8f112eb6facf14bd4ea6a7ed081598",
+          "forkBlob": "8674ee4e21216b21870b62d892aab9856bb0452f",
+          "upstreamBlob": "f0eb85fceef9a3cc021b00dc0dff917abdd06a71"
+        },
+        "gui/src/i18n/en.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/en.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 0be94fe83b0b, fork 8b6e6a12a18d, upstream 8c49a8124827, result b28f58e129e5 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "0be94fe83b0b6d53806ae7529c68d038cad1e278",
+          "forkBlob": "8b6e6a12a18db92c394848695dc095c29f80c55b",
+          "upstreamBlob": "8c49a8124827b5d1cf431cef82d2940839273f8f"
+        },
+        "gui/src/i18n/fr.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/fr.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base ee0ffe0fde17, fork 2e91bb27375c, upstream a05872c15524, result 75f9432c25b5 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "ee0ffe0fde17cea1ffbf95a585736040ae3494f0",
+          "forkBlob": "2e91bb27375cd94ebd609579239d310021f2b9d9",
+          "upstreamBlob": "a05872c15524060015d2d9fd2c2b8590df15db15"
+        },
+        "gui/src/i18n/ja.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/ja.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 9d3dba45885c, fork 086acad8c80e, upstream ce861c5c4749, result 10f25583b0f3 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "9d3dba45885cf66628fe8bf6efb295a954dd21c5",
+          "forkBlob": "086acad8c80e6862acc0dca6b25a2ef7d53ee63b",
+          "upstreamBlob": "ce861c5c47491655540cb12871719a5f6bdf1436"
+        },
+        "gui/src/i18n/ko.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/ko.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 71ebdd8fa598, fork a1e6b0a69099, upstream bf7fe01e246e, result 7cbe94dd15b8 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "71ebdd8fa598200056db5b617b5748ac919a9687",
+          "forkBlob": "a1e6b0a6909940d35d752e5adf741e7af2c0aee2",
+          "upstreamBlob": "bf7fe01e246e8ef092361fa8f7d2e4336ff4f4d1"
+        },
+        "gui/src/i18n/ru.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/ru.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 3cb6f8e10a4a, fork 721496cf412f, upstream 19ebbf68b266, result 4d3636f6c9ab (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "3cb6f8e10a4aef1dd021dfaceaf227960107cbf7",
+          "forkBlob": "721496cf412f26d770fc5ea0c26c9a1396006ea9",
+          "upstreamBlob": "19ebbf68b26644a2e85f7c49805cf80e415ca01e"
+        },
+        "gui/src/i18n/tr.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/tr.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 2befb8ef275d, fork 7633d4f14c32, upstream 21c70d54fd24, result eaea4c6cf740 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "2befb8ef275d6543321718994f50e5b4ebf52148",
+          "forkBlob": "7633d4f14c325e35ef37c83bb9f73d19a33c9a4a",
+          "upstreamBlob": "21c70d54fd24cba5e55ab808ec2ba6711aca7b45"
+        },
+        "gui/src/i18n/zh-TW.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/zh-TW.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 19d9e4321cb7, fork 1a2db21c6e51, upstream 588b09cac047, result c4caf84708c7 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "19d9e4321cb79855e635e7cd0e3093f01730ba29",
+          "forkBlob": "1a2db21c6e51f87651338617aba6b402ef1e28bc",
+          "upstreamBlob": "588b09cac047398db6bffac819b10f117bd5a754"
+        },
+        "gui/src/i18n/zh.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/i18n/zh.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 5f3d36b848db, fork 35ee8b0a1f15, upstream 136c60b254f6, result 6e3d86363f60 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "5f3d36b848dbb56f9ff350ea374dc731a605f981",
+          "forkBlob": "35ee8b0a1f15725ef1ed9894cfac0c43fa6a3433",
+          "upstreamBlob": "136c60b254f625901ead9ed32c42ccd644a27723"
+        },
+        "gui/src/pages/Logs.tsx": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/pages/Logs.tsx without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 07aec2b12abf, fork 8fc632b71982, upstream 384231f698f1, result 56e99cde0dc3 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "07aec2b12abfb02bca0f262e30d068a1a4c72e01",
+          "forkBlob": "8fc632b71982d07921f5424cb90e7876b595284e",
+          "upstreamBlob": "384231f698f1e7f45593da0c0f54accba44f9979"
+        },
+        "gui/src/pages/providers-shared.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/pages/providers-shared.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 3b8607dc751f, fork 1a2e8c4b9787, upstream 2efc654c40f4, result e68e154dbfd5 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "3b8607dc751faa6573c30226c828a97f91e38490",
+          "forkBlob": "1a2e8c4b9787dbeacad50e06bb12f8bbc137445a",
+          "upstreamBlob": "2efc654c40f495bd86a8db28d5af89e9a0f32940"
+        },
+        "gui/src/pages/Providers.tsx": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/pages/Providers.tsx without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 158497a36cfb, fork 61a76d2700be, upstream 7bb9009418dd, result e7ee11b91087 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "158497a36cfb4ef01e4dbc2e64c95fc6b2f8ef0c",
+          "forkBlob": "61a76d2700be16f9207beaad14ad4310e3dffdfe",
+          "upstreamBlob": "7bb9009418dd3c5cd8bd8cd47df47a4077f83201"
+        },
+        "gui/src/pages/use-dashboard-data.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/pages/use-dashboard-data.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 9e2c4cda3a2a, fork 6539875c368c, upstream 6f84950ce193, result 4002a5a72e2e (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "9e2c4cda3a2acf5633672852bfa1eaefaf29081c",
+          "forkBlob": "6539875c368cd3a0c2f29d18e3fa17dca7e2e6b1",
+          "upstreamBlob": "6f84950ce1934569e5fc67c0123bbc3220d0f533"
+        },
+        "gui/src/provider-icons.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/provider-icons.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 319286264812, fork f2756b143ef9, upstream b99cbacd8c34, result 3196207b8665 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "31928626481298f53f22ad42b9a005d8e670e418",
+          "forkBlob": "f2756b143ef9cc6ad0ed81531d3cb94b51c2697e",
+          "upstreamBlob": "b99cbacd8c34df101afe1c5980d7382f6a7bc630"
+        },
+        "gui/src/styles.css": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/src/styles.css without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 38880aa0aa0f, fork 3573e8b89c51, upstream 1d321fc8439a, result 4f4223c8e7b0 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "38880aa0aa0f10964bdffb1b499a6e8ddb00f433",
+          "forkBlob": "3573e8b89c512de91ee48c6bc11ab54f27720d5f",
+          "upstreamBlob": "1d321fc8439a50945f3225cff6352f70c20faac3"
+        },
+        "gui/tests/dashboard-contracts.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/tests/dashboard-contracts.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base c411168daf00, fork 18824155c862, upstream 6b7ec2c6a6a3, result a7e16c12dc95 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "c411168daf001a9bcc1fd2dc3b12e2f1ea34ad04",
+          "forkBlob": "18824155c8629670153937daabe103a1134850da",
+          "upstreamBlob": "6b7ec2c6a6a3d094ce1570c9824bbbcb104f4c04"
+        },
+        "gui/tests/fr-localization.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/tests/fr-localization.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base f1c3511e9538, fork a42a87a1ee8f, upstream 037b03671a8b, result bc2167aa869e (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "f1c3511e953816852d03c1bbcab2dfdfce4ad47f",
+          "forkBlob": "a42a87a1ee8f92ff4fb679f7ca64459dad425289",
+          "upstreamBlob": "037b03671a8bca553bc92fc2d5fbcdb0cff5988e"
+        },
+        "gui/tests/locale-parity.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/tests/locale-parity.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base c6bd877265cb, fork da0a1be4b836, upstream 8a718e265149, result d3cc95ecebcb (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "c6bd877265cbf0872116bdc276ad026e3ea65b0b",
+          "forkBlob": "da0a1be4b836452ba16f28f57c0648f479e0ebbc",
+          "upstreamBlob": "8a718e2651495538095b65ae0414a4cb9db2200d"
+        },
+        "gui/tests/logs-auto-refresh.test.tsx": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for gui/tests/logs-auto-refresh.test.tsx without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 758eeb14fae2, fork fa7f5fdc9856, upstream 5be3656b0dc1, result d817bcdaa946 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run lint:gui",
+            "gui/tests/locale-parity.test.ts"
+          ],
+          "baseBlob": "758eeb14fae278c53f3c7fe9d11f459a3edac068",
+          "forkBlob": "fa7f5fdc985631afb1b38b9b28fe52a7d06b8619",
+          "upstreamBlob": "5be3656b0dc1d34cca7be17ecfa86968133d7664"
+        },
+        "package.json": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for package.json without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base e3bc6b777abb, fork 4c68eeb1434c, upstream 19d8c3f16d43, result b38c524ceaa1 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "e3bc6b777abb4c1749ee9125d8c4e9aa942a6dc6",
+          "forkBlob": "4c68eeb1434c1bf84221437c4efcc8726a16a816",
+          "upstreamBlob": "19d8c3f16d4358c2398760c2d379063737b8e08f"
+        },
+        "README.md": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for README.md without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base c195a32d9d3c, fork ed5ff9a45fcb, upstream f995366a4922, result acc94076a26e (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "c195a32d9d3c6a6a4ea7cd7881fdfc14841816d9",
+          "forkBlob": "ed5ff9a45fcb5805025c27b1ea1b61ecf6ac44fc",
+          "upstreamBlob": "f995366a4922f88c6b4a9bb2db10237f94675df0"
+        },
+        "scripts/model-metadata.source.json": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for scripts/model-metadata.source.json without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 654e32428553, fork fd1a794b3891, upstream 8cc73ca1c30f, result 8cc73ca1c30f (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "654e324285536de88ac03fe3ab05677a8ef85917",
+          "forkBlob": "fd1a794b3891251502bf7c04729a751ae4a0be80",
+          "upstreamBlob": "8cc73ca1c30faf86ee38e9f3b581083055ff5bc9"
+        },
+        "scripts/privacy-scan.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for scripts/privacy-scan.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores untracked-file privacy coverage while retaining the upstream scanner changes.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "f6dbcc66184b0e07b51c79fda46f901c391d61f6",
+          "forkBlob": "bfe23b2e0165cc01aef03bf0e934794159dd74a2",
+          "upstreamBlob": "47bb733779d94a5353ee3421a9339be543b91ea5"
+        },
+        "scripts/test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for scripts/test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 3e3465517591, fork 8b12437b1e6a, upstream 529967c56e13, result 5de77b78bda9 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "3e3465517591811876395bde60c4acb6c2df952f",
+          "forkBlob": "8b12437b1e6a0463a1d733edcc6a67a365037f5c",
+          "upstreamBlob": "529967c56e138318bfff7e9eb9a3e3bd70cd6408"
+        },
+        "skills/ocx/references/05_remote_hub.md": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for skills/ocx/references/05_remote_hub.md without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 9951247a6f02, fork 0d4605271b7b, upstream 46b846d44349, result 46b846d44349 (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "9951247a6f0297cfeaeb81874b0d1fd71ac3ca21",
+          "forkBlob": "0d4605271b7b74e706dcf54d0206bdb94d096f4e",
+          "upstreamBlob": "46b846d4434992227d633c74e0155851fa542be0"
+        },
+        "src/adapters/google.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/adapters/google.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 01189a5938f5, fork c7ca1c309409, upstream 7af5bbdbf1d5, result 220d0f24d99f (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/google-hardening.test.ts",
+            "bun test tests/google-antigravity-wire.test.ts"
+          ],
+          "baseBlob": "01189a5938f539d50fa133a6d75c9a0c1523cb0c",
+          "forkBlob": "c7ca1c309409c81e7a23e7dc82e4a89c6b008bad",
+          "upstreamBlob": "7af5bbdbf1d55f5cac926a58b2734700b24b8880"
+        },
+        "src/adapters/openai-responses.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/adapters/openai-responses.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 781bbef41458, fork edef526c1ef5, upstream 8e23b383f385, result e72208e79320 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "781bbef41458bbc7e23e26ac68dc75a36be4ba26",
+          "forkBlob": "edef526c1ef59a035bf000d28029ebf2634ef080",
+          "upstreamBlob": "8e23b383f3855d73b7d98c7ccf07183b669c8272"
+        },
+        "src/cli/registry.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/cli/registry.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 36bbf9a77178, fork e2ceee8c13a9, upstream 5d6cd4391cea, result d7ab418f0b40 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "36bbf9a77178c7b7a49c5cd951335270e9fd9978",
+          "forkBlob": "e2ceee8c13a9e0788d155b51ef5b1acd46fa4a83",
+          "upstreamBlob": "5d6cd4391ceaf25a36c77c68230e2fac5ecf264c"
+        },
+        "src/cli/status.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/cli/status.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base e3120b074d6f, fork 9058184c514e, upstream 1a0d5685e785, result 1a0d5685e785 (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "e3120b074d6f5898bf39ddd6d2199548b7d82b30",
+          "forkBlob": "9058184c514eae273bc6a9a4dccdde23b35c7dc8",
+          "upstreamBlob": "1a0d5685e785fd86aa78a14ada8d892451a66aff"
+        },
+        "src/codex/catalog.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/codex/catalog.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base fe73d482636d, fork 29b842513b59, upstream e32d5216a567, result be477539a5e4 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "fe73d482636d6ee5133e3b182fa1d7b4defe66c9",
+          "forkBlob": "29b842513b59a3d3eeec8cd0ab676df054d06b7a",
+          "upstreamBlob": "e32d5216a5673cc9eb961433660fcf88752136bd"
+        },
+        "src/codex/catalog/aggregation.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/codex/catalog/aggregation.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base e43fddbf1d0e, fork b2967f091702, upstream f97b8295fc31, result 22b95fa29358 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "e43fddbf1d0eee9faabe81b842014544c4bd8a08",
+          "forkBlob": "b2967f0917027751adc0c07334b568c4470b8a15",
+          "upstreamBlob": "f97b8295fc312ebcc0b55aacce85eeab968bce86"
+        },
+        "src/codex/catalog/parsing.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/codex/catalog/parsing.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base de195b9abc95, fork 92ca0ddf09d9, upstream d9ec821646f4, result d9ec821646f4 (exact-upstream-blob).",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "de195b9abc958103d2dfb761ca63a4ddd80e36ef",
+          "forkBlob": "92ca0ddf09d93ce2b41990174619e089f7ef2f71",
+          "upstreamBlob": "d9ec821646f445165a807c0b86ab59d8a2318ba8"
+        },
+        "src/codex/catalog/provider-fetch.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/codex/catalog/provider-fetch.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 retains fork OAuth catalog projection guarantees while adopting the v2.41 provider-fetch behavior.",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "66b7f63a883fccd917c487454c1ab2faf861d002",
+          "forkBlob": "d39470cdff13913f0a7281947a5f360008604637",
+          "upstreamBlob": "f48edcd03cf2bdecfafd67158bb682b6a4be92e1"
+        },
+        "src/config.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/config.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 0641f772eb43, fork af9df347cdbc, upstream 6cd87ef29f0e, result 596c3da19a72 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "0641f772eb432775d880d8da767e5594f827f978",
+          "forkBlob": "af9df347cdbccf2f595840ffd6c3e9070497f816",
+          "upstreamBlob": "6cd87ef29f0e06a0d0980fab26b20080243975e3"
+        },
+        "src/generated/model-metadata.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/generated/model-metadata.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores the fork AI Studio model aliases on top of the v2.41 generated metadata.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "dea2a49baf4edb44d60bfa409d1035ccdbe18b9f",
+          "forkBlob": "c260998863a6d698086bfb83ed2db2982ce0a85a",
+          "upstreamBlob": "73b9dee5d5ac5387347b87965e2882dde62d52ea"
+        },
+        "src/oauth/index.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/oauth/index.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 92bc74b3fad9, fork 55eed97efe24, upstream 868c4f9b99c7, result def2ff002b49 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "92bc74b3fad9ba7cd473a3f7f6ca8e0b56288028",
+          "forkBlob": "55eed97efe249676e0d67330f7aa598d9d90b0e0",
+          "upstreamBlob": "868c4f9b99c7668d4b105279a60eaffb02787f67"
+        },
+        "src/providers/free-directory.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/providers/free-directory.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 2e935c40e46f, fork 4ccd0eaa8843, upstream ab6e9b2389ec, result ab6e9b2389ec (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "2e935c40e46f6b5077c73485b3ea1c3546ae80f1",
+          "forkBlob": "4ccd0eaa88433f127198689d82b7e41dfe7bcbbc",
+          "upstreamBlob": "ab6e9b2389ec3e5fbcdf31037046b57148f76af2"
+        },
+        "src/providers/registry.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/providers/registry.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores the Command Code prompt-cache capability while retaining the v2.41 registry updates.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "3f71a1a8a788916434130ac8c48c1c733f7c9e88",
+          "forkBlob": "9d54e556027cf49d89efe6d1f6612d8407959cc1",
+          "upstreamBlob": "cc692902d390e2d087d54f27da4ff695a49b18e0"
+        },
+        "src/server/auth-cors.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/auth-cors.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores the fork management/auth DTO fields required by the v2.41 server composition.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "10516ca31c7b0592db1c4c7dc5d78d1b1cd3ac26",
+          "forkBlob": "37daf4466cc505a9c0fa4800eff8c1887a226120",
+          "upstreamBlob": "8da10d5f44f46edcf8603319e2e24b20ba479224"
+        },
+        "src/server/chat-completions.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/chat-completions.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base db084df490e3, fork 904ec0d8eed4, upstream cb3ddbb4d2db, result b5cad2a75b43 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "db084df490e33a5999678d0c9a149d4e4d0e2f39",
+          "forkBlob": "904ec0d8eed42c69cd5a5bac391657b6532087ee",
+          "upstreamBlob": "cb3ddbb4d2db95d73364e9aff6581a33d6216a9f"
+        },
+        "src/server/chat-native.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/chat-native.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base a05e7dd289bd, fork f37984a31e9d, upstream 32f3daea8a57, result 32f3daea8a57 (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "a05e7dd289bd05d32b96d7c22c9b1dec9b00fc76",
+          "forkBlob": "f37984a31e9d3044e214921932b8a50880da2951",
+          "upstreamBlob": "32f3daea8a57f9fcc45e907a5aeb41b83f18959f"
+        },
+        "src/server/claude-messages.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/claude-messages.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 preserves Claude source envelopes, route callbacks, and session handling while integrating v2.41 effort-row routing.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "8425395b18691d7a2137d6673db40274601ecdc8",
+          "forkBlob": "13a0514f6a285799dd40008d87c9699c907ed4c3",
+          "upstreamBlob": "476ac34bc0fa60006263220f427b90b87a99f3ed"
+        },
+        "src/server/index.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/index.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 restores the fork server composition seams while retaining the v2.41 startup changes.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "eab0ba1d7f817adc706ae81fcae302ba7abdb060",
+          "forkBlob": "e6220b140a0ad80d70d6b3c2d2f5dcdae00b8a8e",
+          "upstreamBlob": "92495a8b58bd80727c04cfc7a45972b18abe6ead"
+        },
+        "src/server/management/context.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/management/context.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 49aedf4990ba, fork 240046f45ec1, upstream 13c922e57575, result fb6bd43f0c30 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "49aedf4990baa31b0001bc6b8cab5db7cf9f59b2",
+          "forkBlob": "240046f45ec1cf75cd205e81c8751c7a9fb30198",
+          "upstreamBlob": "13c922e57575955171afb447be78746df8dfe5b0"
+        },
+        "src/server/management/logs-usage-routes.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/management/logs-usage-routes.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 03d8f96f59f6, fork b32058c98423, upstream 5d909283f26c, result 97e438f918c9 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/usage-cost.test.ts"
+          ],
+          "baseBlob": "03d8f96f59f615acee2d2874e82664e53cee5535",
+          "forkBlob": "b32058c98423d135ec2a0c30eff444a001b571ec",
+          "upstreamBlob": "5d909283f26c02b6e89eb580d7823ce63c63c64b"
+        },
+        "src/server/management/provider-routes.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/management/provider-routes.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "PR #244 preserves atomic provider management, AI Studio probing, and Antigravity OAuth checks while adopting v2.41 provider editing.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "2eedb1d5e64baca2f6def575a18d4a702954cf85",
+          "forkBlob": "d95dcb3d9bc04164b8c86254a307df2b2fe1c5b7",
+          "upstreamBlob": "8b9f8d0dd45c3e024d39f51ab0e93987f168c4d6"
+        },
+        "src/server/management/route-registry.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/management/route-registry.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 95c72f50213f, fork f18a68e7747c, upstream 9a52cc9d796d, result 4e2b118643d4 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "95c72f50213f4877c3f390cc599cfd778a0f4cc5",
+          "forkBlob": "f18a68e7747ceedbbdd87fba8d7e1dc0249c061d",
+          "upstreamBlob": "9a52cc9d796d797c0a693d796741b7c219b1ab95"
+        },
+        "src/server/responses/core.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/server/responses/core.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base e2e23f241df7, fork 53c2203a9256, upstream ce6abf5c3d7c, result 2626c2e1af15 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "e2e23f241df77da7a442e5c6a125a4a65b729d38",
+          "forkBlob": "53c2203a9256a440a0c688561f3bce71316beea8",
+          "upstreamBlob": "ce6abf5c3d7c7c9925da1c6a69e7aeac785bec7e"
+        },
+        "src/types/config.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/types/config.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 9bead2ad10c2, fork 1f547309d037, upstream 06270fc172f6, result 8a85b218698e (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "9bead2ad10c299e73442a9b91dc8bbd9eb734fe3",
+          "forkBlob": "1f547309d037892ea7c6adf72d3d031bb8defb72",
+          "upstreamBlob": "06270fc172f62d033631d98cfd4dfa0def46c60d"
+        },
+        "src/types/tools.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/types/tools.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 8f713be620a6, fork 92ec4bc2df87, upstream 3de31c2de671, result 3de31c2de671 (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "8f713be620a6ab40c93a650e28e3a5c4c2bcc213",
+          "forkBlob": "92ec4bc2df87f8cda071ad747e8a5eb4eca53580",
+          "upstreamBlob": "3de31c2de671dea74b6f99267c9492205efff0e7"
+        },
+        "src/usage/expected-prices.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/usage/expected-prices.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 23e5412150a1, fork 29423b8a3b37, upstream 5d71b6ff4c91, result 30c0420eb6e2 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/usage-cost.test.ts"
+          ],
+          "baseBlob": "23e5412150a1b24078a3e9a68011f4b3eb1c2af4",
+          "forkBlob": "29423b8a3b376cdf39719c81d12ff59d15b59afb",
+          "upstreamBlob": "5d71b6ff4c9183685e9a3bcb7b210573aab2b979"
+        },
+        "src/usage/log.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/usage/log.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 7e056f97b0db, fork f1bab5db70f0, upstream 6a74ae7f96fb, result f3afbcedd023 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/usage-cost.test.ts"
+          ],
+          "baseBlob": "7e056f97b0db7625117cc77cf83f2a8b5c146fda",
+          "forkBlob": "f1bab5db70f08fc66952f3029ae8eb93dcc3bda9",
+          "upstreamBlob": "6a74ae7f96fb7e7ff4127fc04f392fa5e7e6047f"
+        },
+        "src/web-search/index.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for src/web-search/index.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 8dad3b3d7341, fork cf9e6abcc779, upstream 719c22efacee, result 36d8c97a970f (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "8dad3b3d73410b67ca0fb479139b1493f14c5c3b",
+          "forkBlob": "cf9e6abcc7799011cf7b817cc277d8b9e5526dba",
+          "upstreamBlob": "719c22efaceebd62979cf2547cae11ab0b578832"
+        },
+        "structure/05_gui-and-management-api.md": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for structure/05_gui-and-management-api.md without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base ff75b15e8875, fork 308d60b8ae27, upstream 725fbdcd5e6e, result db0f74e5ac95 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "ff75b15e8875bb2fb73c1b598995eec6b1eb2dd2",
+          "forkBlob": "308d60b8ae273b2bfa5300f05b1115d54ff9f2d6",
+          "upstreamBlob": "725fbdcd5e6e0bb9f73bce53eee728f78b633004"
+        },
+        "tests/chat-completions-endpoint.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/chat-completions-endpoint.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 6a725e1c9b51, fork 953602bc0348, upstream 824ba640136a, result 824ba640136a (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "6a725e1c9b51fef4d0569023e672b107ad910e91",
+          "forkBlob": "953602bc0348e28d4951cf9856bb37c9c6829f9d",
+          "upstreamBlob": "824ba640136a4272def76795f3faf3fdc20ebb76"
+        },
+        "tests/ci-workflows.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/ci-workflows.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 8a70f4e675bb, fork 9035d226537c, upstream d282349d190c, result d282349d190c (exact-upstream-blob).",
+          "exactTests": [
+            "bun test tests/ci-workflows.test.ts",
+            "bun test tests/fork/sync-workflow.test.ts"
+          ],
+          "baseBlob": "8a70f4e675bb08f1ab5e0c0656b082ff1bb61329",
+          "forkBlob": "9035d226537cd5ea644531cfd90d73dbc24fc4ea",
+          "upstreamBlob": "d282349d190cb82cd6a182e45a4b8eccabc80352"
+        },
+        "tests/cli-status-json.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/cli-status-json.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 1e9f8532ca55, fork a14b21cbb673, upstream fa402923ef8b, result aa7964fcbd50 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "1e9f8532ca55bccf6b483bceea4e6bd6dce93f24",
+          "forkBlob": "a14b21cbb673d55d6d3ff6b96ceeab8083e8f0f5",
+          "upstreamBlob": "fa402923ef8ba25a9f0d5cb858f0781dcc8d45b5"
+        },
+        "tests/codex-catalog.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/codex-catalog.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 7b8015041ec9, fork 1295122b2ab9, upstream 4ae9926b30fa, result c771fcfdfda4 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "7b8015041ec99839cde2d87d99f23bfa54bf5c37",
+          "forkBlob": "1295122b2ab981dd158c2320bef196b3ff611363",
+          "upstreamBlob": "4ae9926b30fac8914b157223b4d93edf9dff771e"
+        },
+        "tests/codex-convergence-contract.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/codex-convergence-contract.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 2006778c2d49, fork 8737d606cca1, upstream 98e9d97b958a, result ac55be10c098 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "2006778c2d49ba87ad8c02b5e88d6dcaaca003ca",
+          "forkBlob": "8737d606cca1d609e0dd79b8dc68a1408f1d3221",
+          "upstreamBlob": "98e9d97b958ac208d1a415d12e7d90e391754ab9"
+        },
+        "tests/command-code-provider.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/command-code-provider.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base f434687a1c27, fork cfdb46bcacaf, upstream 76aed55ccfff, result 7946cc04b967 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "f434687a1c27d2c0097eb5640a4efa444860f506",
+          "forkBlob": "cfdb46bcacaf40cb7ee40eda257aee965ea6671d",
+          "upstreamBlob": "76aed55ccfffb00600565909e77be834a3ca8936"
+        },
+        "tests/gemini-web-search.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/gemini-web-search.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 0f0bd782a1a1, fork 4f9340146fcc, upstream 8dedb4206335, result 8dedb4206335 (exact-upstream-blob).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "0f0bd782a1a179d25463041ba311a303551b79a1",
+          "forkBlob": "4f9340146fcc9b4553ccb3b6bc710c30cb8a24e5",
+          "upstreamBlob": "8dedb42063355d59b5d26e4652ea2c27ef2dbd5f"
+        },
+        "tests/google-antigravity-wire.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/google-antigravity-wire.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base d00ba03b8aed, fork d016e7ee0823, upstream 65d74be11679, result 29f8de5c4482 (overlapping-logical-path).",
+          "exactTests": [
+            "bun test tests/google-hardening.test.ts",
+            "bun test tests/google-antigravity-wire.test.ts"
+          ],
+          "baseBlob": "d00ba03b8aed03bd264043e6f63ca68620823668",
+          "forkBlob": "d016e7ee082302b50424cd13858ee988febb096e",
+          "upstreamBlob": "65d74be11679034a2a6ca4393519eec6f80a9fc4"
+        },
+        "tests/google-hardening.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/google-hardening.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 509f61e606b0, fork b0e855e30d89, upstream a187b9c3d23f, result a187b9c3d23f (exact-upstream-blob).",
+          "exactTests": [
+            "bun test tests/google-hardening.test.ts",
+            "bun test tests/google-antigravity-wire.test.ts"
+          ],
+          "baseBlob": "509f61e606b0e92dae996e9ebb5fd8f0e5b14eed",
+          "forkBlob": "b0e855e30d89f6d423178e5db8828ae4514d6c83",
+          "upstreamBlob": "a187b9c3d23f986e5ce3fd923e17efcc00034674"
+        },
+        "tests/google-models-listing.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/google-models-listing.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 39900f8159ba, fork 435200b53c1d, upstream 5a36700063e7, result 5a36700063e7 (exact-upstream-blob).",
+          "exactTests": [
+            "bun test tests/google-hardening.test.ts",
+            "bun test tests/google-antigravity-wire.test.ts"
+          ],
+          "baseBlob": "39900f8159ba8043a2e5e3d229d1f229d7e2d361",
+          "forkBlob": "435200b53c1d298c4e62145bbb501d0636528c9d",
+          "upstreamBlob": "5a36700063e76123e16fe3b72ad0738167843a4a"
+        },
+        "tests/helpers/enforce-pr-target-harness.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/helpers/enforce-pr-target-harness.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base b6d90da52f93, fork b443a3a3dcef, upstream af295cb678fc, result e54b76e05d8a (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "b6d90da52f936046ecf6ca8db34f8bcb589490e6",
+          "forkBlob": "b443a3a3dcef9953024975c6f312cfa23eda321d",
+          "upstreamBlob": "af295cb678fc1bb60c9b462e5cd54fa8ba0db9c0"
+        },
+        "tests/oauth-provider-reconcile.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/oauth-provider-reconcile.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 08e94c1dda1c, fork 205b332a7bd4, upstream f57c70b6d5ef, result eda4070cf5d7 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "08e94c1dda1cfae06ba3b39d15eb5732ac084636",
+          "forkBlob": "205b332a7bd462cba6747859c2142f34336ca588",
+          "upstreamBlob": "f57c70b6d5efd3bbff95a2a1e9ee65b09b7d4494"
+        },
+        "tests/provider-model-discovery-contract.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/provider-model-discovery-contract.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base f4a088b73017, fork 4417e487296e, upstream a78977d16153, result b80279f374e4 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "f4a088b730171088823528215b54d20675e3981b",
+          "forkBlob": "4417e487296e2c1fa2533749758caa704ca1c0fb",
+          "upstreamBlob": "a78977d16153e9541fba08c5fba7112b9db85280"
+        },
+        "tests/provider-registry-parity.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/provider-registry-parity.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 5ea6539dd693, fork 16b8bbf47bcf, upstream b52a57583a0e, result e049c5941004 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "5ea6539dd693908aa13d0d29e96b2f752e500deb",
+          "forkBlob": "16b8bbf47bcff28881723bbffa1596e6ca5a3616",
+          "upstreamBlob": "b52a57583a0ef8d9ace5f59997b7bc16c64ea077"
+        },
+        "tests/responses-state.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/responses-state.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 070e5163cdb6, fork 3a155341dfa6, upstream 44c10db4e077, result 1fbc90311c35 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "070e5163cdb610055c159d36bbccbec44ac394cf",
+          "forkBlob": "3a155341dfa607e5741069307be83153875c68f2",
+          "upstreamBlob": "44c10db4e0773fa2c1eb1d7749b7d722d752b0f5"
+        },
+        "tests/responses-undeclared-tool-guard.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/responses-undeclared-tool-guard.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 99a73cf8c104, fork 6a46f5d67e5f, upstream 2daf2a7ee685, result 64d82d55a87d (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/chat-completions-endpoint.test.ts"
+          ],
+          "baseBlob": "99a73cf8c104dc24f390454cb9487ed993bb3fff",
+          "forkBlob": "6a46f5d67e5fceb682c40a2312eff298899a41b7",
+          "upstreamBlob": "2daf2a7ee6853900d90cc96f2d51a292010138bb"
+        },
+        "tests/server-combo-failover-e2e.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/server-combo-failover-e2e.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base ce6fbacc7713, fork 4bce79f89fa1, upstream 39053f39fb2f, result f3821fce3a66 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "ce6fbacc7713b6a4f799600314a7236f9ba77761",
+          "forkBlob": "4bce79f89fa1010e0d68a50225b25ae5a4fc331a",
+          "upstreamBlob": "39053f39fb2fa5d81e4d50a7e3b0fe9de1271c68"
+        },
+        "tests/settings-stream-mode.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/settings-stream-mode.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base 293c0a787131, fork 310e09fdd021, upstream 6e78651aa01c, result d187384db2f1 (overlapping-logical-path).",
+          "exactTests": [
+            "bun run typecheck",
+            "bun run check:hygiene"
+          ],
+          "baseBlob": "293c0a7871313a1841501aa6acece639010ca404",
+          "forkBlob": "310e09fdd021fc07e92326f4ee77b8ad7a016c78",
+          "upstreamBlob": "6e78651aa01c5148dded42b52f9f35a72a6601d8"
+        },
+        "tests/usage-cost.test.ts": {
+          "upstreamIntent": "Adopt v2.41.0 upstream changes for tests/usage-cost.test.ts without bypassing fork sync trust boundaries.",
+          "forkInvariant": "Fork-visible behavior must survive on upstream control flow unless upstream is equivalent or better.",
+          "equivalentOrBetter": true,
+          "disposition": "upstream-equivalent",
+          "implementationEvidence": "v2.41 sync merge commit 69c3776a54d7: base f6bf02d482d8, fork 8ee9ac4c0653, upstream d166434a3dd0, result d166434a3dd0 (exact-upstream-blob).",
+          "exactTests": [
+            "bun test tests/usage-cost.test.ts"
+          ],
+          "baseBlob": "f6bf02d482d8c872612973b55517774645f02184",
+          "forkBlob": "8ee9ac4c06537b2c28221362904facf748ea1e25",
+          "upstreamBlob": "d166434a3dd06437635c522a988bc1dfc34419ee"
+        }
+      }
     }
   }
 }

@@ -5,7 +5,6 @@ import { diagnoseCodexBundledPlugins, type CodexPluginsDiagnostic } from "../cod
 import { findLiveProxy, isOpencodexHealthz, probeHostname } from "../server/proxy-liveness";
 import { directLocalHttpFetch } from "../server/direct-local-http";
 import type { OcxConfig } from "../types";
-import { canonicalServerOrigin } from "../lib/server-tls";
 import { diagnoseService, serviceLogPath } from "../service";
 import { collectStartupHealth, type StartupHealth } from "../codex/autostart-health";
 import { isProcessAlive } from "../lib/process-control";
@@ -14,6 +13,7 @@ import { diagnoseCodexShim } from "../codex/shim";
 import { displayCodexRuntimePath, effortClampAppliesToRuntime, loadLastEffortClamp, resolveCodexRuntime } from "../codex/runtime";
 import { packageVersion } from "./help";
 import { computeVersionSkew, type VersionSkew } from "./version-skew";
+import { canonicalServerOrigin } from "../lib/server-tls";
 import { redactSecretString, redactUserPath } from "../lib/redact";
 import { collectOrcaCodexHomeDiagnostic, type OrcaCodexHomeDiagnostic } from "../codex/home";
 import { grokFenceEndpointDrift, readGrokStatus } from "../grok/status";
@@ -121,23 +121,38 @@ export type ListenTarget = {
   dashboardUrl: string;
 };
 
+type StatusListenConfig = Pick<OcxConfig, "port" | "hostname" | "runtimeRole" | "hub" | "tls">;
+
+function statusDashboardUrl(config: StatusListenConfig, hostname: string | undefined, port: number): string {
+  if (config.tls) return canonicalServerOrigin(config, port);
+  const managementOrigin = config.runtimeRole === "hub" ? config.hub?.managementPublicOrigin : undefined;
+  if (managementOrigin) return managementOrigin.endsWith("/") ? managementOrigin : `${managementOrigin}/`;
+
+  const reachableHostname = probeHostname(hostname);
+  const dashboardHostname = reachableHostname === "127.0.0.1"
+    || reachableHostname === "[::1]"
+    || reachableHostname.toLowerCase() === "localhost"
+    ? "localhost"
+    : reachableHostname;
+  return `http://${dashboardHostname}:${port}/`;
+}
+
 export function selectListenTarget(
-  config: Pick<OcxConfig, "port" | "hostname" | "tls">,
+  config: StatusListenConfig,
   pid: number | null,
   runtimePort: RuntimePortState | null,
 ): ListenTarget {
   const currentRuntimePort = pid && runtimePort?.pid === pid ? runtimePort : null;
   const port = currentRuntimePort ? currentRuntimePort.port : config.port ?? 10100;
-  const hostname = currentRuntimePort ? currentRuntimePort.hostname : config.hostname;
+  const hostname = currentRuntimePort?.hostname ?? config.hostname;
   const host = probeHostname(hostname);
   const protocol = config.tls ? "https" : "http";
-  const dashboardUrl = config.tls ? canonicalServerOrigin(config, port) : `http://localhost:${port}/`;
   return {
     port,
     hostname,
     source: currentRuntimePort ? "runtime" : "config",
     healthUrl: `${protocol}://${host}:${port}/healthz`,
-    dashboardUrl,
+    dashboardUrl: statusDashboardUrl(config, hostname, port),
   };
 }
 
@@ -243,9 +258,10 @@ export function unusedProxyWarningLines(input: {
 
 async function checkProxyHealth(target: ListenTarget): Promise<HealthCheck> {
   const url = target.healthUrl;
-  const signal = AbortSignal.timeout(800);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 800);
   try {
-    const response = await directLocalHttpFetch(url, { signal });
+    const response = await directLocalHttpFetch(url, { signal: controller.signal });
     if (!response.ok) {
       const message = `returned HTTP ${response.status}`;
       return { ok: false, url, message, label: `${url} ${message}` };
@@ -260,8 +276,10 @@ async function checkProxyHealth(target: ListenTarget): Promise<HealthCheck> {
     const message = `ok${version}${uptime}`;
     return { ok: true, url, message, label: `${url} ${message}` };
   } catch (error) {
-    const reason = proxyHealthFailureReason(error, signal);
+    const reason = proxyHealthFailureReason(error, controller.signal);
     return { ok: false, url, message: reason, label: `${url} ${reason}`, refused: isConnectionRefused(error) };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -301,13 +319,12 @@ export async function probeUncleanExitState(input: {
   })();
   const protocol = tls ? "https" : "http";
   const host = probeHostname(hostname);
-  const dashboardUrl = tls ? canonicalServerOrigin({ hostname, tls }, port) : `http://localhost:${port}/`;
   const health = await checkProxyHealth({
     port,
     hostname,
     source: runtimeBefore ? "runtime" : "config",
     healthUrl: `${protocol}://${host}:${port}/healthz`,
-    dashboardUrl,
+    dashboardUrl: tls ? canonicalServerOrigin({ hostname, tls }, port) : statusDashboardUrl({ port, hostname, tls }, hostname, port),
   });
   const pidRecordAfter = readPidFileValue();
   const runtimePidAfter = readRuntimePort()?.pid ?? null;
@@ -346,17 +363,16 @@ export async function collectStatus(): Promise<CliStatusView> {
   const versionSkew = computeVersionSkew(packageVersion(), live?.version);
   const listen = live
     ? (() => {
-        const liveHost = probeHostname(live.hostname);
-        const liveProtocol = config.tls ? "https" : "http";
-        const liveDashboardUrl = config.tls ? canonicalServerOrigin(config, live.port) : `http://localhost:${live.port}/`;
-        return {
-          port: live.port,
-          hostname: live.hostname,
-          source: live.source,
-          healthUrl: `${liveProtocol}://${liveHost}:${live.port}/healthz`,
-          dashboardUrl: liveDashboardUrl,
-        };
-      })()
+      const liveHost = probeHostname(live.hostname);
+      const liveProtocol = config.tls ? "https" : "http";
+      return {
+        port: live.port,
+        hostname: live.hostname,
+        source: live.source,
+        healthUrl: `${liveProtocol}://${liveHost}:${live.port}/healthz`,
+        dashboardUrl: statusDashboardUrl(config, live.hostname, live.port),
+      };
+    })()
     : selectListenTarget(config, pidFile, pidFile ? readRuntimePort(pidFile) : null);
   // findLiveProxy already identity-probed /healthz; avoid a second fetch that can race.
   const health = live

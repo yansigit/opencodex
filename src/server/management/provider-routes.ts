@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import type { CatalogModel } from "../../codex/catalog";
 import { catalogModelSlug, invalidateCodexModelsCache, nativeModelRows, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
 import { clearGatherRoutedModelsInflight } from "../../codex/catalog/provider-fetch";
@@ -9,6 +10,7 @@ import {
   codexAutoStartEnabled,
   hasOwnProvider,
   isValidProviderName,
+  modelDisplayNamesConfigError,
   multiAgentGuidanceEnabled,
   nonBlankStringArrayConfigError,
   normalizeNonBlankStringArray,
@@ -17,6 +19,7 @@ import {
   requestPacingConfigError,
   readConfigAdmissionSnapshot,
   upstreamHttpVersionConfigError,
+  validateConfigCandidate,
   withConfigMutationLockSync,
 } from "../../config";
 import {
@@ -29,11 +32,9 @@ import {
   upsertOAuthProvider,
 } from "../../oauth";
 import { replaceProviderAccountSet } from "../../oauth/store";
-import { comboPublicModelId } from "../../combos/types";
 import { providerDestinationResolvedError } from "../../lib/destination-policy";
 import {
   antigravityOAuthDestinationConfigError,
-  getProviderTlsProfileStatus,
   isAntigravityOAuthProvider,
 } from "../../lib/provider-tls-profile";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
@@ -53,10 +54,10 @@ import {
 import { routedSlug, slugEquals } from "../../providers/slug-codec";
 import { clearAccountQuotaCache, clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
 import { clearKeyCooldowns } from "../../providers/key-failover";
-import { apiKeyPoolEntryId } from "../../providers/api-keys";
 import { providerRequestPacingStatus } from "../../providers/request-pacing";
 import { CODEX_FORWARD_BASE_URL, isCanonicalOpenAiForwardProvider } from "../../providers/openai-tiers";
 import { codexAccountNamespaceProviderCollisionError } from "../../codex/account-namespace-match";
+import { comboPublicModelId } from "../../combos/types";
 import { clearThreadAccountMap } from "../../codex/routing";
 import { primeCodexPoolQuotas } from "../../codex/auth-api";
 import { clearModelCache, getProviderDiscoveryStatus } from "../../codex/model-cache";
@@ -69,7 +70,6 @@ import { getUsageDebugLogEntries } from "../../usage/debug";
 import { parseRange, parseUsageSurface, summarizeUsage } from "../../usage/summary";
 import { stripCodexRuntimeProviderFields } from "../../codex/auth-context";
 import { getProviderRegistryEntry } from "../../providers/registry";
-import { dropProviderCustomModels } from "../../providers/provider-id-rewrite";
 import { getDebugLogEntries } from "../../lib/debug-log-buffer";
 import { getInjectionDebugLogEntries } from "../../lib/injection-debug-log";
 import {
@@ -84,18 +84,37 @@ import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import type { PersistedUsageAttempt } from "../../usage/log";
-import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
+import {
+  isAllowedRequestOrigin,
+  jsonResponse,
+  parseProviderEditorConfigDTO,
+  providerEditorConfigDTO,
+  providerManagementConfigError,
+  publicProviderBaseUrl,
+  safeConfigDTO,
+  type ProviderEditorConfigDTO,
+  type ProviderEditorProviderDTO,
+} from "../auth-cors";
 import { providerServiceTierConfigError } from "./provider-capability-config";
+import {
+  maxWsFrameBytesConfigError,
+  providerEmptyToolOutputConfigError,
+  wsUpstreamConfigError,
+} from "../../config/provider-validation";
+import { getProviderTlsProfileStatus } from "../../lib/provider-tls-profile";
 import { applySystemEnvToggle } from "../system-env";
 import {
   LOCAL_PROVIDER_RELOAD_NAME_HEADER,
   LOCAL_PROVIDER_RELOAD_PATH,
 } from "../../lib/local-provider-reload-contract";
 import { refreshUserCostOverlays } from "../../usage/user-cost-overlays";
+import { redactSecretString } from "../../lib/redact";
 import {
   XAI_RESPONSES_OPT_IN_MODELS,
   xaiResponsesOptInState,
 } from "../../providers/xai-responses-opt-in";
+import { dropProviderCustomModels } from "../../providers/provider-id-rewrite";
+import { apiKeyPoolEntryId } from "../../providers/api-keys";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
@@ -103,7 +122,6 @@ import { mutateManagementConfig, saveManagementConfig, type ManagementContext } 
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import { resolveAiStudioCredentials } from "../../oauth/aistudio-credentials";
 import { buildAiStudioHeaders, parseGoogleCookieJar } from "../../oauth/google-aistudio-auth";
-import { maxWsFrameBytesConfigError, wsUpstreamConfigError } from "../../config/provider-validation";
 
 type ProviderPatchApplication =
   | { error: string }
@@ -115,65 +133,9 @@ type ProviderPatchApplication =
       headersTouched: boolean;
     };
 
-const PROVIDER_ALIAS_OVERLAY_FIELDS = ["alias", "modelAliases", "defaultAliases"] as const;
-type ProviderAliasOverlayField = typeof PROVIDER_ALIAS_OVERLAY_FIELDS[number];
-
-function providerAliasOverlayOwnershipError(
-  submitted: Record<string, unknown>,
-  existing: OcxProviderConfig | undefined,
-): string | null {
-  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) {
-    if (!Object.hasOwn(submitted, field)) continue;
-    if (!existing || !Object.hasOwn(existing, field)) {
-      return `${field} is managed by the dedicated alias API`;
-    }
-    const incoming = submitted[field];
-    const persisted = existing[field];
-    if (field === "modelAliases") {
-      if (!isPlainRecord(incoming) || !isPlainRecord(persisted)) {
-        return "modelAliases is managed by the dedicated alias API";
-      }
-      const incomingEntries = Object.entries(incoming);
-      const persistedEntries = Object.entries(persisted);
-      if (
-        incomingEntries.length !== persistedEntries.length
-        || incomingEntries.some(([model, alias]) => typeof alias !== "string" || persisted[model] !== alias)
-      ) {
-        return "modelAliases is managed by the dedicated alias API";
-      }
-      continue;
-    }
-    if (incoming !== persisted) return `${field} is managed by the dedicated alias API`;
-  }
-  return null;
-}
-
-function providerTransportValidationCandidate(provider: Record<string, unknown>): Record<string, unknown> {
-  const candidate = { ...provider };
-  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) delete candidate[field];
-  return candidate;
-}
-
-function restorePersistedAliasOverlays(target: OcxProviderConfig, existing: OcxProviderConfig | undefined): void {
-  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) {
-    delete (target as Record<ProviderAliasOverlayField, unknown>)[field];
-    if (!existing || !Object.hasOwn(existing, field)) continue;
-    const value = existing[field];
-    (target as Record<ProviderAliasOverlayField, unknown>)[field] = field === "modelAliases"
-      ? structuredClone(value)
-      : value;
-  }
-}
-
 type ProviderMutationValue =
   | { config: OcxConfig; fallbackDefault?: string; droppedCustomModels?: number }
-  | {
-      error: string;
-      code?: string;
-      status?: number;
-      combos?: string[];
-      routingProfiles?: string[];
-    };
+  | { error: string; code?: string; status?: number; combos?: string[]; routingProfiles?: string[] };
 
 function reconcileSubmittedApiKey(provider: OcxProviderConfig): string | undefined {
   if (!provider.apiKey || !provider.apiKeyPool) return;
@@ -189,37 +151,6 @@ function reconcileSubmittedApiKey(provider: OcxProviderConfig): string | undefin
   provider.apiKey = key;
 }
 
-function providerDependencies(config: OcxConfig, name: string): {
-  combos: string[];
-  routingProfiles: string[];
-} {
-  return {
-    combos: Object.entries(config.combos ?? {})
-      .filter(([, combo]) => combo.targets.some(target => target.provider === name))
-      .map(([id]) => id)
-      .sort((a, b) => a.localeCompare(b)),
-    routingProfiles: Object.entries(config.routingProfiles ?? {})
-      .filter(([, profile]) => profile.candidates.some(candidate => candidate.provider === name))
-      .map(([id]) => id)
-      .sort((a, b) => a.localeCompare(b)),
-  };
-}
-
-function providerDependencyError(config: OcxConfig, name: string): Extract<ProviderMutationValue, { error: string }> | null {
-  const dependencies = providerDependencies(config, name);
-  if (dependencies.routingProfiles.length > 0) return {
-    error: `cannot delete provider "${name}" while routing profiles depend on it`,
-    code: "provider_has_dependent_routing_profiles",
-    routingProfiles: dependencies.routingProfiles,
-  };
-  if (dependencies.combos.length > 0) return {
-    error: `cannot delete provider "${name}" while combos depend on it`,
-    code: "provider_has_dependent_combos",
-    combos: dependencies.combos,
-  };
-  return null;
-}
-
 function providerNamespaceCollisionError(config: OcxConfig, name: string): string | undefined {
   const accountCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, name);
   if (accountCollision) return accountCollision;
@@ -228,9 +159,7 @@ function providerNamespaceCollisionError(config: OcxConfig, name: string): strin
       const publicId = comboPublicModelId(id, combo);
       return id === name || publicId === name || publicId.startsWith(`${name}/`);
     });
-  if (comboCollision) {
-    return "provider name must not collide with a configured combo namespace";
-  }
+  if (comboCollision) return "provider name must not collide with a configured combo namespace";
   const profileCollision = Object.values(config.routingProfiles ?? {}).some(profile => {
     const alias = profile.alias?.trim();
     return alias === name || alias?.startsWith(`${name}/`);
@@ -246,9 +175,7 @@ function adoptCommittedConfig(target: OcxConfig, source: OcxConfig): void {
 }
 
 function unavailableMutationResponse(reason: "missing" | "invalid" | "conflict", req: Request, config: OcxConfig): Response {
-  const message = reason === "conflict"
-    ? "config changed while applying this update; retry"
-    : `config is ${reason}`;
+  const message = reason === "conflict" ? "config changed while applying this update; retry" : `config is ${reason}`;
   return jsonResponse({ error: message }, reason === "conflict" ? 409 : 500, req, config);
 }
 
@@ -332,6 +259,172 @@ async function probeAiStudioLiveSession(
   }
 }
 
+const PROVIDER_ALIAS_OVERLAY_FIELDS = ["alias", "modelAliases", "defaultAliases"] as const;
+type ProviderAliasOverlayField = typeof PROVIDER_ALIAS_OVERLAY_FIELDS[number];
+
+/**
+ * Alias overlays are owned by the dedicated alias management routes. A full provider POST
+ * may round-trip an already-persisted value, but it must not create, clear, or change one.
+ * PATCH is field-masked and rejects these keys outright below.
+ */
+function providerAliasOverlayOwnershipError(
+  submitted: Record<string, unknown>,
+  existing: OcxProviderConfig | undefined,
+): string | null {
+  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) {
+    if (!Object.hasOwn(submitted, field)) continue;
+    if (!existing || !Object.hasOwn(existing, field)) {
+      return `${field} is managed by the dedicated alias API`;
+    }
+    const incoming = submitted[field];
+    const persisted = existing[field];
+    if (field === "modelAliases") {
+      if (!isPlainRecord(incoming) || !isPlainRecord(persisted)) {
+        return "modelAliases is managed by the dedicated alias API";
+      }
+      const incomingEntries = Object.entries(incoming);
+      const persistedEntries = Object.entries(persisted);
+      if (
+        incomingEntries.length !== persistedEntries.length
+        || incomingEntries.some(([model, alias]) => typeof alias !== "string" || persisted[model] !== alias)
+      ) {
+        return "modelAliases is managed by the dedicated alias API";
+      }
+      continue;
+    }
+    if (incoming !== persisted) return `${field} is managed by the dedicated alias API`;
+  }
+  return null;
+}
+
+/** Remove only alias overlays whose ownership has already been established by the caller. */
+function providerTransportValidationCandidate(provider: Record<string, unknown>): Record<string, unknown> {
+  const candidate = { ...provider };
+  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) delete candidate[field];
+  return candidate;
+}
+
+/** Preserve the authoritative alias values from the stored provider during a full edit. */
+function restorePersistedAliasOverlays(target: OcxProviderConfig, existing: OcxProviderConfig | undefined): void {
+  for (const field of PROVIDER_ALIAS_OVERLAY_FIELDS) {
+    delete (target as Record<ProviderAliasOverlayField, unknown>)[field];
+    if (!existing || !Object.hasOwn(existing, field)) continue;
+    const value = existing[field];
+    (target as Record<ProviderAliasOverlayField, unknown>)[field] = field === "modelAliases"
+      ? structuredClone(value)
+      : value;
+  }
+}
+
+type ProviderEditorCandidateResult =
+  | { ok: true; config: OcxConfig; removedProviders: string[] }
+  | { ok: false; status: 400 | 409; error: string; code: string };
+
+type ProviderEditorMutationValue = ProviderEditorCandidateResult;
+
+function mergeProviderEditorRow(
+  persisted: OcxProviderConfig | undefined,
+  baseline: ProviderEditorProviderDTO | undefined,
+  next: ProviderEditorProviderDTO,
+): OcxProviderConfig {
+  const merged = structuredClone(persisted ?? {}) as Record<string, unknown>;
+  const fields = new Set([...Object.keys(baseline ?? {}), ...Object.keys(next)]);
+  for (const field of fields) {
+    const baselineHasField = baseline !== undefined && Object.hasOwn(baseline, field);
+    const nextHasField = Object.hasOwn(next, field);
+    if (
+      baselineHasField === nextHasField
+      && (!baselineHasField || isDeepStrictEqual(baseline[field], next[field]))
+    ) {
+      continue;
+    }
+    if (nextHasField) merged[field] = structuredClone(next[field]);
+    else delete merged[field];
+  }
+  return merged as unknown as OcxProviderConfig;
+}
+
+/** Build and validate a complete candidate without mutating the caller's snapshot. */
+function providerEditorCandidate(
+  persisted: OcxConfig,
+  baseline: ProviderEditorConfigDTO,
+  next: ProviderEditorConfigDTO,
+): ProviderEditorCandidateResult {
+  const candidate = structuredClone(persisted);
+  const removedProviders = Object.keys(persisted.providers)
+    .filter(name => !Object.hasOwn(next.providers, name));
+
+  for (const name of removedProviders) {
+    const dependentCombos = Object.entries(persisted.combos ?? {})
+      .filter(([, combo]) => combo.targets.some(target => target.provider === name))
+      .map(([id]) => id)
+      .sort((a, b) => a.localeCompare(b));
+    if (dependentCombos.length > 0) {
+      return {
+        ok: false,
+        status: 409,
+        error: `cannot delete provider ${JSON.stringify(redactSecretString(name))} while combos depend on it`,
+        code: "provider_has_dependent_combos",
+      };
+    }
+  }
+
+  const providers: Record<string, OcxProviderConfig> = Object.create(null);
+  for (const [name, publicProvider] of Object.entries(next.providers)) {
+    if (!isValidProviderName(name)) {
+      return {
+        ok: false,
+        status: 400,
+        error: "provider name must use letters, numbers, dot, underscore, or hyphen and cannot be a reserved object key",
+        code: "invalid_provider_name",
+      };
+    }
+    const namespaceCollision = codexAccountNamespaceProviderCollisionError(candidate.codexAccountNamespaces, name);
+    if (namespaceCollision) return { ok: false, status: 409, error: namespaceCollision, code: "provider_namespace_conflict" };
+    const merged = mergeProviderEditorRow(persisted.providers[name], baseline.providers[name], publicProvider);
+    const transportCandidate = providerTransportValidationCandidate(merged as unknown as Record<string, unknown>);
+    const providerError = providerManagementConfigError(name, transportCandidate)
+      ?? providerEmptyToolOutputConfigError(name, transportCandidate)
+      ?? providerServiceTierConfigError(name, transportCandidate);
+    if (providerError) return { ok: false, status: 400, error: providerError, code: "invalid_provider" };
+    providers[name] = merged;
+  }
+
+  const defaultProvider = next.defaultProvider.trim();
+  const selectedDefault = providers[defaultProvider];
+  if (!selectedDefault) {
+    return { ok: false, status: 400, error: "defaultProvider must name a configured provider", code: "invalid_default_provider" };
+  }
+  if (selectedDefault.disabled === true) {
+    return { ok: false, status: 400, error: "defaultProvider cannot be disabled", code: "default_provider_disabled" };
+  }
+
+  candidate.defaultProvider = defaultProvider;
+  candidate.providers = providers;
+  for (const name of removedProviders) {
+    dropProviderCustomModels(candidate, name);
+    setProviderContextCap(candidate, name, false);
+  }
+  const validated = validateConfigCandidate(candidate);
+  if (!validated.ok) {
+    return { ok: false, status: 400, error: validated.error, code: "invalid_provider_editor_config" };
+  }
+  return { ok: true, config: candidate, removedProviders };
+}
+
+function adoptProviderEditorCandidate(live: OcxConfig, persisted: OcxConfig): void {
+  live.defaultProvider = persisted.defaultProvider;
+  for (const name of Object.keys(live.providers)) {
+    if (!Object.hasOwn(persisted.providers, name)) delete live.providers[name];
+  }
+  for (const [name, provider] of Object.entries(persisted.providers)) {
+    live.providers[name] = structuredClone(provider);
+  }
+  if (persisted.customModels === undefined) delete live.customModels;
+  else live.customModels = structuredClone(persisted.customModels);
+  if (persisted.providerContextCaps === undefined) delete live.providerContextCaps;
+  else live.providerContextCaps = structuredClone(persisted.providerContextCaps);
+}
 
 /**
  * Apply the recognized PATCH field mask onto a provider copy. The caller runs this once
@@ -388,6 +481,18 @@ function applyProviderPatchFields(
       return { error: "authMode must be key, forward, oauth, or local" };
     }
   }
+  if (Object.hasOwn(rawBody, "apiKeyTransport")) {
+    const transport = rawBody.apiKeyTransport;
+    if (transport === "x-api-key" || transport === "bearer") {
+      next.apiKeyTransport = transport;
+      touched = true;
+    } else if (transport === "") {
+      delete next.apiKeyTransport;
+      touched = true;
+    } else {
+      return { error: "apiKeyTransport must be x-api-key, bearer, or empty to clear" };
+    }
+  }
   if (Object.hasOwn(rawBody, "azureCredential")) {
     const value = rawBody.azureCredential;
     if (value === null) {
@@ -401,18 +506,6 @@ function applyProviderPatchFields(
       next.azureCredential = credential as OcxProviderConfig["azureCredential"];
     }
     touched = true;
-  }
-  if (Object.hasOwn(rawBody, "apiKeyTransport")) {
-    const transport = rawBody.apiKeyTransport;
-    if (transport === "x-api-key" || transport === "bearer") {
-      next.apiKeyTransport = transport;
-      touched = true;
-    } else if (transport === "") {
-      delete next.apiKeyTransport;
-      touched = true;
-    } else {
-      return { error: "apiKeyTransport must be x-api-key, bearer, or empty to clear" };
-    }
   }
   if (Object.hasOwn(rawBody, "note")) {
     if (typeof rawBody.note !== "string") return { error: "note must be a string" };
@@ -433,9 +526,13 @@ function applyProviderPatchFields(
   }
   if (Object.hasOwn(rawBody, "annotateEmptyToolOutputs")) {
     const value = rawBody.annotateEmptyToolOutputs;
-    if (value === null) delete next.annotateEmptyToolOutputs;
-    else if (typeof value === "boolean") next.annotateEmptyToolOutputs = value;
-    else return { error: "annotateEmptyToolOutputs must be a boolean or null" };
+    if (value === null) {
+      delete next.annotateEmptyToolOutputs;
+    } else if (typeof value === "boolean") {
+      next.annotateEmptyToolOutputs = value;
+    } else {
+      return { error: "annotateEmptyToolOutputs must be a boolean or null" };
+    }
     touched = true;
   }
   if (Object.hasOwn(rawBody, "wsUpstream")) {
@@ -510,6 +607,11 @@ function applyProviderPatchFields(
       // explicit because the incoming value is an unknown JSON scalar.
       next.upstreamHttpVersion = value as OcxProviderConfig["upstreamHttpVersion"];
     }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "upstreamWebsocket")) {
+    if (typeof rawBody.upstreamWebsocket !== "boolean") return { error: "upstreamWebsocket must be a boolean" };
+    next.upstreamWebsocket = rawBody.upstreamWebsocket;
     touched = true;
   }
   // The Models page edits the catalog hints in place; keep them on the existing
@@ -610,7 +712,6 @@ function applyProviderPatchFields(
     }
     touched = true;
   }
-
   if (Object.hasOwn(rawBody, "retainModels")) {
     const value = rawBody.retainModels;
     if (value === null) {
@@ -635,11 +736,6 @@ function applyProviderPatchFields(
       if (models.length > 0) next.omitReasoningEffortWithToolsModels = models;
       else delete next.omitReasoningEffortWithToolsModels;
     }
-    touched = true;
-  }
-  if (Object.hasOwn(rawBody, "upstreamWebsocket")) {
-    if (typeof rawBody.upstreamWebsocket !== "boolean") return { error: "upstreamWebsocket must be a boolean" };
-    next.upstreamWebsocket = rawBody.upstreamWebsocket;
     touched = true;
   }
 
@@ -728,7 +824,8 @@ function canonicalOpenAiBudgetPatchError(
   }
   const applied = applyProviderPatchFields("openai", seed, rawBody, keys, config);
   if ("error" in applied) return applied.error;
-  return providerManagementConfigError("openai", applied.next);
+  return providerManagementConfigError("openai", applied.next)
+    ?? providerEmptyToolOutputConfigError("openai", applied.next);
 }
 
 export async function handleProviderRoutes(ctx: ManagementContext): Promise<Response | null> {
@@ -775,8 +872,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       noStructuredOutputModels: p.noStructuredOutputModels,
       retainModels: p.retainModels,
       omitReasoningEffortWithToolsModels: p.omitReasoningEffortWithToolsModels,
-      upstreamWebsocket: p.upstreamWebsocket,
       upstreamHttpVersion: p.upstreamHttpVersion,
+      upstreamWebsocket: p.upstreamWebsocket === true,
       authMode: p.authMode,
       apiKeyTransport: p.apiKeyTransport,
       tlsProfile: p.tlsProfile,
@@ -811,7 +908,11 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       return jsonResponse({ error: "provider reload target unavailable" }, 404);
     }
     const provider = diskConfig.providers[name]!;
-    const providerError = providerManagementConfigError(name, provider);
+    const providerError = providerManagementConfigError(
+      name,
+      providerTransportValidationCandidate(provider as unknown as Record<string, unknown>),
+    )
+      ?? providerEmptyToolOutputConfigError(name, provider);
     if (providerError) return jsonResponse({ error: "provider reload target invalid" }, 409);
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
       diskConfig.codexAccountNamespaces,
@@ -863,6 +964,98 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     return jsonResponse({ success: true, name, catalogRefresh });
   }
 
+  if (url.pathname === "/api/providers" && req.method === "PUT") {
+    let rawBody: unknown;
+    try {
+      rawBody = await readManagementJsonBody(req);
+    } catch (error) {
+      rethrowManagementBodyTooLarge(error);
+      return jsonResponse({ error: "invalid JSON body" }, 400);
+    }
+    if (!isPlainRecord(rawBody)) {
+      return jsonResponse({ error: "provider batch body must be a plain object", code: "invalid_provider_editor_body" }, 400);
+    }
+    const bodyKeys = Object.keys(rawBody);
+    if (bodyKeys.length !== 2 || !Object.hasOwn(rawBody, "baseline") || !Object.hasOwn(rawBody, "next")) {
+      return jsonResponse({ error: "provider batch body must contain only baseline and next", code: "invalid_provider_editor_body" }, 400);
+    }
+    const baselineResult = parseProviderEditorConfigDTO(rawBody.baseline);
+    if (!baselineResult.ok) return jsonResponse({ error: baselineResult.error, code: baselineResult.code }, 400);
+    const nextResult = parseProviderEditorConfigDTO(rawBody.next);
+    if (!nextResult.ok) return jsonResponse({ error: nextResult.error, code: nextResult.code }, 400);
+
+    const observed = readConfigAdmissionSnapshot();
+    if (observed.kind !== "read" || observed.diagnostics.source !== "file" || observed.diagnostics.error !== null) {
+      return jsonResponse({ error: "provider config is unavailable", code: "provider_config_unavailable" }, 409);
+    }
+    if (!isDeepStrictEqual(providerEditorConfigDTO(observed.diagnostics.config), baselineResult.value)) {
+      return jsonResponse({ error: "provider editor baseline is stale", code: "stale_provider_editor_baseline" }, 409);
+    }
+    const preview = providerEditorCandidate(observed.diagnostics.config, baselineResult.value, nextResult.value);
+    if (!preview.ok) return jsonResponse({ error: preview.error, code: preview.code }, preview.status);
+
+    // DNS/SSRF validation happens before the persistence callback. The callback repeats every
+    // synchronous check against a fresh snapshot and rejects a changed baseline, so this awaited
+    // phase can never authorize a stale provider set.
+    for (const [name, provider] of Object.entries(preview.config.providers)) {
+      const allowBenchmarkAddresses = name === "openai" && isCanonicalOpenAiForwardProvider(provider);
+      const resolvedError = await providerDestinationResolvedError(name, provider, { allowBenchmarkAddresses });
+      if (resolvedError) return jsonResponse({ error: resolvedError, code: "invalid_provider_destination" }, 400);
+    }
+
+    const outcome = mutateManagementConfig<ProviderEditorMutationValue>(deps, persisted => {
+      if (!isDeepStrictEqual(providerEditorConfigDTO(persisted), baselineResult.value)) {
+        return {
+          changed: false,
+          value: {
+            ok: false,
+            status: 409,
+            error: "provider editor baseline is stale",
+            code: "stale_provider_editor_baseline",
+          },
+        };
+      }
+      const candidate = providerEditorCandidate(persisted, baselineResult.value, nextResult.value);
+      if (!candidate.ok) return { changed: false, value: candidate };
+      const changed = !isDeepStrictEqual(providerEditorConfigDTO(persisted), nextResult.value);
+      if (!changed) return { changed: false, value: candidate };
+
+      persisted.defaultProvider = candidate.config.defaultProvider;
+      persisted.providers = structuredClone(candidate.config.providers);
+      for (const name of candidate.removedProviders) {
+        dropProviderCustomModels(persisted, name);
+        setProviderContextCap(persisted, name, false);
+      }
+      return {
+        changed: true,
+        value: {
+          ok: true,
+          config: structuredClone(persisted),
+          removedProviders: candidate.removedProviders,
+        },
+      };
+    });
+    if (outcome.status === "unavailable") {
+      const code = outcome.reason === "conflict" ? "provider_config_conflict" : "provider_config_unavailable";
+      return jsonResponse({ error: "provider config changed before it could be saved", code }, 409);
+    }
+    if (!outcome.value.ok) {
+      return jsonResponse({ error: outcome.value.error, code: outcome.value.code }, outcome.value.status);
+    }
+
+    adoptProviderEditorCandidate(config, outcome.value.config);
+    reconcileLiveStateStores();
+    refreshUserCostOverlays(outcome.value.config);
+    clearGatherRoutedModelsInflight();
+    (deps.clearProviderQuotaCache ?? clearProviderQuotaCache)();
+    clearAccountQuotaCache();
+    clearKeyCooldowns();
+    clearModelCache();
+    (deps.clearThreadAccountMap ?? clearThreadAccountMap)();
+    const catalogRefresh = await convergeCodexCatalog();
+    return jsonResponse({ success: true, catalogRefresh });
+  }
+
   // Add (or overwrite) a single provider. Merges into the live in-memory config and
   // persists — existing providers' real keys are never round-tripped (unlike PUT /api/config,
   // which would re-save the masked keys from GET). Live routing picks it up immediately.
@@ -870,31 +1063,28 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     let body: { name?: unknown; provider?: unknown; setDefault?: boolean };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const name = typeof body.name === "string" ? body.name.trim() : "";
-    const submittedProvider = isPlainRecord(body.provider)
-      ? structuredClone(body.provider) as Record<string, unknown>
-      : body.provider;
-    if (!isPlainRecord(submittedProvider)) {
-      return jsonResponse({ error: "provider must be a plain object" }, 400);
-    }
-    const submittedCredential = isPlainRecord(submittedProvider)
-      && isPlainRecord(submittedProvider.azureCredential)
+    if (!isPlainRecord(body.provider)) return jsonResponse({ error: "provider must be a plain object" }, 400);
+    const submittedProvider = body.provider as Record<string, unknown>;
+    const submittedCredential = isPlainRecord(submittedProvider.azureCredential)
       ? submittedProvider.azureCredential as Record<string, unknown>
       : undefined;
     if (typeof submittedCredential?.managedIdentityClientId === "string") {
       submittedCredential.managedIdentityClientId = submittedCredential.managedIdentityClientId.trim();
     }
-    const existingForAlias = config.providers[name];
-    const aliasOwnershipError = providerAliasOverlayOwnershipError(submittedProvider, existingForAlias);
+    const existing = config.providers[name];
+    const aliasOwnershipError = providerAliasOverlayOwnershipError(body.provider, existing);
     if (aliasOwnershipError) return jsonResponse({ error: aliasOwnershipError }, 400);
-    const transportCandidate = providerTransportValidationCandidate(submittedProvider);
-    const providerError = providerManagementConfigError(name, transportCandidate);
+    const transportCandidate = providerTransportValidationCandidate(body.provider);
+    const providerError = providerManagementConfigError(name, transportCandidate)
+      ?? providerEmptyToolOutputConfigError(name, transportCandidate);
     if (providerError) return jsonResponse({ error: providerError }, 400);
-    if (submittedProvider.upstreamWebsocket !== undefined && typeof submittedProvider.upstreamWebsocket !== "boolean") {
+    const rawProvider = body.provider as Record<string, unknown>;
+    if (rawProvider.upstreamWebsocket !== undefined && typeof rawProvider.upstreamWebsocket !== "boolean") {
       return jsonResponse({ error: "upstreamWebsocket must be a boolean" }, 400);
     }
     const serviceTierError = providerServiceTierConfigError(name, transportCandidate);
     if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
-    const prov = transportCandidate ? stripCodexRuntimeProviderFields(transportCandidate as unknown as OcxProviderConfig) : undefined;
+    const prov = stripCodexRuntimeProviderFields(transportCandidate as unknown as OcxProviderConfig);
     // PATCH already clears on null; POST persisted the body as submitted, so a `null` here
     // reached disk and the next loadConfig() refused it. Canonicalize to absent, which is what
     // "clear" means everywhere else.
@@ -904,6 +1094,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (!name || !prov?.adapter || !prov?.baseUrl) {
       return jsonResponse({ error: "name, provider.adapter and provider.baseUrl are required" }, 400);
     }
+    const displayNamesError = modelDisplayNamesConfigError(prov.modelDisplayNames);
+    if (displayNamesError) return jsonResponse({ error: displayNamesError }, 400);
     if (!isValidProviderName(name)) {
       return jsonResponse({ error: "provider name must use letters, numbers, dot, underscore, or hyphen and cannot be a reserved object key" }, 400);
     }
@@ -924,73 +1116,120 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (body.setDefault === true && prov.disabled) {
       return jsonResponse({ error: "cannot set a disabled provider as default", code: "default_provider_disabled" }, 400);
     }
+    // Catalog providers (e.g. ollama-cloud) carry a models + vision/reasoning classification the GUI
+    // doesn't send — merge it in so the sidecars are gated correctly.
+    // Sample request ownership BEFORE enrichment. Enrichment fills absent fields from the
+    // registry seed, after which "the client omitted this" and "the registry supplied it" are
+    // indistinguishable — so a carry-over guard written as `prov.x === undefined` after this
+    // call can never fire.
     const submittedContextWindow = Object.hasOwn(prov, "contextWindow");
     const submittedModelContextWindows = Object.hasOwn(prov, "modelContextWindows");
     const submittedModelAutoCompactTokenLimits = Object.hasOwn(prov, "modelAutoCompactTokenLimits");
+    const submittedModelDisplayNames = Object.hasOwn(prov, "modelDisplayNames");
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
-    const submittedAnnotateEmptyToolOutputs = Object.hasOwn(prov, "annotateEmptyToolOutputs");
+    const submittedUpstreamWebsocket = Object.hasOwn(prov, "upstreamWebsocket");
     const submittedWsUpstream = Object.hasOwn(prov, "wsUpstream");
     const submittedMaxWsFrameBytes = Object.hasOwn(prov, "maxWsFrameBytes");
-    const submittedModelDisplayNames = Object.hasOwn(prov, "modelDisplayNames");
-    const submittedUpstreamHttpVersion = Object.hasOwn(prov, "upstreamHttpVersion");
-    const submittedUpstreamWebsocket = Object.hasOwn(prov, "upstreamWebsocket");
-    const buildProvider = (existing: OcxProviderConfig | undefined): OcxProviderConfig => {
-      const next = structuredClone(prov);
-      // Native OpenAI capabilities are registry-owned runtime defaults. Enriching this exact
-      // canonical row adds supportsServiceTier to the document, which no longer equals the
-      // immutable forward seed and is correctly rejected by the write validator.
-      if (name !== "openai") enrichProviderFromCatalog(name, next);
-      const existingPool = existing?.apiKeyPool;
-      if (existingPool && !next.apiKeyPool && !next.azureCredential) next.apiKeyPool = existingPool;
-      if (typeof next.apiKey === "string" && !next.apiKey.trim()) delete next.apiKey;
-      if (!next.apiKey && existing?.apiKey && !next.azureCredential
-        && next.authMode !== "oauth" && next.authMode !== "forward") next.apiKey = existing.apiKey;
-      const existingCosts = existing?.modelCosts;
-      if (existingCosts && !next.modelCosts) next.modelCosts = existingCosts;
-      const existingFailover = existing?.oauthAccountFailover;
-      if (existingFailover && !next.oauthAccountFailover) next.oauthAccountFailover = existingFailover;
-      if (!submittedRequestPacing && existing?.requestPacing) next.requestPacing = structuredClone(existing.requestPacing);
-      if (!submittedContextWindow && existing?.contextWindow !== undefined) next.contextWindow = existing.contextWindow;
-      if (!submittedAnnotateEmptyToolOutputs && existing?.annotateEmptyToolOutputs !== undefined) {
-        next.annotateEmptyToolOutputs = existing.annotateEmptyToolOutputs;
-      }
-      if (!submittedWsUpstream && existing?.wsUpstream !== undefined) next.wsUpstream = existing.wsUpstream;
-      if (!submittedMaxWsFrameBytes && existing?.maxWsFrameBytes !== undefined) next.maxWsFrameBytes = existing.maxWsFrameBytes;
-      if (!submittedModelDisplayNames && existing?.modelDisplayNames) next.modelDisplayNames = structuredClone(existing.modelDisplayNames);
-      // upstreamHttpVersion null is already handled at top; preserve omitted value on overwrite
-      if (!submittedUpstreamHttpVersion && existing?.upstreamHttpVersion !== undefined) next.upstreamHttpVersion = existing.upstreamHttpVersion;
-      if (!submittedUpstreamWebsocket && existing?.upstreamWebsocket !== undefined) next.upstreamWebsocket = existing.upstreamWebsocket;
-      if (existing?.modelContextWindows) {
-        next.modelContextWindows = submittedModelContextWindows
-          ? { ...existing.modelContextWindows, ...(next.modelContextWindows ?? {}) }
-          : { ...existing.modelContextWindows };
-      }
-      if (existing?.modelAutoCompactTokenLimits) {
-        next.modelAutoCompactTokenLimits = submittedModelAutoCompactTokenLimits
-          ? { ...existing.modelAutoCompactTokenLimits, ...(next.modelAutoCompactTokenLimits ?? {}) }
-          : { ...existing.modelAutoCompactTokenLimits };
-      }
-      restorePersistedAliasOverlays(next, existing);
-      return stripRegistryOnlyStaticHeaders(name, next);
-    };
+    // Same trap, one more field: DeepSeek carries a registry default of `true` for
+    // annotateEmptyToolOutputs, so enrichment cannot distinguish "the client omitted it"
+    // from "the registry supplied it" either. Without this sample, an unrelated edit that
+    // omits the key resurrects the registry default over an operator's explicit `false`.
+    const submittedAnnotateEmptyToolOutputs = Object.hasOwn(prov, "annotateEmptyToolOutputs");
+    enrichProviderFromCatalog(name, prov);
+    // Overwriting an existing provider must not drop its multi-key pool: carry it over, then
+    // let the (possibly new) apiKey join the pool as the active entry.
+    const existingPool = config.providers[name]?.apiKeyPool;
+    if (existingPool && !prov.apiKeyPool && !prov.azureCredential) prov.apiKeyPool = existingPool;
+    // The same rule applies to user-configured price overlays: the dashboard's
+    // add/edit form does not send modelCosts, so an overwrite must not silently
+    // erase hand-edited per-model prices from Logs/Usage estimates.
+    const existingCosts = config.providers[name]?.modelCosts;
+    if (existingCosts && !prov.modelCosts) prov.modelCosts = existingCosts;
+    // And to the per-provider account-failover opt-out (#2568d). `ProviderPayload` has no
+    // member for it either, so an add/edit save structurally cannot carry it — and dropping it
+    // silently ENABLES rotation, because activation is presence-driven once the knob is gone.
+    // An overwrite must not spend a second subscription account's quota as a side effect.
+    const existingFailover = config.providers[name]?.oauthAccountFailover;
+    if (existingFailover && !prov.oauthAccountFailover) prov.oauthAccountFailover = existingFailover;
+    // ...and to hand-edited context windows. `ProviderPayload` (gui/src/provider-payload.ts)
+    // has no member for either field, so the add/edit form structurally cannot send them:
+    // absence in the request means "not carried", never "the user deleted it". Deletion goes
+    // through PATCH with an explicit null (#1409).
+    if (!submittedModelDisplayNames && existing?.modelDisplayNames) {
+      prov.modelDisplayNames = { ...existing.modelDisplayNames };
+    }
+    if (!submittedRequestPacing && existing?.requestPacing) {
+      prov.requestPacing = structuredClone(existing.requestPacing);
+    }
+    if (!submittedContextWindow && existing?.contextWindow !== undefined) {
+      prov.contextWindow = existing.contextWindow;
+    }
+    // `!== undefined` rather than a truthiness test: the whole point of this field is that
+    // an explicit `false` must survive, and `false` is falsy.
+    if (!submittedAnnotateEmptyToolOutputs && existing?.annotateEmptyToolOutputs !== undefined) {
+      prov.annotateEmptyToolOutputs = existing.annotateEmptyToolOutputs;
+    }
+    if (!submittedWsUpstream && existing?.wsUpstream !== undefined) {
+      prov.wsUpstream = existing.wsUpstream;
+    }
+    if (!submittedMaxWsFrameBytes && existing?.maxWsFrameBytes !== undefined) {
+      prov.maxWsFrameBytes = existing.maxWsFrameBytes;
+    }
+    // The provider add/edit form may omit this transport option. Preserve the stored value
+    // during a full overwrite; PATCH remains the explicit mutation path, and `!== undefined`
+    // keeps an operator's explicit false from being treated as absent.
+    if (!submittedUpstreamWebsocket && existing?.upstreamWebsocket !== undefined) {
+      prov.upstreamWebsocket = existing.upstreamWebsocket;
+    }
+    if (existing?.modelContextWindows) {
+      // When the client did send a map, its keys win and the user's other keys survive. When
+      // it did not, the stored value is the user's map alone: merging the registry seed in
+      // would persist seed keys into user config as a side effect of an unrelated save, and
+      // router.ts already fills registry values beneath user entries at resolve time.
+      prov.modelContextWindows = submittedModelContextWindows
+        ? { ...existing.modelContextWindows, ...(prov.modelContextWindows ?? {}) }
+        : { ...existing.modelContextWindows };
+    }
+    if (existing?.modelAutoCompactTokenLimits) {
+      prov.modelAutoCompactTokenLimits = submittedModelAutoCompactTokenLimits
+        ? { ...existing.modelAutoCompactTokenLimits, ...(prov.modelAutoCompactTokenLimits ?? {}) }
+        : { ...existing.modelAutoCompactTokenLimits };
+    }
+    // DNS validation above awaits. Re-read the live row so a dedicated alias write that
+    // completed during that wait remains authoritative instead of being overwritten by the
+    // older ownership snapshot used to admit this POST.
+    restorePersistedAliasOverlays(prov, config.providers[name]);
+    const submitted = stripRegistryOnlyStaticHeaders(name, prov);
+    if (typeof submitted.apiKey === "string" && submitted.apiKey.trim() === "") {
+      delete submitted.apiKey;
+    }
     const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
       const namespaceCollision = providerNamespaceCollisionError(fresh, name);
-      if (namespaceCollision) return { changed: false, value: { error: namespaceCollision, status: 409 } };
-      const next = buildProvider(fresh.providers[name]);
-      const keyCollision = reconcileSubmittedApiKey(next);
+      if (namespaceCollision) {
+        return { changed: false, value: { error: namespaceCollision, status: 409 } };
+      }
+      const persisted = fresh.providers[name];
+      const committed = {
+        ...(persisted ? structuredClone(persisted) : {}),
+        ...structuredClone(submitted),
+      } as OcxProviderConfig;
+      if (submitted.azureCredential) {
+        // Switching identity modes is an explicit credential replacement. The atomic merge
+        // preserves omitted secrets generally, but Azure identity cannot coexist with a stale
+        // key or key pool from the prior row.
+        delete committed.apiKey;
+        delete committed.apiKeyPool;
+      }
+      const keyCollision = reconcileSubmittedApiKey(committed);
       if (keyCollision) return { changed: false, value: { error: keyCollision, status: 409 } };
-      const providerError = providerManagementConfigError(
-        name,
-        providerTransportValidationCandidate(next as unknown as Record<string, unknown>),
-      )
-        ?? providerServiceTierConfigError(name, next);
-      if (providerError) return { changed: false, value: { error: providerError, status: 400 } };
-      fresh.providers[name] = next;
+      fresh.providers[name] = committed;
       if (body.setDefault === true) fresh.defaultProvider = name;
       return { changed: true, value: { config: structuredClone(fresh) } };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status, req, config);
+    if ("error" in outcome.value) {
+      return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 409, req, config);
+    }
     adoptCommittedConfig(config, outcome.value.config);
     reconcileLiveStateStores();
     const { clearModelCache } = await import("../../codex/model-cache");
@@ -1007,9 +1246,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     if (!isPlainRecord(rawBody)) return jsonResponse({ error: "provider patch body must be a plain object" }, 400);
     const keys = Object.keys(rawBody);
     const aliasField = PROVIDER_ALIAS_OVERLAY_FIELDS.find(field => Object.hasOwn(rawBody, field));
-    if (aliasField) {
-      return jsonResponse({ error: `${aliasField} is managed by the dedicated alias API` }, 400);
-    }
+    if (aliasField) return jsonResponse({ error: `${aliasField} is managed by the dedicated alias API` }, 400);
     const hasMode = Object.hasOwn(rawBody, "codexAccountMode");
     const hasSetDefault = Object.hasOwn(rawBody, "setDefault");
     const canonicalBudgetOnly = name === "openai"
@@ -1032,15 +1269,15 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return jsonResponse({ error: "provider openai must be the canonical built-in provider" }, 400);
       }
       const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
-        const provider = fresh.providers.openai;
-        if (!provider || !isCanonicalOpenAiForwardProvider(provider)) {
-          return { changed: false, value: { error: "provider openai must be the canonical built-in provider" } };
+        const persisted = fresh.providers.openai;
+        if (!persisted || !isCanonicalOpenAiForwardProvider(persisted)) {
+          return { changed: false, value: { error: "provider openai must be the canonical built-in provider", status: 409 } };
         }
-        fresh.providers.openai = { ...provider, codexAccountMode: mode };
+        fresh.providers.openai = { ...persisted, codexAccountMode: mode };
         return { changed: true, value: { config: structuredClone(fresh) } };
       });
       if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 409);
+      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 409);
       adoptCommittedConfig(config, outcome.value.config);
       reconcileLiveStateStores();
       (deps.clearProviderQuotaCache ?? clearProviderQuotaCache)();
@@ -1067,15 +1304,17 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return jsonResponse({ error: "cannot set a disabled provider as default", code: "default_provider_disabled" }, 400);
       }
       const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
-        if (!hasOwnProvider(fresh.providers, name)) return { changed: false, value: { error: "unknown provider" } };
+        if (!hasOwnProvider(fresh.providers, name)) {
+          return { changed: false, value: { error: "unknown provider", status: 404 } };
+        }
         if (fresh.providers[name]!.disabled) {
-          return { changed: false, value: { error: "cannot set a disabled provider as default", code: "default_provider_disabled" } };
+          return { changed: false, value: { error: "cannot set a disabled provider as default", code: "default_provider_disabled", status: 400 } };
         }
         fresh.defaultProvider = name;
         return { changed: true, value: { config: structuredClone(fresh) } };
       });
       if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse(outcome.value, outcome.value.error === "unknown provider" ? 404 : 400);
+      if ("error" in outcome.value) return jsonResponse(outcome.value, outcome.value.status ?? 409);
       adoptCommittedConfig(config, outcome.value.config);
       reconcileLiveStateStores();
       return jsonResponse({ success: true, name, defaultProvider: name });
@@ -1098,11 +1337,17 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         : providerManagementConfigError(
             name,
             providerTransportValidationCandidate(next as unknown as Record<string, unknown>),
-          );
+          )
+          ?? providerEmptyToolOutputConfigError(name, next);
       if (providerError) return jsonResponse({ error: providerError }, 400);
       if (!canonicalBudgetOnly) {
         const serviceTierError = providerServiceTierConfigError(name, next);
         if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
+        // Same DNS gate as POST and re-enable: the canonical built-in OpenAI forward
+        // provider may resolve through Clash/Mihomo fake-IP DNS (198.18.0.0/15), so the
+        // ordinary PATCH must not reject the very same destination the provider was
+        // created with. Loopback, RFC1918, metadata, and mixed dangerous answers still
+        // fail closed; nothing else gains the exception.
         const allowBenchmarkAddresses = name === "openai" && isCanonicalOpenAiForwardProvider(next);
         const resolvedError = await providerDestinationResolvedError(name, next, { allowBenchmarkAddresses });
         if (resolvedError) return jsonResponse({ error: resolvedError }, 400);
@@ -1122,14 +1367,13 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // mask onto the newest provider under the mutation lock right before saving, so two
     // concurrent PATCHes updating different fields/headers both survive instead of the
     // later save clobbering the earlier snapshot.
-    let replayError: string | undefined;
     const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
-      const provider = fresh.providers[name];
-      if (!provider) return { changed: false, value: { error: "unknown provider" } };
-      const replay = applyProviderPatchFields(name, provider, rawBody, keys, fresh);
+      if (!hasOwnProvider(fresh.providers, name)) {
+        return { changed: false, value: { error: "unknown provider", status: 404 } };
+      }
+      const replay = applyProviderPatchFields(name, fresh.providers[name]!, rawBody, keys, fresh);
       if ("error" in replay) {
-        replayError = replay.error;
-        return { changed: false, value: { error: replay.error } };
+        return { changed: false, value: { error: replay.error, status: 409 } };
       }
       if (replay.editorTouched && !pacingOnly) {
         const syncError = canonicalBudgetOnly
@@ -1137,31 +1381,28 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
           : providerManagementConfigError(
               name,
               providerTransportValidationCandidate(replay.next as unknown as Record<string, unknown>),
-            );
+            )
+            ?? providerEmptyToolOutputConfigError(name, replay.next);
         if (syncError) {
-          replayError = syncError;
-          return { changed: false, value: { error: syncError } };
+          return { changed: false, value: { error: syncError, status: 409 } };
         }
         if (!canonicalBudgetOnly) {
           const serviceTierError = providerServiceTierConfigError(name, replay.next);
           if (serviceTierError) {
-            replayError = serviceTierError;
-            return { changed: false, value: { error: serviceTierError } };
+            return { changed: false, value: { error: serviceTierError, status: 409 } };
           }
         }
       } else if (replay.enablingOpenAi && !isCanonicalOpenAiForwardProvider(replay.next)) {
-        replayError = "provider openai must be the canonical built-in provider";
-        return { changed: false, value: { error: replayError } };
+        return { changed: false, value: { error: "provider openai must be the canonical built-in provider", status: 409 } };
       }
       // A PATCH that managed headers owns the resulting block: the clear path restores
       // registry static headers, so exact-match stripping must not erase them again.
       fresh.providers[name] = replay.headersTouched ? replay.next : stripRegistryOnlyStaticHeaders(name, replay.next);
-      return { changed: true, value: { config: structuredClone(fresh) } };
+      return { changed: replay.touched, value: { config: structuredClone(fresh) } };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.error === "unknown provider" ? 404 : 409);
+    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 409);
     adoptCommittedConfig(config, outcome.value.config);
-    if (replayError !== undefined) return jsonResponse({ error: replayError }, 409);
     reconcileLiveStateStores();
     if (applied.editorTouched && !pacingOnly) {
       const { clearModelCache } = await import("../../codex/model-cache");
@@ -1351,32 +1592,52 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         code: "last_provider",
       }, 409);
     }
-    const dependencyError = providerDependencyError(config, name);
-    if (dependencyError) return jsonResponse(dependencyError, 409);
+    const dependentCombos = Object.entries(config.combos ?? {})
+      .filter(([, combo]) => combo.targets.some(target => target.provider === name))
+      .map(([id]) => id)
+      .sort((a, b) => a.localeCompare(b));
+    if (dependentCombos.length > 0) {
+      return jsonResponse({
+        error: `cannot delete provider "${name}" while combos depend on it`,
+        code: "provider_has_dependent_combos",
+        combos: dependentCombos,
+      }, 409);
+    }
     const outcome = mutateManagementConfig<ProviderMutationValue>(deps, fresh => {
-      if (!hasOwnProvider(fresh.providers, name)) return { changed: false, value: { error: "unknown provider" } };
-      const fallbackDefault = name === fresh.defaultProvider
-        ? Object.entries(fresh.providers)
-          .find(([provider, providerConfig]) => provider !== name && providerConfig.disabled !== true)
-          ?.[0]
-        : undefined;
-      if (name === fresh.defaultProvider && !fallbackDefault) {
-        return { changed: false, value: { error: "cannot delete the default provider when no enabled replacement remains", code: "last_provider" } };
+      if (!hasOwnProvider(fresh.providers, name)) {
+        return { changed: false, value: { error: "unknown provider", status: 404 } };
       }
-      const dependencyError = providerDependencyError(fresh, name);
-      if (dependencyError) return { changed: false, value: dependencyError };
-      if (fallbackDefault) fresh.defaultProvider = fallbackDefault;
+      const routingProfiles = Object.entries(fresh.routingProfiles ?? {})
+        .filter(([, profile]) => profile.candidates.some(candidate => candidate.provider === name))
+        .map(([id]) => id)
+        .sort((a, b) => a.localeCompare(b));
+      if (routingProfiles.length > 0) {
+        return { changed: false, value: { error: `cannot delete provider "${name}" while routing profiles depend on it`, code: "provider_has_dependent_routing_profiles", routingProfiles, status: 409 } };
+      }
+      const combos = Object.entries(fresh.combos ?? {})
+        .filter(([, combo]) => combo.targets.some(target => target.provider === name))
+        .map(([id]) => id)
+        .sort((a, b) => a.localeCompare(b));
+      if (combos.length > 0) {
+        return { changed: false, value: { error: `cannot delete provider "${name}" while combos depend on it`, code: "provider_has_dependent_combos", combos, status: 409 } };
+      }
+      const persistedFallback = name === fresh.defaultProvider
+        ? Object.entries(fresh.providers).find(([id, provider]) => id !== name && provider.disabled !== true)?.[0]
+        : undefined;
+      if (name === fresh.defaultProvider && !persistedFallback) {
+        return { changed: false, value: { error: "cannot delete the default provider when no enabled replacement remains", code: "last_provider", status: 409 } };
+      }
+      if (persistedFallback) fresh.defaultProvider = persistedFallback;
       delete fresh.providers[name];
       const droppedCustomModels = dropProviderCustomModels(fresh, name);
       setProviderContextCap(fresh, name, false);
-      return { changed: true, value: { config: structuredClone(fresh), fallbackDefault, droppedCustomModels } };
+      return { changed: true, value: { config: structuredClone(fresh), fallbackDefault: persistedFallback, droppedCustomModels } };
     });
     if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) {
-      const status = outcome.value.code?.startsWith("provider_has_dependent_") || outcome.value.code === "last_provider" ? 409 : 404;
-      return jsonResponse(outcome.value, status);
-    }
+    if ("error" in outcome.value) return jsonResponse(outcome.value, outcome.value.status ?? 409);
     adoptCommittedConfig(config, outcome.value.config);
+    const committedFallbackDefault = outcome.value.fallbackDefault;
+    const droppedCustomModels = outcome.value.droppedCustomModels ?? 0;
     await replaceProviderAccountSet(name, null);
     reconcileLiveStateStores();
     const { clearModelCache: clearCache } = await import("../../codex/model-cache");
@@ -1384,8 +1645,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const catalogRefresh = await convergeCodexCatalog();
     return jsonResponse({
       success: true,
-      ...(outcome.value.fallbackDefault ? { defaultProvider: outcome.value.fallbackDefault } : {}),
-      droppedCustomModels: outcome.value.droppedCustomModels,
+      ...(committedFallbackDefault ? { defaultProvider: committedFallbackDefault } : {}),
+      ...(droppedCustomModels > 0 ? { droppedCustomModels } : {}),
       catalogRefresh,
     });
   }
@@ -1446,7 +1707,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return jsonResponse({ error: "value must be a positive number" }, 400);
       }
       setProviderContextCap(config, provider, body.enabled, perProviderValue);
-    saveManagementConfig(deps, config);
+      saveManagementConfig(deps, config);
       reconcileLiveStateStores();
       clearModelCache(provider);
       const catalogRefresh = await convergeCodexCatalog();

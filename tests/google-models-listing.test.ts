@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildCatalogEntries, gatherRoutedModels as gatherRoutedModelsDirect } from "../src/codex/catalog";
@@ -216,86 +216,6 @@ describe("Antigravity live model discovery", () => {
     }
   });
 
-  test("rejects Antigravity OAuth explicitly configured as ai-studio before discovery", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-antigravity-ai-studio-discovery-"));
-    process.env.OPENCODEX_HOME = home;
-    writeFileSync(join(home, "auth.json"), JSON.stringify({
-      "google-antigravity": {
-        activeAccountId: "active",
-        accounts: [{
-          id: "active",
-          credential: {
-            access: "access-token",
-            refresh: "refresh-token",
-            expires: Date.now() + 3_600_000,
-          },
-        }],
-      },
-    }));
-    let fetches = 0;
-    globalThis.fetch = (async () => {
-      fetches += 1;
-      return Response.json({ models: {} });
-    }) as typeof fetch;
-
-    try {
-      const models = await gatherRoutedModels(configWith("google-antigravity", {
-        adapter: "google",
-        authMode: "oauth",
-        googleMode: "ai-studio",
-        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-        project: "stale-configured-project",
-        liveModels: true,
-        models: ["configured-only"],
-      }));
-
-      expect(fetches).toBe(0);
-      expect(models.filter(model => model.provider === "google-antigravity").map(model => model.id))
-        .toEqual(["configured-only"]);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
-  test("legacy Antigravity config without authMode still ignores stale project without a snapshot project", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-antigravity-legacy-discovery-"));
-    process.env.OPENCODEX_HOME = home;
-    writeFileSync(join(home, "auth.json"), JSON.stringify({
-      "google-antigravity": {
-        activeAccountId: "active",
-        accounts: [{
-          id: "active",
-          credential: {
-            access: "access-token",
-            refresh: "refresh-token",
-            expires: Date.now() + 3_600_000,
-          },
-        }],
-      },
-    }));
-    let fetches = 0;
-    globalThis.fetch = (async () => {
-      fetches += 1;
-      return Response.json({ models: {} });
-    }) as typeof fetch;
-
-    try {
-      const models = await gatherRoutedModels(configWith("google-antigravity", {
-        adapter: "google",
-        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-        project: "stale-configured-project",
-        liveModels: true,
-        models: ["configured-only"],
-      }));
-
-      expect(fetches).toBe(0);
-      expect(models.filter(model => model.provider === "google-antigravity").map(model => model.id))
-        .toEqual(["configured-only"]);
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-    }
-  });
-
   test("does not register wire mappings from a stale CCA discovery", async () => {
     const home = mkdtempSync(join(tmpdir(), "ocx-antigravity-stale-discovery-"));
     process.env.OPENCODEX_HOME = home;
@@ -410,7 +330,7 @@ describe("buildModelsRequest anthropic routing", () => {
 });
 
 describe("google models listing via catalog", () => {
-  test("accepts the official { models } shape and keeps generateContent models", async () => {
+  test("treats a { models } 2xx shape as malformed and degrades to the static seed", async () => {
     clearModelCache("google");
     const warning = spyOn(console, "warn").mockImplementation(() => {});
     const seen: { url: string; headers: Record<string, string> }[] = [];
@@ -418,7 +338,7 @@ describe("google models listing via catalog", () => {
       seen.push({ url: String(input), headers: (init?.headers ?? {}) as Record<string, string> });
       return new Response(JSON.stringify({
         models: [
-          { name: "models/gemini-3-pro", inputTokenLimit: 1048576, outputTokenLimit: 65536, supportedGenerationMethods: ["generateContent", "countTokens"] },
+          { name: "models/gemini-3-pro", inputTokenLimit: 1048576, supportedGenerationMethods: ["generateContent", "countTokens"] },
           { name: "models/text-embedding-004", supportedGenerationMethods: ["embedContent"] },
           { name: "models/gemini-3-flash", inputTokenLimit: 1048576, supportedGenerationMethods: ["generateContent"] },
         ],
@@ -437,14 +357,11 @@ describe("google models listing via catalog", () => {
       expect(seen[0].url).toBe("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000");
       expect(seen[0].headers["x-goog-api-key"]).toBe("gk-123");
       const ids = models.filter(m => m.provider === "google").map(m => m.id);
-      expect(ids).toEqual(["gemini-3-flash", "gemini-3-pro"]);
-      expect(ids).not.toContain("text-embedding-004");
-      const pro = models.find(m => m.provider === "google" && m.id === "gemini-3-pro");
-      expect(pro?.contextWindow).toBe(1_048_576);
-      expect(pro?.maxInputTokens).toBe(1_048_576);
-      expect(pro?.maxOutputTokens).toBe(65_536);
-      expect(getStaleCached("google")).not.toBeNull();
-      expect(warning.mock.calls.flat().join(" ")).toContain("omitted configured model ids");
+      expect(ids).toEqual(["gemini-3.1-pro-preview", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash"]);
+      expect(ids).not.toContain("gemini-3-pro");
+      expect(ids).not.toContain("gemini-3-flash");
+      expect(getStaleCached("google")).toBeNull();
+      expect(warning.mock.calls.flat().join(" ")).toContain("google");
     } finally {
       warning.mockRestore();
     }

@@ -1,4 +1,5 @@
 import { markActivity } from "../lib/sidecar-tracker";
+import { allowPlaintextRemoteForTests } from "../lib/test-server-start";
 import { knownModelIdsForProvider } from "../router";
 import {
   buildWarmupCompletionFrames,
@@ -16,9 +17,9 @@ import {
   applyProxyEnv,
   armClaudeCodeBaseline,
   loadConfig,
-  mutatePersistedConfig,
   saveConfig,
   saveConfigPreservingClaudeCode,
+  mutatePersistedConfig,
   getConfigDir,
   websocketsEnabled,
 } from "../config";
@@ -229,8 +230,6 @@ import {
   createGuiPairingGrant,
 } from "./gui-session";
 import { createReadinessGate, type ReadinessGate } from "./readiness";
-import { allowPlaintextRemoteForTests } from "../lib/test-server-start";
-import { canonicalServerOrigin } from "../lib/server-tls";
 import {
   createRuntimePackageTreeIntegrityGuard,
   type PackageTreeIntegrityGuard,
@@ -239,6 +238,10 @@ import { detectInstall } from "../update/index";
 import { readyProtocolMetadata } from "../remote/protocol";
 import { modelCapabilityFields } from "./models-capabilities";
 import { recordCursorSeen } from "../integrations/cursor-seen";
+import { detectCursorInstalls } from "../integrations/cursor-detect";
+import { loadCursorEffortTable } from "../integrations/cursor-effort-table";
+import { expandCursorEffortRow, knownEffortRowIds } from "./effort-row";
+import { canonicalServerOrigin } from "../lib/server-tls";
 import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
 
 function isAiStudioSessionOrigin(origin: string | null, config: Pick<OcxConfig, "corsAllowOrigins">): boolean {
@@ -1498,7 +1501,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           }
           throw error;
         }
-        const { accountBoundNativeOpenAiSlugsBySelector, applyNativeVisibility, buildCatalogEntries, configuredNativeAliasSlugs, desktopAllowlistSuppressedNativeSlugs, disabledNativeSlugs, exactComboCatalogSlugs, loadCatalogTemplate, NATIVE_OPENAI_MODELS, nativeContextLimits, nativeInputModalities, nativeOpenAiContextWindow, nativeOpenAiContextTier, nativeOpenAiSlugs, nativeReasoningEfforts, nativeDefaultReasoningEffort, orderForSubagents, filterCatalogVisibleModels, shouldIncludeAccountBoundNativeOpenAi, shouldIncludeNativeOpenAi, uniqueCatalogModelsForRawPublicList, visibleCodexAccountSelectors, visibleNativeSlugs, desktopVisibleNativeSlugs } = await import("../codex/catalog");
+        const { accountBoundNativeOpenAiSlugsBySelector, applyNativeVisibility, buildCatalogEntries, configuredNativeAliasSlugs, desktopAllowlistSuppressedNativeSlugs, disabledNativeSlugs, exactComboCatalogSlugs, loadCatalogTemplate, NATIVE_OPENAI_MODELS, nativeContextLimits, nativeInputModalities, nativeOpenAiContextWindow, nativeOpenAiMaxOutputTokens, nativeOpenAiContextTier, nativeOpenAiSlugs, nativeReasoningEfforts, nativeDefaultReasoningEffort, orderForSubagents, filterCatalogVisibleModels, shouldIncludeAccountBoundNativeOpenAi, shouldIncludeNativeOpenAi, uniqueCatalogModelsForRawPublicList, visibleCodexAccountSelectors, visibleNativeSlugs, desktopVisibleNativeSlugs } = await import("../codex/catalog");
         const { ACCOUNT_GATED_NATIVE_OPENAI_MODELS } = await import("../codex/catalog/native-models");
         const includeNativeOpenAi = shouldIncludeNativeOpenAi(config);
         const includeAccountBoundNativeOpenAi = shouldIncludeAccountBoundNativeOpenAi(config);
@@ -1677,6 +1680,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
               // GPT-5.6) so the client can pick per request; without a tier, the effective
               // window is the only value.
               ...nativeContextInput(metadataId),
+              maxOutputTokens: nativeOpenAiMaxOutputTokens(metadataId),
               inputModalities: nativeInputModalities(metadataId),
             }),
           });
@@ -1709,44 +1713,69 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             return disabledModels.has(id) ? [] : [{ id, metadataId }];
           })
         );
+        // The projection is opt-in. Keep the default path free of Cursor install detection,
+        // and resolve the bundle table once for the whole list rather than once per row.
+        const effortRowsEnabled = config.cursorEffortRows === true;
+        const effortRowKnownIds = effortRowsEnabled ? knownEffortRowIds(config) : undefined;
+        const privateInference = effortRowsEnabled
+          ? detectCursorInstalls().find(install => install.build === "private-inference")
+          : undefined;
+        const cursorEffortTable = effortRowsEnabled
+          ? (managementApi.loadCursorEffortTable ?? loadCursorEffortTable)(privateInference)
+          : null;
+        const expandedNativeModelRow = (id: string, metadataId = id) => {
+          const reasoningEfforts = nativeReasoningEfforts(metadataId);
+          return expandCursorEffortRow(nativeModelRow(id, metadataId), reasoningEfforts, config, {
+            knownIds: effortRowKnownIds,
+            table: cursorEffortTable,
+            supportsReasoning: reasoningEfforts.length > 0,
+          });
+        };
+        const routedRows = await Promise.all(uniqueCatalogModelsForRawPublicList(goOrdered).map(async m => {
+          // Same rule as the anthropic branch: with the global fast switch on, a client
+          // that has no Fast toggle is offered the fast identity directly. An operator
+          // alias is an explicit decision and still wins.
+          const fastModelId = cursorFastIdForListing?.(m.id, m.provider);
+          const publicId = m.alias ?? `${m.provider}/${fastModelId ?? m.id}`;
+          const isCombo = m.provider === "combo" && exactComboSlugs.has(publicId);
+          const provider = config.providers[m.provider];
+          const effective = provider
+            ? (await import("../providers/default-aliases")).effectiveModelAliases(
+                config,
+                provider,
+                knownModelIdsForProvider(m.provider, provider, config),
+              ).get(m.id)
+            : undefined;
+          const row = {
+            id: publicId,
+            object: "model",
+            created: 0,
+            // This endpoint is an OpenAI-compatible inbound contract. Some clients use
+            // owned_by as an adapter selector, so a virtual combo must name that wire
+            // adapter rather than the internal catalog authority marker.
+            owned_by: isCombo ? "openai" : (m.owned_by ?? m.provider),
+            ...(isCombo ? { is_combo: true } : {}),
+            ...(effective ? { alias_of: `${provider?.alias || m.provider}/${effective.alias}` } : {}),
+            ...grokEffortFields(m.reasoningEfforts ?? [], m.defaultReasoningEffort),
+            ...modelCapabilityFields({
+              reasoningEfforts: m.reasoningEfforts,
+              // contextWindow is already the post-cap effective value; contextCap is the raw
+              // operator knob and over-reports models whose real window sits below it.
+              contextWindow: m.contextWindow,
+              maxOutputTokens: m.maxOutputTokens,
+              inputModalities: m.inputModalities,
+            }),
+          };
+          return expandCursorEffortRow(row, m.reasoningEfforts, config, {
+            knownIds: effortRowKnownIds,
+            table: cursorEffortTable,
+            supportsReasoning: (m.reasoningEfforts ?? []).length > 0,
+          });
+        }));
         const data = [
-          ...visibleNatives.map(id => nativeModelRow(id)),
-          ...visibleAccountNatives.map(({ id, metadataId }) => nativeModelRow(id, metadataId)),
-          ...await Promise.all(uniqueCatalogModelsForRawPublicList(goOrdered).map(async m => {
-            // Same rule as the anthropic branch: with the global fast switch on, a client
-            // that has no Fast toggle is offered the fast identity directly. An operator
-            // alias is an explicit decision and still wins.
-            const fastModelId = cursorFastIdForListing?.(m.id, m.provider);
-            const publicId = m.alias ?? `${m.provider}/${fastModelId ?? m.id}`;
-            const isCombo = m.provider === "combo" && exactComboSlugs.has(publicId);
-            const provider = config.providers[m.provider];
-            const effective = provider
-              ? (await import("../providers/default-aliases")).effectiveModelAliases(
-                  config,
-                  provider,
-                  knownModelIdsForProvider(m.provider, provider, config),
-                ).get(m.id)
-              : undefined;
-            return {
-              id: publicId,
-              object: "model",
-              created: 0,
-              // This endpoint is an OpenAI-compatible inbound contract. Some clients use
-              // owned_by as an adapter selector, so a virtual combo must name that wire
-              // adapter rather than the internal catalog authority marker.
-              owned_by: isCombo ? "openai" : (m.owned_by ?? m.provider),
-              ...(isCombo ? { is_combo: true } : {}),
-              ...(effective ? { alias_of: `${provider?.alias || m.provider}/${effective.alias}` } : {}),
-              ...grokEffortFields(m.reasoningEfforts ?? [], m.defaultReasoningEffort),
-              ...modelCapabilityFields({
-                reasoningEfforts: m.reasoningEfforts,
-                // contextWindow is already the post-cap effective value; contextCap is the raw
-                // operator knob and over-reports models whose real window sits below it.
-                contextWindow: m.contextWindow,
-                inputModalities: m.inputModalities,
-              }),
-            };
-          })),
+          ...visibleNatives.flatMap(id => expandedNativeModelRow(id)),
+          ...visibleAccountNatives.flatMap(({ id, metadataId }) => expandedNativeModelRow(id, metadataId)),
+          ...routedRows.flat(),
         ];
         return jsonResponse({ object: "list", data }, 200, req, policy);
       }
@@ -2399,7 +2428,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       try {
         loopbackServer = Bun.serve<WsData>({
           ...serveOptions,
-          tls: undefined,
           port: loopbackListenerPort,
           hostname: "127.0.0.1",
         });
@@ -2420,7 +2448,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       try {
         managementIngressServer = Bun.serve<WsData>({
           ...serveOptions,
-          tls: undefined,
           port: managementIngressPort,
           hostname: "127.0.0.1",
         });
@@ -2495,8 +2522,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   console.log(`   GET  /healthz      → health check`);
   console.log(`   GET  /api/*        → management API`);
   console.log(`   GET  /             → GUI dashboard`);
-  const remoteDashboardHint = remoteDashboardStartupHint(config.hostname);
-  if (remoteDashboardHint) console.log(remoteDashboardHint);
 
   if (loopbackServer) {
     // Loud on every start, not once at enable time. An operator who inherits a config, or

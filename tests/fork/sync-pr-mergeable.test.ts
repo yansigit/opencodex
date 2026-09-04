@@ -55,14 +55,17 @@ describe("fork PR mergeable workflow", () => {
     expect(source).not.toMatch(/pull-requests:\s*write/);
   });
 
-  test("runs the trusted base verifier only for sync PRs", () => {
+  test("uses the trusted base verifier for sync PRs after the transition-validation bootstrap", () => {
     const source = workflow();
     expect(source).toContain("if: startsWith(github.head_ref, 'sync/')");
     expect(source).toContain("uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2");
     expect(source.indexOf("Setup Bun for trusted preservation verifier"))
       .toBeLessThan(source.indexOf("Preservation overlap check for sync PR"));
     expect(source).toContain('git worktree add --detach "$trusted" "$BASE_SHA"');
-    expect(source).toContain('bun "$trusted/scripts/fork/sync/cli.ts" verify');
+    expect(source).toContain('verifier="$trusted/scripts/fork/sync/cli.ts"');
+    expect(source).toContain("if ! grep -q 'validateRegistryTransition' \"$trusted/scripts/fork/sync/preservation.ts\"; then");
+    expect(source).toContain('verifier="$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts"');
+    expect(source).toContain('bun "$verifier" verify');
     expect(source).toContain('FORK_SYNC_WORKTREE="$GITHUB_WORKSPACE"');
     expect(source).toContain('FORK_SYNC_TRUSTED_REGISTRY="$trusted/docs/fork/PRESERVATION.json"');
     expect(source).toContain('"$trusted/docs/fork/PRESERVATION.json"');
@@ -75,5 +78,16 @@ describe("fork PR mergeable workflow", () => {
     expect(source).toContain("opencodex-fork-sync-provenance");
     expect(source).toContain('--arg merge "$HEAD_SHA"');
     expect(source).toContain('--argjson provenance "$provenance"');
+  });
+
+  test("resolves upstream release tag from trusted base or upstream package.json when introduced by sync PR", () => {
+    const source = workflow();
+    expect(source).toContain('tag="$(jq -r --arg sha "$upstream" \'.releases | to_entries[] | select(.value.tagSha == $sha) | .value.tag\' "$trusted/docs/fork/PRESERVATION.json" | head -n 1)"');
+    expect(source).toContain('tag="$(git show "$upstream:package.json" 2>/dev/null | jq -r \'select(.version != null) | "v" + .version\' || true)"');
+    expect(source).toContain('if [ -z "$tag" ]; then');
+    expect(source.indexOf('verifier="$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts"'))
+      .toBeGreaterThan(source.indexOf('if [ -z "$tag" ]; then'));
+    expect(source).toContain('echo "::error::Preservation provenance does not identify a registered upstream release"');
+    expect(source).not.toMatch(/jq[^\n]+\sdocs\/fork\/PRESERVATION\.json/);
   });
 });

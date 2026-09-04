@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { analyzeOverlap, preservationReportHash } from "../../scripts/fork/sync/overlap";
 import { runCli } from "../../scripts/fork/sync/cli";
+import { loadRegistry } from "../../scripts/fork/sync/preservation";
 import type { CommandResult, CommandRunner } from "../../scripts/fork/sync/types";
 
 function mockRunner(map: Record<string, CommandResult>): CommandRunner {
@@ -145,24 +146,27 @@ describe("overlap analyzer", () => {
   });
 
   test("trusted verification rejects stale head and report hashes", async () => {
+    const release = loadRegistry().releases["v2.40.0"]!;
     const diffs = "diff --find-renames --find-copies --name-status --diff-filter=ACDMRT";
     const runner = mockRunner({
       "rev-parse HEAD": { exitCode: 0, stdout: "merge\n", stderr: "" },
-      "merge-base --all fork upstream": { exitCode: 0, stdout: "base\n", stderr: "" },
-      [`${diffs} base fork --`]: { exitCode: 0, stdout: "", stderr: "" },
-      [`${diffs} base upstream --`]: { exitCode: 0, stdout: "", stderr: "" },
-      [`${diffs} base merge --`]: { exitCode: 0, stdout: "", stderr: "" },
+      [`merge-base --all fork ${release.tagSha}`]: { exitCode: 0, stdout: `${release.baseSha}\n`, stderr: "" },
+      [`merge-base --all fork ${"0".repeat(40)}`]: { exitCode: 0, stdout: `${release.baseSha}\n`, stderr: "" },
+      [`${diffs} ${release.baseSha} fork --`]: { exitCode: 0, stdout: "", stderr: "" },
+      [`${diffs} ${release.baseSha} ${release.tagSha} --`]: { exitCode: 0, stdout: "", stderr: "" },
+      [`${diffs} ${release.baseSha} ${"0".repeat(40)} --`]: { exitCode: 0, stdout: "", stderr: "" },
+      [`${diffs} ${release.baseSha} merge --`]: { exitCode: 0, stdout: "", stderr: "" },
     });
-    const report = await analyzeOverlap({ runner, base: "base", fork: "fork", upstream: "upstream", merge: "merge", dev: "dev", tag: "v2.40.0" });
+    const report = await analyzeOverlap({ runner, base: release.baseSha, fork: "fork", upstream: release.tagSha, merge: "merge", dev: "dev", tag: "v2.40.0" });
     const provenance = {
       headSha: "merge",
-      tagSha: "upstream",
-      baseSha: "base",
+      tagSha: release.tagSha,
+      baseSha: release.baseSha,
       registryHash: report.registryHash,
       decisionHash: report.decisionHash,
       reportHash: preservationReportHash(report),
     };
-    const input = JSON.stringify({ base: "base", fork: "fork", upstream: "upstream", merge: "merge", dev: "dev", tag: "v2.40.0", provenance });
+    const input = JSON.stringify({ base: release.baseSha, fork: "fork", upstream: release.tagSha, merge: "merge", dev: "dev", tag: "v2.40.0", provenance });
     await expect(runCli(["verify"], { env: {}, stdin: input, runner, write: () => {} })).resolves.toBeUndefined();
     await expect(runCli(["verify"], {
       env: {}, stdin: JSON.stringify({ ...JSON.parse(input), provenance: { ...provenance, headSha: "stale" } }), runner, write: () => {},
@@ -170,5 +174,8 @@ describe("overlap analyzer", () => {
     await expect(runCli(["verify"], {
       env: {}, stdin: JSON.stringify({ ...JSON.parse(input), provenance: { ...provenance, reportHash: "stale" } }), runner, write: () => {},
     })).rejects.toThrow(/stale preservation evidence hash/);
+    await expect(runCli(["verify"], {
+      env: {}, stdin: JSON.stringify({ ...JSON.parse(input), upstream: "0".repeat(40) }), runner, write: () => {},
+    })).rejects.toThrow(/preservation release ancestry/);
   });
 });

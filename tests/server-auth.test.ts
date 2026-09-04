@@ -3574,7 +3574,7 @@ describe("server local API auth", () => {
     } finally {
       await stopPoolRetryHarness(positive);
     }
-  }, 12_000);
+  }, { timeout: SERVER_BUDGET_MS });
 
   test("valid JSON wrong top-level shape never authorizes a pool retry", async () => {
     // One harness, five bodies — same reason as the sibling above. Each
@@ -3595,7 +3595,7 @@ describe("server local API auth", () => {
     } finally {
       await stopPoolRetryHarness(harness);
     }
-  });
+  }, { timeout: SERVER_BUDGET_MS });
 
   test("alternate account resolution failure preserves the original 400", async () => {
     const body = unsupportedModelBody();

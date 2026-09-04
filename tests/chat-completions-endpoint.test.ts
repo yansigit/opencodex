@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { replacePersistedConfig, saveConfig } from "../src/config";
+import { loadConfig, replacePersistedConfig, saveConfig } from "../src/config";
 import { startServer } from "../src/server";
 import { ownedServiceHomeInspection } from "./helpers/owned-service-home-inspection";
 import type { OcxConfig, OcxProviderConfig } from "../src/types";
@@ -479,49 +479,6 @@ test("POST /v1/chat/completions streams OpenAI-shaped chunks end to end", async 
     expect(text).toContain("from mock");
     expect(text).toContain("data: [DONE]");
     expect(text).toContain("\"finish_reason\":\"stop\"");
-  } finally {
-    await server.stop(true);
-    upstream.stop(true);
-  }
-});
-
-test("opt-in transient replay reaches /v1/chat/completions and preserves the translated response", async () => {
-  let calls = 0;
-  const upstream = Bun.serve({
-    port: 0,
-    fetch() {
-      calls += 1;
-      if (calls === 1) {
-        return Response.json({ error: { message: "temporary upstream failure" } }, {
-          status: 502,
-          headers: { "retry-after": "0" },
-        });
-      }
-      return new Response([
-        `data: ${JSON.stringify({ choices: [{ index: 0, delta: { role: "assistant", content: "replayed" } }] })}\n\n`,
-        `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
-        "data: [DONE]\n\n",
-      ].join(""), { headers: { "content-type": "text/event-stream" } });
-    },
-  });
-  saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`, {
-    replayTransientFailures: true,
-  }));
-  const server = startServer(0);
-  try {
-    const response = await fetch(new URL("/v1/chat/completions", server.url), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "mock/test-model",
-        stream: false,
-        messages: [{ role: "user", content: "retry this" }],
-      }),
-    });
-    expect(response.status).toBe(200);
-    expect(calls).toBe(2);
-    const json = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    expect(json.choices?.[0]?.message?.content).toBe("replayed");
   } finally {
     await server.stop(true);
     upstream.stop(true);
@@ -1423,6 +1380,149 @@ test("chat-native preserves a structured cyber_policy type on JSON and SSE failu
   } finally {
     await server.stop(true);
     upstream.stop(true);
+  }
+});
+
+test("chat-native shares the transient send budget across same-target 429 recovery", async () => {
+  let upstreamSends = 0;
+  const upstream = Bun.serve({
+    port: 0,
+    fetch() {
+      upstreamSends += 1;
+      if (upstreamSends === 1) {
+        return Response.json({ error: { message: "rate limited", type: "rate_limit_error" } }, {
+          status: 429,
+          headers: { "retry-after": "0" },
+        });
+      }
+      return Response.json({ error: { message: "temporarily unavailable", type: "server_error" } }, {
+        status: 503,
+        headers: { "retry-after": "0" },
+      });
+    },
+  });
+  saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`, {
+    authMode: "key",
+    transientRetryOn5xx: { attempts: 3 },
+    retryOn429: { attempts: 1, intervalMs: 100, maxIntervalMs: 100, respectRetryAfter: false },
+  }));
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/chat/completions", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "mock/test-model", stream: false, messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(response.status).toBe(503);
+    await response.text();
+    expect(upstreamSends).toBe(3);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("chat-native shares the transient send budget across key rotation", async () => {
+  const { clearKeyCooldowns } = await import("../src/providers/key-failover");
+  clearKeyCooldowns("mock");
+  const authorizations: Array<string | null> = [];
+  const upstream = Bun.serve({
+    port: 0,
+    fetch(req) {
+      authorizations.push(req.headers.get("authorization"));
+      if (authorizations.length === 1) {
+        return Response.json({ error: { message: "temporarily unavailable", type: "server_error" } }, {
+          status: 503,
+          headers: { "retry-after": "0" },
+        });
+      }
+      if (authorizations.length <= 3) {
+        return Response.json({ error: { message: "rate limited", type: "rate_limit_error" } }, {
+          status: 429,
+          headers: { "retry-after": "60" },
+        });
+      }
+      return Response.json({
+        id: "chatcmpl_budget_escape",
+        object: "chat.completion",
+        choices: [{
+          index: 0,
+          message: { role: "assistant", content: "escaped budget" },
+          finish_reason: "stop",
+        }],
+      });
+    },
+  });
+  saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`, {
+    authMode: "key",
+    apiKey: "key-one",
+    apiKeyPool: [
+      { id: "one", key: "key-one" },
+      { id: "two", key: "key-two" },
+      { id: "three", key: "key-three" },
+    ],
+    transientRetryOn5xx: { attempts: 3 },
+  }));
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/chat/completions", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "mock/test-model", stream: false, messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(response.status).toBe(429);
+    await response.text();
+    expect(authorizations).toEqual([
+      "Bearer key-one",
+      "Bearer key-one",
+      "Bearer key-two",
+    ]);
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+    clearKeyCooldowns("mock");
+  }
+});
+
+test("chat-native records terminal key cooldown after the send budget is exhausted", async () => {
+  const { clearKeyCooldowns, getKeyCooldownUntil } = await import("../src/providers/key-failover");
+  clearKeyCooldowns("mock");
+  let upstreamSends = 0;
+  const upstream = Bun.serve({
+    port: 0,
+    fetch() {
+      upstreamSends += 1;
+      return Response.json({ error: { message: "rate limited", type: "rate_limit_error" } }, {
+        status: 429,
+        headers: { "retry-after": "60" },
+      });
+    },
+  });
+  saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`, {
+    authMode: "key",
+    apiKey: "key-one",
+    apiKeyPool: [
+      { id: "one", key: "key-one" },
+      { id: "two", key: "key-two" },
+    ],
+    transientRetryOn5xx: { attempts: 1 },
+  }));
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/chat/completions", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "mock/test-model", stream: false, messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(response.status).toBe(429);
+    await response.text();
+    expect(upstreamSends).toBe(1);
+    expect(getKeyCooldownUntil("mock", "one")).not.toBeNull();
+    expect(loadConfig().providers.mock?.apiKey).toBe("key-two");
+  } finally {
+    await server.stop(true);
+    upstream.stop(true);
+    clearKeyCooldowns("mock");
   }
 });
 

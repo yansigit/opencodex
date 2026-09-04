@@ -480,8 +480,13 @@ describe("GitHub Actions hardening", () => {
     })?.steps?.find(step => step.with?.filters);
     const areaFilters = Bun.YAML.parse(String(filterStep?.with?.filters ?? "")) as {
       ci?: string[];
+      dependencies?: string[];
     };
     expect([...(areaFilters.ci ?? [])].sort()).toEqual(ciPaths);
+    expect([...(areaFilters.dependencies ?? [])].sort()).toEqual([
+      "bun.lock",
+      "gui/bun.lock",
+    ]);
 
     const changesJob = ci.jobs?.changes as {
       outputs?: Record<string, string>;
@@ -498,9 +503,15 @@ describe("GitHub Actions hardening", () => {
       step => step.name === "Assert the scope output is usable",
     );
     expect(changesJob?.outputs?.ci).toBe("${{ steps.scope.outputs.ci }}");
+    expect(changesJob?.outputs?.dependencies).toBe(
+      "${{ steps.scope.outputs.dependencies }}",
+    );
     expect(scopeStep?.id).toBe("scope");
     expect(scopeStep?.shell).toBe("bash");
     expect(scopeStep?.env?.CI_SCOPE).toBe("${{ steps.filter.outputs.ci }}");
+    expect(scopeStep?.env?.DEPENDENCIES_SCOPE).toBe(
+      "${{ steps.filter.outputs.dependencies }}",
+    );
     expect(scopeStep?.run).not.toContain("${{");
     expect(scopeStep?.run).toContain('case "$value" in');
     expect(scopeStep?.run).toContain("true|false)");
@@ -510,6 +521,17 @@ describe("GitHub Actions hardening", () => {
     const scopeIndex = changesJob?.steps?.findIndex(step => step.id === "scope") ?? -1;
     expect(filterIndex).toBeGreaterThanOrEqual(0);
     expect(scopeIndex).toBeGreaterThan(filterIndex);
+
+    const gatesJob = ci.jobs?.gates as {
+      steps?: Array<{ name?: string; if?: string; run?: string }>;
+    } | undefined;
+    const auditStep = gatesJob?.steps?.find(
+      step => step.name === "Dependency audit (high severity)",
+    );
+    expect(auditStep?.if).toBe(
+      "needs.changes.outputs.dependencies == 'true'",
+    );
+    expect(auditStep?.run).toBe("bun run audit:high");
 
     const scopedCondition = "github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'";
     for (const jobName of ["test", "storage-policy", "gates", "keyring-smoke"]) {
@@ -721,7 +743,7 @@ describe("GitHub Actions hardening", () => {
       scripts?: Record<string, string>;
     };
     expect(packageJson.scripts?.["audit:high"]).toBe(
-      "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
+      "bun run scripts/ci/audit-high.ts",
     );
     expect(workflow).toContain("run: bun run audit:high");
     expect(workflow).not.toContain("run: bun audit --audit-level=high");
@@ -933,6 +955,7 @@ describe("GitHub Actions hardening", () => {
     "require",
     "require",
     "require",
+    "require",
   ] as const;
 
   /** Reads every allowed-base PR performs before any enforcement writes. */
@@ -947,6 +970,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.get",
       "pulls.listFiles",
       "pulls.get",
+      "pulls.listCommits",
       "checks.listForRef",
       ...tail,
     ];
@@ -963,6 +987,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.get",
       "pulls.listFiles",
       "pulls.get",
+      "pulls.listCommits",
       "checks.listForRef",
       ...tail,
     ];
@@ -984,6 +1009,8 @@ describe("GitHub Actions hardening", () => {
       "pulls.listFiles",
       "pulls.listFiles",
       "pulls.get",
+      "pulls.listCommits",
+      "pulls.listCommits",
       "checks.listForRef",
       ...tail,
     ];
@@ -1398,7 +1425,8 @@ describe("GitHub Actions hardening", () => {
           name !== "github.rest.issues.listEvents" &&
           name !== "github.rest.checks.listForRef" &&
           // Hygiene reassessment reads the changed-file list; not a write.
-          name !== "github.rest.pulls.listFiles",
+          name !== "github.rest.pulls.listFiles" &&
+          name !== "github.rest.pulls.listCommits",
       );
     expect([...new Set(restWrites)].sort()).toEqual([
       "github.rest.issues.addLabels",
@@ -5288,7 +5316,7 @@ describe("GitHub Actions hardening", () => {
       scripts?: Record<string, string>;
     };
     expect(packageJson.scripts?.["audit:high"]).toBe(
-      "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
+      "bun run scripts/ci/audit-high.ts",
     );
   });
 

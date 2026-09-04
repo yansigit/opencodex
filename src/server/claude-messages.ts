@@ -54,6 +54,10 @@ import {
   isTranslatorBudgetExceededError,
   type TranslatorBudget,
 } from "../lib/translator-budget";
+import {
+  parseRequestEffortRowId,
+  type ParsedEffortRowId,
+} from "./effort-row";
 
 type Rec = Record<string, unknown>;
 
@@ -741,7 +745,9 @@ async function handleClaudeMessagesWithBudget(
   let anthropicBody: unknown;
   let internalBody: Rec;
   let cacheKeySource: ClaudeCacheKeySource = null;
-  let effortOverride: ReturnType<typeof extractOcxEffortDirective> = null;
+  let effortOverride: string | null = null;
+  let effortRow: ParsedEffortRowId | null = null;
+  let requestedModel = "";
   let sourceEnvelope: ClaudeSourceEnvelope | null = null;
   let headerSessionId: string | null = null;
   let featureCodesEarly: string[] = [];
@@ -764,6 +770,14 @@ async function handleClaudeMessagesWithBudget(
       if (routeOverride && typeof anthropicBody.model === "string") {
         anthropicBody.model = stripOneMillionMarker(routeOverride);
         effortOverride = extractOcxEffortDirective(anthropicBody);
+      }
+    }
+    if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
+      requestedModel = anthropicBody.model;
+      effortRow = parseRequestEffortRowId(requestedModel, config);
+      if (effortRow) {
+        anthropicBody.model = effortRow.baseId;
+        effortOverride = effortRow.effort;
       }
     }
     headerSessionId = claudeSessionIdFromRequest(req, anthropicBody);
@@ -799,7 +813,7 @@ async function handleClaudeMessagesWithBudget(
       );
       if (claudeConversationId) logCtx.conversationId = claudeConversationId;
     }
-    if (isRec(anthropicBody) && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model)) {
+    if (!effortRow && isRec(anthropicBody) && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model)) {
       annotateClaudeInboundDecision(debugCaptureId, "anthropic", "native", featureCodesEarly);
       return await anthropicNativePassthrough(req, config, logCtx, logIds, anthropicBody, "/v1/messages");
     }
@@ -844,7 +858,7 @@ async function handleClaudeMessagesWithBudget(
     );
   }
 
-  const requestedModel = (anthropicBody as Rec).model as string;
+  if (!requestedModel) requestedModel = (anthropicBody as Rec).model as string;
   const stream = internalBody.stream === true;
   // Routed adapters only support streamed turns; always stream internally and fold
   // the translated Anthropic SSE into a message JSON for non-streaming clients.
