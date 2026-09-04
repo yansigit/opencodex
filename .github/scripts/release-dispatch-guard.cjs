@@ -12,6 +12,8 @@ function validateReleaseDispatch({
   ref,
   expectedSha,
   actualSha,
+  tag,
+  dryRun,
   candidateRunId,
   candidateArtifactId,
   clientPayload,
@@ -59,6 +61,11 @@ function validateReleaseDispatch({
     if (typeof candidateArtifactId !== "string" || !/^[1-9][0-9]*$/.test(candidateArtifactId)) {
       return "candidate-artifact-id is required and must be canonical decimal digits.";
     }
+  }
+
+  if (eventName === "workflow_dispatch" && tag === "latest" && dryRun !== "true"
+    && (!candidateRunId || !candidateArtifactId)) {
+    return "Publishing the latest dist-tag requires immutable candidate run and artifact IDs.";
   }
 
   if (!/^[0-9a-f]{40}$/.test(expectedSha)) {

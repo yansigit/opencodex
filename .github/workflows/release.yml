@@ -70,6 +70,8 @@ jobs:
       - name: Validate release dispatch
         env:
           EXPECTED_SHA: ${{ env.DISPATCH_EXPECTED_SHA }}
+          DISPATCH_TAG: ${{ env.DISPATCH_TAG }}
+          DISPATCH_DRY_RUN: ${{ env.DISPATCH_DRY_RUN }}
           CANDIDATE_RUN_ID: ${{ env.DISPATCH_CANDIDATE_RUN_ID }}
           CANDIDATE_ARTIFACT_ID: ${{ env.DISPATCH_CANDIDATE_ARTIFACT_ID }}
           EVENT_ACTION: ${{ github.event.action || '' }}
@@ -87,6 +89,8 @@ jobs:
             ref: process.env.GITHUB_REF,
             expectedSha: process.env.EXPECTED_SHA,
             actualSha: process.env.GITHUB_SHA,
+            tag: process.env.DISPATCH_TAG,
+            dryRun: process.env.DISPATCH_DRY_RUN,
             candidateRunId: process.env.CANDIDATE_RUN_ID,
             candidateArtifactId: process.env.CANDIDATE_ARTIFACT_ID,
             clientPayload: event.client_payload,
@@ -119,14 +123,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EXPECTED_SHA: ${{ env.DISPATCH_EXPECTED_SHA }}
+          DISPATCH_TAG: ${{ env.DISPATCH_TAG }}
           CANDIDATE_RUN_ID: ${{ env.DISPATCH_CANDIDATE_RUN_ID }}
           CANDIDATE_ARTIFACT_ID: ${{ env.DISPATCH_CANDIDATE_ARTIFACT_ID }}
         shell: bash
         run: |
           set -euo pipefail
           run_json="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${CANDIDATE_RUN_ID}")"
-          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$EXPECTED_SHA" --arg release_event "$GITHUB_EVENT_NAME" \
-            '(.repository.full_name == $repo) and (.head_sha == $sha) and (.status == "completed") and (.conclusion == "success") and (.name == "Build release candidate") and (.path == ".github/workflows/release-candidate.yml") and ((.event == "workflow_run") or (.event == "workflow_dispatch")) and (($release_event != "repository_dispatch") or ((.event == "workflow_run") and (.head_branch == "main")))' \
+          jq -e --arg repo "$GITHUB_REPOSITORY" --arg sha "$EXPECTED_SHA" --arg release_event "$GITHUB_EVENT_NAME" --arg release_tag "$DISPATCH_TAG" \
+            '(.repository.full_name == $repo) and (.head_sha == $sha) and (.status == "completed") and (.conclusion == "success") and (.name == "Build release candidate") and (.path == ".github/workflows/release-candidate.yml") and ((.event == "workflow_run") or (.event == "workflow_dispatch")) and (($release_event != "repository_dispatch") or ((.event == "workflow_run") and (.head_branch == "main"))) and (($release_tag != "latest") or (.head_branch == "main"))' \
             <<<"$run_json" >/dev/null || { echo "::error::candidate run is not a successful Build release candidate for the expected repository/SHA"; exit 1; }
           repo_id="$(jq -r '.repository.id' <<<"$run_json")"
           run_attempt="$(jq -r '.run_attempt' <<<"$run_json")"

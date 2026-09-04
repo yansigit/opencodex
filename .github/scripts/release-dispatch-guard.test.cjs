@@ -21,6 +21,8 @@ function validate(overrides = {}) {
     ref: "refs/heads/main",
     expectedSha: SHA,
     actualSha: SHA,
+    tag: "latest",
+    dryRun: "false",
     candidateRunId: "123",
     candidateArtifactId: "456",
     clientPayload: CLIENT_PAYLOAD,
@@ -102,8 +104,13 @@ describe("release dispatch guard", () => {
     assert.match(validate({ candidateArtifactId: "01" }), /candidate-artifact-id/);
   });
 
-  it("keeps candidate IDs optional only for transitional manual dispatches", () => {
-    assert.equal(validate({ candidateRunId: "", candidateArtifactId: "" }), null);
+  it("keeps candidate IDs optional only for non-stable or dry-run transitional dispatches", () => {
+    assert.match(
+      validate({ candidateRunId: "", candidateArtifactId: "" }),
+      /latest dist-tag requires immutable candidate run and artifact IDs/,
+    );
+    assert.equal(validate({ tag: "preview", ref: "refs/heads/preview", candidateRunId: "", candidateArtifactId: "" }), null);
+    assert.equal(validate({ dryRun: "true", candidateRunId: "", candidateArtifactId: "" }), null);
     assert.match(validate({ candidateRunId: "123", candidateArtifactId: "" }), /candidate-artifact-id/);
   });
 
