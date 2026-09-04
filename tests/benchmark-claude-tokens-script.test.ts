@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { defaultTokenBenchmarkFixtureSet, materializeFixture } from "../src/claude/token-benchmark";
 import { estimateClaudeRequestTokens } from "../src/server/claude-messages";
-import { executeBenchmark, parseArgs, type BenchmarkDeps } from "../scripts/benchmark-claude-tokens";
+import { executeBenchmark, parseArgs, sendBenchmarkFixture, type BenchmarkDeps } from "../scripts/benchmark-claude-tokens";
+import type { OcxConfig } from "../src/types";
 
 const fakeConfig = { providers: { acme: { adapter: "anthropic", baseUrl: "https://example.invalid", models: ["claude-test"] } }, defaultProvider: "acme" } as any;
 const route = { providerName: "acme", provider: fakeConfig.providers.acme, modelId: "claude-test", routeKind: "explicit-provider", routeReason: "explicit-provider-namespace" } as any;
@@ -107,4 +108,55 @@ test("transport failures are not retried and error text is never rendered", asyn
   expect(await executeBenchmark({ provider: "acme", model: "claude-test", json: true, confirmed: true }, deps)).toBe(1);
   expect(sends).toBe(defaultTokenBenchmarkFixtureSet.length);
   expect(out.join("\n")).not.toContain("SECRET-UPSTREAM-ERROR-SENTINEL");
+});
+
+test("production benchmark send uses the routed Anthropic path and observes usage once", async () => {
+  const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      requests.push({ path: new URL(request.url).pathname, body: await request.json() as Record<string, unknown> });
+      return new Response([
+        'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":37}}}\n\n',
+        'event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}\n\n',
+        'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":1}}\n\n',
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+      ].join(""), { headers: { "content-type": "text/event-stream" } });
+    },
+  });
+  const config = {
+    defaultProvider: "acme",
+    providers: {
+      acme: {
+        adapter: "anthropic",
+        baseUrl: upstream.url.toString().replace(/\/$/, ""),
+        apiKey: "test-key",
+        allowPrivateNetwork: true,
+        models: ["claude-test"],
+      },
+    },
+  } as OcxConfig;
+  const before = structuredClone(config);
+  const target = {
+    providerName: "acme",
+    provider: config.providers.acme,
+    modelId: "claude-test",
+    routeKind: "explicit-provider",
+  } as any;
+  const observations: any[] = [];
+  try {
+    const fixture = materializeFixture(defaultTokenBenchmarkFixtureSet[0]);
+    const response = await sendBenchmarkFixture({ ...fixture, model: "claude-test", stream: false, max_tokens: 1 }, target, config, observation => observations.push(observation));
+    expect(response.ok).toBe(true);
+    await response.text();
+    expect(requests).toHaveLength(1);
+    expect(requests[0].path).toBe("/v1/messages");
+    expect(requests[0].body.model).toBe("claude-test");
+    expect(observations).toHaveLength(1);
+    expect(observations[0]).toMatchObject({ adapterKind: "anthropic", modelId: "acme/claude-test", usage: { inputTokens: 37, outputTokens: 1 } });
+    expect(config).toEqual(before);
+  } finally {
+    upstream.stop(true);
+  }
 });

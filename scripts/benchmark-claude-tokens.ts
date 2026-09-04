@@ -87,35 +87,42 @@ export async function executeBenchmark(args: BenchmarkArgs, deps: BenchmarkDeps)
   return report.status === "pass" ? 0 : 1;
 }
 
+export async function sendBenchmarkFixture(
+  fixture: ClaudeFixtureBody,
+  target: RouteResult,
+  config: OcxConfig,
+  observe: (o: ClaudeBenchmarkRawUsage) => void,
+): Promise<Response> {
+  // Keep the physical provider binding explicit through Claude's route resolver;
+  // the outbound wire still receives the target's native model id after routing.
+  const body = { ...fixture, model: `${target.providerName}/${target.modelId}`, stream: false, max_tokens: 1 };
+  const req = new Request("http://localhost/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  // Benchmark sends are always routed; disable the credential-triggered native
+  // Anthropic passthrough branch even if the user's config enables it.
+  const routedConfig: OcxConfig = {
+    ...config,
+    emptyCompletionRetry: false,
+    claudeCode: { ...config.claudeCode, nativePassthrough: false },
+    images: undefined,
+    webSearchSidecar: undefined,
+    providers: {
+      ...config.providers,
+      [target.providerName]: {
+        ...target.provider,
+        retryOn429: undefined,
+        replayTransientFailures: false,
+        transientRetryOn5xx: undefined,
+        oauthAccountFailover: { ...target.provider.oauthAccountFailover, enabled: false },
+      },
+    },
+  };
+  return handleClaudeMessages(req, routedConfig, { model: target.modelId, provider: target.providerName, surface: "claude" }, undefined, routedConfig, { onRawUsage: observe });
+}
+
 const productionDeps: BenchmarkDeps = {
   loadConfig,
   resolveRoute: (config, provider, model) => routeModel(config, routedSlug(provider, model)),
-  send: async (fixture, target, config, observe) => {
-    // Keep the physical provider binding explicit through Claude's route resolver;
-    // the outbound wire still receives the target's native model id after routing.
-    const body = { ...fixture, model: `${target.providerName}/${target.modelId}`, stream: false, max_tokens: 1 };
-    const req = new Request("http://localhost/v1/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
-    // Benchmark sends are always routed; disable the credential-triggered native
-    // Anthropic passthrough branch even if the user's config enables it.
-    const routedConfig: OcxConfig = {
-      ...config,
-      emptyCompletionRetry: false,
-      claudeCode: { ...config.claudeCode, nativePassthrough: false },
-      images: undefined,
-      webSearchSidecar: undefined,
-      providers: {
-        ...config.providers,
-        [target.providerName]: {
-          ...target.provider,
-          retryOn429: undefined,
-          replayTransientFailures: false,
-          transientRetryOn5xx: undefined,
-          oauthAccountFailover: { ...target.provider.oauthAccountFailover, enabled: false },
-        },
-      },
-    };
-    return handleClaudeMessages(req, routedConfig, { model: target.modelId, provider: target.providerName, surface: "claude" }, undefined, routedConfig, { onRawUsage: observe });
-  },
+  send: sendBenchmarkFixture,
   write: (text) => process.stdout.write(`${text}\n`),
   writeStatus: (text) => process.stderr.write(`${text}\n`),
 };
