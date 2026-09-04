@@ -1,7 +1,7 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, type Stats, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, truncateSync, type Stats, unlinkSync, writeFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { atomicWriteFile, atomicWriteFileAsync, getConfigDir, resolveWriteTarget, withConfigMutationLockSync } from "../config";
+import { atomicWriteFile, atomicWriteFileAsync, getConfigDir, renameAtomicFile, resolveWriteTarget, withConfigMutationLockSync } from "../config";
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
 import type { OcxProviderContinuationState } from "../types";
@@ -1835,7 +1835,17 @@ function retirementMarkerStillCurrent(pending: LegacySnapshotRetirement): boolea
 
 function publishRetirementCompletionMarker(): boolean {
   try {
-    atomicWriteFile(snapshotPath(), JSON.stringify({ version: 3, states: [] }));
+    // This marker contains no continuation data. Publish it without invoking the
+    // synchronous Windows secret-ACL subprocess: a fresh home reaches this path
+    // during synchronous load, while every later snapshot containing real state
+    // still uses the hardened default/async atomic writer below.
+    atomicWriteFile(snapshotPath(), JSON.stringify({ version: 3, states: [] }), {
+      write: (path, content) => writeFileSync(path, content, { encoding: "utf8", flag: "wx", mode: 0o600 }),
+      harden: () => undefined,
+      rename: renameAtomicFile,
+      truncate: path => truncateSync(path, 0),
+      unlink: unlinkSync,
+    });
     return true;
   } catch {
     return false;

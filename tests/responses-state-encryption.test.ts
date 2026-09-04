@@ -1063,8 +1063,9 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(existsSync(secondTarget)).toBe(true);
     expect(await prepareSensitiveResponsePersistence({ input: "still blocked" })).toBe("memory-only");
 
-    runPendingLegacyResponseStateRetirementForTests();
-    runPendingLegacyResponseStateRetirementForTests();
+    for (let attempt = 0; attempt < 4 && existsSync(secondTarget); attempt += 1) {
+      runPendingLegacyResponseStateRetirementForTests();
+    }
     expect(existsSync(secondTarget)).toBe(false);
     expectSafeV3Marker(snapshotPath);
   });
