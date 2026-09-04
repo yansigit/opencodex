@@ -289,7 +289,7 @@ Utilisation : `subagent_type: "ocx-gpt-5-6-sol"`. Les cibles compatibles avec u
 d'une signature `<!-- ocx-sig: ... -->` correspondante qu'OpenCodex crée avec une clé de signature locale
 qu'il gère automatiquement. `ocx doctor` indique la présence et les permissions de cette clé sans jamais
 afficher la clé elle-même. Le proxy vérifie la signature à chaque requête **avant tout envoi à un fournisseur** :
-une directive signée absente, modifiée, corrompue ou autrement invalide rejette la requête avec une
+une signature présente mais malformée, modifiée, corrompue ou autrement invalide rejette la requête avec une
 `400 invalid_request_error` ; elle n'est jamais acheminée vers un autre fournisseur et n'est jamais
 retraitée comme si elle n'était pas signée. Les directives de compatibilité non signées (par exemple celles
 d'une définition ancienne modifiée manuellement) ne sont acceptées que lorsqu'elles correspondent exactement
@@ -546,7 +546,7 @@ Avant de lancer `ocx claude`, opencodex vérifie la version de Claude Code par r
 | `compatible` | Version égale ou supérieure au seuil | Aucune |
 | `outdated` | Version inférieure au seuil | `npm install -g @anthropic-ai/claude-code` |
 | `missing` | Claude Code n'est pas installé | Installez-le avec `npm install -g @anthropic-ai/claude-code` |
-| `timed out` | La vérification de version a expiré | Réessayez ; réparez ou mettez à niveau Claude Code si le problème persiste |
+| `timed-out` | La vérification de version a expiré | Réessayez ; réparez ou mettez à niveau Claude Code si le problème persiste |
 | `unparseable` | La version n'a pas pu être reconnue | Réparez ou mettez à niveau Claude Code, puis réessayez |
 
 La sonde est indicative : un client sous le seuil, absent, dont la vérification a expiré ou non reconnu **ne bloque jamais

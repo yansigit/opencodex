@@ -294,13 +294,6 @@ Auto auth selects subscription when stored Claude auth is found, proxy when none
 subscription with a warning when detection is inconclusive. See
 [Claude Code auth mode](/guides/claude-code/#auth-mode).
 
-Generated roster definitions (`~/.claude/agents/ocx-*.md`) carry signed
-`<!-- ocx-route -->` / `<!-- ocx-effort -->` directives that the proxy verifies before dispatch:
-an invalid signed directive fails closed with `400 invalid_request_error`, and unsigned
-directives are honored only for exact active OpenCodex-owned roster entries.
-`ocx doctor` reports the Claude directive signing key presence and permissions under your
-OpenCodex config directory without printing key material.
-
 When `unauthenticatedLoopbackListener.enabled` is explicitly `true`, its Claude compatibility
 surface admits exactly `POST /v1/messages` and `POST /v1/messages/count_tokens` (POST only).
 No other Claude path is admitted there; the listener is off by default, its `port` is required,
@@ -311,9 +304,10 @@ the secondary listener. See
 ### Claude directive trust and token benchmark
 
 Generated `~/.claude/agents/ocx-*.md` definitions carry signed route and optional effort
-directives. OpenCodex verifies them before provider dispatch; an invalid or altered signed
-directive fails closed with `400 invalid_request_error`. Unsigned compatibility directives are
-honored only for an exact active OpenCodex-owned roster entry. Diagnostics never show key material.
+directives. OpenCodex verifies a present signature before provider dispatch; a malformed or
+invalid signature fails closed with `400 invalid_request_error`. A definition with no signature
+may use compatibility fallback only when its directive exactly matches an active OpenCodex-owned
+roster entry; arbitrary unsigned text is ignored. Diagnostics never show key material.
 
 To compare routed token estimates with authoritative Anthropic counts, run
 `bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`

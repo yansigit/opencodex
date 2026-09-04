@@ -308,11 +308,11 @@ Dispatch: `subagent_type: "ocx-gpt-5-6-sol"`. 1M-capable targets carry `[1m]` au
 with a matching `<!-- ocx-sig: ... -->` signature that OpenCodex creates with a local signing key
 it manages automatically. `ocx doctor` reports that key's presence and permissions without ever
 printing the key itself. The proxy verifies the signature on every request **before any provider
-dispatch**: a missing, altered, corrupted, or otherwise invalid signed directive rejects the
-request with a `400 invalid_request_error` — it is never routed to another provider and it is
-never reprocessed as if it were unsigned. Unsigned compatibility directives (for example from an
-older hand-edited definition) are honored only when they exactly match an active OpenCodex-owned
-roster entry; a failed signed check never falls back to that roster path.
+dispatch**: when a signature is present but malformed, altered, corrupted, or otherwise invalid, the
+request rejects with a `400 invalid_request_error` — it is never routed to another provider. A
+definition with no signature may use the compatibility path, but only when its directive exactly
+matches an active OpenCodex-owned roster entry; arbitrary unsigned text is ignored. A failed
+signature check never falls back to that roster path.
 
 ## Unauthenticated loopback listener (opt-in)
 
@@ -610,7 +610,7 @@ compatibility floor. The probe resolves to one of five states, each with actiona
 | `compatible` | Version is at or above the floor | Nothing |
 | `outdated` | Version is below the floor | `npm install -g @anthropic-ai/claude-code` |
 | `missing` | Claude Code is not installed | Install it with `npm install -g @anthropic-ai/claude-code` |
-| `timed out` | The version check timed out | Retry; repair or upgrade Claude Code if it persists |
+| `timed-out` | The version check timed out | Retry; repair or upgrade Claude Code if it persists |
 | `unparseable` | The version could not be recognized | Repair or upgrade Claude Code, then retry |
 
 The probe is advisory: a below-floor, missing, timed-out, or unrecognized client **never blocks

@@ -650,7 +650,7 @@ uygulanabilir yönlendirme sunar:
 | `compatible` | Sürüm tabanda veya üzerindedir | Hiçbir şey yapmayın |
 | `outdated` | Sürüm tabanın altındadır | `npm install -g @anthropic-ai/claude-code` |
 | `missing` | Claude Code yüklü değildir | `npm install -g @anthropic-ai/claude-code` ile yükleyin |
-| `timed out` | Sürüm kontrolü zaman aşımına uğradı | Sürerse Claude Code'u yeniden deneyin; onarın veya yükseltin |
+| `timed-out` | Sürüm kontrolü zaman aşımına uğradı | Sürerse Claude Code'u yeniden deneyin; onarın veya yükseltin |
 | `unparseable` | Sürüm tanınamadı | Claude Code'u onarın veya yükseltin, ardından yeniden deneyin |
 
 Araştırma yalnızca tavsiye niteliğindedir: tabanın altında, eksik, zaman aşımına uğramış
