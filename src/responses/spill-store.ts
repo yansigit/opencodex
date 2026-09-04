@@ -161,6 +161,8 @@ interface ResponseSpillWriteOptions {
   /** Total caller-owned ACL budget shared by every harden in this publication. */
   aclBudgetMs?: number;
   publicationControl?: ResponseSpillPublicationControl;
+  /** Keeps a cleanup-resistant path charged after this synchronous write settles. */
+  onCleanupResidual?: (path: string, bytes: number) => void;
   /**
    * Runs synchronously while the shared-home mutation lock still covers the
    * newly published destination. Returning false removes the destination
@@ -609,10 +611,12 @@ function writeResponseSpillDurablyUnlocked(
 ): ResponseSpillRef {
   let tempPath: string | null = null;
   let createdDestinationPath: string | null = null;
+  let payloadBytes = 0;
   let fd: number | null = null;
   try {
     const aclBudget = spillAclBudget(options.aclBudgetMs);
     const { bytes, digest, idDigest, contentDigest, version } = serializedSpill(responseId, state);
+    payloadBytes = bytes.byteLength;
     const dir = responseSpillDirectory();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     harden(dir, 0o700, aclBudget);
@@ -652,10 +656,10 @@ function writeResponseSpillDurablyUnlocked(
       try { closeSync(fd); } catch { /* best effort */ }
     }
     if (tempPath) {
-      try { unlinkEphemeral(tempPath); } catch { /* best effort */ }
+      try { unlinkEphemeral(tempPath); } catch { options.onCleanupResidual?.(tempPath, payloadBytes); }
     }
     if (createdDestinationPath) {
-      try { unlink(createdDestinationPath); } catch { /* later orphan retirement retries */ }
+      try { unlink(createdDestinationPath); } catch { options.onCleanupResidual?.(createdDestinationPath, payloadBytes); }
     }
     throw responseSpillWriteError(cause);
   }
@@ -674,11 +678,11 @@ export function writeResponseSpillDurably(
       try {
         accepted = !options.commitUnderLock || options.commitUnderLock(ref);
       } catch (error) {
-        removePublishedResponseSpill(ref);
+        removePublishedResponseSpill(ref, options.onCleanupResidual);
         throw error;
       }
       if (!accepted) {
-        removePublishedResponseSpill(ref);
+        removePublishedResponseSpill(ref, options.onCleanupResidual);
         throw supersededPublicationError();
       }
       transferred = ref;
@@ -886,13 +890,20 @@ export function deleteResponseSpill(ref: ResponseSpillRef): void {
   } catch { /* best effort */ }
 }
 
-function removePublishedResponseSpill(ref: ResponseSpillRef): void {
+function removePublishedResponseSpill(
+  ref: ResponseSpillRef,
+  onCleanupResidual?: (path: string, bytes: number) => void,
+): void {
   if (!validSpillRef(ref)) throw new Error("Invalid published response spill reference");
   const dir = responseSpillDirectory();
+  const path = join(dir, ref.fileName);
   try {
-    unlink(join(dir, ref.fileName));
+    unlink(path);
   } catch (error) {
-    if (!isErrno(error, "ENOENT")) throw error;
+    if (!isErrno(error, "ENOENT")) {
+      onCleanupResidual?.(path, ref.payloadBytes);
+      throw error;
+    }
   }
   fsyncDirectoryBestEffort(dir);
 }

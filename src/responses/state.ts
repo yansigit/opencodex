@@ -811,6 +811,7 @@ function installShutdownFallbackSpill(
     }
     ref = writeResponseSpillDurably(job.id, spillPayloadForResident(job.id, candidate), {
       aclBudgetMs,
+      onCleanupResidual: chargeUnreclaimableSpillPath,
       commitUnderLock: published => {
         if (published.payloadBytes > responseSpillPayloadCap()) {
           rejectedOversized = true;
@@ -1215,6 +1216,7 @@ function replaceSpillEntryAtomically(
     const payload = spillPayloadForResident(id, candidate);
     let installed = false;
     writeResponseSpillDurably(id, payload, {
+      onCleanupResidual: chargeUnreclaimableSpillPath,
       commitUnderLock: ref => {
         if (legacyRetirementBlocked) return false;
         const base: Omit<SpilledResponseState, "sizeBytes"> = {
@@ -1333,6 +1335,7 @@ function admitOversizedCandidate(
     const payload = spillPayloadForResident(id, candidate);
     let installed = false;
     writeResponseSpillDurably(id, payload, {
+      onCleanupResidual: chargeUnreclaimableSpillPath,
       commitUnderLock: ref => {
         // Enforce the ceiling against the REAL envelope: the spill payload adds
         // the {version, responseId, ...} wrapper.
@@ -2537,6 +2540,7 @@ function pruneResponses(at = now()): void {
         : spillPayloadForResident(oldestId, entry);
       let installed = false;
       writeResponseSpillDurably(oldestId, payload, {
+        onCleanupResidual: chargeUnreclaimableSpillPath,
         commitUnderLock: ref => {
           if (legacyRetirementBlocked) return false;
           installed = swapResidentForSpill(oldestId, entry, ref);
@@ -2675,6 +2679,7 @@ export function evictOldestResponseContinuationForBudget(): number {
       : spillPayloadForResident(id, entry);
     let installed = false;
     writeResponseSpillDurably(id, payload, {
+      onCleanupResidual: chargeUnreclaimableSpillPath,
       commitUnderLock: ref => {
         if (legacyRetirementBlocked) return false;
         installed = swapResidentForSpill(id, entry, ref);

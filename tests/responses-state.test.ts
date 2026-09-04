@@ -1857,6 +1857,72 @@ describe("Responses previous_response_id state", () => {
     expect(metrics.totalBytes).toBeLessThanOrEqual(1_024);
   });
 
+  test("repeated synchronous temp cleanup failure remains charged against the disk cap", () => {
+    let tempUnlinks = 0;
+    setSpillIoForTest({
+      unlink(path) {
+        if (path.endsWith(".tmp")) {
+          tempUnlinks += 1;
+          throw Object.assign(new Error("locked temp"), { code: "EACCES" });
+        }
+        unlinkSync(path);
+      },
+    });
+    setResponseStateByteCapForTests(1_024);
+
+    rememberLarge("resp_sync_temp_debt", "t".repeat(8_000));
+
+    expect(tempUnlinks).toBe(2);
+    expect(spillTempNames(home)).toHaveLength(1);
+    expect(spillFileNames(home)).toHaveLength(0);
+    expect(responseStateMetrics()).toMatchObject({ tombstoneCount: 1, spillWriteFailures: 1 });
+    expect(getSpilledResponseBytesForTests()).toBe(0);
+    const cleanupDebt = getAccountedResponseSpillBytesForTests();
+    expect(cleanupDebt).toBeGreaterThan(0);
+
+    setSpillIoForTest(null);
+    setSpilledResponseByteCapForTests(cleanupDebt);
+    rememberLarge("resp_sync_temp_cap", "c".repeat(8_000));
+    expect(spillFileNames(home)).toHaveLength(0);
+    expect(getAccountedResponseSpillBytesForTests()).toBe(cleanupDebt);
+  });
+
+  test("repeated synchronous copy-destination cleanup failure remains charged against the disk cap", () => {
+    let fileFsyncs = 0;
+    let destinationUnlinks = 0;
+    setSpillIoForTest({
+      link: () => { throw Object.assign(new Error("cross-device"), { code: "EXDEV" }); },
+      fsync: () => {
+        fileFsyncs += 1;
+        if (fileFsyncs === 2) throw Object.assign(new Error("fsync failed"), { code: "EIO" });
+      },
+      unlink(path) {
+        if (path.endsWith(".spill.json")) {
+          destinationUnlinks += 1;
+          throw Object.assign(new Error("locked destination"), { code: "EACCES" });
+        }
+        unlinkSync(path);
+      },
+    });
+    setResponseStateByteCapForTests(1_024);
+
+    rememberLarge("resp_sync_destination_debt", "d".repeat(8_000));
+
+    expect(destinationUnlinks).toBe(2);
+    expect(spillTempNames(home)).toHaveLength(0);
+    expect(spillFileNames(home)).toHaveLength(1);
+    expect(responseStateMetrics()).toMatchObject({ tombstoneCount: 1, spillWriteFailures: 1 });
+    expect(getSpilledResponseBytesForTests()).toBe(0);
+    const cleanupDebt = getAccountedResponseSpillBytesForTests();
+    expect(cleanupDebt).toBeGreaterThan(0);
+
+    setSpillIoForTest(null);
+    setSpilledResponseByteCapForTests(cleanupDebt);
+    rememberLarge("resp_sync_destination_cap", "c".repeat(8_000));
+    expect(spillFileNames(home)).toHaveLength(1);
+    expect(getAccountedResponseSpillBytesForTests()).toBe(cleanupDebt);
+  });
+
   test("disk permission failure increments spillWriteFailures without retaining payload", () => {
     const denied = Object.assign(new Error("denied"), { code: "EACCES" });
     setSpillIoForTest({ write: () => { throw denied; } });
