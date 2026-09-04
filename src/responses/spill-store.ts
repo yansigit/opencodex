@@ -424,10 +424,12 @@ function publishNoReplace(
   tempPath: string,
   destinationPath: string,
   budget?: SpillAclBudget,
+  onCreated?: () => void,
 ): void {
   try {
     if (spillIoForTest?.link) spillIoForTest.link(tempPath, destinationPath);
     else linkSync(tempPath, destinationPath);
+    onCreated?.();
   } catch (error) {
     if (isErrno(error, "EEXIST")) throw error;
     if (!canUseExclusiveCopyFallback(error)) throw error;
@@ -436,6 +438,7 @@ function publishNoReplace(
       if (spillIoForTest?.copyFileExcl) spillIoForTest.copyFileExcl(tempPath, destinationPath);
       else copyFileSync(tempPath, destinationPath, constants.COPYFILE_EXCL);
       copied = true;
+      onCreated?.();
       harden(destinationPath, 0o600, budget);
       // "r+": a read-only handle cannot be fsynced on Windows (EPERM).
       const copyFd = openSync(destinationPath, "r+");
@@ -605,6 +608,7 @@ function writeResponseSpillDurablyUnlocked(
   options: ResponseSpillWriteOptions = {},
 ): ResponseSpillRef {
   let tempPath: string | null = null;
+  let createdDestinationPath: string | null = null;
   let fd: number | null = null;
   try {
     const aclBudget = spillAclBudget(options.aclBudgetMs);
@@ -629,10 +633,13 @@ function writeResponseSpillDurablyUnlocked(
       if (!OWNED_SPILL_NAME.test(fileName)) throw new Error("Response spill name allocation failed");
       const destinationPath = join(dir, fileName);
       try {
-        publishNoReplace(publishTempPath, destinationPath, aclBudget);
+        publishNoReplace(publishTempPath, destinationPath, aclBudget, () => {
+          createdDestinationPath = destinationPath;
+        });
         fsyncDirectoryBestEffort(dir);
         unlinkEphemeral(publishTempPath);
         tempPath = null;
+        createdDestinationPath = null;
         return { version, fileName, digest, payloadBytes: bytes.byteLength };
       } catch (error) {
         if (isErrno(error, "EEXIST")) continue;
@@ -646,6 +653,9 @@ function writeResponseSpillDurablyUnlocked(
     }
     if (tempPath) {
       try { unlinkEphemeral(tempPath); } catch { /* best effort */ }
+    }
+    if (createdDestinationPath) {
+      try { unlink(createdDestinationPath); } catch { /* later orphan retirement retries */ }
     }
     throw responseSpillWriteError(cause);
   }
@@ -740,8 +750,9 @@ export async function writeResponseSpillDurablyAsync(
           // Required ACL work completed above. The final no-replace publish,
           // directory durability, and owner stub installation are one shared-
           // home transaction; no destination is visible between them.
-          publishNoReplace(publishTempPath, destinationPath, aclBudget);
-          if (publicationControl) publicationControl.destinationOwned = true;
+          publishNoReplace(publishTempPath, destinationPath, aclBudget, () => {
+            if (publicationControl) publicationControl.destinationOwned = true;
+          });
           throwIfPublicationSuperseded(publicationControl);
           fsyncDirectoryBestEffort(dir);
           const published = { version, fileName, digest, payloadBytes: bytes.byteLength };

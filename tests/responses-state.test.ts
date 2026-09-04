@@ -979,6 +979,41 @@ describe("Responses previous_response_id state", () => {
     }
   });
 
+  test("copy fallback retries cleanup for a destination created before post-copy failure", async () => {
+    forceWindowsAclLane();
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    let destinationUnlinks = 0;
+    let fileFsyncs = 0;
+    setSpillIoForTest({
+      link: () => { throw Object.assign(new Error("cross-device"), { code: "EXDEV" }); },
+      fsync: () => {
+        fileFsyncs += 1;
+        if (fileFsyncs === 2) throw Object.assign(new Error("fsync failed"), { code: "EIO" });
+      },
+      unlink(path) {
+        if (path.endsWith(".spill.json") && ++destinationUnlinks === 1) {
+          throw Object.assign(new Error("temporarily locked"), { code: "EACCES" });
+        }
+        unlinkSync(path);
+      },
+    });
+    const control = createResponseSpillPublicationControl();
+
+    await expect(writeResponseSpillDurablyAsync("resp_copy_cleanup", {
+      createdAt: Date.now(),
+      items: [{ role: "user", content: "cleanup" }],
+    }, {
+      aclBudgetMs: 1_000,
+      publicationControl: control,
+    })).rejects.toThrow();
+
+    expect(destinationUnlinks).toBe(2);
+    expect(spillFileNames(home)).toEqual([]);
+    expect(spillTempNames(home)).toEqual([]);
+    expect(control).toMatchObject({ destinationPath: null, destinationOwned: false, tempPath: null });
+  });
+
   test("a committed async spill survives redundant temp cleanup failure", async () => {
     forceWindowsAclLane();
     setIcaclsRunnerForTests(() => ICACLS_OK);
