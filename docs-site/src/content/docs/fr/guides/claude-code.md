@@ -284,6 +284,32 @@ jusqu'à 5 modèles) ainsi que `ocx-self` dans `~/.claude/agents/ocx-*.md`.
 
 Utilisation : `subagent_type: "ocx-gpt-5-6-sol"`. Les cibles compatibles avec un contexte de 1M portent automatiquement `[1m]`.
 
+**Confiance accordée aux directives :** les définitions générées sont signées. Chaque corps d'agent `ocx-*` contient
+`<!-- ocx-route: ... -->` (ainsi que `<!-- ocx-effort: ... -->` lorsqu'un effort est configuré), accompagné
+d'une signature `<!-- ocx-sig: ... -->` correspondante qu'OpenCodex crée avec une clé de signature locale
+qu'il gère automatiquement. `ocx doctor` indique la présence et les permissions de cette clé sans jamais
+afficher la clé elle-même. Le proxy vérifie la signature à chaque requête **avant tout envoi à un fournisseur** :
+une directive signée absente, modifiée, corrompue ou autrement invalide rejette la requête avec une
+`400 invalid_request_error` ; elle n'est jamais acheminée vers un autre fournisseur et n'est jamais
+retraitée comme si elle n'était pas signée. Les directives de compatibilité non signées (par exemple celles
+d'une définition ancienne modifiée manuellement) ne sont acceptées que lorsqu'elles correspondent exactement
+à une entrée active de la liste appartenant à OpenCodex ; un échec de vérification signée ne bascule jamais
+vers ce chemin de liste.
+
+## Écouteur loopback non authentifié (opt-in)
+
+Lorsque le proxy écoute sur une adresse qui n'est pas loopback et exige un identifiant, un client local qui
+ne reçoit jamais cet identifiant est refusé. Pour ce cas précis, OpenCodex peut ouvrir un second écouteur lié à
+`127.0.0.1` : définissez `unauthenticatedLoopbackListener` dans la configuration (**désactivé par défaut** ;
+le port est obligatoire, doit être différent de celui du proxy et n'est jamais attribué par le système). Voir
+[Clients locaux qui ne peuvent pas recevoir le jeton](/fr/reference/configuration/#clients-locaux-qui-ne-peuvent-pas-recevoir-le-jeton).
+
+Lorsque l'écouteur est activé, il n'admet exactement que deux routes pour Claude Code : `POST /v1/messages` et
+`POST /v1/messages/count_tokens` (POST uniquement). Toute autre méthode ou chemin — y compris `/api/*` et le
+tableau de bord — renvoie `404`. L'authentification de l'écouteur public ne change pas : l'activation de cet
+écouteur n'assouplit jamais l'écouteur principal. Les routes propres à Codex sur cet écouteur sont décrites
+dans la référence de configuration.
+
 ## Élision des compétences intégrées (blockedSkills)
 
 La compétence `claude-api` fournie avec Claude Code injecte environ 840 Ko (~136k jetons) de documentation Anthropic
@@ -513,4 +539,40 @@ Utilisez `"haiku"` comme valeur de remplacement pour le modèle.
 
 ## Diagnostic de compatibilité client
 
-Sous **2.1.201**, `ocx claude` avertit sans bloquer le lancement. Mettez à jour avec `npm install -g @anthropic-ai/claude-code`; `ocx doctor` et `ocx status --json` affichent le même état. Ce seuil est distinct du sélecteur `/model` dès **2.1.129**.
+Avant de lancer `ocx claude`, opencodex vérifie la version de Claude Code par rapport au seuil de compatibilité **2.1.201**. La sonde aboutit à l'un des cinq états suivants, chacun accompagné d'indications exploitables :
+
+| État | Signification | Action |
+| --- | --- | --- |
+| `compatible` | Version égale ou supérieure au seuil | Aucune |
+| `outdated` | Version inférieure au seuil | `npm install -g @anthropic-ai/claude-code` |
+| `missing` | Claude Code n'est pas installé | Installez-le avec `npm install -g @anthropic-ai/claude-code` |
+| `timed out` | La vérification de version a expiré | Réessayez ; réparez ou mettez à niveau Claude Code si le problème persiste |
+| `unparseable` | La version n'a pas pu être reconnue | Réparez ou mettez à niveau Claude Code, puis réessayez |
+
+La sonde est indicative : un client sous le seuil, absent, dont la vérification a expiré ou non reconnu **ne bloque jamais
+le lancement** ; l'avertissement s'affiche et `ocx claude` continue. `ocx doctor` et `ocx status --json` exposent le même
+état client. Ce seuil est distinct de la capacité de passerelle du sélecteur `/model` natif, disponible à partir de **2.1.129**.
+
+### Benchmark du comptage des jetons (opt-in, peut entraîner des frais)
+
+L'approximation des jetons sur le chemin routé peut être comparée aux comptages réels des fournisseurs avec
+`bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`.
+La commande **constitue** le consentement : sans `--confirm-live-provider-charges`, elle valide uniquement les arguments
+et n'envoie rien. Une fois confirmée, elle envoie de vraies requêtes et **peut entraîner des frais de fournisseur**.
+Ne l'automatisez pas et ne l'exécutez pas dans un script sans surveillance : lancez-la délibérément en surveillant le compte.
+
+Fonctionnement :
+
+- Cible uniquement les couples fournisseur/modèle de l'adaptateur Anthropic (le fournisseur doit être authentifié par clé
+  et répertorier le modèle), afin que l'amont fournisse les `input_tokens` faisant autorité.
+- Envoie un ensemble déterministe et assaini de fixtures : aucun texte client n'est lu ni intégré.
+- Envoie les fixtures une par une ; les échecs sont typés et ne font jamais l'objet d'une nouvelle tentative, sans concurrence
+  ni fallback.
+- Produit un rapport fermé et non persistant : identifiants de fixtures, condensats, états, métriques, ainsi que le type de
+  fournisseur et l'identifiant du modèle uniquement. Aucun corps de requête, identifiant d'accès ou identifiant de compte
+  n'est jamais écrit.
+- Applique une tolérance par fixture de `max(32 tokens, 20%)` et réussit uniquement si l'erreur absolue agrégée pondérée
+  reste dans la limite de 10 %.
+
+Le comportement de `/v1/messages/count_tokens` sur le chemin routé reste inchangé par le benchmark : il demeure local pour
+les modèles routés et ne passe par Anthropic que pour les identifiants natifs `sk-ant-`.

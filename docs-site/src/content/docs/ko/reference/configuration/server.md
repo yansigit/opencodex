@@ -105,6 +105,19 @@ ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@r
 
 자동 인증은 저장된 Claude 인증이 있으면 subscription을, 없으면 proxy를 선택합니다. 감지가 불명확할 때는 경고와 함께 subscription을 선택합니다. [Claude Code 인증 모드](/guides/claude-code/#auth-mode)를 보십시오.
 
+생성된 로스터 정의(`~/.claude/agents/ocx-*.md`)에는 서명된
+`<!-- ocx-route -->` / `<!-- ocx-effort -->` 지시문이 포함되며, 프록시는 디스패치 전에 이를
+검증합니다. 서명된 지시문이 유효하지 않으면 `400 invalid_request_error`로 fail-closed 처리하고,
+서명되지 않은 지시문은 정확히 일치하는 활성 OpenCodex 소유 로스터 항목에서만 허용합니다.
+`ocx doctor`는 키 자료를 출력하지 않고 OpenCodex 구성 디렉터리에 있는 Claude 지시문 서명 키의
+존재 여부와 권한을 보고합니다.
+
+`POST /v1/messages`와 `POST /v1/messages/count_tokens`는 옵트인
+`unauthenticatedLoopbackListener`에서 허용되는 유일한 Claude 경로입니다(서버 수준 키이며 포트는
+필수이고 프록시 포트와 달라야 합니다). 퍼블릭 리스너의 인증 방식은 이 리스너로 인해 바뀌지
+않습니다. [토큰을 받을 수 없는 로컬 클라이언트](/reference/configuration/#local-clients-that-cannot-receive-the-token)를
+보십시오.
+
 ## Shadow calls
 
 Codex는 제목과 커밋 메시지 같은 작업에 작은 보조 모델을 사용합니다. 인식된 source-model prefix를 다른 구성된 모델로 돌리려면 `shadowCallIntercept`를 활성화합니다. 대체 호출은 요청에 설정된 reasoning effort를 유지합니다. 클라이언트가 다른 helper id를 사용할 때만 `sourceModels`를 설정합니다.

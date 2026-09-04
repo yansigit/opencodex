@@ -197,6 +197,19 @@ subscription'ı, hiçbiri bulunmadığında proxy'yi ve algılama yetersiz oldu�
 bir uyarı ile subscription'ı seçer. Bkz. [Claude Code kimlik doğrulama
 modu](/tr/guides/claude-code/#auth-mode).
 
+Oluşturulan kadro tanımları (`~/.claude/agents/ocx-*.md`), gönderimden önce proxy'nin
+doğruladığı imzalı `<!-- ocx-route -->` / `<!-- ocx-effort -->` yönergelerini taşır:
+geçersiz bir imzalı yönerge `400 invalid_request_error` ile kapalı olarak başarısız olur ve
+imzasız yönergeler yalnızca etkin, OpenCodex'e ait kadro girdileriyle tam olarak eşleştiğinde
+kabul edilir. `ocx doctor`, anahtar materyalini yazdırmadan imzalama anahtarının varlığını ve
+izinlerini bildirir.
+
+`POST /v1/messages` ve `POST /v1/messages/count_tokens`, isteğe bağlı
+`unauthenticatedLoopbackListener` üzerinde kabul edilen tek Claude rotalarıdır (sunucu
+düzeyinde bir anahtar; bağlantı noktası zorunludur ve proxy bağlantı noktasından farklı
+olmalıdır). Genel dinleyicide kimlik doğrulaması değişmez. Bkz.
+[Belirteci alamayan yerel istemciler](#belirteci-alamayan-yerel-istemciler).
+
 ## Gölge çağrılar
 
 Codex, başlıklar ve commit mesajları gibi görevler için küçük yardımcı modeller

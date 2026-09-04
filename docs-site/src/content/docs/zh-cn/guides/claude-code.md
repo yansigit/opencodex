@@ -161,6 +161,14 @@ v1 别名按字面解码（历史上 model ID 中包含的两字符序列 `~s` /
 
 派发方式：`subagent_type: "ocx-gpt-5-6-sol"`。支持 1M 的目标会自动携带 `[1m]`。
 
+**指令信任：**生成的定义带有签名。每个 `ocx-*` 代理正文都包含 `<!-- ocx-route: ... -->`（配置了努力级别时还包含 `<!-- ocx-effort: ... -->`）以及匹配的 `<!-- ocx-sig: ... -->` 签名；该签名由 OpenCodex 使用其自动管理的本地签名密钥创建。`ocx doctor` 会报告该密钥是否存在及其权限，但绝不会打印密钥本身。代理会在每次请求中、**任何提供方派发之前**验证签名：缺失、被修改、损坏或其他无效的签名指令都会以 `400 invalid_request_error` 拒绝请求；绝不会改路由到其他提供方，也绝不会按无签名处理而重新处理。无签名的兼容指令（例如旧版手动编辑的定义）仅在与活动的 OpenCodex 所有名册条目完全匹配时才会被采纳；签名校验失败绝不会回退到该名册路径。
+
+## 未认证环回监听器（选择启用）
+
+当代理监听需要凭据的非环回地址时，从未收到该凭据的本地客户端会被拒绝。针对这一确切情况，OpenCodex 可在 `127.0.0.1` 上绑定并开启第二个监听器：在配置中设置 `unauthenticatedLoopbackListener`（**默认关闭**；必须指定端口，且必须不同于代理端口，绝不会由操作系统自动分配）。参见[无法接收令牌的本地客户端](/reference/configuration/#local-clients-that-cannot-receive-the-token)。
+
+启用后，面向 Claude Code 的监听器只允许两个路由：`POST /v1/messages` 和 `POST /v1/messages/count_tokens`（均仅支持 POST）。其他所有方法和路径（包括 `/api/*` 和仪表板）均返回 `404`。公共监听器的认证不变：启用此监听器绝不会放宽主监听器。该监听器上的 Codex 专用路由见配置参考。
+
 ## 内置技能省略（blockedSkills）
 
 Claude Code 内置的 `claude-api` 技能会注入约 840KB（约 136k token）的 Anthropic 文档，
@@ -378,4 +386,28 @@ Claude 模型时自动加载。对于原生透传，这是正常现象；对于�
 
 ## 客户端兼容性诊断
 
-低于 **2.1.201** 时，`ocx claude` 只会警告，仍会启动。请用 `npm install -g @anthropic-ai/claude-code` 更新；`ocx doctor` 和 `ocx status --json` 会显示状态。这不同于 **2.1.129** 的 `/model` 选择器功能。
+在 `ocx claude` 启动前，opencodex 会根据 **2.1.201** 兼容性下限检查 Claude Code 版本。探测结果有五种状态，每种都提供可操作的指引：
+
+| 状态 | 含义 | 操作 |
+| --- | --- | --- |
+| `compatible` | 版本达到或高于下限 | 无需操作 |
+| `outdated` | 版本低于下限 | `npm install -g @anthropic-ai/claude-code` |
+| `missing` | 未安装 Claude Code | 使用 `npm install -g @anthropic-ai/claude-code` 安装 |
+| `timed out` | 版本检查超时 | 重试；若持续发生，请修复或升级 Claude Code |
+| `unparseable` | 无法识别版本 | 修复或升级 Claude Code，然后重试 |
+
+探测仅供参考：低于下限、缺失、超时或无法识别的客户端**绝不会阻止启动**——会打印警告，但 `ocx claude` 仍会继续。`ocx doctor` 和 `ocx status --json` 会显示相同的客户端状态。此下限不同于 **2.1.129** 的原生 `/model` 网关选择器能力。
+
+### Token-count benchmark（选择启用，可能产生费用）
+
+可通过 `bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`，将已路由路径的 token 近似值与真实提供方计数进行比较。该命令**本身就是同意**：未提供 `--confirm-live-provider-charges` 时只验证参数，不发送任何内容。确认后会发送真实请求，**可能产生提供方费用**。绝不要自动化或无人值守地脚本化运行——请有意执行并留意账户。
+
+它会：
+
+- 仅针对 Anthropic 适配器的提供方/模型组合（提供方必须使用密钥认证并列出该模型），以便上游报告权威的 `input_tokens`。
+- 发送确定性、经过清理的 fixture 集合——不会读取或嵌入客户文本。
+- 一次发送一个 fixture；失败会分类且绝不重试，不并发，也不回退。
+- 输出封闭且不持久化的报告：仅包含 fixture ID、摘要、状态、指标以及提供方类型和模型 ID。绝不会写入请求正文、凭据或账户标识符。
+- 应用每个 fixture 的 `max(32 tokens, 20%)` 容差；只有加权汇总绝对误差保持在 10% 以内才算通过。
+
+基准测试不会改变已路由 `/v1/messages/count_tokens` 的行为：对已路由模型它仍在本地处理；只有原生 `sk-ant-` 凭据才会透传给 Anthropic。

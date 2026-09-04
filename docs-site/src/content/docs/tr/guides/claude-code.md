@@ -350,6 +350,33 @@ seçer.
 Dağıtım: `subagent_type: "ocx-gpt-5-6-sol"`. 1M yetenekli hedefler `[1m]`
 işaretini otomatik olarak taşır.
 
+**Yönerge güveni:** oluşturulan tanımlar imzalıdır. Her `ocx-*` ajan gövdesi, OpenCodex'in
+otomatik olarak yönettiği yerel imzalama anahtarıyla oluşturduğu eşleşen bir
+`<!-- ocx-sig: ... -->` imzasıyla birlikte `<!-- ocx-route: ... -->` (ve çaba
+yapılandırılmışsa `<!-- ocx-effort: ... -->`) yönergesini taşır. `ocx doctor`, anahtarı
+hiçbir zaman yazdırmadan varlığını ve izinlerini raporlar. Proxy, her istekte **herhangi
+bir sağlayıcıya gönderimden önce** imzayı doğrular: eksik, değiştirilmiş, bozulmuş veya
+başka şekilde geçersiz bir imzalı yönerge isteği `400 invalid_request_error` ile reddeder —
+istek başka bir sağlayıcıya yönlendirilmez ve imzasızmış gibi yeniden işlenmez. İmzasız
+uyumluluk yönergeleri (örneğin eski, elle düzenlenmiş bir tanımdan gelenler) yalnızca etkin
+ve OpenCodex'e ait kadro girdisiyle tam olarak eşleştiğinde kabul edilir; başarısız imzalı
+kontrol bu kadro yoluna geri dönmez.
+
+## Kimlik doğrulaması olmayan loopback dinleyicisi (isteğe bağlı)
+
+Proxy, kimlik bilgisi gerektiren loopback olmayan bir adreste dinlediğinde, bu kimlik
+bilgisini hiç almayan yerel bir istemci reddedilir. Tam olarak bu durum için OpenCodex,
+`127.0.0.1`'e bağlı ikinci bir dinleyici açabilir: yapılandırmada
+`unauthenticatedLoopbackListener` ayarlayın (**varsayılan olarak kapalıdır**; bağlantı noktası
+zorunludur, proxy bağlantı noktasından farklı olmalıdır ve işletim sistemi tarafından asla
+atanmaz). Bkz. [Belirteci alamayan yerel istemciler](/tr/reference/configuration/#belirteci-alamayan-yerel-istemciler).
+
+Etkinleştirildiğinde Claude Code için dinleyici tam olarak iki rotayı kabul eder:
+`POST /v1/messages` ve `POST /v1/messages/count_tokens` (yalnızca POST). Diğer tüm yöntemler
+ve yollar — `/api/*` ve kontrol paneli dahil — `404` döndürür. Genel dinleyicide kimlik
+doğrulaması değişmez: bu dinleyiciyi etkinleştirmek ana dinleyicinin korumasını gevşetmez.
+Codex'e özgü rotalar yapılandırma başvurusunda açıklanmıştır.
+
 ## Paketlenmiş yetenek atlama (blockedSkills)
 
 Claude Code'un paketlenmiş `claude-api` yeteneği, Claude model adları
@@ -614,4 +641,45 @@ tutucusu olarak `"haiku"` iletin.
 
 ## İstemci uyumluluk tanılama
 
-**2.1.201** altında `ocx claude` yalnızca uyarır ve başlatmayı engellemez. `npm install -g @anthropic-ai/claude-code` ile güncelleyin; durum `ocx doctor` ve `ocx status --json` içinde de görünür. Bu, **2.1.129** `/model` seçici özelliğinden ayrıdır.
+`ocx claude` başlatılmadan önce opencodex, Claude Code sürümünü **2.1.201** uyumluluk
+tabanına göre kontrol eder. Araştırma beş durumdan birine ulaşır ve her biri için
+uygulanabilir yönlendirme sunar:
+
+| Durum | Anlamı | Yapılacak |
+| --- | --- | --- |
+| `compatible` | Sürüm tabanda veya üzerindedir | Hiçbir şey yapmayın |
+| `outdated` | Sürüm tabanın altındadır | `npm install -g @anthropic-ai/claude-code` |
+| `missing` | Claude Code yüklü değildir | `npm install -g @anthropic-ai/claude-code` ile yükleyin |
+| `timed out` | Sürüm kontrolü zaman aşımına uğradı | Sürerse Claude Code'u yeniden deneyin; onarın veya yükseltin |
+| `unparseable` | Sürüm tanınamadı | Claude Code'u onarın veya yükseltin, ardından yeniden deneyin |
+
+Araştırma yalnızca tavsiye niteliğindedir: tabanın altında, eksik, zaman aşımına uğramış
+veya tanınamayan bir istemci **başlatmayı hiçbir zaman engellemez** — uyarı yazdırılır ve
+`ocx claude` devam eder. `ocx doctor` ve `ocx status --json` aynı istemci durumunu gösterir.
+Bu taban, yerel `/model` ağ geçidi seçici özelliği olan **2.1.129** sürümünden ayrıdır.
+
+### Token sayımı karşılaştırması (isteğe bağlı, ücret doğurabilir)
+
+Yönlendirilen yolun token yaklaşımı, gerçek sağlayıcı sayımlarıyla şu komut kullanılarak
+ölçülebilir: `bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`.
+Komut **onayın kendisidir**: `--confirm-live-provider-charges` olmadan yalnızca bağımsız
+değişkenleri doğrular ve hiçbir şey göndermez. Onaylandığında gerçek istekler gönderir ve
+**sağlayıcı ücretlerine neden olabilir**. Bunu asla otomatikleştirmeyin veya gözetimsiz bir
+betik olarak çalıştırmayın — hesabı gözeterek bilinçli şekilde çalıştırın.
+
+Ne yapar:
+
+- Yalnızca Anthropic adaptörü sağlayıcı/model çiftlerini hedefler (sağlayıcı anahtarla
+  kimlik doğrulamalı olmalı ve modeli listelemelidir); böylece üst akış yetkili
+  `input_tokens` bilgisini raporlar.
+- Belirli, temizlenmiş bir fixture kümesi gönderir — müşteri metni okunmaz veya gömülmez.
+- Fixture'ları tek tek gönderir; hatalar türlendirilir ve asla yeniden denenmez; eşzamanlılık
+  veya geri dönüş yoktur.
+- Kapalı, kalıcı olmayan bir rapor üretir: yalnızca fixture kimlikleri, özetler, durumlar,
+  ölçümler ve sağlayıcı türü + model kimliği. İstek gövdeleri, kimlik bilgileri veya hesap
+  tanımlayıcıları hiçbir zaman yazılmaz.
+- Fixture başına `max(32 tokens, 20%)` toleransı uygular ve yalnızca ağırlıklı toplam mutlak
+  hata 10% içinde kaldığında başarılı olur.
+
+Yönlendirilen `/v1/messages/count_tokens` davranışı karşılaştırmadan etkilenmez: yönlendirilen
+modeller için yerel kalır ve yalnızca yerel `sk-ant-` kimlik bilgileriyle Anthropic'e geçer.
