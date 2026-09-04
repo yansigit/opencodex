@@ -299,7 +299,9 @@ describe("GitHub Actions hardening", () => {
     expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane serial');
     expect(windowsTestRun).toContain('Windows lane selection returned an empty shard');
     expect(windowsTestRun).not.toContain('mapfile -t general_files < <(');
-    expect(windowsTestRun).toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
+    expect(windowsTestRun).toContain('for serial_file in "${serial_files[@]}"');
+    expect(windowsTestRun).toContain('--parallel=1 --timeout 60000 "$serial_file"');
+    expect(windowsTestRun).not.toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
     expect(windowsTestRun).not.toContain(`tests --shard=\${{ matrix.shard }}/${windowsShards.length}`);
     expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"
       && step.run?.includes("git clean -xffd"))).toBe(true);
@@ -506,6 +508,9 @@ describe("GitHub Actions hardening", () => {
     expect(changesJob?.outputs?.dependencies).toBe(
       "${{ steps.scope.outputs.dependencies }}",
     );
+    expect(changesJob?.outputs?.reuse_dependency_audit).toBe(
+      "${{ steps.promotion-audit.outputs.reuse }}",
+    );
     expect(scopeStep?.id).toBe("scope");
     expect(scopeStep?.shell).toBe("bash");
     expect(scopeStep?.env?.CI_SCOPE).toBe("${{ steps.filter.outputs.ci }}");
@@ -522,16 +527,55 @@ describe("GitHub Actions hardening", () => {
     expect(filterIndex).toBeGreaterThanOrEqual(0);
     expect(scopeIndex).toBeGreaterThan(filterIndex);
 
+    const promotionAuditStep = changesJob?.steps?.find(
+      step => step.name === "Verify reusable promotion audit evidence",
+    );
+    expect(promotionAuditStep?.id).toBe("promotion-audit");
+    expect(promotionAuditStep?.env?.BEFORE_SHA).toBe("${{ github.event.before }}");
+    expect(promotionAuditStep?.env?.DEPENDENCIES_CHANGED).toBe(
+      "${{ steps.scope.outputs.dependencies }}",
+    );
+    expect(promotionAuditStep?.run).toBe(
+      "node .github/scripts/promotion-audit-reuse.cjs",
+    );
+    expect(promotionAuditStep?.if).toBe(
+      "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+    );
+    expect(promotionAuditStep?.env?.GITHUB_TOKEN).toBe("${{ github.token }}");
+
+    expect((ci.jobs?.changes as { permissions?: Record<string, string> })?.permissions)
+      .toEqual({ actions: "read", contents: "read", "pull-requests": "read" });
+
     const gatesJob = ci.jobs?.gates as {
       steps?: Array<{ name?: string; if?: string; run?: string }>;
     } | undefined;
     const auditStep = gatesJob?.steps?.find(
       step => step.name === "Dependency audit (high severity)",
     );
+    expect((auditStep as { id?: string } | undefined)?.id).toBe("dependency-audit");
     expect(auditStep?.if).toBe(
-      "needs.changes.outputs.dependencies == 'true'",
+      "needs.changes.outputs.dependencies == 'true' && needs.changes.outputs.reuse_dependency_audit != 'true'",
     );
     expect(auditStep?.run).toBe("bun run audit:high");
+    const auditProofStep = gatesJob?.steps?.find(
+      step => step.name === "Create dependency audit proof",
+    );
+    expect((auditProofStep as { id?: string } | undefined)?.id).toBe("dependency-audit-proof");
+    expect(auditProofStep?.if).toBe(
+      "github.event_name == 'pull_request' && steps.dependency-audit.outcome == 'success'",
+    );
+    expect(auditProofStep?.run).toContain("git rev-parse 'HEAD^{tree}'");
+    expect(auditProofStep?.run).toContain("dependency-audit-pr-${PR_NUMBER}-base-${BASE_SHA}-head-${HEAD_SHA}-tree-${audited_tree}");
+    const publishProofStep = gatesJob?.steps?.find(
+      step => step.name === "Publish dependency audit proof",
+    ) as { "continue-on-error"?: boolean; if?: string; uses?: string; with?: Record<string, string | number> } | undefined;
+    expect(publishProofStep?.if).toBe("steps.dependency-audit-proof.outcome == 'success'");
+    expect(publishProofStep?.["continue-on-error"]).toBe(true);
+    expect(publishProofStep?.uses).toBe(
+      "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    );
+    expect(publishProofStep?.with?.name).toBe("${{ steps.dependency-audit-proof.outputs.name }}");
+    expect(publishProofStep?.with?.["if-no-files-found"]).toBe("error");
 
     const scopedCondition = "github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'";
     for (const jobName of ["test", "storage-policy", "gates", "keyring-smoke"]) {
@@ -584,7 +628,7 @@ describe("GitHub Actions hardening", () => {
     // errors produces empty outputs — which every `== 'true'` condition reads as
     // "skip". The scoped jobs would silently stop running.
     expect((ci.jobs?.changes as { permissions?: Record<string, string> })?.permissions)
-      .toEqual({ contents: "read", "pull-requests": "read" });
+      .toEqual({ actions: "read", contents: "read", "pull-requests": "read" });
 
     // Whole-list comparison, not samples. Every entry is an input to the
     // published tarball; dropping one silently stops packaging verification for

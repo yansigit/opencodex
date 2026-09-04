@@ -119,6 +119,7 @@ jobs:
     # a failed filter produces empty outputs, which every `== 'true'` condition
     # below would read as "nothing changed, skip".
     permissions:
+      actions: read
       contents: read
       pull-requests: read
     outputs:
@@ -127,6 +128,7 @@ jobs:
       # of silently making every expensive job skip.
       ci: ${{ steps.scope.outputs.ci }}
       dependencies: ${{ steps.scope.outputs.dependencies }}
+      reuse_dependency_audit: ${{ steps.promotion-audit.outputs.reuse }}
       gui: ${{ steps.scope.outputs.gui }}
       packaging: ${{ steps.scope.outputs.packaging }}
       macos: ${{ steps.scope.outputs.macos }}
@@ -139,6 +141,8 @@ jobs:
           # between jobs, so leaving a usable token in .git/config is avoidable
           # residue. Matches the convention already used by the other workflows.
           persist-credentials: false
+          # The promotion audit verifier needs both parents of the main merge.
+          fetch-depth: 2
 
       - name: Detect changed areas
         id: filter
@@ -249,6 +253,15 @@ jobs:
               *) printf '::error::changes.outputs.%s was %q, expected true or false\n' "$scope" "$value"; exit 1 ;;
             esac
           done
+
+      - name: Verify reusable promotion audit evidence
+        id: promotion-audit
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          DEPENDENCIES_CHANGED: ${{ steps.scope.outputs.dependencies }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/promotion-audit-reuse.cjs
 
   # The general suite retains fresh-process containment after direct native
   # sharding failed qualification. The lane manifest is authoritative for
@@ -517,8 +530,41 @@ jobs:
           bun install --frozen-lockfile
 
       - name: Dependency audit (high severity)
-        if: needs.changes.outputs.dependencies == 'true'
+        id: dependency-audit
+        if: needs.changes.outputs.dependencies == 'true' && needs.changes.outputs.reuse_dependency_audit != 'true'
         run: bun run audit:high
+
+      - name: Create dependency audit proof
+        id: dependency-audit-proof
+        if: github.event_name == 'pull_request' && steps.dependency-audit.outcome == 'success'
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]
+          audited_tree="$(git rev-parse 'HEAD^{tree}')"
+          proof_name="dependency-audit-pr-${PR_NUMBER}-base-${BASE_SHA}-head-${HEAD_SHA}-tree-${audited_tree}"
+          mkdir -p .tmp/dependency-audit-proof
+          printf '%s\n' "$proof_name" > .tmp/dependency-audit-proof/evidence.txt
+          printf 'name=%s\n' "$proof_name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish dependency audit proof
+        if: steps.dependency-audit-proof.outcome == 'success'
+        # Artifact availability affects only later reuse. The audit itself has
+        # already passed, so an artifact outage must withhold reuse, not turn
+        # this PR red; main then falls back to its own live fail-closed audit.
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.dependency-audit-proof.outputs.name }}
+          path: .tmp/dependency-audit-proof/evidence.txt
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Validate GitHub Actions workflows
         run: bun run lint:workflows
@@ -808,8 +854,16 @@ jobs:
             bun scripts/test.ts --isolate --timeout 60000 "${general_files[@]}" 2>&1 | tee "$suite_log"
             suite_status="${PIPESTATUS[0]}"
             if [ "$suite_status" -eq 0 ]; then
-              bun scripts/test.ts --isolate --parallel=1 --timeout 60000 "${serial_files[@]}" 2>&1 | tee -a "$suite_log"
-              suite_status="${PIPESTATUS[0]}"
+              # Each process-heavy serial file gets a fresh Bun runner. `--isolate`
+              # resets test globals, but one multi-file Bun process can still retain
+              # runtime/handle pressure before the next file spawns its own children.
+              for serial_file in "${serial_files[@]}"; do
+                bun scripts/test.ts --isolate --parallel=1 --timeout 60000 "$serial_file" 2>&1 | tee -a "$suite_log"
+                suite_status="${PIPESTATUS[0]}"
+                if [ "$suite_status" -ne 0 ]; then
+                  break
+                fi
+              done
             fi
             if [ "$suite_status" -eq 0 ]; then
               exit 0

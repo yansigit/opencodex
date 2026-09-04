@@ -121,7 +121,18 @@ const CLIENT_TOOL_FINALIZE_GRACE_MS = 50;
 const GENERIC_TOOL_COUNT_MIN_FINALIZE_GRACE_MS = 750;
 const GENERIC_TOOL_COUNT_MAX_FINALIZE_GRACE_MS = 1_800;
 const GENERIC_TOOL_COUNT_PER_TOOL_GRACE_MS = 125;
-const cursorContextUsageTracker = createCursorContextUsageTracker();
+const cursorContextUsageTracker = createCursorContextUsageTracker({
+  onContextDrop(previousTokens, currentTokens) {
+    const droppedTokens = previousTokens - currentTokens;
+    if (droppedTokens >= 1_024 && currentTokens <= previousTokens * 0.9) {
+      debugProviderDiagnostic("cursor", "context-compacted", {
+        previousTokens,
+        currentTokens,
+        droppedTokens,
+      });
+    }
+  },
+});
 
 /**
  * Single-shot terminal settlement for one Cursor turn: whichever of fail/finish wins first owns

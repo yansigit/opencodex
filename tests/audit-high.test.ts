@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   auditWithRetries,
   isTransientAuditFailure,
+  runAttempt,
   type AuditAttempt,
 } from "../scripts/ci/audit-high";
 
@@ -17,6 +18,8 @@ describe("dependency audit retry classification", () => {
 
   test("retries transport errors and explicit attempt timeouts", () => {
     expect(isTransientAuditFailure("error: ETIMEDOUT fetching advisories")).toBe(true);
+    expect(isTransientAuditFailure("error: registry request - DNSResolveFailed")).toBe(true);
+    expect(isTransientAuditFailure("error: getaddrinfo ENOTFOUND registry.npmjs.org")).toBe(true);
     expect(isTransientAuditFailure("", true)).toBe(true);
   });
 
@@ -54,6 +57,32 @@ describe("dependency audit retry classification", () => {
 
     expect(attempts).toHaveLength(0);
     expect(warnings).toHaveLength(1);
+  });
+
+  test("hard-kills a timed-out audit and drains its captured streams", async () => {
+    let resolveExit!: (code: number) => void;
+    let killSignal: number | undefined;
+    const exited = new Promise<number>(resolve => { resolveExit = resolve; });
+
+    const result = await runAttempt("/workspace", {
+      timeoutMs: 5,
+      spawn: () => ({
+        exited,
+        stdout: new Response("partial stdout").body!,
+        stderr: new Response("partial stderr").body!,
+        kill: signal => {
+          killSignal = signal;
+          resolveExit(137);
+        },
+      }),
+    });
+
+    expect(killSignal).toBe(9);
+    expect(result).toEqual({
+      exitCode: 137,
+      output: "partial stdoutpartial stderr",
+      timedOut: true,
+    });
   });
 
   test("fails a vulnerability result immediately without retrying", async () => {

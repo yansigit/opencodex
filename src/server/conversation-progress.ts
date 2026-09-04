@@ -7,6 +7,7 @@ export type { TurnProgressTelemetry } from "../types/progress";
 export const CURSOR_429_STORM_THRESHOLD = 3;
 export const CURSOR_429_STORM_WINDOW_MS = 45_000;
 export const CURSOR_429_STORM_COOLDOWN_MS = 30_000;
+export const CURSOR_REPEATED_TOOL_OUTPUT_THRESHOLD = 3;
 
 const MAX_TRACKED_TURNS = 4_096;
 const PROCESS_KEY = randomBytes(32);
@@ -17,7 +18,9 @@ interface ConversationState {
   last429At: number;
   circuitUntil: number;
   logicalCallsSinceToolCompletion: number;
+  consecutiveRepeatedToolOutputs: number;
   lastOutputDigest?: string;
+  lastToolBearingOutputDigest?: string;
   lastCommentaryDigest?: string;
   lastPreToolDigest?: string;
   lastPreToolTokenHashes?: ReadonlySet<string>;
@@ -28,6 +31,7 @@ interface ConversationState {
 
 const conversations = new Map<string, ConversationState>();
 const outputHashes = new WeakMap<TurnProgressTelemetry, Hash>();
+const toolBearingOutputHashes = new WeakMap<TurnProgressTelemetry, Hash>();
 const commentaryText = new WeakMap<TurnProgressTelemetry, string>();
 const MAX_COMMENTARY_FINGERPRINT_BYTES = 8_192;
 export const MAX_GENERIC_PRE_TOOL_NARRATION_BYTES = 512;
@@ -112,6 +116,7 @@ export function beginConversationTurn(
       last429At: 0,
       circuitUntil: 0,
       logicalCallsSinceToolCompletion: 0,
+      consecutiveRepeatedToolOutputs: 0,
       touchedAt: now,
     };
     conversations.set(key, state);
@@ -127,6 +132,10 @@ export function beginConversationTurn(
   state.logicalCallsSinceToolCompletion++;
   state.touchedAt = now;
   const circuitOpen = state.consecutive429s >= CURSOR_429_STORM_THRESHOLD && now < state.circuitUntil;
+  const repetitionCircuitOpen = state.consecutiveRepeatedToolOutputs >= CURSOR_REPEATED_TOOL_OUTPUT_THRESHOLD;
+  // This circuit is a one-shot, stated interruption rather than a cooldown. Consuming it lets a
+  // deliberate caller retry proceed, while still breaking an otherwise unbounded automatic loop.
+  if (repetitionCircuitOpen) state.consecutiveRepeatedToolOutputs = 0;
   return {
     key,
     telemetry: {
@@ -144,12 +153,21 @@ export function beginConversationTurn(
       assistantBoundaries: 0,
       terminalEvents: 0,
       ...(circuitOpen ? { rateLimitCircuitOpen: true } : {}),
+      ...(repetitionCircuitOpen ? { repetitionCircuitOpen: true } : {}),
     },
     ...(circuitOpen ? { retryAfterSeconds: Math.max(1, Math.ceil((state.circuitUntil - now) / 1_000)) } : {}),
   };
 }
 
 export function observeTurnProgress(telemetry: TurnProgressTelemetry, event: AdapterEvent): void {
+  const hashOutput = (...parts: string[]): void => {
+    const hash = toolBearingOutputHashes.get(telemetry) ?? (() => {
+      const created = createHash("sha256");
+      toolBearingOutputHashes.set(telemetry, created);
+      return created;
+    })();
+    for (const part of parts) hash.update(part);
+  };
   switch (event.type) {
     case "text_delta":
       telemetry.textDeltaCount++;
@@ -172,6 +190,7 @@ export function observeTurnProgress(telemetry: TurnProgressTelemetry, event: Ada
         outputHashes.set(telemetry, hash);
         return hash;
       })()).update(event.text);
+      hashOutput("text\0", event.phase ?? "final", "\0", event.text, "\0");
       return;
     case "thinking_delta":
     case "reasoning_raw_delta":
@@ -179,9 +198,14 @@ export function observeTurnProgress(telemetry: TurnProgressTelemetry, event: Ada
       return;
     case "tool_call_start":
       telemetry.toolCallsStarted++;
+      hashOutput("tool-start\0", event.name, "\0");
+      return;
+    case "tool_call_delta":
+      hashOutput("tool-args\0", event.arguments, "\0");
       return;
     case "tool_call_end":
       telemetry.toolCallsCompleted++;
+      hashOutput("tool-end\0");
       return;
     case "assistant_boundary":
       telemetry.assistantBoundaries++;
@@ -331,6 +355,18 @@ export function finishConversationTurn(
     outputHashes.delete(telemetry);
     telemetry.exactOutputRepeat = outputDigest === state.lastOutputDigest;
     state.lastOutputDigest = outputDigest;
+  }
+  const toolBearingOutputHash = toolBearingOutputHashes.get(telemetry);
+  const toolBearingOutputDigest = toolBearingOutputHash?.digest("hex");
+  toolBearingOutputHashes.delete(telemetry);
+  const repeatedToolOutput = telemetry.toolCallsCompleted > 0
+    && toolBearingOutputDigest !== undefined
+    && toolBearingOutputDigest === state.lastToolBearingOutputDigest;
+  state.lastToolBearingOutputDigest = telemetry.toolCallsCompleted > 0 ? toolBearingOutputDigest : undefined;
+  if (status >= 200 && status < 300 && repeatedToolOutput) {
+    state.consecutiveRepeatedToolOutputs++;
+  } else {
+    state.consecutiveRepeatedToolOutputs = 0;
   }
   const commentary = commentaryText.get(telemetry);
   if (commentary) {

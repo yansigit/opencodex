@@ -11,6 +11,11 @@ export const SERIAL_TEST_FILES = [
   "tests/claude-native-passthrough.test.ts",
   "tests/claude-management-api.test.ts",
   "tests/codex-app-server-processes.test.ts",
+  // Spawns multiple real `ocx start` children. Under the general Windows pool,
+  // four Bun test processes can starve a healthy child past its readiness
+  // watchdog even though it is still alive. Keep the end-to-end assertions;
+  // isolate their process scheduling from unrelated shard load.
+  "tests/codex-composed-acceptance.test.ts",
   "tests/codex-journal.test.ts",
   "tests/codex-prompt-route.test.ts",
   "tests/codex-shim.test.ts",
