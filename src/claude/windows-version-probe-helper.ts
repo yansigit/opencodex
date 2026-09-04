@@ -85,6 +85,7 @@ export async function runWindowsVersionProbeHelper(
   });
   return await new Promise(resolve => {
     let finished = false;
+    let timedOut = false;
     let exit: { status: number | null; signal: NodeJS.Signals | null } | null = null;
     const finish = (result: ClaudeVersionProbeOutput): void => {
       if (finished) return;
@@ -94,19 +95,26 @@ export async function runWindowsVersionProbeHelper(
     };
     const timeoutAtMs = request.deadlineAtMs - WINDOWS_HELPER_CLEANUP_RESERVE_MS;
     const timeoutTimer = setTimer(() => {
+      timedOut = true;
       const killer = child.pid ? (deps.spawnTaskkill ?? defaultSpawnTaskkill)(child.pid) : null;
       // Start cleanup while cmd.exe is live, then wait only inside the absolute reserve.
       void awaitClose(killer, Math.min(TASKKILL_WAIT_CAP_MS, Math.max(0, request.deadlineAtMs - now())), { setTimer, clearTimer })
         .then(() => finish({ error: { code: "ETIMEDOUT" } }));
     }, Math.max(0, timeoutAtMs - now()));
-    child.once("error", error => finish({ error: { code: typeof error.code === "string" ? error.code : "ETIMEDOUT" } }));
-    child.once("exit", (status, signal) => { exit = { status, signal }; });
+    child.once("error", error => {
+      if (!timedOut) finish({ error: { code: typeof error.code === "string" ? error.code : "ETIMEDOUT" } });
+    });
+    child.once("exit", (status, signal) => {
+      if (!timedOut) exit = { status, signal };
+    });
     // `close`, not `exit`, guarantees the private stdout has drained before serialization.
-    child.once("close", (status, signal) => finish({
-      status: exit?.status ?? status,
-      signal: exit?.signal ?? signal,
-      error: null,
-    }));
+    child.once("close", (status, signal) => {
+      if (!timedOut) finish({
+        status: exit?.status ?? status,
+        signal: exit?.signal ?? signal,
+        error: null,
+      });
+    });
   });
 }
 

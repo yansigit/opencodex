@@ -53,6 +53,26 @@ describe("Windows Claude version helper lifecycle", () => {
     expect((await pending).error).toEqual({ code: "ETIMEDOUT" });
   });
 
+  test("timeout outcome cannot be overwritten by target close during cleanup", async () => {
+    const target = new FakeChild();
+    const killer = new FakeChild();
+    const timers: (() => void)[] = [];
+    let settled = false;
+    const pending = runWindowsVersionProbeHelper(request(), {
+      now: () => 0,
+      spawnTarget: () => target,
+      spawnTaskkill: () => killer,
+      setTimer: callback => { timers.push(callback); return timers.length as unknown as ReturnType<typeof setTimeout>; },
+      clearTimer: () => {},
+    }).then(result => { settled = true; return result; });
+    timers[0]!();
+    target.emit("close", 0 as never, null as never);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    killer.emit("close", 0 as never, null as never);
+    expect((await pending).error).toEqual({ code: "ETIMEDOUT" });
+  });
+
   test("serializes only after close so drained output and exit status survive", async () => {
     const child = new FakeChild();
     let settled = false;
