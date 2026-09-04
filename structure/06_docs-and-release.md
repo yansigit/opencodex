@@ -68,8 +68,11 @@ authenticated catalog access, and a real routed response themselves.
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | `pull_request` to `main`/`dev`, `push` to `main`/`preview`/`dev`, or manual dispatch when runtime/package paths change | Cross-platform runtime/package quality gate. Linux runs the suite as four parallel shards (`test 1/4`–`4/4`) plus a consolidated `gates` job; macOS runs the full suite. Windows runs the full suite only on a `push` to `main`/`preview` or a manual dispatch — it is the shipping boundary, not the pull-request lane, because it was last to finish in every sampled run at roughly three times the Linux median. The aggregate `ci` job asserts `platform-windows` actually succeeded on those boundary events rather than accepting a skip. `npm-global-smoke` always remains GitHub-hosted because it mutates the global package prefix. |
-| `.github/workflows/release.yml` | Manual dispatch only | npm publish/dry-run workflow. It requires the exact `GITHUB_SHA` to have a successful Cross-platform CI run before publish or dry-run. |
+| `.github/workflows/ci.yml` | `pull_request`, merge-queue `merge_group`, `push` to `main`/`preview`/`dev`, or manual dispatch | Cross-platform quality gate. Candidate runs are keyed by immutable head SHA, merge-group paths compare explicit queue base/head SHAs, and the stable `ci` aggregate fails closed over every producer. Self-hosted Windows is restricted to trusted push/manual events. |
+| `.github/workflows/release-pr.yml` | `push` to `main` or manual dispatch | Maintains a reviewable Release Please version PR without creating a GitHub release or publishing a package. |
+| `.github/workflows/release-candidate.yml` | Successful `Cross-platform CI` push run on `main`, or exact-SHA manual dispatch | Builds one npm tarball, records canonical source/tree/input/package provenance, and uploads it without publish credentials. |
+| `.github/workflows/fork-auto-release.yml` | Successful `Build release candidate` completion on `main` | Resolves exactly one unexpired artifact from the trusted candidate run and dispatches its run/artifact IDs. |
+| `.github/workflows/release.yml` | Audited stable repository dispatch or transitional manual dispatch | Stable automation re-verifies and publishes the exact candidate tarball without lifecycle scripts or repacking. Existing manual dev/preview callers retain their prior path until rollout is proven and cutover is authorized. |
 | `.github/workflows/deploy-docs.yml` | `push` to `main` touching `docs-site/**` or the workflow, or manual dispatch | Build and publish the Astro/Starlight docs site to GitHub Pages. |
 | `.github/workflows/service-lifecycle.yml` | `pull_request` to `main`/`dev` and `push`, both filtered on the service path set (`src/service.ts`, `src/cli.ts`, `src/cli/index.ts`, `src/lib/bun-runtime.ts`, `package.json`, `bun.lock`, the workflow), or manual dispatch | Service-lifecycle smoke on three platforms: Linux systemd, macOS launchd, and Windows Scheduled Tasks. Each installs, verifies, stops via `ocx stop`, and uninstalls. The path list is kept in sync with the `release.yml` service-gate regex. |
 | `.github/workflows/enforce-pr-target.yml` | `pull_request_target` (opened, reopened, edited, labeled, unlabeled, ready_for_review, synchronize) plus default-branch `status` events filtered to successful `CodeRabbit` statuses | The `enforce-target` gate: rejects pull requests whose head ancestry sits on the `main` tip while far behind `dev`, rejects empty or malformed descriptions, requires a GUI screenshot when the title/body mentions `gui` (immediately waivable with the maintainer-controlled `gui-screenshot-waived` label; legacy maintainer comments remain compatibility evidence on later PR events), keeps contributor PRs in draft until a four-box readiness checklist is complete, verifies the CI / latest-dev / Codex+CodeRabbit-findings claims (review threads plus current-head CodeRabbit review-body findings outside the diff range), and adds a `review-ready` status label at the ready moment. CodeRabbit status SHAs must resolve to exactly one open current-head PR before writes. Stacked child PRs targeting another open PR's head skip the wrong-base gate. |
@@ -183,10 +186,12 @@ Invariants:
 
 ## Release workflow
 
-Package release is npm-focused. `package.json` exposes `opencodex` and `ocx`, `prepublishOnly` runs
-typecheck and GUI build, and `scripts/release.ts` now runs local typecheck, `bun test --isolate tests`, and
-`bun run privacy:scan` before the version bump, commit/push, Cross-platform CI wait, and GitHub
-Release workflow dispatch. Docs publishing is separate from npm release publishing.
+Package release is npm-focused. Stable automation follows one provenance chain:
+`Cross-platform CI` → `Build release candidate` → `Fork auto-release` → `Release`. The candidate
+workflow packages once; the publisher verifies the run, artifact, manifest, source tree, inputs,
+version, and tarball digests before publishing that same file. `scripts/release.ts` and dev/preview
+manual dispatch remain a transition path until a real stable candidate release proves the chain and
+maintainers authorize retirement. Docs publishing is separate from npm release publishing.
 
 ### Release notes
 
