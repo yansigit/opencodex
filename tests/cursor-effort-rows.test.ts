@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { saveConfig } from "../src/config";
+import { getOrCreateDirectiveSigningKey } from "../src/claude/directive-key";
+import { signDirective } from "../src/claude/directive-sign";
 import {
   resetCodexModelEntitlementCacheForTests,
   seedCodexModelEntitlementsForTests,
@@ -256,6 +258,8 @@ describe("Cursor effort variant rows", () => {
     const upstream = mockChatUpstream();
     try {
       const config = ingressConfig(`${upstream.server.url.toString().replace(/\/$/u, "")}/v1`);
+      const route = "claude-effort-row-fixture--max";
+      const key = getOrCreateDirectiveSigningKey();
       const response = await handleClaudeMessages(new Request("http://localhost/v1/messages", {
         method: "POST",
         headers: {
@@ -267,7 +271,10 @@ describe("Cursor effort variant rows", () => {
           model: "claude-fallback-model",
           max_tokens: 128,
           stream: false,
-          system: [{ type: "text", text: "<!-- ocx-route: claude-effort-row-fixture--max -->" }],
+          system: [
+            { type: "text", text: `<!-- ocx-route: ${route} -->` },
+            { type: "text", text: `<!-- ocx-sig: v1:${signDirective(route, undefined, key)} -->` },
+          ],
           messages: [{ role: "user", content: "hello" }],
         }),
       }), config, { model: "", provider: "" } as RequestLogContext);

@@ -158,6 +158,50 @@ export function buildClaudeAgentDefs(config: OcxConfig, windows: Record<string, 
   return defs;
 }
 
+export function getActiveRosterDirectives(
+  config: OcxConfig,
+  windows: Record<string, number> = {},
+  configDir?: string,
+): Map<string, { effort?: string }> {
+  if (config.claudeCode?.injectAgents === false || config.claudeCode?.enabled === false) {
+    return new Map();
+  }
+  const defs = buildClaudeAgentDefs(config, windows, configDir);
+  const roster = new Map<string, { effort?: string }>();
+  for (const def of defs) {
+    const raw = def.model.trim().toLowerCase();
+    const stripped = stripOneMillionMarker(raw).trim().toLowerCase();
+    roster.set(raw, { effort: def.effort });
+    roster.set(stripped, { effort: def.effort });
+  }
+  return roster;
+}
+
+export function isAllowedLegacyDirective(
+  route: string,
+  effort: string | null | undefined,
+  config: OcxConfig,
+  configDir?: string,
+): boolean {
+  try {
+    if (!route || typeof route !== "string") return false;
+    const rawRoute = route.trim().toLowerCase();
+    const strippedRoute = stripOneMillionMarker(route.trim()).toLowerCase();
+    const roster = getActiveRosterDirectives(config, {}, configDir);
+    const match = roster.get(rawRoute) ?? roster.get(strippedRoute);
+    if (!match) return false;
+    if (effort) {
+      const expectedEffort = match.effort ?? config.claudeCode?.subagentEffort;
+      if (effort !== expectedEffort) return false;
+    }
+    return true;
+  } catch {
+    // Roster resolution must never crash the request path: an unreadable or
+    // undecodable selector in config fails closed like any untrusted override.
+    return false;
+  }
+}
+
 function skillNameLiteral(name: string): string {
   return JSON.stringify(name)
     .replaceAll("`", "\\u0060")

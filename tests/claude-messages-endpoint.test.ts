@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replacePersistedConfig, saveConfig } from "../src/config";
 import { createAnthropicAdapter } from "../src/adapters/anthropic";
+import { getOrCreateDirectiveSigningKey } from "../src/claude/directive-key";
+import { signDirective } from "../src/claude/directive-sign";
 import { clearableDeadline } from "../src/lib/abort";
 import {
   clearRequestLogsForTests,
@@ -101,6 +103,7 @@ function mockConfig(baseUrl: string, claudeCode?: OcxConfig["claudeCode"]): OcxC
     providers: {
       mock: { adapter: "openai-chat", baseUrl, apiKey: "k", allowPrivateNetwork: true },
     },
+    subagentModels: ["mock/test-model"],
     ...(claudeCode ? { claudeCode } : {}),
   } as OcxConfig;
 }
@@ -1419,6 +1422,8 @@ test("generated agent effort directive restores exact xhigh and max after Claude
   const { server: upstream, captured } = mockChatUpstreamCapturing();
   saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`));
   const server = startServer(0);
+  const route = "claude-ocx-mock--test-model";
+  const key = getOrCreateDirectiveSigningKey();
   try {
     for (const effort of ["xhigh", "max"]) {
       const response = await postMessages(server.url.toString(), {
@@ -1426,8 +1431,9 @@ test("generated agent effort directive restores exact xhigh and max after Claude
         max_tokens: 32000,
         stream: true,
         system: [
-          { type: "text", text: "<!-- ocx-route: claude-ocx-mock--test-model -->" },
+          { type: "text", text: `<!-- ocx-route: ${route} -->` },
           { type: "text", text: `<!-- ocx-effort: ${effort} -->` },
+          { type: "text", text: `<!-- ocx-sig: v1:${signDirective(route, effort, key)} -->` },
         ],
         thinking: { type: "enabled", budget_tokens: 31999 },
         messages: [{ role: "user", content: "hi" }],
@@ -1464,6 +1470,7 @@ test("generated agent effort directive preserves routed Anthropic structured out
   saveConfig({
     port: 0,
     defaultProvider: "mock-anthropic",
+    subagentModels: ["mock-anthropic/claude-sonnet-5"],
     providers: {
       "mock-anthropic": {
         adapter: "anthropic",
@@ -1474,6 +1481,9 @@ test("generated agent effort directive preserves routed Anthropic structured out
     },
   } as OcxConfig);
   const server = startServer(0);
+  const route = "claude-ocx-mock-anthropic--claude-sonnet-5";
+  const effort = "max";
+  const key = getOrCreateDirectiveSigningKey();
   const schema = {
     type: "object",
     properties: { answer: { type: "string" } },
@@ -1486,8 +1496,9 @@ test("generated agent effort directive preserves routed Anthropic structured out
       max_tokens: 32000,
       stream: true,
       system: [
-        { type: "text", text: "<!-- ocx-route: claude-ocx-mock-anthropic--claude-sonnet-5 -->" },
-        { type: "text", text: "<!-- ocx-effort: max -->" },
+        { type: "text", text: `<!-- ocx-route: ${route} -->` },
+        { type: "text", text: `<!-- ocx-effort: ${effort} -->` },
+        { type: "text", text: `<!-- ocx-sig: v1:${signDirective(route, effort, key)} -->` },
       ],
       thinking: { type: "enabled", budget_tokens: 31999 },
       output_config: {

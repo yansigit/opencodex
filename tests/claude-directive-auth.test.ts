@@ -116,7 +116,7 @@ describe("agent injection with ocx-sig (src/claude/agents-inject.ts)", () => {
     expect(extracted.version).toBe("v1");
     expect(extracted.signature).toBeTruthy();
 
-    const verified = verifyAndExtractDirectives({ system: agentBody }, key, config);
+    const verified = verifyAndExtractDirectives({ system: agentBody }, key);
     expect(verified.isSigned).toBe(true);
     expect(verified.route).toBe(defs[0]!.model);
     expect(verified.effort).toBe("high");

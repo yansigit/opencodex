@@ -362,7 +362,10 @@ export function extractSignedDirective(body: unknown): {
 export function verifyAndExtractDirectives(
   body: unknown,
   key: string,
-  config?: OcxConfig | OcxClaudeCodeConfig,
+  allowLegacyDirective?: (
+    route: string,
+    effort: NonNullable<OcxClaudeCodeConfig["subagentEffort"]> | null,
+  ) => boolean,
 ): {
   route: string | null;
   effort: NonNullable<OcxClaudeCodeConfig["subagentEffort"]> | null;
@@ -410,7 +413,7 @@ export function verifyAndExtractDirectives(
   // Unsigned path
   // If unsigned ocx-effort is present without ocx-route: it is ignored and does not override effort or routing.
   if (scanned.routes.length === 0 || !scanned.routes[0].trim()) {
-    return { route: null, effort: null, isSigned: false };
+    return { route: null, effort: null, isSigned: false, isLegacyMatch: false };
   }
 
   const route = scanned.routes[0].trim();
@@ -419,10 +422,16 @@ export function verifyAndExtractDirectives(
     ? (rawEffort as NonNullable<OcxClaudeCodeConfig["subagentEffort"]>)
     : null;
 
+  // Unsigned compatibility is opt-in and caller-authorized. Without the
+  // active-roster predicate, an untrusted prompt directive is ignored.
+  if (!allowLegacyDirective?.(route, effort)) {
+    return { route: null, effort: null, isSigned: false, isLegacyMatch: false };
+  }
   return {
     route,
     effort,
     isSigned: false,
+    isLegacyMatch: true,
   };
 }
 

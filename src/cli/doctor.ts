@@ -27,6 +27,8 @@ import { probeNativeProfileRecoveryState, resolveNativeProfileContext } from "..
 import { NativeProfileError } from "../codex/native-profile-types";
 import { collectOrcaCodexHomeDiagnostic, resolveCodexHomeDir as resolveCodexHomeDirImpl, isWslRuntime, listWslWindowsCodexHomes, wslAutomountRoot, type CodexHomeDeps } from "../codex/home";
 import { scanCodexAgentRolesWithTomlModelFallback } from "../codex/subagent-model-fallback";
+import { lstatSync } from "node:fs";
+import { DIRECTIVE_KEY_FILE, getDirectiveKeyPath } from "../claude/directive-key";
 import { diagnoseCodexShim, findCodexOnPath, isWindowsInteropDir, type CodexShimDiagnostic } from "../codex/shim";
 import { providerTableString, rootTomlString } from "../codex/injected-marker";
 import { countPendingOpencodexHistory } from "../codex/history-provider";
@@ -1267,6 +1269,34 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   } else {
     for (const line of formatProjectCodexConfigWarningsForDoctor(projectWarnings)) {
       console.log(line);
+    }
+  }
+
+  // Claude Code subagent directive signing key (TRUST-01/TRUST-05): report only
+  // presence and permission metadata. The key material itself is NEVER read into
+  // a diagnostic string here.
+  console.log("\nClaude directive signing key");
+  {
+    const keyPath = getDirectiveKeyPath();
+    try {
+      const st = lstatSync(keyPath);
+      if (st.isSymbolicLink()) {
+        console.log(`  --     ${DIRECTIVE_KEY_FILE} is a symlink; the proxy refuses to follow symlinked key files`);
+        console.log("        Action: replace the symlink with a regular file, then let the proxy recreate or reuse the key");
+      } else if (!st.isFile()) {
+        console.log(`  --     ${DIRECTIVE_KEY_FILE} is not a regular file`);
+      } else if (process.platform === "win32" || (st.mode & 0o777) === 0o600) {
+        console.log(`  ok     ${DIRECTIVE_KEY_FILE} present (0600, owner-only)`);
+      } else {
+        console.log(`  !!     ${DIRECTIVE_KEY_FILE} present but permissions are 0${(st.mode & 0o777).toString(8)} (expected 0600)`);
+        console.log("        Action: chmod 600 the key file; the proxy also auto-tightens permissions at startup");
+      }
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+        console.log(`  --     ${DIRECTIVE_KEY_FILE} missing (created automatically by the proxy or sync on first use under ${getDirectiveKeyPath()})`);
+      } else {
+        console.log(`  --     ${DIRECTIVE_KEY_FILE} status could not be checked (${cause instanceof Error ? cause.message : String(cause)})`);
+      }
     }
   }
 

@@ -12,6 +12,7 @@ import { enforceAnthropicImageLimits, sniffImageDimensions } from "../adapters/a
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
 import { AnthropicRequestError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, verifyAndExtractDirectives, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
 import { getOrCreateDirectiveSigningKey } from "../claude/directive-key";
+import { isAllowedLegacyDirective } from "../claude/agents-inject";
 import { resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
@@ -767,7 +768,11 @@ async function handleClaudeMessagesWithBudget(
     // frontmatter. Must run BEFORE the native-passthrough branch — the CLI sends
     // these subagent turns under a fallback claude model id.
     if (isRec(anthropicBody)) {
-      const directives = verifyAndExtractDirectives(anthropicBody, getOrCreateDirectiveSigningKey(), config);
+      const directives = verifyAndExtractDirectives(
+        anthropicBody,
+        getOrCreateDirectiveSigningKey(),
+        (route, effort) => isAllowedLegacyDirective(route, effort, config),
+      );
       if (directives.route && typeof anthropicBody.model === "string") {
         anthropicBody.model = stripOneMillionMarker(directives.route);
         if (directives.effort) {
@@ -1190,7 +1195,11 @@ export async function handleClaudeCountTokens(
   // ocx-route override (devlog 072 + TRUST-01..05): keep count_tokens consistent with messages.
   let directives;
   try {
-    directives = verifyAndExtractDirectives(raw, getOrCreateDirectiveSigningKey(), config);
+    directives = verifyAndExtractDirectives(
+      raw,
+      getOrCreateDirectiveSigningKey(),
+      (route, effort) => isAllowedLegacyDirective(route, effort, config),
+    );
   } catch (err) {
     if (err instanceof AnthropicRequestError) {
       return anthropicErrorResponse(400, err.message, "invalid_request_error");
