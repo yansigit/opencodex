@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expandPreviousResponseInput } from "../src/responses/state";
 import { handleResponses, handleResponsesCompact } from "../src/server/responses";
+import type { RequestLogContext } from "../src/server/request-log";
 import type { OcxConfig } from "../src/types";
-import { FERNET_TASK, fakeChatGptJwt } from "./helpers/agent-task-recovery";
+import { fakeChatGptJwt } from "./helpers/agent-task-recovery";
 
 const savedCodexHome = process.env.CODEX_HOME;
 const codexHome = mkdtempSync(join(tmpdir(), "ocx-v2-routed-delegation-bridge-"));
@@ -88,10 +89,12 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       }), { headers: { "content-type": "application/json" } });
     }) as typeof fetch;
     try {
-      const response = await handleResponses(request(rootBody()), config(), { model: "", provider: "" });
+      const logCtx: RequestLogContext = { model: "", provider: "" };
+      const response = await handleResponses(request(rootBody()), config(), logCtx);
       const output = await response.json() as { output: Array<Record<string, unknown>> };
 
       expect(requests).toHaveLength(1);
+      expect(requests[0]?.stream).toBe(true);
       expect((requests[0]?.tools as Array<Record<string, unknown>>)[0]?.name).toBe("collaboration");
       expect((requests[0]?.tools as Array<Record<string, unknown>>)[1]).toMatchObject({
         type: "namespace", name: "ocx_agents", tools: [{ name: "spawn_agent" }, { name: "send_message" }],
@@ -99,6 +102,202 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       expect(output.output[0]).toMatchObject({
         namespace: "collaboration", name: "spawn_agent", encrypted_function_args: [],
       });
+      expect(logCtx.v2BridgeDecision).toBe("active");
+      expect(logCtx.v2BridgeScope).toBe("root");
+      expect(["encrypted", "memory-only"]).toContain(logCtx.v2BridgeStateDurability);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("drains the canonical SSE-only backend into JSON and retains indexed bridge calls", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const call = {
+      type: "function_call",
+      id: "fc_streamed_bridge",
+      call_id: "call_streamed_bridge",
+      namespace: "ocx_agents",
+      name: "spawn_agent",
+      arguments: "{\"message\":\"plaintext streamed grandchild\"}",
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return new Response([
+        `event: response.output_item.added\ndata: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { ...call, arguments: "" } })}\n\n`,
+        `event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: call })}\n\n`,
+        `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: { id: "resp_streamed_bridge", status: "completed", output: [] } })}\n\n`,
+        "data: [DONE]\n\n",
+      ].join(""), { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+    try {
+      const response = await handleResponses(request(rootBody()), config(), { model: "", provider: "" });
+      const body = await response.json() as { id: string; output: Array<Record<string, unknown>> };
+
+      expect(requests[0]?.stream).toBe(true);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(body.id).toBe("resp_streamed_bridge");
+      expect(body.output).toEqual([{
+        ...call,
+        namespace: "collaboration",
+        encrypted_function_args: [],
+      }]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("finishes unary JSON at the SSE terminal even when the backend connection stays open", async () => {
+    const encoder = new TextEncoder();
+    let cancelled = false;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(
+          `data: ${JSON.stringify({
+            type: "response.completed",
+            response: { id: "resp_open_socket", status: "completed", output: [] },
+          })}\n\n`,
+        ));
+      },
+      cancel() { cancelled = true; },
+    }), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const response = await Promise.race([
+        handleResponses(request(rootBody()), config(), { model: "", provider: "" }),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(new Error("unary SSE aggregation did not stop at terminal")), 1_000);
+        }),
+      ]);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ id: "resp_open_socket", status: "completed", output: [] });
+      expect(cancelled).toBe(true);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("fails closed and settles terminal accounting when unary SSE ends without a terminal", async () => {
+    const terminals: string[] = [];
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      'data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+    try {
+      const response = await handleResponses(
+        request(rootBody()),
+        config(),
+        logCtx,
+        { onNativePassthroughTerminal: status => terminals.push(status) },
+      );
+
+      expect(response.status).toBe(502);
+      expect(await response.json()).toMatchObject({
+        error: { message: "upstream response stream closed before a terminal response" },
+      });
+      expect(terminals).toEqual(["failed"]);
+      expect(logCtx.terminalSource).toBe("synthetic");
+      expect(logCtx.activeAttempt?.streamAborted).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("rejects malformed or contradictory unary SSE terminal envelopes as synthetic failures", async () => {
+    const cases = [
+      { type: "response.completed", response: {} },
+      { type: "response.completed", response: { id: "resp_wrong_status", status: "failed", output: [] } },
+      { type: "response.completed", response: { id: "resp_missing_output", status: "completed" } },
+      { type: "response.failed", response: { id: "resp_failed_as_completed", status: "completed", output: [] } },
+    ];
+    let activeEvent = cases[0]!;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      `data: ${JSON.stringify(activeEvent)}\n\n`,
+      { headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+    try {
+      for (const event of cases) {
+        activeEvent = event;
+        const terminals: string[] = [];
+        const logCtx: RequestLogContext = { model: "", provider: "" };
+        const response = await handleResponses(
+          request(rootBody()),
+          config(),
+          logCtx,
+          { onNativePassthroughTerminal: status => terminals.push(status) },
+        );
+
+        expect(response.status).toBe(502);
+        expect(await response.json()).toMatchObject({
+          error: { message: "upstream response stream carried an invalid terminal response" },
+        });
+        expect(terminals).toEqual(["failed"]);
+        expect(logCtx.terminalSource).toBe("synthetic");
+      }
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("preserves a valid failed unary SSE terminal and reports its upstream outcome", async () => {
+    const terminals: string[] = [];
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const failed = {
+      id: "resp_failed_terminal",
+      status: "failed",
+      output: [],
+      error: { type: "upstream_error", code: "backend_failed", message: "backend failed" },
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      `data: ${JSON.stringify({ type: "response.failed", response: failed })}\n\n`,
+      { headers: { "content-type": "text/event-stream" } },
+    )) as typeof fetch;
+    try {
+      const response = await handleResponses(
+        request(rootBody()),
+        config(),
+        logCtx,
+        { onNativePassthroughTerminal: status => terminals.push(status) },
+      );
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(failed);
+      expect(terminals).toEqual(["failed"]);
+      expect(logCtx.transportPhase).toBe("terminal_sse");
+      expect(logCtx.terminalSource).toBe("upstream");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("maps unary SSE read failures to one synthetic failed terminal", async () => {
+    const terminals: string[] = [];
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("socket reset sentinel"));
+      },
+    }), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
+    try {
+      const response = await handleResponses(
+        request(rootBody()),
+        config(),
+        logCtx,
+        { onNativePassthroughTerminal: status => terminals.push(status) },
+      );
+
+      expect(response.status).toBe(502);
+      expect(terminals).toEqual(["failed"]);
+      expect(logCtx.terminalSource).toBe("synthetic");
+      expect(logCtx.activeAttempt?.streamAborted).toBe(true);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -239,8 +438,8 @@ describe("Responses V2 routed delegation bridge runtime", () => {
         [{ ...config(), multiAgentMode: "v1" }, rootBody(), {}, {}],
         [{ ...config(), multiAgentMode: "default" }, rootBody(), {}, {}],
         [config(), rootBody({ tools: [] }), {}, {}],
-        [config(), rootBody(), { "x-openai-subagent": "collab_spawn" }, {}],
         [config(), rootBody(), { "x-openai-subagent": "review" }, {}],
+        [config(), rootBody(), { "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "review" }) }, {}],
         [config(), rootBody({ tools: [{ type: "function", name: "spawn_agent" }, ...(rootBody().tools as unknown[]) ] }), {}, {}],
         [config(), rootBody(), {}, { comboAttempt: true }],
       ];
@@ -251,7 +450,43 @@ describe("Responses V2 routed delegation bridge runtime", () => {
     } finally { globalThis.fetch = originalFetch; }
   });
 
-  test("keeps the mirror out after routed override, compaction, shadow interception, and native child recovery", async () => {
+  test("bridges a canonical native child so its routed grandchild task stays plaintext", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+      return Response.json({ id: "resp_nested_child", status: "completed", output: [{
+        type: "function_call",
+        id: "fc_nested_child",
+        call_id: "call_nested_child",
+        namespace: "ocx_agents",
+        name: "spawn_agent",
+        arguments: "{\"message\":\"plaintext grandchild assignment\"}",
+      }] });
+    }) as typeof fetch;
+    try {
+      const response = await handleResponses(
+        request(rootBody(), {
+          "x-openai-subagent": "collab_spawn",
+          "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "thread_spawn" }),
+        }),
+        config(),
+        { model: "", provider: "" },
+      );
+      const output = await response.json() as { output: Array<Record<string, unknown>> };
+
+      expect(response.status).toBe(200);
+      expect(JSON.stringify(requests[0]?.tools)).toContain('"name":"ocx_agents"');
+      expect(output.output[0]).toMatchObject({
+        namespace: "collaboration",
+        name: "spawn_agent",
+        arguments: "{\"message\":\"plaintext grandchild assignment\"}",
+        encrypted_function_args: [],
+      });
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  test("keeps the mirror out after routed override, compaction, shadow interception, and compact handling", async () => {
     const outbound: Array<{ url: string; body: Record<string, unknown> }> = [];
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
@@ -276,14 +511,6 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       shadowed.shadowCallIntercept = { enabled: true, model: "gw/routed", sourceModels: ["gpt-5.4-mini"] };
       await handleResponses(request(rootBody({ model: "gpt-5.4-mini" })), shadowed, { model: "", provider: "" });
 
-      const recoveredChild = config();
-      recoveredChild.agentTaskRecovery = { enabled: true };
-      await handleResponses(request(rootBody({ input: [{
-        type: "agent_message", author: "/root", recipient: "/root/child", content: [
-          { type: "encrypted_content", encrypted_content: FERNET_TASK },
-        ],
-      }] }), { "x-openai-subagent": "collab_spawn" }), recoveredChild, { model: "", provider: "" });
-
       const compact = config();
       compact.v2NativeParentOverride = { enabled: true, model: "gw/routed" };
       compact.providers.gw = { adapter: "openai-responses", baseUrl: "https://gateway.example/v1", authMode: "key", apiKey: "test" } as never;
@@ -292,12 +519,11 @@ describe("Responses V2 routed delegation bridge runtime", () => {
         input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "compact" }] }, { type: "compaction_trigger" }],
       }), compact, { model: "", provider: "" });
 
-      expect(outbound).toHaveLength(6);
+      expect(outbound).toHaveLength(5);
       for (const requestBody of outbound) expect(JSON.stringify(requestBody.body)).not.toContain('"ocx_agents"');
       expect(outbound[0]?.url).toContain("gateway.example");
       expect(outbound[1]?.url).toContain("gateway.example");
-      expect(outbound[4]?.url).toContain("chatgpt.com/backend-api/codex");
-      expect(outbound[5]?.url).toContain("gateway.example");
+      expect(outbound[4]?.url).toContain("gateway.example");
     } finally { globalThis.fetch = originalFetch; }
   });
 
@@ -376,7 +602,7 @@ describe("Responses V2 routed delegation bridge runtime", () => {
     }
   });
 
-  test("rewrites split SSE calls only for an eligible root", async () => {
+  test("rewrites split SSE calls for eligible roots and both spawned-child marker forms", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response([
       "data: ", JSON.stringify({ type: "response.output_item.added", item: {
@@ -388,12 +614,22 @@ describe("Responses V2 routed delegation bridge runtime", () => {
       }] } }), "\n\n",
     ].join(""), { headers: { "content-type": "text/event-stream" } })) as typeof fetch;
     try {
-      const response = await handleResponses(request(rootBody({ stream: true })), config(), { model: "", provider: "" });
-      const text = await response.text();
-
-      expect(text).toContain('"namespace":"collaboration"');
-      expect(text).toContain('"encrypted_function_args":[]');
-      expect(text).not.toContain('"namespace":"ocx_agents"');
+      const markerForms = [
+        {},
+        { "x-openai-subagent": "collab_spawn" },
+        { "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "thread_spawn" }) },
+      ];
+      for (const headers of markerForms) {
+        const response = await handleResponses(
+          request(rootBody({ stream: true }), headers),
+          config(),
+          { model: "", provider: "" },
+        );
+        const text = await response.text();
+        expect(text).toContain('"namespace":"collaboration"');
+        expect(text).toContain('"encrypted_function_args":[]');
+        expect(text).not.toContain('"namespace":"ocx_agents"');
+      }
     } finally {
       globalThis.fetch = originalFetch;
     }

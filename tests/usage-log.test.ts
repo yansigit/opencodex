@@ -39,6 +39,37 @@ afterEach(() => {
 });
 
 describe("usage log", () => {
+  test("normalizes Routed V2 bridge diagnostics as closed enums", () => {
+    const base = {
+      requestId: "ocx-v2-bridge",
+      timestamp: 1,
+      provider: "openai",
+      model: "gpt-test",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "unreported" as const,
+    };
+    expect(normalizeUsageEntryForTest({
+      ...base,
+      v2BridgeScope: "root",
+      v2BridgeDecision: "no_collaboration_catalog",
+      v2BridgeStateDurability: "memory-only",
+    })).toMatchObject({
+      v2BridgeScope: "root",
+      v2BridgeDecision: "no_collaboration_catalog",
+      v2BridgeStateDurability: "memory-only",
+    });
+    const invalid = normalizeUsageEntryForTest({
+      ...base,
+      v2BridgeScope: "secret",
+      v2BridgeDecision: "secret",
+      v2BridgeStateDurability: "secret",
+    } as unknown as PersistedUsageEntry);
+    expect(invalid).not.toHaveProperty("v2BridgeScope");
+    expect(invalid).not.toHaveProperty("v2BridgeDecision");
+    expect(invalid).not.toHaveProperty("v2BridgeStateDurability");
+  });
+
   test("round-trips agentKind and drops invalid historical values", () => {
     const base = {
       requestId: "ocx-agent-kind",

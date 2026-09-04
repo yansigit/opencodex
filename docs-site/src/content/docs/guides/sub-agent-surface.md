@@ -37,7 +37,7 @@ surface and makes that root's child tasks plaintext, but it is independent of bo
 | `keepNativeChatGptOnV1` | Preserves the native ChatGPT parent, but advertises it on v1. | The native v2 task-encryption problem is avoided by leaving v2, and it applies to new sessions. |
 | `agentTaskRecovery` | Preserves the native v2 parent and recovers a routed child task through ChatGPT. | The extra authenticated ChatGPT request consumes quota, adds latency, and returns model-produced plaintext. |
 | `v2NativeParentOverride` | Preserves v2 tools while executing eligible native roots on one configured routed model. | The routed provider receives the root data; availability, context, behavior, latency, cost, and privacy differ by provider. |
-| `v2RoutedDelegationBridge` | Preserves an eligible native V2 root while exposing plaintext mirror collaboration tools for routed children. | Default off; root-only. A native child creating a routed grandchild can still cross the encrypted boundary. |
+| `v2RoutedDelegationBridge` | Preserves eligible native V2 root and spawned-child turns while exposing plaintext mirror collaboration tools. | Default off; bridged task text follows the selected provider's privacy and billing terms. |
 
 The override is off unless explicitly enabled, requires an explicitly forced v2 surface and the
 upstream V2 flag, and is unavailable while **Keep ChatGPT on v1** is on. There is no automatic
@@ -54,7 +54,7 @@ the prerequisites are restored.
 ### Routed delegation bridge
 
 `v2RoutedDelegationBridge` is a separate experimental, default-off boolean. When armed, it activates
-only for eligible native V2 roots after parent-override routing. It exposes mirror collaboration tools
+for eligible native V2 root and thread-spawn child turns after final routing. It exposes mirror collaboration tools
 so the routed child receives plaintext task, repository-context, and tool-result flow. It exposes
 `spawn_agent`, `send_message`, and `followup_task` only through that plaintext mirror while leaving
 `wait_agent`, `interrupt_agent`, and `list_agents` native. While active, this makes every use of those
@@ -65,7 +65,21 @@ The native Codex UI can still display the original model. Routed prompts, reposi
 results follow the selected provider's availability, context window, behavior, billing, and privacy
 terms. The bridge differs from ordinary native GPT-to-GPT delegation, the
 parent override (which reroutes the root), and recovery (which makes an additional ChatGPT request for
-an already encrypted child task). It cannot rewrite a native child delegating to a routed grandchild.
+an already encrypted child task). Eligible canonical native children are bridged after their final
+fallback route is selected, so they can delegate plaintext assignments to routed grandchildren.
+The current-turn collaboration catalog remains authoritative: a depth-limited child without those tools
+cannot regain delegation authority merely by carrying child headers.
+
+Bridge continuations are selectively encrypted at rest with AES-256-GCM and an installation key held in
+the operating system credential store. If that store is unavailable or times out, delegation continues
+with memory-only replay; sensitive state is never persisted as plaintext and is lost at restart. The first
+run of this version retires legacy v1/v2 continuation snapshots and spills rather than guessing which old
+rows contain bridged plaintext. Ordinary continuation rows remain in their standard format.
+
+The bridge prevents *new* encrypted message operations only inside this eligibility boundary.
+`agentTaskRecovery` remains the fallback for Fernet ciphertext created outside it. Because bridging sends
+the assignment as plaintext, the routed provider receives that text under its own privacy and retention
+terms; enable the experiment only for providers you trust with it.
 
 :::tip[Not sure?]
 Start with **base**. Choose **v1** when cross-provider delegation must work predictably. Force **v2**

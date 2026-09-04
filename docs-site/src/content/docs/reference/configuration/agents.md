@@ -26,7 +26,7 @@ routes, and limits delegated work.
 | `effortCap?` | `string` | — | Hard ceiling for qualifying v2 main turns and marked spawned-child turns. Accepts `low` through `ultra`. |
 | `subagentEffortCap?` | `string` | — | Additional ceiling for spawned-child turns only. When both caps apply, the lower wins. |
 | `v2NativeParentOverride?` | `{ enabled?: boolean; model?: string }` | off | Experimental V2-only routed replacement for an eligible ChatGPT-native root parent. See [V2 native parent override](#v2-native-parent-override). |
-| `v2RoutedDelegationBridge?` | `boolean` | `false` | Experimental root-only plaintext mirror bridge for eligible native V2 roots. See [Routed V2 delegation bridge](#routed-v2-delegation-bridge). |
+| `v2RoutedDelegationBridge?` | `boolean` | `false` | Experimental plaintext mirror bridge for eligible native V2 root and spawned-child turns. See [Routed V2 delegation bridge](#routed-v2-delegation-bridge). |
 | `agentTaskRecovery?` | `object` | — | Experimental opt-in recovery for backend-encrypted v2 tasks sent to routed providers. Disabled unless `enabled: true`; see [Encrypted v2 task recovery](#encrypted-v2-task-recovery). |
 
 Manage the surface with the dashboard or
@@ -95,7 +95,7 @@ behavior, latency, cost, and privacy characteristics.
 
 `v2RoutedDelegationBridge` is an experimental default-off boolean. It does not reroute a parent like
 `v2NativeParentOverride`; after parent-override routing, it moves `spawn_agent`, `send_message`, and
-`followup_task` from native collaboration to plaintext mirrors for eligible native V2 roots so routed children
+`followup_task` from native collaboration to plaintext mirrors for eligible native V2 root and thread-spawn child turns so routed descendants
 can receive task, repository-context, and tool-result flow without `agentTaskRecovery`'s additional
 ChatGPT request. `wait_agent`, `interrupt_agent`, and `list_agents` remain native. While active, every use
 of the three delegation-message operations is plaintext, including native-to-native delegation.
@@ -103,8 +103,18 @@ of the three delegation-message operations is plaintext, including native-to-nat
 It can be armed while the current surface is not explicit V2, but is inactive until an eligible root
 arrives. A false value disables it immediately for subsequent requests. The original native model can
 remain visible in Codex while the selected provider receives the routed content and its availability,
-context, behavior, billing, and privacy rules apply. The bridge is root-only: a native child that
-delegates to a routed grandchild can still encounter the encrypted-task boundary.
+context, behavior, billing, and privacy rules apply. Eligible canonical native children with a V2
+collaboration catalog are bridged too, allowing their routed grandchildren to receive plaintext
+assignments. Routed child fallbacks, depth-limited leaves, and non-spawn maintenance turns remain
+outside the bridge.
+
+The bridge prevents newly created encrypted message operations within that boundary; `agentTaskRecovery`
+is still the fallback for ciphertext produced outside it. Bridge-derived continuation rows are sealed with
+AES-256-GCM using an installation key in the operating system credential store. If secure storage is
+unavailable, replay remains memory-only and does not survive restart—there is no plaintext persistence
+fallback. Upgrading retires legacy v1/v2 continuation snapshots and spills once, accepting loss of the
+bounded continuation cache instead of risking historical plaintext. This encryption is automatic and has
+no separate configuration switch. Routed providers necessarily receive bridged assignments in plaintext.
 
 ```json
 {

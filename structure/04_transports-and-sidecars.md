@@ -77,6 +77,13 @@ executor contract. Main-request migration must not treat that branch as fixed-tr
 provider, lets the selected adapter speak the upstream protocol, then bridges adapter events back to
 Responses-compatible streaming output.
 
+Canonical ChatGPT forward requests always use upstream SSE because the private Codex endpoint
+rejects unary Responses requests. A downstream `stream: false` preference is retained separately:
+the proxy drains the upstream stream under the ordinary 32 MiB and body-timeout limits, reconstructs
+an empty terminal snapshot from indexed `response.output_item.done` events, applies the same
+client-facing bridge and tool-call guards, and returns one JSON response. Missing, malformed,
+oversized, or stalled terminals fail closed instead of returning partial output.
+
 ### Fetch-helper import boundary
 
 `src/server/responses/fetch-helpers.ts` is a transport leaf shared by Responses, compact, and native

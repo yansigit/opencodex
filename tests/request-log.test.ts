@@ -56,6 +56,34 @@ function log(overrides: Partial<RequestLogEntry>): RequestLogEntry {
 }
 
 describe("request log metadata", () => {
+  test("projects only bounded Routed V2 bridge metadata", () => {
+    const base = {
+      requestId: "ocx-v2-bridge",
+      timestamp: 1,
+      provider: "openai",
+      model: "gpt-test",
+      status: 200,
+      durationMs: 1,
+      usageStatus: "unreported" as const,
+    };
+    expect(requestLogEntryFromPersistedUsage({
+      ...base,
+      v2BridgeScope: "child",
+      v2BridgeDecision: "active",
+      v2BridgeStateDurability: "encrypted",
+    })).toMatchObject({
+      v2BridgeScope: "child",
+      v2BridgeDecision: "active",
+      v2BridgeStateDurability: "encrypted",
+    });
+    expect(requestLogEntryFromPersistedUsage({
+      ...base,
+      v2BridgeScope: "task text",
+      v2BridgeDecision: "ciphertext",
+      v2BridgeStateDurability: "key",
+    } as unknown as PersistedUsageEntry)).not.toHaveProperty("v2BridgeDecision");
+  });
+
   test("creates one ordinary attempt after the final adapter is resolved", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => Response.json({
