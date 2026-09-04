@@ -271,7 +271,7 @@ export default function SubagentsWorkspace({
             <h2 className="swi-featured-title">{t("sub.settings")}</h2>
           </div>
           {delegation.model && !chosenSet.has(delegation.model) && (
-            <p className="swi-featured-hint"><IconInfo width={15} height={15} aria-hidden="true" />{t("sub.preferredOutsideAdvertised")}</p>
+            <p className="muted setting-hint"><IconInfo width={15} height={15} aria-hidden="true" />{t("sub.preferredOutsideAdvertised")}</p>
           )}
           <SubagentDelegationSection
             model={delegation.model}
