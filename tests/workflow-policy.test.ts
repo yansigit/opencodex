@@ -78,8 +78,22 @@ describe("repository workflow policy", () => {
       "github.event.workflow_run.conclusion == 'success'";
     expect(validateWorkflowPolicy(input)).toEqual([
       "CI aggregate job must directly need every producer job",
-      "auto-release gate is missing: github.event.workflow_run.event == 'push'",
+      "auto-release gate is missing: github.event.workflow_run.event == 'workflow_run'",
       "auto-release gate is missing: github.event.workflow_run.head_branch == 'main'",
+    ]);
+  });
+
+  test("rejects weakened runner selection and aggregate shell gates", async () => {
+    const input = clone(await loadInput());
+    const pick = input.ci.jobs?.["select-windows-runner"]?.steps
+      ?.find(step => step.name === "Pick runner");
+    pick!.run = pick!.run!.replace('runner="windows-latest"', 'runner=["self-hosted"]');
+    const aggregate = input.ci.jobs?.ci?.steps
+      ?.find(step => step.name === "Assert every needed job succeeded or was skipped");
+    aggregate!.run = "set -euo pipefail\ntrue";
+    expect(validateWorkflowPolicy(input)).toEqual([
+      "CI aggregate job must fail closed on every non-success/non-skipped producer and required Windows result",
+      "self-hosted Windows routing must trust only push and workflow_dispatch",
     ]);
   });
 

@@ -156,10 +156,16 @@ export function validateWorkflowPolicy(input: WorkflowPolicyInput): string[] {
 
   const runnerScript = ci.jobs?.["select-windows-runner"]?.steps
     ?.find(step => step.name === "Pick runner")?.run ?? "";
-  if (!runnerScript.includes("push|workflow_dispatch) trusted=yes")) {
+  if (!runnerScript.includes("set -euo pipefail") ||
+      !runnerScript.includes("trusted=no") ||
+      !runnerScript.includes("push|workflow_dispatch) trusted=yes") ||
+      !runnerScript.includes('if [ "$trusted" = "yes" ] && [ "${USE_SELF_HOSTED:-}" = "1" ]; then') ||
+      !runnerScript.includes("else") ||
+      !runnerScript.includes("runner=\"windows-latest\"")) {
     fail("self-hosted Windows routing must trust only push and workflow_dispatch");
   }
-  if (/merge_group\).*trusted=yes|pull_request\).*trusted=yes/.test(runnerScript)) {
+  if ((runnerScript.match(/trusted=yes/g) ?? []).length !== 1 ||
+      /merge_group\).*trusted=yes|pull_request\).*trusted=yes/.test(runnerScript)) {
     fail("candidate events must never select the self-hosted Windows runner");
   }
 
@@ -180,6 +186,15 @@ export function validateWorkflowPolicy(input: WorkflowPolicyInput): string[] {
     const expectedNeeds = Object.keys(ci.jobs ?? {}).filter(name => name !== policy.ci.aggregateJob);
     if (!sameMembers(actualNeeds, expectedNeeds)) {
       fail("CI aggregate job must directly need every producer job");
+    }
+    const aggregateSteps = aggregate.steps ?? [];
+    const aggregateRun = aggregateSteps.find(step => step.name === "Assert every needed job succeeded or was skipped")?.run ?? "";
+    if (aggregateSteps.length !== 1 ||
+        !aggregateRun.includes("set -euo pipefail") ||
+        !aggregateRun.includes('.value.result != "success" and .value.result != "skipped"') ||
+        !aggregateRun.includes('if [ -n "$bad" ]; then') ||
+        !aggregateRun.includes('if [ "$WINDOWS_REQUIRED" = "true" ] && [ "$WINDOWS_RESULT" != "success" ]; then')) {
+      fail("CI aggregate job must fail closed on every non-success/non-skipped producer and required Windows result");
     }
   }
 
