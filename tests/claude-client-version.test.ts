@@ -132,16 +132,18 @@ describe("Claude client version probing", () => {
     expect(JSON.stringify(result)).not.toContain(hostile);
   });
 
-  test("reaps a timed-out Windows command shim tree without retaining process details", () => {
-    const reaped: number[] = [];
+  test("uses the bounded helper runner for Windows command shims without retaining process details", () => {
+    const requests: Array<{ file: string; args: readonly string[]; timeout: number }> = [];
     const result = probeClaudeClientVersion({
       platform: "win32",
       commandInvocation: () => ({ file: "cmd.exe", args: ["/d", "/s", "/c", '"claude.cmd --version"'], options: { windowsVerbatimArguments: true } }),
-      versionProbe: () => ({ error: { code: "ETIMEDOUT" }, pid: 4242 }),
-      terminateProcessTree: pid => reaped.push(pid),
+      windowsCommandShimProbe: request => {
+        requests.push({ file: request.file, args: request.args, timeout: request.options.timeout });
+        return { error: { code: "ETIMEDOUT" } };
+      },
     });
-    expect(reaped).toEqual([4242]);
+    expect(requests).toEqual([{ file: "cmd.exe", args: ["/d", "/s", "/c", '"claude.cmd --version"'], timeout: 5_000 }]);
     expect(result).toEqual({ state: "timed-out", version: null, source: "windows-command-shim" });
-    expect(JSON.stringify(result)).not.toContain("4242");
+    expect(JSON.stringify(result)).not.toContain("cmd.exe");
   });
 });
