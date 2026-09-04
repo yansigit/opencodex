@@ -3,7 +3,7 @@ const ATTEMPT_TIMEOUT_MS = 90_000;
 const RETRY_DELAY_MS = 2_000;
 
 const TRANSIENT_ERROR =
-  /(?:\b(?:408|429|5\d\d)\b|eai_again|econnreset|etimedout|enetunreach|econnrefused|und_err_connect_timeout|fetch failed|socket hang up|network timeout|tls handshake timeout)/i;
+  /(?:\b(?:408|429|5\d\d)\b|dnsresolvefailed|eai_again|econnreset|enotfound|etimedout|enetunreach|econnrefused|und_err_connect_timeout|fetch failed|socket hang up|network timeout|tls handshake timeout)/i;
 
 export function isTransientAuditFailure(
   output: string,
@@ -23,8 +23,23 @@ export interface AuditAttempt {
   timedOut: boolean;
 }
 
-async function runAttempt(cwd: string): Promise<AuditAttempt> {
-  const child = Bun.spawn(
+interface AuditProcess {
+  exited: Promise<number>;
+  stdout: ReadableStream<Uint8Array>;
+  stderr: ReadableStream<Uint8Array>;
+  kill(signal?: number): void;
+}
+
+interface AuditAttemptOptions {
+  spawn?: () => AuditProcess;
+  timeoutMs?: number;
+}
+
+export async function runAttempt(
+  cwd: string,
+  options: AuditAttemptOptions = {},
+): Promise<AuditAttempt> {
+  const child = options.spawn?.() ?? Bun.spawn(
     [process.execPath, "audit", "--audit-level=high"],
     {
       cwd,
@@ -37,8 +52,8 @@ async function runAttempt(cwd: string): Promise<AuditAttempt> {
   let timedOut = false;
   const timeout = setTimeout(() => {
     timedOut = true;
-    child.kill();
-  }, ATTEMPT_TIMEOUT_MS);
+    child.kill(9);
+  }, options.timeoutMs ?? ATTEMPT_TIMEOUT_MS);
 
   try {
     const [exitCode, stdout, stderr] = await Promise.all([
