@@ -23,8 +23,23 @@ export interface AuditAttempt {
   timedOut: boolean;
 }
 
-async function runAttempt(cwd: string): Promise<AuditAttempt> {
-  const child = Bun.spawn(
+interface AuditProcess {
+  exited: Promise<number>;
+  stdout: ReadableStream<Uint8Array>;
+  stderr: ReadableStream<Uint8Array>;
+  kill(signal?: number): void;
+}
+
+interface AuditAttemptOptions {
+  spawn?: () => AuditProcess;
+  timeoutMs?: number;
+}
+
+export async function runAttempt(
+  cwd: string,
+  options: AuditAttemptOptions = {},
+): Promise<AuditAttempt> {
+  const child = options.spawn?.() ?? Bun.spawn(
     [process.execPath, "audit", "--audit-level=high"],
     {
       cwd,
@@ -38,7 +53,7 @@ async function runAttempt(cwd: string): Promise<AuditAttempt> {
   const timeout = setTimeout(() => {
     timedOut = true;
     child.kill(9);
-  }, ATTEMPT_TIMEOUT_MS);
+  }, options.timeoutMs ?? ATTEMPT_TIMEOUT_MS);
 
   try {
     const [exitCode, stdout, stderr] = await Promise.all([

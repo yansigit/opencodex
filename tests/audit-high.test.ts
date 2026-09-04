@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   auditWithRetries,
   isTransientAuditFailure,
+  runAttempt,
   type AuditAttempt,
 } from "../scripts/ci/audit-high";
 
@@ -58,25 +59,30 @@ describe("dependency audit retry classification", () => {
     expect(warnings).toHaveLength(1);
   });
 
-  test("retries a timed-out attempt once and then accepts a clean audit", async () => {
-    const attempts: AuditAttempt[] = [
-      { exitCode: 1, output: "", timedOut: true },
-      { exitCode: 0, output: "No vulnerabilities found\n", timedOut: false },
-    ];
-    const warnings: string[] = [];
+  test("hard-kills a timed-out audit and drains its captured streams", async () => {
+    let resolveExit!: (code: number) => void;
+    let killSignal: number | undefined;
+    const exited = new Promise<number>(resolve => { resolveExit = resolve; });
 
-    await auditWithRetries({
-      label: "root",
-      cwd: "/workspace",
-      run: async () => attempts.shift()!,
-      sleep: async () => {},
-      write: () => {},
-      warn: (message) => warnings.push(message),
-      maxAttempts: 2,
+    const result = await runAttempt("/workspace", {
+      timeoutMs: 5,
+      spawn: () => ({
+        exited,
+        stdout: new Response("partial stdout").body!,
+        stderr: new Response("partial stderr").body!,
+        kill: signal => {
+          killSignal = signal;
+          resolveExit(137);
+        },
+      }),
     });
 
-    expect(attempts).toHaveLength(0);
-    expect(warnings).toHaveLength(1);
+    expect(killSignal).toBe(9);
+    expect(result).toEqual({
+      exitCode: 137,
+      output: "partial stdoutpartial stderr",
+      timedOut: true,
+    });
   });
 
   test("fails a vulnerability result immediately without retrying", async () => {
