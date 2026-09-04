@@ -48,6 +48,7 @@
     "skill:surface": "bun scripts/generate-ocx-skill-surface.ts",
     "skill:surface:check": "bun scripts/generate-ocx-skill-surface.ts --check",
     "benchmark:claude-tokens": "bun scripts/benchmark-claude-tokens.ts",
+    "certify:claude": "bun scripts/claude-certification.ts",
     "generate:model-metadata": "bun scripts/generate-model-metadata.ts",
     "build:gui": "cd gui && bun install --frozen-lockfile && bun run build && cd .. && bun run prepare:package",
     "prepare:package": "bun scripts/prepare-package.ts",

@@ -206,6 +206,18 @@ Ensure the proxy is running, then launch Claude Code with `ANTHROPIC_BASE_URL`,
 with Claude Code 2.1.129 or newer. On older versions, select with `ANTHROPIC_MODEL` or `/model <id>`.
 User-exported `ANTHROPIC_*` variables always take precedence.
 
+### Claude Code certification
+
+`bun run certify:claude` runs a bounded, hermetic certification against an isolated
+Claude Code configuration and a deterministic loopback provider. It skips clearly when
+the `claude` executable is unavailable and reports only a sanitized JSON summary with
+streaming and tool-continuation checks. It never reuses credentials or proxy settings.
+
+Live certification is currently a fail-closed scaffold. It requires both
+`--live --confirm-live-provider-charges` and `OCX_ALLOW_CLAUDE_LIVE_CERT=1`; even then
+no provider request is made and the report is `live_fail` until a reviewed billing-safe
+harness is enabled. There is no automatic persistence of results.
+
 Claude Desktop profile commands are:
 
 ```text
