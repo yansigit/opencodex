@@ -1,0 +1,123 @@
+name: Build release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected-sha:
+        description: "Full immutable commit SHA to qualify and package"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ inputs.expected-sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: immutable release candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Validate candidate SHA
+        env:
+          EXPECTED_SHA: ${{ inputs.expected-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected-sha must be a lowercase full Git SHA"
+            exit 1
+          fi
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.expected-sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact checkout
+        env:
+          EXPECTED_SHA: ${{ inputs.expected-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [ "$actual_sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::checkout resolved to $actual_sha instead of $EXPECTED_SHA"
+            exit 1
+          fi
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+
+      - name: Install root dependencies from lockfile
+        run: bun install --frozen-lockfile
+
+      - name: Install GUI dependencies from lockfile
+        working-directory: gui
+        run: bun install --frozen-lockfile
+
+      - name: Audit dependencies
+        run: bun run audit:high
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test release-candidate contracts
+        run: bun test tests/release-candidate.test.ts tests/fork/release-candidate-workflow.test.ts
+
+      - name: Run full test suite
+        run: bun run test
+
+      - name: Build GUI and package assets
+        run: bun run build:gui
+
+      - name: Build candidate tarball once
+        env:
+          EXPECTED_SHA: ${{ inputs.expected-sha }}
+        run: >-
+          bun scripts/build-release-candidate.ts
+          --sha "$EXPECTED_SHA"
+          --repository "$GITHUB_REPOSITORY"
+          --output release-candidate
+          --workflow "$GITHUB_WORKFLOW"
+          --run-id "$GITHUB_RUN_ID"
+          --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+      - name: Verify candidate manifest and tarball
+        env:
+          EXPECTED_SHA: ${{ inputs.expected-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_file="$(find release-candidate -maxdepth 1 -type f -name '*.tgz' -print)"
+          if [ -z "$package_file" ] || [ "$(printf '%s\n' "$package_file" | wc -l | tr -d ' ')" != "1" ]; then
+            echo "::error::candidate must contain exactly one package tarball"
+            exit 1
+          fi
+          tree_sha="$(git rev-parse 'HEAD^{tree}')"
+          bun scripts/release-candidate.ts verify \
+            release-candidate/release-candidate.json "$package_file" \
+            --repository "$GITHUB_REPOSITORY" \
+            --sha "$EXPECTED_SHA" \
+            --tree "$tree_sha" \
+            --input-root "$GITHUB_WORKSPACE"
+
+      # No attestation action is used until its version is reviewed and pinned to a known full SHA.
+      # This workflow deliberately has no id-token or package-publish permission in the meantime.
+      - name: Upload immutable candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate-${{ inputs.expected-sha }}
+          path: release-candidate/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+          overwrite: false
+          include-hidden-files: false
