@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, type Stats, unlinkSync } from "node:fs";
 import { uptime } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../config";
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
@@ -177,9 +177,10 @@ const responseStateDurabilityByBody = new WeakMap<object, ResponseStateDurabilit
 let legacyRetirementBlocked = false;
 const legacySpillsAwaitingRetirement = new Map<string, ResponseSpillRef>();
 interface LegacySnapshotRetirement {
-  targetPath: string;
-  targetDev: number;
-  targetIno: number;
+  targetPath?: string;
+  targetDev?: number;
+  targetIno?: number;
+  absentPath?: string;
   linkPath?: string;
   linkDev?: number;
   linkIno?: number;
@@ -189,9 +190,25 @@ interface LegacySnapshotRetirement {
   spillScanComplete?: boolean;
 }
 let legacySnapshotAwaitingRetirement: LegacySnapshotRetirement | null = null;
+let legacySnapshotInspectionPending: string | null = null;
 let legacyRetirementRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
 const sensitiveStorageWarnings = new Set<string>();
+
+interface ResponseSnapshotInspectionIo {
+  lstat: (path: string) => Stats;
+  stat: (path: string) => Stats;
+}
+
+let responseSnapshotInspectionIoForTest: Partial<ResponseSnapshotInspectionIo> | null = null;
+
+function snapshotLstat(path: string): Stats {
+  return responseSnapshotInspectionIoForTest?.lstat?.(path) ?? lstatSync(path);
+}
+
+function snapshotStat(path: string): Stats {
+  return responseSnapshotInspectionIoForTest?.stat?.(path) ?? statSync(path);
+}
 
 function warnSensitiveStorageMemoryOnly(reason: "credential_store" | "legacy_retirement"): void {
   const key = `${responseContinuationHomeId()}:${reason}`;
@@ -1664,6 +1681,19 @@ function pathEntryExists(path: string): boolean {
   }
 }
 
+function liveResponseSpillFileNames(): Set<string> {
+  const protectedNames = new Set<string>();
+  for (const state of states.values()) {
+    if (state.kind === "spill") protectedNames.add(state.spill.fileName);
+  }
+  for (const job of pendingResponseSpills) {
+    const { tempPath, destinationPath } = job.publicationControl;
+    if (tempPath) protectedNames.add(basename(tempPath));
+    if (destinationPath) protectedNames.add(basename(destinationPath));
+  }
+  return protectedNames;
+}
+
 function retryLegacySpillRetirement(): void {
   for (const [fileName, ref] of legacySpillsAwaitingRetirement) {
     try { deleteResponseSpill(ref); } catch { /* best effort */ }
@@ -1673,7 +1703,7 @@ function retryLegacySpillRetirement(): void {
   }
   const snapshot = legacySnapshotAwaitingRetirement;
   if (snapshot?.spillScan && !snapshot.spillScanComplete) {
-    const result = retirePreexistingResponseSpills(snapshot.spillScan);
+    const result = retirePreexistingResponseSpills(snapshot.spillScan, liveResponseSpillFileNames());
     if (result.complete) snapshot.spillScanComplete = true;
   }
 }
@@ -1693,7 +1723,27 @@ function retryLegacySnapshotRetirement(): void {
   const pending = legacySnapshotAwaitingRetirement;
   if (!pending || legacySpillsAwaitingRetirement.size > 0) return;
   if (pending.spillScan && !pending.spillScanComplete) return;
-  if (!unlinkLegacyEntryIfUnchanged(pending.targetPath, pending.targetDev, pending.targetIno)) {
+  if (pending.absentPath) {
+    try {
+      snapshotLstat(pending.absentPath);
+      closeResponseSpillRetirementScan(pending.spillScan!);
+      legacySnapshotAwaitingRetirement = null;
+      legacySnapshotInspectionPending = pending.absentPath;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        legacySnapshotAwaitingRetirement = null;
+      } else if (pending.spillScan) {
+        pending.spillScanComplete = false;
+      }
+    }
+    return;
+  }
+  if (
+    pending.targetPath === undefined
+    || pending.targetDev === undefined
+    || pending.targetIno === undefined
+    || !unlinkLegacyEntryIfUnchanged(pending.targetPath, pending.targetDev, pending.targetIno)
+  ) {
     // The marker is still live, so another writer can add a candidate before
     // the next unlink attempt. Require another clean scan first.
     if (pending.spillScan) pending.spillScanComplete = false;
@@ -1727,6 +1777,7 @@ function scheduleLegacyRetirementRetry(): void {
 
 function refreshLegacyRetirementBlock(): void {
   legacyRetirementBlocked = legacySnapshotAwaitingRetirement !== null
+    || legacySnapshotInspectionPending !== null
     || legacySpillsAwaitingRetirement.size > 0;
   if (legacyRetirementBlocked) {
     warnSensitiveStorageMemoryOnly("legacy_retirement");
@@ -1738,7 +1789,69 @@ function refreshLegacyRetirementBlock(): void {
   }
 }
 
+function absentSnapshotRetirementMarker(path: string): LegacySnapshotRetirement {
+  return {
+    absentPath: path,
+    spillScan: createResponseSpillRetirementScan(),
+    spillScanComplete: false,
+  };
+}
+
+type SnapshotTargetInspection =
+  | { kind: "target"; targetPath: string; target: Stats }
+  | { kind: "literal" }
+  | { kind: "retry" };
+
+function inspectSnapshotTarget(path: string, literal: Stats): SnapshotTargetInspection {
+  let targetPath: string;
+  try {
+    targetPath = resolveWriteTarget(path);
+  } catch {
+    if (!literal.isSymbolicLink()) return { kind: "retry" };
+    try {
+      snapshotStat(path);
+      return { kind: "retry" };
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === "ENOENT"
+        ? { kind: "literal" }
+        : { kind: "retry" };
+    }
+  }
+  try {
+    const target = snapshotStat(targetPath);
+    return target.isFile()
+      ? { kind: "target", targetPath, target }
+      : { kind: "literal" };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT"
+      ? { kind: "literal" }
+      : { kind: "retry" };
+  }
+}
+
+function retryLegacySnapshotInspection(): void {
+  const path = legacySnapshotInspectionPending;
+  if (!path) return;
+  let literal: Stats;
+  try {
+    literal = snapshotLstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      legacySnapshotInspectionPending = null;
+      legacySnapshotAwaitingRetirement = absentSnapshotRetirementMarker(path);
+    }
+    return;
+  }
+  const inspection = inspectSnapshotTarget(path, literal);
+  if (inspection.kind === "retry") return;
+  legacySnapshotInspectionPending = null;
+  legacySnapshotAwaitingRetirement = inspection.kind === "literal"
+    ? snapshotRetirementMarker(path, literal, path, literal)
+    : snapshotRetirementMarker(path, literal, inspection.targetPath, inspection.target);
+}
+
 function retryLegacyRetirement(): void {
+  retryLegacySnapshotInspection();
   retryLegacySpillRetirement();
   retryLegacySnapshotRetirement();
   refreshLegacyRetirementBlock();
@@ -1772,6 +1885,11 @@ function beginUntrustedSnapshotRetirement(
   retryLegacyRetirement();
 }
 
+function beginSnapshotInspectionRetry(path: string): void {
+  legacySnapshotInspectionPending = path;
+  refreshLegacyRetirementBlock();
+}
+
 /**
  * Best-effort disk snapshot so previous_response_id chains survive a proxy restart (the
  * dominant expansion-miss cause: an in-memory-only store dies with the process, and the next
@@ -1801,62 +1919,74 @@ function ensureLoaded(): void {
       /* best-effort cleanup only; snapshot loading must remain independent */
     }
   }
+  let literal: Stats | null = null;
   try {
-    if (existsSync(path)) {
-      // Bound the read BEFORE parse: the 24 MiB write cap constrains snapshots
-      // this process wrote, not a pre-existing oversized file. statSync follows
-      // symlinks deliberately — readFileSync below follows them too, so the
-      // size gate must measure the same target the read would.
-      const literal = lstatSync(path);
-      const targetPath = resolveWriteTarget(path);
-      const stat = statSync(targetPath);
-      if (!stat.isFile()) {
-        // Symlink to a FIFO/device (e.g. /dev/zero): reading would block or
-        // return unbounded input. Retire only the literal entry, never the
-        // external target, while draining spills under the durable marker.
-        beginUntrustedSnapshotRetirement(path, literal, path, literal);
-      } else if (stat.size > SNAPSHOT_FILE_MAX_BYTES) {
-        admissionCounters.snapshotOversizedRefusals += 1;
-        // No snapshot this process writes can exceed this bound. Treat an older
-        // or externally planted oversized regular file as untrusted plaintext:
-        // retire the inode without reading it, and block encrypted persistence
-        // until that inode (and a symlink entry, if present) is really gone.
-        beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
-      } else {
-        let parsed: unknown;
-        let parsedOk = false;
-        try {
-          parsed = JSON.parse(readFileSync(targetPath, "utf-8"));
-          parsedOk = true;
-        } catch {
+    literal = snapshotLstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      beginSnapshotInspectionRetry(path);
+    }
+  }
+  if (literal) {
+    const inspection = inspectSnapshotTarget(path, literal);
+    if (inspection.kind === "retry") {
+      beginSnapshotInspectionRetry(path);
+    } else if (inspection.kind === "literal") {
+      // Dangling/non-regular targets must never be read or unlinked through.
+      // The captured literal inode is the durable marker and unlink target.
+      beginUntrustedSnapshotRetirement(path, literal, path, literal);
+    } else {
+      const { targetPath, target: stat } = inspection;
+      try {
+        // Bound the read BEFORE parse: the 24 MiB write cap constrains snapshots
+        // this process wrote, not a pre-existing oversized file. stat follows
+        // symlinks deliberately — readFileSync below follows them too, so the
+        // size gate must measure the same target the read would.
+        if (stat.size > SNAPSHOT_FILE_MAX_BYTES) {
+          admissionCounters.snapshotOversizedRefusals += 1;
+          // No snapshot this process writes can exceed this bound. Treat an older
+          // or externally planted oversized regular file as untrusted plaintext:
+          // retire the inode without reading it, and block encrypted persistence
+          // until that inode (and a symlink entry, if present) is really gone.
           beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
-        }
-        const raw = parsedOk && parsed && typeof parsed === "object" && !Array.isArray(parsed)
-          ? parsed as { version?: unknown; states?: unknown }
-          : undefined;
-        if (raw?.version === 3 && Array.isArray(raw.states)) {
-          for (const entry of raw.states) {
-            if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
-            loadSnapshotEntry(entry[0], entry[1]);
+        } else {
+          let parsed: unknown;
+          let parsedOk = false;
+          try {
+            parsed = JSON.parse(readFileSync(targetPath, "utf-8"));
+            parsedOk = true;
+          } catch {
+            beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
           }
-        } else if (raw && (raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
-          legacySnapshotAwaitingRetirement = snapshotRetirementMarker(path, literal, targetPath, stat);
-          for (const entry of raw.states) {
-            if (Array.isArray(entry) && entry.length === 2 && entry[1] && typeof entry[1] === "object") {
-              const item = entry[1] as { kind?: unknown; spill?: unknown };
-              if (item.kind === "spill" && isSpillRef(item.spill)) {
-                legacySpillsAwaitingRetirement.set(item.spill.fileName, item.spill);
+          const raw = parsedOk && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? parsed as { version?: unknown; states?: unknown }
+            : undefined;
+          if (raw?.version === 3 && Array.isArray(raw.states)) {
+            for (const entry of raw.states) {
+              if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
+              loadSnapshotEntry(entry[0], entry[1]);
+            }
+          } else if (raw && (raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
+            legacySnapshotAwaitingRetirement = snapshotRetirementMarker(path, literal, targetPath, stat);
+            for (const entry of raw.states) {
+              if (Array.isArray(entry) && entry.length === 2 && entry[1] && typeof entry[1] === "object") {
+                const item = entry[1] as { kind?: unknown; spill?: unknown };
+                if (item.kind === "spill" && isSpillRef(item.spill)) {
+                  legacySpillsAwaitingRetirement.set(item.spill.fileName, item.spill);
+                }
               }
             }
+            retryLegacyRetirement();
+          } else if (parsedOk) {
+            beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
           }
-          retryLegacyRetirement();
-        } else if (parsedOk) {
-          beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
         }
+      } catch {
+        // Once lstat/stat proved an entry exists, later read/classification
+        // failures must remain fail-closed and retry in-process.
+        beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
       }
     }
-  } catch {
-    /* missing/corrupt snapshot: start empty */
   }
   const referenced = new Set<string>();
   for (const state of states.values()) {
@@ -2909,6 +3039,7 @@ export function clearResponseStateMemoryForTests(): void {
   lastSnapshotTarget = null;
   loaded = false;
   legacyRetirementBlocked = false;
+  legacySnapshotInspectionPending = null;
   if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
   legacyRetirementRetryTimer = null;
   legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
@@ -2924,6 +3055,7 @@ export function clearResponseStateMemoryForTests(): void {
 export function clearResponseStateForTests(): void {
   for (const entry of states.values()) deleteOwnedSpills(entry);
   clearResponseStateMemoryForTests();
+  responseSnapshotInspectionIoForTest = null;
   reservedResponseSpillBytes = 0;
   unreclaimableSpillPaths.clear();
   resetResponseContinuationKeyForTests();
@@ -2940,6 +3072,13 @@ export function runPendingLegacyResponseStateRetirementForTests(): void {
   if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
   legacyRetirementRetryTimer = null;
   if (legacyRetirementBlocked) retryLegacyRetirement();
+}
+
+/** Test-only: inject snapshot pre-classification lstat/stat failures. */
+export function setResponseSnapshotInspectionIoForTests(
+  io: Partial<ResponseSnapshotInspectionIo> | null,
+): void {
+  responseSnapshotInspectionIoForTest = io;
 }
 
 export {

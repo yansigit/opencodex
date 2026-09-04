@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -40,6 +41,7 @@ import {
   responseStateMetrics,
   runPendingLegacyResponseStateRetirementForTests,
   setResponseContinuationKeyringFactoryForTests,
+  setResponseSnapshotInspectionIoForTests,
   setResponseStateByteCapForTests,
 } from "../src/responses/state";
 import {
@@ -761,6 +763,69 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     expect(() => lstatSync(snapshotPath)).toThrow();
   });
 
+  test.skipIf(!canSymlink)("dangling snapshot symlink drains young spills before unlinking its captured inode", async () => {
+    const ref = writeResponseSpillDurably("resp_dangling_legacy", {
+      createdAt: Date.now(),
+      items: [{ secret: "dangling legacy plaintext" }],
+    });
+    const spillPath = join(responseSpillDirectory(home), ref.fileName);
+    const snapshotPath = join(home, "responses-state.json");
+    symlinkSync(join(home, "missing-snapshot-target.json"), snapshotPath);
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(spillPath)).toBe(false);
+    expect(() => lstatSync(snapshotPath)).not.toThrow();
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(() => lstatSync(snapshotPath)).toThrow();
+    expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
+  test.each(["lstat", "stat"] as const)(
+    "snapshot %s failure stays fail-closed until classification and spill drain retry",
+    async failure => {
+      const ref = writeResponseSpillDurably(`resp_${failure}_retry`, {
+        createdAt: Date.now(),
+        items: [{ secret: `${failure} retry plaintext` }],
+      });
+      const spillPath = join(responseSpillDirectory(home), ref.fileName);
+      const snapshotPath = join(home, "responses-state.json");
+      writeFileSync(snapshotPath, JSON.stringify({ version: 2, states: [] }));
+      useMemoryKeyring();
+      clearResponseStateMemoryForTests();
+      let failed = false;
+      setResponseSnapshotInspectionIoForTests({
+        lstat(path) {
+          if (failure === "lstat" && !failed) {
+            failed = true;
+            throw Object.assign(new Error("transient lstat failure"), { code: "EIO" });
+          }
+          return lstatSync(path);
+        },
+        stat(path) {
+          if (failure === "stat" && !failed) {
+            failed = true;
+            throw Object.assign(new Error("transient stat failure"), { code: "EIO" });
+          }
+          return statSync(path);
+        },
+      });
+
+      expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+      expect(existsSync(spillPath)).toBe(true);
+      expect(existsSync(snapshotPath)).toBe(true);
+
+      runPendingLegacyResponseStateRetirementForTests();
+      expect(existsSync(spillPath)).toBe(false);
+      expect(existsSync(snapshotPath)).toBe(true);
+      runPendingLegacyResponseStateRetirementForTests();
+      expect(existsSync(snapshotPath)).toBe(false);
+      expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+    },
+  );
+
   test("oversized legacy retirement removes a fresh referenced spill before its unreadable marker", async () => {
     const ref = writeResponseSpillDurably("resp_fresh_legacy", {
       createdAt: Date.now(),
@@ -853,6 +918,43 @@ describe("Selective encrypted continuation state for Routed V2", () => {
     runPendingLegacyResponseStateRetirementForTests();
     expect(existsSync(snapshotPath)).toBe(false);
     expect(await prepareSensitiveResponsePersistence({ input: "retry" })).toBe("encrypted");
+  });
+
+  test("retirement skips an ordinary live spill published between capped passes", async () => {
+    const snapshotPath = writeOversizedLegacySnapshot();
+    let served = 0;
+    let liveFileName: string | undefined;
+    setSpillIoForTest({
+      readdirEntry() {
+        served += 1;
+        if (served <= RESPONSE_SPILL_SCAN_MAX) return `not-owned-${served}.txt`;
+        if (served === RESPONSE_SPILL_SCAN_MAX + 1 && liveFileName) return liveFileName;
+        return null;
+      },
+    });
+    useMemoryKeyring();
+    clearResponseStateMemoryForTests();
+    setResponseStateByteCapForTests(4 * 1024);
+
+    expect(await prepareSensitiveResponsePersistence({ input: "sensitive" })).toBe("memory-only");
+    expect(existsSync(snapshotPath)).toBe(true);
+
+    const liveContent = "ordinary-live-replay-".repeat(600);
+    rememberResponseState({ input: "ordinary" }, {
+      id: "resp_interleaved_live",
+      status: "completed",
+      output: [{ type: "message", role: "assistant", content: liveContent }],
+    });
+    liveFileName = readdirSync(responseSpillDirectory(home))
+      .find(name => name.endsWith(".spill.json"));
+    expect(liveFileName).toBeDefined();
+    expect(responseStateMetrics()).toMatchObject({ count: 1, spillStubCount: 1, tombstoneCount: 0 });
+
+    runPendingLegacyResponseStateRetirementForTests();
+    expect(existsSync(snapshotPath)).toBe(false);
+    expect(existsSync(join(responseSpillDirectory(home), liveFileName!))).toBe(true);
+    const replay = { previous_response_id: "resp_interleaved_live", input: "next" };
+    expect(JSON.stringify(expandPreviousResponseInput(replay))).toContain(liveContent);
   });
 
   test("oversized legacy retirement stays blocked across cleanup-cap exhaustion", async () => {

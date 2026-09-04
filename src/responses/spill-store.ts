@@ -820,9 +820,10 @@ export function closeResponseSpillRetirementScan(scan: ResponseSpillRetirementSc
   scan.opened = false;
 }
 
-/** Retire one bounded batch from the candidate set present when this scan opens. */
+/** Retire one bounded batch while preserving caller-owned live/pending publications. */
 export function retirePreexistingResponseSpills(
   scan: ResponseSpillRetirementScan,
+  protectedFileNames?: ReadonlySet<string>,
 ): ResponseSpillRetirementResult {
   const result: ResponseSpillRetirementResult = {
     scanned: 0,
@@ -877,6 +878,7 @@ export function retirePreexistingResponseSpills(
     }
     result.scanned += 1;
     if (!OWNED_SPILL_NAME.test(name) && !OWNED_SPILL_TEMP_NAME.test(name)) continue;
+    if (protectedFileNames?.has(name)) continue;
     const path = join(scan.dir, name);
     let size: number;
     try {
