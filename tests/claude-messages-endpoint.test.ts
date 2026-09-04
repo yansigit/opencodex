@@ -19,6 +19,7 @@ import { ownedServiceHomeInspection } from "./helpers/owned-service-home-inspect
 import {
   estimateClaudeRequestTokens,
   fetchWithHeaderDeadline,
+  handleClaudeCountTokens,
   handleClaudeMessages,
   readBoundedPassthroughBody,
   resolvePassthroughBodyGuard,
@@ -199,6 +200,56 @@ test("non-streaming /v1/messages returns an Anthropic message JSON", async () =>
     expect(typeof json.usage.input_tokens).toBe("number");
   } finally {
     await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("benchmark usage observer is one-shot, isolated from mutation, and non-disruptive", async () => {
+  const upstream = mockChatUpstream();
+  const config = mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`);
+  const observations: Array<{ adapterKind: string; modelId: string; inputTokens?: number }> = [];
+  const request = () => new Request("http://localhost/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "mock/test-model",
+      max_tokens: 8,
+      stream: false,
+      messages: [{ role: "user", content: "observer isolation" }],
+    }),
+  });
+  try {
+    const mutated = await handleClaudeMessages(
+      request(),
+      config,
+      { model: "test-model", provider: "mock", surface: "claude" },
+      undefined,
+      config,
+      { onRawUsage: observation => {
+        observations.push({
+          adapterKind: observation.adapterKind,
+          modelId: observation.modelId,
+          inputTokens: observation.usage?.inputTokens,
+        });
+        if (observation.usage) observation.usage.inputTokens = 999_999;
+      } },
+    );
+    expect(mutated.status).toBe(200);
+    const body = await mutated.json() as { usage: { input_tokens: number } };
+    expect(body.usage.input_tokens).toBe(12);
+    expect(observations).toEqual([{ adapterKind: "openai-chat", modelId: "test-model", inputTokens: 12 }]);
+
+    const throwing = await handleClaudeMessages(
+      request(),
+      config,
+      { model: "test-model", provider: "mock", surface: "claude" },
+      undefined,
+      config,
+      { onRawUsage: () => { throw new Error("observer failure"); } },
+    );
+    expect(throwing.status).toBe(200);
+    expect((await throwing.json() as { usage: { input_tokens: number } }).usage.input_tokens).toBe(12);
+  } finally {
     upstream.stop(true);
   }
 });
@@ -1200,6 +1251,38 @@ test("count_tokens returns a positive estimate in the exact contract shape", asy
     expect(json.input_tokens as number).toBeGreaterThan(0);
   } finally {
     await server.stop(true);
+  }
+});
+
+test("routed count_tokens stays local and does not invoke provider transport or benchmark observation", async () => {
+  const raw = {
+    model: "mock/test-model",
+    system: "be brief",
+    messages: [{ role: "user", content: "count this routed request" }],
+    tools: [{ name: "Read", input_schema: { type: "object" } }],
+  };
+  const expected = estimateClaudeRequestTokens(raw, raw.model);
+  // The count_tokens handler has no benchmark observer parameter; keep this
+  // sentinel to make the no-observation invariant explicit in the regression.
+  const observerCalls: unknown[] = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (() => {
+    throw new Error("provider transport must not be reached by routed count_tokens");
+  }) as typeof fetch;
+  try {
+    const response = await handleClaudeCountTokens(
+      new Request("http://localhost/v1/messages/count_tokens", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(raw),
+      }),
+      mockConfig("http://127.0.0.1:1/v1"),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ input_tokens: expected });
+    expect(observerCalls).toHaveLength(0);
+  } finally {
+    globalThis.fetch = previousFetch;
   }
 });
 

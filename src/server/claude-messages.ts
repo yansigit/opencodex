@@ -35,7 +35,7 @@ import {
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { estimateTokens } from "../lib/token-estimate";
 import { modelInList } from "../types/tools";
-import type { ClaudeSourceEnvelope, OcxConfig } from "../types";
+import type { ClaudeSourceEnvelope, OcxConfig, OcxUsage } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, recordFirstOutput, type RequestLogContext, type RequestLogEntry } from "./request-log";
 import { conversationIdFromClaudeMetadata } from "./request-log-conversation";
@@ -80,6 +80,25 @@ export function buildClaudeReplayConfig(config: OcxConfig): OcxConfig {
       ...config.claudeCode?.visionSidecar,
     },
   };
+}
+
+/**
+ * Phase 4 plan 04-02: benchmark-only raw-usage observation.
+ *
+ * The optional benchmark observer receives a sanitized structural record only —
+ * final adapter kind, resolved model id, and the raw OcxUsage reported before
+ * Anthropic wire normalization. It never receives request bodies, headers,
+ * provider names/aliases, endpoint, account identity, raw provider response, or
+ * error text. Standard Messages behavior is unchanged when omitted.
+ */
+export interface ClaudeBenchmarkRawUsage {
+  adapterKind: string;
+  modelId: string;
+  usage: OcxUsage | undefined;
+}
+
+export interface ClaudeBenchmarkObserverOptions {
+  onRawUsage?: (observation: ClaudeBenchmarkRawUsage) => void;
 }
 
 function claudeInboundDisabled(config: OcxConfig): Response | null {
@@ -716,11 +735,12 @@ export async function handleClaudeMessages(
   logCtx: RequestLogContext,
   logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease },
   requestPolicy: RequestPolicyView = config,
+  benchmark?: ClaudeBenchmarkObserverOptions,
 ): Promise<Response> {
   const translatorBudget = createTranslatorBudget();
   try {
     return finalizeTranslatorBudgetResponse(
-      await handleClaudeMessagesWithBudget(req, config, logCtx, translatorBudget, logIds, requestPolicy),
+      await handleClaudeMessagesWithBudget(req, config, logCtx, translatorBudget, logIds, requestPolicy, benchmark),
       translatorBudget,
     );
   } catch (error) {
@@ -736,6 +756,7 @@ async function handleClaudeMessagesWithBudget(
   translatorBudget: TranslatorBudget,
   logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease },
   requestPolicy: RequestPolicyView = config,
+  benchmark?: ClaudeBenchmarkObserverOptions,
 ): Promise<Response> {
   logCtx.surface = "claude";
   const disabled = claudeInboundDisabled(config);
@@ -959,6 +980,7 @@ async function handleClaudeMessagesWithBudget(
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
     onNativePassthroughCancel: () => finalizeNativeLog(499, { closeReason: "client_cancel" }),
+    ...(benchmark?.onRawUsage ? { claudeBenchmarkObserver: benchmark.onRawUsage } : {}),
   });
   const response = logIds ? responseWithDeferredRequestLog(upstream, logIds.requestId, logIds.start, logCtx) : upstream;
 

@@ -318,11 +318,17 @@ export function runTokenBenchmark(
         return unsupportedRow(fixture.id, digest, "transport_declined");
       }
       const usage = result.usage;
+      if (!usage || typeof usage !== "object") {
+        return unsupportedRow(fixture.id, digest, "malformed_usage");
+      }
       if (usage.estimated === true) {
         return unsupportedRow(fixture.id, digest, "estimated_usage");
       }
       const cacheFields = [usage.cachedInputTokens, usage.cacheReadInputTokens, usage.cacheCreationInputTokens];
-      if (cacheFields.some(v => typeof v === "number" && v !== 0)) {
+      // Cache detail is deliberately closed for this benchmark. Any present value
+      // must be a finite zero; non-zero *or malformed* detail cannot silently alter
+      // the inclusive inputTokens convention.
+      if (cacheFields.some(v => v !== undefined && (typeof v !== "number" || !Number.isFinite(v) || v !== 0))) {
         return unsupportedRow(fixture.id, digest, "cache_usage_present");
       }
       if (!isAcceptableAuthoritativeInput(usage.inputTokens)) {
