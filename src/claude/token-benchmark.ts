@@ -3,7 +3,7 @@
  *
  * A benchmark-only pure library: no network, no configuration loading, no provider
  * credentials, no persistence. The authoritative count always arrives through an
- * injected transport and is only accepted when it is a finite non-negative
+ * injected transport and is only accepted when it is a finite positive integer
  * provider-reported input count that is not marked estimated and carries no cache
  * detail (the shared proxy usage convention folds cache reads/writes into the
  * input total; report that total, never a cache-split residual).
@@ -298,9 +298,10 @@ export function runTokenBenchmark(
   const ordered = [...fixtures].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
   const rows: TokenBenchmarkFixtureRow[] = ordered.map((fixture) => {
+    let digest = "";
     try {
       const materialized = materializeFixture(fixture);
-      const digest = canonicalFixtureDigest(materialized);
+      digest = canonicalFixtureDigest(materialized);
       // The local count is the exact single estimation call under measurement.
       const local = estimateClaudeRequestTokens(materialized, modelId);
       const result = transport({
@@ -336,7 +337,7 @@ export function runTokenBenchmark(
       };
     } catch {
       // Transport/materialization failures are typed with no error text exposed.
-      return failedRow(fixture.id, "");
+      return failedRow(fixture.id, digest);
     }
   });
 

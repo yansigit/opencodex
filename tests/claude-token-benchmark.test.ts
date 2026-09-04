@@ -122,6 +122,17 @@ describe("04-01 offline token benchmark", () => {
     expect(report.status).toBe("incomplete");
   });
 
+  test("transport throws preserve the already-computed fixture digest", () => {
+    const report = runTokenBenchmark(
+      [FIRST],
+      () => { throw new Error("SECRET-THROWN-TRANSPORT"); },
+      { modelId: MODEL_ID, providerKind: PROVIDER_KIND },
+    );
+    expect(report.fixtures[0].state).toBe("failed");
+    expect(report.fixtures[0].digest).toBe(canonicalFixtureDigest(materializeFixture(FIRST)));
+    expect(serializeBenchmarkReport(report)).not.toContain("SECRET-THROWN-TRANSPORT");
+  });
+
   test("32-token absolute tolerance holds at both limbs", () => {
     const absPass = textFixture("abs-pass", "a", 400);
     const localPass = localOf(absPass);
