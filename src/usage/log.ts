@@ -113,6 +113,10 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  v2BridgeScope?: "root" | "child";
+  v2BridgeDecision?: "active" | "disabled" | "not_v2" | "non_native_route"
+    | "maintenance_turn" | "no_collaboration_catalog" | "combo" | "compaction" | "shadow_route";
+  v2BridgeStateDurability?: "standard" | "encrypted" | "memory-only";
   /** Stable non-PII identity for the account that served this request. */
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
@@ -186,6 +190,14 @@ const KNOWN_ADMISSION_KINDS = new Set<NonNullable<PersistedUsageEntry["admission
 const KNOWN_INBOUND_PROTOCOLS = new Set<NonNullable<PersistedUsageEntry["inboundProtocol"]>>([
   "responses", "chat", "messages",
 ]);
+const KNOWN_V2_BRIDGE_SCOPES = new Set<NonNullable<PersistedUsageEntry["v2BridgeScope"]>>(["root", "child"]);
+const KNOWN_V2_BRIDGE_DECISIONS = new Set<NonNullable<PersistedUsageEntry["v2BridgeDecision"]>>([
+  "active", "disabled", "not_v2", "non_native_route", "maintenance_turn",
+  "no_collaboration_catalog", "combo", "compaction", "shadow_route",
+]);
+const KNOWN_V2_BRIDGE_DURABILITIES = new Set<NonNullable<PersistedUsageEntry["v2BridgeStateDurability"]>>([
+  "standard", "encrypted", "memory-only",
+]);
 const KNOWN_AGENT_KINDS = new Set<AgentKind>(["main", "subagent", "internal"]);
 
 export function isKnownAgentKind(value: unknown): value is AgentKind {
@@ -200,6 +212,18 @@ export function isKnownAdmissionKind(value: unknown): value is NonNullable<Persi
 
 export function isKnownInboundProtocol(value: unknown): value is NonNullable<PersistedUsageEntry["inboundProtocol"]> {
   return typeof value === "string" && KNOWN_INBOUND_PROTOCOLS.has(value as NonNullable<PersistedUsageEntry["inboundProtocol"]>);
+}
+
+export function isKnownV2BridgeScope(value: unknown): value is NonNullable<PersistedUsageEntry["v2BridgeScope"]> {
+  return typeof value === "string" && KNOWN_V2_BRIDGE_SCOPES.has(value as NonNullable<PersistedUsageEntry["v2BridgeScope"]>);
+}
+
+export function isKnownV2BridgeDecision(value: unknown): value is NonNullable<PersistedUsageEntry["v2BridgeDecision"]> {
+  return typeof value === "string" && KNOWN_V2_BRIDGE_DECISIONS.has(value as NonNullable<PersistedUsageEntry["v2BridgeDecision"]>);
+}
+
+export function isKnownV2BridgeStateDurability(value: unknown): value is NonNullable<PersistedUsageEntry["v2BridgeStateDurability"]> {
+  return typeof value === "string" && KNOWN_V2_BRIDGE_DURABILITIES.has(value as NonNullable<PersistedUsageEntry["v2BridgeStateDurability"]>);
 }
 
 export function usageLogPath(configDir?: string): string {
@@ -575,6 +599,11 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+    ...(isKnownV2BridgeScope(entry.v2BridgeScope) ? { v2BridgeScope: entry.v2BridgeScope } : {}),
+    ...(isKnownV2BridgeDecision(entry.v2BridgeDecision) ? { v2BridgeDecision: entry.v2BridgeDecision } : {}),
+    ...(isKnownV2BridgeStateDurability(entry.v2BridgeStateDurability)
+      ? { v2BridgeStateDurability: entry.v2BridgeStateDurability }
+      : {}),
     ...(isPersistableAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),

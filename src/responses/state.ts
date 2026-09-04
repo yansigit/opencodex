@@ -17,11 +17,24 @@ import {
   responseSpillPayloadCap,
   markResponseSpillPublicationSuperseded,
   prospectiveResponseSpillBytes,
+  type ResponseSpillStateInput,
   type ResponseSpillPublicationControl,
   type ResponseSpillRef,
   writeResponseSpillDurably,
   writeResponseSpillDurablyAsync,
 } from "./spill-store";
+import {
+  buildResponseContinuationAAD,
+  decryptResponseContinuation,
+  encryptResponseContinuation,
+  getResponseContinuationKey,
+  getResponseContinuationKeySync,
+  hasPlaintextDelegationHistory,
+  releaseResponseContinuationKey,
+  resetResponseContinuationKeyForTests,
+  responseContinuationHomeId,
+  type ResponseContinuationEncryptedEnvelope,
+} from "./continuation-crypto";
 
 const MAX_STORED_RESPONSES = 1_000;
 const RESPONSE_TTL_MS = 60 * 60 * 1_000;
@@ -88,6 +101,15 @@ const RESPONSE_SPILL_SHUTDOWN_FALLBACK_RESERVE_MS = 4_000;
 const RESPONSE_SPILL_ASYNC_ACL_ATTEMPT_BUDGET_MS = 30_000;
 const RESPONSE_SPILL_SHUTDOWN_TERMINALIZATION_MAX_PASSES = MAX_STORED_RESPONSES + 1;
 
+export type ResponseStateDurability = "standard" | "encrypted" | "memory-only";
+export type ResponseDurability = ResponseStateDurability;
+
+export interface RememberResponseStateOptions {
+  force?: boolean;
+  clientThreadId?: string;
+  durability?: ResponseStateDurability;
+}
+
 interface ResidentResponseState {
   kind: "resident";
   createdAt: number;
@@ -97,6 +119,18 @@ interface ResidentResponseState {
   providerOutputStart?: number;
   providers?: OcxProviderContinuationState;
   sizeBytes: number;
+  durability?: ResponseStateDurability;
+  envelope?: ResponseContinuationEncryptedEnvelope;
+}
+
+interface EncryptedResidentResponseState {
+  kind: "encrypted-resident";
+  createdAt: number;
+  clientThreadId?: string;
+  providerOutputStart?: number;
+  envelope: ResponseContinuationEncryptedEnvelope;
+  sizeBytes: number;
+  durability: "encrypted";
 }
 
 interface SpilledResponseState {
@@ -108,6 +142,8 @@ interface SpilledResponseState {
   providers?: OcxProviderContinuationState;
   spill: ResponseSpillRef;
   sizeBytes: number;
+  durability?: ResponseStateDurability;
+  envelope?: ResponseContinuationEncryptedEnvelope;
 }
 
 interface SpillFailedResponseState {
@@ -116,7 +152,11 @@ interface SpillFailedResponseState {
   sizeBytes: number;
 }
 
-type StoredResponseState = ResidentResponseState | SpilledResponseState | SpillFailedResponseState;
+type StoredResponseState =
+  | ResidentResponseState
+  | EncryptedResidentResponseState
+  | SpilledResponseState
+  | SpillFailedResponseState;
 type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
 
 export type PreviousResponseReplayFailure = {
@@ -126,6 +166,104 @@ export type PreviousResponseReplayFailure = {
 
 const states = new Map<string, StoredResponseState>();
 const replayScopeMismatches = new WeakSet<object>();
+const responseStateDurabilityByBody = new WeakMap<object, ResponseStateDurability>();
+let legacyRetirementBlocked = false;
+const sensitiveStorageWarnings = new Set<string>();
+
+function warnSensitiveStorageMemoryOnly(reason: "credential_store" | "legacy_retirement"): void {
+  const key = `${responseContinuationHomeId()}:${reason}`;
+  if (sensitiveStorageWarnings.has(key)) return;
+  sensitiveStorageWarnings.add(key);
+  console.warn("[responses] secure continuation storage unavailable; sensitive replay is memory-only", { reason });
+}
+
+export function getResponseStateDurability(body: unknown): ResponseStateDurability | undefined {
+  return body && typeof body === "object" ? responseStateDurabilityByBody.get(body as object) : undefined;
+}
+
+export function markBodyResponseStateDurability(body: unknown, durability: ResponseStateDurability): void {
+  if (body && typeof body === "object") {
+    responseStateDurabilityByBody.set(body as object, durability);
+  }
+}
+
+export function isMemoryOnlyBody(body: unknown): boolean {
+  return !!body && typeof body === "object" && responseStateDurabilityByBody.get(body as object) === "memory-only";
+}
+
+export function isEncryptedResponseStateBody(body: unknown): boolean {
+  return !!body && typeof body === "object" && responseStateDurabilityByBody.get(body as object) === "encrypted";
+}
+
+export async function prepareResponseStateReplay(body: unknown): Promise<void> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return;
+  const request = body as Record<string, unknown>;
+
+  const carriesSensitiveHistory = hasPlaintextDelegationHistory(request.input)
+    || hasPlaintextDelegationHistory(request.tools);
+  const previousId = typeof request.previous_response_id === "string" ? request.previous_response_id : undefined;
+  if (!carriesSensitiveHistory && !previousId) return;
+
+  ensureLoaded();
+  if (carriesSensitiveHistory) {
+    const key = legacyRetirementBlocked ? null : await getResponseContinuationKey();
+    responseStateDurabilityByBody.set(request, key ? "encrypted" : "memory-only");
+    if (!key) warnSensitiveStorageMemoryOnly(legacyRetirementBlocked ? "legacy_retirement" : "credential_store");
+  }
+
+  if (!previousId) {
+    return;
+  }
+
+  pruneResponses();
+  const previous = states.get(previousId);
+  if (!previous) return;
+
+  const isEncrypted =
+    previous.kind === "encrypted-resident"
+    || (previous.kind === "resident" && previous.durability === "encrypted")
+    || (previous.kind === "spill" && (previous.spill.version === 2 || previous.durability === "encrypted"));
+
+  if (isEncrypted) {
+    const key = legacyRetirementBlocked ? null : await getResponseContinuationKey();
+    if (!responseStateDurabilityByBody.has(request)) {
+      responseStateDurabilityByBody.set(request, key ? "encrypted" : "memory-only");
+    }
+  } else if (previous.kind === "resident" && previous.durability === "memory-only") {
+    if (!responseStateDurabilityByBody.has(request)) {
+      responseStateDurabilityByBody.set(request, "memory-only");
+    }
+  }
+}
+
+export async function prepareSensitiveResponsePersistence(body?: unknown): Promise<"encrypted" | "memory-only"> {
+  ensureLoaded();
+  const current = body && typeof body === "object"
+    ? responseStateDurabilityByBody.get(body as object)
+    : undefined;
+
+  if (current === "encrypted") return "encrypted";
+
+  if (legacyRetirementBlocked) {
+    if (body && typeof body === "object") responseStateDurabilityByBody.set(body as object, "memory-only");
+    warnSensitiveStorageMemoryOnly("legacy_retirement");
+    return "memory-only";
+  }
+
+  const key = await getResponseContinuationKey();
+  if (!key) {
+    if (body && typeof body === "object") {
+      responseStateDurabilityByBody.set(body as object, "memory-only");
+    }
+    warnSensitiveStorageMemoryOnly("credential_store");
+    return "memory-only";
+  }
+
+  if (body && typeof body === "object") {
+    responseStateDurabilityByBody.set(body as object, "encrypted");
+  }
+  return "encrypted";
+}
 let storedResponseBytes = 0;
 let residentResponseBytes = 0;
 let oldestResidentId: string | undefined;
@@ -205,7 +343,7 @@ const MAX_PENDING_RESPONSE_SPILL_BYTES = MAX_RESPONSE_SPILL_PAYLOAD_BYTES;
 
 interface PendingResponseSpill {
   id: string;
-  candidate: ResidentResponseState | null;
+  candidate: ResidentResponseState | EncryptedResidentResponseState | null;
   supersededSpill?: ResponseSpillRef;
   directAdmission: boolean;
   running: boolean;
@@ -281,8 +419,8 @@ function reconcileUnreclaimableSpillPaths(): number {
  * still exceed it. Falls back to the resident figure only when serialization fails, which
  * is the same condition that will fail the publication itself.
  */
-function publicationFootprintBytes(id: string, candidate: ResidentResponseState): number {
-  const exact = prospectiveResponseSpillBytes(id, spillPayloadForResident(candidate));
+function publicationFootprintBytes(id: string, candidate: ResidentResponseState | EncryptedResidentResponseState): number {
+  const exact = prospectiveResponseSpillBytes(id, spillPayloadForResident(id, candidate));
   return (exact ?? candidate.sizeBytes) * 2;
 }
 let responseSpillPublicationTail: Promise<void> = Promise.resolve();
@@ -331,8 +469,35 @@ function isAclTimeout(error: unknown): boolean {
     && String((error as { code?: unknown }).code) === "ETIMEDOUT";
 }
 
-function spillPayloadForResident(candidate: ResidentResponseState): Parameters<typeof writeResponseSpillDurably>[1] {
+function spillPayloadForResident(id: string, candidate: ResidentResponseState | EncryptedResidentResponseState): ResponseSpillStateInput {
+  if (candidate.durability === "encrypted" || candidate.envelope) {
+    let envelope = candidate.envelope;
+    if (!envelope && candidate.kind === "resident") {
+      const key = getResponseContinuationKeySync();
+      if (key) {
+        const homeId = responseContinuationHomeId();
+        const aad = buildResponseContinuationAAD(homeId, id, candidate.createdAt, candidate.clientThreadId, candidate.providerOutputStart);
+        envelope = encryptResponseContinuation(
+          { items: candidate.items, ...(candidate.providers ? { providers: candidate.providers } : {}) },
+          aad,
+          key,
+        );
+        candidate.envelope = envelope;
+      }
+    }
+    if (!envelope) {
+      throw new Error("Cannot spill encrypted state without keyring key");
+    }
+    return {
+      version: 2,
+      createdAt: candidate.createdAt,
+      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
+      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
+      envelope,
+    };
+  }
   return {
+    version: 1,
     createdAt: candidate.createdAt,
     ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
     items: candidate.items,
@@ -347,7 +512,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
   const candidate = job.candidate;
   let ref: ResponseSpillRef | null = null;
   try {
-    const state = spillPayloadForResident(candidate);
+    const state = spillPayloadForResident(job.id, candidate);
     try {
       ref = await writeResponseSpillDurablyAsync(job.id, state, {
         aclBudgetMs: responseSpillAsyncAclAttemptBudgetMs(),
@@ -401,7 +566,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
 
 function queuePendingResponseSpill(
   id: string,
-  candidate: ResidentResponseState,
+  candidate: ResidentResponseState | EncryptedResidentResponseState,
   options: { supersededSpill?: ResponseSpillRef; directAdmission?: boolean } = {},
 ): void {
   const inheritedSpill = cancelPendingResponseSpill(id) ?? options.supersededSpill;
@@ -453,7 +618,7 @@ function queuePendingResponseSpill(
 
 function replaceWithPendingResponseSpill(
   id: string,
-  candidate: ResidentResponseState,
+  candidate: ResidentResponseState | EncryptedResidentResponseState,
   expected: StoredResponseState | undefined,
   options: { directAdmission?: boolean } = {},
 ): boolean {
@@ -567,7 +732,7 @@ function installShutdownFallbackSpill(
         throw Object.assign(new Error("Response spill shutdown fallback exceeds the durable disk cap"), { code: "ENOSPC" });
       }
     }
-    ref = writeResponseSpillDurably(job.id, spillPayloadForResident(candidate), { aclBudgetMs });
+    ref = writeResponseSpillDurably(job.id, spillPayloadForResident(job.id, candidate), { aclBudgetMs });
     if (ref.payloadBytes > responseSpillPayloadCap()) {
       deleteResponseSpill(ref);
       ref = null;
@@ -854,7 +1019,7 @@ function recomputeOldestResident(): void {
   oldestResidentId = undefined;
   oldestResidentAt = null;
   for (const [id, state] of states) {
-    if (state.kind !== "resident") continue;
+    if (state.kind !== "resident" && state.kind !== "encrypted-resident") continue;
     if (pendingResponseSpillById.get(id)?.candidate === state) continue;
     if (oldestResidentAt !== null && state.createdAt >= oldestResidentAt) continue;
     oldestResidentId = id;
@@ -867,10 +1032,10 @@ function replaceMapEntry(id: string, next: StoredResponseState, expected?: Store
   if (expected && existing !== expected) return false;
   storedResponseBytes -= existing?.sizeBytes ?? 0;
   storedResponseBytes += next.sizeBytes;
-  if (existing?.kind === "resident") {
+  if (existing?.kind === "resident" || existing?.kind === "encrypted-resident") {
     residentResponseBytes -= existing.sizeBytes;
   }
-  if (next.kind === "resident") {
+  if (next.kind === "resident" || next.kind === "encrypted-resident") {
     residentResponseBytes += next.sizeBytes;
   }
   if (storedResponseBytes < 0) storedResponseBytes = 0;
@@ -879,7 +1044,7 @@ function replaceMapEntry(id: string, next: StoredResponseState, expected?: Store
   states.set(id, next);
   if (oldestResidentId === id) {
     recomputeOldestResident();
-  } else if (next.kind === "resident" && (oldestResidentAt === null || next.createdAt < oldestResidentAt)) {
+  } else if ((next.kind === "resident" || next.kind === "encrypted-resident") && (oldestResidentAt === null || next.createdAt < oldestResidentAt)) {
     oldestResidentId = id;
     oldestResidentAt = next.createdAt;
   }
@@ -906,7 +1071,7 @@ function deleteEntry(id: string, options: { deleteSpill?: boolean } = {}): void 
   if (!existing) return;
   const supersededSpill = cancelPendingResponseSpill(id);
   storedResponseBytes -= existing.sizeBytes;
-  if (existing.kind === "resident") {
+  if (existing.kind === "resident" || existing.kind === "encrypted-resident") {
     residentResponseBytes -= existing.sizeBytes;
   }
   if (storedResponseBytes < 0) storedResponseBytes = 0;
@@ -943,13 +1108,17 @@ function replaceWithSpillFailure(
   }
 }
 
-function swapResidentForSpill(id: string, expected: ResidentResponseState, ref: ResponseSpillRef): boolean {
+function swapResidentForSpill(id: string, expected: ResidentResponseState | EncryptedResidentResponseState, ref: ResponseSpillRef): boolean {
   const base: Omit<SpilledResponseState, "sizeBytes"> = {
     kind: "spill",
     createdAt: expected.createdAt,
     ...(expected.clientThreadId ? { clientThreadId: expected.clientThreadId } : {}),
-    ...(expected.providers ? { providers: expected.providers } : {}),
+    ...(expected.kind === "resident" && expected.durability !== "encrypted" && expected.providers
+      ? { providers: expected.providers }
+      : {}),
+    ...(expected.providerOutputStart !== undefined ? { providerOutputStart: expected.providerOutputStart } : {}),
     spill: ref,
+    ...(expected.durability ? { durability: expected.durability } : {}),
   };
   const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
   if (!replaceMapEntry(id, next, expected)) {
@@ -966,20 +1135,16 @@ function replaceSpillEntryAtomically(
   candidate: ResidentResponseState,
 ): void {
   try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      items: candidate.items,
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
-    });
+    const payload = spillPayloadForResident(id, candidate);
+    const ref = writeResponseSpillDurably(id, payload);
     const base: Omit<SpilledResponseState, "sizeBytes"> = {
       kind: "spill",
       createdAt: candidate.createdAt,
       ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
       ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
+      ...(candidate.durability !== "encrypted" && candidate.providers ? { providers: candidate.providers } : {}),
       spill: ref,
+      ...(candidate.durability ? { durability: candidate.durability } : {}),
     };
     const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
     if (!replaceMapEntry(id, next, expected)) {
@@ -1016,17 +1181,32 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
     return;
   }
   if (candidate.sizeBytes > byteCap()) {
+    if (candidate.durability === "memory-only") {
+      admissionCounters.oversizedDrops += 1;
+      if (expected) deleteEntry(id);
+      return;
+    }
     admitOversizedCandidate(id, candidate, expected);
     pruneResponses();
     return;
   }
   const pending = pendingResponseSpillById.get(id);
   if (windowsSecretAclApplies() && (expected?.kind === "spill" || pending?.supersededSpill)) {
+    if (candidate.durability === "memory-only") {
+      deleteEntry(id);
+      return;
+    }
     replaceWithPendingResponseSpill(id, candidate, expected);
     pruneResponses();
     return;
   }
   if (expected?.kind === "spill") {
+    if (candidate.durability === "memory-only") {
+      deleteOwnedSpills(expected);
+      if (!replaceMapEntry(id, candidate, expected)) return;
+      pruneResponses();
+      return;
+    }
     replaceSpillEntryAtomically(id, expected, candidate);
     pruneResponses();
     return;
@@ -1049,6 +1229,11 @@ function admitOversizedCandidate(
   candidate: ResidentResponseState,
   expected?: StoredResponseState,
 ): void {
+  if (candidate.durability === "memory-only") {
+    admissionCounters.oversizedDrops += 1;
+    if (expected) deleteEntry(id);
+    return;
+  }
   if (candidate.sizeBytes > responseSpillPayloadCap()) {
     admissionCounters.oversizedDrops += 1;
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
@@ -1059,13 +1244,8 @@ function admitOversizedCandidate(
     return;
   }
   try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      items: candidate.items,
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
-    });
+    const payload = spillPayloadForResident(id, candidate);
+    const ref = writeResponseSpillDurably(id, payload);
     // Enforce the ceiling against the REAL envelope: the spill payload adds
     // the {version, responseId, ...} wrapper, so a candidate within the
     // wrapper's size of the cap would otherwise be retained unreadably.
@@ -1079,8 +1259,9 @@ function admitOversizedCandidate(
       kind: "spill",
       createdAt: candidate.createdAt,
       ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
+      ...(candidate.durability !== "encrypted" && candidate.providers ? { providers: candidate.providers } : {}),
       spill: ref,
+      ...(candidate.durability ? { durability: candidate.durability } : {}),
     };
     const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
     if (!replaceMapEntry(id, next, expected)) {
@@ -1139,7 +1320,7 @@ interface LegacySnapshotState {
 function isSpillRef(value: unknown): value is ResponseSpillRef {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const ref = value as ResponseSpillRef;
-  return ref.version === 1
+  return (ref.version === 1 || ref.version === 2)
     && typeof ref.fileName === "string"
     && /^[0-9a-f]{64}$/.test(ref.digest)
     && Number.isSafeInteger(ref.payloadBytes)
@@ -1148,7 +1329,7 @@ function isSpillRef(value: unknown): value is ResponseSpillRef {
 
 function loadSnapshotEntry(id: string, value: unknown): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const rec = value as LegacySnapshotState & { kind?: unknown; spill?: unknown };
+  const rec = value as Record<string, unknown>;
   if (typeof rec.createdAt !== "number" || !Number.isFinite(rec.createdAt)) return;
   const clientThreadId = typeof rec.clientThreadId === "string" && rec.clientThreadId.trim().length > 0
     ? rec.clientThreadId.trim()
@@ -1156,13 +1337,42 @@ function loadSnapshotEntry(id: string, value: unknown): void {
   // A malformed boundary degrades to "never skip" rather than to a bad index: an untrusted
   // snapshot must not be able to authorize dropping conversation history.
   const anchorFor = (itemCount: number): number | undefined => {
-    const raw = (rec as { providerOutputStart?: unknown }).providerOutputStart;
+    const raw = rec.providerOutputStart;
     return Number.isSafeInteger(raw) && (raw as number) >= 0 && (raw as number) <= itemCount
       ? raw as number
       : undefined;
   };
+  if (rec.kind === "encrypted-resident") {
+    const env = rec.envelope as ResponseContinuationEncryptedEnvelope | undefined;
+    if (
+      !env
+      || env.version !== 1
+      || env.cipher !== "aes-256-gcm"
+      || typeof env.keyId !== "string"
+      || typeof env.nonce !== "string"
+      || typeof env.tag !== "string"
+      || typeof env.ciphertext !== "string"
+    ) {
+      return;
+    }
+    const stubBase = {
+      kind: "encrypted-resident",
+      createdAt: rec.createdAt,
+      ...(clientThreadId ? { clientThreadId } : {}),
+      ...(anchorFor(Number.MAX_SAFE_INTEGER) !== undefined ? { providerOutputStart: anchorFor(Number.MAX_SAFE_INTEGER) } : {}),
+      envelope: env,
+      durability: "encrypted",
+    } as const;
+    const stub: EncryptedResidentResponseState = {
+      ...stubBase,
+      sizeBytes: serializedBytes({ responseId: id, ...stubBase }) ?? 0,
+    };
+    replaceMapEntry(id, stub);
+    return;
+  }
   if (rec.kind === "spill") {
     if (!isSpillRef(rec.spill)) return;
+    const isEncryptedSpill = (rec.spill as ResponseSpillRef).version === 2;
     const base: Omit<SpilledResponseState, "sizeBytes"> = {
       kind: "spill",
       createdAt: rec.createdAt,
@@ -1170,8 +1380,9 @@ function loadSnapshotEntry(id: string, value: unknown): void {
       // Item count is unknown until materialization, so accept any non-negative integer
       // here; the spill payload validator re-checks it against the real array.
       ...(anchorFor(Number.MAX_SAFE_INTEGER) !== undefined ? { providerOutputStart: anchorFor(Number.MAX_SAFE_INTEGER) } : {}),
-      ...(rec.providers ? { providers: rec.providers } : {}),
-      spill: rec.spill,
+      ...(rec.providers ? { providers: rec.providers as OcxProviderContinuationState } : {}),
+      spill: rec.spill as ResponseSpillRef,
+      ...(isEncryptedSpill ? { durability: "encrypted" } : {}),
     };
     replaceMapEntry(id, { ...base, sizeBytes: stubSize(id, base) });
     return;
@@ -1197,7 +1408,7 @@ function loadSnapshotEntry(id: string, value: unknown): void {
     ...(clientThreadId ? { clientThreadId } : {}),
     items: rec.items,
     ...(anchorFor(rec.items.length) !== undefined ? { providerOutputStart: anchorFor(rec.items.length) } : {}),
-    ...(providers ? { providers } : {}),
+    ...(providers ? { providers: providers as OcxProviderContinuationState } : {}),
   });
   if (!resident) {
     replaceMapEntry(id, tombstone(id, rec.createdAt));
@@ -1449,6 +1660,21 @@ function ensureLoaded(): void {
       } else {
         const raw = JSON.parse(readFileSync(path, "utf-8")) as { version?: unknown; states?: unknown };
         if ((raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
+          let retirementFailed = false;
+          for (const entry of raw.states) {
+            if (Array.isArray(entry) && entry.length === 2 && entry[1] && typeof entry[1] === "object") {
+              const item = entry[1] as { kind?: unknown; spill?: unknown };
+              if (item.kind === "spill" && isSpillRef(item.spill)) {
+                try { deleteResponseSpill(item.spill); } catch { /* best effort */ }
+                if (existsSync(join(responseSpillDirectory(), item.spill.fileName))) retirementFailed = true;
+              }
+            }
+          }
+          try { unlinkSync(path); } catch { /* best effort */ }
+          if (existsSync(path)) retirementFailed = true;
+          legacyRetirementBlocked = retirementFailed;
+          if (retirementFailed) warnSensitiveStorageMemoryOnly("legacy_retirement");
+        } else if (raw.version === 3 && Array.isArray(raw.states)) {
           for (const entry of raw.states) {
             if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
             loadSnapshotEntry(entry[0], entry[1]);
@@ -1463,7 +1689,9 @@ function ensureLoaded(): void {
   for (const state of states.values()) {
     if (state.kind === "spill") referenced.add(state.spill.fileName);
   }
-  try { recoverOrphanedResponseSpills(referenced); } catch { /* best effort */ }
+  if (!legacyRetirementBlocked) {
+    try { recoverOrphanedResponseSpills(referenced); } catch { /* best effort */ }
+  }
   pruneResponses();
 }
 
@@ -1482,13 +1710,49 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
       let total = 0;
       // Newest-first so the most recent chains survive both legacy snapshot caps.
       for (const [id, state] of [...states].reverse()) {
+        if (state.kind !== "spill-failed" && state.durability === "memory-only") {
+          continue;
+        }
         let persistable: unknown;
-        if (state.kind === "resident") {
-          const { sizeBytes: _sizeBytes, kind: _kind, ...resident } = state;
-          persistable = resident;
-        } else {
-          const { sizeBytes: _sizeBytes, ...smallState } = state;
+        if (state.kind === "spill-failed") {
+          persistable = { kind: "spill-failed", createdAt: state.createdAt };
+        } else if (state.kind === "spill") {
+          const { sizeBytes: _sizeBytes, durability: _d, envelope: _e, ...smallState } = state;
           persistable = smallState;
+        } else if (state.kind === "encrypted-resident") {
+          persistable = {
+            kind: "encrypted-resident",
+            createdAt: state.createdAt,
+            ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
+            ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
+            envelope: state.envelope,
+          };
+        } else if (state.durability === "encrypted") {
+          let env = state.envelope;
+          if (!env) {
+            const key = getResponseContinuationKeySync();
+            if (key) {
+              const homeId = responseContinuationHomeId();
+              const aad = buildResponseContinuationAAD(homeId, id, state.createdAt, state.clientThreadId, state.providerOutputStart);
+              env = encryptResponseContinuation(
+                { items: state.items, ...(state.providers ? { providers: state.providers } : {}) },
+                aad,
+                key,
+              );
+              state.envelope = env;
+            }
+          }
+          if (!env) continue;
+          persistable = {
+            kind: "encrypted-resident",
+            createdAt: state.createdAt,
+            ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
+            ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
+            envelope: env,
+          };
+        } else {
+          const { sizeBytes: _sizeBytes, kind: _kind, durability: _d, envelope: _e, ...resident } = state;
+          persistable = resident;
         }
         const persistEntry: [string, unknown] = [id, persistable];
         // UTF-8 bytes, not UTF-16 code units: multibyte items otherwise slip
@@ -1500,7 +1764,7 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
         entries.push(persistEntry);
       }
       entries.reverse();
-      const payload = JSON.stringify({ version: 2, states: entries });
+      const payload = JSON.stringify({ version: 3, states: entries });
       const payloadBytes = Buffer.byteLength(payload, "utf8");
       const payloadDigest = Bun.hash(payload).toString(36);
       // A mutation does not always change what gets persisted: entries past the
@@ -1528,6 +1792,9 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
         try { chmodSync(dirname(path), 0o700); } catch { /* best-effort (e.g. Windows) */ }
         await atomicWriteFileAsync(path, payload);
+        // A successful v3 replacement proves a legacy snapshot that could not be
+        // unlinked has now been retired. Future sensitive turns may persist again.
+        legacyRetirementBlocked = false;
         lastSnapshotDigest = payloadDigest;
         lastSnapshotBytes = payloadBytes;
         lastSnapshotTarget = resolveWriteTarget(path);
@@ -1620,6 +1887,11 @@ export async function flushResponseState(): Promise<void> {
   }
   try {
     await flushResponseSnapshot();
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    releaseResponseContinuationKey();
   } catch (error) {
     failures.push(error);
   }
@@ -1788,15 +2060,19 @@ function pruneResponses(at = now()): void {
   // Unconditional RAM cap. Resident payloads demote durably; stubs/tombstones are
   // deleted only when even their bounded metadata cannot fit the override.
   while (storedResponseBytes > byteCap() && states.size > 0) {
-    const oldestResident = [...states].find(([id, entry]) => entry.kind === "resident"
+    const oldestResident = [...states].find(([id, entry]) => (entry.kind === "resident" || entry.kind === "encrypted-resident")
       && pendingResponseSpillById.get(id)?.candidate !== entry);
-    const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => entry.kind === "resident"
+    const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => (entry.kind === "resident" || entry.kind === "encrypted-resident")
       && pendingResponseSpillById.get(id)?.candidate === entry);
     if (hasPendingResident) break;
     const oldestId = oldestResident?.[0] ?? states.keys().next().value as string | undefined;
     if (!oldestId) break;
     const entry = states.get(oldestId)!;
-    if (entry.kind !== "resident") {
+    if (entry.kind !== "resident" && entry.kind !== "encrypted-resident") {
+      deleteEntry(oldestId);
+      continue;
+    }
+    if (entry.durability === "memory-only") {
       deleteEntry(oldestId);
       continue;
     }
@@ -1805,13 +2081,16 @@ function pruneResponses(at = now()): void {
       continue;
     }
     try {
-      const ref = writeResponseSpillDurably(oldestId, {
-        createdAt: entry.createdAt,
-        ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-        items: entry.items,
-        ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-        ...(entry.providers ? { providers: entry.providers } : {}),
-      });
+      const payload = entry.kind === "encrypted-resident"
+        ? {
+            version: 2 as const,
+            createdAt: entry.createdAt,
+            ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
+            ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
+            envelope: entry.envelope,
+          }
+        : spillPayloadForResident(oldestId, entry);
+      const ref = writeResponseSpillDurably(oldestId, payload);
       if (swapResidentForSpill(oldestId, entry, ref)) spillCounters.writes += 1;
     } catch {
       spillCounters.writeFailures += 1;
@@ -1915,20 +2194,28 @@ export function evictOldestResponseContinuationForBudget(): number {
   if (oldestResidentId === undefined) return 0;
   const id = oldestResidentId;
   const entry = states.get(id);
-  if (!entry || entry.kind !== "resident") return 0;
+  if (!entry || (entry.kind !== "resident" && entry.kind !== "encrypted-resident")) return 0;
+  if (entry.durability === "memory-only") {
+    const freedBytes = entry.sizeBytes;
+    deleteEntry(id);
+    return freedBytes;
+  }
   if (windowsSecretAclApplies()) {
     queuePendingResponseSpill(id, entry);
     schedulePersist();
     return 0;
   }
   try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: entry.createdAt,
-      ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-      items: entry.items,
-      ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-      ...(entry.providers ? { providers: entry.providers } : {}),
-    });
+    const payload = entry.kind === "encrypted-resident"
+      ? {
+          version: 2 as const,
+          createdAt: entry.createdAt,
+          ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
+            ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
+          envelope: entry.envelope,
+        }
+      : spillPayloadForResident(id, entry);
+    const ref = writeResponseSpillDurably(id, payload);
     if (swapResidentForSpill(id, entry, ref)) spillCounters.writes += 1;
   } catch {
     spillCounters.writeFailures += 1;
@@ -1936,7 +2223,7 @@ export function evictOldestResponseContinuationForBudget(): number {
   }
   schedulePersist();
   const replacement = states.get(id);
-  return !replacement || replacement.kind === "resident"
+  return !replacement || replacement.kind === "resident" || replacement.kind === "encrypted-resident"
     ? 0
     : Math.max(0, entry.sizeBytes - replacement.sizeBytes);
 }
@@ -1948,6 +2235,40 @@ function materializeEntry(
   if (entry.kind === "resident") return { ok: true, state: entry };
   if (entry.kind === "spill-failed") {
     return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_failed" } };
+  }
+  if (entry.kind === "encrypted-resident") {
+    const key = getResponseContinuationKeySync();
+    if (!key) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    const homeId = responseContinuationHomeId();
+    const aad = buildResponseContinuationAAD(homeId, id, entry.createdAt, entry.clientThreadId, entry.providerOutputStart);
+    const decrypted = decryptResponseContinuation(entry.envelope, aad, key);
+    if (!decrypted || (entry.providerOutputStart !== undefined && entry.providerOutputStart > decrypted.items.length)) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    const state = measureResidentEntry(id, {
+      createdAt: entry.createdAt,
+      ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
+      items: decrypted.items,
+      ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
+      ...(decrypted.providers ? { providers: decrypted.providers as OcxProviderContinuationState } : {}),
+      durability: "encrypted",
+      envelope: entry.envelope,
+    });
+    if (!state) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    return { ok: true, state };
   }
   const result = readResponseSpill(id, entry.spill);
   if (!result.ok) {
@@ -1963,6 +2284,51 @@ function materializeEntry(
     replaceWithSpillFailure(id, entry);
     schedulePersist();
     return { ok: false, failure };
+  }
+  if (result.payload.version === 2) {
+    const key = getResponseContinuationKeySync();
+    if (!key) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    const homeId = responseContinuationHomeId();
+    const aad = buildResponseContinuationAAD(
+      homeId,
+      id,
+      result.payload.createdAt,
+      result.payload.clientThreadId,
+      result.payload.providerOutputStart,
+    );
+    const decrypted = decryptResponseContinuation(result.payload.envelope, aad, key);
+    if (!decrypted || (
+      result.payload.providerOutputStart !== undefined
+      && result.payload.providerOutputStart > decrypted.items.length
+    )) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    const state = measureResidentEntry(id, {
+      createdAt: result.payload.createdAt,
+      ...(result.payload.clientThreadId ? { clientThreadId: result.payload.clientThreadId } : {}),
+      items: decrypted.items,
+      ...(result.payload.providerOutputStart !== undefined
+        ? { providerOutputStart: result.payload.providerOutputStart }
+        : {}),
+      ...(decrypted.providers ? { providers: decrypted.providers as OcxProviderContinuationState } : {}),
+      durability: "encrypted",
+      envelope: result.payload.envelope,
+    });
+    if (!state) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    return { ok: true, state };
   }
   const state = measureResidentEntry(id, {
     createdAt: result.payload.createdAt,
@@ -2045,6 +2411,11 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
       // not re-acknowledge historical compaction markers (parser.ts) and stays visible to
       // guidance de-duplication (collaboration.ts).
       replayedInputPrefixLengths.set(unchanged, carried);
+      if (materialized.state.durability === "memory-only") {
+        responseStateDurabilityByBody.set(unchanged, "memory-only");
+      } else if (materialized.state.durability === "encrypted") {
+        responseStateDurabilityByBody.set(unchanged, "encrypted");
+      }
       return unchanged;
     }
   }
@@ -2053,6 +2424,11 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
     input: [...materialized.state.items, ...inputItems(request.input)],
   };
   replayedInputPrefixLengths.set(expanded, materialized.state.items.length);
+  if (materialized.state.durability === "memory-only") {
+    responseStateDurabilityByBody.set(expanded, "memory-only");
+  } else if (materialized.state.durability === "encrypted") {
+    responseStateDurabilityByBody.set(expanded, "encrypted");
+  }
   return expanded;
 }
 
@@ -2072,10 +2448,19 @@ export function copyPreviousResponseReplayProvenance(source: unknown, target: un
   if (!source || typeof source !== "object" || Array.isArray(source)) return;
   if (!target || typeof target !== "object" || Array.isArray(target)) return;
   const prefixLength = replayedInputPrefixLengths.get(source);
-  if (!prefixLength) return;
-  const input = (target as { input?: unknown }).input;
-  if (!Array.isArray(input) || prefixLength > input.length) return;
-  replayedInputPrefixLengths.set(target, prefixLength);
+  if (prefixLength) {
+    const input = (target as { input?: unknown }).input;
+    if (Array.isArray(input) && prefixLength <= input.length) {
+      replayedInputPrefixLengths.set(target, prefixLength);
+    }
+  }
+  const durability = responseStateDurabilityByBody.get(source as object);
+  if (durability) {
+    responseStateDurabilityByBody.set(target as object, durability);
+  }
+  if (nonPersistableBodies.has(source as object)) {
+    nonPersistableBodies.add(target as object);
+  }
 }
 
 /** True when a stale or foreign previous_response_id was removed from this exact request body. */
@@ -2092,7 +2477,12 @@ export function previousResponseProviderState(responseId: string | undefined): O
   ensureLoaded();
   pruneResponses();
   const state = states.get(responseId);
-  const providers = state?.kind === "spill-failed" ? undefined : state?.providers;
+  if (!state || state.kind === "spill-failed") return undefined;
+  if (state.kind === "encrypted-resident" || (state.kind === "spill" && state.spill.version === 2)) {
+    const materialized = materializeEntry(responseId, state);
+    return materialized.ok ? structuredClone(materialized.state.providers) : undefined;
+  }
+  const providers = state.providers;
   return providers ? structuredClone(providers) : undefined;
 }
 
@@ -2132,7 +2522,7 @@ export function responseStateMetrics(): ResponseStateMetrics {
     const bytes = state.sizeBytes;
     if (bytes > largestBytes) largestBytes = bytes;
     if (state.createdAt < oldestCreatedAt) oldestCreatedAt = state.createdAt;
-    if (state.kind === "resident") {
+    if (state.kind === "resident" || state.kind === "encrypted-resident") {
       residentCount += 1;
     } else if (state.kind === "spill") {
       spillStubCount += 1;
@@ -2184,7 +2574,7 @@ export function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
   providerState?: OcxProviderContinuationState | string,
-  opts?: { force?: boolean; clientThreadId?: string },
+  opts?: RememberResponseStateOptions,
 ): void {
   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
   const request = requestBody as Record<string, unknown>;
@@ -2202,6 +2592,21 @@ export function rememberResponseState(
       || (details as { reason?: unknown }).reason !== "max_output_tokens") return;
   } else if (response.status !== undefined && response.status !== "completed") return;
   ensureLoaded();
+
+  let durability: ResponseStateDurability = opts?.durability
+    ?? responseStateDurabilityByBody.get(request)
+    ?? "standard";
+
+  if (durability === "standard") {
+    if (
+      hasPlaintextDelegationHistory(request.input)
+      || hasPlaintextDelegationHistory(request.tools)
+      || hasPlaintextDelegationHistory(response.output)
+    ) {
+      durability = "encrypted";
+    }
+  }
+
   const normalizedProviderState: OcxProviderContinuationState = typeof providerState === "string"
     ? { cursor: { conversationId: providerState } }
     : structuredClone(providerState ?? {});
@@ -2214,23 +2619,56 @@ export function rememberResponseState(
   // Compute the normalized array once and reuse it for both fields, so the recorded
   // boundary can never disagree with the items it indexes.
   const requestItems = inputItems(request.input);
+  const createdAt = now();
+  const providerOutputStart = requestItems.length;
+
+  let envelope: ResponseContinuationEncryptedEnvelope | undefined;
+  if (durability === "encrypted") {
+    const key = legacyRetirementBlocked ? null : getResponseContinuationKeySync();
+    if (!key) {
+      durability = "memory-only";
+      warnSensitiveStorageMemoryOnly(legacyRetirementBlocked ? "legacy_retirement" : "credential_store");
+    } else {
+      const homeId = responseContinuationHomeId();
+      const aad = buildResponseContinuationAAD(
+        homeId,
+        response.id,
+        createdAt,
+        clientThreadId,
+        providerOutputStart,
+      );
+      envelope = encryptResponseContinuation(
+        {
+          items: [...requestItems, ...response.output],
+          ...(Object.keys(normalizedProviderState).length > 0 ? { providers: normalizedProviderState } : {}),
+        },
+        aad,
+        key,
+      );
+    }
+  }
+
   setResidentEntry(response.id, {
-    createdAt: now(),
+    createdAt,
     ...(clientThreadId ? { clientThreadId } : {}),
     items: [...requestItems, ...response.output],
     // Where response.output begins. A replay skip requires a matched item at or past this
     // index that also carries a provider-issued id — position alone proves only that an item
     // sits on the provider side, not that the provider authored it.
-    providerOutputStart: requestItems.length,
+    providerOutputStart,
     // Always preserve the Cursor conversation id so the next tool-result turn can continue the SAME
     // Cursor conversation (multi-turn continuation). Separately track whether Cursor's own
     // checkpoint/cache is safe to reuse: a turn that ended with a pending client tool call produced an
     // incomplete agent turn on the Cursor side (we suspended without a real mcpResult), so its
     // checkpoint must not be reused — but the conversation id string itself is still valid.
     ...(Object.keys(normalizedProviderState).length > 0 ? { providers: normalizedProviderState } : {}),
+    ...(durability !== "standard" ? { durability } : {}),
+    ...(envelope ? { envelope } : {}),
   });
   enforceAppOwnedMemoryBudget();
-  schedulePersist();
+  if (durability !== "memory-only") {
+    schedulePersist();
+  }
 }
 
 /** Test-only persistence churn hook; invoked after each atomic snapshot rewrite. */
@@ -2275,6 +2713,9 @@ export function clearResponseStateMemoryForTests(): void {
   lastSnapshotDigest = null;
   lastSnapshotTarget = null;
   loaded = false;
+  legacyRetirementBlocked = false;
+  sensitiveStorageWarnings.clear();
+  releaseResponseContinuationKey();
 }
 
 export function clearResponseStateForTests(): void {
@@ -2282,6 +2723,7 @@ export function clearResponseStateForTests(): void {
   clearResponseStateMemoryForTests();
   reservedResponseSpillBytes = 0;
   unreclaimableSpillPaths.clear();
+  resetResponseContinuationKeyForTests();
   try {
     unlinkSync(snapshotPath());
   } catch {
@@ -2289,3 +2731,20 @@ export function clearResponseStateForTests(): void {
   }
   try { rmSync(responseSpillDirectory(), { recursive: true, force: true }); } catch { /* no spill directory */ }
 }
+
+export {
+  buildResponseContinuationAAD,
+  canonicalConfigDir,
+  decryptResponseContinuation,
+  encryptResponseContinuation,
+  getResponseContinuationKey,
+  getResponseContinuationKeySync,
+  hasPlaintextDelegationHistory,
+  releaseResponseContinuationKey,
+  resetResponseContinuationKeyForTests,
+  responseContinuationHomeId,
+  responseContinuationKeyringAccount,
+  setResponseContinuationKeyringFactoryForTests,
+  type KeyringTestFactorySeam,
+  type ResponseContinuationEncryptedEnvelope,
+} from "./continuation-crypto";

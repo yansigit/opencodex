@@ -2014,7 +2014,7 @@ describe("Responses previous_response_id state", () => {
     rememberLarge("resp_legacy_small", "small");
     await flushResponseState();
     const snapshot = JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")) as { version: number; states: [string, Record<string, unknown>][] };
-    expect(snapshot.version).toBe(2);
+    expect(snapshot.version).toBe(3);
     const row = snapshot.states.find(([id]) => id === "resp_legacy_small")?.[1];
     expect(row).toMatchObject({ items: expect.any(Array) });
     expect(row?.kind).toBeUndefined();
@@ -2915,7 +2915,7 @@ describe("Responses previous_response_id state", () => {
     expect(closed).toBe(true);
   });
 
-  test("v1 Cursor snapshot migrates to versioned provider state", () => {
+  test("v1 Cursor snapshot is retired by the version 3 confidentiality migration", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "responses-state.json"), JSON.stringify({
       version: 1,
@@ -2927,10 +2927,9 @@ describe("Responses previous_response_id state", () => {
       }]],
     }));
 
-    expect(previousResponseProviderState("resp_v1")).toEqual({
-      cursor: { conversationId: "cursor_v1", checkpointUsable: false },
-    });
-    expect(previousResponseConversationId("resp_v1")).toBe("cursor_v1");
+    expect(previousResponseProviderState("resp_v1")).toBeUndefined();
+    expect(previousResponseConversationId("resp_v1")).toBeUndefined();
+    expect(existsSync(join(home, "responses-state.json"))).toBe(false);
   });
 
   test("persists provider-keyed Cursor and Kiro continuation state across restart", async () => {
@@ -2970,7 +2969,7 @@ describe("Responses previous_response_id state", () => {
       kiro: { conversationId: "kiro_conv_2" },
     });
     const snapshot = JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")) as { version: number };
-    expect(snapshot.version).toBe(2);
+    expect(snapshot.version).toBe(3);
   });
 
   test("stale snapshot entries are pruned on load", async () => {

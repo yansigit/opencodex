@@ -27,6 +27,7 @@ import {
   windowsSecretAclApplies,
 } from "../lib/windows-secret-acl";
 import { isValidProviderContinuationOwner } from "./provider-continuation";
+import type { ResponseContinuationEncryptedEnvelope } from "./continuation-crypto";
 import type { OcxProviderContinuationState } from "../types";
 
 export const RESPONSE_SPILL_VERSION = 1;
@@ -59,8 +60,19 @@ export interface ResponseSpillPayload {
   providers?: OcxProviderContinuationState;
 }
 
+export interface EncryptedResponseSpillPayload {
+  version: 2;
+  responseId: string;
+  createdAt: number;
+  clientThreadId?: string;
+  providerOutputStart?: number;
+  envelope: ResponseContinuationEncryptedEnvelope;
+}
+
+export type AnyResponseSpillPayload = ResponseSpillPayload | EncryptedResponseSpillPayload;
+
 export interface ResponseSpillRef {
-  version: 1;
+  version: 1 | 2;
   fileName: string;
   digest: string;
   payloadBytes: number;
@@ -87,7 +99,7 @@ export function responseSpillPayloadCap(): number {
 }
 
 export type ResponseSpillReadResult =
-  | { ok: true; payload: ResponseSpillPayload }
+  | { ok: true; payload: AnyResponseSpillPayload }
   | { ok: false; reason: "missing" | "corrupt" | "too_large" };
 
 export interface ResponseSpillCleanupResult {
@@ -445,24 +457,42 @@ async function publishNoReplaceAsync(
   record("publish");
 }
 
+export type ResponseSpillStateInput =
+  | ({ version?: 1 } & Omit<ResponseSpillPayload, "version" | "responseId">)
+  | ({ version: 2; envelope: ResponseContinuationEncryptedEnvelope } & Omit<EncryptedResponseSpillPayload, "version" | "responseId">);
+
 function serializedSpill(
   responseId: string,
-  state: Omit<ResponseSpillPayload, "version" | "responseId">,
+  state: ResponseSpillStateInput,
 ): {
   bytes: Buffer;
   digest: string;
   idDigest: string;
   contentDigest: string;
+  version: 1 | 2;
 } {
-  const payload: ResponseSpillPayload = {
-    version: 1,
-    responseId,
-    createdAt: state.createdAt,
-    ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
-    items: state.items,
-    ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
-    ...(state.providers ? { providers: state.providers } : {}),
-  };
+  const isV2 = (state as { version?: unknown }).version === 2 || "envelope" in state;
+  const version: 1 | 2 = isV2 ? 2 : 1;
+  const payload: AnyResponseSpillPayload = isV2
+    ? {
+        version: 2,
+        responseId,
+        createdAt: state.createdAt,
+        ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
+        ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
+        envelope: (state as { envelope: ResponseContinuationEncryptedEnvelope }).envelope,
+      }
+    : {
+        version: 1,
+        responseId,
+        createdAt: state.createdAt,
+        ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
+        items: (state as { items: unknown[] }).items,
+        ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
+        ...((state as { providers?: OcxProviderContinuationState }).providers
+          ? { providers: (state as { providers?: OcxProviderContinuationState }).providers }
+          : {}),
+      };
   const serialized = JSON.stringify(payload);
   if (serialized === undefined) throw new Error("Response spill serialization failed");
   const bytes = Buffer.from(serialized, "utf8");
@@ -472,6 +502,7 @@ function serializedSpill(
     digest,
     idDigest: sha256(responseId).slice(0, 12),
     contentDigest: digest.slice(0, 24),
+    version,
   };
 }
 
@@ -486,7 +517,7 @@ function serializedSpill(
  */
 export function prospectiveResponseSpillBytes(
   responseId: string,
-  state: Omit<ResponseSpillPayload, "version" | "responseId">,
+  state: ResponseSpillStateInput,
 ): number | null {
   try {
     return serializedSpill(responseId, state).bytes.byteLength;
@@ -504,53 +535,82 @@ function responseSpillWriteError(cause: unknown): NodeJS.ErrnoException {
 }
 
 function validSpillRef(ref: ResponseSpillRef): boolean {
-  return ref.version === 1
+  return (ref.version === 1 || ref.version === 2)
     && OWNED_SPILL_NAME.test(ref.fileName)
     && /^[0-9a-f]{64}$/.test(ref.digest)
     && Number.isSafeInteger(ref.payloadBytes)
     && ref.payloadBytes >= 0;
 }
 
-function validPayload(value: unknown, responseId: string): value is ResponseSpillPayload {
+function validPayload(value: unknown, responseId: string): value is AnyResponseSpillPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const payload = value as Record<string, unknown>;
-  const keys = Object.keys(payload);
-  if (keys.some(key => !["version", "responseId", "createdAt", "clientThreadId", "items", "providerOutputStart", "providers"].includes(key))) return false;
-  if (payload.version !== 1 || payload.responseId !== responseId) return false;
+  if (payload.responseId !== responseId) return false;
   if (typeof payload.createdAt !== "number" || !Number.isFinite(payload.createdAt)) return false;
   if (payload.clientThreadId !== undefined
     && (typeof payload.clientThreadId !== "string" || payload.clientThreadId.trim().length === 0)) return false;
-  if (!Array.isArray(payload.items)) return false;
-  // A malformed boundary must degrade to "never skip", never to a bad index: reject the
-  // payload outright so materialization treats it as corrupt rather than trusting it.
-  if (payload.providerOutputStart !== undefined) {
-    const anchor = payload.providerOutputStart;
-    if (typeof anchor !== "number" || !Number.isSafeInteger(anchor)
-      || anchor < 0 || anchor > payload.items.length) return false;
-  }
-  if (payload.providers !== undefined) {
-    if (!payload.providers || typeof payload.providers !== "object" || Array.isArray(payload.providers)) return false;
-    const providers = payload.providers as Record<string, unknown>;
-    if (providers.__ocxOwner !== undefined
-      && !isValidProviderContinuationOwner(providers.__ocxOwner)) return false;
-    for (const [provider, providerState] of Object.entries(providers)) {
-      if (provider === "__ocxOwner") continue;
-      if (!providerState || typeof providerState !== "object" || Array.isArray(providerState)) return false;
+
+  if (payload.version === 1) {
+    const keys = Object.keys(payload);
+    if (keys.some(key => !["version", "responseId", "createdAt", "clientThreadId", "items", "providerOutputStart", "providers"].includes(key))) return false;
+    if (!Array.isArray(payload.items)) return false;
+    // A malformed boundary must degrade to "never skip", never to a bad index: reject the
+    // payload outright so materialization treats it as corrupt rather than trusting it.
+    if (payload.providerOutputStart !== undefined) {
+      const anchor = payload.providerOutputStart;
+      if (typeof anchor !== "number" || !Number.isSafeInteger(anchor)
+        || anchor < 0 || anchor > payload.items.length) return false;
     }
+    if (payload.providers !== undefined) {
+      if (!payload.providers || typeof payload.providers !== "object" || Array.isArray(payload.providers)) return false;
+      const providers = payload.providers as Record<string, unknown>;
+      if (providers.__ocxOwner !== undefined
+        && !isValidProviderContinuationOwner(providers.__ocxOwner)) return false;
+      for (const [provider, providerState] of Object.entries(providers)) {
+        if (provider === "__ocxOwner") continue;
+        if (!providerState || typeof providerState !== "object" || Array.isArray(providerState)) return false;
+      }
+    }
+    return true;
   }
+
+  if (payload.version === 2) {
+    const keys = Object.keys(payload);
+    if (keys.some(key => !["version", "responseId", "createdAt", "clientThreadId", "providerOutputStart", "envelope"].includes(key))) return false;
+    if (payload.providerOutputStart !== undefined) {
+      const anchor = payload.providerOutputStart;
+      if (typeof anchor !== "number" || !Number.isSafeInteger(anchor) || anchor < 0) return false;
+    }
+    const env = payload.envelope as Record<string, unknown> | undefined;
+    if (!env || typeof env !== "object" || Array.isArray(env)) return false;
+    const envKeys = Object.keys(env);
+    if (envKeys.some(key => !["version", "cipher", "keyId", "nonce", "tag", "ciphertext"].includes(key))) return false;
+    if (
+      env.version !== 1
+      || env.cipher !== "aes-256-gcm"
+      || typeof env.keyId !== "string"
+      || typeof env.nonce !== "string"
+      || typeof env.tag !== "string"
+      || typeof env.ciphertext !== "string"
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   return true;
 }
 
 export function writeResponseSpillDurably(
   responseId: string,
-  state: Omit<ResponseSpillPayload, "version" | "responseId">,
+  state: ResponseSpillStateInput,
   options: ResponseSpillWriteOptions = {},
 ): ResponseSpillRef {
   let tempPath: string | null = null;
   let fd: number | null = null;
   try {
     const aclBudget = spillAclBudget(options.aclBudgetMs);
-    const { bytes, digest, idDigest, contentDigest } = serializedSpill(responseId, state);
+    const { bytes, digest, idDigest, contentDigest, version } = serializedSpill(responseId, state);
     const dir = responseSpillDirectory();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     harden(dir, 0o700, aclBudget);
@@ -575,7 +635,7 @@ export function writeResponseSpillDurably(
         fsyncDirectoryBestEffort(dir);
         unlinkEphemeral(publishTempPath);
         tempPath = null;
-        return { version: 1, fileName, digest, payloadBytes: bytes.byteLength };
+        return { version, fileName, digest, payloadBytes: bytes.byteLength };
       } catch (error) {
         if (isErrno(error, "EEXIST")) continue;
         throw error;
@@ -603,7 +663,7 @@ export function writeResponseSpillDurably(
  */
 export async function writeResponseSpillDurablyAsync(
   responseId: string,
-  state: Omit<ResponseSpillPayload, "version" | "responseId">,
+  state: ResponseSpillStateInput,
   options: ResponseSpillWriteOptions & { aclBudgetMs: number },
 ): Promise<ResponseSpillRef> {
   const publicationControl = options.publicationControl;
@@ -613,7 +673,7 @@ export async function writeResponseSpillDurablyAsync(
   let fd: number | null = null;
   try {
     throwIfPublicationSuperseded(publicationControl);
-    const { bytes, digest, idDigest, contentDigest } = serializedSpill(responseId, state);
+    const { bytes, digest, idDigest, contentDigest, version } = serializedSpill(responseId, state);
     const dir = responseSpillDirectory();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     await hardenAsync(dir, 0o700, aclBudget, options.retryTimedOutOnce === true);
@@ -655,7 +715,7 @@ export async function writeResponseSpillDurablyAsync(
           publicationControl.tempPath = null;
           publicationControl.destinationPath = null;
         }
-        return { version: 1, fileName, digest, payloadBytes: bytes.byteLength };
+        return { version, fileName, digest, payloadBytes: bytes.byteLength };
       } catch (error) {
         if (publicationControl?.superseded) throw error;
         if (publicationControl) publicationControl.destinationPath = null;
@@ -718,7 +778,8 @@ export function readResponseSpill(responseId: string, ref: ResponseSpillRef): Re
   if (bytes.byteLength !== ref.payloadBytes || sha256(bytes) !== ref.digest) return { ok: false, reason: "corrupt" };
   try {
     const payload = JSON.parse(bytes.toString("utf8")) as unknown;
-    return validPayload(payload, responseId) ? { ok: true, payload } : { ok: false, reason: "corrupt" };
+    if (!validPayload(payload, responseId) || payload.version !== ref.version) return { ok: false, reason: "corrupt" };
+    return { ok: true, payload };
   } catch {
     return { ok: false, reason: "corrupt" };
   }

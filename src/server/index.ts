@@ -23,6 +23,7 @@ import {
   getConfigDir,
   websocketsEnabled,
 } from "../config";
+import { prepareSensitiveResponsePersistence } from "../responses/state";
 import { grokDefaultReasoningEffort } from "../grok/effort";
 import { flushConfigDirHardening } from "../config/paths";
 import { reconcileOAuthProviders } from "../oauth";
@@ -2575,6 +2576,13 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   const labConfigDir = getConfigDir();
   if (labActivationRequired(config, labConfigDir)) {
     activateLab(config, labConfigDir);
+  }
+
+  // Prime secure continuation storage without delaying listen or suspending the
+  // synchronous startup window above. A failed credential-store lookup degrades
+  // bridge turns to memory-only state at their admission boundary.
+  if (config.v2RoutedDelegationBridge === true) {
+    void prepareSensitiveResponsePersistence();
   }
 
   // Reset-credit auto-redemption (#822) is opt-in; a default install constructs nothing here.
