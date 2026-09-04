@@ -113,8 +113,10 @@ zaten çalışan app-server'lar önceki `base_url`'i tutardı.
 
 Dinleyici yalnızca `POST /v1/responses`, onun WebSocket yükseltmesi, `POST
 /v1/responses/compact`, `POST /v1/alpha/search` (yerel Codex web arama aktarımı),
-`GET /v1/models` ve bağımsız sesli WebSocket yükseltmelerini sunar. `/api/*` ve
-kontrol paneli dahil diğer her şey `404` döndürür.
+`GET /v1/models`, `POST /v1/messages`, `POST /v1/messages/count_tokens` ve bağımsız
+sesli WebSocket yükseltmelerini sunar. İki Messages rotası, Anthropic protokolünü
+kullanan yerel Claude Code istemcilerini destekler. `/api/*` ve kontrol paneli
+dahil diğer her şey `404` döndürür.
 
 :::danger[Bu kimliği doğrulanmamış bir yüzeydir]
 Makinedeki her süreç bu dinleyiciyi kullanabilir. Hesap kotasını ve ücretli

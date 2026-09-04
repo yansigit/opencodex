@@ -91,8 +91,9 @@ stream 開啟前以 `401` 失敗。
 已執行的 app-server 仍保留先前的 `base_url`。
 
 該 listener 只服務 `POST /v1/responses`、其 WebSocket upgrade、`POST /v1/responses/compact`、
-`POST /v1/alpha/search`（Codex 原生網頁搜尋中繼）、`GET /v1/models`，以及獨立語音 WebSocket upgrade。
-其他一切，包括 `/api/*` 與儀表板，都會回傳 `404`。
+`POST /v1/alpha/search`（Codex 原生網頁搜尋中繼）、`GET /v1/models`、`POST /v1/messages`、
+`POST /v1/messages/count_tokens`，以及獨立語音 WebSocket upgrade。兩個 Messages 路由支援使用
+Anthropic 協定的本機 Claude Code 用戶端。其他一切，包括 `/api/*` 與儀表板，都會回傳 `404`。
 
 :::danger[這是一個未認證的介面]
 機器上的每個 process 都可以使用此 listener。它會耗用帳號配額與付費 provider 憑證，也可能耗盡
