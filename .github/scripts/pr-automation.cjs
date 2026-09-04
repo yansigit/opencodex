@@ -135,7 +135,7 @@ function classifyPullRequest(input = {}) {
   }
 
   const updateable = pr?.state === "open" && !pr.draft && sameRepository &&
-    ["same-repo-human", "deterministic-sync"].includes(className) &&
+    className === "same-repo-human" &&
     !labels.has("automation:hold");
   return {
     class: className,

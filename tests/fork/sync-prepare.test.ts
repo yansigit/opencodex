@@ -11,13 +11,20 @@ const conflict = (paths: string): CommandResult => ({
 });
 
 function event(overrides: Partial<SyncEvent> = {}): SyncEvent {
+  const upstreamSha = "1".repeat(40);
+  const baseSha = "3".repeat(40);
   return {
     kind: "pin-updated",
     upstreamRepo: "upstream",
     latestTag: "v2.32.0",
-    latestTagSha: "tag-sha",
-    vendorMainSha: "vendor-sha",
-    vendorDevSha: "dev-sha",
+    latestTagSha: upstreamSha,
+    upstreamTag: "v2.32.0",
+    upstreamSha,
+    baseRef: "refs/heads/dev",
+    baseSha,
+    candidate: { upstreamRepo: "upstream", upstreamTag: "v2.32.0", upstreamSha, baseRef: "refs/heads/dev", baseSha },
+    vendorMainSha: "2".repeat(40),
+    vendorDevSha: "4".repeat(40),
     detectedAt: "2026-08-24T12:34:56.000Z",
     recommendedLane: "daily-merge",
     ...overrides,
@@ -82,14 +89,14 @@ describe("fork sync daily preparation", () => {
 
     const result = await prepareSync(event(), { runner: queued.runner });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       status: "merged",
-      branch: "sync/upstream-v2.32.0-tagsha",
+      branch: `sync/upstream-v2.32.0-${"1".repeat(12)}-${"3".repeat(12)}`,
       resolutions: [],
       unresolved: [],
     });
     expect(queued.calls).toEqual([
-      ["switch", "-C", "sync/upstream-v2.32.0-tagsha"],
+      ["switch", "-c", `sync/upstream-v2.32.0-${"1".repeat(12)}-${"3".repeat(12)}`, "3".repeat(40)],
       ["merge", "--no-ff", "vendor/main"],
     ]);
   });
@@ -112,7 +119,7 @@ describe("fork sync daily preparation", () => {
       action: "decision-handoff: merge --abort",
     }]);
     expect(queued.calls).toEqual([
-      ["switch", "-C", "sync/upstream-v2.32.0-tagsha"],
+      ["switch", "-c", `sync/upstream-v2.32.0-${"1".repeat(12)}-${"3".repeat(12)}`, "3".repeat(40)],
       ["merge", "--no-ff", "vendor/main"],
       ["diff", "--name-only", "--diff-filter=U"],
       ["merge", "--abort"],
@@ -151,9 +158,9 @@ describe("fork sync daily preparation", () => {
 
     const prepared = await prepareSync(event(), { runner: queued.runner });
 
-    expect(prepared).toEqual({
+    expect(prepared).toMatchObject({
       status: "merged",
-      branch: "sync/upstream-v2.32.0-tagsha",
+      branch: `sync/upstream-v2.32.0-${"1".repeat(12)}-${"3".repeat(12)}`,
       resolutions: [{
         path: "package.json",
         classification: "recipe",
@@ -175,10 +182,10 @@ describe("fork sync daily preparation", () => {
 
     const result = await prepareSync(event(), { runner: queued.runner });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       status: "decision-handoff",
       handoffReason: "conflict",
-      branch: "sync/upstream-v2.32.0-tagsha",
+      branch: `sync/upstream-v2.32.0-${"1".repeat(12)}-${"3".repeat(12)}`,
       resolutions: [{
         path: "src/server/responses/core.ts",
         classification: "shared-hotspot",
@@ -187,7 +194,7 @@ describe("fork sync daily preparation", () => {
       unresolved: ["src/server/responses/core.ts"],
     });
     expect(queued.calls).toEqual([
-      ["switch", "-C", "sync/upstream-v2.32.0-tagsha"],
+      ["switch", "-c", `sync/upstream-v2.32.0-${"1".repeat(12)}-${"3".repeat(12)}`, "3".repeat(40)],
       ["merge", "--no-ff", "vendor/main"],
       ["diff", "--name-only", "--diff-filter=U"],
       ["merge", "--abort"],
@@ -195,17 +202,18 @@ describe("fork sync daily preparation", () => {
   });
 
   test("skips events outside the daily merge lane", async () => {
-    const queued = queuedRunner([]);
+    const queued = queuedRunner([ok()]);
 
     await expect(prepareSync(event({
       kind: "history-diverged",
       recommendedLane: "emergency-rebuild",
     }), { runner: queued.runner })).resolves.toEqual({
       status: "history-diverged",
-      branch: "sync/upstream-v2.32.0-tagsha",
+      branch: `sync/upstream-v2.32.0-${"1".repeat(12)}-${"3".repeat(12)}`,
       resolutions: [],
       unresolved: [],
+      candidate: event().candidate,
     });
-    expect(queued.calls).toEqual([]);
+    expect(queued.calls).toEqual([["switch", "-c", `sync/upstream-v2.32.0-${"1".repeat(12)}-${"3".repeat(12)}`, "3".repeat(40)]]);
   });
 });

@@ -93,6 +93,7 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /retry|Retry/);
     assert.match(source, /compare|ancestor|contains.*base/i);
     assert.match(source, /automerge-approved/);
+    assert.match(source, /!immutableSyncCandidate/);
   });
 
   it("reconciles each PR independently and records outcomes", () => {

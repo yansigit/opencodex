@@ -57,6 +57,18 @@ describe("classifyPullRequest", () => {
       assert.equal(result.reason, expectedReason);
     });
   }
+
+  it("never marks an immutable sync candidate eligible for update-branch", () => {
+    const result = classifyPullRequest({
+      pr: pr({
+        head: { ref: "sync/upstream-v2.36.1-abcdef123456-0123456789ab", sha: SHA, repo: { full_name: "yansigit/opencodex" } },
+        body: "<!-- opencodex-fork-sync -->\nGenerated sync.",
+      }),
+      repository: "yansigit/opencodex",
+    });
+    assert.equal(result.class, "deterministic-sync");
+    assert.equal(result.eligibleForUpdate, false);
+  });
 });
 
 describe("workflowRunRetryDisposition", () => {

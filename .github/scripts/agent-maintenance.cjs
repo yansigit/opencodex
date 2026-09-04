@@ -348,9 +348,7 @@ function validateSessionPullRequest({ session, pr, owner, repo, expectedAuthorId
 }
 
 function buildJulesSessionRequest({ title, prompt, source, startingBranch = "dev", requirePlanApproval }) {
-  if (startingBranch !== "dev" && !/^sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64}$/i.test(startingBranch)) {
-    throw new Error("invalid Jules starting branch");
-  }
+  if (startingBranch !== "dev") throw new Error("Jules sessions must start from mutable trunk dev");
   return {
     title,
     prompt,

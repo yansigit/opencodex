@@ -141,11 +141,11 @@ describe("agent maintenance workflow", () => {
     assert.match(workflow, /MAINTAINERS\.md/);
   });
 
-  it("routes sync hotspots to the issue's validated sync branch", () => {
+  it("refuses to dispatch or resume agents on immutable sync candidates", () => {
     assert.match(workflow, /sync-hotspot/);
-    assert.match(workflow, /Sync branch:/);
-    assert.match(workflow, /startingBranch/);
-    assert.ok(workflow.includes(String.raw`sync\/upstream-`));
+    assert.match(workflow, /Immutable sync candidate: fix trunk \(dev\) and generate a new successor candidate/);
+    assert.match(workflow, /Refusing to dispatch an agent for immutable sync candidate/);
+    assert.match(workflow, /Refusing to resume an agent for immutable sync candidate/);
   });
 
   it("immediately accepts only identity-bound generated Jules issue events", () => {

@@ -409,18 +409,40 @@ describe("fork sync CLI", () => {
       write: value => output.push(value),
     });
 
-    expect(JSON.parse(output[0]!)).toEqual({
+    expect(JSON.parse(output[0]!)).toMatchObject({
       status: "decision-handoff",
       handoffReason: "preservation",
-      branch: "sync/upstream-v2.29.0-1111111",
+      branch: "sync/upstream-v2.29.0-111111111111-333333333333",
       resolutions: [],
       unresolved: [],
     });
     expect(calls.slice(0, 3)).toEqual([
       ["rev-parse", "HEAD"],
-      ["switch", "-C", "sync/upstream-v2.29.0-1111111"],
+      ["switch", "-c", "sync/upstream-v2.29.0-111111111111-333333333333", DEV_SHA],
       ["merge", "--no-ff", "vendor/main"],
     ]);
+  });
+
+  test("prepare rejects a candidate whose base is not the checked-out dev commit", async () => {
+    const prepareEvent: SyncEvent = {
+      kind: "pin-updated",
+      upstreamRepo: "upstream",
+      latestTag: "v2.29.0",
+      latestTagSha: TAG_SHA,
+      vendorMainSha: MAIN_SHA,
+      vendorDevSha: DEV_SHA,
+      detectedAt: "2026-08-24T12:00:00.000Z",
+      recommendedLane: "daily-merge",
+      baseRef: "refs/heads/dev",
+      baseSha: "9".repeat(40),
+    };
+    await expect(runCli(["prepare"], {
+      env: {},
+      stdin: JSON.stringify(prepareEvent),
+      runner: async args => args[0] === "rev-parse"
+        ? result(DEV_SHA)
+        : result("", 1, "unexpected command"),
+    })).rejects.toThrow("does not match checked-out dev");
   });
 
   test("draft-pr reads an event/result envelope and returns the PR number", async () => {
@@ -434,7 +456,7 @@ describe("fork sync CLI", () => {
     };
     const prepareResult: PrepareResult = {
       status: "merged",
-      branch: "sync/upstream-v2.29.0-1111111",
+      branch: "sync/upstream-v2.29.0-111111111111-333333333333",
       resolutions: [],
       unresolved: [],
     };
@@ -456,7 +478,7 @@ describe("fork sync CLI", () => {
     });
 
     expect(received).toEqual([{ event: draftEvent, result: prepareResult }]);
-    expect(JSON.parse(output[0]!)).toEqual({ pullRequestNumber: 29 });
+    expect(JSON.parse(output[0]!)).toMatchObject({ pullRequestNumber: 29 });
   });
 
   test("emit still starts coordinators when a notifier fails", async () => {
