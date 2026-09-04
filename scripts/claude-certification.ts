@@ -13,7 +13,7 @@ import type { OcxConfig } from "../src/types";
 const MODEL = "claude-cert-hermetic";
 const MAX_OUTPUT = 256 * 1024;
 const TIMEOUT_MS = 45_000;
-const CREDENTIAL = /(?:API_KEY|API_TOKEN|AUTH_TOKEN|ACCESS_TOKEN|SECRET|PASSWORD|TOKEN)$/i;
+const CREDENTIAL = /(?:API_KEY|API_TOKEN|AUTH_TOKEN|ACCESS_TOKEN|SECRET|PASSWORD|TOKEN)/i;
 const PROXY = /^(?:HTTP|HTTPS|ALL)_PROXY$/i;
 
 export type CertificationStatus = "live_pass" | "live_fail" | "skipped" | "hermetic_pass" | "hermetic_fail";
