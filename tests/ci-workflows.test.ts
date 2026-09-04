@@ -299,7 +299,9 @@ describe("GitHub Actions hardening", () => {
     expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane serial');
     expect(windowsTestRun).toContain('Windows lane selection returned an empty shard');
     expect(windowsTestRun).not.toContain('mapfile -t general_files < <(');
-    expect(windowsTestRun).toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
+    expect(windowsTestRun).toContain('for serial_file in "${serial_files[@]}"');
+    expect(windowsTestRun).toContain('--parallel=1 --timeout 60000 "$serial_file"');
+    expect(windowsTestRun).not.toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
     expect(windowsTestRun).not.toContain(`tests --shard=\${{ matrix.shard }}/${windowsShards.length}`);
     expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"
       && step.run?.includes("git clean -xffd"))).toBe(true);
