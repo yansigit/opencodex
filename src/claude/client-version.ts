@@ -54,12 +54,16 @@ export interface ClaudeClientProbeDeps {
   ) => SpawnInvocation;
   /** Windows .cmd/.bat runner that owns its live shim tree under one outer deadline. */
   readonly windowsCommandShimProbe?: (request: WindowsCommandShimProbeRequest) => ClaudeVersionProbeOutput;
+  /** Clock seam for deterministic absolute-deadline tests. */
+  readonly now?: () => number;
 }
 
 export interface WindowsCommandShimProbeRequest {
   readonly file: string;
   readonly args: readonly string[];
   readonly options: ClaudeVersionProbeOptions;
+  /** Absolute parent deadline, not a fresh helper-local timeout. */
+  readonly deadlineAtMs: number;
 }
 
 /** Accept a Claude version only when it begins the version banner. */
@@ -135,9 +139,10 @@ const WINDOWS_SHIM_HELPER_PATH = fileURLToPath(new URL("./windows-version-probe-
  */
 function productionWindowsCommandShimProbe(request: WindowsCommandShimProbeRequest): ClaudeVersionProbeOutput {
   try {
+    const remainingMs = Math.max(1, request.deadlineAtMs - Date.now());
     const result = spawnSync(process.execPath, [WINDOWS_SHIM_HELPER_PATH, JSON.stringify(request)], {
       encoding: "utf8",
-      timeout: 5_000,
+      timeout: remainingMs,
       windowsHide: true,
       stdio: ["ignore", "pipe", "ignore"],
     });
@@ -180,7 +185,12 @@ export function probeClaudeClientVersion(deps: ClaudeClientProbeDeps = {}): Clau
       ...invocation.options,
     } as ClaudeVersionProbeOptions;
     const output = platform === "win32" && invocation.options.windowsVerbatimArguments && !deps.versionProbe
-      ? (deps.windowsCommandShimProbe ?? productionWindowsCommandShimProbe)({ file: invocation.file, args: invocation.args, options })
+      ? (deps.windowsCommandShimProbe ?? productionWindowsCommandShimProbe)({
+        file: invocation.file,
+        args: invocation.args,
+        options,
+        deadlineAtMs: (deps.now ?? Date.now)() + 5_000,
+      })
       : (deps.versionProbe ?? productionVersionProbe)(invocation.file, invocation.args, options);
     return classifyClaudeClientVersion(output, source);
   } catch {

@@ -133,16 +133,17 @@ describe("Claude client version probing", () => {
   });
 
   test("uses the bounded helper runner for Windows command shims without retaining process details", () => {
-    const requests: Array<{ file: string; args: readonly string[]; timeout: number }> = [];
+    const requests: Array<{ file: string; args: readonly string[]; timeout: number; deadlineAtMs: number }> = [];
     const result = probeClaudeClientVersion({
       platform: "win32",
+      now: () => 0,
       commandInvocation: () => ({ file: "cmd.exe", args: ["/d", "/s", "/c", '"claude.cmd --version"'], options: { windowsVerbatimArguments: true } }),
       windowsCommandShimProbe: request => {
-        requests.push({ file: request.file, args: request.args, timeout: request.options.timeout });
+        requests.push({ file: request.file, args: request.args, timeout: request.options.timeout, deadlineAtMs: request.deadlineAtMs });
         return { error: { code: "ETIMEDOUT" } };
       },
     });
-    expect(requests).toEqual([{ file: "cmd.exe", args: ["/d", "/s", "/c", '"claude.cmd --version"'], timeout: 5_000 }]);
+    expect(requests).toEqual([{ file: "cmd.exe", args: ["/d", "/s", "/c", '"claude.cmd --version"'], timeout: 5_000, deadlineAtMs: 5_000 }]);
     expect(result).toEqual({ state: "timed-out", version: null, source: "windows-command-shim" });
     expect(JSON.stringify(result)).not.toContain("cmd.exe");
   });
