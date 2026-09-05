@@ -1,7 +1,8 @@
 import * as readline from "node:readline";
 import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { injectCodexConfig } from "../codex/inject";
-import { classifyOpenAiTierBackup, getConfigPath, getDefaultConfig, isValidProviderName, preserveOpenAiTierRollbackSnapshot, saveConfig } from "../config";
+import { classifyOpenAiTierBackup, getConfigPath, getDefaultConfig, initializePersistedConfigIfMissing, isValidProviderName, preserveOpenAiTierRollbackSnapshot, saveConfig } from "../config";
+import { interactiveConfirm } from "./interactive-confirm";
 import { enrichProviderFromCatalog } from "../oauth/key-providers";
 import { deriveInitProviders } from "../providers/derive";
 import type { OcxConfig, OcxProviderConfig } from "../types";
@@ -10,8 +11,20 @@ function createPrompt(): { ask(question: string): Promise<string>; close(): void
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   let closed = false;
   rl.on("close", () => { closed = true; });
+  // When stdin is a pipe, all input may arrive in one chunk and readline closes
+  // immediately after the first question consumes its line. Consume the
+  // interface as an async iterator instead, which retains already-buffered
+  // lines for subsequent prompts.
+  const pipedLines = !process.stdin.isTTY ? rl[Symbol.asyncIterator]() : null;
   return {
     ask(question: string): Promise<string> {
+      if (pipedLines) {
+        process.stdout.write(question);
+        return pipedLines.next().then(({ value, done }) => {
+          if (done) throw new Error("stdin reached EOF while waiting for input");
+          return value as string;
+        });
+      }
       return new Promise((resolve, reject) => {
         if (closed) {
           reject(new Error("stdin closed before the prompt could be answered"));
@@ -85,11 +98,47 @@ export function cleanupOpenAiTierBackupAfterInit(configPath = getConfigPath()): 
   } catch { /* cleanup is best-effort; never block init on backup housekeeping */ }
 }
 
-export async function runInit(): Promise<void> {
-  const prompt = createPrompt();
+export function parseInitArgs(args: string[]): { yes: boolean; error?: string } {
+  const unknown = args.find(arg => arg !== "--yes");
+  return unknown === undefined
+    ? { yes: args.includes("--yes") }
+    : { yes: false, error: `Unknown option: ${unknown}. Usage: ocx init [--yes]` };
+}
+
+export async function runInit(args: string[] = []): Promise<void> {
+  const parsed = parseInitArgs(args);
+  if (parsed.error) {
+    console.error(parsed.error);
+    process.exitCode = 2;
+    return;
+  }
+  // Do not create a readline reader until overwrite consent has completed.
+  // interactiveConfirm may temporarily enable raw mode on stdin; keeping a
+  // second reader alive here can replay its key into the first setup prompt.
+  let prompt: ReturnType<typeof createPrompt> | undefined;
   try {
     console.log("\n🔧 opencodex (ocx) setup\n");
 
+    const existingConfig = existsSync(getConfigPath());
+    let replaceExisting = parsed.yes;
+    if (existingConfig && !replaceExisting) {
+      if (!process.stdin.isTTY) {
+        console.error("❌ An opencodex config already exists. Re-run `ocx init --yes` to replace it.");
+        process.exitCode = 2;
+        return;
+      }
+      replaceExisting = await interactiveConfirm({
+        question: "Overwrite existing config?",
+        defaultYes: false,
+        hint: "y/n · enter",
+      });
+      if (!replaceExisting) {
+        console.log("Keeping existing config.");
+        return;
+      }
+    }
+
+    prompt = createPrompt();
     const providers = buildInitProviders();
     printMenu(providers);
 
@@ -168,7 +217,18 @@ export async function runInit(): Promise<void> {
       modelDiscovery: { newModelPolicy: "off" },
     };
 
-    saveConfig(config);
+    if (replaceExisting) {
+      saveConfig(config);
+    } else {
+      const outcome = initializePersistedConfigIfMissing(config);
+      if (outcome !== "created") {
+        console.error(outcome === "exists"
+          ? "❌ Config was created by another process while setup was running; keeping that config."
+          : "❌ Config became invalid while setup was running; no changes were made.");
+        process.exitCode = 1;
+        return;
+      }
+    }
     // Init writes a fresh config, so a stale pre-migration backup from a previous
     // installation would make the next `ocx start` crash on a stale-backup
     // collision (issue #257). But only a STALE backup (unparseable, or already a
@@ -207,6 +267,6 @@ export async function runInit(): Promise<void> {
     }
     throw error;
   } finally {
-    prompt.close();
+    prompt?.close();
   }
 }

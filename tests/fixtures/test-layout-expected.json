@@ -506,6 +506,7 @@
   "identity-neutralize.test.ts": "adapters",
   "init-backup-cleanup.test.ts": "service",
   "init-eof.test.ts": "service",
+  "init-overwrite-confirmation.test.ts": "service",
   "injection-model-api.test.ts": "codex-integration",
   "input-admission.test.ts": "server",
   "install-scripts.test.ts": "ci-workflows",

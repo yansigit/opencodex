@@ -11,13 +11,13 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   {
     name: "init",
     aliases: ["setup"],
-    usage: "ocx init",
+    usage: "ocx init [--yes]",
     summary: "Interactive setup for providers and Codex config injection.",
   },
   {
     name: "setup",
     aliases: [],
-    usage: "ocx setup",
+    usage: "ocx setup [--yes]",
     summary: "Interactive setup for providers and Codex config injection (alias of init).",
   },
   { name: "start", usage: "ocx start [--port <port>]", summary: "Start the proxy server and sync models to Codex." },
