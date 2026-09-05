@@ -634,7 +634,7 @@ jobs:
   # green again. Keep the leg sharded and bounded: removing it from ordinary
   # pushes is what allowed the Windows-only backlog to accumulate unnoticed.
   platform-windows:
-    name: windows ${{ matrix.shard }}/4
+    name: windows ${{ matrix.shard }}/6
     needs: [changes]
     if: >-
       (github.event_name != 'pull_request' && github.event_name != 'merge_group') ||
@@ -656,11 +656,14 @@ jobs:
     # margin. 25 leaves the outer bound in place — a wedged shard still dies —
     # while making a completed shard the normal outcome. The crash-retry below can
     # double a shard's work, and this ceiling has to cover that second attempt too.
+    # Four shards later grew back into that ceiling as the suite expanded. Six
+    # shards reduce each hosted-Windows process's filesystem, Worker, and child
+    # process pressure without raising the ceiling or weakening assertions.
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -722,11 +725,11 @@ jobs:
           fi
           general_list="$(mktemp -t ocx-windows-general.XXXXXX)"
           serial_list="$(mktemp -t ocx-windows-serial.XXXXXX)"
-          if ! bun scripts/ci/test-lanes.ts --lane general "${timing_args[@]}" --shard ${{ matrix.shard }}/4 > "$general_list"; then
+          if ! bun scripts/ci/test-lanes.ts --lane general "${timing_args[@]}" --shard ${{ matrix.shard }}/6 > "$general_list"; then
             echo "::error::Windows general lane selection failed."
             exit 1
           fi
-          if ! bun scripts/ci/test-lanes.ts --lane serial "${timing_args[@]}" --shard ${{ matrix.shard }}/4 > "$serial_list"; then
+          if ! bun scripts/ci/test-lanes.ts --lane serial "${timing_args[@]}" --shard ${{ matrix.shard }}/6 > "$serial_list"; then
             echo "::error::Windows serial lane selection failed."
             exit 1
           fi
@@ -766,12 +769,12 @@ jobs:
               exit 0
             fi
             if ! grep -Eqi 'oh no: Bun has crashed|Internal assertion failure|Segmentation fault at address|Illegal instruction|Bus error|Aborted \(core dumped\)' "$suite_log"; then
-              echo "::error::Windows shard ${{ matrix.shard }}/4 failed on attempt ${attempt} (exit ${suite_status}); assertion failures are not retried."
+              echo "::error::Windows shard ${{ matrix.shard }}/6 failed on attempt ${attempt} (exit ${suite_status}); assertion failures are not retried."
               exit "$suite_status"
             fi
-            echo "::warning::Bun runtime crash in Windows shard ${{ matrix.shard }}/4 (exit ${suite_status}, attempt ${attempt})."
+            echo "::warning::Bun runtime crash in Windows shard ${{ matrix.shard }}/6 (exit ${suite_status}, attempt ${attempt})."
           done
-          echo "::error::Bun runtime crash repeated on Windows shard ${{ matrix.shard }}/4; failing after one retry."
+          echo "::error::Bun runtime crash repeated on Windows shard ${{ matrix.shard }}/6; failing after one retry."
           exit 1
 
       - name: CLI help smoke

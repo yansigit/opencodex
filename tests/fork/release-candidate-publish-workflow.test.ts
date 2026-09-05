@@ -38,4 +38,13 @@ describe("release candidate publish bridge", () => {
     expect(text).toContain('if [ -z "$DISPATCH_CANDIDATE_RUN_ID" ]; then');
     expect(text).toContain('elif [ -z "$DISPATCH_CANDIDATE_RUN_ID" ]; then');
   });
+
+  test("recovers exact npm-success metadata without publishing twice", () => {
+    expect(text).toContain("release-postpublish.cjs");
+    expect(text).toContain("npm view \"${pkg_name}@${RELEASE_VERSION}\" version gitHead --json");
+    expect(text).toContain("PUBLISH_NEEDED: ${{ steps.release-metadata.outputs.publish-needed }}");
+    expect(text).toContain("resuming post-publish metadata only");
+    expect(text).toContain('gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs"');
+    expect(text).not.toContain('git push origin "refs/tags/${release_tag}"');
+  });
 });
