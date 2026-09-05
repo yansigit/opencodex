@@ -22,6 +22,9 @@ import {
   isKnownAgentKind,
   isKnownAdmissionKind,
   isKnownInboundProtocol,
+  isKnownV2BridgeDecision,
+  isKnownV2BridgeScope,
+  isKnownV2BridgeStateDurability,
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
   isPersistableAccountLogLabel,
@@ -75,6 +78,11 @@ export interface RequestLogContext {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  /** Closed-set bridge diagnostics; deliberately contains no request-derived text. */
+  v2BridgeScope?: "root" | "child";
+  v2BridgeDecision?: "active" | "disabled" | "not_v2" | "non_native_route"
+    | "maintenance_turn" | "no_collaboration_catalog" | "combo" | "compaction" | "shadow_route";
+  v2BridgeStateDurability?: "standard" | "encrypted" | "memory-only";
   /**
    * Set when an adapter answered the turn locally and no upstream request was made
    * (`ProviderAdapter.localTerminal`). A fixed identifier naming the code path, never
@@ -175,6 +183,9 @@ export interface RequestLogEntry {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
+  v2BridgeScope?: RequestLogContext["v2BridgeScope"];
+  v2BridgeDecision?: RequestLogContext["v2BridgeDecision"];
+  v2BridgeStateDurability?: RequestLogContext["v2BridgeStateDurability"];
   agentKind?: AgentKind;
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
@@ -293,6 +304,11 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
     ...(entry.turnProgress ? { turnProgress: { ...entry.turnProgress } } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
+    ...(isKnownV2BridgeScope(entry.v2BridgeScope) ? { v2BridgeScope: entry.v2BridgeScope } : {}),
+    ...(isKnownV2BridgeDecision(entry.v2BridgeDecision) ? { v2BridgeDecision: entry.v2BridgeDecision } : {}),
+    ...(isKnownV2BridgeStateDurability(entry.v2BridgeStateDurability)
+      ? { v2BridgeStateDurability: entry.v2BridgeStateDurability }
+      : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
@@ -413,6 +429,11 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
+      ...(isKnownV2BridgeScope(entry.v2BridgeScope) ? { v2BridgeScope: entry.v2BridgeScope } : {}),
+      ...(isKnownV2BridgeDecision(entry.v2BridgeDecision) ? { v2BridgeDecision: entry.v2BridgeDecision } : {}),
+      ...(isKnownV2BridgeStateDurability(entry.v2BridgeStateDurability)
+        ? { v2BridgeStateDurability: entry.v2BridgeStateDurability }
+        : {}),
       ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
       ...(isPersistableAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
@@ -1011,6 +1032,11 @@ export function addFinalRequestLog(
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
+    ...(isKnownV2BridgeScope(logCtx.v2BridgeScope) ? { v2BridgeScope: logCtx.v2BridgeScope } : {}),
+    ...(isKnownV2BridgeDecision(logCtx.v2BridgeDecision) ? { v2BridgeDecision: logCtx.v2BridgeDecision } : {}),
+    ...(isKnownV2BridgeStateDurability(logCtx.v2BridgeStateDurability)
+      ? { v2BridgeStateDurability: logCtx.v2BridgeStateDurability }
+      : {}),
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),

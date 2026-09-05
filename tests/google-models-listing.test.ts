@@ -137,11 +137,15 @@ describe("Antigravity live model discovery", () => {
       ]);
       expect(live.find(model => model.id === "gemini-3.1-pro-low")).toMatchObject({
         contextWindow: 1_048_576,
+        metadataSource: "live",
+        metadataFieldSources: { contextWindow: "live" },
         inputModalities: ["text", "image"],
         reasoningEfforts: [],
       });
       expect(live.find(model => model.id === "future-agent-model")).toMatchObject({
         contextWindow: 333_333,
+        metadataSource: "live",
+        metadataFieldSources: { contextWindow: "live" },
         inputModalities: ["text"],
         reasoningEfforts: [],
       });

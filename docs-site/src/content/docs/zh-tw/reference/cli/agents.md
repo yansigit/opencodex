@@ -202,3 +202,7 @@ ocx system codex-cli-update check --json
 ### `ocx config <show|get|set|unset|validate|export|import> ...`
 
 檢查並安全地修改已驗證的 OpenCodex 設定。`show` 與 `get` 會遮罩秘密。匯入在寫入前驗證且需要 `--yes`。
+
+#### Claude Code 相容性診斷
+
+低於 **2.1.201** 時，`ocx claude` 會警告但不阻止啟動。請用 `npm install -g @anthropic-ai/claude-code` 更新；`ocx doctor` 與 `ocx status --json` 會顯示狀態。這不同於 **2.1.129** 的 `/model` 選擇器門檻。

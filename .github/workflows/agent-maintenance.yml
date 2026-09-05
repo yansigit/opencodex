@@ -455,6 +455,14 @@ jobs:
                 const periodKey = issue.title.replace(/^\[agent:(?:docs|tests)\]\s*/, "");
                 const taskId = recipe?.taskId || (scheduledTaskKind ? `${scheduledTaskKind === "scheduled-docs" ? "docs" : "tests"}-${periodKey}` : `issue-${issue.number}`);
                 state = defaultAgentMaintenanceState({ taskId, taskKind, issueNumber: issue.number });
+                if (taskKind === "sync-hotspot") {
+                  state.status = "needs-human";
+                  state.reason = "Immutable sync candidate: fix trunk (dev) and generate a new successor candidate";
+                  await saveRecord(issue.number, comment, state);
+                  await setLifecycle(issue.number, "agent:needs-human");
+                  core.warning(`Refusing to dispatch an agent for immutable sync candidate issue #${issue.number}.`);
+                  continue;
+                }
                 const syncBranchMatch = taskKind === "sync-hotspot"
                   ? String(issue.body || "").match(/(?:^|\n)Sync branch:\s*(sync\/upstream-[A-Za-z0-9._-]+-[0-9a-f]{7,64})(?:\s|$)/i)
                   : null;
@@ -471,7 +479,7 @@ jobs:
                  : taskKind === "scheduled-tests"
                    ? "Improve monthly test health. Change only tests/** and existing test helpers. If production code is needed, stop and explain why. Fill .github/PULL_REQUEST_TEMPLATE.md and record `bun run prepush` in Verification."
                     : taskKind === "sync-hotspot"
-                      ? `Resolve the upstream sync failure for issue #${issue.number} from ${startingBranch}. This may be a shared-hotspot conflict or an exact-head CI regression. Follow docs/fork/OWNED.md: preserve upstream control flow and re-fit fork behavior. Push fixes to the existing sync branch, target dev, and fill .github/PULL_REQUEST_TEMPLATE.md.\nIssue title: ${issue.title}\nIssue body:\n${issue.body || ""}`
+                      ? `Investigate the upstream sync failure for issue #${issue.number}. Sync candidates are immutable: do not edit, push, or update the candidate branch. Fix the underlying regression on trunk (dev), then allow fork-upstream-sync to generate a new successor candidate.\nIssue title: ${issue.title}\nIssue body:\n${issue.body || ""}`
                    : `Implement trusted maintenance issue #${issue.number}. Follow AGENTS.md and nested instructions, target dev, and fill .github/PULL_REQUEST_TEMPLATE.md. Issue title: ${issue.title}\nIssue body:\n${issue.body || ""}`;
                try {
                   const request = buildJulesSessionRequest({
@@ -513,6 +521,14 @@ jobs:
                 (state.status === "completed" && state.reason === "PR merged") ||
                 !state.sessionId
               ) continue;
+              if (state.taskKind === "sync-hotspot") {
+                state.status = "needs-human";
+                state.reason = "Immutable sync candidate: fix trunk (dev) and generate a new successor candidate";
+                await saveRecord(issue.number, comment, state);
+                await setLifecycle(issue.number, "agent:needs-human");
+                core.warning(`Refusing to resume an agent for immutable sync candidate issue #${issue.number}.`);
+                continue;
+              }
               let session;
               try {
                 session = await client.getSession(state.sessionId);
@@ -548,26 +564,8 @@ jobs:
                 continue;
               }
               if (disposition === "needs-human") {
-                // Soft-resolve stalled sync-hotspot feedback loops: Jules often lands on
-                // AWAITING_USER_FEEDBACK with a clarifying question on the already-merged
-                // sync branch. For sync-hotspot only, auto-nudge once via sendMessage;
-                // otherwise require a human.
                 const isAwaitingFeedback = String(sessionState || "").toUpperCase() === "AWAITING_USER_FEEDBACK";
                 const alreadyNudged = String(state.reason || "").startsWith("auto-nudged:");
-                if (state.taskKind === "sync-hotspot" && isAwaitingFeedback && !alreadyNudged) {
-                  try {
-                    await client.sendMessage(state.sessionId, `Continue from the existing hotspot sync branch already checked out. Do not re-merge vendor/main (it is already merged with upstream-owned files resolved). Resolve only the shared-hotspot files listed in Resolutions per docs/fork/OWNED.md and push to the same branch. If you asked a yes/no question (e.g. notifications), answer it yourself and continue.`);
-                    state.reason = `auto-nudged:${sessionState}:${new Date().toISOString()}`;
-                    state.status = "running";
-                    await setLifecycle(issue.number, "agent:running");
-                    await saveRecord(issue.number, comment, state);
-                    core.info(`Auto-nudged Jules session ${state.sessionId} from AWAITING_USER_FEEDBACK.`);
-                    continue;
-                  } catch (error) {
-                    core.warning(`Auto-nudge failed for ${state.sessionId}: ${error.message}`);
-                    // Fall through to human escalation
-                  }
-                }
                 state.status = "needs-human";
                 state.reason = `Jules session requires human attention: ${sessionState || "UNKNOWN"}`;
                 await saveRecord(issue.number, comment, state);

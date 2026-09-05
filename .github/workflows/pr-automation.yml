@@ -789,7 +789,8 @@ jobs:
                   evidence = await rawEvidence(pr);
                   result = controllerEvidence(pr, evidence, await loadMaintenanceMap());
                 }
-                if ((mode === "update" || mode === "merge") && result.classification.eligibleForUpdate && needsUpdate) {
+                const immutableSyncCandidate = SYNC_BRANCH_RE.test(String(pr.head?.ref || ""));
+                if ((mode === "update" || mode === "merge") && result.classification.eligibleForUpdate && needsUpdate && !immutableSyncCandidate) {
                   const updated = await updateBranch(pr, maintenanceMap);
                   pr = updated.pr;
                   if (updated.action === "updated") {

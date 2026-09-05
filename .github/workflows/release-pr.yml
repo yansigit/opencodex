@@ -1,0 +1,40 @@
+name: Release PR
+
+# Release Please maintains a reviewable version/changelog pull request on main
+# when explicitly dispatched during the candidate-artifact rollout.
+# Publishing and promotion are deliberately owned by the existing release and
+# promotion workflows; this workflow never runs on dev or preview.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-pr
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Create release-please App token
+        id: release-please-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.PR_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.PR_AUTOMATION_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Maintain release pull request
+        id: release-please
+        uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        with:
+          token: ${{ steps.release-please-app-token.outputs.token }}
+          target-branch: main
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

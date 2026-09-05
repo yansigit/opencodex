@@ -42,10 +42,14 @@ import {
   copyPreviousResponseReplayProvenance,
   expandPreviousResponseInput,
   markBodyNonPersistable,
+  prepareResponseStateReplay,
+  prepareSensitiveResponsePersistence,
   previousResponseProviderState,
+  previousResponseReplayPrefixLength,
   previousResponseReplayFailure,
   previousResponseScopeMismatch,
   rememberResponseState,
+  type ResponseStateDurability,
 } from "../../responses/state";
 import {
   bindTurnTerminationScope,
@@ -227,6 +231,7 @@ import type { DataPlaneAdmission } from "../auth-cors";
 import { createTranslatorBudget, isTranslatorBudgetExceededError, type TranslatorBudget } from "../../lib/translator-budget";
 import { listOpenAiForwardSidecarCandidates, resolveFirstUsableOpenAiSidecar, type ResolvedOpenAiForwardSidecar } from "../../providers/openai-sidecar";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
+import { decideV2RoutedDelegationBridge } from "./v2-routed-delegation-policy";
 import { providerContextCap } from "../../providers/context-cap";
 import {
   fastPolicyForModel,
@@ -283,7 +288,7 @@ import {
 } from "../../lib/errors";
 import type { AdmissionLease } from "../../lib/admission";
 import { supportedLadderFor } from "../effort-policy";
-import { isThreadSpawnRequest } from "../effort-policy";
+import { classifyAgentKind, isThreadSpawnRequest } from "../effort-policy";
 import { isMultiAgentV2Enabled } from "../../codex/features";
 import {
   applySubagentModelFallback,
@@ -433,7 +438,7 @@ import { responsesJsonToSseStream } from "../responses-json-events";
 import { streamingContextOverflowResponse } from "./context-overflow";
 import { guardTerminalEventStream } from "./terminal-guard";
 import {
-  emptyCompletionRetryEnabled,
+  emptyCompletionPolicy,
   observeEmptyCompletion,
   guardEmptyCompletionEventStream,
 } from "./empty-completion-guard";
@@ -1595,6 +1600,42 @@ export type ResolvedRouteInfo = {
   headers: Headers;
 };
 
+/** Benchmark-only observation passed to the optional raw-usage observer (phase 4 plan 04-02). */
+export interface ClaudeBenchmarkRawUsage {
+  adapterKind: string;
+  modelId: string;
+  usage: OcxUsage | undefined;
+}
+
+/** Invoke the benchmark observer at most once per attempt context (per registration). */
+function observeBenchmarkUsage(
+  observer: HandleResponsesOptions["claudeBenchmarkObserver"],
+  gate: { done: boolean },
+  adapterKind: string,
+  modelId: string,
+  usage: OcxUsage | undefined,
+): void {
+  if (!observer || gate.done) return;
+  gate.done = true;
+  const safeUsage = usage ? {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(usage.contextTotalTokens !== undefined ? { contextTotalTokens: usage.contextTotalTokens } : {}),
+    ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+    ...(usage.cachedInputTokens !== undefined ? { cachedInputTokens: usage.cachedInputTokens } : {}),
+    ...(usage.cacheReadInputTokens !== undefined ? { cacheReadInputTokens: usage.cacheReadInputTokens } : {}),
+    ...(usage.cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens: usage.cacheCreationInputTokens } : {}),
+    ...(usage.reasoningOutputTokens !== undefined ? { reasoningOutputTokens: usage.reasoningOutputTokens } : {}),
+    ...(usage.estimated !== undefined ? { estimated: usage.estimated } : {}),
+  } : undefined;
+  try {
+    observer({ adapterKind, modelId, usage: safeUsage });
+  } catch {
+    // Benchmark-only seam: ordinary requests must be unaffected even when the
+    // observer misbehaves.
+  }
+}
+
 function maybeInvokeResolvedRoute(
   options: HandleResponsesOptions,
   parsed: OcxParsedRequest,
@@ -1699,6 +1740,16 @@ export interface HandleResponsesOptions {
   claudeSourceEnvelope?: ClaudeSourceEnvelope;
   /** Synchronous callback invoked after each newly resolved route; must be pure and fast. */
   onResolvedRoute?: (info: ResolvedRouteInfo) => void;
+  /**
+   * Phase 4 plan 04-02: benchmark-only raw-usage observer. Optional and absent
+   * for ordinary requests. Receives a structural record only: final adapter
+   * kind, resolved model id, and the raw OcxUsage reported before any
+   * Anthropic wire normalization. Never receives request bodies, headers,
+   * provider names/aliases, endpoint, account identity, raw provider response,
+   * or error text. Invoked at most once per attempt context per onUsage
+   * registration; observer exceptions never affect ordinary request behavior.
+   */
+  claudeBenchmarkObserver?: (observation: ClaudeBenchmarkRawUsage) => void;
 }
 
 
@@ -2198,6 +2249,20 @@ async function applyFinalRouteRequestNormalization(args: {
     }
   }
 
+  // The private ChatGPT Codex Responses endpoint accepts only streaming
+  // requests, even when the downstream HTTP client asked for a unary JSON
+  // response. The caller preference was captured before this normalization;
+  // the passthrough response path drains this SSE back into bounded JSON.
+  if (
+    isCanonicalOpenAiForwardProvider(route.provider)
+    && route.provider.adapter === "openai-responses"
+  ) {
+    parsed.stream = true;
+    if (parsed._rawBody && typeof parsed._rawBody === "object") {
+      (parsed._rawBody as Record<string, unknown>).stream = true;
+    }
+  }
+
   // Generic Responses clients (e.g. AI-SDK apps) omit `store`, but the canonical
   // forward Codex backend rejects a native request without an explicit store:false.
   // Default it only there — every other Responses upstream (key-auth providers and
@@ -2356,6 +2421,7 @@ export async function handleComboResponses(
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
   const inboundClientThreadId = inboundClientThreadIdFromRequest(req.headers);
+  await prepareResponseStateReplay(rawBody);
   const body = expandPreviousResponseInput(rawBody, inboundClientThreadId);
   const scopeMismatch = previousResponseScopeMismatch(body);
   if (scopeMismatch) {
@@ -2904,6 +2970,7 @@ async function handleResponsesInner(
       onRequestBodyRead: undefined,
     });
   }
+  await prepareResponseStateReplay(body);
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
   );
@@ -3007,9 +3074,16 @@ async function handleResponsesInner(
     return formatErrorResponse(400, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
   options.onRequestBodyRead?.();
-  const responseStateOptions = (force = false): { force?: boolean; clientThreadId?: string } => ({
+  let v2RoutedDelegationBridge: V2RoutedDelegationBridgeContext | undefined;
+  let v2BridgeStateDurability: ResponseStateDurability | undefined;
+  const responseStateOptions = (force = false): {
+    force?: boolean;
+    clientThreadId?: string;
+    durability?: ResponseStateDurability;
+  } => ({
     ...(force ? { force: true } : {}),
     ...(parsed._clientThreadId ? { clientThreadId: parsed._clientThreadId } : {}),
+    ...(v2BridgeStateDurability ? { durability: v2BridgeStateDurability } : {}),
   });
   const resolvedConversationId = conversationIdFromResponsesRequest({
     clientThreadId: parsed._clientThreadId,
@@ -3121,34 +3195,13 @@ async function handleResponsesInner(
     }
   }
 
-  let v2RoutedDelegationBridge: V2RoutedDelegationBridgeContext | undefined;
-  if (
-    inboundWire === "responses"
-    && config.v2RoutedDelegationBridge === true
-    && config.multiAgentMode === "v2"
-    && isMultiAgentV2Enabled()
-    && isCanonicalOpenAiForwardProvider(route.provider)
-    && collabSurface(parsed) === "v2"
-    && !isThreadSpawnRequest(req.headers, logCtx.agentKind)
-    && !req.headers.has("x-openai-subagent")
-    && !options.comboAttempt
-    && parsed._compactionRequest !== true
-    && !shadowIntercepted
-  ) {
-    try {
-      v2RoutedDelegationBridge = injectV2RoutedDelegationBridge(parsed);
-      if (v2RoutedDelegationBridge) toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
-    } catch (error) {
-      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
-    }
-  }
-
   const hasUnexpandedPreviousResponse = !!parsed.previousResponseId
     && parsed._previousResponseInputExpanded !== true;
   // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
   // also fail closed without polling quota upstream. Cached fallback state can still select a
   // provider with native continuation support below.
-  const threadSpawn = isThreadSpawnRequest(req.headers, logCtx.agentKind);
+  const agentKind = logCtx.agentKind ?? classifyAgentKind(req.headers, "responses");
+  const threadSpawn = isThreadSpawnRequest(req.headers, agentKind);
   const initialSubagentFallbackChain = threadSpawn && !options.comboAttempt
     ? resolveSubagentFallbackChain(parsed, config)
     : null;
@@ -3416,9 +3469,54 @@ async function handleResponsesInner(
     );
   }
 
-  // Captured before normalization: whether the CLIENT asked for SSE. The
-  // transport-neutral upstream-streaming policy below may force a bounded JSON
-  // upstream for reliability (#875); the answer must then be reframed to SSE
+  // Child fallback and encrypted-task recovery can change both the parsed catalog and the
+  // destination. Arm the plaintext mirror only after that selection is final: eligible native
+  // children may then delegate to routed grandchildren without creating ChatGPT-only ciphertext,
+  // while routed fallbacks and non-spawn maintenance turns never see the private namespace.
+  const bridgeDecision = decideV2RoutedDelegationBridge({
+    enabled: config.v2RoutedDelegationBridge === true,
+    inboundWire,
+    multiAgentMode: config.multiAgentMode,
+    upstreamV2Enabled: isMultiAgentV2Enabled(),
+    canonicalNativeRoute: isCanonicalOpenAiForwardProvider(route.provider),
+    // `classifyAgentKind` incorporates both x-openai-subagent and the JSON
+    // x-codex-turn-metadata marker. Undefined is malformed/conflicting and fails closed.
+    hasSubagentMarker: agentKind !== "main",
+    threadSpawn,
+    comboAttempt: options.comboAttempt === true,
+    compaction: parsed._compactionRequest === true,
+    shadowRoute: shadowIntercepted,
+    collaborationSurface: collabSurface(parsed),
+    body: parsed._rawBody,
+    replayPrefixLength: previousResponseReplayPrefixLength(parsed._rawBody),
+  });
+  if (config.v2RoutedDelegationBridge === true) {
+    logCtx.v2BridgeDecision = bridgeDecision.decision;
+    if (bridgeDecision.active) logCtx.v2BridgeScope = bridgeDecision.scope;
+  }
+  if (bridgeDecision.active) {
+    try {
+      v2RoutedDelegationBridge = injectV2RoutedDelegationBridge(parsed);
+      if (v2RoutedDelegationBridge) {
+        copyPreviousResponseReplayProvenance(
+          parsed._rawBody,
+          v2RoutedDelegationBridge.requestStateBody,
+        );
+        v2BridgeStateDurability = await prepareSensitiveResponsePersistence(
+          v2RoutedDelegationBridge.requestStateBody,
+        );
+        logCtx.v2BridgeStateDurability = v2BridgeStateDurability;
+        toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
+      }
+    } catch (error) {
+      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  // Captured before normalization: whether the CLIENT asked for SSE. Transport
+  // policy may force bounded JSON upstream for reliability (#875), or force
+  // canonical ChatGPT upstream to SSE; the answer is reframed to the client's
+  // requested transport after the final route has been normalized.
   // for streaming clients.
   const clientRequestedStream = parsed.stream;
   await applyFinalRouteRequestNormalization({
@@ -3838,6 +3936,15 @@ async function handleResponsesInner(
     const turn = beginConversationTurn(logCtx.conversationId, route.providerName, route.modelId);
     logCtx.turnProgressTrackerKey = turn.key;
     logCtx.turnProgress = turn.telemetry;
+    if (turn.telemetry.repetitionCircuitOpen === true) {
+      logCtx.localTerminalReason = "cursor-repetition-circuit";
+      logCtx.errorCode = "cursor_repetition_circuit_open";
+      return formatErrorResponse(
+        502,
+        "upstream_error",
+        "Cursor repeated the same tool-bearing output across multiple turns; this request was stopped to break the loop",
+      );
+    }
     if (turn.retryAfterSeconds !== undefined) {
       logCtx.turnProgressCircuitBlocked = true;
       logCtx.localTerminalReason = "cursor-rate-limit-circuit";
@@ -4967,9 +5074,9 @@ async function handleResponsesInner(
       if (upstreamContentType) logCtx.usageDebugContentType = upstreamContentType;
     }
     // The chatgpt backend may omit Content-Type on SSE responses. Fall back to
-    // treating a successful body as SSE when the caller requested streaming.
+    // treating a successful body as SSE when upstream normalization requested it.
     const passthroughCt = headers.get("content-type")?.toLowerCase();
-    const isEventStream = passthroughCt?.includes("text/event-stream")
+    let isEventStream = passthroughCt?.includes("text/event-stream")
       || (upstreamResponse.ok && !!upstreamResponse.body && !passthroughCt && parsed.stream);
     const recordTerminalOutcome = codexForwardTerminalOutcomeRecorder(
       config,
@@ -5085,6 +5192,167 @@ async function handleResponsesInner(
     // (src/server/relay-eager.ts; policy:
     // devlog/_fin/260731_macos_rss_retention/100_darwin_eager_optin.md).
     // The bundled known-bad runtime remains on tee by default on both platforms.
+    if (isEventStream && upstreamResponse.body && clientRequestedStream !== true) {
+      commitReasoningReplayServingRoute();
+      const bridgeSseRewrite = createV2RoutedDelegationSseRewrite(v2RoutedDelegationBridge);
+      const normalizedBody = bridgeSseRewrite
+        ? relaySseWithBlockRewrite(
+          upstreamResponse.body,
+          payloadRewriteAsBlockRewrite(bridgeSseRewrite),
+          translatorBudget,
+        )
+        : upstreamResponse.body;
+      // Stop reading at the first protocol terminal even if the backend keeps
+      // the HTTP connection alive. This is the same terminal boundary used by
+      // the client-facing SSE path and prevents unary callers from hanging on
+      // a completed response.
+      const terminalBoundedBody = relaySseWithFailedTail(
+        normalizedBody,
+        upstream,
+        undefined,
+        { synthesizeMissingTerminal: false },
+      );
+      let completedResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
+      let terminalResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
+      let rawTerminalResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
+      let terminalEventType: "response.completed" | "response.failed" | "response.incomplete" | undefined;
+      let observedTerminal: {
+        status: ResponsesTerminalStatus;
+        httpStatusOverride?: number;
+      } | undefined;
+      const reportNativeTerminal = recordTerminalOutcomes
+        ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
+          terminalRecorder?.(status, httpStatusOverride);
+          if (status === "failed") {
+            interceptRuntimeFailure(
+              new Error(logCtx.upstreamError ?? "upstream response stream failed"),
+              { provider: route.providerName, model: route.modelId, config: config.autonomousRemediation },
+            );
+            if (!isFixedCodexAccount(authCtx)) {
+              recordSubagentSpawnFailureForTerminal(
+                req.headers,
+                subagentQuotaFailureModel,
+                status,
+                config,
+                subagentFallbackAccountId,
+                httpStatusOverride,
+                logCtx,
+              );
+            }
+          }
+          options.onNativePassthroughTerminal?.(status);
+        }
+        : undefined;
+      let aggregationFailureSettled = false;
+      const failUnarySseAggregation = (message: string): Response => {
+        if (!aggregationFailureSettled) {
+          aggregationFailureSettled = true;
+          logCtx.transportPhase = "mid_stream";
+          logCtx.terminalSource = "synthetic";
+          if (logCtx.activeAttempt) logCtx.activeAttempt.streamAborted = true;
+          reportNativeTerminal?.("failed", 502);
+        }
+        return formatErrorResponse(502, "upstream_error", message);
+      };
+      const inspector = createSseInspector({
+        onTerminal: (status, httpStatusOverride) => {
+          observedTerminal ??= {
+            status,
+            ...(httpStatusOverride !== undefined ? { httpStatusOverride } : {}),
+          };
+        },
+        logCtx,
+        onCompletedResponse: response => { completedResponse = response; },
+        onParsedPayload: payload => {
+          noteInspectedPayload(payload);
+          if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+          const event = payload as { type?: unknown; response?: unknown };
+          if (
+            event.type !== "response.completed"
+            && event.type !== "response.failed"
+            && event.type !== "response.incomplete"
+          ) return;
+          terminalEventType ??= event.type;
+          if (!event.response || typeof event.response !== "object" || Array.isArray(event.response)) return;
+          rawTerminalResponse ??= event.response as { id?: unknown; output?: unknown; status?: unknown };
+          if (event.type !== "response.completed") terminalResponse = rawTerminalResponse;
+        },
+        onFirstOutput: options.onFirstOutput,
+        pinCompletedResponseIdToFirstSeen: route.providerName === "github-copilot",
+      });
+      let bounded;
+      try {
+        bounded = await readBoundedResponseBody(
+          new Response(terminalBoundedBody),
+          { ...UPSTREAM_JSON_BODY_READ_OPTIONS, signal: upstream.signal, fatalUtf8: true },
+        );
+        if (!bounded.oversized && !bounded.truncated) {
+          inspector.feed(new TextEncoder().encode(bounded.text));
+          inspector.finish();
+        }
+      } catch (error) {
+        inspector.dispose();
+        if (options.abortSignal?.aborted || req.signal.aborted) {
+          releaseCodexAuthContextProbeLease(authCtx);
+          options.onNativePassthroughCancel?.();
+          return clientCancelledResponse();
+        }
+        if (isTranslatorBudgetExceededError(error)) {
+          return failUnarySseAggregation("upstream translation buffer exceeded the safe limit");
+        }
+        return failUnarySseAggregation("upstream response stream could not be decoded");
+      } finally {
+        inspector.dispose();
+      }
+      if (bounded.oversized) {
+        return failUnarySseAggregation("upstream response stream exceeded the safe body limit");
+      }
+      if (bounded.truncated) {
+        return failUnarySseAggregation("upstream response stream stalled before completing");
+      }
+      if (inspectionSawUndeclaredTool) {
+        return failUnarySseAggregation("upstream emitted a tool call outside the request catalog");
+      }
+      const collected = completedResponse ?? terminalResponse;
+      const expectedStatus = terminalEventType === "response.completed"
+        ? "completed"
+        : terminalEventType === "response.failed"
+          ? "failed"
+          : terminalEventType === "response.incomplete"
+            ? "incomplete"
+            : undefined;
+      if (
+        !collected
+        || !rawTerminalResponse
+        || !observedTerminal
+        || !expectedStatus
+        || observedTerminal.status !== expectedStatus
+        || typeof rawTerminalResponse.id !== "string"
+        || rawTerminalResponse.id.length === 0
+        || rawTerminalResponse.status !== expectedStatus
+        || !Array.isArray(rawTerminalResponse.output)
+        || typeof collected.id !== "string"
+        || collected.id.length === 0
+        || collected.status !== expectedStatus
+        || !Array.isArray(collected.output)
+      ) {
+        return failUnarySseAggregation(
+          terminalEventType
+            ? "upstream response stream carried an invalid terminal response"
+            : "upstream response stream closed before a terminal response",
+        );
+      }
+      reportNativeTerminal?.(observedTerminal.status, observedTerminal.httpStatusOverride);
+      headers.set("content-type", "application/json");
+      headers.delete("cache-control");
+      upstreamResponse = new Response(JSON.stringify(collected), {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers,
+      });
+      isEventStream = false;
+    }
+
     if (isEventStream && upstreamResponse.body) {
       // For streamed passthrough, a successful terminal response means non-error upstream status
       // before relay starts. Waiting for SSE completion would retain request state across the whole
@@ -5637,6 +5905,7 @@ async function handleResponsesInner(
       options.codexWsRuntimeIdentity,
       { providerName: route.providerName, modelId: route.modelId },
     );
+    const benchmarkUsageGate = { done: false };
     const imgResponse = await runWithImageBridge({
       parsed, adapter,
       incomingMeta: { headers: selectedForwardHeaders, abortSignal: options.abortSignal, translatorBudget },
@@ -5664,6 +5933,7 @@ async function handleResponsesInner(
       validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       ...(vidPlan?.timeoutMs ? { videoTimeoutMs: vidPlan.timeoutMs } : {}),
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, adapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         // Cursor may assign _cursorConversationId inside the image loop's first runTurn;
         // backfill so Logs can filter/total that opening request (parity with the normal
         // runTurn branch).
@@ -5714,6 +5984,7 @@ async function handleResponsesInner(
         providerName: route.providerName,
         modelId: route.modelId,
       })(input, init)) as typeof globalThis.fetch;
+    const benchmarkUsageGate = { done: false };
     const wsResponse = await runWithWebSearch({
       parsed, adapter,
       incomingMeta: {
@@ -5747,6 +6018,7 @@ async function handleResponsesInner(
         noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
       ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, adapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -5777,16 +6049,18 @@ async function handleResponsesInner(
   // Empty-completion guard (codex-router PR #145 port): a 200 that completes with no output
   // text and no tool call is a failure the client cannot see — it silently records the turn as
   // done. The guard holds pre-content adapter events, suppresses the terminal of an empty
-  // turn, retries the IDENTICAL request once, and surfaces a stated error when the retry is
-  // empty or fails. This is a top-level config opt-in; OCX_EMPTY_COMPLETION_RETRY=0 is a
-  // disable-only emergency override. Compaction turns and combo attempts keep their own
+  // turn, and surfaces a stated error. An explicit top-level opt-in retries the IDENTICAL
+  // request once; known-broken Composer 2.5 empty turns fail statedly without an automatic
+  // replay. OCX_EMPTY_COMPLETION_RETRY=0 is a disable-only replay override. Compaction turns
+  // and combo attempts keep their own
   // machinery (the combo preflight already handles empty streams). Native Chat-to-Chat
   // requests return from handleChatCompletions before entering Responses core, so they are
   // intentionally outside this guard and retain their existing one-send wire behavior.
-  const emptyCompletionGuardEnabled =
-    emptyCompletionRetryEnabled(config)
+  const selectedEmptyCompletionPolicy = emptyCompletionPolicy(config, adapter.name, route.modelId);
+  const emptyCompletionGuardEnabled = selectedEmptyCompletionPolicy !== "observe"
     && !options.comboAttempt
     && !routedCompaction;
+  const emptyCompletionMaxRetries = selectedEmptyCompletionPolicy === "retry" ? 1 : 0;
 
   if (adapter.runTurn) {
     const runTurnAbort = new AbortController();
@@ -6011,6 +6285,7 @@ async function handleResponsesInner(
       const guardedSource = emptyCompletionGuardEnabled
         ? guardEmptyCompletionEventStream({
             firstEvents: eventSource,
+            maxRetries: emptyCompletionMaxRetries,
             // Identical-turn retry: same parsed request, same headers, same
             // signal — run the adapter transport again against a fresh queue.
             continuation: runTurnRetrySource,
@@ -6025,6 +6300,7 @@ async function handleResponsesInner(
             + "and no tool call. Set \"emptyCompletionRetry\": true to retry such turns once.",
           );
         });
+      const benchmarkUsageGate = { done: false };
       const sseStream = bridgeToResponsesSSE(
         observeProgressEvents(guardedSource, logCtx), parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
         () => {
@@ -6048,6 +6324,7 @@ async function handleResponsesInner(
           onUsage: usage => {
             // Raw adapter usage, pre wire-normalization: the bridged SSE now always carries
             // zero-default detail objects, so provenance must come from here (cache_detail_missing).
+            observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, runTurnAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
             logCtx.usageFromBridge = true;
             if (usage) {
               logCtx.usage = usage;
@@ -6092,6 +6369,7 @@ async function handleResponsesInner(
       events = [];
       for await (const event of guardEmptyCompletionEventStream({
         firstEvents: (async function* () { yield* runTurnEvents; })(),
+        maxRetries: emptyCompletionMaxRetries,
         continuation: runTurnRetrySource,
       })) events.push(event);
     } else {
@@ -6108,6 +6386,7 @@ async function handleResponsesInner(
       }
     }
     let providerState: OcxProviderContinuationState | undefined;
+    const benchmarkUsageGate = { done: false };
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
@@ -6120,6 +6399,7 @@ async function handleResponsesInner(
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, runTurnAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -7456,10 +7736,12 @@ async function handleResponsesInner(
     const guardedEventStream = emptyCompletionGuardEnabled
       ? guardEmptyCompletionEventStream({
           firstEvents: eventStream,
+          maxRetries: emptyCompletionMaxRetries,
           continuation: fetchGuardedEmptyCompletionRetry,
         })
       : eventStream;
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
+    const benchmarkUsageGate = { done: false };
     const sseStream = bridgeToResponsesSSE(
       observeProgressEvents(guardedEventStream, logCtx), parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
       () => upstream.abort(), 2_000,
@@ -7478,6 +7760,7 @@ async function handleResponsesInner(
         ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
         onUsage: usage => {
           // Raw adapter usage, pre wire-normalization (see the runTurn branch above).
+          observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, activeAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
           logCtx.usageFromBridge = true;
           if (usage) {
             logCtx.usage = usage;
@@ -7533,6 +7816,7 @@ async function handleResponsesInner(
         events = [];
         for await (const event of guardEmptyCompletionEventStream({
           firstEvents: (async function* () { yield* guardedEvents; })(),
+          maxRetries: emptyCompletionMaxRetries,
           continuation: fetchGuardedEmptyCompletionRetry,
         })) events.push(event);
       } else {
@@ -7544,6 +7828,7 @@ async function handleResponsesInner(
     }
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     let providerState: OcxProviderContinuationState | undefined;
+    const benchmarkUsageGate = { done: false };
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
@@ -7556,6 +7841,7 @@ async function handleResponsesInner(
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, activeAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;

@@ -289,3 +289,7 @@ ocx system codex-cli-update check --json
 Doğrulanmış OpenCodex yapılandırmasını inceleyin ve güvenle değiştirin. `show`
 ve `get` sırları maskeler. İçe aktarma yazmadan önce doğrular ve `--yes`
 gerektirir.
+
+#### Claude Code uyumluluk tanılama
+
+**2.1.201** altında `ocx claude` engellemeden uyarır. `npm install -g @anthropic-ai/claude-code` ile güncelleyin; durum `ocx doctor` ve `ocx status --json` içinde görünür. Bu, **2.1.129** `/model` seçici eşiğinden ayrıdır.

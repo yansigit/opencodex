@@ -1125,8 +1125,11 @@ describe("Cursor protobuf tool-call events", () => {
     ]);
   });
 
-  test("same-session checkpoints cannot regress below a carried context total", () => {
-    const tracker = createCursorContextUsageTracker();
+  test("a lower authoritative checkpoint replaces carried usage and reports compaction", () => {
+    const drops: Array<[number, number]> = [];
+    const tracker = createCursorContextUsageTracker({
+      onContextDrop: (previous, current) => drops.push([previous, current]),
+    });
     tracker.record("cursor_conv_1", 10_300);
     const state = createCursorProtobufEventState({
       contextUsage: tracker.controlsForConversation("cursor_conv_1"),
@@ -1135,9 +1138,10 @@ describe("Cursor protobuf tool-call events", () => {
 
     expect(mapCursorProtobufServerMessage(checkpointUpdate(9_900), state)).toEqual([]);
     expect(mapCursorProtobufServerMessage(turnEndedFrame(), state)).toEqual([
-      { type: "done", usage: { inputTokens: 10_280, outputTokens: 20, totalTokens: 10_300, estimated: true } },
+      { type: "done", usage: { inputTokens: 9_880, outputTokens: 20, totalTokens: 9_900, estimated: true } },
     ]);
-    expect(tracker.get("cursor_conv_1")).toBe(10_300);
+    expect(tracker.get("cursor_conv_1")).toBe(9_900);
+    expect(drops).toEqual([[10_300, 9_900]]);
   });
 
   test("late checkpoint after terminal done is inert and does not seed carry-forward", () => {

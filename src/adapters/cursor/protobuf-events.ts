@@ -55,7 +55,12 @@ interface CursorContextUsageEntry {
  * a real active-context value with the current turn's tiny output delta. Context text, tool args,
  * and model output are never stored here.
  */
-export function createCursorContextUsageTracker(options: { maxEntries?: number; ttlMs?: number; now?: () => number } = {}): CursorContextUsageTracker {
+export function createCursorContextUsageTracker(options: {
+  maxEntries?: number;
+  ttlMs?: number;
+  now?: () => number;
+  onContextDrop?: (previousTokens: number, currentTokens: number) => void;
+} = {}): CursorContextUsageTracker {
   const maxEntries = options.maxEntries ?? DEFAULT_CONTEXT_USAGE_MAX_ENTRIES;
   const ttlMs = options.ttlMs ?? DEFAULT_CONTEXT_USAGE_TTL_MS;
   const now = options.now ?? (() => Date.now());
@@ -77,11 +82,7 @@ export function createCursorContextUsageTracker(options: { maxEntries?: number; 
     if (!Number.isFinite(tokens) || tokens <= 0) return;
     prune();
     const existing = entries.get(conversationId);
-    if (existing && existing.tokens >= tokens) {
-      entries.delete(conversationId);
-      entries.set(conversationId, { tokens: existing.tokens, updatedAt: now() });
-      return;
-    }
+    if (existing && tokens < existing.tokens) options.onContextDrop?.(existing.tokens, tokens);
     entries.delete(conversationId);
     entries.set(conversationId, { tokens, updatedAt: now() });
     prune();
@@ -150,8 +151,8 @@ export interface CursorProtobufEventState {
   /**
    * Session-level last-known absolute context size for this Cursor conversation. This is a fallback
    * for no-checkpoint client-tool finalize turns only; any checkpoint observed during the current
-   * turn remains authoritative, with monotonic max semantics unless a compaction boundary reset the
-   * conversation cache before the turn.
+   * turn remains authoritative. A lower live checkpoint replaces the carry because Cursor may
+   * compact independently of a Codex-authored compaction boundary.
    */
   contextCarryForwardTokens?: number;
   recordContextTokens?: (tokens: number) => void;
@@ -256,16 +257,20 @@ export function createCursorProtobufEventState(options: {
 
 function observeContextTokens(state: CursorProtobufEventState, usedTokens: number): void {
   if (!Number.isFinite(usedTokens) || usedTokens <= 0) return;
-  if (usedTokens > (state.contextTokens ?? 0)) state.contextTokens = usedTokens;
-  state.recordContextTokens?.(usedTokens);
+  // Checkpoints within one response can arrive stale/out of order, so retain that turn's maximum.
+  // The first checkpoint of a later turn still outranks its carry-forward, allowing a real
+  // cross-turn compaction drop to become visible.
+  if (usedTokens > (state.contextTokens ?? 0)) {
+    state.contextTokens = usedTokens;
+    state.recordContextTokens?.(usedTokens);
+  }
 }
 
 export function reportableContextTokens(state: CursorProtobufEventState): number | undefined {
   const current = state.contextTokens;
   const carry = state.contextCarryForwardTokens;
   if (current === undefined) return carry;
-  if (carry === undefined) return current;
-  return Math.max(current, carry);
+  return current;
 }
 
 export function usageFromContextTokens(state: CursorProtobufEventState, contextTokens: number): OcxUsage {
@@ -1324,7 +1329,7 @@ export function mapCursorProtobufServerMessage(
   if (serverMessage.message.case === "conversationCheckpointUpdate") {
     const usedTokens = serverMessage.message.value.tokenDetails?.usedTokens ?? 0;
     // `usedTokens` is the ABSOLUTE conversation context size, not a per-turn output delta. Track it
-    // separately (monotonic max) and surface it as `done.usage.totalTokens`; folding it into
+    // separately and surface the current turn's checkpoint as `done.usage.totalTokens`; folding it into
     // `outputTokens` (which also accumulates `tokenDelta`) double-counts in Codex. See contextTokens.
     observeContextTokens(state, usedTokens);
     return [];

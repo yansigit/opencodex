@@ -48,9 +48,25 @@ export function emptyCompletionRetryEnabled(
   return config.emptyCompletionRetry === true && env[EMPTY_COMPLETION_RETRY_ENV] !== "0";
 }
 
+export type EmptyCompletionPolicy = "observe" | "fail" | "retry";
+
+/** Composer 2.5 has a verified pre-output empty-stop failure. Fail it statedly by default; only
+ * replay when the operator explicitly accepts the billing/side-effect tradeoff. */
+export function emptyCompletionPolicy(
+  config: Pick<OcxConfig, "emptyCompletionRetry">,
+  adapterName: string,
+  modelId: string,
+  env: Record<string, string | undefined> = process.env,
+): EmptyCompletionPolicy {
+  if (emptyCompletionRetryEnabled(config, env)) return "retry";
+  const bareModel = modelId.startsWith("cursor/") ? modelId.slice("cursor/".length) : modelId;
+  return adapterName === "cursor" && bareModel === "composer-2.5" ? "fail" : "observe";
+}
+
 /** Surfaced when the single retry was also empty or failed upstream. */
 export const EMPTY_COMPLETION_RETRY_FAILED_CODE = "empty_completion_retry_failed";
 export const EMPTY_COMPLETION_REPLAY_UNSAFE_CODE = "empty_completion_replay_unsafe";
+export const EMPTY_COMPLETION_FAILED_CODE = "empty_completion";
 
 /**
  * Observe an event stream for the empty-completion shape WITHOUT changing it (#2472).
@@ -161,6 +177,19 @@ export function emptyCompletionReplayUnsafeEvent(
     errorType: "upstream_error",
     code: EMPTY_COMPLETION_REPLAY_UNSAFE_CODE,
     message: "The model returned an empty completion after a local side effect; retrying this turn is unsafe.",
+    ...(usage ? { usage } : {}),
+  };
+}
+
+export function emptyCompletionFailedEvent(
+  usage?: OcxUsage,
+): Extract<AdapterEvent, { type: "error" }> {
+  return {
+    type: "error",
+    status: 502,
+    errorType: "upstream_error",
+    code: EMPTY_COMPLETION_FAILED_CODE,
+    message: "The model completed without output text or a tool call; the turn was not replayed automatically.",
     ...(usage ? { usage } : {}),
   };
 }
@@ -307,7 +336,9 @@ export async function* guardEmptyCompletionEventStream(
         }
         // The retry was also empty: a stated failure, not a second silent
         // success.
-        yield emptyCompletionRetryFailedEvent(usage);
+        yield maxRetries === 0
+          ? emptyCompletionFailedEvent(usage)
+          : emptyCompletionRetryFailedEvent(usage);
         return;
       }
       if (event.type === "error") {
@@ -371,8 +402,10 @@ export async function* guardEmptyCompletionEventStream(
         }
         continue;
       }
-      if (!sawContent && retries > 0) {
-        yield emptyCompletionRetryFailedEvent(usage, true);
+      if (!sawContent && (retries > 0 || maxRetries === 0)) {
+        yield maxRetries === 0
+          ? emptyCompletionFailedEvent(usage)
+          : emptyCompletionRetryFailedEvent(usage, true);
         return;
       }
       // Post-output EOF remains incomplete; replaying could duplicate text or

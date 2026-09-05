@@ -1,16 +1,45 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCodexAccountForThread, clearThreadAccountMap, formatCodexProviderForLog } from "../src/codex/routing";
 import { CODEX_ACCOUNT_LOG_LABEL_RE, fallbackCodexAccountLogLabel } from "../src/codex/account-label";
 import { updateAccountQuota, clearAccountQuota } from "../src/codex/auth-api";
 import { saveCodexAccountCredential } from "../src/codex/account-store";
 import type { OcxConfig } from "../src/types";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-session-affinity-test");
+let TEST_DIR = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
+function installScratchHome(): void {
+  // These tests exercise routing behavior, not Windows ACL behavior. Stub both runners so
+  // optional hardening never spawns a real icacls.exe child that can hold the fixture open.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-session-affinity-"));
+  process.env.OPENCODEX_HOME = TEST_DIR;
+  // Isolate the main-account credential source: TEST_DIR has no auth.json, so the
+  // main account is deterministically absent and cannot become a rotation target.
+  previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = TEST_DIR;
+}
+
+async function removeScratchHome(): Promise<void> {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousOpencodexHome;
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = previousCodexHome;
+  if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
+  TEST_DIR = "";
+}
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -42,25 +71,15 @@ function makeActivePoolConfig(active: string, ids: string[] = [active]): OcxConf
 describe("resolveCodexAccountForThread", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    // Isolate the main-account credential source: TEST_DIR has no auth.json, so the
-    // main account is deterministically absent and cannot become a rotation target.
-    previousCodexHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = TEST_DIR;
+    installScratchHome();
     clearThreadAccountMap();
     clearAccountQuota();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearAccountQuota();
     clearThreadAccountMap();
-    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    await removeScratchHome();
   });
 
   test("returns null when no active account", () => {

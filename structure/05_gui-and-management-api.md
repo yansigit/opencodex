@@ -173,15 +173,23 @@ override, per-thread pin, or CLI surface. Public behavior details live in the
 `v2NativeParentOverride`, and `agentTaskRecovery`. It is a scalar `/api/v2` setting: the dashboard
 must not optimistically change it, sends only that scalar, and refreshes the server state after a
 write. The switch remains usable outside explicit V2 so operators can arm it; it is active only for
-eligible native V2 roots and disabling is immediate for later requests.
+eligible native V2 root and thread-spawn child turns and disabling is immediate for later requests.
 
 The bridge moves `spawn_agent`, `send_message`, and `followup_task` from native collaboration to its
 plaintext mirror after parent-override routing; native `wait_agent`, `interrupt_agent`, and `list_agents`
 remain unchanged. Thus all uses of those three delegation-message operations are plaintext while the
 experiment is active, including native-to-native delegation. The native Codex UI may retain the original model while
 routed prompts, repository context, and tool results follow the selected provider's availability,
-context, behavior, billing, and privacy boundaries. Its rewrite is root-only: native children are not
-rewritten and a native child delegating to a routed grandchild can still face encrypted content.
+context, behavior, billing, and privacy boundaries. The rewrite also applies to genuine spawned-child
+turns that settle on the canonical native provider and retain a V2 collaboration catalog; routed
+fallbacks, depth-limited leaves, and non-spawn maintenance turns remain excluded.
+
+Continuation durability is automatic rather than another public setting. Bridge-derived or recognized
+plaintext delegation history is sealed per entry with AES-256-GCM and an installation key from the OS
+credential store. Credential-store failure degrades only those rows to memory-only replay; it must never
+fall back to plaintext disk persistence. Legacy v1/v2 response-state snapshots and their spills are retired
+as a unit on first load. The bridge prevents new ciphertext only inside its eligibility boundary, while
+`agentTaskRecovery` remains the fallback outside it. Routed providers are inside the plaintext trust boundary.
 
 The UI must show one provider card and one Models group for Codex-login OpenAI, describe Pool and
 Direct accurately, and keep the main account inside Pool. Public model state keeps virtual Pro ids

@@ -284,7 +284,6 @@ describe("unauthenticated loopback listener", () => {
         { method: "GET", path: "/healthz" },
         { method: "GET", path: "/readyz" },
         { method: "POST", path: "/v1/chat/completions", body: '{"model":"x","messages":[]}' },
-        { method: "POST", path: "/v1/messages", body: '{"model":"x","messages":[]}' },
         { method: "POST", path: "/v1/images/generations", body: '{"prompt":"x"}' },
         { method: "GET", path: "/v1/opencodex/artifacts/x" },
         // Voice call-create is admitted only as POST; the keyed sideband join only as an upgrade.
@@ -343,6 +342,103 @@ describe("unauthenticated loopback listener", () => {
       expect(viaPublic.status).toBe(401);
       const publicBody = await viaPublic.json() as { error?: { message?: string } };
       expect(publicBody.error?.message).toBe("opencodex API key required");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("admits POST /v1/messages so Claude Code reaches the Anthropic route (LOOP-01)", async () => {
+    const loopbackPort = await freePort();
+    saveConfig(baseConfig(loopbackPort));
+    const server = startServer(0);
+    const body = '{"model":"x","messages":[]}';
+    const headers = { "content-type": "application/json" };
+    try {
+      // The request is deliberately malformed, so it fails INSIDE the handler rather than
+      // at admission — no upstream is involved. Any status other than 401/404 proves the
+      // allowlist let it through to the messages handler.
+      const viaLoopback = await fetch(`http://127.0.0.1:${loopbackPort}/v1/messages`, {
+        method: "POST", body, headers,
+      });
+      expect(viaLoopback.status).not.toBe(401);
+      expect(viaLoopback.status).not.toBe(404);
+
+      // The public listener keeps its credential barrier: no key, no admission.
+      const viaPublic = await fetch(`http://127.0.0.1:${server.port}/v1/messages`, {
+        method: "POST", body, headers,
+      });
+      expect(viaPublic.status).toBe(401);
+      const publicBody = await viaPublic.json() as { error?: { message?: string } };
+      expect(publicBody.error?.message).toBe("opencodex API key required");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("executes POST /v1/messages/count_tokens locally without credentials (LOOP-02)", async () => {
+    const loopbackPort = await freePort();
+    saveConfig(baseConfig(loopbackPort));
+    const server = startServer(0);
+    const body = '{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hello"}]}';
+    const headers = { "content-type": "application/json" };
+    try {
+      // Counting tokens is local work, so this one must fully succeed end to end: 200 and a
+      // real input_tokens reading, no credential and no upstream provider involved.
+      const viaLoopback = await fetch(`http://127.0.0.1:${loopbackPort}/v1/messages/count_tokens`, {
+        method: "POST", body, headers,
+      });
+      expect(viaLoopback.status).toBe(200);
+      const counted = await viaLoopback.json() as { input_tokens?: number };
+      expect(typeof counted.input_tokens).toBe("number");
+
+      // The public listener answers the identical request with its admission refusal.
+      const viaPublic = await fetch(`http://127.0.0.1:${server.port}/v1/messages/count_tokens`, {
+        method: "POST", body, headers,
+      });
+      expect(viaPublic.status).toBe(401);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("default-denies non-POST methods and path variants on the Anthropic routes (LOOP-03)", async () => {
+    const loopbackPort = await freePort();
+    saveConfig(baseConfig(loopbackPort));
+    const server = startServer(0);
+    const base = `http://127.0.0.1:${loopbackPort}`;
+    const body = '{"model":"x","messages":[]}';
+    const headers = { "content-type": "application/json" };
+    try {
+      // Method mismatches on allowlisted paths. The allowlist is exact-path + POST-only,
+      // so these must refuse at the gate (404) before any handler runs.
+      for (const { method, path } of [
+        { method: "GET", path: "/v1/messages" },
+        { method: "DELETE", path: "/v1/messages" },
+        { method: "PUT", path: "/v1/messages" },
+        { method: "GET", path: "/v1/messages/count_tokens" },
+        { method: "DELETE", path: "/v1/messages/count_tokens" },
+      ] as const) {
+        const res = await fetch(`${base}${path}`, { method, headers });
+        expect({ method, path, status: res.status }).toEqual({ method, path, status: 404 });
+      }
+      // Trailing-slash variants never match the exact-path admission.
+      for (const path of ["/v1/messages/", "/v1/messages/count_tokens/"]) {
+        const res = await fetch(`${base}${path}`, { method: "POST", body, headers });
+        expect({ path, status: res.status }).toEqual({ path, status: 404 });
+      }
+      // Encoded variants: url.pathname keeps percent-encoding, so neither form can match.
+      for (const path of ["/v1%2Fmessages", "/%761/messages"]) {
+        const res = await fetch(`${base}${path}`, { method: "POST", body, headers });
+        expect({ path, status: res.status }).toEqual({ path, status: 404 });
+      }
+
+      // The public listener refuses the identical unauthenticated Claude requests.
+      for (const path of ["/v1/messages", "/v1/messages/count_tokens"]) {
+        const res = await fetch(`http://127.0.0.1:${server.port}${path}`, {
+          method: "POST", body, headers,
+        });
+        expect({ path, status: res.status }).toEqual({ path, status: 401 });
+      }
     } finally {
       await server.stop(true);
     }

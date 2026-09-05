@@ -34,13 +34,15 @@ const workflow = Bun.YAML.parse(workflowText) as {
 };
 
 describe("fork auto-release workflow contract", () => {
-  test("runs only after successful Cross-platform CI on main", () => {
+  test("runs only after successful Build release candidate on main", () => {
     expect(workflow.on?.workflow_run).toEqual({
-      workflows: ["Cross-platform CI"],
+      workflows: ["Build release candidate"],
       types: ["completed"],
       branches: ["main"],
     });
     expect(workflow.jobs?.["auto-release"]?.if).toContain("conclusion == 'success'");
+    expect(workflow.jobs?.["auto-release"]?.if).toContain("event == 'workflow_run'");
+    expect(workflow.jobs?.["auto-release"]?.if).toContain("repository.full_name == github.repository");
   });
 
   test("uses minimum dispatch permissions and bounded non-canceling concurrency", () => {
@@ -80,6 +82,9 @@ describe("fork auto-release workflow contract", () => {
     expect(workflowText).toContain('gh api --method POST "repos/$GITHUB_REPOSITORY/dispatches" --input -');
     expect(workflowText).toContain("GH_TOKEN: ${{ steps.release-dispatch-app-token.outputs.token }}");
     expect(workflowText).toContain("expected_sha:$expected_sha");
+    expect(workflowText).toContain("candidate_run_id:$candidate_run_id");
+    expect(workflowText).toContain("candidate_artifact_id:$candidate_artifact_id");
+    expect(workflowText).toContain("actions/runs/${CANDIDATE_RUN_ID}/artifacts");
     expect(workflowText).not.toContain("gh workflow run");
     expect(workflowText).not.toMatch(/^\s*npm publish\b/m);
   });

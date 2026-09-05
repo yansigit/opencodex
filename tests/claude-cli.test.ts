@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildClaudeEnv, claudeNotFoundHint, ensureProxyForClaude, rootSkipPermissionsNotice, shouldAllowRootSkipPermissions } from "../src/cli/claude";
+import { buildClaudeEnv, claudeNotFoundHint, ensureProxyForClaude, launchClaudeWithDiagnostics, rootSkipPermissionsNotice, shouldAllowRootSkipPermissions } from "../src/cli/claude";
 import { commandInvocation } from "../src/lib/win-exec";
 import type { LivenessIo, LiveProxy } from "../src/server/proxy-liveness";
 import type { OcxConfig } from "../src/types";
@@ -37,6 +37,78 @@ describe("ocx claude proxy liveness", () => {
 
     expect(await ensureProxyForClaude({ findLiveProxy })).toBe(10100);
     expect(seen).toEqual([3]);
+  });
+});
+
+describe("ocx claude compatibility diagnostics", () => {
+  const versionProbe = (stdout: string) => () => ({ stdout, status: 0 });
+  const exitChild = (code: number | null, signal: NodeJS.Signals | null = null) => ({
+    on(event: "error" | "exit", listener: (value: never, signal?: NodeJS.Signals | null) => void) {
+      if (event === "exit") queueMicrotask(() => listener(code as never, signal));
+    },
+  });
+  const launch = (stdout: string, code = 0) => launchClaudeWithDiagnostics([], {}, {
+    versionProbe: versionProbe(stdout),
+    commandInvocation: () => ({ file: "claude", args: [], options: {} }),
+    spawnChild: () => exitChild(code, null),
+  });
+
+  test("warns once for an outdated client and still launches", async () => {
+    const original = console.error;
+    const output: string[] = [];
+    console.error = (...parts: unknown[]) => output.push(parts.join(" "));
+    try {
+      expect(await launch("2.1.200\n")).toBe(0);
+      expect(output).toHaveLength(1);
+      expect(output[0]).toContain("2.1.200");
+      expect(output[0]).toContain("2.1.201");
+      expect(output[0]).toContain("npm install -g @anthropic-ai/claude-code");
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test("missing, timed-out, and unparseable probes still launch without a warning", async () => {
+    const original = console.error;
+    const output: string[] = [];
+    console.error = (...parts: unknown[]) => output.push(parts.join(" "));
+    try {
+      for (const probe of [
+        () => ({ error: { code: "ENOENT" } }),
+        () => ({ error: new Error("timeout") }),
+        () => ({ stdout: "not a version", status: 0 }),
+      ]) {
+        const result = await launchClaudeWithDiagnostics([], {}, {
+          versionProbe: probe,
+          commandInvocation: () => ({ file: "claude", args: [], options: {} }),
+          spawnChild: () => exitChild(0),
+        });
+        expect(result).toBe(0);
+      }
+      expect(output).toEqual([]);
+    } finally {
+      console.error = original;
+    }
+  });
+
+  test("real launch ENOENT and Windows 9009 retain the install hint", async () => {
+    const original = console.error;
+    const output: string[] = [];
+    console.error = (...parts: unknown[]) => output.push(parts.join(" "));
+    try {
+      const enoentChild = { on(event: "error" | "exit", listener: (value: never) => void) {
+        if (event === "error") queueMicrotask(() => listener({ code: "ENOENT" } as never));
+      } };
+      expect(await launchClaudeWithDiagnostics([], {}, {
+        versionProbe: versionProbe("2.1.201\n"), commandInvocation: () => ({ file: "claude", args: [], options: {} }), spawnChild: () => enoentChild,
+      })).toBe(1);
+      expect(await launchClaudeWithDiagnostics([], {}, {
+        versionProbe: versionProbe("2.1.201\n"), commandInvocation: () => ({ file: "claude", args: [], options: {} }), spawnChild: () => exitChild(9009), platform: "win32",
+      })).toBe(9009);
+      expect(output.filter(line => line.includes("npm install -g @anthropic-ai/claude-code"))).toHaveLength(2);
+    } finally {
+      console.error = original;
+    }
   });
 });
 

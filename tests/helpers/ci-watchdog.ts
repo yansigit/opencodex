@@ -24,6 +24,24 @@ export function watchdogMs(base: number): number {
 }
 
 /**
+ * Budget for a readiness marker emitted by a freshly spawned Bun child.
+ *
+ * This is deliberately separate from `watchdogMs`: a Windows `ocx start`
+ * child can cross the generic 45 s floor while it is still alive, loading the
+ * CLI and traversing the real PowerShell/ACL startup path. Dev run
+ * 33899715577 observed the runtime-port marker after that floor would already
+ * have expired. The marker is the assertion; elapsed startup time is not.
+ */
+export function childStartupMarkerMs(
+  base: number,
+  ci = process.env.CI === "true",
+  platform = process.platform,
+): number {
+  if (!ci) return base;
+  return Math.max(base, platform === "win32" ? 75_000 : 30_000);
+}
+
+/**
  * Scale a *product* timing budget that a test deliberately shortened.
  *
  * `watchdogMs` bounds how long a test may run. This is the other half: a budget the code

@@ -3,6 +3,7 @@ import {
   beginConversationTurn,
   clearConversationProgressForTests,
   CURSOR_429_STORM_COOLDOWN_MS,
+  CURSOR_REPEATED_TOOL_OUTPUT_THRESHOLD,
   finishConversationTurn,
   guardRepeatedPreToolText,
   MAX_PRE_TOOL_TEXT_GUARD_BYTES,
@@ -84,6 +85,36 @@ describe("conversation progress telemetry", () => {
     observeTurnProgress(second.telemetry, { type: "text_delta", text: "Checking the files." });
     finishConversationTurn(second.key, second.telemetry, 200, { now: 4 });
     expect(second.telemetry.exactOutputRepeat).toBe(true);
+  });
+
+  test("interrupts a repeated tool-bearing output loop once, then permits a deliberate retry", () => {
+    for (let ordinal = 1; ordinal <= CURSOR_REPEATED_TOOL_OUTPUT_THRESHOLD + 1; ordinal++) {
+      const turn = beginConversationTurn("conversation-a", "cursor", "composer-2.5", ordinal);
+      expect(turn.telemetry.repetitionCircuitOpen).toBeUndefined();
+      observeTurnProgress(turn.telemetry, { type: "text_delta", text: "I will inspect it." });
+      observeTurnProgress(turn.telemetry, { type: "tool_call_start", id: `call-${ordinal}`, name: "exec" });
+      observeTurnProgress(turn.telemetry, { type: "tool_call_delta", arguments: '{"cmd":"pwd"}' });
+      observeTurnProgress(turn.telemetry, { type: "tool_call_end" });
+      finishConversationTurn(turn.key, turn.telemetry, 200, { now: ordinal });
+    }
+
+    const blocked = beginConversationTurn("conversation-a", "cursor", "composer-2.5", 10);
+    expect(blocked.telemetry.repetitionCircuitOpen).toBe(true);
+    finishConversationTurn(blocked.key, blocked.telemetry, 502, { now: 10 });
+    expect(beginConversationTurn("conversation-a", "cursor", "composer-2.5", 11).telemetry.repetitionCircuitOpen)
+      .toBeUndefined();
+  });
+
+  test("does not treat different tool arguments as an exact repeated output", () => {
+    for (let ordinal = 1; ordinal <= CURSOR_REPEATED_TOOL_OUTPUT_THRESHOLD + 2; ordinal++) {
+      const turn = beginConversationTurn("conversation-a", "cursor", "composer-2.5", ordinal);
+      expect(turn.telemetry.repetitionCircuitOpen).toBeUndefined();
+      observeTurnProgress(turn.telemetry, { type: "text_delta", text: "I will inspect it." });
+      observeTurnProgress(turn.telemetry, { type: "tool_call_start", id: `call-${ordinal}`, name: "exec" });
+      observeTurnProgress(turn.telemetry, { type: "tool_call_delta", arguments: JSON.stringify({ cmd: `sed -n '${ordinal}p' file` }) });
+      observeTurnProgress(turn.telemetry, { type: "tool_call_end" });
+      finishConversationTurn(turn.key, turn.telemetry, 200, { now: ordinal });
+    }
   });
 
   test("flags punctuation-equivalent commentary without suppressing it", () => {

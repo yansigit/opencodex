@@ -86,6 +86,9 @@ export default function SubagentDelegationSection({
     ? nativeDefaultState
     : "disabled";
   const nativeParentTargets = available.filter(option => option.canonical !== true);
+  const nativeRecoveryTargets = available.filter(option => (
+    option.provider === "openai" && option.namespaced === option.model
+  ));
   const nativeParentCanActivate = ultraMode.multiAgentV2Enabled && !keepNativeChatGptOnV1 && nativeParentOverride.model !== null;
 
   return (
@@ -316,21 +319,29 @@ export default function SubagentDelegationSection({
           <div className="muted setting-hint">{t("sub.agentTaskRecoveryHint")}</div>
         </div>
         <div className="swi-delegation-controls">
-          <input
-            type="text"
-            className="input input-sm"
-            style={{ width: 180, textAlign: "right" }}
-            placeholder="gpt-5.6-luna"
+          <Select
             value={agentTaskRecovery.model ?? ""}
-            onChange={e => {
-              const val = e.target.value.trim();
-              onAgentTaskRecoverySave({
-                enabled: agentTaskRecovery.enabled,
-                model: val.length > 0 ? val : null,
-              });
-            }}
+            options={[
+              { value: "", label: t("sub.agentTaskRecoveryDefault") },
+              // Recovery unwraps ciphertext through the ChatGPT backend, so only
+              // native catalog rows are valid targets. A saved value that no longer
+              // resolves in the catalog still displays instead of being discarded.
+              ...(agentTaskRecovery.model
+                && !nativeRecoveryTargets.some(option => option.model === agentTaskRecovery.model)
+                ? [{ value: agentTaskRecovery.model, label: agentTaskRecovery.model }]
+                : []),
+              ...nativeRecoveryTargets.map(option => ({
+                value: option.model,
+                label: formatNamespacedModelId(option.provider + "/" + option.model, t),
+              })),
+            ]}
+            onChange={v => onAgentTaskRecoverySave({
+              enabled: agentTaskRecovery.enabled,
+              model: v || null,
+            })}
             disabled={agentTaskRecoverySaving}
-            aria-label={t("sub.agentTaskRecoveryModel")}
+            label={t("sub.agentTaskRecoveryModel")}
+            align="right"
           />
           <Switch
             on={agentTaskRecovery.enabled}

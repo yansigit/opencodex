@@ -24,7 +24,7 @@ base for upstream PRs.
 | `feat/…` | One topic; upstream PRs from `vendor/dev` | Yes until landed | No |
 | `run/dev` | Disposable rebuild workspace; merge into `dev`, never force-push `dev` | Yes (rebuilt) | No |
 | `run/main` | Retired stable-lane rebuild workspace | Yes (if used) | No |
-| `sync/upstream-TAG-SHA` | Throwaway merge + CI, then merge to `origin/dev` | Discarded | No |
+| `sync/upstream-TAG-UPSTREAM_SHA-BASE_SHA` | Immutable upstream candidate + CI, then merge to `origin/dev` | Never rewritten | No |
 | `archive/mixed-dev-YYYYMMDD` | Frozen pre-split snapshot | Frozen | No |
 
 Rules:
@@ -60,17 +60,22 @@ branch handled immediately. Do not chase daily `upstream/dev` movement into
 git fetch upstream origin --prune
 git fetch . upstream/main:refs/heads/vendor/main
 git fetch . upstream/dev:refs/heads/vendor/dev
-git switch -C sync/upstream-TAG-SHA origin/dev
+git switch -c sync/upstream-TAG-UPSTREAM_SHA-BASE_SHA <exact-origin-dev-sha>
 git merge --no-ff vendor/main
 ```
 
 Resolve conflicts using [`OWNED.md`](./OWNED.md) and record every overlap in
 [`PRESERVATION.json`](./PRESERVATION.json). Run focused tests for every
-changed domain. Open or update a draft PR on the fork from
-`sync/upstream-TAG-SHA` into `dev`, and check
+changed domain. Open one draft PR on the fork from the content-addressed
+candidate into `dev`, and check
 `gh pr view <number> --json mergeable -q .mergeable` until it reports
 `MERGEABLE`. The human creates the **merge commit** / **Merge pull request**.
 Never squash or rebase these sync PRs.
+
+Candidate branches and PRs are write-once. Never force-push, fast-forward, call
+GitHub's `update-branch`, or ask Cursor/Jules to repair one in place. If CI or
+conflict resolution exposes a problem, fix it on `dev` through a normal PR and
+let the sync workflow create a successor bound to the newer `dev` SHA.
 
 ### Long-running sync operator discipline
 
@@ -179,8 +184,10 @@ schedule or manual dispatch from the trusted default branch, fetches released
 `vendor/dev` to `upstream/dev` in that same new-tag cycle. It never merges or
 force-pushes `origin/main` or `origin/dev`.
 
-The CLI emits a `SyncEvent` to the enabled plugins. The first notifier,
-`github-issue`, upserts a `fork-sync` issue for non-no-op events. The first
+The CLI emits a `SyncEvent` to the enabled plugins. Actionable events carry the
+upstream repository/tag/SHA and exact `dev` ref/SHA as immutable identity. The
+first notifier, `github-issue`, creates a candidate-specific handoff record and
+preserves human edits. The first
 coordinator, `cursor-webhook`, sends `pin-updated`, `main-behind`, and
 `history-diverged` events. A diverged vendor ref creates an issue but does not
 start the coordinator; an `already-current` poll is silent apart from the
@@ -189,10 +196,10 @@ workflow summary only when `vendor/main` is already contained in `dev`.
 The Action needs repository secrets `FORK_SYNC_CURSOR_WEBHOOK_URL` and
 `FORK_SYNC_CURSOR_WEBHOOK_SECRET`. Plugin IDs are selected with
 `FORK_SYNC_NOTIFIERS` and `FORK_SYNC_COORDINATORS`. The webhook starts the
-Cursor Automation described in the fork-sync skill; that agent creates the
-merge-from-`dev` sync branch, opens or updates a draft PR and decision table,
-and waits until `gh pr view --json mergeable` reports `MERGEABLE` before
-stopping. A human reviews and creates the merge commit for `origin/dev`;
+Cursor Automation described in the fork-sync skill. It may investigate a
+handoff, but it must fix the underlying problem on `dev`; no coordinator may
+push to an existing candidate. A successor run creates a new branch and draft
+PR. A human reviews and creates the merge commit for `origin/dev`;
 never squash or rebase these sync PRs. A timeout-only `macos-launchd` check
 flake may be retried with `gh run rerun`; do not edit the upstream lifecycle
 workflow for that flake.

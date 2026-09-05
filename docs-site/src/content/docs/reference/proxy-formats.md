@@ -128,7 +128,11 @@ With `stream: true`, the response is `text/event-stream`. The bridge emits Respo
 `data: [DONE]`.
 
 With `stream: false` or no `stream`, the same adapter events are collected into one Responses JSON
-object. Both forms preserve the selected model, output items, terminal status, and usage.
+object. The canonical ChatGPT Codex backend itself requires `stream: true`, so opencodex sends that
+route as SSE and reconstructs a bounded JSON response for the non-streaming client. Reconstruction
+retains indexed `response.output_item.done` records because the terminal snapshot can omit its
+`output` array. Both client-facing forms preserve the selected model, output items, terminal status,
+and usage.
 
 Client-facing Responses SSE frames are limited to 4 MiB per frame, measured in raw bytes before the
 SSE block delimiter. On HTTP, an unterminated upstream frame that exceeds the limit fails closed

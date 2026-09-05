@@ -322,7 +322,7 @@ function rootPromptMessages(
     normalized: string,
   ): void => {
     const previous = replayRuns.get(role);
-    if (externalModel && previous?.text === normalized) {
+    if (echoToolResultInRoot && previous?.text === normalized) {
       const runLength = previous.length + 1;
       if (runLength > maxRunLength) maxRunLength = runLength;
       const marked = `${normalized}\n[note: this exact output was produced ${runLength} times in a row]`;
@@ -410,7 +410,7 @@ function rootPromptMessages(
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same tool call repeated ${maxToolCallCount} times in this user turn. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
     }, "user", {}));
-  } else if (externalModel && maxRunLength >= 3) {
+  } else if (echoToolResultInRoot && maxRunLength >= 3) {
     entries.push(rootBlobCandidate({
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same output repeated ${maxRunLength} times in a row. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],

@@ -17,7 +17,7 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain(
       "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7",
     );
-    expect(workflow).toContain("ref: ${{ github.ref }}");
+    expect(workflow).toContain("ref: ${{ github.sha }}");
     expect(workflow).toContain("persist-credentials: false");
   });
 
@@ -78,12 +78,12 @@ describe("fork upstream sync workflow contract", () => {
       "if: steps.vendor.outputs.kind == 'pin-updated' || steps.vendor.outputs.kind == 'main-behind' || steps.vendor.outputs.kind == 'history-diverged'",
     );
     expect(workflow).toContain('[ "$status" = "decision-handoff" ] || [ "$status" = "history-diverged" ]');
-    expect(workflow).toContain('git switch -C "$branch"');
+    expect(workflow).not.toContain('git switch -C "$branch"');
     expect(workflow).toContain('/scripts/fork/sync/cli.ts" publish');
   });
 
   test("prepares from dev while keeping scripts on the guarded trusted ref", () => {
-    expect(workflow).toContain("ref: ${{ github.ref }}");
+    expect(workflow).toContain("ref: ${{ github.sha }}");
     expect(workflow).toContain("git fetch origin dev");
     expect(workflow).toContain("git fetch --force upstream main dev --tags --prune");
     expect(workflow).toContain("git worktree add");
@@ -192,10 +192,10 @@ describe("fork upstream sync workflow contract", () => {
     expect(workflow).toContain("UserKnownHostsFile=$known_hosts");
   });
 
-  test("asserts pinning did not move the checked-out branch HEAD", () => {
-    expect(workflow).toContain("git rev-parse --abbrev-ref HEAD");
-    expect(workflow).toContain("EXPECTED_BRANCH: ${{ github.ref_name }}");
-    expect(workflow).toContain('expected_branch="$EXPECTED_BRANCH"');
+  test("asserts pinning did not move the immutable trusted checkout", () => {
+    expect(workflow).toContain('current_sha="$(git rev-parse HEAD)"');
+    expect(workflow).toContain("EXPECTED_SHA: ${{ github.sha }}");
+    expect(workflow).toContain('current_sha" != "$EXPECTED_SHA');
   });
 
   test("does not merge or force-push from the action", () => {
