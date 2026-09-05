@@ -1693,7 +1693,11 @@ async function fetchProviderModelsWithAuth(
         // CCA only exposes a numeric thinking budget. Until the adapter owns an exact Codex
         // effort-to-wire mapping for a newly discovered model, do not advertise a false ladder.
         reasoningEfforts: [],
-        ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+        ...(model.contextWindow ? {
+          contextWindow: model.contextWindow,
+          metadataSource: "live" as const,
+          metadataFieldSources: { contextWindow: "live" as const },
+        } : {}),
         ...(model.inputModalities ? { inputModalities: model.inputModalities } : {}),
       }, contextCap, metadataModelIdCaseFold));
       const forCache = withConfiguredRetention(live, { retainComboTargets: false });

@@ -119,6 +119,62 @@ describe("loopback listener origin gate", () => {
   });
 });
 
+describe("loopback listener Claude Messages route admission", () => {
+  // loopbackRouteAllowed is not exported, so the unit layer pins the exact branch text of
+  // the allowlist function. The behavioral half of this contract lives in
+  // tests/loopback-listener-integration.test.ts against a real server, where 404-vs-401
+  // cannot be confused; here the point is that the mapping itself cannot silently change.
+  function allowlistBody(source: string): string {
+    const start = source.indexOf("function loopbackRouteAllowed");
+    const end = source.indexOf("function managementIngressRouteAllowed", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return source.slice(start, end);
+  }
+
+  function indexServerSource(): string {
+    return readFileSync(new URL("../src/server/index.ts", import.meta.url), "utf8");
+  }
+
+  test("admits exact POST /v1/messages and POST /v1/messages/count_tokens", () => {
+    const body = allowlistBody(indexServerSource());
+    expect(body).toMatch(
+      /if \(path === "\/v1\/messages" \|\| path === "\/v1\/messages\/count_tokens"\)\s*\{\s*return req\.method === "POST";\s*\}/,
+    );
+  });
+
+  test("does not admit trailing-slash or encoded path variants", () => {
+    // The match must be exact on url.pathname, which keeps percent-encoding. Any
+    // decodeURIComponent / endsWith("/") relaxation in the allowlist would admit the
+    // variants the negative gates exist to refuse — flag it here at the source level.
+    const body = allowlistBody(indexServerSource());
+    expect(body).not.toContain("decodeURIComponent");
+    expect(body).not.toContain("startsWith(\"/v1/messages\")");
+    expect(body).not.toContain("endsWith");
+  });
+
+  test("does not admit other methods or discovery endpoints for the Anthropic routes", () => {
+    // GET /v1/models stays Codex-only: the Anthropic entry must not fold a models listing
+    // or any other method into the same branch.
+    const body = allowlistBody(indexServerSource());
+    expect(body).toContain('if (path === "/v1/models") return req.method === "GET";');
+    // Exactly two Anthropic entries, both inside the POST-only branch.
+    expect(body.match(/path === "\/v1\/messages/g) ?? []).toHaveLength(2);
+    expect(body.slice(body.indexOf("/v1/messages"), body.lastIndexOf('req.method === "POST"')))
+      .not.toMatch(/"(GET|DELETE|PUT)"/);
+  });
+
+  test("the handler dispatch still passes policy to both Anthropic handlers", () => {
+    // Admission alone is not enough: on the loopback listener the request must run with the
+    // loopback policy view, or resolveApiAuth would re-demand a credential it cannot supply.
+    const source = indexServerSource();
+    expect(source).toContain("await handleClaudeCountTokens(req, config, policy)");
+    expect(source).toContain(
+      "await handleClaudeMessages(req, config, logCtx, { requestId, start, turnAdmissionLease }, policy)",
+    );
+  });
+});
+
 describe("loopback listener configuration", () => {
   test("an enabled listener sharing the proxy port is rejected at write time", () => {
     // A collision would otherwise surface as a startup failure after the public listener had

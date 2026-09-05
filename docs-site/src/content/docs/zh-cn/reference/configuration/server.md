@@ -116,6 +116,9 @@ ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@r
 自动认证会在找到已保存的 Claude 认证时选择 subscription，在未找到时选择 proxy；如果检测结果不明确，则会选择 subscription 并给出警告。参见
 [Claude Code 认证模式](/guides/claude-code/#auth-mode)。
 
+生成的名册定义（`~/.claude/agents/ocx-*.md`）带有签名的 `<!-- ocx-route -->` / `<!-- ocx-effort -->` 指令，代理会在派发前验证这些指令：无效的签名指令会安全拒绝并返回 `400 invalid_request_error`（关闭失败）；无签名指令仅在与活动的 OpenCodex 所有名册条目完全匹配时才会被采纳。`ocx doctor` 会在 OpenCodex 配置目录下报告 Claude 指令签名密钥的存在性和权限，但不会打印密钥材料。
+
+`POST /v1/messages` 和 `POST /v1/messages/count_tokens` 也是在选择启用的 `unauthenticatedLoopbackListener` 上允许的唯二 Claude 路由（服务器级密钥；必须指定端口，且必须不同于代理端口）。公共监听器的认证不受该监听器影响。参见[远程访问](#远程访问)。
 ## 影子调用
 
 Codex 会为标题、提交信息等任务使用较小的辅助模型。启用

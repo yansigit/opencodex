@@ -109,8 +109,10 @@ Le port est obligatoire et doit différer du port proxy. Il n'est jamais attribu
 changerait au fil des redémarrages tandis que les serveurs d'applications déjà en cours d'exécution conservaient le `base_url` précédent.
 
 L'écouteur ne sert que `POST /v1/responses`, sa mise à niveau WebSocket, `POST /v1/responses/compact`,
-`POST /v1/alpha/search` (le relais de recherche web natif de Codex), `GET /v1/models` et les mises à
-niveau WebSocket vocales autonomes. Tout le reste, y compris `/api/*` et le tableau de bord, renvoie `404`.
+`POST /v1/alpha/search` (le relais de recherche web natif de Codex), `GET /v1/models`,
+`POST /v1/messages`, `POST /v1/messages/count_tokens` et les mises à niveau WebSocket vocales autonomes.
+Les deux routes Messages prennent en charge les clients Claude Code locaux utilisant le protocole Anthropic.
+Tout le reste, y compris `/api/*` et le tableau de bord, renvoie `404`.
 
 :::danger[Surface non authentifiée]
 Chaque processus de la machine peut utiliser cet écouteur. Il consomme le quota du compte et utilise les identifiants de
@@ -177,6 +179,18 @@ Ces paramètres régissent `/v1/messages`, `/v1/messages/count_tokens`, le lance
 L'authentification automatique sélectionne l'abonnement lorsqu'une authentification Claude stockée est trouvée, le proxy lorsqu'aucune ne l'est et
 l'abonnement avec un avertissement lorsque la détection n'est pas concluante. Voir
 [Mode d'authentification de Claude Code](/fr/guides/claude-code/#mode-dauthentification).
+
+Les définitions de la liste générées (`~/.claude/agents/ocx-*.md`) portent des directives signées
+`<!-- ocx-route -->` / `<!-- ocx-effort -->` que le proxy vérifie avant l'envoi : une directive signée invalide
+échoue de manière sécurisée avec `400 invalid_request_error`, et les directives non signées ne sont acceptées que
+pour des entrées actives exactes de la liste appartenant à OpenCodex. `ocx doctor` indique la présence et les
+permissions de la clé de signature des directives Claude sous votre répertoire de configuration OpenCodex, sans
+afficher le moindre élément de la clé.
+
+`POST /v1/messages` et `POST /v1/messages/count_tokens` sont également les seules routes Claude admises par
+`unauthenticatedLoopbackListener`, activé avec l'opt-in (clé au niveau du serveur ; le port est obligatoire et doit
+être différent de celui du proxy). L'authentification de l'écouteur public reste inchangée par cet écouteur. Voir
+[Clients locaux qui ne peuvent pas recevoir le jeton](#clients-locaux-qui-ne-peuvent-pas-recevoir-le-jeton).
 
 ## Appels fantômes
 
