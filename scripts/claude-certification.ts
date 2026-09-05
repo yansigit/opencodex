@@ -30,6 +30,15 @@ export interface CertificationReport {
   reason?: string;
 }
 
+export interface LiveOptions { provider: string; model: string; maxBudgetUsd: number }
+export function parseLiveOptions(args: string[]): LiveOptions | { error: string } {
+  const value = (flag: string) => { const i = args.indexOf(flag); return i >= 0 ? args[i + 1] : undefined; };
+  const provider = value("--provider"); const model = value("--model"); const budget = value("--max-budget-usd");
+  if (!provider || !model || !budget || !/^[A-Za-z0-9._/-]+$/.test(provider) || !/^[A-Za-z0-9._/-]+$/.test(model)) return { error: "provider, model, and max-budget-usd are required" };
+  const maxBudgetUsd = Number(budget); if (!Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0 || maxBudgetUsd > 100) return { error: "invalid max-budget-usd" };
+  return { provider, model, maxBudgetUsd };
+}
+
 export function sanitizedChildEnv(base: Record<string, string | undefined>, dirs: { home: string; claude: string; ocx: string }): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [key, value] of Object.entries(base)) {

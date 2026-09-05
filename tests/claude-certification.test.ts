@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   evaluateLivePolicy,
+  parseLiveOptions,
   runHermetic,
   sanitizedChildEnv,
 } from "../scripts/claude-certification";
@@ -41,6 +42,10 @@ describe("Claude certification runner policy", () => {
     expect(evaluateLivePolicy({ confirmFlag: true, allowEnv: false })).toMatchObject({ status: "skipped", requests: 0 });
     expect(evaluateLivePolicy({ confirmFlag: false, allowEnv: true })).toMatchObject({ status: "skipped", requests: 0 });
     expect(evaluateLivePolicy({ confirmFlag: true, allowEnv: true })).toMatchObject({ status: "live_fail", requests: 0 });
+  });
+  test("strictly parses live route and budget options", () => {
+    expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1.5"])).toEqual({ provider: "p", model: "m", maxBudgetUsd: 1.5 });
+    expect(parseLiveOptions(["--provider", "p"])).toEqual({ error: "provider, model, and max-budget-usd are required" });
   });
 
   test("missing Claude CLI is an explicit hermetic skip and does not leak OPENCODEX_HOME", async () => {
