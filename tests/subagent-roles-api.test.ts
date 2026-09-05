@@ -2,7 +2,7 @@
  * GET/PUT /api/subagent-roles: atomic validation, roster union warnings, routed-on-v2.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../src/server/management-api";
@@ -10,19 +10,24 @@ import { inMemoryManagementPersistence } from "./helpers/management-auth";
 import { AGENT_ROLE_MARKER } from "../src/codex/agent-roles-sync";
 import type { OcxConfig, OcxSubagentRole } from "../src/types";
 import { ManagementRequest as Request } from "./helpers/management-auth";
+import { flushConfigDirHardening } from "../src/config/paths";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const savedHome = process.env.OPENCODEX_HOME;
 const savedCodexHome = process.env.CODEX_HOME;
 let tempHome: string | null = null;
 
-afterEach(() => {
-  if (savedHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = savedHome;
-  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
-  else process.env.CODEX_HOME = savedCodexHome;
-  if (tempHome) {
-    rmSync(tempHome, { recursive: true, force: true });
-    tempHome = null;
+afterEach(async () => {
+  const home = tempHome;
+  tempHome = null;
+  try {
+    if (home) await flushConfigDirHardening(home);
+  } finally {
+    if (savedHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = savedHome;
+    if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = savedCodexHome;
+    if (home) removeTreeWithRetry(home);
   }
 });
 

@@ -36,6 +36,13 @@ describe("fork PR mergeable workflow", () => {
     expect(source).toContain("GitHub has not computed mergeability");
   });
 
+  test("preserves GitHub null while mergeability is still being computed", () => {
+    const source = workflow();
+
+    expect(source).toContain('if .mergeable == null then "null" else (.mergeable | tostring) end');
+    expect(source).not.toContain("--jq '.mergeable'");
+  });
+
   test("rejects branches that are not descendants of the base with promotion-specific recovery", () => {
     const source = workflow();
 
