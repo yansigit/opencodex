@@ -1,0 +1,14 @@
+{
+  "release-type": "node",
+  "package-name": "@yansigit/opencodex",
+  "include-component-in-tag": false,
+  "changelog-path": "CHANGELOG.md",
+  "skip-github-release": true,
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "package-name": "@yansigit/opencodex",
+      "include-component-in-tag": false
+    }
+  }
+}

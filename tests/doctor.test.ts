@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -13,15 +13,19 @@ import {
   fetchServiceMemory,
   formatResponseTempLines,
   formatServiceMemoryLines,
+  formatClaudeClientDoctorLines,
   parseProcessEnvBlock,
   probeWham,
   proxyDownRestartHint,
   resolveCodexHomeDir,
   runDoctor,
+  setDoctorClaudeClientProbeDepsForTests,
   type ServiceMemoryData,
 } from "../src/cli/doctor";
+import type { ClaudeClientVersion } from "../src/claude/client-version";
 import { collectOrcaCodexHomeDiagnostic } from "../src/codex/home";
 import { NativeProfileError } from "../src/codex/native-profile-types";
+import * as windowsAcl from "../src/lib/windows-secret-acl";
 import {
   LOCAL_MANAGEMENT_CAPABILITY_HEADER,
   LOCAL_MANAGEMENT_CAPABILITY_EXPIRES_AT_HEADER,
@@ -33,15 +37,20 @@ import {
 import { findDeadPid } from "./helpers/dead-pid";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-doctor-test");
-const TEST_CODEX_HOME = join(TEST_DIR, "codex");
-const TEST_OPENCODEX_HOME = join(TEST_DIR, "opencodex");
+let TEST_DIR = "";
+let TEST_CODEX_HOME = "";
+let TEST_OPENCODEX_HOME = "";
 let prevOpencodexHome: string | undefined;
 let prevCodexHome: string | undefined;
 let prevHttpsProxy: string | undefined;
 let prevLowerHttpsProxy: string | undefined;
 let prevProxyRef: string | undefined;
 let prevAdminToken: string | undefined;
+
+// No doctor test should discover or execute the workstation's real Claude binary.
+beforeEach(() => {
+  setDoctorClaudeClientProbeDepsForTests({ versionProbe: () => ({ stdout: "2.1.201\n", status: 0 }) });
+});
 
 describe("doctor", () => {
   beforeEach(() => {
@@ -51,7 +60,9 @@ describe("doctor", () => {
     prevLowerHttpsProxy = process.env.https_proxy;
     prevProxyRef = process.env.OCX_TEST_PROXY_REF;
     prevAdminToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    TEST_DIR = mkdtempSync(join(import.meta.dir, ".tmp-doctor-test-"));
+    TEST_CODEX_HOME = join(TEST_DIR, "codex");
+    TEST_OPENCODEX_HOME = join(TEST_DIR, "opencodex");
     mkdirSync(TEST_CODEX_HOME, { recursive: true });
     mkdirSync(TEST_OPENCODEX_HOME, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_OPENCODEX_HOME;
@@ -62,6 +73,7 @@ describe("doctor", () => {
   });
 
   afterEach(() => {
+    setDoctorClaudeClientProbeDepsForTests(undefined);
     if (prevOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = prevOpencodexHome;
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME;
@@ -89,6 +101,27 @@ describe("doctor", () => {
     rows = collectPaths();
     expect(auth().exists).toBe(true);
     expect(cfg().exists).toBe(true);
+  });
+
+  test("reports unverifiable Windows directive-key ACLs without claiming 0600", async () => {
+    writeFileSync(join(TEST_OPENCODEX_HOME, "claude-agent-directive-key"), "a".repeat(64) + "\n");
+    const originalPlatform = process.platform;
+    const hardenSpy = spyOn(windowsAcl, "hardenSecretPath").mockReturnValue({ ok: false, diagnostics: "ACL unavailable" });
+    const originalLog = console.log;
+    const lines: string[] = [];
+    console.log = (...parts: unknown[]) => lines.push(parts.join(" "));
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    try {
+      await runDoctor([]);
+      const report = lines.join("\n");
+      expect(report).toContain("Windows ACL hardening could not be verified");
+      expect(report).not.toContain("present (0600, owner-only)");
+      expect(hardenSpy).toHaveBeenCalledWith(join(TEST_OPENCODEX_HOME, "claude-agent-directive-key"), { required: false });
+    } finally {
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+      hardenSpy.mockRestore();
+      console.log = originalLog;
+    }
   });
 
   test("resolveCodexHomeDir expands ~ like the hardened runtime paths", () => {
@@ -413,6 +446,36 @@ describe("doctor", () => {
       classification: "native_main_recovery_manual",
       authenticated: false,
     });
+  });
+});
+
+describe("Claude Code client doctor formatter", () => {
+  const result = (state: ClaudeClientVersion["state"], version: string | null = null): ClaudeClientVersion => ({ state, version, source: "path" });
+
+  test("renders every canonical state with safe actionable guidance", () => {
+    expect(formatClaudeClientDoctorLines(result("compatible", "2.1.201")).join("\n")).toContain("compatible");
+    const outdated = formatClaudeClientDoctorLines(result("outdated", "2.1.200")).join("\n");
+    expect(outdated).toContain("2.1.201");
+    expect(outdated).toContain("npm install -g @anthropic-ai/claude-code");
+    for (const state of ["missing", "timed-out", "unparseable"] as const) {
+      expect(formatClaudeClientDoctorLines(result(state)).join("\n")).toContain("Action:");
+    }
+  });
+
+  test("runDoctor renders the injected Claude client report without invoking Claude", async () => {
+    const original = console.log;
+    const lines: string[] = [];
+    console.log = (...parts: unknown[]) => lines.push(parts.join(" "));
+    setDoctorClaudeClientProbeDepsForTests({ versionProbe: () => ({ stdout: "2.1.200\n", status: 0 }) });
+    try {
+      await runDoctor([]);
+      const report = lines.join("\n");
+      expect(report).toContain("Claude Code client");
+      expect(report).toContain("2.1.200");
+      expect(report).toContain("npm install -g @anthropic-ai/claude-code");
+    } finally {
+      console.log = original;
+    }
   });
 });
 

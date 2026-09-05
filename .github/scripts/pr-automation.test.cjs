@@ -9,6 +9,7 @@ const {
   buildAutomationComment,
   classifyPullRequest,
   exactHeadGate,
+  isMissingPullRequestError,
   REQUIRED_CHECKS,
   summarizeAgedHolds,
   workflowRunRetryDisposition,
@@ -57,6 +58,18 @@ describe("classifyPullRequest", () => {
       assert.equal(result.reason, expectedReason);
     });
   }
+
+  it("never marks an immutable sync candidate eligible for update-branch", () => {
+    const result = classifyPullRequest({
+      pr: pr({
+        head: { ref: "sync/upstream-v2.36.1-abcdef123456-0123456789ab", sha: SHA, repo: { full_name: "yansigit/opencodex" } },
+        body: "<!-- opencodex-fork-sync -->\nGenerated sync.",
+      }),
+      repository: "yansigit/opencodex",
+    });
+    assert.equal(result.class, "deterministic-sync");
+    assert.equal(result.eligibleForUpdate, false);
+  });
 });
 
 describe("workflowRunRetryDisposition", () => {
@@ -119,6 +132,15 @@ describe("workflowRunRetryDisposition", () => {
       base: { ref: "main", sha: BASE_SHA, repo: { full_name: "yansigit/opencodex" } },
       head: { ref: "dev", sha: SHA, repo: { full_name: "yansigit/opencodex" } },
     }).action, "rerun");
+  });
+});
+
+describe("isMissingPullRequestError", () => {
+  it("recognizes only GitHub's missing-resource status", () => {
+    assert.equal(isMissingPullRequestError({ status: 404 }), true);
+    assert.equal(isMissingPullRequestError({ status: "404" }), true);
+    assert.equal(isMissingPullRequestError({ status: 403 }), false);
+    assert.equal(isMissingPullRequestError(new Error("not found")), false);
   });
 });
 

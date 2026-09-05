@@ -12,7 +12,7 @@
  * act on — rather than artifacts the next start silently undoes.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -23,6 +23,8 @@ import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let fixtureRoot = "";
 let previousOpencodexHome: string | undefined;
+let previousCodexHome: string | undefined;
+let codexHome = "";
 const cleanup: string[] = [];
 
 function baseConfig(): OcxConfig {
@@ -72,9 +74,13 @@ function persistedCodexIntent(): unknown {
 
 beforeEach(() => {
   previousOpencodexHome = process.env.OPENCODEX_HOME;
-  fixtureRoot = mkdtempSync(join(tmpdir(), "ocx-codex-toggle-"));
+  previousCodexHome = process.env.CODEX_HOME;
+  fixtureRoot = realpathSync.native(mkdtempSync(join(tmpdir(), "ocx-codex-toggle-")));
+  codexHome = join(fixtureRoot, "codex");
+  mkdirSync(codexHome);
   cleanup.push(fixtureRoot);
   process.env.OPENCODEX_HOME = fixtureRoot;
+  process.env.CODEX_HOME = codexHome;
   writeFileSync(join(fixtureRoot, "config.json"), JSON.stringify(baseConfig(), null, 2));
   writeFileSync(join(fixtureRoot, "service-state.json"), JSON.stringify({
     version: 2,
@@ -87,6 +93,8 @@ beforeEach(() => {
 afterEach(() => {
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = previousCodexHome;
   while (cleanup.length) removeTreeWithRetry(cleanup.pop()!);
 });
 

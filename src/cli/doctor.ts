@@ -27,6 +27,9 @@ import { probeNativeProfileRecoveryState, resolveNativeProfileContext } from "..
 import { NativeProfileError } from "../codex/native-profile-types";
 import { collectOrcaCodexHomeDiagnostic, resolveCodexHomeDir as resolveCodexHomeDirImpl, isWslRuntime, listWslWindowsCodexHomes, wslAutomountRoot, type CodexHomeDeps } from "../codex/home";
 import { scanCodexAgentRolesWithTomlModelFallback } from "../codex/subagent-model-fallback";
+import { lstatSync } from "node:fs";
+import { DIRECTIVE_KEY_FILE, getDirectiveKeyPath } from "../claude/directive-key";
+import { hardenSecretPath } from "../lib/windows-secret-acl";
 import { diagnoseCodexShim, findCodexOnPath, isWindowsInteropDir, type CodexShimDiagnostic } from "../codex/shim";
 import { providerTableString, rootTomlString } from "../codex/injected-marker";
 import { countPendingOpencodexHistory } from "../codex/history-provider";
@@ -60,6 +63,12 @@ import {
   fetchBoundLocalManagementRead,
   type LocalManagementReadDeps,
 } from "../server/local-management-read-client";
+import {
+  CLAUDE_CODE_COMPATIBILITY_FLOOR,
+  probeClaudeClientVersion,
+  type ClaudeClientProbeDeps,
+  type ClaudeClientVersion,
+} from "../claude/client-version";
 export { resolveCodexHomeDir } from "../codex/home";
 
 /**
@@ -82,6 +91,7 @@ export type OAuthDoctorCheck = { level: "OK" | "WARN" | "FAIL"; message: string 
  * times in one process; a sticky flag would make the second call fail because the first did.
  */
 let doctorSawFailure = false;
+let doctorClaudeClientProbeDeps: ClaudeClientProbeDeps | undefined;
 
 function recordDoctorFailure(): void {
   doctorSawFailure = true;
@@ -90,6 +100,35 @@ function recordDoctorFailure(): void {
 /** True when the last `runDoctor` pass saw a FAIL-level condition. */
 export function doctorFailed(): boolean {
   return doctorSawFailure;
+}
+
+/** Test-only injection keeps ordinary doctor calls on the production probe. */
+export function setDoctorClaudeClientProbeDepsForTests(deps: ClaudeClientProbeDeps | undefined): void {
+  doctorClaudeClientProbeDeps = deps;
+}
+
+/** Privacy-safe Claude Code client diagnostic lines, shared by doctor tests and output. */
+export function formatClaudeClientDoctorLines(client: ClaudeClientVersion): string[] {
+  switch (client.state) {
+    case "compatible":
+      return [`  ok     Claude Code ${client.version} is compatible (floor ${CLAUDE_CODE_COMPATIBILITY_FLOOR})`];
+    case "outdated":
+      return [
+        `  !!     Claude Code ${client.version} is below required floor ${CLAUDE_CODE_COMPATIBILITY_FLOOR}`,
+        "         Action: npm install -g @anthropic-ai/claude-code",
+      ];
+    case "missing":
+      return ["  --     Claude Code client is not installed", "         Action: npm install -g @anthropic-ai/claude-code"];
+    case "timed-out":
+      return ["  --     Claude Code client version check timed out", "         Action: retry the check; repair or upgrade Claude Code if it continues"];
+    case "unparseable":
+      return ["  --     Claude Code client version could not be recognized", "         Action: repair or upgrade Claude Code, then retry"];
+  }
+}
+
+export function reportClaudeClientDoctor(deps: ClaudeClientProbeDeps = {}): void {
+  console.log("\nClaude Code client");
+  for (const line of formatClaudeClientDoctorLines(probeClaudeClientVersion(deps))) console.log(line);
 }
 
 function pathIsWritable(path: string): boolean {
@@ -1053,6 +1092,9 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   // flag would fail the second call because the first saw a problem.
   doctorSawFailure = false;
 
+  // Independent advisory probe; a missing or bad client never stops doctor.
+  reportClaudeClientDoctor(doctorClaudeClientProbeDeps);
+
   // Ordering note: the memory/runtime section renders after "Running proxy
   // process proxy env" below; helpers live above runDoctor for testability.
 
@@ -1267,6 +1309,43 @@ export async function runDoctor(args: string[] = []): Promise<void> {
   } else {
     for (const line of formatProjectCodexConfigWarningsForDoctor(projectWarnings)) {
       console.log(line);
+    }
+  }
+
+  // Claude Code subagent directive signing key (TRUST-01/TRUST-05): report only
+  // presence and permission metadata. The key material itself is NEVER read into
+  // a diagnostic string here.
+  console.log("\nClaude directive signing key");
+  {
+    const keyPath = getDirectiveKeyPath();
+    try {
+      const st = lstatSync(keyPath);
+      if (st.isSymbolicLink()) {
+        console.log(`  --     ${DIRECTIVE_KEY_FILE} is a symlink; the proxy refuses to follow symlinked key files`);
+        console.log("        Action: replace the symlink with a regular file, then let the proxy recreate or reuse the key");
+      } else if (!st.isFile()) {
+        console.log(`  --     ${DIRECTIVE_KEY_FILE} is not a regular file`);
+      } else if (process.platform === "win32") {
+        const hardened = hardenSecretPath(keyPath, { required: false });
+        if (hardened.ok) {
+          console.log(`  ok     ${DIRECTIVE_KEY_FILE} present (Windows ACL hardened)`);
+        } else {
+          console.log(`  !!     ${DIRECTIVE_KEY_FILE} present but Windows ACL hardening could not be verified`);
+          if (hardened.diagnostics) console.log(`        Detail: ${hardened.diagnostics}`);
+          console.log("        Action: repair the key file ACL, then rerun doctor");
+        }
+      } else if ((st.mode & 0o777) === 0o600) {
+        console.log(`  ok     ${DIRECTIVE_KEY_FILE} present (0600, owner-only)`);
+      } else {
+        console.log(`  !!     ${DIRECTIVE_KEY_FILE} present but permissions are 0${(st.mode & 0o777).toString(8)} (expected 0600)`);
+        console.log("        Action: chmod 600 the key file; the proxy also auto-tightens permissions at startup");
+      }
+    } catch (cause) {
+      if ((cause as NodeJS.ErrnoException).code === "ENOENT") {
+        console.log(`  --     ${DIRECTIVE_KEY_FILE} missing (created automatically by the proxy or sync on first use under ${getDirectiveKeyPath()})`);
+      } else {
+        console.log(`  --     ${DIRECTIVE_KEY_FILE} status could not be checked (${cause instanceof Error ? cause.message : String(cause)})`);
+      }
     }
   }
 

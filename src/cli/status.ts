@@ -20,6 +20,7 @@ import { grokFenceEndpointDrift, readGrokStatus } from "../grok/status";
 import { claudeDesktopIntegrationEnabled } from "../codex/desired-state";
 import { claudeDesktopPolicyHealth, probeClaudeDesktopPolicy, type ClaudeDesktopPolicyHealth } from "../claude/desktop-policy";
 import { collectClientConnectionStatus } from "./connect";
+import { probeClaudeClientVersion, type ClaudeClientProbeDeps, type ClaudeClientVersion } from "../claude/client-version";
 
 type HealthCheck = {
   ok: boolean;
@@ -97,6 +98,8 @@ export type CliStatusJson = {
     desiredEnabled: boolean;
     policy: ClaudeDesktopPolicyHealth;
   };
+  /** Advisory local Claude Code client evidence; deliberately contains no process details. */
+  claudeClient?: ClaudeClientVersion;
   /**
    * This CLI's version against the running proxy's (#2701).
    *
@@ -111,6 +114,10 @@ export type CliStatusView = {
   proxyLabel: string;
   healthLabel: string;
 };
+
+export function claudeClientStatusView(deps: ClaudeClientProbeDeps = {}): ClaudeClientVersion {
+  return probeClaudeClientVersion(deps);
+}
 
 
 export type ListenTarget = {
@@ -343,6 +350,7 @@ export async function probeUncleanExitState(input: {
 
 export async function collectStatus(): Promise<CliStatusView> {
   const configDiagnostics = readConfigDiagnostics();
+  const claudeClient = claudeClientStatusView();
   const config = configDiagnostics.config;
   const claudeDesktop = {
     desiredEnabled: claudeDesktopIntegrationEnabled(config),
@@ -554,6 +562,7 @@ export async function collectStatus(): Promise<CliStatusView> {
       codexRuntime,
       codexHome,
       claudeDesktop,
+      claudeClient,
       // Own field rather than a line in `codexRuntime.warning`: a stale ocx on PATH is a
       // fact about this install, not about the Codex runtime, and filing it there would
       // print it under the wrong heading (#2701).

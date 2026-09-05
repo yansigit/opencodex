@@ -91,8 +91,9 @@ stream 開啟前以 `401` 失敗。
 已執行的 app-server 仍保留先前的 `base_url`。
 
 該 listener 只服務 `POST /v1/responses`、其 WebSocket upgrade、`POST /v1/responses/compact`、
-`POST /v1/alpha/search`（Codex 原生網頁搜尋中繼）、`GET /v1/models`，以及獨立語音 WebSocket upgrade。
-其他一切，包括 `/api/*` 與儀表板，都會回傳 `404`。
+`POST /v1/alpha/search`（Codex 原生網頁搜尋中繼）、`GET /v1/models`、`POST /v1/messages`、
+`POST /v1/messages/count_tokens`，以及獨立語音 WebSocket upgrade。兩個 Messages 路由支援使用
+Anthropic 協定的本機 Claude Code 用戶端。其他一切，包括 `/api/*` 與儀表板，都會回傳 `404`。
 
 :::danger[這是一個未認證的介面]
 機器上的每個 process 都可以使用此 listener。它會耗用帳號配額與付費 provider 憑證，也可能耗盡
@@ -139,6 +140,10 @@ ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@r
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | 繼承 | 寫入生成的 `~/.claude/agents/ocx-*.md` 的 effort；與 Codex guidance 與代理上限分開。透過 `ocx claude` 重啟以重新生成。 |
 
 自動認證在找到已儲存的 Claude 認證時選擇訂閱，無認證時選擇 proxy，偵測不明確時選擇訂閱並附帶警告。請見[Claude Code 認證模式](/zh-tw/guides/claude-code/#auth-mode)。
+
+生成的名冊定義（`~/.claude/agents/ocx-*.md`）帶有已簽署的 `<!-- ocx-route -->` / `<!-- ocx-effort -->` 指令，代理會在派發前驗證這些指令：無效的已簽署指令會以 `400 invalid_request_error` **關閉失敗（fail closed）**，未簽署指令僅在與作用中的 OpenCodex 所有名冊項目完全相符時才會採用。`ocx doctor` 會在你的 OpenCodex 設定目錄下回報 Claude 指令簽署金鑰是否存在及其權限，但不會印出金鑰材料。
+
+`POST /v1/messages` 與 `POST /v1/messages/count_tokens` 也是 opt-in `unauthenticatedLoopbackListener` 上唯一允許的 Claude 路由（伺服器層級金鑰；必須指定埠號，且不得與代理埠號相同）。該監聽器不會改變公用監聽器的身分驗證。請參閱[無法取得 token 的本機用戶端](#無法接收-token-的本機用戶端)。
 
 ## Shadow call
 

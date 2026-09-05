@@ -45,6 +45,7 @@ import {
   drainStorageWorkers,
 } from "../src/storage/worker-lifecycle";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
+import { INTERNAL_DEADLINE_MS } from "./helpers/test-budget";
 
 let testDir = "";
 let previousHome: string | undefined;
@@ -126,7 +127,8 @@ async function enablePolicyAndRun(serverUrl: string): Promise<{ startedAt: numbe
 async function waitForPolicyJob(
   serverUrl: string,
   startedAt: number,
-  timeoutMs = 20_000,
+  // Same wait as helpers/storage-policy-api waitForJobIdle: live server, worker-backed job.
+  timeoutMs = INTERNAL_DEADLINE_MS,
 ): Promise<{ job: { lastOutcome?: { ok?: boolean; error?: string; removed?: number } } }> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

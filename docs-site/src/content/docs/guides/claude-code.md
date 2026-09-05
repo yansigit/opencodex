@@ -3,9 +3,16 @@ title: Claude Code
 description: Use any routed model from Claude Code — opencodex serves the Anthropic Messages API and gateway model discovery on the same port.
 ---
 
-opencodex serves `POST /v1/messages` (plus `count_tokens`) alongside `/v1/responses`, so Claude
+opencodex serves `POST /v1/messages` and `POST /v1/messages/count_tokens` alongside `/v1/responses`, so Claude
 Code can use every routed provider — OAuth logins, account pools, key failover and sidecars
 included — with zero extra auth work.
+
+Generated OpenCodex roster definitions carry signed route and (when configured) effort directives.
+The proxy verifies those directives before dispatching a provider request: an invalid or altered
+signed directive fails closed with `400 invalid_request_error`. For compatibility with older,
+unsigned definitions, a directive is honored only when it exactly matches an active
+OpenCodex-owned roster entry; arbitrary unsigned text is ignored. See [Roster agents](#roster-agents-injectagents)
+for operational details.
 
 ## Claude OAuth account pool (experimental)
 
@@ -296,6 +303,32 @@ Proxy startup/ensure, `ocx claude`, and relevant dashboard saves sync your featu
 
 Dispatch: `subagent_type: "ocx-gpt-5-6-sol"`. 1M-capable targets carry `[1m]` automatically.
 
+**Directive trust:** the generated definitions are signed. Each `ocx-*` agent body carries
+`<!-- ocx-route: ... -->` (plus `<!-- ocx-effort: ... -->` when an effort is configured) together
+with a matching `<!-- ocx-sig: ... -->` signature that OpenCodex creates with a local signing key
+it manages automatically. `ocx doctor` reports that key's presence and permissions without ever
+printing the key itself. The proxy verifies the signature on every request **before any provider
+dispatch**: when a signature is present but malformed, altered, corrupted, or otherwise invalid, the
+request rejects with a `400 invalid_request_error` — it is never routed to another provider. A
+definition with no signature may use the compatibility path, but only when its directive exactly
+matches an active OpenCodex-owned roster entry; arbitrary unsigned text is ignored. A failed
+signature check never falls back to that roster path.
+
+## Unauthenticated loopback listener (opt-in)
+
+When the proxy listens on a non-loopback address that requires a credential, a local client that
+never receives that credential would be refused. For that exact case OpenCodex can open a second
+listener bound to `127.0.0.1`: set `unauthenticatedLoopbackListener` in the configuration
+(**off by default**; the port is required, must differ from the proxy port, and is never
+OS-assigned). See
+[Local clients that cannot receive the token](/reference/configuration/#local-clients-that-cannot-receive-the-token).
+
+When enabled, the listener for Claude Code admits exactly two routes: `POST /v1/messages` and
+`POST /v1/messages/count_tokens` (both POST-only). Every other method and path — including
+`/api/*` and the dashboard — returns `404`. Public-listener authentication is unchanged:
+enabling this listener never relaxes the main listener. Codex-specific routes on this listener
+are described in the configuration reference.
+
 ## Bundled-skill elision (blockedSkills)
 
 Claude Code's bundled `claude-api` skill injects ~840KB (~136k tokens) of Anthropic documentation
@@ -566,3 +599,45 @@ it by default (`blockedSkills: ["claude-api"]`).
 **Subagent dispatches to wrong model** — Roster agents (`ocx-*`) use `<!-- ocx-route: ... -->`
 directives, not the Agent tool's `model` argument. Make sure the directive matches the intended
 route. Pass `"haiku"` as the model placeholder.
+
+## Client compatibility diagnostics
+
+Before `ocx claude` launches, opencodex checks the Claude Code version against the **2.1.201**
+compatibility floor. The probe resolves to one of five states, each with actionable guidance:
+
+| State | Meaning | What to do |
+| --- | --- | --- |
+| `compatible` | Version is at or above the floor | Nothing |
+| `outdated` | Version is below the floor | `npm install -g @anthropic-ai/claude-code` |
+| `missing` | Claude Code is not installed | Install it with `npm install -g @anthropic-ai/claude-code` |
+| `timed-out` | The version check timed out | Retry; repair or upgrade Claude Code if it persists |
+| `unparseable` | The version could not be recognized | Repair or upgrade Claude Code, then retry |
+
+The probe is advisory: a below-floor, missing, timed-out, or unrecognized client **never blocks
+launch** — the warning prints and `ocx claude` proceeds. `ocx doctor` and `ocx status --json`
+surface the same client state. This floor is separate from the **2.1.129** native `/model`
+gateway-picker capability.
+
+### Token-count benchmark (opt-in, may incur charges)
+
+The routed-path token approximation can be measured against real provider counts with
+`bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`.
+The command **is** the consent: without `--confirm-live-provider-charges` it performs argument
+validation only and sends nothing. When confirmed, it sends real requests and **can incur
+provider charges**. Never automate or unattended-script it — run it deliberately, with an eye on
+the account.
+
+What it does:
+
+- Targets Anthropic-adapter provider/model pairs only (the provider must be key-authed and list
+  the model), so the upstream reports authoritative `input_tokens`.
+- Sends a deterministic, sanitized fixture set — no customer text is read or embedded.
+- Sends fixtures one at a time; failures are typed and never retried, with no concurrency and no
+  fallback.
+- Emits a closed, non-persistent report: fixture ids, digests, states, metrics, and the provider
+  kind + model id only. No request bodies, credentials, or account identifiers are ever written.
+- Applies a per-fixture tolerance of max(32 tokens, 20%) and passes only when the weighted
+  aggregate absolute error stays within 10%.
+
+Routed `/v1/messages/count_tokens` behavior itself is unchanged by the benchmark: it stays
+local for routed models and passes through to Anthropic only for native `sk-ant-` credentials.

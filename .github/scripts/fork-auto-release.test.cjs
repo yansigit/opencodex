@@ -10,7 +10,11 @@ const OTHER_SHA = "89abcdef0123456789abcdef0123456789abcdef";
 function candidate(overrides = {}) {
   return {
     eventName: "workflow_run",
-    workflowName: "Cross-platform CI",
+    workflowName: "Build release candidate",
+    workflowEvent: "workflow_run",
+    workflowPath: ".github/workflows/release-candidate.yml",
+    workflowRepository: "yansigit/opencodex",
+    repository: "yansigit/opencodex",
     conclusion: "success",
     headBranch: "main",
     headSha: SHA,
@@ -23,8 +27,28 @@ function candidate(overrides = {}) {
 }
 
 describe("fork auto-release decision", () => {
-  it("dispatches an unused stable package version from green main CI", () => {
+  it("dispatches an unused stable package version from a qualified candidate", () => {
     assert.deepEqual(decideForkAutoRelease(candidate()), { action: "dispatch" });
+  });
+
+  it("accepts a trusted release-candidate workflow_run", () => {
+    assert.deepEqual(decideForkAutoRelease(candidate({
+      workflowName: "Build release candidate",
+      workflowEvent: "workflow_run",
+      workflowPath: ".github/workflows/release-candidate.yml",
+      workflowRepository: "yansigit/opencodex",
+      repository: "yansigit/opencodex",
+    })), { action: "dispatch" });
+  });
+
+  it("skips a candidate with untrusted workflow provenance", () => {
+    assert.deepEqual(decideForkAutoRelease(candidate({
+      workflowName: "Build release candidate",
+      workflowEvent: "workflow_dispatch",
+      workflowPath: ".github/workflows/release-candidate.yml",
+      workflowRepository: "yansigit/opencodex",
+      repository: "yansigit/opencodex",
+    })).action, "skip");
   });
 
   it("skips when the final trailer block requests it exactly", () => {
@@ -76,7 +100,7 @@ describe("fork auto-release decision", () => {
 
   for (const [name, overrides, reason] of [
     ["skips non-workflow_run events", { eventName: "push" }, "workflow_run"],
-    ["skips another triggering workflow", { workflowName: "Release" }, "Cross-platform CI"],
+    ["skips another triggering workflow", { workflowName: "Release" }, "Build release candidate"],
     ["skips unsuccessful CI", { conclusion: "failure" }, "success"],
     ["skips non-main branches", { headBranch: "dev" }, "main"],
     ["skips a moved main branch", { liveMainSha: OTHER_SHA }, "live main"],
@@ -121,7 +145,11 @@ describe("fork auto-release env CLI", () => {
   it("prints dispatch JSON from env vars without a node heredoc", () => {
     const result = runCli({
       EVENT_NAME: "workflow_run",
-      WORKFLOW_NAME: "Cross-platform CI",
+      WORKFLOW_NAME: "Build release candidate",
+      WORKFLOW_EVENT: "workflow_run",
+      WORKFLOW_PATH: ".github/workflows/release-candidate.yml",
+      WORKFLOW_REPOSITORY: "yansigit/opencodex",
+      GITHUB_REPOSITORY: "yansigit/opencodex",
       CONCLUSION: "success",
       HEAD_BRANCH: "main",
       HEAD_SHA: SHA,
@@ -137,7 +165,11 @@ describe("fork auto-release env CLI", () => {
   it("treats VERSION_ON_NPM as already published when set", () => {
     const result = runCli({
       EVENT_NAME: "workflow_run",
-      WORKFLOW_NAME: "Cross-platform CI",
+      WORKFLOW_NAME: "Build release candidate",
+      WORKFLOW_EVENT: "workflow_run",
+      WORKFLOW_PATH: ".github/workflows/release-candidate.yml",
+      WORKFLOW_REPOSITORY: "yansigit/opencodex",
+      GITHUB_REPOSITORY: "yansigit/opencodex",
       CONCLUSION: "success",
       HEAD_BRANCH: "main",
       HEAD_SHA: SHA,

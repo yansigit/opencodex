@@ -6,8 +6,7 @@ import type {
   PublishResult,
   SyncEvent,
 } from "./types";
-import { preservationReportHash } from "./overlap";
-import { isAgentProtectedPath } from "../../../.github/scripts/pr-sponsored-surface.cjs";
+import { branchFor, candidateIdentityFor } from "./prepare";
 
 export interface DraftPullRequestOptions {
   repository: string;
@@ -24,23 +23,8 @@ function publicValue(value: string): string {
     .slice(0, 240);
 }
 
-function autonomousSyncEligible(result: PrepareResult, publishResult?: PublishResult): publishResult is PublishResult {
-  if (!publishResult || result.status !== "merged" || result.unresolved.length > 0) return false;
-  if (!/^[0-9a-f]{40}$/i.test(publishResult.remoteSha ?? "")) return false;
-  if (!publishResult.containsDev || !publishResult.containsVendorMain
-    || publishResult.handoffRequired || publishResult.escalationRequired) return false;
-  const report = publishResult.preservationReport;
-  const provenance = publishResult.provenance;
-  if (!report || report.status !== "passed" || report.candidates.length > 0 || !provenance) return false;
-  if (report.shas.merge !== publishResult.remoteSha
-    || provenance.headSha !== publishResult.remoteSha
-    || provenance.registryHash !== report.registryHash
-    || provenance.decisionHash !== report.decisionHash
-    || provenance.reportHash !== preservationReportHash(report)) return false;
-  return result.resolutions.every(({ classification }) => classification !== "shared-hotspot");
-}
-
 function bodyFor(event: SyncEvent, result: PrepareResult, publishResult?: PublishResult): string {
+  const candidate = result.candidate ?? event.candidate;
   const rows = result.resolutions.length === 0
     ? ["| (none) | (none) | merge completed without conflicts |"]
     : result.resolutions.map(resolution =>
@@ -48,8 +32,8 @@ function bodyFor(event: SyncEvent, result: PrepareResult, publishResult?: Publis
   return [
     "<!-- opencodex-fork-sync -->",
     "## Summary",
-    `Merge upstream ${publicValue(event.latestTag)} into the fork integration branch (dev).`,
-    `Tag SHA: ${publicValue(event.latestTagSha) || "unavailable"}`,
+    `Merge upstream ${publicValue(candidate?.upstreamTag ?? event.upstreamTag ?? event.latestTag)} into the fork integration branch.`,
+    `Tag SHA: ${publicValue(candidate?.upstreamSha ?? event.upstreamSha ?? event.latestTagSha) || "unavailable"}`,
     `Vendor main SHA: ${publicValue(event.vendorMainSha) || "unavailable"}`,
     "",
     "## Verification",
@@ -113,23 +97,6 @@ export function createDraftPullRequestClient(
     return response;
   }
 
-  async function liveSyncSafety(number: number, expectedSha: string): Promise<{ safe: boolean; body: string }> {
-    const prResponse = await request(`/pulls/${number}`);
-    const live = await prResponse.json() as GitHubPullRequest & { changed_files?: number };
-    const files: Array<{ filename?: string; previous_filename?: string }> = [];
-    for (let page = 1; page <= 100; page += 1) {
-      const response = await request(`/pulls/${number}/files?per_page=100&page=${page}`);
-      const batch = await response.json() as Array<{ filename?: string; previous_filename?: string }>;
-      if (!Array.isArray(batch)) return { safe: false, body: live.body || "" };
-      files.push(...batch);
-      if (batch.length < 100) break;
-    }
-    const complete = Number.isInteger(live.changed_files) && live.changed_files === files.length && files.length <= 10000;
-    const safe = complete && live.state === "open" && live.base.ref === "dev" && live.head.sha === expectedSha &&
-      files.every(file => !isAgentProtectedPath(file));
-    return { safe, body: live.body || "" };
-  }
-
   return {
     async upsert({ event, result, publishResult }) {
       if (result.status !== "merged" && !(result.status === "decision-handoff" && result.handoffReason === "preservation")) {
@@ -137,48 +104,43 @@ export function createDraftPullRequestClient(
       }
       const branch = result.branch;
       if (!branch) throw new Error("merged prepare result is missing a branch");
-      const title = `sync: upstream ${publicValue(event.latestTag) || "unknown-release"}`;
-      const body = bodyFor(event, result, publishResult);
+      const candidate = candidateIdentityFor({ ...event, candidate: result.candidate ?? event.candidate });
+      if (!candidate) throw new Error("draft PR requires immutable candidate identity");
+      if (!candidate.baseRef.startsWith("refs/heads/")) {
+        throw new Error("draft PR candidate base ref is invalid");
+      }
+      const baseRef = candidate.baseRef.slice("refs/heads/".length);
+      if (!/^(?![./])(?!.*(?:\.\.|\/\.|\.lock(?:\/|$)))[A-Za-z0-9._/-]+$/.test(baseRef)) {
+        throw new Error("draft PR candidate base ref is invalid");
+      }
+      if (branch !== branchFor({ ...event, candidate })) {
+        throw new Error("draft PR branch does not match immutable candidate identity");
+      }
+      const candidateEvent = { ...event, candidate };
+      const title = `sync: upstream ${publicValue(candidate.upstreamTag) || "unknown-release"}`;
+      const body = bodyFor(candidateEvent, result, publishResult);
       const response = await request(
-        `/pulls?head=${owner}:${branch}&state=open&base=dev`,
+        `/pulls?head=${owner}:${branch}&state=open&base=${encodeURIComponent(baseRef)}`,
       );
       const openPullRequests = await response.json() as GitHubPullRequest[];
       const matching = openPullRequests.find(pullRequest =>
         pullRequest.state === "open"
-        && pullRequest.base.ref === "dev"
+        && pullRequest.base.ref === baseRef
         && pullRequest.head.ref === branch);
-      const eligible = autonomousSyncEligible(result, publishResult);
-      if (matching && !publishResult) return matching.number;
+      // PRs are create-once: an existing open PR for this exact branch/base is
+      // authoritative, even when its body or metadata was edited by a human.
+      // Never mutate an existing PR while syncing.
       if (matching) {
-        const exactPublishedHead = Boolean(publishResult?.remoteSha)
-          && matching.head.sha === publishResult?.remoteSha;
-        const currentBody = matching.body || "";
-        const safety = await liveSyncSafety(matching.number, publishResult?.remoteSha || "");
-        const exactSafe = eligible && exactPublishedHead && safety.safe;
-        const reconciledBody = exactPublishedHead && publishResult
-          ? provenanceBody(currentBody, event, publishResult)
-          : currentBody
-          .replace(/\n*<!-- opencodex-fork-sync-provenance:[\s\S]*? -->/g, "").trimEnd();
-        if (reconciledBody !== currentBody) {
-          await request(`/pulls/${matching.number}`, { method: "PATCH", body: JSON.stringify({ body: reconciledBody }) });
-        }
-        const labelsResponse = await request(`/issues/${matching.number}/labels`);
-        const labels = await labelsResponse.json() as unknown;
-        if (!Array.isArray(labels)) return matching.number;
-        const labelList = labels as Array<{ name?: string }>;
-        const hasLabel = labelList.some(label => label?.name === "autonomous-sync");
-        if (exactSafe && !hasLabel) {
-          await request(`/issues/${matching.number}/labels`, { method: "POST", body: JSON.stringify({ labels: ["autonomous-sync"] }) });
-        } else if (!exactSafe && hasLabel) {
-          await request(`/issues/${matching.number}/labels/autonomous-sync`, { method: "DELETE" });
+        if (publishResult?.remoteSha && matching.head.sha && matching.head.sha !== publishResult.remoteSha) {
+          throw new Error(`existing sync PR #${matching.number} head does not match the published candidate`);
         }
         return matching.number;
       }
       const payload = {
         title,
         head: branch,
-        base: "dev",
-        body: publishResult ? provenanceBody(body, event, publishResult) : body,
+        base: baseRef,
+        body: publishResult ? provenanceBody(body, candidateEvent, publishResult) : body,
         draft: true,
       };
       const created = await request("/pulls", {
@@ -186,14 +148,6 @@ export function createDraftPullRequestClient(
         body: JSON.stringify(payload),
       });
       const createdPullRequest = await created.json() as { number: number };
-      if (eligible) {
-        const safety = await liveSyncSafety(createdPullRequest.number, publishResult.remoteSha);
-        if (!safety.safe) return createdPullRequest.number;
-        await request(`/issues/${createdPullRequest.number}/labels`, {
-          method: "POST",
-          body: JSON.stringify({ labels: ["autonomous-sync"] }),
-        });
-      }
       return createdPullRequest.number;
     },
   };

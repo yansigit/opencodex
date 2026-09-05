@@ -36,6 +36,7 @@ interface ReleaseScenario {
   releaseSshRepo?: string;
   pendingBump?: boolean;
   originUrl?: string;
+  autoReleaseTrailer?: string;
 }
 
 interface SshInvocation {
@@ -147,6 +148,11 @@ if (args[0] === "rev-parse" && args[1] === "HEAD") {
   process.exit(0);
 }
 
+if (args[0] === "log" && args.includes("--format=%(trailers:key=Auto-Release,valueonly)")) {
+  stdout((process.env.FAKE_AUTO_RELEASE_TRAILER ?? "skip") + "\\n");
+  process.exit(0);
+}
+
 if (args[0] === "rev-parse" && args[1]?.startsWith("origin/")) {
   stdout(headSha + "\\n");
   process.exit(0);
@@ -214,6 +220,16 @@ if (args[0] === "run" && args[1] === "list") {
     stdout(JSON.stringify([{ createdAt: new Date().toISOString(), databaseId: 9, headSha, status: "queued", url: "https://example.test/release" }]));
     process.exit(0);
   }
+
+  if (args.includes("release-candidate.yml")) {
+    stdout(JSON.stringify([{ conclusion: "success", databaseId: 10, event: "workflow_run", headBranch: "main", headSha, name: "Build release candidate", status: "completed", url: "https://example.test/candidate" }]));
+    process.exit(0);
+  }
+}
+
+if (args[0] === "api" && args[1]?.includes("actions/runs/10/artifacts")) {
+  stdout(JSON.stringify({ total_count: 1, artifacts: [{ id: 11, name: "release-candidate-" + headSha, expired: false }] }));
+  process.exit(0);
 }
 
 if (args[0] === "workflow" && args[1] === "run") {
@@ -291,6 +307,7 @@ async function runRelease(version: string, scenario: ReleaseScenario = {}) {
     ...(scenario.releaseSshRepo ? { OCX_RELEASE_SSH_REPO: scenario.releaseSshRepo } : {}),
     ...(scenario.pendingBump ? { FAKE_GIT_PENDING_BUMP: " M package.json" } : {}),
     ...(scenario.originUrl ? { FAKE_GIT_ORIGIN_URL: scenario.originUrl } : {}),
+    FAKE_AUTO_RELEASE_TRAILER: scenario.autoReleaseTrailer ?? "skip",
   };
   try {
     const result = await runCaptured(process.execPath, [releaseScriptPath, version], {
@@ -425,6 +442,11 @@ describe("release helper", () => {
     expect(push?.gitSshCommand).toBe('ssh -i "/tmp/ocx-release-key" -o IdentitiesOnly=yes');
     expect(calls.find(call => call.name === "gh" && call.args[0] === "workflow" && call.args[1] === "run")?.args)
       .toContain("expected-sha=deadbeefcafe1234");
+    expect(calls.find(call => call.name === "gh" && call.args[0] === "workflow" && call.args[1] === "run")?.args)
+      .toEqual(expect.arrayContaining(["candidate-run-id=10", "candidate-artifact-id=11"]));
+    const commit = calls.find(call => call.name === "git" && call.args[0] === "commit");
+    expect(commit?.args).toEqual(expect.arrayContaining(["Auto-Release: skip"]));
+    expect(calls.some(call => call.name === "git" && call.args[0] === "log" && call.args.some(arg => arg.includes("trailers:key=Auto-Release")))).toBe(true);
   });
 
   test("an obsolete latest version aborts before bumping or committing", async () => {
@@ -434,6 +456,14 @@ describe("release helper", () => {
     expect(result.stderr).toContain("does not move the 'latest' channel forward");
     expect(findCallIndex(calls, "npm", call => call.args[0] === "version")).toBe(-1);
     expect(findCallIndex(calls, "git", call => call.args[0] === "commit")).toBe(-1);
+  });
+
+  test("an existing stable commit without the skip trailer aborts before release dispatch", async () => {
+    const { calls, result } = await runRelease("9.9.9", { autoReleaseTrailer: "" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("Auto-Release: skip");
+    expect(findCallIndex(calls, "gh", call => call.args[0] === "workflow" && call.args[1] === "run")).toBe(-1);
   });
 
   test("failed privacy scan aborts before version bump, commit, and push", async () => {

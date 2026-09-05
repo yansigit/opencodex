@@ -1597,6 +1597,42 @@ export type ResolvedRouteInfo = {
   headers: Headers;
 };
 
+/** Benchmark-only observation passed to the optional raw-usage observer (phase 4 plan 04-02). */
+export interface ClaudeBenchmarkRawUsage {
+  adapterKind: string;
+  modelId: string;
+  usage: OcxUsage | undefined;
+}
+
+/** Invoke the benchmark observer at most once per attempt context (per registration). */
+function observeBenchmarkUsage(
+  observer: HandleResponsesOptions["claudeBenchmarkObserver"],
+  gate: { done: boolean },
+  adapterKind: string,
+  modelId: string,
+  usage: OcxUsage | undefined,
+): void {
+  if (!observer || gate.done) return;
+  gate.done = true;
+  const safeUsage = usage ? {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(usage.contextTotalTokens !== undefined ? { contextTotalTokens: usage.contextTotalTokens } : {}),
+    ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+    ...(usage.cachedInputTokens !== undefined ? { cachedInputTokens: usage.cachedInputTokens } : {}),
+    ...(usage.cacheReadInputTokens !== undefined ? { cacheReadInputTokens: usage.cacheReadInputTokens } : {}),
+    ...(usage.cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens: usage.cacheCreationInputTokens } : {}),
+    ...(usage.reasoningOutputTokens !== undefined ? { reasoningOutputTokens: usage.reasoningOutputTokens } : {}),
+    ...(usage.estimated !== undefined ? { estimated: usage.estimated } : {}),
+  } : undefined;
+  try {
+    observer({ adapterKind, modelId, usage: safeUsage });
+  } catch {
+    // Benchmark-only seam: ordinary requests must be unaffected even when the
+    // observer misbehaves.
+  }
+}
+
 function maybeInvokeResolvedRoute(
   options: HandleResponsesOptions,
   parsed: OcxParsedRequest,
@@ -1701,6 +1737,16 @@ export interface HandleResponsesOptions {
   claudeSourceEnvelope?: ClaudeSourceEnvelope;
   /** Synchronous callback invoked after each newly resolved route; must be pure and fast. */
   onResolvedRoute?: (info: ResolvedRouteInfo) => void;
+  /**
+   * Phase 4 plan 04-02: benchmark-only raw-usage observer. Optional and absent
+   * for ordinary requests. Receives a structural record only: final adapter
+   * kind, resolved model id, and the raw OcxUsage reported before any
+   * Anthropic wire normalization. Never receives request bodies, headers,
+   * provider names/aliases, endpoint, account identity, raw provider response,
+   * or error text. Invoked at most once per attempt context per onUsage
+   * registration; observer exceptions never affect ordinary request behavior.
+   */
+  claudeBenchmarkObserver?: (observation: ClaudeBenchmarkRawUsage) => void;
 }
 
 
@@ -5825,6 +5871,7 @@ async function handleResponsesInner(
       options.codexWsRuntimeIdentity,
       { providerName: route.providerName, modelId: route.modelId },
     );
+    const benchmarkUsageGate = { done: false };
     const imgResponse = await runWithImageBridge({
       parsed, adapter,
       incomingMeta: { headers: selectedForwardHeaders, abortSignal: options.abortSignal, translatorBudget },
@@ -5852,6 +5899,7 @@ async function handleResponsesInner(
       validateAdapter: (requestParsed, candidate) => assertGoogleOptionsRoute(candidate, route.provider, requestParsed),
       ...(vidPlan?.timeoutMs ? { videoTimeoutMs: vidPlan.timeoutMs } : {}),
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, adapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         // Cursor may assign _cursorConversationId inside the image loop's first runTurn;
         // backfill so Logs can filter/total that opening request (parity with the normal
         // runTurn branch).
@@ -5902,6 +5950,7 @@ async function handleResponsesInner(
         providerName: route.providerName,
         modelId: route.modelId,
       })(input, init)) as typeof globalThis.fetch;
+    const benchmarkUsageGate = { done: false };
     const wsResponse = await runWithWebSearch({
       parsed, adapter,
       incomingMeta: {
@@ -5935,6 +5984,7 @@ async function handleResponsesInner(
         noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
       ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, adapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -6216,6 +6266,7 @@ async function handleResponsesInner(
             + "and no tool call. Set \"emptyCompletionRetry\": true to retry such turns once.",
           );
         });
+      const benchmarkUsageGate = { done: false };
       const sseStream = bridgeToResponsesSSE(
         observeProgressEvents(guardedSource, logCtx), parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
         () => {
@@ -6239,6 +6290,7 @@ async function handleResponsesInner(
           onUsage: usage => {
             // Raw adapter usage, pre wire-normalization: the bridged SSE now always carries
             // zero-default detail objects, so provenance must come from here (cache_detail_missing).
+            observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, runTurnAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
             logCtx.usageFromBridge = true;
             if (usage) {
               logCtx.usage = usage;
@@ -6300,6 +6352,7 @@ async function handleResponsesInner(
       }
     }
     let providerState: OcxProviderContinuationState | undefined;
+    const benchmarkUsageGate = { done: false };
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
@@ -6312,6 +6365,7 @@ async function handleResponsesInner(
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, runTurnAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -7653,6 +7707,7 @@ async function handleResponsesInner(
         })
       : eventStream;
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
+    const benchmarkUsageGate = { done: false };
     const sseStream = bridgeToResponsesSSE(
       observeProgressEvents(guardedEventStream, logCtx), parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
       () => upstream.abort(), 2_000,
@@ -7671,6 +7726,7 @@ async function handleResponsesInner(
         ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
         onUsage: usage => {
           // Raw adapter usage, pre wire-normalization (see the runTurn branch above).
+          observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, activeAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
           logCtx.usageFromBridge = true;
           if (usage) {
             logCtx.usage = usage;
@@ -7738,6 +7794,7 @@ async function handleResponsesInner(
     }
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     let providerState: OcxProviderContinuationState | undefined;
+    const benchmarkUsageGate = { done: false };
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
@@ -7750,6 +7807,7 @@ async function handleResponsesInner(
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, activeAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;

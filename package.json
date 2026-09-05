@@ -1,6 +1,6 @@
 {
   "name": "@yansigit/opencodex",
-  "version": "2.41.1",
+  "version": "2.41.2",
   "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
@@ -18,6 +18,7 @@
   "files": [
     "bin",
     "src",
+    "scripts/benchmark-claude-tokens.ts",
     "gui/dist",
     "assets/banner.png",
     "assets/architecture.png",
@@ -46,6 +47,8 @@
     "privacy:scan": "bun scripts/privacy-scan.ts",
     "skill:surface": "bun scripts/generate-ocx-skill-surface.ts",
     "skill:surface:check": "bun scripts/generate-ocx-skill-surface.ts --check",
+    "benchmark:claude-tokens": "bun scripts/benchmark-claude-tokens.ts",
+    "certify:claude": "bun scripts/claude-certification.ts",
     "generate:model-metadata": "bun scripts/generate-model-metadata.ts",
     "build:gui": "cd gui && bun install --frozen-lockfile && bun run build && cd .. && bun run prepare:package",
     "prepare:package": "bun scripts/prepare-package.ts",
@@ -53,7 +56,7 @@
     "prepublishOnly": "bun run audit:high && bun run typecheck && bun run build:gui",
     "release": "bun scripts/release.ts",
     "release:watch": "bun scripts/release.ts watch",
-    "prepush": "bun run check:hygiene && bun run lint:workflows && bun run audit:high && bun run typecheck && bun run lint:gui:if-changed && bun run test && bun run privacy:scan && bun run doctor:gui:if-changed",
+    "prepush": "bun run check:hygiene && bun run check:workflow-policy && bun run lint:workflows && bun run audit:high && bun run typecheck && bun run lint:gui:if-changed && bun run test && bun run privacy:scan && bun run doctor:gui:if-changed",
     "lint:gui": "cd gui && bun run lint",
     "lint:gui:if-changed": "bun scripts/lint-gui-if-changed.ts",
     "postmerge": "bun scripts/build-gui-if-changed.ts",
@@ -62,6 +65,7 @@
     "doctor:gui:if-changed": "bun scripts/doctor-gui-if-changed.ts",
     "setup:hooks": "bun scripts/setup-hooks.ts",
     "check:hygiene": "node scripts/check-hygiene.mjs",
+    "check:workflow-policy": "bun scripts/ci/check-workflow-policy.ts",
     "lint:workflows": "bun scripts/ci/actionlint.ts"
   },
   "dependencies": {

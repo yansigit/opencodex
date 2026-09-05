@@ -206,6 +206,64 @@ Ensure the proxy is running, then launch Claude Code with `ANTHROPIC_BASE_URL`,
 with Claude Code 2.1.129 or newer. On older versions, select with `ANTHROPIC_MODEL` or `/model <id>`.
 User-exported `ANTHROPIC_*` variables always take precedence.
 
+### Claude Code certification
+
+`bun run certify:claude` runs a bounded, hermetic certification against an isolated
+Claude Code configuration and a deterministic loopback provider. It skips clearly when
+the `claude` executable is unavailable and reports a closed text summary by default;
+pass `--json` for the sanitized structured summary. The hermetic run includes streaming and
+tool-continuation checks in both output formats. It never reuses credentials or proxy settings.
+
+Live certification requires both the `--confirm-live-provider-charges` flag and
+`OCX_ALLOW_CLAUDE_LIVE_CERT=1`, plus an exact stored provider/model and an explicit Claude
+budget (greater than zero and at most $5). The default `basic` scenario runs one tools-disabled
+streaming turn through an authenticated private loopback bridge. Optional scenarios exercise a
+real `Read` tool continuation, a Claude Code `Agent` subagent, or a moderate 128 KiB context input.
+Every scenario caps each outbound response at 256 tokens, enforces its own request/time limit and a
+768 KiB input ceiling, confines file tools to the ephemeral working directory, terminates the full
+Claude process tree on timeout, and disables
+Claude Code transport retries plus OpenCodex retry/failover/sidecars, and never persists prompts, responses, credentials, or raw
+errors. Live mode reuses the selected provider's stored authentication. The Claude budget is a
+client-side safety ceiling, not a provider invoice estimate; the request, input, and output limits
+are the provider-independent bounds. The context scenario verifies a substantial prompt crosses
+the real bridge; it is not a claim that the provider's advertised maximum context window was
+exhausted. Sanitized JSON reports include only aggregate diagnostics such as blocked request counts,
+whether retries were disabled, the terminal stream event, and whether the expected marker matched.
+There is no automatic persistence of results:
+
+```bash
+OCX_ALLOW_CLAUDE_LIVE_CERT=1 bun run certify:claude -- --live \
+  --provider <provider> --model <model> --max-budget-usd <amount> \
+  --confirm-live-provider-charges --json
+```
+
+Add `--scenario read-continuation`, `--scenario subagent`, or `--scenario long-context` to run one
+of the deeper checks. Run scenarios separately so each invocation has an explicit spend ceiling and
+an independently attributable result. A model that is available only through live catalog discovery
+may cause one authenticated, read-only model-list request before the inference limits begin; the JSON
+report identifies that with `discoveryPerformed`.
+
+The optional `high-context` tier is a distinct, fail-closed live certification (not the 128 KiB
+long-context smoke). It sends exactly one streaming request with a deterministic 900,000-byte
+punctuation-rich prompt, 64 output tokens, a 300-second timeout, and no tools or retries. It runs
+with a separate 1.5 MiB raw-request ceiling and only when both additive gates are present:
+`--confirm-live-high-context-costs` and
+`OCX_ALLOW_CLAUDE_HIGH_CONTEXT_CERT=1` (alongside the ordinary live consent gates). Preflight
+requires an authoritative catalog context window of at least 1,000,000 tokens from live, registry,
+or snapshot metadata; otherwise it skips with `capacity_undetermined` without making an inference
+request. Upstream usage must be authoritative (not estimated) and report at least 400,000 input
+tokens, and the response must contain the exact high-context marker.
+
+```bash
+OCX_ALLOW_CLAUDE_LIVE_CERT=1 OCX_ALLOW_CLAUDE_HIGH_CONTEXT_CERT=1 \
+bun run certify:claude -- --live --scenario high-context \
+  --provider <provider> --model <model> --max-budget-usd <amount> \
+  --confirm-live-provider-charges --confirm-live-high-context-costs --json
+```
+
+The ordinary `long-context` scenario remains the lower-cost 128 KiB smoke check and does not prove
+that a provider supports a million-token context window.
+
 Claude Desktop profile commands are:
 
 ```text
@@ -362,3 +420,7 @@ and are never classified as managed.
 
 Inspect and safely modify validated OpenCodex configuration. `show` and `get` mask secrets. Import
 validates before writing and requires `--yes`.
+
+#### Claude Code compatibility diagnostics
+
+`ocx claude` warns but does not block launch below **2.1.201**. Upgrade with `npm install -g @anthropic-ai/claude-code`; the same state is available in `ocx doctor` and `ocx status --json`. This advisory floor is separate from the **2.1.129** `/model` picker capability.

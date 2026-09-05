@@ -854,8 +854,10 @@ test("Claude Desktop PUT retains but cannot move an unavailable route", async ()
       version: 1,
       assignments: {
         "missing/old-model": { family: "opus", alias: "claude-opus-4-8-20260101" },
+        "missing/haiku-model": { family: "haiku", alias: "claude-opus-4-8-20260102" },
+        "missing/haiku-model-2": { family: "haiku", alias: "claude-opus-4-8-20260103" },
       },
-      defaults: { opus: "missing/old-model", fable: null, sonnet: null, haiku: null },
+      defaults: { opus: "missing/old-model", fable: null, sonnet: null, haiku: "missing/haiku-model" },
     },
   };
   saveConfig(seeded);
@@ -872,9 +874,35 @@ test("Claude Desktop PUT retains but cannot move an unavailable route", async ()
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile: edited }),
     });
-    expect(put.status).toBe(400);
-    expect((await put.json() as { error: string }).error).toContain("사용할 수 없는 모델");
+    expect(put.status).toBe(409);
+    const conflict = await put.json() as {
+      error: { code: string; message: string; route: string };
+      current: { profile: typeof state.profile; models: Array<{ route: string; available: boolean }>; rendered: unknown; port: number };
+    };
+    expect(conflict.error).toEqual({
+      code: "catalog_changed",
+      message: "현재 사용할 수 없는 모델은 옮길 수 없습니다: missing/old-model",
+      route: "missing/old-model",
+    });
+    expect(conflict.current.models.find(model => model.route === "missing/old-model")?.available).toBe(false);
+    expect(conflict.current.profile).toEqual(state.profile);
+    expect(conflict.current.port).toBe(Number(new URL(server.url).port));
     expect(loadConfig().claudeCode?.desktopProfile?.assignments["missing/old-model"]?.family).toBe("opus");
+
+    const defaultEdit = structuredClone(state.profile);
+    defaultEdit.defaults.haiku = "missing/haiku-model-2";
+    const defaultPut = await fetch(new URL("/api/claude-desktop", server.url), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: defaultEdit }),
+    });
+    expect(defaultPut.status).toBe(409);
+    const defaultConflict = await defaultPut.json() as {
+      error: { code: string; route: string };
+      current: { profile: typeof state.profile };
+    };
+    expect(defaultConflict.error).toMatchObject({ code: "catalog_changed", route: "missing/haiku-model-2" });
+    expect(defaultConflict.current.profile).toEqual(state.profile);
   } finally {
     await server.stop(true);
   }
