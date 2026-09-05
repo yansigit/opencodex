@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   assessLiveScenario,
   evaluateLivePolicy,
@@ -6,6 +9,7 @@ import {
   liveConfig,
   parseLiveOptions,
   processTreeTerminationPlan,
+  runCertificationCommandForTests,
   runHermetic,
   sanitizedChildEnv,
 } from "../scripts/claude-certification";
@@ -114,6 +118,37 @@ describe("Claude certification runner policy", () => {
     expect(processTreeTerminationPlan(42, "darwin")).toEqual({ groupPid: -42 });
     expect(processTreeTerminationPlan(42, "win32", "C:\\Windows\\System32\\taskkill.exe")).toEqual({ command: ["C:\\Windows\\System32\\taskkill.exe", "/PID", "42", "/T", "/F"] });
     expect(() => processTreeTerminationPlan(0, "linux")).toThrow("invalid child pid");
+    expect(() => processTreeTerminationPlan(1, "linux")).toThrow("invalid child pid");
+    expect(() => processTreeTerminationPlan(1, "win32", "taskkill.exe")).toThrow("invalid child pid");
+  });
+
+  test.if(process.platform !== "win32")("timeout and output overflow kill stubborn descendants", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-claude-cert-tree-"));
+    const fixture = join(import.meta.dir, "fixtures/claude-cert-process-tree.ts");
+    try {
+      const alive = (pid: number): boolean => { try { process.kill(pid, 0); return true; } catch { return false; } };
+      for (const [mode, expected, timeout] of [["timeout", "timeout", 250], ["overflow", "output limit exceeded", 2_000]] as const) {
+        const marker = join(root, `${mode}.json`);
+        await expect(runCertificationCommandForTests(process.execPath, [fixture, marker, mode], root, { ...process.env } as Record<string, string>, timeout)).rejects.toThrow(expected);
+        expect(existsSync(marker)).toBe(true);
+        const { child, grandchild } = JSON.parse(readFileSync(marker, "utf8")) as { child: number; grandchild: number };
+        const deadline = Date.now() + 2_000;
+        while ((alive(child) || alive(grandchild)) && Date.now() < deadline) await Bun.sleep(10);
+        expect(alive(child)).toBe(false);
+        expect(alive(grandchild)).toBe(false);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("bounded command returns ordinary subprocess output", async () => {
+    const result = await runCertificationCommandForTests(
+      process.execPath,
+      ["-e", "console.log('cert-ok')"],
+      import.meta.dir,
+      { ...process.env } as Record<string, string>,
+      2_000,
+    );
+    expect(result).toMatchObject({ code: 0, out: "cert-ok\n", err: "" });
   });
 
   test("live config rejects an unlisted model and disables alternate request paths", () => {

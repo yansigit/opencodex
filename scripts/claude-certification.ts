@@ -108,46 +108,78 @@ async function command(exe: string, args: string[], cwd: string, env: Record<str
   try { child = Bun.spawn([exe, ...args], { cwd, env, detached: true, stdin: input === undefined ? "ignore" : "pipe", stdout: "pipe", stderr: "pipe" }); }
   catch { const error = new Error("missing executable"); error.name = "MissingExecutable"; throw error; }
   let termination: Promise<void> | undefined;
-  const terminate = () => termination ??= terminateProcessTree(child);
-  let timedOut = false; const timer = setTimeout(() => { timedOut = true; void terminate(); }, timeoutMs);
+  let exited = false;
+  const exitedPromise = child.exited.then(code => { exited = true; return code; });
+  const terminate = () => termination ??= terminateProcessTree(child, () => exited);
+  let timedOut = false;
+  let reportTerminationFailure: (error: unknown) => void = () => {};
+  const terminationFailure = new Promise<never>((_, reject) => { reportTerminationFailure = reject; });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    if (exited) return;
+    void terminate().catch(error => reportTerminationFailure(error));
+  }, timeoutMs);
   try {
     if (input !== undefined) { await child.stdin.write(input); child.stdin.end(); }
-    const [code, out, err] = await Promise.all([child.exited, readBounded(child.stdout), readBounded(child.stderr)]);
+    const [code, out, err] = await Promise.race([
+      Promise.all([exitedPromise, readBounded(child.stdout), readBounded(child.stderr)]),
+      terminationFailure,
+    ]);
     if (timedOut) throw new Error("timeout");
     return { code, out, err };
   }
-  catch (error) { await terminate(); throw error; }
+  catch (error) {
+    if (!exited) {
+      try { await terminate(); }
+      catch { throw new Error("process_tree_termination_failed", { cause: error }); }
+    }
+    throw error;
+  }
   finally { clearTimeout(timer); }
 }
 
+export const runCertificationCommandForTests = command;
+
 export function processTreeTerminationPlan(pid: number, platform: NodeJS.Platform, taskkill = "taskkill.exe"): { command: string[] } | { groupPid: number } {
-  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("invalid child pid");
+  if (!Number.isSafeInteger(pid) || pid <= 1) throw new Error("invalid child pid");
   return platform === "win32"
     ? { command: [taskkill, "/PID", String(pid), "/T", "/F"] }
     : { groupPid: -pid };
 }
 
-async function terminateProcessTree(child: { pid: number; exited: Promise<number>; kill(signal?: NodeJS.Signals): void }): Promise<void> {
+async function terminateProcessTree(child: { pid: number; exited: Promise<number>; kill(signal?: NodeJS.Signals): void }, hasExited: () => boolean): Promise<void> {
+  if (hasExited()) return;
+  const waitForExit = async (): Promise<boolean> => await Promise.race([child.exited.then(() => true), Bun.sleep(5_000).then(() => false)]);
   if (process.platform === "win32") {
-    const plan = processTreeTerminationPlan(child.pid, "win32", resolveTrustedWindowsTaskkillExe()) as { command: string[] };
+    if (hasExited()) return;
+    let plan: { command: string[] };
+    try { plan = processTreeTerminationPlan(child.pid, "win32", resolveTrustedWindowsTaskkillExe()) as { command: string[] }; }
+    catch { throw new Error("process_tree_termination_failed"); }
     let exitCode: number;
     try { exitCode = Bun.spawnSync(plan.command, { stdout: "ignore", stderr: "ignore", windowsHide: true }).exitCode; }
     catch { exitCode = -1; }
     if (exitCode !== 0) {
       try { child.kill("SIGKILL"); } catch { /* already exited */ }
-      await Promise.race([child.exited.then(() => undefined), Bun.sleep(5_000)]);
+      if (await waitForExit()) throw new Error("process_tree_termination_failed");
       throw new Error("process_tree_termination_failed");
     }
-    await Promise.race([child.exited.then(() => undefined), Bun.sleep(5_000)]);
+    if (!(await waitForExit()) && !hasExited()) throw new Error("process_tree_termination_failed");
     return;
   }
+  if (hasExited()) return;
+  let signalledGroup = false;
   try {
     const plan = processTreeTerminationPlan(child.pid, process.platform) as { groupPid: number };
     process.kill(plan.groupPid, "SIGKILL");
+    signalledGroup = true;
   } catch {
     try { child.kill("SIGKILL"); } catch { /* already exited */ }
   }
-  await Promise.race([child.exited.then(() => undefined), Bun.sleep(5_000)]);
+  if (await waitForExit()) {
+    if (!signalledGroup) throw new Error("process_tree_termination_failed");
+    return;
+  }
+  throw new Error("process_tree_termination_failed");
 }
 
 function config(baseUrl: string): OcxConfig {
