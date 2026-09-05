@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { safeConfigDTO } from "../src/server/auth-cors";
@@ -7,26 +7,42 @@ import { handleManagementAPI } from "../src/server/management-api";
 import { setAiStudioProbeFetchForTests } from "../src/server/management/provider-routes";
 import { saveAiStudioSession } from "../src/oauth/aistudio-session-sync";
 import { saveConfig } from "../src/config";
+import { flushConfigDirHardening } from "../src/config/paths";
+import {
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+} from "../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../src/types";
 import { startServer } from "../src/server";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(tmpdir(), "ocx-aistudio-status-" + Date.now());
 const prevHome = process.env.OPENCODEX_HOME;
 const originalGlobalFetch = globalThis.fetch;
 const REAUTH_ERROR = "Session expired or missing — re-authentication required";
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+let testDir: string;
 
 beforeEach(() => {
-  if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-  mkdirSync(TEST_DIR, { recursive: true });
-  process.env.OPENCODEX_HOME = TEST_DIR;
+  testDir = mkdtempSync(join(tmpdir(), "ocx-aistudio-status-"));
+  process.env.OPENCODEX_HOME = testDir;
+  // This suite verifies management behavior, not Windows ACL mechanics. Keep both
+  // hardening lanes hermetic so teardown owns no real icacls child.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
 });
 
-afterEach(() => {
-  setAiStudioProbeFetchForTests(undefined);
-  globalThis.fetch = originalGlobalFetch;
-  if (prevHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = prevHome;
-  rmSync(TEST_DIR, { recursive: true, force: true });
+afterEach(async () => {
+  try {
+    await flushConfigDirHardening(testDir);
+  } finally {
+    setAiStudioProbeFetchForTests(undefined);
+    globalThis.fetch = originalGlobalFetch;
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (prevHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = prevHome;
+    removeTreeWithRetry(testDir);
+  }
 });
 
 function cfg(): OcxConfig {
@@ -237,12 +253,18 @@ describe("AI Studio status & re-auth", () => {
 
   test("native login aborts the injected login when the request is cancelled", async () => {
     let receivedSignal: AbortSignal | undefined;
+    let markLoginStarted!: () => void;
+    let markAbortReceived!: () => void;
+    const loginStarted = new Promise<void>(resolve => { markLoginStarted = resolve; });
+    const abortReceived = new Promise<void>(resolve => { markAbortReceived = resolve; });
     const server = startServer(0, {
       runAiStudioNativeLogin: async ({ signal }) => {
         receivedSignal = signal;
-        await new Promise<void>(resolve => {
-          signal?.addEventListener("abort", () => resolve(), { once: true });
-        });
+        markLoginStarted();
+        if (!signal) return { kind: "cancelled" };
+        if (signal.aborted) markAbortReceived();
+        else signal.addEventListener("abort", markAbortReceived, { once: true });
+        await abortReceived;
         return { kind: "cancelled" };
       },
     });
@@ -252,7 +274,10 @@ describe("AI Studio status & re-auth", () => {
         method: "POST",
         signal: controller.signal,
       });
-      await new Promise(resolve => setTimeout(resolve, 5));
+      // Abort only after the server has entered the injected login. A fixed sleep can
+      // cancel fetch before a loaded Windows runner dispatches the request at all.
+      await loginStarted;
+      expect(receivedSignal).toBeDefined();
       controller.abort();
       let res: Response | undefined;
       try {
@@ -261,9 +286,7 @@ describe("AI Studio status & re-auth", () => {
         expect(error).toBeInstanceOf(DOMException);
         expect((error as DOMException).name).toBe("AbortError");
       }
-      for (let i = 0; i < 20 && !receivedSignal?.aborted; i++) {
-        await new Promise(resolve => setTimeout(resolve, 5));
-      }
+      await abortReceived;
       expect(receivedSignal?.aborted).toBe(true);
       if (res) {
         expect(res.status).toBe(499);
