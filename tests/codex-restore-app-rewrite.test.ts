@@ -32,7 +32,7 @@ const INJECT_REWRITE_RESTORE = [
   'const fs = require("fs");',
   'const path = require("path");',
   'const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");',
-  "(async () => {",
+  "await (async () => {",
   "  await injectCodexConfig(10100, {",
   "    port: 10100,",
   "    providers: {},",
@@ -59,7 +59,7 @@ const CATALOG_REWRITE_RESTORE = [
   'const fs = require("fs");',
   'const path = require("path");',
   'const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");',
-  "(async () => {",
+  "await (async () => {",
   '  const cachePath = path.join(process.env.CODEX_HOME, "models_cache.json");',
   "  // The catalog file itself is written by catalog sync, which needs network state this",
   "  // test has no business standing up. Seed it directly: what is under test is WHICH file",
@@ -88,7 +88,7 @@ const REINJECT_AND_READ_JOURNAL = [
   'const fs = require("fs");',
   'const path = require("path");',
   'const { injectCodexConfig } = require("./src/codex/inject");',
-  "(async () => {",
+  "await (async () => {",
   '  const firstCatalog = path.join(process.env.CODEX_HOME, "first-catalog.json");',
   '  const secondCatalog = path.join(process.env.CODEX_HOME, "second-catalog.json");',
   "  const config = {",
@@ -110,7 +110,7 @@ const REINJECT_AFTER_USER_EDIT_RESTORE = [
   'const fs = require("fs");',
   'const path = require("path");',
   'const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");',
-  "(async () => {",
+  "await (async () => {",
   "  const config = {",
   "    port: 10100,",
   "    providers: {},",
@@ -142,10 +142,24 @@ function runScript(codexHome: string, script: string): { stdout: string; stderr:
   if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 60_000) {
     throw new Error("invalid restore child delay fault");
   }
-  const evaluatedScript = delayMs > 0 ? `await Bun.sleep(${delayMs});\n${script}` : script;
+  const delay = delayMs > 0 ? `await Bun.sleep(${delayMs});\n` : "";
+  const evaluatedScript = [
+    'const { flushConfigDirHardeningForTests } = require("./src/config/paths");',
+    'const { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } = require("./src/lib/windows-secret-acl");',
+    'const icaclsOk = { success: true, exitCode: 0, timedOut: false, stdout: "processed file: 1" };',
+    'setIcaclsRunnerForTests(() => icaclsOk);',
+    'setAsyncIcaclsRunnerForTests(async () => icaclsOk);',
+    "try {",
+    delay + script,
+    "} finally {",
+    "  await flushConfigDirHardeningForTests();",
+    "  setAsyncIcaclsRunnerForTests(null);",
+    "  setIcaclsRunnerForTests(null);",
+    "}",
+  ].join("\n");
   const result = spawnSync(process.execPath, ["--eval", evaluatedScript], {
     cwd: repoRoot,
-    env: { ...process.env, CODEX_HOME: codexHome },
+    env: { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: join(codexHome, ".opencodex-test") },
     encoding: "utf8",
     timeout: SPAWN_BUDGET_MS,
     killSignal: "SIGKILL",
