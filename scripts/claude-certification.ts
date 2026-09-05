@@ -61,6 +61,10 @@ export interface CertificationReport {
   contextSource?: string;
   providerInputTokens?: number;
   rawUsageObservations?: number;
+  blockedRequests?: number;
+  outputMarkerMatched?: boolean;
+  retriesDisabled?: boolean;
+  streamTerminal?: "message_stop" | "error" | "eof" | "not_observed";
 }
 
 export interface LiveOptions { provider: string; model: string; maxBudgetUsd: number; scenario: CertificationScenario }
@@ -233,6 +237,8 @@ interface LiveObservation {
   httpStatus?: number;
   providerInputTokens?: number;
   rawUsageObservations?: number;
+  blockedRequests: number;
+  streamTerminal: "message_stop" | "error" | "eof" | "not_observed";
 }
 
 export interface HighContextCapacity {
@@ -339,11 +345,13 @@ export function assessLiveScenario(
     return output.includes(READ_MARKER) ? { passed: true } : { passed: false, reason: "marker_mismatch" };
   }
   if (scenario === "subagent") {
-    if (!observation.subagentObserved || !observation.toolContinuation || observation.requests < 2) return { passed: false, reason: "subagent_not_observed" };
+    if (!observation.subagentObserved || observation.requests < 2) return { passed: false, reason: "subagent_not_observed" };
+    if (!observation.toolContinuation) return { passed: false, reason: "subagent_result_not_observed" };
     return output.includes(SUBAGENT_MARKER) ? { passed: true } : { passed: false, reason: "marker_mismatch" };
   }
   if (scenario === "high-context") {
     if (observation.requests !== 1) return { passed: false, reason: "request_count" };
+    if (observation.streamTerminal !== "message_stop") return { passed: false, reason: observation.streamTerminal === "error" ? "stream_error" : "stream_incomplete" };
     if (observation.maxPromptBytes < HIGH_CONTEXT_PROMPT_BYTES) return { passed: false, reason: "context_too_short" };
     if (observation.rawUsageObservations !== 1 || observation.providerInputTokens === undefined || observation.providerInputTokens < HIGH_CONTEXT_MIN_INPUT_TOKENS) return { passed: false, reason: "usage_missing_or_too_low" };
     return output.trim() === HIGH_CONTEXT_MARKER ? { passed: true } : { passed: false, reason: "marker_mismatch" };
@@ -351,6 +359,48 @@ export function assessLiveScenario(
   if (observation.requests !== 1) return { passed: false, reason: "request_count" };
   if (observation.maxPromptBytes < LONG_CONTEXT_BYTES) return { passed: false, reason: "context_too_short" };
   return output.trim() === CONTEXT_MARKER ? { passed: true } : { passed: false, reason: "marker_mismatch" };
+}
+
+export function scenarioOutputMarkerMatched(scenario: CertificationScenario, output: string): boolean {
+  if (scenario === "basic") return output.trim() === LIVE_MARKER;
+  if (scenario === "read-continuation") return output.includes(READ_MARKER);
+  if (scenario === "subagent") return output.includes(SUBAGENT_MARKER);
+  if (scenario === "high-context") return output.trim() === HIGH_CONTEXT_MARKER;
+  return output.trim() === CONTEXT_MARKER;
+}
+
+export function observeAnthropicSse(
+  response: Response,
+  observation: { streamTerminal: "message_stop" | "error" | "eof" | "not_observed" },
+): Response {
+  if (!response.body || !response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) return response;
+  const decoder = new TextDecoder();
+  let pending = "";
+  const inspect = (chunk: string): void => {
+    pending += chunk;
+    let newline = pending.indexOf("\n");
+    while (newline >= 0) {
+      const line = pending.slice(0, newline).replace(/\r$/, "");
+      pending = pending.slice(newline + 1);
+      if (line.startsWith("event:")) {
+        const event = line.slice("event:".length).trim();
+        if (event === "message_stop") observation.streamTerminal = "message_stop";
+        else if (event === "error" && observation.streamTerminal !== "message_stop") observation.streamTerminal = "error";
+      }
+      newline = pending.indexOf("\n");
+    }
+  };
+  const body = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      inspect(decoder.decode(chunk, { stream: true }));
+      controller.enqueue(chunk);
+    },
+    flush() {
+      inspect(`${decoder.decode()}\n`);
+      if (observation.streamTerminal === "not_observed") observation.streamTerminal = "eof";
+    },
+  }));
+  return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
 function longContextPrompt(): string {
@@ -493,7 +543,7 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
   const root = mkdtempSync(join(tmpdir(), "ocx-claude-live-cert-"));
   const dirs = { home: join(root, "home"), claude: join(root, "claude"), ocx: join(root, "ocx") };
   Object.values(dirs).forEach(dir => mkdirSync(dir, { recursive: true, mode: 0o700 }));
-  const observation: LiveObservation = { requests: 0, streaming: false, toolContinuation: false, subagentObserved: false, maxInputBytes: 0, maxPromptBytes: 0, limitExceeded: false, inputLimitExceeded: false, hadHttpError: false, rawUsageObservations: 0 };
+  const observation: LiveObservation = { requests: 0, streaming: false, toolContinuation: false, subagentObserved: false, maxInputBytes: 0, maxPromptBytes: 0, limitExceeded: false, inputLimitExceeded: false, hadHttpError: false, rawUsageObservations: 0, blockedRequests: 0, streamTerminal: "not_observed" };
   let bridge: ReturnType<typeof Bun.serve> | undefined;
   try {
     bridge = Bun.serve({
@@ -509,6 +559,7 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
         }
         if (observation.requests >= limits.requests) {
           observation.limitExceeded = true;
+          observation.blockedRequests++;
           return Response.json({ type: "error", error: { type: "rate_limit_error", message: "certification request limit reached" } }, { status: 429 });
         }
         observation.requests++;
@@ -558,7 +609,7 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
         );
         observation.httpStatus = response.status;
         observation.hadHttpError ||= response.status >= 400;
-        return response;
+        return observeAnthropicSse(response, observation);
       },
     });
     const env = buildClaudeEnv(
@@ -570,6 +621,7 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
     );
     env.ANTHROPIC_MODEL = options.scenario === "high-context" ? HIGH_CONTEXT_CLI_MODEL : CLI_MODEL;
     env.CLAUDE_CODE_MAX_TURNS = String(limits.requests);
+    env.CLAUDE_CODE_MAX_RETRIES = "0";
     env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
     env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
     env.CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY = "1";
@@ -582,11 +634,12 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
       result = await command(cli, [...invocation.args, "--max-budget-usd", String(options.maxBudgetUsd)], root, env, limits.timeoutMs, invocation.input);
     } catch (error) {
       const missing = error instanceof Error && error.name === "MissingExecutable";
-      return { mode: "live", status: missing ? "skipped" : "live_fail", cliPresent: !missing, streaming: observation.streaming, toolContinuation: observation.toolContinuation, scenario: options.scenario, subagentObserved: observation.subagentObserved, maxInputBytes: observation.maxInputBytes, maxPromptBytes: observation.maxPromptBytes, discoveryPerformed, requests: observation.requests, provider: options.provider, model: options.model, durationMs: Date.now() - started, httpStatus: observation.httpStatus, declaredContextTokens: highCapacity?.declaredContextTokens, contextSource: highCapacity?.contextSource, providerInputTokens: observation.providerInputTokens, rawUsageObservations: options.scenario === "high-context" ? observation.rawUsageObservations : undefined, reason: missing ? "cli_unavailable" : (error instanceof Error && error.message === "timeout" ? "timeout" : "subprocess_failure") };
+      return { mode: "live", status: missing ? "skipped" : "live_fail", cliPresent: !missing, streaming: observation.streaming, toolContinuation: observation.toolContinuation, scenario: options.scenario, subagentObserved: observation.subagentObserved, maxInputBytes: observation.maxInputBytes, maxPromptBytes: observation.maxPromptBytes, discoveryPerformed, requests: observation.requests, provider: options.provider, model: options.model, durationMs: Date.now() - started, httpStatus: observation.httpStatus, declaredContextTokens: highCapacity?.declaredContextTokens, contextSource: highCapacity?.contextSource, providerInputTokens: observation.providerInputTokens, rawUsageObservations: options.scenario === "high-context" ? observation.rawUsageObservations : undefined, blockedRequests: observation.blockedRequests, retriesDisabled: true, streamTerminal: observation.streamTerminal, reason: missing ? "cli_unavailable" : (error instanceof Error && error.message === "timeout" ? "timeout" : "subprocess_failure") };
     }
     const assessment = assessLiveScenario(options.scenario, observation, result.code, result.out);
+    const outputMarkerMatched = scenarioOutputMarkerMatched(options.scenario, result.out);
     if (!assessment.passed && assessment.reason === "client_nonzero" && /budget|cost limit|max-budget/i.test(result.err)) assessment.reason = "client_budget";
-    return { mode: "live", status: assessment.passed ? "live_pass" : "live_fail", cliPresent: true, streaming: observation.streaming, toolContinuation: observation.toolContinuation, scenario: options.scenario, subagentObserved: observation.subagentObserved, maxInputBytes: observation.maxInputBytes, maxPromptBytes: observation.maxPromptBytes, discoveryPerformed, requests: observation.requests, provider: options.provider, model: options.model, durationMs: Date.now() - started, httpStatus: observation.httpStatus, providerInputTokens: options.scenario === "high-context" ? observation.providerInputTokens : undefined, rawUsageObservations: options.scenario === "high-context" ? observation.rawUsageObservations : undefined, declaredContextTokens: highCapacity?.declaredContextTokens, contextSource: highCapacity?.contextSource, reason: assessment.reason };
+    return { mode: "live", status: assessment.passed ? "live_pass" : "live_fail", cliPresent: true, streaming: observation.streaming, toolContinuation: observation.toolContinuation, scenario: options.scenario, subagentObserved: observation.subagentObserved, maxInputBytes: observation.maxInputBytes, maxPromptBytes: observation.maxPromptBytes, discoveryPerformed, requests: observation.requests, provider: options.provider, model: options.model, durationMs: Date.now() - started, httpStatus: observation.httpStatus, providerInputTokens: options.scenario === "high-context" ? observation.providerInputTokens : undefined, rawUsageObservations: options.scenario === "high-context" ? observation.rawUsageObservations : undefined, blockedRequests: observation.blockedRequests, retriesDisabled: true, streamTerminal: observation.streamTerminal, outputMarkerMatched, declaredContextTokens: highCapacity?.declaredContextTokens, contextSource: highCapacity?.contextSource, reason: assessment.reason };
   } finally {
     bridge?.stop(true);
     rmSync(root, { recursive: true, force: true });

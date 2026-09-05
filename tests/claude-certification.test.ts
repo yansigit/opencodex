@@ -11,12 +11,14 @@ import {
   highContextPrompt,
   inspectScenarioRequestBody,
   liveConfig,
+  observeAnthropicSse,
   parseLiveOptions,
   processTreeTerminationPlan,
   runCertificationCommandForTests,
   runHermetic,
   sanitizedChildEnv,
   scenarioCommand,
+  scenarioOutputMarkerMatched,
 } from "../scripts/claude-certification";
 
 describe("Claude certification runner policy", () => {
@@ -102,12 +104,13 @@ describe("Claude certification runner policy", () => {
   });
 
   test("assesses scenario-specific evidence without retaining request content", () => {
-    const base = { requests: 1, streaming: true, toolContinuation: false, subagentObserved: false, maxInputBytes: 140_000, maxPromptBytes: 140_000, limitExceeded: false, inputLimitExceeded: false, hadHttpError: false, httpStatus: 200 };
+    const base = { requests: 1, streaming: true, toolContinuation: false, subagentObserved: false, maxInputBytes: 140_000, maxPromptBytes: 140_000, limitExceeded: false, inputLimitExceeded: false, hadHttpError: false, httpStatus: 200, streamTerminal: "message_stop" as const };
     expect(assessLiveScenario("basic", base, 0, "OCX_CLAUDE_LIVE_OK\n")).toEqual({ passed: true });
     expect(assessLiveScenario("read-continuation", { ...base, requests: 2, toolContinuation: true }, 0, "OCX_CLAUDE_READ_OK")).toEqual({ passed: true });
     expect(assessLiveScenario("read-continuation", base, 0, "OCX_CLAUDE_READ_OK")).toEqual({ passed: false, reason: "tool_not_used" });
     expect(assessLiveScenario("subagent", { ...base, requests: 2, subagentObserved: true, toolContinuation: true }, 0, "OCX_CLAUDE_SUBAGENT_OK")).toEqual({ passed: true });
     expect(assessLiveScenario("subagent", base, 0, "OCX_CLAUDE_SUBAGENT_OK")).toEqual({ passed: false, reason: "subagent_not_observed" });
+    expect(assessLiveScenario("subagent", { ...base, requests: 2, subagentObserved: true }, 0, "OCX_CLAUDE_SUBAGENT_OK")).toEqual({ passed: false, reason: "subagent_result_not_observed" });
     expect(assessLiveScenario("long-context", base, 0, "OCX_CLAUDE_CONTEXT_OK")).toEqual({ passed: true });
     expect(assessLiveScenario("long-context", { ...base, maxPromptBytes: 1_000 }, 0, "OCX_CLAUDE_CONTEXT_OK")).toEqual({ passed: false, reason: "context_too_short" });
     expect(assessLiveScenario("high-context", { ...base, rawUsageObservations: 1, maxPromptBytes: 900_000, providerInputTokens: 400_000 }, 0, "OCX_CLAUDE_HIGH_CONTEXT_OK")).toEqual({ passed: true });
@@ -119,6 +122,27 @@ describe("Claude certification runner policy", () => {
     expect(assessLiveScenario("basic", { ...base, hadHttpError: true }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "upstream_http" });
     expect(assessLiveScenario("basic", { ...base, streaming: false }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "non_streaming" });
     expect(assessLiveScenario("basic", { ...base, requests: 0 }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "request_count" });
+  });
+
+  test("classifies marker output without retaining response content", () => {
+    expect(scenarioOutputMarkerMatched("high-context", "OCX_CLAUDE_HIGH_CONTEXT_OK\n")).toBe(true);
+    expect(scenarioOutputMarkerMatched("high-context", "prefix OCX_CLAUDE_HIGH_CONTEXT_OK")).toBe(false);
+    expect(scenarioOutputMarkerMatched("read-continuation", "read: OCX_CLAUDE_READ_OK")).toBe(true);
+  });
+
+  test("observes Anthropic stream termination without retaining event data", async () => {
+    const complete: { streamTerminal: "message_stop" | "error" | "eof" | "not_observed" } = { streamTerminal: "not_observed" };
+    const completeResponse = observeAnthropicSse(new Response("event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n", { headers: { "content-type": "text/event-stream" } }), complete);
+    expect(await completeResponse.text()).toContain("event: message_stop");
+    expect(complete.streamTerminal).toBe("message_stop");
+
+    const failed: { streamTerminal: "message_stop" | "error" | "eof" | "not_observed" } = { streamTerminal: "not_observed" };
+    await observeAnthropicSse(new Response("event: error\ndata: {}\n\n", { headers: { "content-type": "text/event-stream" } }), failed).text();
+    expect(failed.streamTerminal).toBe("error");
+
+    const incomplete: { streamTerminal: "message_stop" | "error" | "eof" | "not_observed" } = { streamTerminal: "not_observed" };
+    await observeAnthropicSse(new Response("event: message_start\ndata: {}\n\n", { headers: { "content-type": "text/event-stream" } }), incomplete).text();
+    expect(incomplete.streamTerminal).toBe("eof");
   });
 
   test("correlates exact Read and Agent exchanges and counts only user prompt text", () => {

@@ -222,12 +222,14 @@ real `Read` tool continuation, a Claude Code `Agent` subagent, or a moderate 128
 Every scenario caps each outbound response at 256 tokens, enforces its own request/time limit and a
 768 KiB input ceiling, confines file tools to the ephemeral working directory, terminates the full
 Claude process tree on timeout, and disables
-OpenCodex retry/failover/sidecars, and never persists prompts, responses, credentials, or raw
+Claude Code transport retries plus OpenCodex retry/failover/sidecars, and never persists prompts, responses, credentials, or raw
 errors. Live mode reuses the selected provider's stored authentication. The Claude budget is a
 client-side safety ceiling, not a provider invoice estimate; the request, input, and output limits
 are the provider-independent bounds. The context scenario verifies a substantial prompt crosses
 the real bridge; it is not a claim that the provider's advertised maximum context window was
-exhausted. There is no automatic persistence of results:
+exhausted. Sanitized JSON reports include only aggregate diagnostics such as blocked request counts,
+whether retries were disabled, the terminal stream event, and whether the expected marker matched.
+There is no automatic persistence of results:
 
 ```bash
 OCX_ALLOW_CLAUDE_LIVE_CERT=1 bun run certify:claude -- --live \
