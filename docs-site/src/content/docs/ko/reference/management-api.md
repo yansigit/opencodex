@@ -64,7 +64,7 @@ Authorization: Bearer <admin-token>
 | `GET /api/grok` | Grok 관리 구성 상태와 후보 모델을 읽습니다 | 400 상태 읽기 실패 |
 | `PUT /api/grok/selection` | 제외할 Grok 모델을 영속화합니다 | 400 잘못되었거나 너무 큰 선택 |
 | `POST /api/grok/apply` | 관리형 동기화를 통해 영속화된 Grok 구성을 적용합니다 | 409 `grok_apply_busy`; 400/500 적용 실패 |
-| `GET, PUT /api/claude-desktop` | Claude Desktop 라우팅/네이티브 프로필을 읽거나 저장합니다 | 400 잘못되었거나 사용할 수 없는 할당 |
+| `GET, PUT /api/claude-desktop` | Claude Desktop 라우팅/네이티브 프로필을 읽거나 저장합니다 | 400 잘못된 프로필, 409 카탈로그 변경 또는 할당 사용 불가 |
 | `POST /api/claude-desktop/apply` | 저장된 프로필을 Claude Desktop의 관리형 구성에 기록합니다 | 400/500 기록 실패 |
 | `GET /api/claude-desktop/status` | 저장된 프로필과 적용된 프로필, Desktop 상태를 확인합니다 | 400 상태 읽기 실패 |
 | `GET, PUT /api/claude-code` | Claude Code gateway, auth-mode, model-map, context, agent, sidecar 설정을 읽거나 갱신합니다 | 400 잘못된 필드 또는 형태 |

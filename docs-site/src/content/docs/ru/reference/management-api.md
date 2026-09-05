@@ -79,7 +79,7 @@ GUI-сессия в стиле loopback не выпускается.
 | `GET /api/grok` | Прочитать статус управляемой конфигурации Grok и кандидатные модели | 400 status read failure |
 | `PUT /api/grok/selection` | Сохранить список исключённых моделей Grok | 400 invalid or oversized selection |
 | `POST /api/grok/apply` | Применить сохранённую конфигурацию Grok через managed sync | 409 `grok_apply_busy`; 400/500 apply failure |
-| `GET, PUT /api/claude-desktop` | Прочитать или сохранить routed/native-профиль Claude Desktop | 400 invalid or unavailable assignment |
+| `GET, PUT /api/claude-desktop` | Прочитать или сохранить routed/native-профиль Claude Desktop | 400 неверный профиль; 409 каталог изменился или назначение стало недоступно |
 | `POST /api/claude-desktop/apply` | Записать сохранённый профиль в managed config Claude Desktop | 400/500 write failure |
 | `GET /api/claude-desktop/status` | Проверить согласованность saved-vs-applied profile и здоровье Desktop | 400 status read failure |
 | `GET, PUT /api/claude-code` | Прочитать или обновить настройки gateway, auth-mode, model-map, context, agent и sidecar для Claude Code | 400 invalid field or shape |

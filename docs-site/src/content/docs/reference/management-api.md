@@ -78,7 +78,7 @@ route-specific results rather than repeating this table.
 | `GET /api/grok` | Read Grok managed-config status and candidate models | 400 status read failure |
 | `PUT /api/grok/selection` | Persist the excluded Grok models | 400 invalid or oversized selection |
 | `POST /api/grok/apply` | Apply persisted Grok configuration through the managed sync | 409 `grok_apply_busy`; 400/500 apply failure |
-| `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile | 400 invalid or unavailable assignment |
+| `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile | 400 invalid profile; 409 catalog changed or assignment became unavailable |
 | `POST /api/claude-desktop/apply` | Write the saved profile to Claude Desktop's managed config | 400/500 write failure |
 | `GET /api/claude-desktop/status` | Inspect saved-versus-applied profile and Desktop health | 400 status read failure |
 | `GET, PUT /api/claude-code` | Read or update Claude Code gateway, auth-mode, model-map, context, agent, and sidecar settings | 400 invalid field or shape |
