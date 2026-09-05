@@ -149,6 +149,16 @@ describe("fork upstream sync workflow contract", () => {
     expect(handoffStep).toContain("mergeBaseShas");
   });
 
+  test("streams sync results from files instead of placing unbounded JSON in argv", () => {
+    const handoffStep = workflow.split("- name: Build sync handoff payload")[1];
+    expect(handoffStep).toContain('--slurpfile prepareResult "$prepare_result"');
+    expect(handoffStep).toContain('--slurpfile publishResult "$publish_result"');
+    expect(handoffStep).toContain("prepareResult: $prepareResult[0]");
+    expect(handoffStep).toContain("publishResult: $publishResult[0]");
+    expect(handoffStep).not.toContain("--argjson prepareResult");
+    expect(handoffStep).not.toContain("--argjson publishResult");
+  });
+
   test("falls back to a trusted Jules issue only when Cursor is unavailable", () => {
     const cursorStep = workflow.split("- name: Notify Cursor handoff")[1]?.split("\n      - name:")[0];
     const fallbackStep = workflow.split("- name: Notify Jules fallback issue")[1]?.split("\n      - name:")[0];

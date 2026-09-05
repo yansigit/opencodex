@@ -46,7 +46,8 @@ jobs:
           while [ "$mergeable" = "null" ] && [ "$attempts" -lt 3 ]; do
             attempts=$((attempts + 1))
             sleep 10
-            mergeable="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq '.mergeable')"
+            mergeable="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" \
+              --jq 'if .mergeable == null then "null" else (.mergeable | tostring) end')"
           done
 
           if [ "$mergeable" = "null" ]; then
