@@ -4542,6 +4542,19 @@
           "forkBlob": "8c00d5e138fbbf2a5fcc6b1581224a94f0b62b42",
           "upstreamBlob": "2048ed92e54be07cb13c0bdebc92663fe7906925"
         },
+        "tests/server-live.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 live-session affinity and malformed sideband-target regression coverage.",
+          "forkInvariant": "The fork's load-scaled watchdog and teardown-safe WebSocket cleanup remain present alongside the upstream live-session coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 6759e75a8f6038ed4820fb8439c78681f4751501, fork c86105775fb077d6fb9ccf6faad6d196011e76fe, upstream 8e97b156a1ff8dc2b42636bbe06521e35c5ea55e, and integrated result b89eb92e639e9120dd47abea3ebf30e2b437fb37; the result contains both independent test additions and retains the fork's guarded cleanup.",
+          "exactTests": [
+            "bun test tests/server-live.test.ts"
+          ],
+          "baseBlob": "6759e75a8f6038ed4820fb8439c78681f4751501",
+          "forkBlob": "c86105775fb077d6fb9ccf6faad6d196011e76fe",
+          "upstreamBlob": "8e97b156a1ff8dc2b42636bbe06521e35c5ea55e"
+        },
         "tests/shutdown-launcher.test.ts": {
           "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/shutdown-launcher.test.ts.",
           "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
