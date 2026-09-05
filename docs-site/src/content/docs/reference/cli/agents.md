@@ -210,8 +210,9 @@ User-exported `ANTHROPIC_*` variables always take precedence.
 
 `bun run certify:claude` runs a bounded, hermetic certification against an isolated
 Claude Code configuration and a deterministic loopback provider. It skips clearly when
-the `claude` executable is unavailable and reports only a sanitized JSON summary with
-streaming and tool-continuation checks. It never reuses credentials or proxy settings.
+the `claude` executable is unavailable and reports a closed text summary by default;
+pass `--json` for the sanitized structured summary. Both forms include streaming and
+tool-continuation checks. The run never reuses credentials or proxy settings.
 
 Live certification is currently a fail-closed scaffold. It requires both
 `--live --confirm-live-provider-charges` and `OCX_ALLOW_CLAUDE_LIVE_CERT=1`; even then
