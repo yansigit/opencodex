@@ -75,9 +75,10 @@ describe("Claude client version parser and compatibility policy", () => {
   });
 
   test("is total when the injected runner or invocation builder throws", () => {
-    expect(probeClaudeClientVersion({ versionProbe: () => { throw new Error("hostile failure"); } }))
+    expect(probeClaudeClientVersion({ platform: "linux", versionProbe: () => { throw new Error("hostile failure"); } }))
       .toEqual({ state: "timed-out", version: null, source: "path" });
     expect(probeClaudeClientVersion({
+      platform: "linux",
       commandInvocation: () => { throw new Error("hostile path"); },
     })).toEqual({ state: "timed-out", version: null, source: "path" });
   });
@@ -87,6 +88,7 @@ describe("Claude client version probing", () => {
   test("passes the bounded --version invocation to its injected synchronous runner", () => {
     const calls: Array<{ file: string; args: readonly string[]; options: unknown }> = [];
     const result = probeClaudeClientVersion({
+      platform: "linux",
       versionProbe(file, args, options) {
         calls.push({ file, args, options });
         return { stdout: "2.1.207" };
