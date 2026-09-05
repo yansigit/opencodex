@@ -29,6 +29,7 @@ import { createSseInspector } from "../src/server/relay";
 import {
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
+  awaitResponseSpillPublicationTailForTests,
   evictOldestResponseContinuationForBudget,
   expandPreviousResponseInput,
   flushResponseState,
@@ -131,6 +132,8 @@ function forceWindowsAclLane(): void {
   setPlatformForTests("win32");
   setWindowsPrincipalRunnerForTests(() => SYNTHETIC_SID);
   setAsyncWindowsPrincipalRunnerForTests(async () => SYNTHETIC_SID);
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
 }
 
 function feedInspector(
@@ -323,28 +326,36 @@ describe("Responses previous_response_id state", () => {
     expect(previousResponseConversationId("resp_progress_31")).toBe("cursor_progress_chain");
   });
 
-  afterEach(() => {
-    setAfterSpillOwnershipTransferForTests(null);
-    setSpillIoForTest(null);
-    setResponseSpillNowForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    setIcaclsRunnerForTests(null);
-    setNowForTests(null);
-    setPlatformForTests(null);
-    setWindowsPrincipalRunnerForTests(null);
-    setAsyncWindowsPrincipalRunnerForTests(null);
-    resetWindowsPrincipalForTests();
-    setStatForTests(null);
-    resetHardenedStateForTests();
-    delete process.env.OPENCODEX_ACL_TIMEOUT_MS;
-    setResponseSpillShutdownBudgetForTests(null);
-    setResponseSpillAsyncAclAttemptBudgetForTests(null);
-    setResponseStateByteCapForTests(null);
-    setSpilledResponseByteCapForTests(null);
-    clearResponseStateForTests();
-    removeTreeWithRetry(home);
-    if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
-    else process.env["OPENCODEX_HOME"] = priorHome;
+  afterEach(async () => {
+    let tailError: unknown;
+    try {
+      await awaitResponseSpillPublicationTailForTests();
+    } catch (error) {
+      tailError = error;
+    } finally {
+      setAfterSpillOwnershipTransferForTests(null);
+      setSpillIoForTest(null);
+      setResponseSpillNowForTests(null);
+      setAsyncIcaclsRunnerForTests(null);
+      setIcaclsRunnerForTests(null);
+      setNowForTests(null);
+      setPlatformForTests(null);
+      setWindowsPrincipalRunnerForTests(null);
+      setAsyncWindowsPrincipalRunnerForTests(null);
+      resetWindowsPrincipalForTests();
+      setStatForTests(null);
+      resetHardenedStateForTests();
+      delete process.env.OPENCODEX_ACL_TIMEOUT_MS;
+      setResponseSpillShutdownBudgetForTests(null);
+      setResponseSpillAsyncAclAttemptBudgetForTests(null);
+      setResponseStateByteCapForTests(null);
+      setSpilledResponseByteCapForTests(null);
+      clearResponseStateForTests();
+      removeTreeWithRetry(home);
+      if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
+      else process.env["OPENCODEX_HOME"] = priorHome;
+    }
+    if (tailError) throw tailError;
   });
 
   test("expands later input with stored prior input and output", () => {
@@ -1332,7 +1343,8 @@ describe("Responses previous_response_id state", () => {
     const firstStarted = new Promise<void>(resolve => { firstEntered = resolve; });
     const secondStarted = new Promise<void>(resolve => { secondEntered = resolve; });
     let aclCalls = 0;
-    setAsyncIcaclsRunnerForTests(async () => {
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (!isSpillAclTarget(args)) return ICACLS_OK;
       aclCalls += 1;
       if (aclCalls === 1) {
         firstEntered();
@@ -1359,6 +1371,7 @@ describe("Responses previous_response_id state", () => {
       releaseSecond();
     }
     await flushing;
+    await awaitResponseSpillPublicationTailForTests();
     expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 2 });
   });
 
@@ -1397,6 +1410,7 @@ describe("Responses previous_response_id state", () => {
     } finally {
       release();
     }
+    await awaitResponseSpillPublicationTailForTests();
   });
 
   test("shutdown fallback prices the job-owned superseded generation before publishing", async () => {
@@ -1457,6 +1471,7 @@ describe("Responses previous_response_id state", () => {
     } finally {
       release();
     }
+    await awaitResponseSpillPublicationTailForTests();
   });
 
   test("shutdown fallback spends only its reserved ACL budget", async () => {
@@ -1492,6 +1507,7 @@ describe("Responses previous_response_id state", () => {
     } finally {
       release();
     }
+    await awaitResponseSpillPublicationTailForTests();
     const logicalElapsedMs = totalMs - fallbackReserveMs + aclClock;
     expect(deadlines.length).toBeGreaterThanOrEqual(6);
     expect(Math.max(...deadlines)).toBeLessThanOrEqual(Math.floor(fallbackReserveMs / 2));
