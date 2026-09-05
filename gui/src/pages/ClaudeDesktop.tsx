@@ -355,9 +355,9 @@ export default function ClaudeDesktop({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile }),
       });
-      const body = response.text ? await response.text() : "";
-      const parsed = body ? JSON.parse(body) as { error?: unknown; current?: DesktopResponse } : {};
       if (!response.ok) {
+        const body = response.text ? await response.text() : "";
+        const parsed = body ? JSON.parse(body) as { error?: unknown; current?: DesktopResponse } : {};
         const error = parsed.error;
         if (response.status === 409 && error && typeof error === "object" && "code" in error && error.code === "catalog_changed" && parsed.current) {
           const route = "route" in error && typeof error.route === "string" ? error.route : undefined;
