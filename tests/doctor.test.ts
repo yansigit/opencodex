@@ -37,9 +37,9 @@ import {
 import { findDeadPid } from "./helpers/dead-pid";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-doctor-test");
-const TEST_CODEX_HOME = join(TEST_DIR, "codex");
-const TEST_OPENCODEX_HOME = join(TEST_DIR, "opencodex");
+let TEST_DIR = "";
+let TEST_CODEX_HOME = "";
+let TEST_OPENCODEX_HOME = "";
 let prevOpencodexHome: string | undefined;
 let prevCodexHome: string | undefined;
 let prevHttpsProxy: string | undefined;
@@ -60,7 +60,9 @@ describe("doctor", () => {
     prevLowerHttpsProxy = process.env.https_proxy;
     prevProxyRef = process.env.OCX_TEST_PROXY_REF;
     prevAdminToken = process.env.OPENCODEX_ADMIN_AUTH_TOKEN;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    TEST_DIR = mkdtempSync(join(import.meta.dir, ".tmp-doctor-test-"));
+    TEST_CODEX_HOME = join(TEST_DIR, "codex");
+    TEST_OPENCODEX_HOME = join(TEST_DIR, "opencodex");
     mkdirSync(TEST_CODEX_HOME, { recursive: true });
     mkdirSync(TEST_OPENCODEX_HOME, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_OPENCODEX_HOME;

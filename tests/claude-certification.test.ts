@@ -148,7 +148,7 @@ describe("Claude certification runner policy", () => {
   test("correlates exact Read and Agent exchanges and counts only user prompt text", () => {
     const read = { messages: [{ content: [
       { type: "text", text: "hello" },
-      { type: "tool_use", id: "read-1", name: "Read", input: { file_path: "/cert/read-marker.txt" } },
+      { type: "tool_use", id: "read-1", name: "Read", input: { file_path: join("/cert", "read-marker.txt") } },
       { type: "tool_result", tool_use_id: "read-1", content: "OCX_CLAUDE_READ_OK" },
     ] }] };
     expect(inspectScenarioRequestBody("read-continuation", read, "/cert")).toEqual({ promptBytes: 5, toolContinuation: true, subagentObserved: false });
