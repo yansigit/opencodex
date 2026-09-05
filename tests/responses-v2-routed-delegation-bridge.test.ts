@@ -582,6 +582,98 @@ describe("Responses V2 routed delegation bridge runtime", () => {
     } finally { globalThis.fetch = originalFetch; }
   });
 
+  test("keeps routed parent to native child to routed grandchild delegation plaintext on V2", async () => {
+    const outbound: Array<{ url: string; body: Record<string, unknown> }> = [];
+    let turn = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      outbound.push({ url: String(url), body });
+      turn += 1;
+      if (turn === 1) {
+        return Response.json({ choices: [{ message: { role: "assistant", content: "dispatch native child" }, finish_reason: "stop" }] });
+      }
+      if (turn === 2) {
+        return Response.json({ id: "resp_native_child", status: "completed", output: [{
+          type: "function_call",
+          id: "fc_native_child",
+          call_id: "call_native_child",
+          namespace: "ocx_agents",
+          name: "spawn_agent",
+          arguments: "{\"message\":\"plaintext routed grandchild assignment\"}",
+        }] });
+      }
+      return Response.json({ choices: [{ message: { role: "assistant", content: "grandchild complete" }, finish_reason: "stop" }] });
+    }) as typeof fetch;
+    try {
+      const mixed = config();
+      mixed.providers.gw = {
+        adapter: "openai-chat",
+        baseUrl: "https://gateway.example/v1",
+        authMode: "key",
+        apiKey: "test",
+      } as never;
+
+      const parent = await handleResponses(
+        request(rootBody({ model: "gw/routed" })),
+        mixed,
+        { model: "", provider: "" },
+      );
+      expect(parent.status).toBe(200);
+
+      const child = await handleResponses(
+        request(rootBody({
+          model: "gpt-5.5",
+          input: [{
+            type: "agent_message",
+            author: "/root",
+            recipient: "/root/native-child",
+            content: [{ type: "input_text", text: "Inspect the routed parent result." }],
+          }],
+        }), {
+          "x-openai-subagent": "collab_spawn",
+          "x-codex-turn-metadata": JSON.stringify({ subagent_kind: "thread_spawn" }),
+        }),
+        mixed,
+        { model: "", provider: "" },
+      );
+      const childOutput = await child.json() as { output: Array<Record<string, unknown>> };
+
+      const grandchild = await handleResponses(
+        request({
+          model: "gw/routed",
+          stream: false,
+          input: [{
+            type: "agent_message",
+            author: "/root/native-child",
+            recipient: "/root/native-child/routed-grandchild",
+            content: [{ type: "input_text", text: "plaintext routed grandchild assignment" }],
+          }],
+          tools: [],
+        }, { "x-openai-subagent": "collab_spawn" }),
+        mixed,
+        { model: "", provider: "" },
+      );
+
+      expect(child.status).toBe(200);
+      expect(grandchild.status).toBe(200);
+      expect(outbound).toHaveLength(3);
+      expect(outbound[0]?.url).toContain("gateway.example");
+      expect(outbound[1]?.url).toContain("chatgpt.com");
+      expect(JSON.stringify(outbound[1]?.body.tools)).toContain('"name":"ocx_agents"');
+      expect(childOutput.output[0]).toMatchObject({
+        namespace: "collaboration",
+        name: "spawn_agent",
+        arguments: "{\"message\":\"plaintext routed grandchild assignment\"}",
+        encrypted_function_args: [],
+      });
+      expect(outbound[2]?.url).toContain("gateway.example");
+      expect(JSON.stringify(outbound[2]?.body)).toContain("plaintext routed grandchild assignment");
+      expect(JSON.stringify(outbound[2]?.body)).not.toContain("encrypted_content");
+      expect(JSON.stringify(outbound[2]?.body)).not.toContain('"ocx_agents"');
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
   test("fails a mirror namespace collision before upstream I/O", async () => {
     let fetches = 0;
     const originalFetch = globalThis.fetch;
