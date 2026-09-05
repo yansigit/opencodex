@@ -1,6 +1,6 @@
 {
   "name": "@yansigit/opencodex",
-  "version": "2.41.2",
+  "version": "2.43.0",
   "description": "Universal provider proxy for OpenAI Codex & Claude Code — use any LLM with Codex CLI/App/SDK and Claude Code",
   "type": "module",
   "main": "./bin/package-main.mjs",
@@ -41,7 +41,6 @@
     "start": "bun run src/cli/index.ts start",
     "test": "bun scripts/test.ts",
     "test:changed": "bun scripts/test.ts --changed=dev",
-    "test:container": "bun scripts/test-container.ts",
     "typecheck": "bun x tsc --noEmit",
     "audit:high": "bun run scripts/ci/audit-high.ts",
     "privacy:scan": "bun scripts/privacy-scan.ts",
@@ -64,6 +63,7 @@
     "doctor:gui:full": "cd gui && bun run doctor:full",
     "doctor:gui:if-changed": "bun scripts/doctor-gui-if-changed.ts",
     "setup:hooks": "bun scripts/setup-hooks.ts",
+    "test:container": "bun scripts/test-container.ts",
     "check:hygiene": "node scripts/check-hygiene.mjs",
     "check:workflow-policy": "bun scripts/ci/check-workflow-policy.ts",
     "lint:workflows": "bun scripts/ci/actionlint.ts"

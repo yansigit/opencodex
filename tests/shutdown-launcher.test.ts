@@ -1,7 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claimOwnedServiceHome } from "./helpers/owned-service-home";
@@ -54,6 +53,9 @@ async function healthy(port: number): Promise<boolean> {
     return false;
   }
 }
+
+/** The signal-forwarding assertion should not fail merely because a shared CI runner starts slowly. */
+const STARTUP_BUDGET_MS = process.env.CI ? 60_000 : 20_000;
 
 async function waitUntil(fn: () => Promise<boolean>, deadlineMs: number): Promise<boolean> {
   const end = performance.now() + deadlineMs;
@@ -129,10 +131,10 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
         const up = await waitUntil(async () => {
           port = publishedPort(home);
           return port !== null && await healthy(port);
-        }, 30_000);
+        }, STARTUP_BUDGET_MS);
         if (!up || port === null) {
           throw new Error(
-            `launcher did not publish a healthy runtime within 30s (${exitDetail})`
+            `launcher did not publish a healthy runtime within ${STARTUP_BUDGET_MS}ms (${exitDetail})`
             + (childOutput() ? `\n${childOutput()}` : ""),
           );
         }
@@ -158,7 +160,7 @@ describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
         expect(existsSync(join(home, "runtime-port.json"))).toBe(false);
         expect(readFileSync(codexConfig, "utf8")).not.toContain("opencodex");
       },
-      60_000,
+      STARTUP_BUDGET_MS + 40_000,
     );
   }
 });

@@ -72,6 +72,16 @@ describe("fork PR mergeable workflow", () => {
     expect(source).not.toContain("bun scripts/fork/sync/cli.ts overlap");
   });
 
+  test("reads live exact-head provenance instead of the synchronize event body snapshot", () => {
+    const source = workflow();
+    expect(source).not.toContain("PR_BODY: ${{ github.event.pull_request.body }}");
+    expect(source).toContain('pr_json="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"');
+    expect(source).toContain("pull-requests: read");
+    expect(source).toContain('if [[ ! "$live_head" =~ ^[0-9a-fA-F]{40}$ ]]; then');
+    expect(source).toContain('if [ "$live_head" != "$HEAD_SHA" ]; then');
+    expect(source).toContain('PR_BODY="$(printf \'%s\' "$pr_json" | jq -r \'.body // ""\')"');
+  });
+
   test("binds exact head, registry, decisions, and report through PR provenance", () => {
     const source = workflow();
     expect(source).toContain("opencodex-fork-sync-provenance");

@@ -3835,6 +3835,740 @@
           "upstreamBlob": "d166434a3dd06437635c522a988bc1dfc34419ee"
         }
       }
+    },
+    "v2.42.0": {
+      "tag": "v2.42.0",
+      "tagSha": "48f8186647d9ffb108d226dcfa91a64225aae2a7",
+      "baseSha": "4600f80198c8eb6cef1b9cf1338d51906100007e",
+      "decisions": {
+        "docs-site/src/content/docs/guides/providers.md": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to docs-site/src/content/docs/guides/providers.md.",
+          "forkInvariant": "Fork-specific operator guidance remains accurate and is extended rather than silently replaced.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 73f7f206203072ab394164ad8ff5fb4721f33fb1, fork 4434408934ab341af16fe321b97e202690fc8b7a, upstream 7409cae523989d0ff209d1c600f3525df6be4089, and integrated result de6089754e0e79f3342ff19fb16c401af2b645d7; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run privacy:scan"
+          ],
+          "baseBlob": "73f7f206203072ab394164ad8ff5fb4721f33fb1",
+          "forkBlob": "4434408934ab341af16fe321b97e202690fc8b7a",
+          "upstreamBlob": "7409cae523989d0ff209d1c600f3525df6be4089"
+        },
+        "docs-site/src/content/docs/ko/reference/proxy-formats.md": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to docs-site/src/content/docs/ko/reference/proxy-formats.md.",
+          "forkInvariant": "Fork-specific operator guidance remains accurate and is extended rather than silently replaced.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 69f9077c2334f14c444edeb70dac65ba2711d5a5, fork cc56f479435c33a1238f1a039cac0ca8236eccee, upstream b5b9d22d5577fff248b8609bfde4ba4baf04e7c8, and integrated result 5eae85953ec437d5ea9bfef6e3a9183b23f9a218; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run privacy:scan"
+          ],
+          "baseBlob": "69f9077c2334f14c444edeb70dac65ba2711d5a5",
+          "forkBlob": "cc56f479435c33a1238f1a039cac0ca8236eccee",
+          "upstreamBlob": "b5b9d22d5577fff248b8609bfde4ba4baf04e7c8"
+        },
+        "docs-site/src/content/docs/reference/configuration/server.md": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to docs-site/src/content/docs/reference/configuration/server.md.",
+          "forkInvariant": "Fork-specific operator guidance remains accurate and is extended rather than silently replaced.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 1a82eb82cdf0203e7ceb506416b9f2d2e4189cfd, fork 07acfbe1e90e02357a6f83f4504e337e858b9933, upstream b9eaf62883503911039b40911f54b8e30846b729, and integrated result a41983e826f3da3f5386cc2f99efe0479d83fc6f; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run privacy:scan"
+          ],
+          "baseBlob": "1a82eb82cdf0203e7ceb506416b9f2d2e4189cfd",
+          "forkBlob": "07acfbe1e90e02357a6f83f4504e337e858b9933",
+          "upstreamBlob": "b9eaf62883503911039b40911f54b8e30846b729"
+        },
+        "docs-site/src/content/docs/reference/proxy-formats.md": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to docs-site/src/content/docs/reference/proxy-formats.md.",
+          "forkInvariant": "Fork-specific operator guidance remains accurate and is extended rather than silently replaced.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base a3219e9139b180eb667dcea4b5eba9e08d4ffc8c, fork 902d712f4a2f11476e37f45632fbdc8187ff8af6, upstream ce56c0b0266643af00f909b9862d5dab7dee1cd5, and integrated result 13ecd6ee5572f3aa686d1ce394bbed31dd115022; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run privacy:scan"
+          ],
+          "baseBlob": "a3219e9139b180eb667dcea4b5eba9e08d4ffc8c",
+          "forkBlob": "902d712f4a2f11476e37f45632fbdc8187ff8af6",
+          "upstreamBlob": "ce56c0b0266643af00f909b9862d5dab7dee1cd5"
+        },
+        "gui/src/components/QuotaBars.tsx": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/components/QuotaBars.tsx.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 3c80e0c5200451edc3afb8b7e342ff8b27f3f39d, fork 4521fe48deb90b5af454be04bea3525847b0c168, upstream 2715f4860852bbb27a79feaf97899aec86299f33, and integrated result a5d16ca4ddbbf9b2c2e9ee2c58df2a4a1de9e6a1; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "3c80e0c5200451edc3afb8b7e342ff8b27f3f39d",
+          "forkBlob": "4521fe48deb90b5af454be04bea3525847b0c168",
+          "upstreamBlob": "2715f4860852bbb27a79feaf97899aec86299f33"
+        },
+        "gui/src/components/provider-workspace/ProviderAuthPanel.tsx": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/components/provider-workspace/ProviderAuthPanel.tsx.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 287bda342aa28be263b1572ff9728c8a2a943f52, fork a82e555c343931f436a4fc3514ad6b7ac4fe291b, upstream e33e7ffcbfb6b4409791c79c6f5b37dce19d4ac8, and integrated result 9b70c49af6a7d7c7eaf44dba171e8c7fc9ad2099; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "287bda342aa28be263b1572ff9728c8a2a943f52",
+          "forkBlob": "a82e555c343931f436a4fc3514ad6b7ac4fe291b",
+          "upstreamBlob": "e33e7ffcbfb6b4409791c79c6f5b37dce19d4ac8"
+        },
+        "gui/src/components/subagents-workspace/SubagentDelegationSection.tsx": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/components/subagents-workspace/SubagentDelegationSection.tsx.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base e631570734e7006a9b7697669e5f0b5f6afec292, fork 7538badc83f87e37d905851d824c2a0eab64d0c9, upstream 46c0447a7cec37301dac017ee8c2686e805bdc12, and integrated result c5820103126b1ac36f5eca465af229deaefa9232; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "e631570734e7006a9b7697669e5f0b5f6afec292",
+          "forkBlob": "7538badc83f87e37d905851d824c2a0eab64d0c9",
+          "upstreamBlob": "46c0447a7cec37301dac017ee8c2686e805bdc12"
+        },
+        "gui/src/components/subagents-workspace/SubagentsWorkspace.tsx": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/components/subagents-workspace/SubagentsWorkspace.tsx.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 862467da09f0f658f9e7336830fdbc243044b464, fork d4f5b8026097b25c518635e870b35ef4fb6642aa, upstream a22bd2a30593ef0e44d7fd33bcce5cc365e87eb4, and integrated result bcb460df59b75a115410a21264563e7e06120334; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "862467da09f0f658f9e7336830fdbc243044b464",
+          "forkBlob": "d4f5b8026097b25c518635e870b35ef4fb6642aa",
+          "upstreamBlob": "a22bd2a30593ef0e44d7fd33bcce5cc365e87eb4"
+        },
+        "gui/src/i18n/de.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/de.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base f0eb85fceef9a3cc021b00dc0dff917abdd06a71, fork 532dd59e388294b88c4639ee59a471b3c999f3e8, upstream 7a266420615a7e142515123f4a517acafd0e756e, and integrated result 0ba8cc694703897926f1d915e07726d34b9103fe; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "f0eb85fceef9a3cc021b00dc0dff917abdd06a71",
+          "forkBlob": "532dd59e388294b88c4639ee59a471b3c999f3e8",
+          "upstreamBlob": "7a266420615a7e142515123f4a517acafd0e756e"
+        },
+        "gui/src/i18n/en.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/en.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 8c49a8124827b5d1cf431cef82d2940839273f8f, fork b28f58e129e5c94a10262ba4b7cfe9ef46415030, upstream 549bd2b8857026131a7fe55f76cb3e7463d4938a, and integrated result 20e49ee11cd087ad39ed13d25efad34068f60812; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "8c49a8124827b5d1cf431cef82d2940839273f8f",
+          "forkBlob": "b28f58e129e5c94a10262ba4b7cfe9ef46415030",
+          "upstreamBlob": "549bd2b8857026131a7fe55f76cb3e7463d4938a"
+        },
+        "gui/src/i18n/fr.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/fr.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base a05872c15524060015d2d9fd2c2b8590df15db15, fork 75f9432c25b57e0a9cd2b27cac8a9afe9c9c5619, upstream 050b40fa67b996596da203e847be456fa7ca92cc, and integrated result 81dd2080b76ed1d807a92629ed294617d00de018; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "a05872c15524060015d2d9fd2c2b8590df15db15",
+          "forkBlob": "75f9432c25b57e0a9cd2b27cac8a9afe9c9c5619",
+          "upstreamBlob": "050b40fa67b996596da203e847be456fa7ca92cc"
+        },
+        "gui/src/i18n/ja.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/ja.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base ce861c5c47491655540cb12871719a5f6bdf1436, fork 10f25583b0f3734fc946be8eb40b55dfdb7772a2, upstream e9860ff5375894a3ed281b31a77a2cbf51d80a9a, and integrated result 0b8c50dbb34a32dd5247defd17537ecee7ee597c; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "ce861c5c47491655540cb12871719a5f6bdf1436",
+          "forkBlob": "10f25583b0f3734fc946be8eb40b55dfdb7772a2",
+          "upstreamBlob": "e9860ff5375894a3ed281b31a77a2cbf51d80a9a"
+        },
+        "gui/src/i18n/ko.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/ko.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base bf7fe01e246e8ef092361fa8f7d2e4336ff4f4d1, fork 7cbe94dd15b8b0312d291218561ea9b58a343f2f, upstream 8d1e3bc8ea4537f8380bce62a3ecad089f9030bf, and integrated result 8fb89863493406303d49b69c15b0eb1f0b1900d1; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "bf7fe01e246e8ef092361fa8f7d2e4336ff4f4d1",
+          "forkBlob": "7cbe94dd15b8b0312d291218561ea9b58a343f2f",
+          "upstreamBlob": "8d1e3bc8ea4537f8380bce62a3ecad089f9030bf"
+        },
+        "gui/src/i18n/ru.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/ru.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 19ebbf68b26644a2e85f7c49805cf80e415ca01e, fork 4d3636f6c9ab6d683e60cce2fdbcb606974575c5, upstream a00d5dcbe4b356df3c05985089fb8663bea397d4, and integrated result bc720c9f1537d6133303ed8b06e871b37165067d; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "19ebbf68b26644a2e85f7c49805cf80e415ca01e",
+          "forkBlob": "4d3636f6c9ab6d683e60cce2fdbcb606974575c5",
+          "upstreamBlob": "a00d5dcbe4b356df3c05985089fb8663bea397d4"
+        },
+        "gui/src/i18n/tr.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/tr.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 21c70d54fd24cba5e55ab808ec2ba6711aca7b45, fork eaea4c6cf740ea0cf985edc2dde5163599b3486b, upstream 981bacb56b2bd3e2666b36927181fc4115a81b61, and integrated result 25beadfc645443bcc833f66a889a1997c267502d; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "21c70d54fd24cba5e55ab808ec2ba6711aca7b45",
+          "forkBlob": "eaea4c6cf740ea0cf985edc2dde5163599b3486b",
+          "upstreamBlob": "981bacb56b2bd3e2666b36927181fc4115a81b61"
+        },
+        "gui/src/i18n/zh-TW.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/zh-TW.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 588b09cac047398db6bffac819b10f117bd5a754, fork c4caf84708c736e61080199614c54c2cfdb6f821, upstream 5eb6557302405d6be9f86ac9045960aa4c70a5d2, and integrated result 67851e484846c3d31ff1ca368ff52586c87bcc1e; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "588b09cac047398db6bffac819b10f117bd5a754",
+          "forkBlob": "c4caf84708c736e61080199614c54c2cfdb6f821",
+          "upstreamBlob": "5eb6557302405d6be9f86ac9045960aa4c70a5d2"
+        },
+        "gui/src/i18n/zh.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/i18n/zh.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 136c60b254f625901ead9ed32c42ccd644a27723, fork 6e3d86363f60d330e6b75c8a08add72ec14b383e, upstream f53e53ce39db94f6ec9daf45aa891f014a632042, and integrated result 69ddc14fe4e8adc9c9d7e6808f9462719792db4d; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "136c60b254f625901ead9ed32c42ccd644a27723",
+          "forkBlob": "6e3d86363f60d330e6b75c8a08add72ec14b383e",
+          "upstreamBlob": "f53e53ce39db94f6ec9daf45aa891f014a632042"
+        },
+        "gui/src/pages/Logs.tsx": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/pages/Logs.tsx.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 384231f698f1e7f45593da0c0f54accba44f9979, fork 56e99cde0dc3843c66243edc968a9fd37b26de76, upstream 0bbe286a887d6f811c9243d53e544cf4928700cd, and integrated result 1338bf3b7048ce14c72b575a8c7c19316d939f65; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "384231f698f1e7f45593da0c0f54accba44f9979",
+          "forkBlob": "56e99cde0dc3843c66243edc968a9fd37b26de76",
+          "upstreamBlob": "0bbe286a887d6f811c9243d53e544cf4928700cd"
+        },
+        "gui/src/pages/Subagents.tsx": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/pages/Subagents.tsx.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base ea36769466516539b91e18513af2ae4feedbf29d, fork 42edc11117c8d1855d888fcc7f60784f2f738d0d, upstream 6b54d39ffd964eb749e049f09c7c4cadeba8714b, and integrated result 398e47c842d636a0bbf4312e513aea49e75ab3b8; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "ea36769466516539b91e18513af2ae4feedbf29d",
+          "forkBlob": "42edc11117c8d1855d888fcc7f60784f2f738d0d",
+          "upstreamBlob": "6b54d39ffd964eb749e049f09c7c4cadeba8714b"
+        },
+        "gui/src/pages/use-subagent-delegation.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/pages/use-subagent-delegation.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base d2c5342bfa59bac58be7c591737bea162c8ad77d, fork f9560d8653f0dac22d84757d353ab3dee690abe1, upstream 716eb11482b518f1a4fb7d07333bab2aa6da2244, and integrated result 40d1f42abd60213c0b7a58f9422e9d05e698eeae; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "d2c5342bfa59bac58be7c591737bea162c8ad77d",
+          "forkBlob": "f9560d8653f0dac22d84757d353ab3dee690abe1",
+          "upstreamBlob": "716eb11482b518f1a4fb7d07333bab2aa6da2244"
+        },
+        "gui/src/styles-models-workspace.css": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/styles-models-workspace.css.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base ab00d414028418e5b2381353651c9382a49bd93f, fork c43ae23f9f71b5968f31d74cbbc7c4aaea5535fe, upstream e1120eb04c9736c98a48c223497385e1ec3b1da8, and integrated result 0706f115280bfa9963744685f96667264b4493c9; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "ab00d414028418e5b2381353651c9382a49bd93f",
+          "forkBlob": "c43ae23f9f71b5968f31d74cbbc7c4aaea5535fe",
+          "upstreamBlob": "e1120eb04c9736c98a48c223497385e1ec3b1da8"
+        },
+        "gui/src/styles.css": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/src/styles.css.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 1d321fc8439a50945f3225cff6352f70c20faac3, fork 4f4223c8e7b00c7ea621b14f09fbbac562d3a689, upstream 0efa270e635bffc681db897bd6a18177f19a43bb, and integrated result c579b6cef7fb73c880f7291097a2b700cb27b159; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run build:gui",
+            "bun run lint:gui"
+          ],
+          "baseBlob": "1d321fc8439a50945f3225cff6352f70c20faac3",
+          "forkBlob": "4f4223c8e7b00c7ea621b14f09fbbac562d3a689",
+          "upstreamBlob": "0efa270e635bffc681db897bd6a18177f19a43bb"
+        },
+        "gui/tests/fr-localization.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/tests/fr-localization.test.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 037b03671a8bca553bc92fc2d5fbcdb0cff5988e, fork bc2167aa869e3d288be52f307e47d2242d1ef72c, upstream 221de55d009fa328132b3ce7e3cdd3ff971fae82, and integrated result 7d265e1efd4ce4eb00172f2338e2503eb53ea997; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "037b03671a8bca553bc92fc2d5fbcdb0cff5988e",
+          "forkBlob": "bc2167aa869e3d288be52f307e47d2242d1ef72c",
+          "upstreamBlob": "221de55d009fa328132b3ce7e3cdd3ff971fae82"
+        },
+        "gui/tests/locale-parity.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/tests/locale-parity.test.ts.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 8a718e2651495538095b65ae0414a4cb9db2200d, fork d3cc95ecebcb60836b8368d02636b56ccdc9a399, upstream 11976154c98c94a4cc34c695af12b15cf5436d01, and integrated result 93e680b55758e7db1c765c661bfea002047f06f4; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "8a718e2651495538095b65ae0414a4cb9db2200d",
+          "forkBlob": "d3cc95ecebcb60836b8368d02636b56ccdc9a399",
+          "upstreamBlob": "11976154c98c94a4cc34c695af12b15cf5436d01"
+        },
+        "gui/tests/logs-auto-refresh.test.tsx": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to gui/tests/logs-auto-refresh.test.tsx.",
+          "forkInvariant": "Fork GUI behavior, controls, and localized labels remain present while the upstream v2.42 interface changes are integrated.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 5be3656b0dc1d34cca7be17ecfa86968133d7664, fork d817bcdaa9467b6041483e2e0602ddf7cbae7b09, upstream b0dbda25016bc381b919467ee76a8fd56e0d0056, and integrated result 7358e8f3001793b0485bbca5a13515f7643a7ac5; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "cd gui && bun test tests/locale-parity.test.ts tests/fr-localization.test.ts tests/logs-auto-refresh.test.tsx"
+          ],
+          "baseBlob": "5be3656b0dc1d34cca7be17ecfa86968133d7664",
+          "forkBlob": "d817bcdaa9467b6041483e2e0602ddf7cbae7b09",
+          "upstreamBlob": "b0dbda25016bc381b919467ee76a8fd56e0d0056"
+        },
+        "package.json": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to package.json.",
+          "forkInvariant": "Fork package identity, release commands, hygiene gates, and dependency audit policy remain intact while upstream dependency changes are adopted.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 19d8c3f16d4358c2398760c2d379063737b8e08f, fork 3a91b97adb476ed027a0f2437f1d0e3fe5163186, upstream 6c7c80d9e471282778d67df6c7bacfe511278cdb, and integrated result 6c4f1dadca5dd5a609e8d962512639d18ceb2f48; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run audit:high",
+            "bun run typecheck"
+          ],
+          "baseBlob": "19d8c3f16d4358c2398760c2d379063737b8e08f",
+          "forkBlob": "3a91b97adb476ed027a0f2437f1d0e3fe5163186",
+          "upstreamBlob": "6c7c80d9e471282778d67df6c7bacfe511278cdb"
+        },
+        "skills/ocx/references/01_management_surface.md": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to skills/ocx/references/01_management_surface.md.",
+          "forkInvariant": "Fork-specific operator guidance remains accurate and is extended rather than silently replaced.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 419a3a7af91145b57fa94c8fa54c2fb54fc487f5, fork d6e006dbaf2abeb9820c043a053f26597dbfb34a, upstream 36438d2f688782064b2fe6c70fea484669f3a302, and integrated result da69f81ef8b47e67edf7bdaae5b5c408b3c73fed; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run skill:surface:check"
+          ],
+          "baseBlob": "419a3a7af91145b57fa94c8fa54c2fb54fc487f5",
+          "forkBlob": "d6e006dbaf2abeb9820c043a053f26597dbfb34a",
+          "upstreamBlob": "36438d2f688782064b2fe6c70fea484669f3a302"
+        },
+        "src/adapters/cursor/protobuf-request.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/adapters/cursor/protobuf-request.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 3efe36ecb3bc335b7d894778e315ac2474db0130, fork 3994a478de985f99001a1ce74f067414b8d3a37a, upstream f3dec71d788ad900c3b1da486b69c8d5b30bdf1a, and integrated result 5d180363e6706bb30fae5913adbc5cd427eee2b9; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/cursor-repetition-breaker.test.ts"
+          ],
+          "baseBlob": "3efe36ecb3bc335b7d894778e315ac2474db0130",
+          "forkBlob": "3994a478de985f99001a1ce74f067414b8d3a37a",
+          "upstreamBlob": "f3dec71d788ad900c3b1da486b69c8d5b30bdf1a"
+        },
+        "src/adapters/openai-responses.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/adapters/openai-responses.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 8e23b383f3855d73b7d98c7ccf07183b669c8272, fork e72208e7932033c39e536e0571d6c125c7692637, upstream d9ec1fb01ab8dd36c99179c1fd1f12073ad84654, and integrated result 463f5c744bb93a608dba459898213f9c1b41d75a; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/openai-responses-passthrough.test.ts"
+          ],
+          "baseBlob": "8e23b383f3855d73b7d98c7ccf07183b669c8272",
+          "forkBlob": "e72208e7932033c39e536e0571d6c125c7692637",
+          "upstreamBlob": "d9ec1fb01ab8dd36c99179c1fd1f12073ad84654"
+        },
+        "src/bridge.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/bridge.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base c50cac8c04e1143cee81e937084b0570ac332952, fork e956f7b64f8a34bd760e15aae357ffa7849dc886, upstream a5e83641b796fa2036e7b687b1b790fc38cf7462, and integrated result 863f9394549eeaed0314e7605b68423655a4d2fe; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run typecheck"
+          ],
+          "baseBlob": "c50cac8c04e1143cee81e937084b0570ac332952",
+          "forkBlob": "e956f7b64f8a34bd760e15aae357ffa7849dc886",
+          "upstreamBlob": "a5e83641b796fa2036e7b687b1b790fc38cf7462"
+        },
+        "src/cli/capabilities.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/cli/capabilities.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base accffd9fb93cf80c7e37170cb1370d81e8305735, fork dd2a4c8d4ef4209e2d5939e37ccbbac62a8ead07, upstream d4ae958829dff27f28249e354926cbe62ad8000b, and integrated result 08ddfe3a65ab62e46a1120526c6e70e3ce5da64f; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run typecheck"
+          ],
+          "baseBlob": "accffd9fb93cf80c7e37170cb1370d81e8305735",
+          "forkBlob": "dd2a4c8d4ef4209e2d5939e37ccbbac62a8ead07",
+          "upstreamBlob": "d4ae958829dff27f28249e354926cbe62ad8000b"
+        },
+        "src/codex/auth-api.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/codex/auth-api.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 52178b64f6fd9efe06aa8f0277841f017edf5431, fork a13eea13af7998439fe8334f04cdb215a89557ac, upstream 36295027e96b10eba1e002a3c7c8535536df3ac5, and integrated result eba9314158029fa81d7ce931158759854a41399c; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-auth-api.test.ts"
+          ],
+          "baseBlob": "52178b64f6fd9efe06aa8f0277841f017edf5431",
+          "forkBlob": "a13eea13af7998439fe8334f04cdb215a89557ac",
+          "upstreamBlob": "36295027e96b10eba1e002a3c7c8535536df3ac5"
+        },
+        "src/codex/catalog.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/codex/catalog.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base e32d5216a5673cc9eb961433660fcf88752136bd, fork be477539a5e4d2336bdb717fdbf19cc5a6a51ab4, upstream af79cb13b57f8bb353ffafe928f918280cf87ace, and integrated result 421686a8df560d98c43cb3d1204d36ecf572adb7; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "e32d5216a5673cc9eb961433660fcf88752136bd",
+          "forkBlob": "be477539a5e4d2336bdb717fdbf19cc5a6a51ab4",
+          "upstreamBlob": "af79cb13b57f8bb353ffafe928f918280cf87ace"
+        },
+        "src/codex/catalog/effort.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/codex/catalog/effort.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 2d6494e2fd3c456663b6148f012b43bf39f7ca74, fork 88465d08bfad8e84f374ec020ca5fe868e1f1a65, upstream 8c0f7884d4a8e293e3919e7a5a8df9f3e79f3afc, and integrated result 073458e03a25d7248323f3521266f6a9edf66e38; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "2d6494e2fd3c456663b6148f012b43bf39f7ca74",
+          "forkBlob": "88465d08bfad8e84f374ec020ca5fe868e1f1a65",
+          "upstreamBlob": "8c0f7884d4a8e293e3919e7a5a8df9f3e79f3afc"
+        },
+        "src/codex/catalog/parsing.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/codex/catalog/parsing.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base d9ec821646f445165a807c0b86ab59d8a2318ba8, fork 2c4992e4c45ffebc2e03dac31ee86221c9f2f0b7, upstream fecf49c2ddaa1a06bb5974ca68edc6b178b08ce8, and integrated result c5f936007810d4e3cf0e0fe80a9adb112c0cc488; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "d9ec821646f445165a807c0b86ab59d8a2318ba8",
+          "forkBlob": "2c4992e4c45ffebc2e03dac31ee86221c9f2f0b7",
+          "upstreamBlob": "fecf49c2ddaa1a06bb5974ca68edc6b178b08ce8"
+        },
+        "src/codex/catalog/provider-fetch.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/codex/catalog/provider-fetch.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base f48edcd03cf2bdecfafd67158bb682b6a4be92e1, fork c886926d355b078b3426f63331489527b95be9f3, upstream 8e8f417bc91ec8d760bec7e9385194f3fd445409, and integrated result 696fad218602fdb77b21619e79665779fef6ba8d; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "f48edcd03cf2bdecfafd67158bb682b6a4be92e1",
+          "forkBlob": "c886926d355b078b3426f63331489527b95be9f3",
+          "upstreamBlob": "8e8f417bc91ec8d760bec7e9385194f3fd445409"
+        },
+        "src/codex/inject.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/codex/inject.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 46f322f0fe78f3fe619ad04e95722a7763757098, fork 22ed375ac35d3d609ed4bfb43fc17ebe028512d2, upstream cb8e1434b39dc03867734ed9683b76ee37c4ee89, and integrated result 3ea8281fdcbbdfe14c2e1c342b12b2eac8ae282c; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-inject.test.ts tests/codex-inject-integration.test.ts"
+          ],
+          "baseBlob": "46f322f0fe78f3fe619ad04e95722a7763757098",
+          "forkBlob": "22ed375ac35d3d609ed4bfb43fc17ebe028512d2",
+          "upstreamBlob": "cb8e1434b39dc03867734ed9683b76ee37c4ee89"
+        },
+        "src/oauth/chatgpt.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/oauth/chatgpt.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 5dd01497db3a4eedbdf085f13d5db6b62082e867, fork b01de306d29dcb73f88a5e0a68b11e289b9cd143, upstream bb4d1c8497864dd62d67af5fe20ffe9eca077128, and integrated result 1ae616a00566795b1e3ba8c7d1286369ac0e97c1; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/oauth-provider-reconcile.test.ts tests/codex-auth-api.test.ts"
+          ],
+          "baseBlob": "5dd01497db3a4eedbdf085f13d5db6b62082e867",
+          "forkBlob": "b01de306d29dcb73f88a5e0a68b11e289b9cd143",
+          "upstreamBlob": "bb4d1c8497864dd62d67af5fe20ffe9eca077128"
+        },
+        "src/oauth/index.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/oauth/index.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 868c4f9b99c7668d4b105279a60eaffb02787f67, fork def2ff002b498ce99eaef4c8e37656f83fe86ab9, upstream 3ae6f4c01f4c45143641be943a21b377a1f8ebcb, and integrated result 357dde83e3d57d2ca732b0281d55b03cac99e37e; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/oauth-provider-reconcile.test.ts tests/codex-auth-api.test.ts"
+          ],
+          "baseBlob": "868c4f9b99c7668d4b105279a60eaffb02787f67",
+          "forkBlob": "def2ff002b498ce99eaef4c8e37656f83fe86ab9",
+          "upstreamBlob": "3ae6f4c01f4c45143641be943a21b377a1f8ebcb"
+        },
+        "src/providers/quota.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/providers/quota.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base ca7e9eb993322c65073f956e051c990d0f096e0b, fork 2ddfcc7c27d1d48f67ad9b7db83786cd28b25a8a, upstream c080e74aa8d468cf173b2fa5c24ffb3f8deed40c, and integrated result d5dbac00f175fcd32e854900790fd67f4db5769f; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/codex-auth-api.test.ts"
+          ],
+          "baseBlob": "ca7e9eb993322c65073f956e051c990d0f096e0b",
+          "forkBlob": "2ddfcc7c27d1d48f67ad9b7db83786cd28b25a8a",
+          "upstreamBlob": "c080e74aa8d468cf173b2fa5c24ffb3f8deed40c"
+        },
+        "src/providers/registry.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/providers/registry.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base cc692902d390e2d087d54f27da4ff695a49b18e0, fork 67b673698a433948837adfcd34f3813a6eee9450, upstream 2063c9d2c057daddfea25c010b684467132bf935, and integrated result be34e913f869d6a62a3f4fe10f5601993d066f02; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run typecheck"
+          ],
+          "baseBlob": "cc692902d390e2d087d54f27da4ff695a49b18e0",
+          "forkBlob": "67b673698a433948837adfcd34f3813a6eee9450",
+          "upstreamBlob": "2063c9d2c057daddfea25c010b684467132bf935"
+        },
+        "src/server/index.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/server/index.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 92495a8b58bd80727c04cfc7a45972b18abe6ead, fork 848aa025bc6434e5b4d7e56de07c32bdd2292ce4, upstream 17d662a02030e984b87c4102bb202e735dc61ac5, and integrated result 4e898de95de41f1fca461b1322eed1cf55645001; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run typecheck",
+            "bun test tests/loopback-listener-integration.test.ts"
+          ],
+          "baseBlob": "92495a8b58bd80727c04cfc7a45972b18abe6ead",
+          "forkBlob": "848aa025bc6434e5b4d7e56de07c32bdd2292ce4",
+          "upstreamBlob": "17d662a02030e984b87c4102bb202e735dc61ac5"
+        },
+        "src/server/management/oauth-account-routes.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/server/management/oauth-account-routes.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 0dee1017236e96309c8190d92aeeabd71fa590b1, fork 2398ff9438a5efc65c6ae0f8565522cffa31485d, upstream 9206f96bd5f8275bf1ec4a0bc53178827831a818, and integrated result 2ac954b975e86377e832e026c970227349caecde; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/oauth-provider-reconcile.test.ts tests/codex-auth-api.test.ts"
+          ],
+          "baseBlob": "0dee1017236e96309c8190d92aeeabd71fa590b1",
+          "forkBlob": "2398ff9438a5efc65c6ae0f8565522cffa31485d",
+          "upstreamBlob": "9206f96bd5f8275bf1ec4a0bc53178827831a818"
+        },
+        "src/server/responses/core.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/server/responses/core.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base ce6abf5c3d7c7c9925da1c6a69e7aeac785bec7e, fork 2626c2e1af15e6d460c178800cb89bac30229900, upstream e257a02f15ceb93f6e0a991b1e63f718f77b9957, and integrated result 49e9a8088f83f6aeebf0b7a2e93be8649a68f2bc; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/openai-responses-passthrough.test.ts"
+          ],
+          "baseBlob": "ce6abf5c3d7c7c9925da1c6a69e7aeac785bec7e",
+          "forkBlob": "2626c2e1af15e6d460c178800cb89bac30229900",
+          "upstreamBlob": "e257a02f15ceb93f6e0a991b1e63f718f77b9957"
+        },
+        "src/server/responses/empty-completion-guard.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/server/responses/empty-completion-guard.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 352d4a9eaf5609947fa534d2a8c1a70b079c5784, fork 94bd0d905e82647e33362a017709e9b161eaaf0c, upstream 92243523e1acb61a788343924d66f02bd78de284, and integrated result 44c51aa220c0c2f8c48779b979093db9454d58dc; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run typecheck"
+          ],
+          "baseBlob": "352d4a9eaf5609947fa534d2a8c1a70b079c5784",
+          "forkBlob": "94bd0d905e82647e33362a017709e9b161eaaf0c",
+          "upstreamBlob": "92243523e1acb61a788343924d66f02bd78de284"
+        },
+        "src/types/request.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to src/types/request.ts.",
+          "forkInvariant": "Fork-visible runtime behavior remains present on the integrated upstream control flow.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 25c4a26ef4545fec561ef720edb4cd1a3dac7d6e, fork 1e42001340411c7d4b82737cde7e4e24cb020b7f, upstream ffee4eb8a330b2e69dc761eb713a72142c4d036c, and integrated result adf1071ff2d9ae24bd58b92cff5e0287977de05a; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun run typecheck"
+          ],
+          "baseBlob": "25c4a26ef4545fec561ef720edb4cd1a3dac7d6e",
+          "forkBlob": "1e42001340411c7d4b82737cde7e4e24cb020b7f",
+          "upstreamBlob": "ffee4eb8a330b2e69dc761eb713a72142c4d036c"
+        },
+        "tests/codex-auth-api.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/codex-auth-api.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base a8e435596f9fba1a52f5c7612eea08bdca4f6e63, fork 44ba22a3a7ef0cd8b4c77c015c70f84a15b9fcf8, upstream 5aa534fbe9c58973157d131ae4e1390b8e898a70, and integrated result c02851b945a54c04151f0af9f6fdd8d5874f7d68; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-auth-api.test.ts"
+          ],
+          "baseBlob": "a8e435596f9fba1a52f5c7612eea08bdca4f6e63",
+          "forkBlob": "44ba22a3a7ef0cd8b4c77c015c70f84a15b9fcf8",
+          "upstreamBlob": "5aa534fbe9c58973157d131ae4e1390b8e898a70"
+        },
+        "tests/codex-catalog.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/codex-catalog.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 4ae9926b30fac8914b157223b4d93edf9dff771e, fork c771fcfdfda48aadce45f865c83be5ed7eedede0, upstream 4328c10e0b4a3907f29c5f5a28cf6c602ced42cb, and integrated result 92170199c39dc3e6885d0b90f8849eaf80ca842b; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-catalog.test.ts"
+          ],
+          "baseBlob": "4ae9926b30fac8914b157223b4d93edf9dff771e",
+          "forkBlob": "c771fcfdfda48aadce45f865c83be5ed7eedede0",
+          "upstreamBlob": "4328c10e0b4a3907f29c5f5a28cf6c602ced42cb"
+        },
+        "tests/codex-inject-integration.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/codex-inject-integration.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 6f1680429dae742440b41bec8477b78123fbbcdf, fork f1adf48d8c5ff6fd89d4c523ed41874c304a4e14, upstream 8c1ca474a20191374b2a7f9a7e50502fbba53503, and integrated result a7bf8b087490e0ed71eb5a797f6e60febef56597; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-inject-integration.test.ts"
+          ],
+          "baseBlob": "6f1680429dae742440b41bec8477b78123fbbcdf",
+          "forkBlob": "f1adf48d8c5ff6fd89d4c523ed41874c304a4e14",
+          "upstreamBlob": "8c1ca474a20191374b2a7f9a7e50502fbba53503"
+        },
+        "tests/codex-inject.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/codex-inject.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 5a4650de655f8c9a332d7c555d12165fb0184964, fork 2d011c0dff81c2726cf481181fe923c4cfffb25a, upstream 4133d333bcadb8279e9a4d536f14ac8ed0428342, and integrated result bd5556779988e5cbf56feb334a6e82b30bdbc08e; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/codex-inject.test.ts"
+          ],
+          "baseBlob": "5a4650de655f8c9a332d7c555d12165fb0184964",
+          "forkBlob": "2d011c0dff81c2726cf481181fe923c4cfffb25a",
+          "upstreamBlob": "4133d333bcadb8279e9a4d536f14ac8ed0428342"
+        },
+        "tests/cursor-repetition-breaker.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/cursor-repetition-breaker.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 63708f7a32725d42efcac7f797535d0ad0602d89, fork 5a35598c3cd74429481ad601170d2a934d41fd64, upstream bba00b39e92ca31806b12118aa99bf123f6a07f3, and integrated result 5d0eae1545e0bfa83880d1e55935e05c6a2ea19a; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/cursor-repetition-breaker.test.ts"
+          ],
+          "baseBlob": "63708f7a32725d42efcac7f797535d0ad0602d89",
+          "forkBlob": "5a35598c3cd74429481ad601170d2a934d41fd64",
+          "upstreamBlob": "bba00b39e92ca31806b12118aa99bf123f6a07f3"
+        },
+        "tests/loopback-listener-integration.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/loopback-listener-integration.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base ef88a56a1505b6ebaf393dcd39c468efbf3e3d7a, fork cd4cac09fb7bc8221a91197deb48aaefbc2f6d2e, upstream 89cd3cfb744cfbe371a25984ec281e7c02baba6c, and integrated result 93ade0de3a6a6799bc8bf085c1de4928b2bfab66; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/loopback-listener-integration.test.ts"
+          ],
+          "baseBlob": "ef88a56a1505b6ebaf393dcd39c468efbf3e3d7a",
+          "forkBlob": "cd4cac09fb7bc8221a91197deb48aaefbc2f6d2e",
+          "upstreamBlob": "89cd3cfb744cfbe371a25984ec281e7c02baba6c"
+        },
+        "tests/openai-responses-passthrough.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/openai-responses-passthrough.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 83cf68fe454d3bdc7fcd32600d67817171ceab16, fork 8c00d5e138fbbf2a5fcc6b1581224a94f0b62b42, upstream 2048ed92e54be07cb13c0bdebc92663fe7906925, and integrated result 51354781485a66fb515790e86cfc6c0ae6d24e0d; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/openai-responses-passthrough.test.ts"
+          ],
+          "baseBlob": "83cf68fe454d3bdc7fcd32600d67817171ceab16",
+          "forkBlob": "8c00d5e138fbbf2a5fcc6b1581224a94f0b62b42",
+          "upstreamBlob": "2048ed92e54be07cb13c0bdebc92663fe7906925"
+        },
+        "tests/shutdown-launcher.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/shutdown-launcher.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 2425cc071010054b5e1a9a1355616a0e5b807b20, fork b08170ec1946870654566748bf0a4b04a24304aa, upstream 189629988e89e180b4fcefaa01e2e068ede2fda1, and integrated result f4298ea47a64610b096ea3b992239dd9734a0545; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/shutdown-launcher.test.ts"
+          ],
+          "baseBlob": "2425cc071010054b5e1a9a1355616a0e5b807b20",
+          "forkBlob": "b08170ec1946870654566748bf0a4b04a24304aa",
+          "upstreamBlob": "189629988e89e180b4fcefaa01e2e068ede2fda1"
+        },
+        "tests/ws-upstream.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.42.0 changes to tests/ws-upstream.test.ts.",
+          "forkInvariant": "Existing fork regression assertions remain present alongside the upstream v2.42 coverage.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 975f9ad215bf2960db7db47934a85c00d58c7024, fork 923b47ef6bb47f82a9ce06dd725e63c7e9a037ee, upstream 9ef4f9515d1af787736a86cc2c9664aa3b74bc50, and integrated result 7366c693b1252b6ace099bb1c1a24f3c2a936fb7; the merged tree retains the fork contract and the v2.42 change, with the named checks covering the result.",
+          "exactTests": [
+            "bun test tests/ws-upstream.test.ts"
+          ],
+          "baseBlob": "975f9ad215bf2960db7db47934a85c00d58c7024",
+          "forkBlob": "923b47ef6bb47f82a9ce06dd725e63c7e9a037ee",
+          "upstreamBlob": "9ef4f9515d1af787736a86cc2c9664aa3b74bc50"
+        }
+      }
     }
   }
 }
