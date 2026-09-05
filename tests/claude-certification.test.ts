@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assessLiveScenario,
   evaluateLivePolicy,
+  inspectScenarioRequestBody,
   liveConfig,
   parseLiveOptions,
+  processTreeTerminationPlan,
   runHermetic,
   sanitizedChildEnv,
 } from "../scripts/claude-certification";
@@ -21,6 +24,12 @@ describe("Claude certification runner policy", () => {
       AWS_PROFILE: "must-not-leak",
       USERPROFILE: "/operator",
       XDG_CONFIG_HOME: "/operator/config",
+      SSH_AUTH_SOCK: "/operator/ssh-agent",
+      KUBECONFIG: "/operator/kubeconfig",
+      GOOGLE_APPLICATION_CREDENTIALS: "/operator/google.json",
+      GIT_ASKPASS: "/operator/askpass",
+      NODE_OPTIONS: "--require=/operator/inject.js",
+      DYLD_INSERT_LIBRARIES: "/operator/inject.dylib",
       UNRELATED: "kept",
     }, { home: "/tmp/cert-home", claude: "/tmp/cert-claude", ocx: "/tmp/cert-ocx" });
 
@@ -36,6 +45,12 @@ describe("Claude certification runner policy", () => {
     expect(env.HTTPS_PROXY).toBeUndefined();
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.AWS_SECRET_ACCESS_KEY).toBeUndefined();
+    expect(env.SSH_AUTH_SOCK).toBeUndefined();
+    expect(env.KUBECONFIG).toBeUndefined();
+    expect(env.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
+    expect(env.GIT_ASKPASS).toBeUndefined();
+    expect(env.NODE_OPTIONS).toBeUndefined();
+    expect(env.DYLD_INSERT_LIBRARIES).toBeUndefined();
   });
 
   test("requires both explicit consent and the environment gate for live mode", () => {
@@ -45,11 +60,60 @@ describe("Claude certification runner policy", () => {
     expect(evaluateLivePolicy({ confirmFlag: true, allowEnv: true })).toMatchObject({ status: "live_fail", requests: 0 });
   });
   test("strictly parses live route and budget options", () => {
-    expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1.5"])).toEqual({ provider: "p", model: "m", maxBudgetUsd: 1.5 });
+    expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1.5"])).toEqual({ provider: "p", model: "m", maxBudgetUsd: 1.5, scenario: "basic" });
+    expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1.5", "--scenario", "subagent"])).toEqual({ provider: "p", model: "m", maxBudgetUsd: 1.5, scenario: "subagent" });
     expect(parseLiveOptions(["--provider", "p"])).toEqual({ error: "provider, model, and max-budget-usd are required" });
     expect(parseLiveOptions(["--provider", "p", "--provider", "q", "--model", "m", "--max-budget-usd", "1"])).toEqual({ error: "invalid live certification arguments" });
     expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "0"])).toEqual({ error: "invalid max-budget-usd" });
     expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "5.01"])).toEqual({ error: "invalid max-budget-usd" });
+    expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1", "--scenario", "unknown"])).toEqual({ error: "invalid certification scenario" });
+  });
+
+  test("assesses scenario-specific evidence without retaining request content", () => {
+    const base = { requests: 1, streaming: true, toolContinuation: false, subagentObserved: false, maxInputBytes: 140_000, maxPromptBytes: 140_000, limitExceeded: false, inputLimitExceeded: false, hadHttpError: false, httpStatus: 200 };
+    expect(assessLiveScenario("basic", base, 0, "OCX_CLAUDE_LIVE_OK\n")).toEqual({ passed: true });
+    expect(assessLiveScenario("read-continuation", { ...base, requests: 2, toolContinuation: true }, 0, "OCX_CLAUDE_READ_OK")).toEqual({ passed: true });
+    expect(assessLiveScenario("read-continuation", base, 0, "OCX_CLAUDE_READ_OK")).toEqual({ passed: false, reason: "tool_not_used" });
+    expect(assessLiveScenario("subagent", { ...base, requests: 2, subagentObserved: true, toolContinuation: true }, 0, "OCX_CLAUDE_SUBAGENT_OK")).toEqual({ passed: true });
+    expect(assessLiveScenario("subagent", base, 0, "OCX_CLAUDE_SUBAGENT_OK")).toEqual({ passed: false, reason: "subagent_not_observed" });
+    expect(assessLiveScenario("long-context", base, 0, "OCX_CLAUDE_CONTEXT_OK")).toEqual({ passed: true });
+    expect(assessLiveScenario("long-context", { ...base, maxPromptBytes: 1_000 }, 0, "OCX_CLAUDE_CONTEXT_OK")).toEqual({ passed: false, reason: "context_too_short" });
+    expect(assessLiveScenario("basic", { ...base, limitExceeded: true }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "request_limit" });
+    expect(assessLiveScenario("basic", { ...base, inputLimitExceeded: true }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "input_limit" });
+    expect(assessLiveScenario("basic", { ...base, hadHttpError: true }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "upstream_http" });
+    expect(assessLiveScenario("basic", { ...base, streaming: false }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "non_streaming" });
+    expect(assessLiveScenario("basic", { ...base, requests: 0 }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "request_count" });
+  });
+
+  test("correlates exact Read and Agent exchanges and counts only user prompt text", () => {
+    const read = { messages: [{ content: [
+      { type: "text", text: "hello" },
+      { type: "tool_use", id: "read-1", name: "Read", input: { file_path: "/cert/read-marker.txt" } },
+      { type: "tool_result", tool_use_id: "read-1", content: "OCX_CLAUDE_READ_OK" },
+    ] }] };
+    expect(inspectScenarioRequestBody("read-continuation", read, "/cert")).toEqual({ promptBytes: 5, toolContinuation: true, subagentObserved: false });
+    expect(inspectScenarioRequestBody("read-continuation", { ...read, messages: [{ content: [
+      { type: "tool_use", id: "read-1", name: "Read", input: { file_path: "/operator/secret" } },
+      { type: "tool_result", tool_use_id: "read-1", content: "OCX_CLAUDE_READ_OK" },
+    ] }] }, "/cert").toolContinuation).toBe(false);
+
+    const agent = { system: "OCX_CLAUDE_CHILD_SYSTEM", messages: [{ content: [
+      { type: "tool_use", id: "agent-1", name: "Agent", input: { subagent_type: "cert-worker" } },
+      { type: "tool_result", tool_use_id: "agent-1", content: "OCX_CLAUDE_SUBAGENT_OK" },
+    ] }] };
+    expect(inspectScenarioRequestBody("subagent", agent, "/cert")).toMatchObject({ toolContinuation: true, subagentObserved: true });
+    expect(inspectScenarioRequestBody("subagent", { ...agent, messages: [{ content: [
+      { type: "tool_use", id: "agent-1", name: "Agent", input: { subagent_type: "other" } },
+      { type: "tool_result", tool_use_id: "agent-1", content: "OCX_CLAUDE_SUBAGENT_OK" },
+    ] }] }, "/cert").toolContinuation).toBe(false);
+    expect(inspectScenarioRequestBody("long-context", { messages: "plain string prompt" }, "/cert").promptBytes).toBe(19);
+  });
+
+  test("pins cross-platform process-tree termination targets", () => {
+    expect(processTreeTerminationPlan(42, "linux")).toEqual({ groupPid: -42 });
+    expect(processTreeTerminationPlan(42, "darwin")).toEqual({ groupPid: -42 });
+    expect(processTreeTerminationPlan(42, "win32", "C:\\Windows\\System32\\taskkill.exe")).toEqual({ command: ["C:\\Windows\\System32\\taskkill.exe", "/PID", "42", "/T", "/F"] });
+    expect(() => processTreeTerminationPlan(0, "linux")).toThrow("invalid child pid");
   });
 
   test("live config rejects an unlisted model and disables alternate request paths", () => {

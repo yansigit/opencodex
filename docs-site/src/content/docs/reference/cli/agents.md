@@ -216,18 +216,30 @@ tool-continuation checks in both output formats. It never reuses credentials or 
 
 Live certification requires both the `--confirm-live-provider-charges` flag and
 `OCX_ALLOW_CLAUDE_LIVE_CERT=1`, plus an exact stored provider/model and an explicit Claude
-budget (greater than zero and at most $5). It runs one tools-disabled streaming turn through an
-authenticated private loopback bridge, caps the outbound response at 256 tokens, disables
+budget (greater than zero and at most $5). The default `basic` scenario runs one tools-disabled
+streaming turn through an authenticated private loopback bridge. Optional scenarios exercise a
+real `Read` tool continuation, a Claude Code `Agent` subagent, or a moderate 128 KiB context input.
+Every scenario caps each outbound response at 256 tokens, enforces its own request/time limit and a
+768 KiB input ceiling, confines file tools to the ephemeral working directory, terminates the full
+Claude process tree on timeout, and disables
 OpenCodex retry/failover/sidecars, and never persists prompts, responses, credentials, or raw
 errors. Live mode reuses the selected provider's stored authentication. The Claude budget is a
-client-side safety ceiling, not a provider invoice estimate; the one-request and output-token
-limits are the provider-independent bounds. There is no automatic persistence of results:
+client-side safety ceiling, not a provider invoice estimate; the request, input, and output limits
+are the provider-independent bounds. The context scenario verifies a substantial prompt crosses
+the real bridge; it is not a claim that the provider's advertised maximum context window was
+exhausted. There is no automatic persistence of results:
 
 ```bash
 OCX_ALLOW_CLAUDE_LIVE_CERT=1 bun run certify:claude -- --live \
   --provider <provider> --model <model> --max-budget-usd <amount> \
   --confirm-live-provider-charges --json
 ```
+
+Add `--scenario read-continuation`, `--scenario subagent`, or `--scenario long-context` to run one
+of the deeper checks. Run scenarios separately so each invocation has an explicit spend ceiling and
+an independently attributable result. A model that is available only through live catalog discovery
+may cause one authenticated, read-only model-list request before the inference limits begin; the JSON
+report identifies that with `discoveryPerformed`.
 
 Claude Desktop profile commands are:
 
