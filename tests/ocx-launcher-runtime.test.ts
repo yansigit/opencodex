@@ -16,17 +16,16 @@ const nodeAvailable = spawnSync("node", ["--version"], {
 }).status === 0;
 const runnable = process.platform === "win32" && nodeAvailable;
 
-// /healthz is the launcher's first trustworthy end-to-end startup signal: a
-// live Node parent or Bun child does not prove that the proxy is serving. The
-// old 25s budget expired on loaded Windows and macOS runners, and equivalent
-// real-proxy starts elsewhere in this suite have taken 46-47s. A loaded hosted
-// Windows fallback start has also crossed the former standalone 90s ceiling.
-// Compose the repository budgets for the Node launcher, its Bun child, and the
-// server bind instead of maintaining another drifting wall-clock constant.
-// Keep the case budget derived so process inspection and cleanup have their own
-// child-process envelope after readiness settles.
+// Runtime-selection assertions need the executable identity of the Node
+// launcher's direct Bun child, not a fully initialized HTTP server. Waiting for
+// /healthz coupled this test to unrelated config/ACL/server startup and produced
+// the recurring 25s -> 90s -> 120s Windows timeout escalations. Keep process
+// discovery and the surrounding cleanup independently bounded instead.
+const RUNTIME_CHILD_TIMEOUT_MS = SPAWN_BUDGET_MS;
+const EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS = 3 * SPAWN_BUDGET_MS;
+// The packaged first-start test does assert a serving proxy, so its readiness
+// signal legitimately includes two process starts plus the server bind.
 const PROXY_HEALTH_TIMEOUT_MS = 2 * SPAWN_BUDGET_MS + SERVER_BUDGET_MS;
-const EFFECTIVE_RUNTIME_TEST_TIMEOUT_MS = PROXY_HEALTH_TIMEOUT_MS + SPAWN_BUDGET_MS;
 
 type Health = {
   status: string;
@@ -123,6 +122,65 @@ function windowsProcessIdentity(pid: number): WindowsProcessIdentity | null {
   };
 }
 
+function windowsChildProcessIdentity(parentPid: number): WindowsProcessIdentity | null {
+  const result = spawnSync(
+    "powershell.exe",
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $children = @(`
+        + `Get-CimInstance Win32_Process -Filter "ParentProcessId = ${parentPid}" | `
+        + "Select-Object ProcessId, ParentProcessId, ExecutablePath, CreationDate"
+        + "); ConvertTo-Json -InputObject $children -Compress",
+    ],
+    { encoding: "utf8", timeout: 10_000, windowsHide: true },
+  );
+  if (result.status !== 0) throw new Error(`could not inspect child process identity: ${result.stderr.trim()}`);
+  if (!result.stdout.trim()) return null;
+  const parsed = JSON.parse(result.stdout) as Array<{
+    ProcessId?: number;
+    ParentProcessId?: number;
+    ExecutablePath?: string;
+    CreationDate?: string;
+  }>;
+  for (const value of parsed) {
+    if (
+      Number.isSafeInteger(value.ProcessId)
+      && value.ParentProcessId === parentPid
+      && typeof value.ExecutablePath === "string"
+      && typeof value.CreationDate === "string"
+    ) {
+      return {
+        pid: value.ProcessId!,
+        parentPid: value.ParentProcessId,
+        executablePath: value.ExecutablePath,
+        creationDate: value.CreationDate,
+      };
+    }
+  }
+  return null;
+}
+
+async function waitForChildProcessIdentity(
+  launcher: ChildProcess,
+  deadlineMs: number,
+): Promise<WindowsProcessIdentity | null> {
+  if (!launcher.pid) return null;
+  const deadline = performance.now() + deadlineMs;
+  while (performance.now() < deadline) {
+    if (launcher.exitCode !== null || launcher.signalCode !== null) return null;
+    try {
+      const identity = windowsChildProcessIdentity(launcher.pid);
+      if (identity) return identity;
+    } catch {
+      // CIM can be briefly unavailable while the child is being registered.
+    }
+    await Bun.sleep(200);
+  }
+  return null;
+}
+
 function canonicalWindowsPath(path: string): string {
   try {
     return realpathSync.native(path).toLowerCase();
@@ -210,12 +268,8 @@ async function effectiveRuntime(override: string): Promise<string> {
     launcherPid = launcher.pid;
     ownedLauncher = captureWindowsProcessIdentity(launcherPid);
 
-    const health = await waitForHealth(port, PROXY_HEALTH_TIMEOUT_MS, launcher);
-    if (!health) throw new Error("proxy did not become healthy");
-    const identity = windowsProcessIdentity(health.pid);
-    if (!identity || identity.parentPid !== launcher.pid) {
-      throw new Error("health PID is not the spawned Node launcher's direct Bun child");
-    }
+    const identity = await waitForChildProcessIdentity(launcher, RUNTIME_CHILD_TIMEOUT_MS);
+    if (!identity) throw new Error("Node launcher did not spawn a Bun child");
     ownedProxy = identity;
     runtimePath = identity.executablePath;
   } catch (error) {
