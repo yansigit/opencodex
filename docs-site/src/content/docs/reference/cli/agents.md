@@ -211,13 +211,23 @@ User-exported `ANTHROPIC_*` variables always take precedence.
 `bun run certify:claude` runs a bounded, hermetic certification against an isolated
 Claude Code configuration and a deterministic loopback provider. It skips clearly when
 the `claude` executable is unavailable and reports a closed text summary by default;
-pass `--json` for the sanitized structured summary. Both forms include streaming and
-tool-continuation checks. The run never reuses credentials or proxy settings.
+pass `--json` for the sanitized structured summary. The hermetic run includes streaming and
+tool-continuation checks in both output formats. It never reuses credentials or proxy settings.
 
-Live certification is currently a fail-closed scaffold. It requires both
-`--live --confirm-live-provider-charges` and `OCX_ALLOW_CLAUDE_LIVE_CERT=1`; even then
-no provider request is made and the report is `live_fail` until a reviewed billing-safe
-harness is enabled. There is no automatic persistence of results.
+Live certification requires both the `--confirm-live-provider-charges` flag and
+`OCX_ALLOW_CLAUDE_LIVE_CERT=1`, plus an exact stored provider/model and an explicit Claude
+budget (greater than zero and at most $5). It runs one tools-disabled streaming turn through an
+authenticated private loopback bridge, caps the outbound response at 256 tokens, disables
+OpenCodex retry/failover/sidecars, and never persists prompts, responses, credentials, or raw
+errors. Live mode reuses the selected provider's stored authentication. The Claude budget is a
+client-side safety ceiling, not a provider invoice estimate; the one-request and output-token
+limits are the provider-independent bounds. There is no automatic persistence of results:
+
+```bash
+OCX_ALLOW_CLAUDE_LIVE_CERT=1 bun run certify:claude -- --live \
+  --provider <provider> --model <model> --max-budget-usd <amount> \
+  --confirm-live-provider-charges --json
+```
 
 Claude Desktop profile commands are:
 
