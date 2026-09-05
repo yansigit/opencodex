@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assessLiveScenario,
+  assessHighContextCapacity,
+  authoritativeHighContextInputTokens,
   evaluateLivePolicy,
+  highContextConsent,
+  highContextPrompt,
   inspectScenarioRequestBody,
   liveConfig,
   parseLiveOptions,
@@ -12,6 +16,7 @@ import {
   runCertificationCommandForTests,
   runHermetic,
   sanitizedChildEnv,
+  scenarioCommand,
 } from "../scripts/claude-certification";
 
 describe("Claude certification runner policy", () => {
@@ -63,6 +68,28 @@ describe("Claude certification runner policy", () => {
     expect(evaluateLivePolicy({ confirmFlag: false, allowEnv: true })).toMatchObject({ status: "skipped", requests: 0 });
     expect(evaluateLivePolicy({ confirmFlag: true, allowEnv: true })).toMatchObject({ status: "live_fail", requests: 0 });
   });
+  test("high-context has additive consent and fail-closed capacity", () => {
+    expect(highContextConsent(true, true)).toBe(true);
+    expect(highContextConsent(true, false)).toBe(false);
+    expect(assessHighContextCapacity([{ provider: "p", id: "m", contextWindow: 999_999, metadataFieldSources: { contextWindow: "registry" } }], "p", "m")).toEqual({ skipped: true, reason: "capacity_undetermined" });
+    expect(assessHighContextCapacity([{ provider: "p", id: "m", contextWindow: Number.NaN, metadataFieldSources: { contextWindow: "live" } }], "p", "m")).toEqual({ skipped: true, reason: "capacity_undetermined" });
+    expect(assessHighContextCapacity([{ provider: "p", id: "m", contextWindow: 1_000_000, metadataFieldSources: { contextWindow: "derived" } }], "p", "m")).toEqual({ skipped: true, reason: "capacity_undetermined" });
+    expect(assessHighContextCapacity([{ provider: "other", id: "m", contextWindow: 1_000_000, metadataFieldSources: { contextWindow: "live" } }], "p", "m")).toEqual({ skipped: true, reason: "capacity_undetermined" });
+    expect(assessHighContextCapacity([{ provider: "p", id: "m", contextWindow: 1_000_000, metadataFieldSources: { contextWindow: "snapshot" } }], "p", "m")).toEqual({ declaredContextTokens: 1_000_000, contextSource: "snapshot" });
+    expect(new TextEncoder().encode(highContextPrompt()).byteLength).toBe(900_000);
+    const command = scenarioCommand("high-context", "/cert");
+    expect(command.args.filter(value => value === "--model")).toHaveLength(1);
+    expect(command.args).not.toContain("-");
+    expect(command.args).toContain("claude-sonnet-4-5[1m]");
+    expect(command.input).toBe(highContextPrompt());
+  });
+  test("accepts only authoritative usage from the resolved adapter and routed model", () => {
+    const usage = { inputTokens: 456_789, outputTokens: 1 };
+    expect(authoritativeHighContextInputTokens({ adapterKind: "anthropic", modelId: "p/m", usage }, "p", "m", "anthropic")).toBe(456_789);
+    expect(authoritativeHighContextInputTokens({ adapterKind: "openai-responses", modelId: "m", usage }, "p", "m", "openai-responses")).toBe(456_789);
+    expect(authoritativeHighContextInputTokens({ adapterKind: "anthropic", modelId: "other/m", usage }, "p", "m", "anthropic")).toBeUndefined();
+    expect(authoritativeHighContextInputTokens({ adapterKind: "anthropic", modelId: "p/m", usage: { ...usage, estimated: true } }, "p", "m", "anthropic")).toBeUndefined();
+  });
   test("strictly parses live route and budget options", () => {
     expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1.5"])).toEqual({ provider: "p", model: "m", maxBudgetUsd: 1.5, scenario: "basic" });
     expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1.5", "--scenario", "subagent"])).toEqual({ provider: "p", model: "m", maxBudgetUsd: 1.5, scenario: "subagent" });
@@ -71,6 +98,7 @@ describe("Claude certification runner policy", () => {
     expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "0"])).toEqual({ error: "invalid max-budget-usd" });
     expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "5.01"])).toEqual({ error: "invalid max-budget-usd" });
     expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1", "--scenario", "unknown"])).toEqual({ error: "invalid certification scenario" });
+    expect(parseLiveOptions(["--provider", "p", "--model", "m", "--max-budget-usd", "1", "--scenario", "high-context", "--confirm-live-high-context-costs"])).toMatchObject({ scenario: "high-context" });
   });
 
   test("assesses scenario-specific evidence without retaining request content", () => {
@@ -82,6 +110,10 @@ describe("Claude certification runner policy", () => {
     expect(assessLiveScenario("subagent", base, 0, "OCX_CLAUDE_SUBAGENT_OK")).toEqual({ passed: false, reason: "subagent_not_observed" });
     expect(assessLiveScenario("long-context", base, 0, "OCX_CLAUDE_CONTEXT_OK")).toEqual({ passed: true });
     expect(assessLiveScenario("long-context", { ...base, maxPromptBytes: 1_000 }, 0, "OCX_CLAUDE_CONTEXT_OK")).toEqual({ passed: false, reason: "context_too_short" });
+    expect(assessLiveScenario("high-context", { ...base, rawUsageObservations: 1, maxPromptBytes: 900_000, providerInputTokens: 400_000 }, 0, "OCX_CLAUDE_HIGH_CONTEXT_OK")).toEqual({ passed: true });
+    expect(assessLiveScenario("high-context", { ...base, rawUsageObservations: 0, maxPromptBytes: 900_000 }, 0, "OCX_CLAUDE_HIGH_CONTEXT_OK")).toEqual({ passed: false, reason: "usage_missing_or_too_low" });
+    expect(assessLiveScenario("high-context", { ...base, rawUsageObservations: 2, maxPromptBytes: 900_000, providerInputTokens: 500_000 }, 0, "OCX_CLAUDE_HIGH_CONTEXT_OK")).toEqual({ passed: false, reason: "usage_missing_or_too_low" });
+    expect(assessLiveScenario("high-context", { ...base, rawUsageObservations: 1, maxPromptBytes: 900_000, providerInputTokens: 500_000 }, 0, "WRONG")).toEqual({ passed: false, reason: "marker_mismatch" });
     expect(assessLiveScenario("basic", { ...base, limitExceeded: true }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "request_limit" });
     expect(assessLiveScenario("basic", { ...base, inputLimitExceeded: true }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "input_limit" });
     expect(assessLiveScenario("basic", { ...base, hadHttpError: true }, 0, "OCX_CLAUDE_LIVE_OK")).toEqual({ passed: false, reason: "upstream_http" });

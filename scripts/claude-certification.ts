@@ -18,6 +18,7 @@ import type { OcxConfig } from "../src/types";
 
 const MODEL = "claude-cert-hermetic";
 const CLI_MODEL = "claude-sonnet-4-5";
+const HIGH_CONTEXT_CLI_MODEL = "claude-sonnet-4-5[1m]";
 const ADMISSION_TOKEN = ["sk-ant-api03", "hermetic-certification-key"].join("-");
 const MAX_OUTPUT = 256 * 1024;
 const TIMEOUT_MS = 45_000;
@@ -27,6 +28,10 @@ const SUBAGENT_MARKER = "OCX_CLAUDE_SUBAGENT_OK";
 const SUBAGENT_SYSTEM_MARKER = "OCX_CLAUDE_CHILD_SYSTEM";
 const CONTEXT_MARKER = "OCX_CLAUDE_CONTEXT_OK";
 const LONG_CONTEXT_BYTES = 128 * 1024;
+const HIGH_CONTEXT_PROMPT_BYTES = 900_000;
+const HIGH_CONTEXT_INPUT_CEILING = 1.5 * 1024 * 1024;
+const HIGH_CONTEXT_MIN_INPUT_TOKENS = 400_000;
+const HIGH_CONTEXT_MARKER = "OCX_CLAUDE_HIGH_CONTEXT_OK";
 const LIVE_INPUT_BYTE_CEILING = 768 * 1024;
 const CREDENTIAL = /(?:API_KEY|API_TOKEN|AUTH_TOKEN|ACCESS_TOKEN|CREDENTIAL|SECRET|PASSWORD|TOKEN)/i;
 const PROXY = /^(?:HTTP|HTTPS|ALL)_PROXY$/i;
@@ -34,7 +39,7 @@ const CAPABILITY_ENV = /^(?:SSH_AUTH_SOCK|KUBECONFIG|GIT_CONFIG_GLOBAL|GIT_CONFI
 const RUNTIME_INJECTION_ENV = /^(?:NODE_OPTIONS|BUN_OPTIONS|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z0-9_]+|PYTHONPATH|PYTHONHOME|RUBYOPT|PERL5OPT|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS)$/i;
 
 export type CertificationStatus = "live_pass" | "live_fail" | "skipped" | "hermetic_pass" | "hermetic_fail";
-export type CertificationScenario = "basic" | "read-continuation" | "subagent" | "long-context";
+export type CertificationScenario = "basic" | "read-continuation" | "subagent" | "long-context" | "high-context";
 export interface CertificationReport {
   mode: "hermetic" | "live";
   status: CertificationStatus;
@@ -52,6 +57,10 @@ export interface CertificationReport {
   durationMs?: number;
   httpStatus?: number;
   reason?: string;
+  declaredContextTokens?: number;
+  contextSource?: string;
+  providerInputTokens?: number;
+  rawUsageObservations?: number;
 }
 
 export interface LiveOptions { provider: string; model: string; maxBudgetUsd: number; scenario: CertificationScenario }
@@ -61,13 +70,14 @@ const SCENARIO_LIMITS: Record<CertificationScenario, ScenarioLimits> = {
   "read-continuation": { requests: 4, maxTokens: 256, timeoutMs: 90_000 },
   subagent: { requests: 6, maxTokens: 256, timeoutMs: 120_000 },
   "long-context": { requests: 1, maxTokens: 256, timeoutMs: 90_000 },
+  "high-context": { requests: 1, maxTokens: 64, timeoutMs: 300_000 },
 };
 
 export function parseLiveOptions(args: string[]): LiveOptions | { error: string } {
   const values = new Map<string, string>();
   for (let i = 0; i < args.length; i++) {
     const flag = args[i];
-    if (["--live", "--json", "--confirm-live-provider-charges"].includes(flag)) continue;
+    if (["--live", "--json", "--confirm-live-provider-charges", "--confirm-live-high-context-costs"].includes(flag)) continue;
     if (!["--provider", "--model", "--max-budget-usd", "--scenario"].includes(flag) || values.has(flag)) return { error: "invalid live certification arguments" };
     const next = args[++i];
     if (!next || next.startsWith("--")) return { error: "provider, model, and max-budget-usd are required" };
@@ -221,6 +231,37 @@ interface LiveObservation {
   inputLimitExceeded: boolean;
   hadHttpError: boolean;
   httpStatus?: number;
+  providerInputTokens?: number;
+  rawUsageObservations?: number;
+}
+
+export interface HighContextCapacity {
+  declaredContextTokens: number;
+  contextSource: "live" | "registry" | "snapshot";
+}
+
+export function assessHighContextCapacity(models: readonly { provider: string; id: string; contextWindow?: number; metadataFieldSources?: { contextWindow?: string } }[], provider: string, model: string): HighContextCapacity | { skipped: true; reason: "capacity_undetermined" } {
+  const row = models.find(candidate => candidate.provider === provider && candidate.id === model);
+  const contextWindow = row?.contextWindow;
+  const source = row?.metadataFieldSources?.contextWindow;
+  if (typeof contextWindow !== "number" || !Number.isSafeInteger(contextWindow) || contextWindow < 1_000_000 || (source !== "live" && source !== "registry" && source !== "snapshot")) return { skipped: true, reason: "capacity_undetermined" };
+  return { declaredContextTokens: contextWindow, contextSource: source };
+}
+
+export function authoritativeHighContextInputTokens(
+  observation: { adapterKind: string; modelId: string; usage?: { inputTokens: number; estimated?: boolean } },
+  provider: string,
+  model: string,
+  adapter: string | undefined,
+): number | undefined {
+  const inputTokens = observation.usage?.inputTokens;
+  const expectedModel = observation.modelId === model || slugEquals(observation.modelId, provider, model);
+  if (observation.adapterKind !== adapter || !expectedModel || observation.usage?.estimated === true || typeof inputTokens !== "number" || !Number.isSafeInteger(inputTokens) || inputTokens < 0) return undefined;
+  return inputTokens;
+}
+
+export function highContextConsent(confirmFlag: boolean, allowEnv: boolean): boolean {
+  return confirmFlag && allowEnv;
 }
 
 function containsContentType(value: unknown, expected: string): boolean {
@@ -301,6 +342,12 @@ export function assessLiveScenario(
     if (!observation.subagentObserved || !observation.toolContinuation || observation.requests < 2) return { passed: false, reason: "subagent_not_observed" };
     return output.includes(SUBAGENT_MARKER) ? { passed: true } : { passed: false, reason: "marker_mismatch" };
   }
+  if (scenario === "high-context") {
+    if (observation.requests !== 1) return { passed: false, reason: "request_count" };
+    if (observation.maxPromptBytes < HIGH_CONTEXT_PROMPT_BYTES) return { passed: false, reason: "context_too_short" };
+    if (observation.rawUsageObservations !== 1 || observation.providerInputTokens === undefined || observation.providerInputTokens < HIGH_CONTEXT_MIN_INPUT_TOKENS) return { passed: false, reason: "usage_missing_or_too_low" };
+    return output.trim() === HIGH_CONTEXT_MARKER ? { passed: true } : { passed: false, reason: "marker_mismatch" };
+  }
   if (observation.requests !== 1) return { passed: false, reason: "request_count" };
   if (observation.maxPromptBytes < LONG_CONTEXT_BYTES) return { passed: false, reason: "context_too_short" };
   return output.trim() === CONTEXT_MARKER ? { passed: true } : { passed: false, reason: "marker_mismatch" };
@@ -312,14 +359,24 @@ function longContextPrompt(): string {
   return `${filler}\nThe verification marker is ${CONTEXT_MARKER}. Reply with exactly that marker and nothing else.`;
 }
 
-function scenarioCommand(scenario: CertificationScenario, root: string): { args: string[]; input?: string } {
-  const common = ["--model", CLI_MODEL, "--restricted", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--no-session-persistence", "--output-format", "text"];
+export function highContextPrompt(): string {
+  const suffix = `\nReply with exactly ${HIGH_CONTEXT_MARKER} and nothing else.`;
+  const punctuation = "q! x? ";
+  const fillerBytes = HIGH_CONTEXT_PROMPT_BYTES - new TextEncoder().encode(suffix).byteLength;
+  const filler = punctuation.repeat(Math.ceil(fillerBytes / punctuation.length)).slice(0, fillerBytes);
+  return `${filler}${suffix}`;
+}
+
+export function scenarioCommand(scenario: CertificationScenario, root: string): { args: string[]; input?: string } {
+  const commandModel = scenario === "high-context" ? HIGH_CONTEXT_CLI_MODEL : CLI_MODEL;
+  const common = ["--model", commandModel, "--restricted", "--permission-mode", "dontAsk", "--permission-prompts", "none", "--strict-mcp-config", "--no-session-persistence", "--output-format", "text"];
   if (scenario === "basic") return { args: ["-p", `Reply with exactly ${LIVE_MARKER} and nothing else.`, ...common, "--tools", ""] };
   if (scenario === "read-continuation") return { args: ["-p", `Use the Read tool once on ${join(root, "read-marker.txt")}, then reply with exactly ${READ_MARKER}.`, ...common, "--allowedTools", "Read"] };
   if (scenario === "subagent") {
     const agents = JSON.stringify({ "cert-worker": { description: "Certification worker", prompt: `${SUBAGENT_SYSTEM_MARKER}. Reply with exactly ${SUBAGENT_MARKER}.`, tools: [], model: CLI_MODEL, maxTurns: 1 } });
     return { args: ["-p", `Use the Agent tool to delegate to cert-worker. Then reply with exactly ${SUBAGENT_MARKER}.`, ...common, "--agents", agents, "--allowedTools", "Agent"] };
   }
+  if (scenario === "high-context") return { args: ["-p", ...common, "--tools", ""], input: highContextPrompt() };
   return { args: ["-p", ...common, "--tools", ""], input: longContextPrompt() };
 }
 
@@ -396,6 +453,7 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
   let discoveryPerformed = false;
   let source: OcxConfig;
   let cfg: OcxConfig;
+  let highCapacity: HighContextCapacity | undefined;
   try {
     source = loadConfig();
     const provider = source.providers[options.provider];
@@ -408,16 +466,26 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
       || provider.selectedModels?.includes(options.model) === true
       || nativeOpenAiModel;
     if (!alreadyKnown) discoveryPerformed = true;
-    const discoveredModelIds = alreadyKnown
-      ? []
-      : (await gatherRoutedModels({
+    const gatheredRows = options.scenario === "high-context"
+      ? await gatherRoutedModels({ ...source, defaultProvider: options.provider, providers: { [options.provider]: provider }, combos: undefined, routingProfiles: undefined })
+      : undefined;
+    if (options.scenario === "high-context") discoveryPerformed = true;
+    const discoveredModelIds = options.scenario === "high-context"
+      ? gatheredRows!.filter(model => model.provider === options.provider).map(model => model.id)
+      : alreadyKnown ? [] : (await gatherRoutedModels({
           ...source,
           defaultProvider: options.provider,
           providers: { [options.provider]: provider },
           combos: undefined,
           routingProfiles: undefined,
         })).filter(model => model.provider === options.provider).map(model => model.id);
+    if (options.scenario === "high-context") {
+      const capacity = assessHighContextCapacity(gatheredRows!, options.provider, options.model);
+      if ("skipped" in capacity) return { mode: "live", status: "skipped", cliPresent: false, streaming: false, toolContinuation: false, scenario: options.scenario, discoveryPerformed: true, requests: 0, provider: options.provider, model: options.model, durationMs: Date.now() - started, reason: capacity.reason };
+      highCapacity = capacity;
+    }
     cfg = liveConfig(source, options.provider, options.model, discoveredModelIds);
+    if (options.scenario === "high-context" && cfg.claudeCode) cfg.claudeCode = { ...cfg.claudeCode, modelMap: { ...cfg.claudeCode.modelMap, [HIGH_CONTEXT_CLI_MODEL]: routedSlug(options.provider, options.model) } };
   } catch {
     return { mode: "live", status: "live_fail", cliPresent: true, streaming: false, toolContinuation: false, scenario: options.scenario, discoveryPerformed, requests: 0, provider: options.provider, model: options.model, durationMs: Date.now() - started, reason: "route_unavailable" };
   }
@@ -425,7 +493,7 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
   const root = mkdtempSync(join(tmpdir(), "ocx-claude-live-cert-"));
   const dirs = { home: join(root, "home"), claude: join(root, "claude"), ocx: join(root, "ocx") };
   Object.values(dirs).forEach(dir => mkdirSync(dir, { recursive: true, mode: 0o700 }));
-  const observation: LiveObservation = { requests: 0, streaming: false, toolContinuation: false, subagentObserved: false, maxInputBytes: 0, maxPromptBytes: 0, limitExceeded: false, inputLimitExceeded: false, hadHttpError: false };
+  const observation: LiveObservation = { requests: 0, streaming: false, toolContinuation: false, subagentObserved: false, maxInputBytes: 0, maxPromptBytes: 0, limitExceeded: false, inputLimitExceeded: false, hadHttpError: false, rawUsageObservations: 0 };
   let bridge: ReturnType<typeof Bun.serve> | undefined;
   try {
     bridge = Bun.serve({
@@ -445,14 +513,16 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
         }
         observation.requests++;
         const declaredBytes = Number(req.headers.get("content-length") ?? 0);
-        if (Number.isFinite(declaredBytes) && declaredBytes > LIVE_INPUT_BYTE_CEILING) {
+        // This is a transport byte ceiling, independent of the catalog's token-unit capacity gate.
+        const inputCeiling = options.scenario === "high-context" ? HIGH_CONTEXT_INPUT_CEILING : LIVE_INPUT_BYTE_CEILING;
+        if (Number.isFinite(declaredBytes) && declaredBytes > inputCeiling) {
           observation.inputLimitExceeded = true;
           return Response.json({ type: "error", error: { type: "invalid_request_error", message: "certification input limit reached" } }, { status: 413 });
         }
         const rawBody = await req.clone().text();
         const inputBytes = new TextEncoder().encode(rawBody).byteLength;
         observation.maxInputBytes = Math.max(observation.maxInputBytes, inputBytes);
-        if (inputBytes > LIVE_INPUT_BYTE_CEILING) {
+        if (inputBytes > inputCeiling) {
           observation.inputLimitExceeded = true;
           return Response.json({ type: "error", error: { type: "invalid_request_error", message: "certification input limit reached" } }, { status: 413 });
         }
@@ -480,6 +550,11 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
           { provider: options.provider, model: options.model, surface: "claude" },
           undefined,
           cfg,
+          options.scenario === "high-context" ? { onRawUsage: usage => {
+            observation.rawUsageObservations = (observation.rawUsageObservations ?? 0) + 1;
+            const inputTokens = authoritativeHighContextInputTokens(usage, options.provider, options.model, cfg.providers[options.provider]?.adapter);
+            if (inputTokens !== undefined) observation.providerInputTokens = inputTokens;
+          } } : undefined,
         );
         observation.httpStatus = response.status;
         observation.hadHttpError ||= response.status >= 400;
@@ -493,7 +568,7 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
       {},
       { preBunAnthropicSlots: [] },
     );
-    env.ANTHROPIC_MODEL = CLI_MODEL;
+    env.ANTHROPIC_MODEL = options.scenario === "high-context" ? HIGH_CONTEXT_CLI_MODEL : CLI_MODEL;
     env.CLAUDE_CODE_MAX_TURNS = String(limits.requests);
     env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
     env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
@@ -507,11 +582,11 @@ export async function runLive(options: LiveOptions, cli = process.env.CLAUDE_BIN
       result = await command(cli, [...invocation.args, "--max-budget-usd", String(options.maxBudgetUsd)], root, env, limits.timeoutMs, invocation.input);
     } catch (error) {
       const missing = error instanceof Error && error.name === "MissingExecutable";
-      return { mode: "live", status: missing ? "skipped" : "live_fail", cliPresent: !missing, streaming: observation.streaming, toolContinuation: observation.toolContinuation, scenario: options.scenario, subagentObserved: observation.subagentObserved, maxInputBytes: observation.maxInputBytes, maxPromptBytes: observation.maxPromptBytes, discoveryPerformed, requests: observation.requests, provider: options.provider, model: options.model, durationMs: Date.now() - started, httpStatus: observation.httpStatus, reason: missing ? "cli_unavailable" : (error instanceof Error && error.message === "timeout" ? "timeout" : "subprocess_failure") };
+      return { mode: "live", status: missing ? "skipped" : "live_fail", cliPresent: !missing, streaming: observation.streaming, toolContinuation: observation.toolContinuation, scenario: options.scenario, subagentObserved: observation.subagentObserved, maxInputBytes: observation.maxInputBytes, maxPromptBytes: observation.maxPromptBytes, discoveryPerformed, requests: observation.requests, provider: options.provider, model: options.model, durationMs: Date.now() - started, httpStatus: observation.httpStatus, declaredContextTokens: highCapacity?.declaredContextTokens, contextSource: highCapacity?.contextSource, providerInputTokens: observation.providerInputTokens, rawUsageObservations: options.scenario === "high-context" ? observation.rawUsageObservations : undefined, reason: missing ? "cli_unavailable" : (error instanceof Error && error.message === "timeout" ? "timeout" : "subprocess_failure") };
     }
     const assessment = assessLiveScenario(options.scenario, observation, result.code, result.out);
     if (!assessment.passed && assessment.reason === "client_nonzero" && /budget|cost limit|max-budget/i.test(result.err)) assessment.reason = "client_budget";
-    return { mode: "live", status: assessment.passed ? "live_pass" : "live_fail", cliPresent: true, streaming: observation.streaming, toolContinuation: observation.toolContinuation, scenario: options.scenario, subagentObserved: observation.subagentObserved, maxInputBytes: observation.maxInputBytes, maxPromptBytes: observation.maxPromptBytes, discoveryPerformed, requests: observation.requests, provider: options.provider, model: options.model, durationMs: Date.now() - started, httpStatus: observation.httpStatus, reason: assessment.reason };
+    return { mode: "live", status: assessment.passed ? "live_pass" : "live_fail", cliPresent: true, streaming: observation.streaming, toolContinuation: observation.toolContinuation, scenario: options.scenario, subagentObserved: observation.subagentObserved, maxInputBytes: observation.maxInputBytes, maxPromptBytes: observation.maxPromptBytes, discoveryPerformed, requests: observation.requests, provider: options.provider, model: options.model, durationMs: Date.now() - started, httpStatus: observation.httpStatus, providerInputTokens: options.scenario === "high-context" ? observation.providerInputTokens : undefined, rawUsageObservations: options.scenario === "high-context" ? observation.rawUsageObservations : undefined, declaredContextTokens: highCapacity?.declaredContextTokens, contextSource: highCapacity?.contextSource, reason: assessment.reason };
   } finally {
     bridge?.stop(true);
     rmSync(root, { recursive: true, force: true });
@@ -522,7 +597,13 @@ async function main() {
   const args = process.argv.slice(2); const live = args.includes("--live"); const json = args.includes("--json");
   let report: CertificationReport;
   if (live) {
-    const policy = evaluateLivePolicy({ confirmFlag: args.includes("--confirm-live-provider-charges"), allowEnv: process.env.OCX_ALLOW_CLAUDE_LIVE_CERT === "1" });
+    const optionsForConsent = parseLiveOptions(args);
+    const high = !("error" in optionsForConsent) && optionsForConsent.scenario === "high-context";
+    const policy = high
+      ? (highContextConsent(args.includes("--confirm-live-provider-charges") && args.includes("--confirm-live-high-context-costs"), process.env.OCX_ALLOW_CLAUDE_LIVE_CERT === "1" && process.env.OCX_ALLOW_CLAUDE_HIGH_CONTEXT_CERT === "1")
+        ? evaluateLivePolicy({ confirmFlag: true, allowEnv: true })
+        : { mode: "live", status: "skipped", cliPresent: false, streaming: false, toolContinuation: false, requests: 0, reason: "high-context certification requires --confirm-live-provider-charges, --confirm-live-high-context-costs, OCX_ALLOW_CLAUDE_LIVE_CERT=1, and OCX_ALLOW_CLAUDE_HIGH_CONTEXT_CERT=1" } as CertificationReport)
+      : evaluateLivePolicy({ confirmFlag: args.includes("--confirm-live-provider-charges"), allowEnv: process.env.OCX_ALLOW_CLAUDE_LIVE_CERT === "1" });
     if (policy.status === "skipped") report = policy;
     else {
       const options = parseLiveOptions(args);

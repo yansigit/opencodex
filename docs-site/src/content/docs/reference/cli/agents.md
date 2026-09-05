@@ -241,6 +241,27 @@ an independently attributable result. A model that is available only through liv
 may cause one authenticated, read-only model-list request before the inference limits begin; the JSON
 report identifies that with `discoveryPerformed`.
 
+The optional `high-context` tier is a distinct, fail-closed live certification (not the 128 KiB
+long-context smoke). It sends exactly one streaming request with a deterministic 900,000-byte
+punctuation-rich prompt, 64 output tokens, a 300-second timeout, and no tools or retries. It runs
+with a separate 1.5 MiB raw-request ceiling and only when both additive gates are present:
+`--confirm-live-high-context-costs` and
+`OCX_ALLOW_CLAUDE_HIGH_CONTEXT_CERT=1` (alongside the ordinary live consent gates). Preflight
+requires an authoritative catalog context window of at least 1,000,000 tokens from live, registry,
+or snapshot metadata; otherwise it skips with `capacity_undetermined` without making an inference
+request. Upstream usage must be authoritative (not estimated) and report at least 400,000 input
+tokens, and the response must contain the exact high-context marker.
+
+```bash
+OCX_ALLOW_CLAUDE_LIVE_CERT=1 OCX_ALLOW_CLAUDE_HIGH_CONTEXT_CERT=1 \
+bun run certify:claude -- --live --scenario high-context \
+  --provider <provider> --model <model> --max-budget-usd <amount> \
+  --confirm-live-provider-charges --confirm-live-high-context-costs --json
+```
+
+The ordinary `long-context` scenario remains the lower-cost 128 KiB smoke check and does not prove
+that a provider supports a million-token context window.
+
 Claude Desktop profile commands are:
 
 ```text
