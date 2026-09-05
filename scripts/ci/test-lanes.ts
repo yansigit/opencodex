@@ -32,12 +32,19 @@ export const SERIAL_TEST_FILES = [
   "tests/request-decompress.test.ts",
   "tests/responses-stateless-dangling-call-repair.test.ts",
   "tests/server-auth.test.ts",
+  // Relays a real 50 MiB WebSocket frame to prove the production ceiling. On a
+  // loaded macOS pool this exhausted its 15s internal deadline while the same
+  // runner completed it in ~5.6s without contention.
+  "tests/server-live.test.ts",
   "tests/server-search.test.ts",
   "tests/shutdown-launcher.test.ts",
   "tests/storage-policy-job-responsive.test.ts",
   "tests/storage-restore-job-responsive.test.ts",
   "tests/test-runner.test.ts",
   "tests/update-stop-first.test.ts",
+  // Builds and parses 500,001 JSONL entries to prove the entry cap. It reached
+  // the 30s test budget under pool contention and completes in ~5s in isolation.
+  "tests/usage-log.test.ts",
 ] as const;
 
 export const DEDICATED_TEST_FILES = [
