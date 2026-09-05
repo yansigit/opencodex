@@ -9,6 +9,7 @@ const {
   buildAutomationComment,
   classifyPullRequest,
   exactHeadGate,
+  isMissingPullRequestError,
   REQUIRED_CHECKS,
   summarizeAgedHolds,
   workflowRunRetryDisposition,
@@ -131,6 +132,15 @@ describe("workflowRunRetryDisposition", () => {
       base: { ref: "main", sha: BASE_SHA, repo: { full_name: "yansigit/opencodex" } },
       head: { ref: "dev", sha: SHA, repo: { full_name: "yansigit/opencodex" } },
     }).action, "rerun");
+  });
+});
+
+describe("isMissingPullRequestError", () => {
+  it("recognizes only GitHub's missing-resource status", () => {
+    assert.equal(isMissingPullRequestError({ status: 404 }), true);
+    assert.equal(isMissingPullRequestError({ status: "404" }), true);
+    assert.equal(isMissingPullRequestError({ status: 403 }), false);
+    assert.equal(isMissingPullRequestError(new Error("not found")), false);
   });
 });
 

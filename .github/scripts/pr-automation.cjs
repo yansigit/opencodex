@@ -178,6 +178,10 @@ function workflowRunRetryDisposition({ run, pr, repository } = {}) {
   return { action: "rerun", reason: `first-${run.conclusion}`, runId: Number(run.id), pullNumber: Number(pr.number) };
 }
 
+function isMissingPullRequestError(error) {
+  return Number(error?.status) === 404;
+}
+
 function filePathEntries(files = []) {
   return (files || []).flatMap(file => {
     if (typeof file === "string") return [{ filename: file }];
@@ -441,6 +445,7 @@ module.exports = {
   buildAutomationComment,
   classifyPullRequest,
   exactHeadGate,
+  isMissingPullRequestError,
   summarizeAgedHolds,
   workflowRunRetryDisposition,
 };
