@@ -282,6 +282,13 @@ describe("two real processes contend for one lock", () => {
    * production module.
    */
   const childPath = join(import.meta.dir, "helpers", "codex-write-lock-child.ts");
+  // The promotion matrix can overlap the dev-push matrix. On windows-latest a
+  // fresh Bun child has then taken more than the generic 15 s internal deadline
+  // just to reach its first synchronous marker. Keep the proof bounded, but size
+  // its Windows startup and whole-case budgets for the two real children the
+  // assertion intrinsically requires.
+  const lockChildStartupDeadlineMs = process.platform === "win32" ? 30_000 : INTERNAL_DEADLINE_MS;
+  const lockEnvironmentCaseBudgetMs = process.platform === "win32" ? 90_000 : SPAWN_BUDGET_MS;
 
   function spawnChild(payload: Record<string, unknown>) {
     return Bun.spawn(["bun", childPath], {
@@ -312,9 +319,10 @@ describe("two real processes contend for one lock", () => {
   }
 
   // A spawned holder child boots in 8-19 s on a loaded windows-latest shard; the 10 s
-  // literal expired first on run 33930757649. Keep this internal wait below the case budget
-  // so its marker-specific diagnostic is reported instead of Bun's test timeout.
-  async function waitFor(path: string, timeoutMs = INTERNAL_DEADLINE_MS): Promise<void> {
+  // literal expired first on run 33930757649 and the generic 15 s deadline expired on
+  // run 33993001186. Keep this internal wait below the case budget so its marker-specific
+  // diagnostic is reported instead of Bun's test timeout.
+  async function waitFor(path: string, timeoutMs = lockChildStartupDeadlineMs): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (Bun.file(path).size > 0) return;
@@ -440,26 +448,39 @@ describe("two real processes contend for one lock", () => {
       // holdMs is a ceiling, not a duration: the release marker ends the hold. It only has
       // to outlast the contender's process boot, which took >4 s on windows-latest in run
       // 33603770447 and made the default 3 s hold expire first (read as 'acquired').
-      const holder = spawnChildWithEnv({ holdMarker, releaseMarker, timeoutMs: 0, holdMs: 20_000 }, { ...a });
-      await waitFor(holdMarker);
-
-      // Fail-fast: if the two environments produced different lock files this
-      // would acquire instead of reporting contention.
-      const contender = await childResult(
-        spawnChildWithEnv({ timeoutMs: 0 }, { ...b }),
+      const holder = spawnChildWithEnv(
+        {
+          holdMarker,
+          releaseMarker,
+          timeoutMs: 0,
+          holdMs: lockChildStartupDeadlineMs * 2,
+        },
+        { ...a },
       );
-      expect(contender.status).toBe("busy");
+      try {
+        await waitFor(holdMarker);
 
-      writeFileSync(releaseMarker, "go");
-      const held = await childResult(holder);
-      expect(held.status).toBe("acquired");
+        // Fail-fast: if the two environments produced different lock files this
+        // would acquire instead of reporting contention.
+        const contender = await childResult(
+          spawnChildWithEnv({ timeoutMs: 0 }, { ...b }),
+        );
+        expect(contender.status).toBe("busy");
 
-      // And the identity is literally the same value, not merely a shared outcome.
-      const after = await childResult(
-        spawnChildWithEnv({ timeoutMs: 5_000 }, { ...b }),
-      );
-      expect(after.status).toBe("acquired");
-      expect(after.lockId).toBe(held.lockId);
-    }, SPAWN_BUDGET_MS);
+        writeFileSync(releaseMarker, "go");
+        const held = await childResult(holder);
+        expect(held.status).toBe("acquired");
+
+        // A busy result already reports the lock identity it attempted. Comparing
+        // that value directly proves both environments resolved the same lock id;
+        // a third post-release child added startup time without adding evidence.
+        expect(contender.lockId).toBe(held.lockId);
+      } finally {
+        // An assertion or marker timeout must not leave a real holder child running
+        // into fixture cleanup or the next test.
+        writeFileSync(releaseMarker, "go");
+        await holder.exited;
+      }
+    }, lockEnvironmentCaseBudgetMs);
   }
 });
