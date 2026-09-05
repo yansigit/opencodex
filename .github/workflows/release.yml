@@ -357,6 +357,7 @@ jobs:
       # PREREQUISITE: configure the Trusted Publisher for this repo + workflow on npmjs.com — possible
       # only AFTER the package's first version exists (do the first publish locally, see the runbook).
       - name: Preflight release metadata
+        id: release-metadata
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
@@ -371,37 +372,41 @@ jobs:
           git fetch --force --tags origin
 
           existing_tag_sha="$(git rev-parse -q --verify "refs/tags/${release_tag}^{commit}" || true)"
-          if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$GITHUB_SHA" ]; then
-            echo "::error::${release_tag} already points at ${existing_tag_sha}, not ${GITHUB_SHA}"
-            exit 1
+          release_exists=false
+          gh release view "$release_tag" >/dev/null 2>&1 && release_exists=true
+
+          npm_exists=false
+          npm_git_head=""
+          if npm_metadata="$(npm view "${pkg_name}@${RELEASE_VERSION}" version gitHead --json 2>/dev/null)"; then
+            npm_exists=true
+            npm_git_head="$(jq -r '.gitHead // empty' <<<"$npm_metadata")"
           fi
 
-          if [ -n "$existing_tag_sha" ]; then
-            if [ "$dry_run" = "true" ]; then
-              echo "::notice::${release_tag} already exists at this commit; dry-run only"
-            else
-              echo "::error::${release_tag} already exists. Refusing to publish a version with pre-existing Git metadata."
-              exit 1
-            fi
-          fi
-
-          if gh release view "$release_tag" >/dev/null 2>&1; then
-            if [ "$dry_run" = "true" ]; then
-              echo "::notice::GitHub Release ${release_tag} already exists; dry-run only"
-            else
-              echo "::error::GitHub Release ${release_tag} already exists. Choose the next unused patch version."
-              exit 1
-            fi
-          fi
-
-          if npm view "${pkg_name}@${RELEASE_VERSION}" version >/dev/null 2>&1; then
-            if [ "$dry_run" = "true" ]; then
-              echo "::notice::${pkg_name}@${RELEASE_VERSION} already exists on npm; dry-run only"
-            else
-              echo "::error::${pkg_name}@${RELEASE_VERSION} already exists on npm. Choose the next unused patch version."
-              exit 1
-            fi
-          fi
+          decision="$(
+            EXPECTED_SHA="$GITHUB_SHA" \
+            NPM_EXISTS="$npm_exists" \
+            NPM_GIT_HEAD="$npm_git_head" \
+            TAG_SHA="$existing_tag_sha" \
+            RELEASE_EXISTS="$release_exists" \
+            RELEASE_DRY_RUN="$dry_run" \
+            node - <<'NODE'
+          const { decideReleasePostpublish } = require("./.github/scripts/release-postpublish.cjs");
+          const result = decideReleasePostpublish({
+            expectedSha: process.env.EXPECTED_SHA,
+            npmExists: process.env.NPM_EXISTS === "true",
+            npmGitHead: process.env.NPM_GIT_HEAD,
+            tagSha: process.env.TAG_SHA,
+            releaseExists: process.env.RELEASE_EXISTS === "true",
+            dryRun: process.env.RELEASE_DRY_RUN === "true",
+          });
+          process.stdout.write(JSON.stringify(result));
+          NODE
+          )"
+          action="$(jq -r .action <<<"$decision")"
+          echo "publish-needed=$(jq -r .publish <<<"$decision")" >> "$GITHUB_OUTPUT"
+          echo "tag-needed=$(jq -r .createTag <<<"$decision")" >> "$GITHUB_OUTPUT"
+          echo "release-needed=$(jq -r .createRelease <<<"$decision")" >> "$GITHUB_OUTPUT"
+          echo "::notice::Release metadata disposition: ${action}"
 
       - name: Build and validate release changelog
         env:
@@ -427,6 +432,7 @@ jobs:
           DRY_RUN: ${{ env.DISPATCH_DRY_RUN }}
           NPM_DIST_TAG: ${{ env.DISPATCH_TAG }}
           CANDIDATE_PACKAGE_PATH: ${{ steps.candidate-package.outputs.path }}
+          PUBLISH_NEEDED: ${{ steps.release-metadata.outputs.publish-needed }}
         run: |
           set -euo pipefail
           package_file=""
@@ -438,6 +444,8 @@ jobs:
             echo "::notice::TRANSITIONAL DRY RUN — building locally; automatic main releases always consume an immutable candidate"
             npm run prepublishOnly
             npm pack --dry-run
+          elif [ "$PUBLISH_NEEDED" != "true" ]; then
+            echo "::notice::Exact npm version is already published from ${GITHUB_SHA}; resuming post-publish metadata only"
           elif [ -z "$DISPATCH_CANDIDATE_RUN_ID" ]; then
             echo "::warning::transitional manual release is building locally; migrate this caller to candidate IDs"
             npm publish --tag "$NPM_DIST_TAG" --access public
@@ -474,6 +482,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
+          TAG_NEEDED: ${{ steps.release-metadata.outputs.tag-needed }}
+          RELEASE_NEEDED: ${{ steps.release-metadata.outputs.release-needed }}
         run: |
           set -euo pipefail
 
@@ -497,10 +507,29 @@ jobs:
             prerelease_flag="--prerelease"
           fi
 
-          if [ -z "$existing_tag_sha" ]; then
-            git tag "$release_tag" "$GITHUB_SHA"
-            git push origin "refs/tags/${release_tag}"
+          if [ "$TAG_NEEDED" = "true" ]; then
+            # Checkout deliberately leaves no credential in .git/config. Create
+            # the lightweight tag through the authenticated API instead of an
+            # unauthenticated git push, then verify the public ref before release.
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${release_tag}" -f sha="$GITHUB_SHA" >/dev/null; then
+              echo "::notice::Tag creation raced another writer; verifying the resulting ref"
+            fi
           fi
 
-          gh release create "$release_tag" --target "$GITHUB_SHA" --title "$release_tag" \
-            --notes-file "$notes_file" ${prerelease_flag:+$prerelease_flag}
+          git fetch --force --tags origin
+          published_tag_sha="$(git rev-parse -q --verify "refs/tags/${release_tag}^{commit}" || true)"
+          if [ "$published_tag_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::${release_tag} resolved to ${published_tag_sha:-nothing}, not ${GITHUB_SHA}"
+            exit 1
+          fi
+
+          if [ "$RELEASE_NEEDED" = "true" ]; then
+            if ! gh release create "$release_tag" --target "$GITHUB_SHA" --title "$release_tag" \
+              --notes-file "$notes_file" ${prerelease_flag:+$prerelease_flag}; then
+              echo "::notice::Release creation raced another writer; verifying the resulting release"
+              gh release view "$release_tag" --json tagName,targetCommitish >/dev/null
+            fi
+          else
+            echo "::notice::GitHub Release ${release_tag} already exists at the verified tag"
+          fi

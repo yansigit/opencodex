@@ -81,6 +81,8 @@ describe("PR automation workflow contract", () => {
     assert.match(source, /!pr\.merged && pr\.head\?\.sha === run\.head_sha/);
     assert.match(source, /context\.eventName !== "workflow_run"/);
     assert.match(source, /\[409, 422\]/);
+    assert.match(source, /isMissingPullRequestError\(error\)/);
+    assert.match(source, /linked pull request.*no longer exists/);
     assert.doesNotMatch(source, /reRunWorkflow\s*\(/);
   });
 

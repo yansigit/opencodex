@@ -184,7 +184,7 @@ describe("GitHub Actions hardening", () => {
     const linuxShards = (ci.jobs?.test as { strategy?: { matrix?: { shard?: number[] } } })
       ?.strategy?.matrix?.shard ?? [];
     expect(linuxShards).toEqual([1, 2, 3, 4]);
-    expect(workflow).toContain(`--shard \${{ matrix.shard }}/${linuxShards.length}`);
+    expect(workflow).toContain(`TEST_SHARD: \${{ matrix.shard }}/${linuxShards.length}`);
 
     // Every job that runs tests/ must fetch tags, because one of those tests reads
     // them. tests/release-version-line.test.ts compares package.json against the
@@ -200,13 +200,23 @@ describe("GitHub Actions hardening", () => {
       expect(`${jobName}:${String(checkout?.with?.["fetch-tags"])}`).toBe(`${jobName}:true`);
     }
 
-    // Windows uses the same shard matrix after the single-leg isolate budget was
-    // replaced. Keep the two matrices equal so a future edit cannot reintroduce
-    // a partial Windows suite while Linux stays fully tiled.
+    // Windows uses more, smaller shards because its process-heavy suite and NTFS
+    // filesystem work repeatedly exhausted four hosted runners under load. Keep
+    // its matrix contiguous and bind the lane selector divisor to that matrix so
+    // load reduction cannot silently drop part of the suite.
     const windowsShards = (ci.jobs?.["platform-windows"] as {
       strategy?: { matrix?: { shard?: number[] } };
     })?.strategy?.matrix?.shard ?? [];
-    expect(windowsShards).toEqual(linuxShards);
+    expect(windowsShards).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(windowsShards).toEqual(windowsShards.map((_, index) => index + 1));
+    const windowsSteps = (ci.jobs?.["platform-windows"] as {
+      steps?: Array<{ run?: string }>;
+    })?.steps ?? [];
+    expect(windowsSteps.some(step =>
+      step.run?.includes(`--shard \${{ matrix.shard }}/${windowsShards.length}`),
+    )).toBe(true);
+    expect(ci.jobs?.["platform-windows"]?.name)
+      .toBe(`windows \${{ matrix.shard }}/${windowsShards.length}`);
 
     // The aggregate gate is the check a human trusts. Three ways to break it
     // silently: drop `if: always()` so it skips (and a skipped job reports
@@ -951,9 +961,10 @@ describe("GitHub Actions hardening", () => {
     expect(createStep).toContain('notes_file="$GITHUB_WORKSPACE/.release-notes.md"');
     expect(createStep).toContain('test -s "$notes_file"');
     expect(createStep).not.toContain("generate-notes");
-    expect(createStep).not.toContain("gh api");
+    expect(createStep).toContain('gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs"');
+    expect(createStep).not.toContain('git push origin "refs/tags/${release_tag}"');
     expect(createStep.indexOf('test -s "$notes_file"')).toBeLessThan(
-      createStep.indexOf('git tag "$release_tag"'),
+      createStep.indexOf('gh api --method POST'),
     );
 
     // The merged-only restriction remains on the service gate, whose
