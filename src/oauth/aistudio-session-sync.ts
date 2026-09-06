@@ -1,8 +1,8 @@
 import { chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { atomicWriteFile, getConfigDir, hardenConfigDir, hardenExistingSecret } from "../config";
+import { atomicWriteFile, getConfigDir, hardenConfigDir } from "../config";
 import { assertNotRealHomeUnderTest } from "../lib/test-home-guard";
-import { hardenSecretDir } from "../lib/windows-secret-acl";
+import { hardenSecretDir, hardenSecretPath } from "../lib/windows-secret-acl";
 
 export interface AiStudioCookieItem {
   name: string;
@@ -141,7 +141,9 @@ export function loadAiStudioSession(path = getAiStudioSessionPath()): AiStudioSe
   try {
     const before = lstatSync(path);
     if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_SESSION_FILE_BYTES) return null;
-    hardenExistingSecret(path);
+    hardenSecretDir(dirname(path), { required: true });
+    try { chmodSync(path, 0o600); } catch { /* Windows authority is the required ACL below */ }
+    hardenSecretPath(path, { required: true });
     descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const opened = fstatSync(descriptor);
     const linked = lstatSync(path);

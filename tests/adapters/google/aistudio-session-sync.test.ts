@@ -14,7 +14,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigDir } from "../../../src/config";
 import { flushConfigDirHardening } from "../../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../../src/lib/windows-secret-acl";
+import {
+  hardenSecretDir,
+  resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+  setPlatformForTests,
+} from "../../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../../helpers/remove-tree";
 
 const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
@@ -30,6 +36,8 @@ beforeEach(() => {
 
 afterEach(async () => {
   await flushConfigDirHardening(testHome);
+  setPlatformForTests(null);
+  resetHardenedStateForTests();
   setIcaclsRunnerForTests(null);
   setAsyncIcaclsRunnerForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -152,6 +160,22 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
       symlinkSync(dest, linked);
       expect(loadAiStudioSession(linked)).toBeNull();
     }
+  });
+
+  test("load fails closed when required Windows ACL hardening fails", () => {
+    setPlatformForTests("win32");
+    resetHardenedStateForTests();
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    const dest = join(testHome, "legacy-session.json");
+    writeFileSync(dest, `${JSON.stringify(sampleData)}\n`, { encoding: "utf8", mode: 0o600 });
+    hardenSecretDir(testHome, { required: true });
+    setIcaclsRunnerForTests(() => ({
+      success: false,
+      exitCode: 5,
+      timedOut: false,
+      stdout: "access denied",
+    }));
+    expect(loadAiStudioSession(dest)).toBeNull();
   });
 
   test("cookieHeaderFromSession joins cookies and filters invalid or empty entries", () => {
