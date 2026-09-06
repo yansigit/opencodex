@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveConfig } from "../../src/config";
 import { forceRefreshOAuthAccessSnapshot, getValidAccessTokenSnapshot } from "../../src/oauth";
+import { clearAntigravityRoutingState } from "../../src/oauth/antigravity-routing";
 import { getAccountSet, saveCredential } from "../../src/oauth/store";
 import { startServer } from "../../src/server";
 import type { OcxConfig } from "../../src/types";
@@ -24,6 +25,7 @@ let isolatedCodexHome: IsolatedCodexHome | null = null;
 let originalFetch: typeof fetch;
 
 beforeEach(() => {
+  clearAntigravityRoutingState();
   originalFetch = globalThis.fetch;
   previousHome = process.env.OPENCODEX_HOME;
   isolatedCodexHome = installIsolatedCodexHome("ocx-google-401-codex-");
@@ -32,6 +34,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  clearAntigravityRoutingState();
   globalThis.fetch = originalFetch;
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
@@ -399,7 +402,7 @@ describe("Google Antigravity OAuth upstream 401 replay", () => {
     }
   });
 
-  test("forceRefreshOAuthAccessSnapshot supports google-antigravity", async () => {
+  test("forceRefreshOAuthAccessSnapshot preserves a stored google-antigravity project", async () => {
     await seedOAuth();
     installOAuthFetch([], { refreshedProjectId: "rediscovered-project-xyz" });
 
@@ -410,7 +413,7 @@ describe("Google Antigravity OAuth upstream 401 replay", () => {
     const refreshed = await forceRefreshOAuthAccessSnapshot(snapshot);
     expect(refreshed.provider).toBe("google-antigravity");
     expect(refreshed.accessToken).toBe("fresh-access");
-    expect(refreshed.projectId).toBe("rediscovered-project-xyz");
+    expect(refreshed.projectId).toBe("initial-project-id");
   });
 
   test("initial OAuth refresh projects raw provider failures before responding", async () => {
@@ -475,7 +478,7 @@ describe("Google Antigravity OAuth upstream 401 replay", () => {
       expect(json.output?.find(item => item.type === "message")?.content?.[0]?.text).toBe("ok after google refresh");
       expect(observed.counts.refresh).toBe(1);
       expect(observed.chatAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
-      expect(observed.chatProjects).toEqual(["initial-project-id", "new-project-456"]);
+      expect(observed.chatProjects).toEqual(["initial-project-id", "initial-project-id"]);
     } finally {
       await server.stop(true);
     }
@@ -493,7 +496,7 @@ describe("Google Antigravity OAuth upstream 401 replay", () => {
       expect(json.choices?.[0]?.message?.content).toBe("ok after google refresh");
       expect(observed.counts.refresh).toBe(1);
       expect(observed.chatAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
-      expect(observed.chatProjects).toEqual(["initial-project-id", "chat-project-789"]);
+      expect(observed.chatProjects).toEqual(["initial-project-id", "initial-project-id"]);
     } finally {
       await server.stop(true);
     }
@@ -671,7 +674,7 @@ describe("Google Antigravity OAuth upstream 401 replay", () => {
       expect(streamText).toContain("ok after google refresh");
       expect(observed.counts.refresh).toBe(1);
       expect(observed.chatAuth).toEqual(["Bearer rejected-access", "Bearer fresh-access"]);
-      expect(observed.chatProjects).toEqual(["initial-project-id", "stream-project-999"]);
+      expect(observed.chatProjects).toEqual(["initial-project-id", "initial-project-id"]);
     } finally {
       await server.stop(true);
     }
