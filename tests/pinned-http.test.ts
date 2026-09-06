@@ -161,4 +161,26 @@ describe("pinned HTTP peer identity", () => {
   test("an IPv6 literal is unbracketed for connection and certificate identity", () => {
     expect(pinnedHttpHostnameForTests("https://[::1]:9443/hook")).toBe("::1");
   });
+
+  test("an HTTPS IP literal connects without sending an invalid IP-valued SNI", async () => {
+    const certFile = new URL("./fixtures/network-tls-test-cert.pem", import.meta.url);
+    const keyFile = new URL("./fixtures/network-tls-test-key.pem", import.meta.url);
+    const tlsServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      tls: { cert: Bun.file(certFile), key: Bun.file(keyFile) },
+      fetch: () => new Response("tls-ok"),
+    });
+    try {
+      const response = await pinnedHttpGet(
+        `https://127.0.0.1:${tlsServer.port}/hook`,
+        { address: "127.0.0.1", family: 4 },
+        undefined,
+        { rejectUnauthorized: false },
+      );
+      expect(await response.text()).toBe("tls-ok");
+    } finally {
+      tlsServer.stop(true);
+    }
+  });
 });

@@ -1,5 +1,6 @@
 import http, { type ClientRequest, type IncomingMessage, type RequestOptions } from "node:http";
 import https from "node:https";
+import { isIP } from "node:net";
 
 export type PinnedAddress = { address: string; family: number };
 
@@ -117,7 +118,9 @@ function pinnedHttpRequest(
       headers: requestHeaders,
       ...(parsed.protocol === "https:"
         ? {
-          servername: hostname,
+          // TLS SNI is a DNS-name extension. Bun rejects an IP-valued servername outright;
+          // omitting it for literals leaves certificate identity checking on the IP hostname.
+          ...(isIP(hostname) === 0 ? { servername: hostname } : {}),
           rejectUnauthorized: options?.rejectUnauthorized ?? true,
         }
         : {}),
