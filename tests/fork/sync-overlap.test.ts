@@ -167,6 +167,16 @@ describe("overlap analyzer", () => {
       reportHash: preservationReportHash(report),
     };
     const input = JSON.stringify({ base: release.baseSha, fork: "fork", upstream: release.tagSha, merge: "merge", dev: "dev", tag: "v2.40.0", provenance });
+    let attestation: { report: typeof report; provenance: typeof provenance } | undefined;
+    await runCli(["attest"], {
+      env: {}, stdin: input, runner,
+      write: value => { attestation = JSON.parse(value); },
+    });
+    expect(attestation?.report).toEqual(report);
+    expect(attestation?.provenance).toEqual(provenance);
+    await expect(runCli(["attest"], {
+      env: {}, stdin: JSON.stringify({ ...JSON.parse(input), merge: "stale" }), runner, write: () => {},
+    })).rejects.toThrow(/stale preservation head SHA/);
     await expect(runCli(["verify"], { env: {}, stdin: input, runner, write: () => {} })).resolves.toBeUndefined();
     await expect(runCli(["verify"], {
       env: {}, stdin: JSON.stringify({ ...JSON.parse(input), provenance: { ...provenance, headSha: "stale" } }), runner, write: () => {},
@@ -177,5 +187,28 @@ describe("overlap analyzer", () => {
     await expect(runCli(["verify"], {
       env: {}, stdin: JSON.stringify({ ...JSON.parse(input), upstream: "0".repeat(40) }), runner, write: () => {},
     })).rejects.toThrow(/preservation release ancestry/);
+  });
+
+  test("attestation refuses unresolved overlap decisions", async () => {
+    const release = loadRegistry().releases["v2.40.0"]!;
+    const diffs = "diff --find-renames --find-copies --name-status --diff-filter=ACDMRT";
+    const changed = "M\tsrc/unregistered-overlap.ts\n";
+    const runner = mockRunner({
+      "rev-parse HEAD": { exitCode: 0, stdout: "merge\n", stderr: "" },
+      [`merge-base --all fork ${release.tagSha}`]: { exitCode: 0, stdout: `${release.baseSha}\n`, stderr: "" },
+      [`${diffs} ${release.baseSha} fork --`]: { exitCode: 0, stdout: changed, stderr: "" },
+      [`${diffs} ${release.baseSha} ${release.tagSha} --`]: { exitCode: 0, stdout: changed, stderr: "" },
+      [`${diffs} ${release.baseSha} merge --`]: { exitCode: 0, stdout: changed, stderr: "" },
+    });
+    const input = JSON.stringify({
+      base: release.baseSha,
+      fork: "fork",
+      upstream: release.tagSha,
+      merge: "merge",
+      dev: "dev",
+      tag: "v2.40.0",
+    });
+    await expect(runCli(["attest"], { env: {}, stdin: input, runner, write: () => {} }))
+      .rejects.toThrow(/overlap candidates detected/);
   });
 });

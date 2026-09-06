@@ -21,15 +21,18 @@ Execute only the unresolved handoff stages:
    candidate, preserve fork-visible behavior on upstream control flow unless
    upstream is proven equivalent or better by commit/path evidence and the
    same behavioral test. Only named deterministic recipes may run unattended.
-5. Run focused tests for every changed domain. Run typecheck and the full suite
-   when shared runtime, routing, configuration, or server code is involved.
-   Include exact commands and output in the report.
+5. Run focused tests for every changed domain. After the last merge from
+   `origin/dev`, validate the resulting tree again: run `bun run build:gui` if
+   any GUI path changed, then run `bun run prepush`. Never reuse test evidence
+   from an earlier head. Include exact commands and output in the report.
 6. Update the v2 registry decision for every candidate: upstream intent, fork
    invariant, whether upstream is equivalent or better, disposition
    (`preserve` or `upstream-equivalent`), implementation evidence, and exact
    tests. `intentional-drop` is forbidden during a sync; it requires a separate
    earlier maintainer-reviewed baseline change.
-7. Push the sync branch as needed and open or update a draft PR into `dev`.
+7. Regenerate the preservation report and exact-head provenance after the last
+   commit and before every push; any merge or commit invalidates the previous
+   hashes. Push the sync branch as needed and open or update a draft PR into `dev`.
    Fill Summary, Verification, and Checklist from the PR template. Include the
    decision table and the tag SHA. Inside the PR body, maintain a sticky
    section between `<!-- cursor-sync-progress:start -->` and
@@ -43,7 +46,7 @@ Execute only the unresolved handoff stages:
    never create a new one. Run
    `gh pr view <number> --json mergeable -q .mergeable` and do not stop or ping
    the human until it reports `MERGEABLE`.
-8. Until `MERGEABLE` and hygiene green, stay and supervise. After every push, poll `gh pr view <number> --json mergeable` and `gh pr checks` every 60s for 10m. If `not a descendant of origin/dev`, run `git fetch origin dev && git merge --no-edit origin/dev && git push` yourself. For `macos-launchd` timeout-only flakes, run `gh run rerun --failed` once. Update the sticky PR-body section and the single `<!-- cursor-sync-progress -->` comment in place (never a new comment) with the 4-line checklist and exact failing codes. Only `new_suppression` / `unsponsored_surface` need `suppression-approved` / `maintainer-sponsored` human waive - report the blocker but do not auto-waive.
+8. Until `MERGEABLE` and hygiene green, stay and supervise. After every push, poll `gh pr view <number> --json mergeable` and `gh pr checks` every 60s for 10m. If `not a descendant of origin/dev`, run `git fetch origin dev && git merge --no-edit origin/dev`, rerun step 5, regenerate step 7 provenance, and only then push. For `macos-launchd` timeout-only flakes, run `gh run rerun --failed` once. Update the sticky PR-body section and the single `<!-- cursor-sync-progress -->` comment in place (never a new comment) with the 4-line checklist and exact failing codes. Only `new_suppression` / `unsponsored_surface` need `suppression-approved` / `maintainer-sponsored` human waive - report the blocker but do not auto-waive.
 9. When the trusted preservation report says `passed`, all provenance hashes
    match the exact remote head, and all gates are `MERGEABLE` and hygiene green, flip Draft -> Ready
    for review and post `Ready for human merge - do not squash/rebase.` Stop.

@@ -41,6 +41,7 @@ The preservation gate runs after `prepare`:
 
 ```bash
 bun scripts/fork/sync/cli.ts overlap < overlap-input.json   # generate/check candidates and decisions
+bun scripts/fork/sync/cli.ts attest < overlap-input.json    # regenerate report + provenance for HEAD
 bun scripts/fork/sync/cli.ts verify < verify-input.json     # exact-head hashes and provenance
 bun scripts/fork/sync/cli.ts preservation-check              # validates docs/fork/PRESERVATION.json
 ```
@@ -94,7 +95,11 @@ never post a new comment. Inside each, render a 4-line checklist in this order:
 When all gates are `MERGEABLE` and hygiene is green, flip Draft -> Ready for
 review and post `Ready for human merge - do not squash/rebase.` Stop.
 
-Upstream sync readiness: when workflow files changed, run `bun run lint:workflows`; when dependency/lock files changed (`package.json`, `bun.lock`, `gui/package.json`, `gui/bun.lock`), run `bun run audit:high`; verify exact-head/provenance (tag, base, published head, registry/decision/report hashes); treat `cancelled` or `skipped` CI as not green — only `success` counts.
+Upstream sync readiness: after the final merge from `origin/dev`, run `bun run
+build:gui` when GUI files changed and run `bun run prepush` on the resulting
+tree. Regenerate the report and provenance with `attest`, then verify the exact
+head (tag, base, published head, registry/decision/report hashes). Treat
+`cancelled` or `skipped` CI as not green — only `success` counts.
 
 Cursor is the first coordinator, not the only supported integration. The
 registry accepts comma-separated IDs and can run multiple coordinators, for

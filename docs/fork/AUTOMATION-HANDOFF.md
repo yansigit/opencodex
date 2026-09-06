@@ -17,8 +17,10 @@ The handoff payload's `prepareResult` is authoritative. For
 `decision-handoff`, inspect `handoffReason`: `conflict` means the merge was
 aborted without choosing either side; `preservation` means the clean result
 has unresolved preservation candidates. Complete the same questionnaire stored
-in `docs/fork/PRESERVATION.json`, regenerate exact-head provenance, and never
-apply an unrecorded drop. Any push invalidates the previous report and hashes.
+in `docs/fork/PRESERVATION.json`, rerun validation after the final merge from
+`origin/dev`, and regenerate exact-head provenance with `bun
+scripts/fork/sync/cli.ts attest < overlap-input.json`. Any commit or merge
+invalidates the previous report and hashes. Never apply an unrecorded drop.
 
 GitHub `pull_request_target` and scheduled workflows load their trusted
 automation from the repository default branch (`origin/main`). Promoting the

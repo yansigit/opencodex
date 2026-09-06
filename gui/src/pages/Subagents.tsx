@@ -35,7 +35,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
   const catalogLoadGeneration = useRef(0);
   const delegation = useSubagentDelegation(apiBase);
   const [catalogState, setCatalogState] = useState<CatalogState>(() => readCatalogState(cached));
-  const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false });
+  const [ultraMode, setUltraMode] = useState<UltraModeState>({ enabled: false, hintText: null, multiAgentV2Enabled: false, multiAgentMode: "default" });
   const [nativeParentOverride, setNativeParentOverride] = useState<V2NativeParentOverrideState>({ enabled: false, model: null, active: false });
   const [agentTaskRecovery, setAgentTaskRecovery] = useState<AgentTaskRecoveryState>({ enabled: false, model: null });
   const [routedDelegationBridge, setRoutedDelegationBridge] = useState<V2RoutedDelegationBridgeState>({ enabled: false });
@@ -88,6 +88,7 @@ export default function Subagents({ apiBase }: { apiBase: string }) {
       // `default` surface still preserves upstream V1 pins (for example luna),
       // so only an explicitly forced V2 catalog is an effective surface here.
       multiAgentV2Enabled: data.enabled === true && data.multiAgentMode === "v2",
+      multiAgentMode: data.multiAgentMode ?? "default",
     });
     const override = data.v2NativeParentOverride;
     setNativeParentOverride({
