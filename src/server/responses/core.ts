@@ -68,6 +68,7 @@ import {
   routeCompactionModel,
   routeConcreteModel,
   routeModel,
+  routedProviderConfig,
   type RouteResult,
 } from "../../router";
 import { evidenceFromBody } from "../../routing/request-evidence";
@@ -270,6 +271,7 @@ import {
   type InboundWire,
 } from "../../providers/registry";
 import type { AdapterRequest, ProviderAdapter } from "../../adapters/base";
+import { isAzureIdentityProvider } from "../../config/provider-validation";
 import { providerApiKeySelectionIsCurrent, resolveCurrentProviderApiKeyTransport } from "../../providers/api-key-selection";
 import {
   hasKeyPoolFailover,
@@ -3949,6 +3951,7 @@ async function handleResponsesInner(
   const invalidateSameTargetRequest = (): void => { transportToken += 1; };
   type DispatchBinding =
     | { kind: "oauth"; selection: NonNullable<typeof oauthSelection>; snapshot: OAuthAccessSnapshot }
+    | { kind: "azure-identity"; provider: OcxProviderConfig }
     | { kind: "api-key"; provider: OcxProviderConfig };
   const requestBindings = new WeakMap<AdapterRequest, DispatchBinding>();
   const adapterBindings = new WeakMap<ProviderAdapter, DispatchBinding>();
@@ -4090,6 +4093,11 @@ async function handleResponsesInner(
     if (route.provider.authMode === "forward") return true;
     if (!binding) return false;
     if (binding.kind === "api-key") return providerApiKeySelectionIsCurrent(config, route.providerName, binding.provider);
+    if (binding.kind === "azure-identity") {
+      const current = config.providers[route.providerName];
+      return !!current && !current.disabled && isAzureIdentityProvider(current)
+        && JSON.stringify(current) === JSON.stringify(binding.provider);
+    }
     const selected = captureOAuthAccountSelection(route.providerName);
     const row = getAccountCredentialWithStatus(route.providerName, binding.snapshot.accountId);
     return selected?.accountId === binding.selection.accountId && selected?.revision === binding.selection.revision
@@ -4099,11 +4107,15 @@ async function handleResponsesInner(
   const resolveSelectionAdapter = (provider: OcxProviderConfig, retention = config.cacheRetention): ProviderAdapter => {
     const resolved = resolveAdapter(provider, retention);
     if (route.provider.authMode === "forward") return resolved;
-    const binding: DispatchBinding | undefined = route.provider.authMode === "oauth"
-      ? oauthSelection && servingOAuthSnapshot
-        ? { kind: "oauth", selection: { ...oauthSelection }, snapshot: servingOAuthSnapshot }
+    const binding: DispatchBinding | undefined = isAzureIdentityProvider(provider)
+      ? config.providers[route.providerName]
+        ? { kind: "azure-identity", provider: structuredClone(config.providers[route.providerName]!) }
         : undefined
-      : { kind: "api-key", provider: { ...route.provider } };
+      : route.provider.authMode === "oauth"
+        ? oauthSelection && servingOAuthSnapshot
+          ? { kind: "oauth", selection: { ...oauthSelection }, snapshot: servingOAuthSnapshot }
+          : undefined
+        : { kind: "api-key", provider: { ...route.provider } };
     if (binding) adapterBindings.set(resolved, binding);
     const build = resolved.buildRequest.bind(resolved);
     resolved.buildRequest = async (requestParsed, incoming) => {
@@ -4123,6 +4135,12 @@ async function handleResponsesInner(
       if (!servingOAuthSnapshot || !await applyFailoverSnapshot(servingOAuthSnapshot, requestParsed)) {
         throw new Error("OAuth account selection changed before dispatch");
       }
+    } else if (isAzureIdentityProvider(config.providers[route.providerName] ?? route.provider)) {
+      const current = config.providers[route.providerName];
+      if (!current || current.disabled || !isAzureIdentityProvider(current)) {
+        throw new Error("Azure identity selection is unavailable before dispatch");
+      }
+      route.provider = routedProviderConfig(route.providerName, structuredClone(current));
     } else {
       const current = resolveCurrentProviderApiKeyTransport(config, route.providerName, route.provider);
       if (!current) throw new Error("API key selection is unavailable before dispatch");
