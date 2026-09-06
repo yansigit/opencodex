@@ -7823,6 +7823,18 @@
           "baseBlob": "eda003d503abb90f5dd1f0396cc0cca580b1ad5a",
           "forkBlob": "de4d00a360ef343bb4bd9eb0dd8189a3023c3a3c"
         },
+        "tests/anthropic-account-pool.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.43.0 test-layout move to tests/adapters/anthropic/anthropic-account-pool.test.ts while retaining the fork's account-pool regression coverage.",
+          "forkInvariant": "Fork regression coverage remains active at its resolved test location and continues to bind the preserved behavior.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base e0d73a5189e532e6500fc7466bbaaec4733ca370, fork d6b972135309b7e510afe6fd5cc749492336941e, upstream absent, and integrated result absent at the original path for fork-path-deleted-in-result, overlapping-logical-path. The resolved suite at tests/adapters/anthropic/anthropic-account-pool.test.ts has blob 235bffd043aa51cef7f5edd0f661ea03a5773c3f, retains all 47 fork test names, incorporates upstream replacement 7817fd7104ea261fd754463556fae924e0befc56, and keeps the fork's dual Windows ACL stubs and hardening flush.",
+          "exactTests": [
+            "bun test tests/adapters/anthropic/anthropic-account-pool.test.ts"
+          ],
+          "baseBlob": "e0d73a5189e532e6500fc7466bbaaec4733ca370",
+          "forkBlob": "d6b972135309b7e510afe6fd5cc749492336941e"
+        },
         "tests/anthropic-sdk-fingerprint.test.ts": {
           "upstreamIntent": "Adopt the upstream v2.43.0 changes to tests/anthropic-sdk-fingerprint.test.ts.",
           "forkInvariant": "Fork regression coverage remains active at its resolved test location and continues to bind the preserved behavior.",
@@ -8703,6 +8715,18 @@
           "baseBlob": "a4fe5889cb17885ed99bda879cd2d5d47e7ffcb0",
           "forkBlob": "799e393742c8636b4acaf0e2a296bb88c4d95e13"
         },
+        "tests/codex-auth-context.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.43.0 test-layout move to tests/codex-integration/codex-auth-context.test.ts while retaining the fork's authentication-context regression coverage.",
+          "forkInvariant": "Fork regression coverage remains active at its resolved test location and continues to bind the preserved behavior.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 38cf7d2c8a41d3d4524648de2af7e72f624d0f0a, fork a39f69cdedcf000df89a5d218547d24ca8de68a3, upstream absent, and integrated result absent at the original path for fork-path-deleted-in-result, overlapping-logical-path. The resolved suite at tests/codex-integration/codex-auth-context.test.ts has blob 65d0adcd0c34661b5acd11ef5466e157ea29af1a, retains all 68 fork test names, incorporates upstream replacement bb4f24a098bb327f03e8ff65507c804294205314, and keeps both Windows ACL runner stubs plus the hardening flush.",
+          "exactTests": [
+            "bun test tests/codex-integration/codex-auth-context.test.ts"
+          ],
+          "baseBlob": "38cf7d2c8a41d3d4524648de2af7e72f624d0f0a",
+          "forkBlob": "a39f69cdedcf000df89a5d218547d24ca8de68a3"
+        },
         "tests/codex-catalog-sync-hardening.test.ts": {
           "upstreamIntent": "Adopt the upstream v2.43.0 changes to tests/codex-catalog-sync-hardening.test.ts.",
           "forkInvariant": "Fork regression coverage remains active at its resolved test location and continues to bind the preserved behavior.",
@@ -9313,6 +9337,18 @@
           ],
           "baseBlob": "c4bf31fa2ce6220710d4dbbf53ff9bf7c8fe6b66",
           "forkBlob": "17cb1a78c7462d884239ab0a22005efa7a7e0706"
+        },
+        "tests/codex-plugins-doctor.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.43.0 test-layout move to tests/codex-integration/codex-plugins-doctor.test.ts while retaining the fork's doctor-process regression coverage.",
+          "forkInvariant": "Fork regression coverage remains active at its resolved test location and continues to bind the preserved behavior.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 939d31c783075d53c22a348815cdc2ed666692bd, fork 5dc7bb0d7675c1ad8be75efd564bf8956495dc65, upstream absent, and integrated result absent at the original path for fork-path-deleted-in-result, overlapping-logical-path. The resolved suite at tests/codex-integration/codex-plugins-doctor.test.ts has blob 96bddc7d788d868fdde8d44fe6cafdac9321ae40, retains all 20 fork test names, incorporates upstream replacement ce47b8c4c5c34494879b8bec0203b7cfef841b84, and keeps the spawn budget, ACL timeout, and hidden-window safeguards.",
+          "exactTests": [
+            "bun test tests/codex-integration/codex-plugins-doctor.test.ts"
+          ],
+          "baseBlob": "939d31c783075d53c22a348815cdc2ed666692bd",
+          "forkBlob": "5dc7bb0d7675c1ad8be75efd564bf8956495dc65"
         },
         "tests/codex-pool-rotation.test.ts": {
           "upstreamIntent": "Adopt the upstream v2.43.0 changes to tests/codex-pool-rotation.test.ts.",
@@ -11008,6 +11044,17 @@
           "baseBlob": "504d68375442393c08c1c276b113ed8b8ed8ed08",
           "forkBlob": "101e1a64c1b12b0de93f0e7f3ea8fadca88e116d"
         },
+        "tests/oauth-failover-optout-security.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.43.0 test layout while retaining the fork-only OAuth failover opt-out security regression suite at tests/oauth/oauth-failover-optout-security.test.ts.",
+          "forkInvariant": "Explicit OAuth failover opt-outs remain authoritative for both generic and Anthropic reactive failover paths, with regression coverage retained after the layout move.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base absent, fork 824e516280fb0d2d59996adeb2b3702de125faa1, upstream absent, and integrated result absent at the original path for fork-path-deleted-in-result. The fork-only suite is preserved at tests/oauth/oauth-failover-optout-security.test.ts as blob cbbc2eb491f3d45944465b5735fef4711abd018a with all three security assertions intact; only import and helper depth changed.",
+          "exactTests": [
+            "bun test tests/oauth/oauth-failover-optout-security.test.ts"
+          ],
+          "forkBlob": "824e516280fb0d2d59996adeb2b3702de125faa1"
+        },
         "tests/oauth-login-cli-live-update.test.ts": {
           "upstreamIntent": "Adopt the upstream v2.43.0 changes to tests/oauth-login-cli-live-update.test.ts.",
           "forkInvariant": "Fork regression coverage remains active at its resolved test location and continues to bind the preserved behavior.",
@@ -12190,6 +12237,18 @@
           "baseBlob": "9a32447dcb387ed49f85685ecab335f131f44c09",
           "forkBlob": "27a2e65d3a2b430d3d03dbb5792297b6682e370b"
         },
+        "tests/routing-policy-surface-parity.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.43.0 test-layout move to tests/routing/routing-policy-surface-parity.test.ts while retaining the fork's routing-policy parity coverage.",
+          "forkInvariant": "Fork routing-policy surface assertions and their Windows-safe configuration and history teardown remain active at the resolved test location.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 9b466b4dc2f2b4a673fa4c573c89d8fb9eed0e3f, fork 1004cd5b140ab88e8bf860a3787ad87272b17311, upstream absent, and integrated result absent at the original path for fork-path-deleted-in-result, overlapping-logical-path. The resolved suite at tests/routing/routing-policy-surface-parity.test.ts has blob 9b0c825c6fa25c2ea0984d18b42b2e5fb4c79e66, retains all four fork test names, incorporates both upstream additions, adds five integration regressions, and keeps ACL/config isolation, directive-key preseed, and history-index teardown.",
+          "exactTests": [
+            "bun test tests/routing/routing-policy-surface-parity.test.ts"
+          ],
+          "baseBlob": "9b466b4dc2f2b4a673fa4c573c89d8fb9eed0e3f",
+          "forkBlob": "1004cd5b140ab88e8bf860a3787ad87272b17311"
+        },
         "tests/routing/combo-management-api.test.ts": {
           "upstreamIntent": "Adopt the upstream v2.43.0 changes to tests/routing/combo-management-api.test.ts.",
           "forkInvariant": "Fork regression coverage remains active at its resolved test location and continues to bind the preserved behavior.",
@@ -12932,6 +12991,18 @@
           ],
           "baseBlob": "68f1f526813a02cbda1dc471651a301f368e82c4",
           "forkBlob": "98261058058f05b084fea6f38e8e5bbce21f3648"
+        },
+        "tests/subagent-model-fallback.test.ts": {
+          "upstreamIntent": "Adopt the upstream v2.43.0 test-layout move to tests/routing/subagent-model-fallback.test.ts while retaining the fork's subagent fallback coverage.",
+          "forkInvariant": "Fork subagent fallback behavior and Windows-safe credential-home teardown remain bound by the relocated regression suite.",
+          "equivalentOrBetter": false,
+          "disposition": "preserve",
+          "implementationEvidence": "Reviewed base 04d1b14aea23b3be0843e9243649bf4997d6e1cd, fork c02769a8355667379dd9e9d131c38e5290093374, upstream absent, and integrated result absent at the original path for fork-path-deleted-in-result, overlapping-logical-path. The resolved suite at tests/routing/subagent-model-fallback.test.ts has blob 92de12f14c283b845f442a5fac7c73b96ed05ca6, retains all 59 fork test names plus two upstream additions, keeps dual ACL stubs and hardening flushes, and adapts quota fixtures with weeklyPercent.",
+          "exactTests": [
+            "bun test tests/routing/subagent-model-fallback.test.ts"
+          ],
+          "baseBlob": "04d1b14aea23b3be0843e9243649bf4997d6e1cd",
+          "forkBlob": "c02769a8355667379dd9e9d131c38e5290093374"
         },
         "tests/subagent-roles-api.test.ts": {
           "upstreamIntent": "Adopt the upstream v2.43.0 changes to tests/subagent-roles-api.test.ts.",
