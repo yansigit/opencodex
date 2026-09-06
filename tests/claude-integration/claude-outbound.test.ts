@@ -1118,6 +1118,9 @@ describe("sanitizeWebSearchInput (#381)", () => {
       }),
       sse("response.completed", { response: { status: "completed", usage: {} } }),
     ].join("")), "m"));
-    expect(events.some(event => event.data.content_block?.type === "redacted_thinking")).toBe(true);
+    expect(events.map(event => event.name)).toEqual([
+      "message_start", "ping", "content_block_start", "content_block_stop", "message_delta", "message_stop",
+    ]);
+    expect(events[2].data.content_block).toEqual({ type: "redacted_thinking", data: "opaque" });
   });
 });

@@ -534,6 +534,7 @@ export function responsesSseToAnthropicSse(
                 if (env?.sig) open.reasoningSig = env.sig;
                 closeOpenBlock();
               }
+              if (red.length > 0) ensureStarted();
               for (const data of red) {
                 const idx = blockIndex++;
                 emit("content_block_start", { type: "content_block_start", index: idx, content_block: { type: "redacted_thinking", data } });
