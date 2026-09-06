@@ -47,6 +47,19 @@ function run(system: "running" | "stopped" = "running", args: string[] = [], ver
 }
 function output(result: ReturnType<typeof Bun.spawnSync>) { return new TextDecoder().decode(result.stdout) + new TextDecoder().decode(result.stderr); }
 
+function buildContextIncludes(rules: string[], path: string): boolean {
+  const ancestors = path.split("/").map((_, index, parts) => parts.slice(0, index + 1).join("/"));
+  let ignored = false;
+  for (const rawRule of rules) {
+    const rule = rawRule.trim();
+    if (!rule || rule.startsWith("#")) continue;
+    const negated = rule.startsWith("!");
+    const pattern = (negated ? rule.slice(1) : rule).replace(/^\/+|\/+$/g, "");
+    if (ancestors.some(candidate => new Bun.Glob(pattern).match(candidate))) ignored = !negated;
+  }
+  return !ignored;
+}
+
 test("build precedes the locked-down run with exact flags", () => {
   const { result, calls } = run();
   expect(result.exitCode).toBe(0);
@@ -166,9 +179,41 @@ test("image and ignore policy freeze dependencies and exclude host state", () =>
   expect(entrypoint.indexOf('writeFileSync("/app/.ocx-write-test"')).toBeLessThan(entrypoint.indexOf('const workspace = "/tmp/ocx-test-workspace"'));
   expect(entrypoint).not.toContain('await run("/app", ["run", "test"])');
   expect(entrypoint).not.toContain('await run("/app/integrations/replit-gateway", ["run", "test"])');
-  for (const pattern of [".git", ".worktrees", ".tmp", ".planning", ".agents", ".claude", ".cursor", ".windsurf", ".ssh", ".gnupg", ".aws", ".docker/config.json", "**/.docker/config.json", ".config/containers/auth.json", "**/.config/containers/auth.json", ".config/gh/hosts.yml", "**/.config/gh/hosts.yml", "**/.opencodex", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "dist", "gui/dist", "*.log", "coverage", "*.tgz", "*.tar", "*.zip", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/*.sqlite", "**/*.sqlite3", "**/*.db"]) expect(ignored).toContain(pattern);
+  for (const pattern of ["**/.git", "**/.worktrees", "**/.tmp", "**/.codex", "**/.opencode", "**/.opencodex", "**/.planning", "**/.agents", "**/.claude", "**/.cursor", "**/.windsurf", "**/.ssh", "**/.gnupg", "**/.aws", "**/.docker/config.json", "**/.config/containers/auth.json", "**/.config/gh/hosts.yml", "**/.env", "**/.env.*", "**/.npmrc", "**/.netrc", "**/.pypirc", "**/auth.json", "**/credentials.json", "**/node_modules", "**/dist", "**/coverage", "**/*.log", "**/*.log.*", "**/*.tgz", "**/*.tar", "**/*.tar.gz", "**/*.zip", "**/*.pem", "**/*.key", "**/*.p12", "**/*.pfx", "**/*.jks", "**/*.sqlite", "**/*.sqlite3", "**/*.db", "**/*.sqlite-*", "**/*.sqlite3-*", "**/*.db-*"]) expect(ignored).toContain(pattern);
   expect(ignored).toContain("!tests/fixtures/network-tls-test-cert.pem");
   expect(ignored).toContain("!tests/fixtures/network-tls-test-key.pem");
   expect(ignored.indexOf("!tests/fixtures/network-tls-test-cert.pem")).toBeGreaterThan(ignored.indexOf("**/*.pem"));
   expect(ignored.indexOf("!tests/fixtures/network-tls-test-key.pem")).toBeGreaterThan(ignored.indexOf("**/*.key"));
+});
+
+test("ignore policy excludes nested credentials and state from allowed subtrees", () => {
+  const rules = readFileSync(join(ROOT, ".dockerignore"), "utf8").split(/\r?\n/);
+  const sensitivePaths = [
+    "docker/local/.codex/config.json",
+    "gui/local/.opencodex/config.json",
+    "docker/local/.docker/config.json",
+    "gui/local/.config/containers/auth.json",
+    "docker/local/.config/gh/hosts.yml",
+    "gui/local/.env.production",
+    "docker/local/.npmrc",
+    "gui/local/.netrc",
+    "docker/local/.pypirc",
+    "gui/local/auth.json",
+    "docker/local/credentials.json",
+    "gui/local/private-key.pem",
+    "docker/local/client-key.p12",
+    "gui/local/state.sqlite3",
+    "docker/local/cache.db",
+    "gui/local/state.sqlite3-wal",
+    "docker/local/cache.db-shm",
+    "gui/local/debug.log.1",
+    "docker/local/secrets.tar.gz",
+    "gui/local/coverage/report.json",
+    "docker/local/dist/bundle.js",
+  ];
+  for (const path of sensitivePaths) expect(buildContextIncludes(rules, path), path).toBe(false);
+  expect(buildContextIncludes(rules, "docker/bootstrap-token.ts")).toBe(true);
+  expect(buildContextIncludes(rules, "gui/src/ui.tsx")).toBe(true);
+  expect(buildContextIncludes(rules, "tests/fixtures/network-tls-test-cert.pem")).toBe(true);
+  expect(buildContextIncludes(rules, "tests/fixtures/network-tls-test-key.pem")).toBe(true);
 });

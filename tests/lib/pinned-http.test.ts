@@ -1,6 +1,10 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { afterEach, describe, expect, test } from "bun:test";
-import { PinnedHttpError, pinnedHttpGet } from "../../src/lib/pinned-http";
+import {
+  PinnedHttpError,
+  pinnedHttpGet,
+  pinnedHttpHostnameForTests,
+} from "../src/lib/pinned-http";
 
 let server: Server | undefined;
 const sockets = new Set<Socket>();
@@ -111,5 +115,72 @@ describe("pinned HTTP timeouts", () => {
 
     const error = await request(port, 100, signal).catch((caught: unknown) => caught);
     expect(error).toBe(reason);
+  });
+});
+
+describe("pinned HTTP peer identity", () => {
+  test("a later pin cannot reuse a pooled socket to an earlier address", async () => {
+    const peer = (body: string) => createServer((socket) => {
+      trackSocket(socket);
+      socket.on("data", () => socket.write([
+        "HTTP/1.1 200 OK",
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        "Connection: keep-alive",
+        "",
+        body,
+      ].join("\r\n")));
+    });
+    const first = peer("first");
+    const second = peer("second");
+    const listenPeer = (target: Server, address: string, port: number) => new Promise<number>((resolve, reject) => {
+      target.once("error", reject);
+      target.listen({ port, host: address, ipv6Only: address.includes(":") }, () => {
+        const bound = target.address();
+        if (!bound || typeof bound === "string") reject(new Error("peer did not expose a port"));
+        else resolve(bound.port);
+      });
+    });
+    const port = await listenPeer(first, "127.0.0.1", 0);
+    await listenPeer(second, "::1", port);
+    try {
+      const url = `http://rebind.example.test:${port}/hook`;
+      const firstResponse = await pinnedHttpGet(url, { address: "127.0.0.1", family: 4 });
+      expect(await firstResponse.text()).toBe("first");
+
+      const secondResponse = await pinnedHttpGet(url, { address: "::1", family: 6 });
+      expect(await secondResponse.text()).toBe("second");
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await Promise.all([
+        new Promise<void>(resolve => first.close(() => resolve())),
+        new Promise<void>(resolve => second.close(() => resolve())),
+      ]);
+    }
+  });
+
+  test("an IPv6 literal is unbracketed for connection and certificate identity", () => {
+    expect(pinnedHttpHostnameForTests("https://[::1]:9443/hook")).toBe("::1");
+  });
+
+  test("an HTTPS IP literal connects without sending an invalid IP-valued SNI", async () => {
+    const certFile = new URL("./fixtures/network-tls-test-cert.pem", import.meta.url);
+    const keyFile = new URL("./fixtures/network-tls-test-key.pem", import.meta.url);
+    const tlsServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      tls: { cert: Bun.file(certFile), key: Bun.file(keyFile) },
+      fetch: () => new Response("tls-ok"),
+    });
+    try {
+      const response = await pinnedHttpGet(
+        `https://127.0.0.1:${tlsServer.port}/hook`,
+        { address: "127.0.0.1", family: 4 },
+        undefined,
+        { rejectUnauthorized: false },
+      );
+      expect(await response.text()).toBe("tls-ok");
+    } finally {
+      tlsServer.stop(true);
+    }
   });
 });

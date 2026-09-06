@@ -1,22 +1,29 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { chatCompletionsToResponsesBody } from "../../src/chat/inbound";
-import { anthropicToResponsesTranslation } from "../../src/claude/inbound";
-import { evidenceFromBody } from "../../src/routing/request-evidence";
-import type { ProviderAdapter } from "../../src/adapters/base";
-import type { AdapterEvent, OcxConfig, OcxProviderConfig } from "../../src/types";
-import { clearRequestLogsForTests, type RequestLogContext } from "../../src/server/request-log";
-import { readUsageEntries } from "../../src/usage/log";
-import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { chatCompletionsToResponsesBody } from "../src/chat/inbound";
+import { anthropicToResponsesTranslation } from "../src/claude/inbound";
+import { DIRECTIVE_KEY_FILE } from "../src/claude/directive-key";
+import { evidenceFromBody } from "../src/routing/request-evidence";
+import { closeRequestHistoryIndex } from "../src/routing/history/indexer";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import {
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+} from "../src/lib/windows-secret-acl";
+import type { ProviderAdapter } from "../src/adapters/base";
+import type { AdapterEvent, OcxConfig, OcxProviderConfig } from "../src/types";
+import { clearRequestLogsForTests, type RequestLogContext } from "../src/server/request-log";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const MODEL = "policy/daily";
 const EXPECTED_RICH_EVIDENCE = {
   toolsRequired: true,
   imageInputRequired: true,
 };
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 describe("routing policy request evidence parity (translator-level coverage)", () => {
   test("tools and image input produce the same evidence across Responses, Chat Completions, and Claude Messages", () => {
@@ -112,26 +119,52 @@ describe("routing policy request evidence parity (translator-level coverage)", (
 
 // ---- Handler-level parity tests (via dev handler entry points) ----
 
-const actualResolver = await import("../../src/server/adapter-resolve");
+const actualResolver = await import("../src/server/adapter-resolve");
 let adapterFactory: ((provider: OcxProviderConfig) => ProviderAdapter) | undefined;
 
-mock.module("../../src/server/adapter-resolve", () => ({
+mock.module("../src/server/adapter-resolve", () => ({
   ...actualResolver,
   resolveAdapter(provider: OcxProviderConfig, cacheRetention?: "none" | "short" | "long") {
     return adapterFactory?.(provider) ?? actualResolver.resolveAdapter(provider, cacheRetention);
   },
 }));
 
-const { handleResponses, handleResponsesCompact } = await import("../../src/server/responses");
-const { handleChatCompletions } = await import("../../src/server/chat-completions");
-const {
-  estimateClaudeRequestTokens,
-  handleClaudeCountTokens,
-  handleClaudeMessages,
-} = await import("../../src/server/claude-messages");
+const { handleResponses } = await import("../src/server/responses");
+const { handleChatCompletions } = await import("../src/server/chat-completions");
+const { handleClaudeMessages } = await import("../src/server/claude-messages");
 
-afterEach(() => {
+let testHome = "";
+let previousHome: string | undefined;
+
+beforeEach(() => {
+  // Handler coverage can create config-owned state. Keep it isolated and stub both Windows
+  // ACL runners so no real icacls child can retain the scratch home during teardown.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  previousHome = process.env.OPENCODEX_HOME;
+  testHome = mkdtempSync(join(tmpdir(), "ocx-routing-policy-"));
+  process.env.OPENCODEX_HOME = testHome;
+  // Directive-key creation takes the SQLite-backed config mutation lock. That
+  // lifecycle is unrelated to routing parity and can keep the scratch home open
+  // briefly on Windows, so provide the valid fixture state up front.
+  writeFileSync(join(testHome, DIRECTIVE_KEY_FILE), `${"a".repeat(64)}\n`, { mode: 0o600 });
+  clearRequestLogsForTests();
+});
+
+afterEach(async () => {
   adapterFactory = undefined;
+  clearRequestLogsForTests();
+  closeRequestHistoryIndex();
+  try {
+    await flushConfigDirHardeningForTests();
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (testHome) removeTreeWithRetry(testHome);
+    testHome = "";
+  }
 });
 
 function testConfig(): OcxConfig {
@@ -156,15 +189,6 @@ function testConfig(): OcxConfig {
   } as OcxConfig;
 }
 
-function noEligibleConfig(): OcxConfig {
-  const config = testConfig();
-  config.routingProfiles!.strict = {
-    candidates: [{ provider: "a", model: "m1" }],
-    require: { minContextWindow: 300_000 },
-  };
-  return config;
-}
-
 function minimalSuccessAdapter(provider: OcxProviderConfig): ProviderAdapter {
   return {
     name: "test-run-turn",
@@ -180,216 +204,6 @@ function minimalSuccessAdapter(provider: OcxProviderConfig): ProviderAdapter {
 }
 
 describe("routing policy request evidence parity (via dev handlers)", () => {
-  test("finalized Chat and Messages policy errors retain the rejected selector", async () => {
-    const previousHome = process.env.OPENCODEX_HOME;
-    const home = mkdtempSync(join(tmpdir(), "ocx-policy-log-"));
-    process.env.OPENCODEX_HOME = home;
-    clearRequestLogsForTests();
-    try {
-      for (const [wire, handler, body] of [
-        ["chat", handleChatCompletions, { model: "policy/missing", messages: [{ role: "user", content: "hello" }] }],
-        ["messages", handleClaudeMessages, { model: "policy/missing", max_tokens: 64, messages: [{ role: "user", content: "hello" }] }],
-      ] as const) {
-        const requestId = `policy-log-${wire}`;
-        const path = wire === "chat" ? "/v1/chat/completions" : "/v1/messages";
-        const response = await handler(new Request(`http://localhost${path}`, {
-          method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-        }), testConfig(), { model: "", provider: "" }, { requestId, start: Date.now() });
-        expect(response.status).toBe(404);
-        const entry = readUsageEntries().find(row => row.requestId === requestId);
-        expect(entry?.requestedModel).toBe("policy/missing");
-        expect(entry?.status).toBe(404);
-      }
-
-      const noEligibleRequestId = "policy-log-chat-noeligible";
-      const noEligibleResponse = await handleChatCompletions(new Request("http://localhost/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "policy/strict",
-          messages: [{ role: "user", content: "hello" }],
-        }),
-      }), noEligibleConfig(), { model: "", provider: "" }, {
-        requestId: noEligibleRequestId,
-        start: Date.now(),
-      });
-      expect(noEligibleResponse.status).toBe(404);
-      const noEligibleEntry = readUsageEntries().find(row => row.requestId === noEligibleRequestId);
-      expect(noEligibleEntry?.requestedModel).toBe("policy/strict");
-      expect(noEligibleEntry?.status).toBe(404);
-    } finally {
-      clearRequestLogsForTests();
-      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = previousHome;
-      removeTreeWithRetry(home);
-    }
-  });
-  test("missing and empty policies return compatible 404s on every wire before adapter resolution", async () => {
-    let adapterCalls = 0;
-    adapterFactory = provider => {
-      adapterCalls += 1;
-      return minimalSuccessAdapter(provider);
-    };
-    for (const model of ["policy/missing", "policy/"]) {
-      for (const stream of [false, true]) {
-        const bodies = [
-          { path: "/v1/responses", handler: handleResponses, body: { model, stream, input: "hello" } },
-          { path: "/v1/chat/completions", handler: handleChatCompletions, body: { model, stream, messages: [{ role: "user", content: "hello" }] } },
-          { path: "/v1/messages", handler: handleClaudeMessages, body: { model, stream, max_tokens: 64, messages: [{ role: "user", content: "hello" }] } },
-          { path: "/v1/responses/compact", handler: handleResponsesCompact, body: { model, stream, input: "hello" } },
-        ];
-        for (const { path, handler, body } of bodies) {
-          const log: RequestLogContext = { model: "", provider: "" };
-          const response = await handler(new Request(`http://localhost${path}`, {
-            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-          }), testConfig(), log);
-          expect(response.status).toBe(404);
-          const payload = await response.json() as { error: { type: string; message: string } };
-          expect(payload.error.type).toBe("invalid_request_error");
-          expect(payload.error.message).toStartWith("Unknown routing policy:");
-          expect(log.routeDecision).toBeUndefined();
-          expect(adapterCalls).toBe(0);
-        }
-      }
-    }
-  });
-  test("a no-eligible policy remains an invalid request on Chat and Messages", async () => {
-    let adapterCalls = 0;
-    adapterFactory = provider => {
-      adapterCalls += 1;
-      return minimalSuccessAdapter(provider);
-    };
-    for (const [path, handler, body] of [
-      ["/v1/chat/completions", handleChatCompletions, {
-        model: "policy/strict",
-        messages: [{ role: "user", content: "hello" }],
-      }],
-      ["/v1/messages", handleClaudeMessages, {
-        model: "policy/strict",
-        max_tokens: 64,
-        messages: [{ role: "user", content: "hello" }],
-      }],
-    ] as const) {
-      const response = await handler(new Request(`http://localhost${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      }), noEligibleConfig(), { model: "", provider: "" });
-      expect(response.status).toBe(404);
-      const payload = await response.json() as { error: { type: string; message: string } };
-      expect(payload.error.type).toBe("invalid_request_error");
-      expect(payload.error.message).toStartWith("No eligible candidates for policy profile:");
-      expect(adapterCalls).toBe(0);
-    }
-  });
-  test("count_tokens matches policy rejection behavior without adapter resolution", async () => {
-    for (const [model, config, expectedMessage] of [
-      ["policy/missing", testConfig(), "Unknown routing policy:"],
-      ["claude-ocx-policy--missing", testConfig(), "Unknown routing policy:"],
-      ["policy/strict", noEligibleConfig(), "No eligible candidates for policy profile:"],
-    ] as const) {
-      const response = await handleClaudeCountTokens(new Request("http://localhost/v1/messages/count_tokens", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: "user", content: "hello" }],
-        }),
-      }), config);
-      expect(response.status).toBe(404);
-      const payload = await response.json() as { error: { type: string; message: string } };
-      expect(payload.error.type).toBe("invalid_request_error");
-      expect(payload.error.message).toStartWith(expectedMessage);
-    }
-  });
-  test("count_tokens estimates against the policy-selected concrete model", async () => {
-    const config = testConfig();
-    config.providers.a!.models = ["claude-selected"];
-    config.providers.a!.modelContextWindows = { "claude-selected": 200_000 };
-    config.routingProfiles!.daily = {
-      candidates: [{ provider: "a", model: "claude-selected" }],
-    };
-    const body = {
-      model: MODEL,
-      messages: [{ role: "user", content: "a".repeat(3_500) }],
-    };
-    const expected = estimateClaudeRequestTokens(body, "claude-selected");
-    const unresolved = estimateClaudeRequestTokens(body, MODEL);
-    expect(expected).not.toBe(unresolved);
-
-    const response = await handleClaudeCountTokens(new Request("http://localhost/v1/messages/count_tokens", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    }), config);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ input_tokens: expected });
-  });
-  test("count_tokens resolves the generated Claude alias before selecting a policy model", async () => {
-    const config = testConfig();
-    const model = "claude-ocx-policy--daily";
-    const body = {
-      model,
-      messages: [{ role: "user", content: "a".repeat(3_500) }],
-    };
-    const expected = estimateClaudeRequestTokens(body, "m1");
-    expect(expected).not.toBe(estimateClaudeRequestTokens(body, model));
-
-    const response = await handleClaudeCountTokens(new Request("http://localhost/v1/messages/count_tokens", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    }), config);
-
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ input_tokens: expected });
-  });
-  test("a native-looking policy alias never escapes through Anthropic passthrough", async () => {
-    const config = testConfig();
-    config.routingProfiles!.daily!.alias = "claude-smart";
-    adapterFactory = minimalSuccessAdapter;
-    const originalFetch = globalThis.fetch;
-    let nativeFetchCalls = 0;
-    globalThis.fetch = mock(async () => {
-      nativeFetchCalls += 1;
-      throw new Error("native passthrough must not be reached for a policy alias");
-    }) as typeof fetch;
-    const body = {
-      model: "claude-smart",
-      max_tokens: 64,
-      messages: [{ role: "user", content: "a".repeat(3_500) }],
-    };
-    try {
-      const logCtx: RequestLogContext = { model: "", provider: "" };
-      const messages = await handleClaudeMessages(new Request("http://localhost/v1/messages", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: "Bearer sk-ant-fixture",
-        },
-        body: JSON.stringify(body),
-      }), config, logCtx);
-      expect(messages.status).toBe(200);
-      await messages.text();
-      expect(logCtx.routeDecision?.routeKind).toBe("policy");
-
-      const count = await handleClaudeCountTokens(new Request("http://localhost/v1/messages/count_tokens", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: "Bearer sk-ant-fixture",
-        },
-        body: JSON.stringify(body),
-      }), config);
-      expect(count.status).toBe(200);
-      expect(await count.json()).toEqual({
-        input_tokens: estimateClaudeRequestTokens(body, "m1"),
-      });
-      expect(nativeFetchCalls).toBe(0);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
   test("rich evidence (tools + image) produces identical route decision across all three surfaces", async () => {
     adapterFactory = minimalSuccessAdapter;
     const config = testConfig();

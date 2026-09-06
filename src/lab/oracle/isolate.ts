@@ -14,6 +14,37 @@ export interface IsolatedOracleEnv {
   cleanup: () => void;
 }
 
+const WINDOWS_CLEANUP_TRANSIENT_CODES = new Set(["EBUSY", "EPERM", "ENOTEMPTY"]);
+const WINDOWS_CLEANUP_ATTEMPTS = 50;
+const WINDOWS_CLEANUP_RETRY_DELAY_MS = 50;
+
+interface OracleCleanupDeps {
+  platform?: NodeJS.Platform;
+  remove?: (path: string) => void;
+  sleep?: (milliseconds: number) => void;
+}
+
+/** Remove an oracle sandbox after its child process has released Windows handles. */
+export function removeIsolatedOracleRoot(root: string, deps: OracleCleanupDeps = {}): void {
+  const platform = deps.platform ?? process.platform;
+  const remove = deps.remove ?? (path => rmSync(path, { recursive: true, force: true }));
+  const sleep = deps.sleep ?? Bun.sleepSync;
+
+  for (let attempt = 1; attempt <= WINDOWS_CLEANUP_ATTEMPTS; attempt += 1) {
+    try {
+      remove(root);
+      return;
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error
+        ? String(error.code)
+        : "";
+      if (platform !== "win32" || !WINDOWS_CLEANUP_TRANSIENT_CODES.has(code)
+        || attempt === WINDOWS_CLEANUP_ATTEMPTS) throw error;
+      sleep(WINDOWS_CLEANUP_RETRY_DELAY_MS);
+    }
+  }
+}
+
 function randomSuffix(): string {
   return `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
 }
@@ -38,7 +69,10 @@ export function createIsolatedOracleEnv(opts: { configDir?: string } = {}): Isol
     if (process.platform !== "win32") chmodSync(d, 0o700);
   }
   const cleanup = () => {
-    rmSync(base, { recursive: true, force: true, maxRetries: 3 });
+    // A terminated Windows agent tree can retain its working-directory handle
+    // briefly after the wrapper emits `close`. Keep cleanup strict, but give
+    // those transient EBUSY/EPERM releases a bounded retry window.
+    removeIsolatedOracleRoot(base);
   };
   return { root: base, configDir, dataDir, workspaceDir, homeDir, cleanup };
 }

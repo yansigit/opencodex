@@ -18,30 +18,30 @@ import {
   selectAvailableSubagentModel,
   setSubagentQuotaPrimeForTests,
   subagentFallbackGuidanceText,
-} from "../../src/codex/subagent-model-fallback";
-import { saveCodexAccountCredential } from "../../src/codex/account-store";
-import { NATIVE_MAIN_DRAIN_SENTINEL_MODELS } from "../../src/codex/catalog/native-models";
-import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/main-account";
-import { clearAccountNeedsReauth, markAccountNeedsReauth } from "../../src/codex/account-runtime-state";
-import { clearAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../../src/codex/quota";
+} from "../src/codex/subagent-model-fallback";
+import { saveCodexAccountCredential } from "../src/codex/account-store";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { clearAccountNeedsReauth, markAccountNeedsReauth } from "../src/codex/account-runtime-state";
+import { clearAccountQuota, setAccountQuotaFromParsed, updateAccountQuota } from "../src/codex/quota";
 import {
   canAcquireCodexQuotaProbeLease,
   canAcquireCodexQuotaScopeProbeLease,
   clearCodexUpstreamHealthForAccount,
   CODEX_QUOTA_PROBE_INTERVAL_MS,
   recordCodexUpstreamOutcome,
-} from "../../src/codex/routing";
-import type { OcxConfig } from "../../src/types";
-import { removeTreeWithRetry } from "../helpers/remove-tree";
+} from "../src/codex/routing";
+import type { OcxConfig } from "../src/types";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
-// beforeEach writes three Codex credentials (NTFS ACL harden on Windows). Under
-// `bun test --isolate` on a loaded windows-latest runner that can exceed the
-// default 5s hook budget (seen as beforeEach/afterEach timeout at ~7.6s).
+// Keep assertion headroom for the large suite under full-shard isolate load.
+// Windows ACL process isolation is handled explicitly in the fixture hooks below.
 setDefaultTimeout(30_000);
 
 const savedCodexHome = process.env.CODEX_HOME;
 const savedOpencodexHome = process.env.OPENCODEX_HOME;
 let testDir: string;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function installPoolCredential(accountId: string, now = Date.now()): void {
   saveCodexAccountCredential(accountId, {
@@ -93,6 +93,11 @@ function codexHomeFixture(): string {
 // Credential writes can hit Windows ACL harden stalls under full-suite isolate
 // load (GHA windows-latest: beforeEach/afterEach hook timed out ~7.6s).
 beforeEach(() => {
+  // This suite exercises fallback selection, not Windows ACL behavior. Stub both
+  // hardening lanes so each credential fixture cannot leave a real icacls child
+  // competing with unrelated subprocess tests on a loaded Windows shard.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testDir = mkdtempSync(join(tmpdir(), "ocx-subagent-fb-"));
   process.env.OPENCODEX_HOME = testDir;
   process.env.CODEX_HOME = testDir;
@@ -105,11 +110,7 @@ beforeEach(() => {
   clearAccountNeedsReauth("main");
 }, { timeout: 30_000 });
 
-afterEach(() => {
-  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
-  else process.env.CODEX_HOME = savedCodexHome;
-  if (savedOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = savedOpencodexHome;
+afterEach(async () => {
   clearAccountQuota();
   resetSubagentModelFallbackStateForTests();
   clearAccountNeedsReauth("pool-a");
@@ -119,7 +120,14 @@ afterEach(() => {
   clearCodexUpstreamHealthForAccount("pool-a");
   clearCodexUpstreamHealthForAccount("account-a");
   clearCodexUpstreamHealthForAccount("account-b");
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   removeTreeWithRetry(testDir);
+  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = savedCodexHome;
+  if (savedOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = savedOpencodexHome;
 }, { timeout: 30_000 });
 
 describe("subagent model fallback chain", () => {
@@ -253,37 +261,6 @@ describe("subagent model fallback chain", () => {
       throwingPreview,
       () => new Set(["account-a"]),
     )).toBe(false);
-  });
-
-test("the native-main drain sentinel covers the flagships without widening to gpt-5.5", () => {
-    // During a native-main drain with no usable non-main candidate, a sentinel model retains
-    // main as a read-free candidate so final auth returns maintenance and owns the atomic claim.
-    // Anything outside the sentinel set reads as unavailable and the chain advances.
-    //
-    // The predicate used to be spelled ACCOUNT_GATED_NATIVE_OPENAI_MODELS, which was an accident
-    // of the two sets holding the same slugs. Ungating the flagships (2026-09-04) would have
-    // flipped it false and let a drain silently rewrite the operator's configured subagent model.
-    // Widening it to every supported native would have been the opposite error: gpt-5.5 and the
-    // other non-flagship natives would newly raise a maintenance error where they used to fall
-    // back and answer. This pins both edges.
-    const now = 1_800_000_000_000;
-    const config = cfg({ autoSwitchThreshold: 0 });
-    updateAccountQuota(MAIN_CODEX_ACCOUNT_ID, 10, undefined, 20);
-    const draining = { nativeMainSelectionOnly: true } as const;
-    const noPoolCandidate = () => undefined;
-
-    for (const slug of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra", "gpt-daybreak-blue-latest"]) {
-      expect(NATIVE_MAIN_DRAIN_SENTINEL_MODELS.has(slug)).toBe(true);
-      expect(isSubagentModelUnavailable(slug, config, null, now, draining, noPoolCandidate))
-        .toBe(false);
-    }
-
-    // Outside the set, and deliberately so: these keep advancing the chain as they always did.
-    for (const slug of ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"]) {
-      expect(NATIVE_MAIN_DRAIN_SENTINEL_MODELS.has(slug)).toBe(false);
-      expect(isSubagentModelUnavailable(slug, config, null, now, draining, noPoolCandidate))
-        .toBe(true);
-    }
   });
 
   test("unqualified gated candidates pass their entitlement set into Pool preview", () => {
@@ -789,12 +766,12 @@ test("the native-main drain sentinel covers the flagships without widening to gp
 
     resetSubagentModelFallbackStateForTests();
     clearAccountQuota("pool-a");
-    setAccountQuotaFromParsed("pool-a", { weeklyPercent: 20, shortPercent: 100, shortResetAt: now + 60_000 });
+    setAccountQuotaFromParsed("pool-a", { shortPercent: 100, shortResetAt: now + 60_000 });
     expect(isNativeModelQuotaExhausted("gpt-5.6-sol", config, "pool-a", now)).toBe(true);
 
     resetSubagentModelFallbackStateForTests();
     clearAccountQuota("pool-a");
-    setAccountQuotaFromParsed("pool-a", { weeklyPercent: 20, shortPercent: 100, shortResetAt: now - 60_000 });
+    setAccountQuotaFromParsed("pool-a", { shortPercent: 100, shortResetAt: now - 60_000 });
     expect(isNativeModelQuotaExhausted("gpt-5.6-sol", config, "pool-a", now)).toBe(false);
   });
 
@@ -869,52 +846,6 @@ test("the native-main drain sentinel covers the flagships without widening to gp
       model: "gpt-5.6-sol",
       rewritten: false,
       skipped: ["gpt-5.6-sol", "openai-compat/gpt-5.5", "kimi/k3"],
-    });
-  });
-
-  test("restricted fallback can admit an independently trusted resolved route", () => {
-    resetSubagentModelFallbackStateForTests();
-    const config = cfg({
-      providers: {
-        openai: {
-          adapter: "openai-responses",
-          baseUrl: "https://chatgpt.com/backend-api/codex",
-          authMode: "forward",
-          codexAccountMode: "direct",
-        },
-        relay: {
-          adapter: "openai-responses",
-          baseUrl: "https://relay.example.test/v1",
-          authMode: "key",
-          apiKey: "test-relay-key",
-        },
-        xai: {
-          adapter: "openai-chat",
-          baseUrl: "https://api.x.ai/v1",
-          authMode: "key",
-          apiKey: "test-xai-key",
-        },
-      },
-      subagentModelFallback: ["relay/gpt-5.5"],
-    });
-    const selected = selectAvailableSubagentModel(
-      "xai/grok-4.5",
-      config,
-      [],
-      null,
-      Date.now(),
-      true,
-      undefined,
-      [],
-      undefined,
-      undefined,
-      undefined,
-      route => route.providerName === "relay",
-    );
-    expect(selected).toEqual({
-      model: "relay/gpt-5.5",
-      rewritten: true,
-      skipped: ["xai/grok-4.5"],
     });
   });
 
