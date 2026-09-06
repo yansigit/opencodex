@@ -299,7 +299,9 @@ describe("GitHub Actions hardening", () => {
     // Windows runs the same suite, sharded like the Linux legs, on an ephemeral
     // GitHub-hosted runner. Public pull-request code must never reach a
     // persistent self-hosted host.
-    const winSteps = (ci.jobs?.["platform-windows"] as { steps?: { if?: string; run?: string }[] })?.steps ?? [];
+    const winSteps = (ci.jobs?.["platform-windows"] as {
+      steps?: { if?: string; run?: string; env?: Record<string, unknown> }[];
+    })?.steps ?? [];
     // --timeout is part of the contract, not incidental: this leg ran on Bun's 5s default
     // while Linux and macOS both pass 60000, and it is the slowest hardware on the board.
     // Three composed-acceptance failures were that default firing on tests still working
@@ -313,6 +315,12 @@ describe("GitHub Actions hardening", () => {
     const windowsTestSteps = winSteps.filter(step => hasShellCommandHead(step.run, windowsTestCommand));
     expect(windowsTestSteps.length).toBeGreaterThan(0);
     expect(windowsTestSteps.every(step => step.if === undefined)).toBe(true);
+    // The hosted Windows shard owns an ephemeral VM and invokes every wrapper
+    // sequentially in this one shell step. Requiring the local multi-worktree
+    // queue there adds a pre-test PowerShell SID/known-folder dependency without
+    // preventing any possible overlap; run 34000228308 lost the entire shard when
+    // that bounded identity lookup timed out before Bun started a test.
+    expect(windowsTestSteps.every(step => step.env?.OCX_TEST_NO_QUEUE === "1")).toBe(true);
     const windowsTestRun = windowsTestSteps[0]?.run ?? "";
     expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane general');
     expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane serial');
