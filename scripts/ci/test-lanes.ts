@@ -16,6 +16,10 @@ export const SERIAL_TEST_FILES = [
   // watchdog even though it is still alive. Keep the end-to-end assertions;
   // isolate their process scheduling from unrelated shard load.
   "tests/codex-integration/codex-composed-acceptance.test.ts",
+  // Exercises repeated catalog convergence against a synthetic Codex runtime.
+  // On a fully loaded macOS promotion runner its 30s featured-model deadline
+  // expired, while the same exact commit passed in the isolated dev push.
+  "tests/codex-integration/codex-convergence-account-selectors.test.ts",
   // Proves production write-lock contention through many real Bun children.
   // Run it after the general pool so unrelated process pressure cannot consume
   // the bounded child startup budgets or let a holder expire before a contender.
@@ -33,7 +37,14 @@ export const SERIAL_TEST_FILES = [
   "tests/adapters/openai/openai-provider-option-e2e.test.ts",
   "tests/cli/ocx-launcher-runtime.test.ts",
   "tests/ci-workflows/release-helper.test.ts",
+  // Uses real worker inactivity periods to classify periodic activity. On the
+  // loaded promotion pool, scheduler stalls crossed its bounded observation
+  // window and changed the expected blocked/inconclusive outcome.
+  "tests/lab/lab-fabric-task.test.ts",
   "tests/usage/request-decompress.test.ts",
+  // Drives a sustained real-time debounce to prove writes cannot be starved.
+  // Keep its 60s product invariant, but remove unrelated suite contention.
+  "tests/usage/quota-reset-seen-store.test.ts",
   "tests/responses/responses-stateless-dangling-call-repair.test.ts",
   "tests/server/server-auth.test.ts",
   // Relays a real 50 MiB WebSocket frame to prove the production ceiling. On a
@@ -44,6 +55,9 @@ export const SERIAL_TEST_FILES = [
   "tests/service/shutdown-launcher.test.ts",
   "tests/storage/storage-policy-job-responsive.test.ts",
   "tests/storage/storage-restore-job-responsive.test.ts",
+  // Waits for a real background policy worker to settle and prove process
+  // cleanup. Parallel macOS pressure can starve that worker past its 20s guard.
+  "tests/storage/storage-worker-lifecycle.test.ts",
   "tests/ci-workflows/test-runner.test.ts",
   "tests/update/update-stop-first.test.ts",
   // These suites share the interval-based overlay reconciler singleton and
@@ -52,6 +66,9 @@ export const SERIAL_TEST_FILES = [
   "tests/usage/user-cost-overlay-coderabbit-regressions.test.ts",
   "tests/usage/user-cost-overlay-live-reconcile.test.ts",
   "tests/usage/user-cost-overlay-provider-delete.test.ts",
+  // Proves a deliberately stalled response body is cut off inside a one-second
+  // contract. Isolate it so unrelated macOS workers cannot consume that budget.
+  "tests/web-search/web-search-timeout-contract.test.ts",
   // Builds and parses 500,001 JSONL entries to prove the entry cap. It reached
   // the 30s test budget under pool contention and completes in ~5s in isolation.
   "tests/usage/usage-log.test.ts",

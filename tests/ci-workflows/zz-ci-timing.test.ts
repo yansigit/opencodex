@@ -33,18 +33,23 @@ describe("CI lane manifest", () => {
       "tests/claude-integration/claude-management-api.test.ts",
       "tests/codex-integration/codex-app-server-processes.test.ts",
       "tests/codex-integration/codex-composed-acceptance.test.ts",
+      "tests/codex-integration/codex-convergence-account-selectors.test.ts",
       "tests/codex-integration/codex-transition-state-race.test.ts",
       "tests/codex-integration/native-main-owner-lifetime.test.ts",
       "tests/cli/ocx-launcher-runtime.test.ts",
+      "tests/lab/lab-fabric-task.test.ts",
       "tests/server/server-auth.test.ts",
       "tests/server/server-search.test.ts",
       "tests/service/shutdown-launcher.test.ts",
       "tests/storage/storage-policy-job-responsive.test.ts",
       "tests/storage/storage-restore-job-responsive.test.ts",
+      "tests/storage/storage-worker-lifecycle.test.ts",
       "tests/ci-workflows/test-runner.test.ts",
+      "tests/usage/quota-reset-seen-store.test.ts",
       "tests/usage/user-cost-overlay-coderabbit-regressions.test.ts",
       "tests/usage/user-cost-overlay-live-reconcile.test.ts",
       "tests/usage/user-cost-overlay-provider-delete.test.ts",
+      "tests/web-search/web-search-timeout-contract.test.ts",
     ]) expect(lanes.serial).toContain(historicallyLoadSensitive);
     expect(lanes.dedicated).toEqual(DEDICATED_TEST_FILES);
     expect(laneFiles("general", process.cwd())).toEqual(lanes.general);
