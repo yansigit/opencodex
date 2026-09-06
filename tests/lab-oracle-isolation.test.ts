@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, statSync, readFileSync, symlinkSync, u
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CURSOR_ORACLE_UPSTREAM, CURSOR_ORACLE_LOOPBACK_HOST, CURSOR_ORACLE_SCRATCH_SUBDIR, CURSOR_ORACLE_RAW_TTL_MS, CURSOR_ORACLE_MAX_RAW_BYTES } from "../src/lab/oracle/constants";
-import { createIsolatedOracleEnv, ensureOracleRawDir, writeRawScratch, purgeExpiredRaw, assertUnderRoot } from "../src/lab/oracle/isolate";
+import { createIsolatedOracleEnv, ensureOracleRawDir, writeRawScratch, purgeExpiredRaw, assertUnderRoot, removeIsolatedOracleRoot } from "../src/lab/oracle/isolate";
 import { createLoopbackProxy } from "../src/lab/oracle/loopback";
 import { labScratchDir } from "../src/lab/paths";
 const ROOTS: string[] = [];
@@ -12,6 +12,55 @@ function tempConfigDir(): string { const d = mkdtempSync(join(tmpdir(), "ocx-tes
 afterEach(()=>{ for(const d of ROOTS.splice(0)) rmSync(d,{recursive:true,force:true}); });
 describe("oracle constants are hard-coded",()=>{test("upstream is api2.cursor.sh and loopback is 127.0.0.1",()=>{expect(CURSOR_ORACLE_UPSTREAM).toBe("https://api2.cursor.sh");expect(CURSOR_ORACLE_LOOPBACK_HOST).toBe("127.0.0.1");expect(CURSOR_ORACLE_SCRATCH_SUBDIR).toBe("oracle-raw");expect(CURSOR_ORACLE_RAW_TTL_MS).toBe(24*60*60*1000);expect(CURSOR_ORACLE_MAX_RAW_BYTES).toBe(2*1024*1024);});});
 describe("createIsolatedOracleEnv",()=>{test("creates config/data/workspace/home under tmp with 0700 and cleans up",()=>{const cfg=tempConfigDir();const env=createIsolatedOracleEnv({configDir:cfg});ROOTS.push(env.root);expect(existsSync(env.root)).toBe(true);expect(existsSync(env.configDir)).toBe(true);expect(existsSync(env.dataDir)).toBe(true);expect(existsSync(env.workspaceDir)).toBe(true);expect(existsSync(env.homeDir)).toBe(true);if(process.platform!=="win32"){for(const d of [env.root,env.configDir,env.dataDir,env.workspaceDir,env.homeDir]) expect((statSync(d).mode & 0o777)).toBe(0o700);} const root=env.root;env.cleanup();expect(existsSync(root)).toBe(false);});});
+describe("removeIsolatedOracleRoot", () => {
+  test.each(["EBUSY", "EPERM", "ENOTEMPTY"])("retries transient Windows %s failures", code => {
+    let attempts = 0;
+    const sleeps: number[] = [];
+    removeIsolatedOracleRoot("sandbox", {
+      platform: "win32",
+      remove: () => {
+        attempts += 1;
+        if (attempts < 3) throw Object.assign(new Error(code), { code });
+      },
+      sleep: milliseconds => sleeps.push(milliseconds),
+    });
+    expect(attempts).toBe(3);
+    expect(sleeps).toEqual([50, 50]);
+  });
+
+  test("propagates the final transient Windows failure after the bounded attempts", () => {
+    const terminal = Object.assign(new Error("still busy"), { code: "EBUSY" });
+    let attempts = 0;
+    let sleeps = 0;
+    let thrown: unknown;
+    try {
+      removeIsolatedOracleRoot("sandbox", {
+        platform: "win32",
+        remove: () => { attempts += 1; throw terminal; },
+        sleep: () => { sleeps += 1; },
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBe(terminal);
+    expect(attempts).toBe(50);
+    expect(sleeps).toBe(49);
+  });
+
+  test.each([
+    ["win32", "EACCES"],
+    ["linux", "EBUSY"],
+  ] as const)("does not retry %s %s failures outside the transient boundary", (platform, code) => {
+    const terminal = Object.assign(new Error(code), { code });
+    let attempts = 0;
+    expect(() => removeIsolatedOracleRoot("sandbox", {
+      platform,
+      remove: () => { attempts += 1; throw terminal; },
+      sleep: () => { throw new Error("unexpected sleep"); },
+    })).toThrow(terminal);
+    expect(attempts).toBe(1);
+  });
+});
 test.skipIf(process.platform !== "win32")("isolated cleanup waits for a child working-directory handle to release", async () => {
   const cfg = tempConfigDir();
   const env = createIsolatedOracleEnv({ configDir: cfg });
