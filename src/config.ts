@@ -3906,7 +3906,7 @@ function readPersistedServerBinding(
  *   conflict keeps the live value;
  * - a provider or custom-model row deleted on disk stays deleted even if stale
  *   live state edited that same row;
- * - file missing/unreadable → save what we have, no throw.
+ * - missing file → save what we have; invalid existing file → fail closed.
  *
  * Custom-model rows are merged by their stable `id`, preserving independent
  * edits and deletions across stale whole-config saves.
@@ -3978,10 +3978,10 @@ export function saveConfigPreservingClaudeCode(config: OcxConfig): void {
       const persistedConfig: OcxConfig = { ...projectedConfig, port: persistedBinding.port };
       if (persistedBinding.hostname === undefined) delete persistedConfig.hostname;
       else persistedConfig.hostname = persistedBinding.hostname;
-      if (persistConfigUnlocked(persistedConfig)) bumpGenerationForCooperatingConfigWrite();
+      if (persistConfigUnlocked(persistedConfig, "mutation")) bumpGenerationForCooperatingConfigWrite();
       persistedLiveServerBinding.set(config, persistedBinding);
     } else {
-      if (persistConfigUnlocked(projectedConfig)) bumpGenerationForCooperatingConfigWrite();
+      if (persistConfigUnlocked(projectedConfig, "mutation")) bumpGenerationForCooperatingConfigWrite();
     }
     adoptCustomModelCatalogMigration(config, projectedConfig);
     if (claudeCodeBaseline.has(config)) {
