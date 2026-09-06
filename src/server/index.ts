@@ -16,6 +16,8 @@ import {
   armClaudeCodeBaseline,
   loadConfig,
   saveConfig,
+  saveConfigPreservingClaudeCode,
+  mutatePersistedConfig,
   getConfigDir,
   websocketsEnabled,
 } from "../config";
@@ -46,6 +48,11 @@ import {
   setLiveStateStoreConfig,
 } from "../lib/state-store-registrations";
 import { startUserCostOverlayReconciler } from "../usage/user-cost-overlay-reconciler";
+import {
+  getStorageCleanupPolicyJobState,
+  getStorageCleanupPolicyTestStreamResponse,
+  requestStorageCleanupPolicyRun,
+} from "../storage/policy-job";
 import {
   configureAppOwnedMemoryBudget,
   enforceAppOwnedMemoryBudget,
@@ -655,6 +662,16 @@ export function warnAgentTaskRecoveryStartup(config: {
 }
 
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
+  const managementApi: ManagementApiDeps = {
+    saveConfigPreservingClaudeCode,
+    mutatePersistedConfig,
+    storageCleanupPolicyJob: {
+      getState: getStorageCleanupPolicyJobState,
+      getTestStream: getStorageCleanupPolicyTestStreamResponse,
+      requestRun: requestStorageCleanupPolicyRun,
+    },
+    ...deps.managementApi,
+  };
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();
   // Captured before loadConfig() starts the optional ACL flight so stop() drains the same dir
   // even if OPENCODEX_HOME changes underneath a long-lived process.
@@ -1187,7 +1204,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             method: "POST",
             headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
           });
-          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, deps.managementApi);
+          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, managementApi);
           const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
           if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
           return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
@@ -1289,7 +1306,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             }), req, config);
           }
         }
-        const mgmtResponse = await handleManagementAPI(req, url, config, deps.managementApi, principal, managementSessionControl);
+        const mgmtResponse = await handleManagementAPI(req, url, config, managementApi, principal, managementSessionControl);
         if (mgmtResponse) return withManagementCors(mgmtResponse, req, config);
         return withManagementCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
       }
@@ -1697,7 +1714,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ? detectCursorInstalls().find(install => install.build === "private-inference")
           : undefined;
         const cursorEffortTable = effortRowsEnabled
-          ? (deps.managementApi?.loadCursorEffortTable ?? loadCursorEffortTable)(privateInference)
+          ? (managementApi.loadCursorEffortTable ?? loadCursorEffortTable)(privateInference)
           : null;
         const expandedNativeModelRow = (id: string, metadataId = id) => {
           const reasoningEfforts = nativeReasoningEfforts(metadataId);
