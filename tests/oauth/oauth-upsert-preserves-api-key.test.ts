@@ -84,6 +84,27 @@ describe("upsertOAuthProvider credential preservation", () => {
     expect(config.providers.xai!.modelCosts).toEqual(costs);
   });
 
+  test("carries Command Code projectContext across a re-login upsert", () => {
+    const config = {
+      port: 10100,
+      defaultProvider: "command-code",
+      providers: {
+        "command-code": {
+          adapter: "command-code",
+          baseUrl: "https://api.commandcode.ai",
+          authMode: "oauth",
+          commandCodeVersion: "0.52.1",
+          projectContext: "on",
+        },
+      },
+    } as unknown as OcxConfig;
+
+    upsertOAuthProvider(config, "command-code");
+
+    expect(config.providers["command-code"]?.commandCodeVersion).toBe("0.52.1");
+    expect(config.providers["command-code"]?.projectContext).toBe("on");
+  });
+
   test("carries the per-provider account-failover opt-out across a re-login upsert (#2568d)", () => {
     // The sequence that makes this load-bearing: an operator switches rotation off, then logs in
     // a SECOND account. That login rebuilds this row from the preset and simultaneously creates
