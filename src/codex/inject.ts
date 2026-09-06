@@ -73,6 +73,7 @@ import {
   tomlString,
 } from "./paths";
 import { resolveEffectiveProjectModelProvider } from "./project-config-warnings";
+import { syncCodexAgentRoles } from "./agent-roles-sync";
 import {
   transformManagedSubagentDefaults,
   type ManagedSubagentDefaults,
@@ -878,6 +879,7 @@ export interface CodexInjectResult {
   status?: "skipped";
   skippedReason?: "desired_disabled" | "desired_enabled";
   nativeSubagentDefaultsWarning?: string;
+  agentRolesSyncWarning?: string;
 }
 
 export async function injectCodexConfig(
@@ -902,6 +904,16 @@ export async function injectCodexConfig(
   } catch (error) {
     return { success: false, message: error instanceof Error ? error.message : "Invalid Codex routing target" };
   }
+  // Role files are independent of config.toml. Skip when the caller omitted
+  // config so an unknown catalog cannot prune owned files. The sync fail-closes
+  // internally; do not wrap this call in an empty catch.
+  let agentRolesSyncWarning: string | undefined;
+  if (!options.validateOnly && config) {
+    const roleSync = syncCodexAgentRoles(config);
+    if (roleSync.warnings.length > 0) agentRolesSyncWarning = roleSync.warnings.join(" ");
+  }
+  const withRoleWarning = <T extends CodexInjectResult>(result: T): T =>
+    agentRolesSyncWarning ? { ...result, agentRolesSyncWarning } : result;
   if (!existsSync(CODEX_CONFIG_PATH)) {
     return {
       success: false,
@@ -927,7 +939,7 @@ export async function injectCodexConfig(
     )
       ? `Native Codex sub-agent defaults were not injected: external model_provider ${tomlString(activeProvider)} owns config.toml.`
       : undefined;
-    return {
+    return withRoleWarning({
       success: true,
       ...(nativeSubagentDefaultsWarning
         ? { nativeSubagentDefaultsWarning }
@@ -938,7 +950,7 @@ export async function injectCodexConfig(
         `  Configure that provider for Responses passthrough at ${routingTarget.baseUrl}` +
         `${routingTarget.requiresAdmissionToken ? ` with x-opencodex-api-key from ${routingTarget.tokenEnv}` : ""}.\n` +
         `  For direct injection, switch to the built-in openai provider, remove any user-owned root openai_base_url, and rerun 'ocx start'.`,
-    };
+    });
   }
 
   // Marker-owned native defaults are OpenCodex residue, never part of the
@@ -1375,7 +1387,7 @@ export async function injectCodexConfig(
   // A user-owned root openai_base_url means we did NOT install routing — say so honestly
   // instead of claiming the proxy route is active (catalog/fast_mode were still written).
   if (keptUserBaseUrl) {
-    return {
+    return withRoleWarning({
       success: true,
       ...(nativeSubagentDefaultsWarning
         ? { nativeSubagentDefaultsWarning }
@@ -1387,14 +1399,14 @@ export async function injectCodexConfig(
         managedDefaultsMessage +
         `  To route plain codex through the proxy, remove your openai_base_url line from ~/.codex/config.toml and rerun 'ocx start'.\n` +
         `  Reference config: ${CODEX_PROFILE_PATH}`,
-    };
+    });
   }
   const headline = routingTarget.desktopAuthless === true
     ? `Injected opencodex as default provider into Codex config (authless Desktop mode: requires_openai_auth = false).\n`
     : legacyMode
       ? `Injected opencodex as default provider into Codex config.\n`
       : `Pointed Codex's built-in openai provider at the opencodex proxy (openai_base_url + realtime sideband override).\n`;
-  return {
+  return withRoleWarning({
     success: true,
     ...(nativeSubagentDefaultsWarning ? { nativeSubagentDefaultsWarning } : {}),
     message:
@@ -1408,7 +1420,7 @@ export async function injectCodexConfig(
       (legacyMode
         ? `  Fallback: codex --profile opencodex (same behavior)`
         : `  Fallback reference: ${CODEX_PROFILE_PATH}`),
-  };
+  });
 }
 
 /**

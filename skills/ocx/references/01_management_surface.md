@@ -645,8 +645,26 @@ JSON mode: `payload`.
 
 - A bare invocation reads and never writes.
 
+### `ocx agent roles`
+
+Show, replace, or remove subagent roles.
+
+| Method | Route |
+|---|---|
+| GET | `/api/subagent-roles` |
+| PUT | `/api/subagent-roles` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--file` | string | Read role JSON from a file instead of stdin. |
+| `--json` | boolean | Emit role state as JSON. |
+
+JSON mode: `payload`.
+
+- A status invocation reads and never writes.
+
 ## Counts
 
-- declared capabilities: 35
-- of those, state-changing: 15
+- declared capabilities: 36
+- of those, state-changing: 16
 - head-resolved invocations: 2

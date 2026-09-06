@@ -577,6 +577,21 @@ export const CAPABILITIES: readonly Capability[] = [
     json: "payload",
     details: ["A bare invocation reads and never writes."],
   },
+  {
+    command: ["agent", "roles"],
+    summary: "Show, replace, or remove subagent roles.",
+    routes: [
+      { method: "GET", path: "/api/subagent-roles" },
+      { method: "PUT", path: "/api/subagent-roles" },
+    ],
+    flags: [
+      { name: "--file", value: "string", summary: "Read role JSON from a file instead of stdin." },
+      { name: "--json", value: "boolean", summary: "Emit role state as JSON." },
+    ],
+    mutates: true,
+    json: "payload",
+    details: ["A status invocation reads and never writes."],
+  },
 ];
 
 /** Capabilities that drive `route`, for `ocx capabilities --route`. */
