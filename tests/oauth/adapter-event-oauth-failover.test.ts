@@ -165,7 +165,13 @@ describe("#2568 adapter-event OAuth failover", () => {
     });
     const cfg = config();
     cfg.defaultProvider = "google-antigravity";
-    cfg.providers = { "google-antigravity": { ...cfg.providers.cursor!, googleMode: "cloud-code-assist", project: "project-a" } };
+    cfg.providers = { "google-antigravity": {
+      ...cfg.providers.cursor!,
+      adapter: "google",
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      googleMode: "cloud-code-assist",
+      project: "project-a",
+    } };
     attempts = [
       [{ type: "text_delta", text: "first" }, { type: "done" }],
       [{ type: "text_delta", text: "second" }, { type: "done" }],
