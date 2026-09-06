@@ -16,7 +16,7 @@ fazla Claude hesabına giriş yapabilirsiniz. Varsayılan olarak her istek yaln�
 
 **Deneysel, isteğe bağlı** bir Claude hesap havuzu
 (`anthropicAccountPool.enabled`), bu OAuth hesapları arasında yapışkan oturum
-bağlılığı ve 429 bekleme süresi (cooldown) yük devretmesi ekler. Yalnızca
+bağlılığı ve kullanıma dayalı yeni oturum seçimi ekler. Bu ayar atlandığında, iki veya daha fazla kullanılabilir hesabın varlığı 429 yük devretmesini varsayılan olarak etkinleştirir ve hız sınırına takılan bir istek başka bir hesaba geçebilir. Açık bir `anthropicAccountPool.enabled: false` değeri hem bu reaktif yük devretmeyi hem de havuzu kapatır. Yalnızca
 **yeni** oturumlar için `anthropicAccountPool.strategy` uygun hesaplar arasından
 seçim yapar: `quota` (varsayılan), `autoSwitchThreshold` üzerinde olduğunda
 `anthropicAccountPool.quotaWindow` ile yapılandırılan penceredeki bilinen en düşük kullanımı
@@ -27,7 +27,7 @@ olarak kapalıdır**, bir GUI uyarısı gösterir ve sahada kapsamlı olarak tes
 edilmemiştir — Anthropic otomatik rotasyona benzeyen hesapları kısıtlayabilir;
 rotasyon sağlayıcı yaptırımlarına karşı koruma sağlamaz.
 
-Etkinleştirildiğinde operasyonel sözleşme:
+Yük devretme etkinken operasyonel sözleşme:
 
 - Yukarı akıştan gelen **429**, varsa `Retry-After` (yoksa varsayılan bir geri
   çekilme) kullanarak o hesabı soğutur, bağlılıklarını temizler ve aynı istek
@@ -79,6 +79,37 @@ kimlik bilgilerini yok sayar. Kabuğunuzda dışa aktardığınız bir değer, h
 kimlik doğrulama modunda her zaman geçerlidir. Bir API anahtarını kasıtlı olarak
 kullanmak için, onu bir proje dosyasında bırakmak yerine dışa aktarın (`export
 ANTHROPIC_API_KEY=...`).
+
+### Claude yönlendirmesi kapalıyken yerel geri dönüş
+
+`ocx claude` eskiden Claude yönlendirmesi kapalıyken hata vererek çıkardı.
+Artık bunun yerine yerel `claude` ikili dosyasını başlatır; böylece komut,
+yönlendirme kapalıyken de kullanışlı kalır:
+
+| Yönlendirmenin kapalı olduğu yer | Ne olur |
+| --- | --- |
+| Yapılandırmada `claudeCode.enabled: false` | Yönlendirmenin kapalı olduğunu bildiren bir uyarıyla yerel başlatma |
+| Çalışan vekil `GET /api/claude-code` üzerinden `enabled: false` bildiriyor | Yerel başlatma ve yeniden etkinleştirdikten sonra servisi yeniden başlatma önerisi |
+| `claudeCode.enabled` yok veya `true` | Değişmeden vekil üzerinden yönlendirme |
+
+Geri dönüşü yalnızca açık bir `false` tetikler; bu alandan önceki bir vekil
+yönlendirilmiş kalır. Vekilin bulunmaması da bir tetikleyici değildir —
+yönlendirme açıkken `ocx claude` vekili yine başlatır.
+
+Yerel bir oturum vekil durumunu devralmamalıdır; bu nedenle geri dönüş yalnızca
+OpenCodex'in sahipliğini **kanıtlayabildiği** değerleri kaldırır:
+`ANTHROPIC_BASE_URL` yalnızca bu vekilin kendi geri döngü adresini ve
+yapılandırılmış bağlantı noktasını gösteriyorsa *ve* eşlenmiş kabul belirteci
+vekilin verdiği bir belirteçse; `CLAUDE_CODE_*` keşif ve otomatik bağlam
+anahtarları; ve yalnızca vekil üzerinden çözülen model yuvaları (yönlendirme
+takma adları ve `provider/model` kimlikleri). Geri kalan her şey sizindir ve
+korunur — ilgisiz bir `http://localhost:8080` ağ geçidi ve kendi `sk-ant-`
+kimlik bilginiz birlikte hayatta kalır.
+
+Kaydedilmiş `/model` seçici varsayılanınız yalnızca vekile özgü bir modelse,
+yerel oturum `claudeCode.model` yerel olarak kullanılabildiğinde ona döner;
+aksi hâlde `--model <Anthropic modeli>` geçmeniz için uyarır. Açık bir
+`--model` argümanı her zaman kazanır.
 
 ## Kimlik doğrulama modu (Auth mode)
 

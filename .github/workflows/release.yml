@@ -408,6 +408,21 @@ jobs:
           echo "release-needed=$(jq -r .createRelease <<<"$decision")" >> "$GITHUB_OUTPUT"
           echo "::notice::Release metadata disposition: ${action}"
 
+      - name: Refuse a release the current tag set already outranks
+        env:
+          RELEASE_VERSION: ${{ env.DISPATCH_VERSION }}
+        run: |
+          set -euo pipefail
+          allow=()
+          existing_tag_sha="$(git rev-parse -q --verify "refs/tags/v${RELEASE_VERSION}^{commit}" || true)"
+          # release-postpublish.cjs already proved that any existing public state
+          # belongs to this exact source commit. Permit an exact-tag resume while
+          # still rejecting a candidate outranked by any other release tag.
+          if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" = "$GITHUB_SHA" ]; then
+            allow=(--allow-existing-tag "v${RELEASE_VERSION}")
+          fi
+          git tag --list 'v*' | bun scripts/version-line.ts assert-releasable "$RELEASE_VERSION" "${allow[@]}"
+
       - name: Build and validate release changelog
         env:
           GH_TOKEN: ${{ github.token }}

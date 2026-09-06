@@ -6,62 +6,62 @@ export const SERIAL_TEST_FILES = [
   // This is the single source of truth for tests that must not share a parallel
   // worker pool. The normal CI serial job and scripts/test.ts full-suite planner
   // both consume it, so promotion/nightly runs cannot silently lose quarantine.
-  "tests/aistudio-native-webkit.test.ts",
-  "tests/anthropic-image-normalize.test.ts",
-  "tests/claude-native-passthrough.test.ts",
-  "tests/claude-management-api.test.ts",
-  "tests/codex-app-server-processes.test.ts",
+  "tests/adapters/google/aistudio-native-webkit.test.ts",
+  "tests/adapters/anthropic/anthropic-image-normalize.test.ts",
+  "tests/claude-integration/claude-native-passthrough.test.ts",
+  "tests/claude-integration/claude-management-api.test.ts",
+  "tests/codex-integration/codex-app-server-processes.test.ts",
   // Spawns multiple real `ocx start` children. Under the general Windows pool,
   // four Bun test processes can starve a healthy child past its readiness
   // watchdog even though it is still alive. Keep the end-to-end assertions;
   // isolate their process scheduling from unrelated shard load.
-  "tests/codex-composed-acceptance.test.ts",
+  "tests/codex-integration/codex-composed-acceptance.test.ts",
   // Proves production write-lock contention through many real Bun children.
   // Run it after the general pool so unrelated process pressure cannot consume
   // the bounded child startup budgets or let a holder expire before a contender.
-  "tests/codex-inject-write-lock.test.ts",
-  "tests/codex-journal.test.ts",
-  "tests/codex-prompt-route.test.ts",
-  "tests/codex-shim.test.ts",
-  "tests/codex-transition-state-race.test.ts",
-  "tests/config-save-boundary.test.ts",
-  "tests/cursor-images.test.ts",
-  "tests/cursor-native-exec-shell.test.ts",
-  "tests/issue-452-empty-503.test.ts",
-  "tests/kiro-images.test.ts",
-  "tests/native-main-owner-lifetime.test.ts",
-  "tests/openai-provider-option-e2e.test.ts",
-  "tests/ocx-launcher-runtime.test.ts",
-  "tests/release-helper.test.ts",
-  "tests/request-decompress.test.ts",
-  "tests/responses-stateless-dangling-call-repair.test.ts",
-  "tests/server-auth.test.ts",
+  "tests/codex-integration/codex-inject-write-lock.test.ts",
+  "tests/codex-integration/codex-journal.test.ts",
+  "tests/codex-integration/codex-prompt-route.test.ts",
+  "tests/codex-integration/codex-shim.test.ts",
+  "tests/codex-integration/codex-transition-state-race.test.ts",
+  "tests/config/config-save-boundary.test.ts",
+  "tests/providers/cursor/cursor-images.test.ts",
+  "tests/providers/cursor/cursor-native-exec-shell.test.ts",
+  "tests/codex-integration/issue-452-empty-503.test.ts",
+  "tests/providers/kiro/kiro-images.test.ts",
+  "tests/codex-integration/native-main-owner-lifetime.test.ts",
+  "tests/adapters/openai/openai-provider-option-e2e.test.ts",
+  "tests/cli/ocx-launcher-runtime.test.ts",
+  "tests/ci-workflows/release-helper.test.ts",
+  "tests/usage/request-decompress.test.ts",
+  "tests/responses/responses-stateless-dangling-call-repair.test.ts",
+  "tests/server/server-auth.test.ts",
   // Relays a real 50 MiB WebSocket frame to prove the production ceiling. On a
   // loaded macOS pool this exhausted its 15s internal deadline while the same
   // runner completed it in ~5.6s without contention.
-  "tests/server-live.test.ts",
-  "tests/server-search.test.ts",
-  "tests/shutdown-launcher.test.ts",
-  "tests/storage-policy-job-responsive.test.ts",
-  "tests/storage-restore-job-responsive.test.ts",
-  "tests/test-runner.test.ts",
-  "tests/update-stop-first.test.ts",
+  "tests/server/server-live.test.ts",
+  "tests/server/server-search.test.ts",
+  "tests/service/shutdown-launcher.test.ts",
+  "tests/storage/storage-policy-job-responsive.test.ts",
+  "tests/storage/storage-restore-job-responsive.test.ts",
+  "tests/ci-workflows/test-runner.test.ts",
+  "tests/update/update-stop-first.test.ts",
   // Builds and parses 500,001 JSONL entries to prove the entry cap. It reached
   // the 30s test budget under pool contention and completes in ~5s in isolation.
-  "tests/usage-log.test.ts",
+  "tests/usage/usage-log.test.ts",
 ] as const;
 
 export const DEDICATED_TEST_FILES = [
-  "tests/api-storage-policy-already-running.test.ts",
-  "tests/api-storage-policy-mutation-busy.test.ts",
-  "tests/api-storage-policy-put-race.test.ts",
-  "tests/api-storage-policy-run.test.ts",
-  "tests/api-storage-policy.test.ts",
-  "tests/api-storage.test.ts",
-  "tests/api-usage.test.ts",
+  "tests/storage/api-storage-policy-already-running.test.ts",
+  "tests/storage/api-storage-policy-mutation-busy.test.ts",
+  "tests/storage/api-storage-policy-put-race.test.ts",
+  "tests/storage/api-storage-policy-run.test.ts",
+  "tests/storage/api-storage-policy.test.ts",
+  "tests/storage/api-storage.test.ts",
+  "tests/server/api-usage.test.ts",
 ] as const;
 export const STORAGE_TEST_FILES = DEDICATED_TEST_FILES.slice(0, 6);
-export const API_TEST_FILES = ["tests/api-usage.test.ts"] as const;
+export const API_TEST_FILES = ["tests/server/api-usage.test.ts"] as const;
 
 const laneNames = ["general", "serial", "dedicated", "dedicated-storage", "dedicated-api"] as const;
 export type TestLane = (typeof laneNames)[number];

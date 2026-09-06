@@ -1,0 +1,167 @@
+import { afterAll, describe, expect, test } from "bun:test";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { claimOwnedServiceHome } from "../helpers/owned-service-home";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { repoPath } from "../helpers/repo-root";
+
+/**
+ * Regression: `ocx start` + Ctrl-C must NOT orphan the Bun proxy.
+ *
+ * The bin/ocx.mjs launcher used a blocking spawnSync that did not forward signals,
+ * so a signal delivered only to the launcher killed it and left the Bun child
+ * serving forever (port bound, ocx.pid/runtime-port.json left behind, Codex config
+ * not restored). The launcher now forwards SIGINT/SIGTERM/SIGHUP to the child and
+ * waits for its graceful shutdown.
+ *
+ * POSIX-only (Windows has no real signal forwarding semantics) and requires `node`
+ * on PATH to exercise the real launcher.
+ */
+
+const BIN_OCX = repoPath("bin", "ocx.mjs");
+const nodeAvailable = !spawnSync("node", ["--version"], { stdio: "ignore" }).error;
+const runnable = process.platform !== "win32" && nodeAvailable;
+
+const spawned: ChildProcess[] = [];
+const tmpHomes: string[] = [];
+
+function claimTempHome(home: string): { homeDir: string; userProfile: string; serviceManagerEnv: Record<string, string> } {
+  const homeDir = join(home, "user-home");
+  const userProfile = join(home, "user-profile");
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(userProfile, { recursive: true });
+  return { homeDir, userProfile, serviceManagerEnv: claimOwnedServiceHome(home, home, homeDir).env };
+}
+
+afterAll(() => {
+  for (const c of spawned) {
+    try { c.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+  for (const dir of tmpHomes) {
+    try { removeTreeWithRetry(dir); } catch { /* best-effort */ }
+  }
+});
+
+async function healthy(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`, {
+      signal: AbortSignal.timeout(800),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** The signal-forwarding assertion should not fail merely because a shared CI runner starts slowly. */
+const STARTUP_BUDGET_MS = process.env.CI ? 60_000 : 20_000;
+
+async function waitUntil(fn: () => Promise<boolean>, deadlineMs: number): Promise<boolean> {
+  const end = performance.now() + deadlineMs;
+  while (performance.now() < end) {
+    if (await fn()) return true;
+    await Bun.sleep(250);
+  }
+  return false;
+}
+
+function publishedPort(home: string): number | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(home, "runtime-port.json"), "utf8")) as { port?: unknown };
+    return Number.isInteger(parsed.port) && Number(parsed.port) > 0 ? Number(parsed.port) : null;
+  } catch {
+    return null;
+  }
+}
+
+function captureOutput(child: ChildProcess): () => string {
+  let output = "";
+  const append = (chunk: Buffer | string) => {
+    output = (output + chunk.toString()).slice(-16_384);
+  };
+  child.stdout?.on("data", append);
+  child.stderr?.on("data", append);
+  return () => output.trim();
+}
+
+describe.skipIf(!runnable)("ocx launcher graceful shutdown", () => {
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    test(
+      `${signal} to the launcher tears down the Bun proxy and restores Codex config (no orphan)`,
+      async () => {
+        const home = mkdtempSync(join(tmpdir(), "ocx-shutdown-"));
+        tmpHomes.push(home);
+        const identity = claimTempHome(home);
+
+        // Let the runtime ask the OS for an ephemeral port and publish the concrete
+        // selection. Reserving and releasing a port in the test creates a check-then-bind
+        // race with both the runtime and the readiness probes on loaded CI hosts.
+        writeFileSync(join(home, "config.json"), JSON.stringify({ port: 0, codexAutoStart: false }));
+
+        // Seed a native Codex config so the proxy actually injects on start (injectCodexConfig
+        // no-ops when no config.toml exists) — this lets us prove the config is RESTORED.
+        const codexConfig = join(home, "config.toml");
+        writeFileSync(codexConfig, 'model = "gpt-5.1"\n');
+
+        const child = spawn("node", [BIN_OCX, "start"], {
+          stdio: ["ignore", "pipe", "pipe"],
+          env: {
+            ...process.env,
+            OPENCODEX_BUN_PATH: process.env.OPENCODEX_BUN_PATH ?? process.execPath,
+            HOME: identity.homeDir,
+            USERPROFILE: identity.userProfile,
+            OPENCODEX_HOME: home,
+            CODEX_HOME: home,
+            ...identity.serviceManagerEnv,
+          },
+        });
+        spawned.push(child);
+        const childOutput = captureOutput(child);
+
+        let exited = false;
+        let exitDetail = "still running";
+        child.on("exit", (code, signal) => {
+          exited = true;
+          exitDetail = signal ? `signal ${signal}` : `exit ${code ?? "unknown"}`;
+        });
+
+        // 1. Proxy comes up + injected the Codex config (Design B root override on loopback).
+        let port: number | null = null;
+        const up = await waitUntil(async () => {
+          port = publishedPort(home);
+          return port !== null && await healthy(port);
+        }, STARTUP_BUDGET_MS);
+        if (!up || port === null) {
+          throw new Error(
+            `launcher did not publish a healthy runtime within ${STARTUP_BUDGET_MS}ms (${exitDetail})`
+            + (childOutput() ? `\n${childOutput()}` : ""),
+          );
+        }
+        expect(existsSync(join(home, "ocx.pid"))).toBe(true);
+        const injected = readFileSync(codexConfig, "utf8");
+        expect(injected).toContain("# Auto-injected by opencodex");
+        expect(injected).toContain(`openai_base_url = "http://127.0.0.1:${port}/v1"`);
+        expect(injected).not.toContain("model_providers.opencodex");
+
+        // 2. Signal ONLY the launcher PID (the exact orphan trigger).
+        child.kill(signal);
+
+        // 3. Launcher exits...
+        const launcherGone = await waitUntil(async () => exited, 15_000);
+        expect(launcherGone).toBe(true);
+
+        // 4. ...and the Bun proxy is gone (port freed) — the regression guard.
+        const portFreed = await waitUntil(async () => !(await healthy(port)), 10_000);
+        expect(portFreed).toBe(true);
+
+        // 5. Graceful cleanup ran: pid + runtime-port removed, Codex config restored.
+        expect(existsSync(join(home, "ocx.pid"))).toBe(false);
+        expect(existsSync(join(home, "runtime-port.json"))).toBe(false);
+        expect(readFileSync(codexConfig, "utf8")).not.toContain("opencodex");
+      },
+      STARTUP_BUDGET_MS + 40_000,
+    );
+  }
+});

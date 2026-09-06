@@ -1,4 +1,5 @@
 import AddProviderModal from "../components/AddProviderModal";
+import ProviderModelsNotice, { type ProviderModelsNoticeProps } from "../components/ProviderModelsNotice";
 import AddCodexAccountModal from "../components/AddCodexAccountModal";
 import OAuthTosWarningModal from "../components/OAuthTosWarningModal";
 import ReplitGatewayWizard from "../components/replit-gateway/ReplitGatewayWizard";
@@ -14,6 +15,7 @@ export function ProvidersPageModals({
   config,
   adding,
   replitWizardOpen,
+  modelsNotice,
   addIntent,
   busy,
   addModalAccountRows,
@@ -48,6 +50,7 @@ export function ProvidersPageModals({
   config: ProvidersConfig;
   adding: boolean;
   replitWizardOpen: boolean;
+  modelsNotice?: ProviderModelsNoticeProps | null;
   addIntent: AddProviderIntent | null;
   busy: string | null;
   addModalAccountRows: AccountLoginRow[];
@@ -80,6 +83,7 @@ export function ProvidersPageModals({
 }) {
   return (
     <>
+      {modelsNotice && <ProviderModelsNotice {...modelsNotice} />}
       {adding && (
         <AddProviderModal
           apiBase={apiBase}

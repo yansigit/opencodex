@@ -17,6 +17,7 @@ export interface ProvidersConfig {
     googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" | string;
     keyOptional?: boolean;
     disabled?: boolean;
+    initialModelSelection?: { status: "pending" | "ready" | "all-off"; modelCount?: number };
     note?: string;
     codexAccountMode?: "direct" | "pool";
     xaiResponsesOptInState?: boolean | "mixed";

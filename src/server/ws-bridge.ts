@@ -8,19 +8,13 @@ import type { DataPlaneAdmission } from "./auth-cors";
 import type { AdmissionLease, AdmissionReservation } from "../lib/admission";
 import { BoundedSseFrameBuffer } from "./sse-frame-buffer";
 import { classifyAgentKind, type AgentKind } from "./effort-policy";
+import { safeResponseHeaders } from "./safe-response-headers";
+
+export { safeResponseHeaders } from "./safe-response-headers";
 
 const OPEN = 1;
 type ResponsesTerminalReporter = (status: ResponsesTerminalStatus) => void;
 type ResponsesPayloadObserver = (payload: string) => void;
-const SAFE_RESPONSE_HEADER_EXACT = new Set([
-  "retry-after",
-  "x-request-id",
-  "openai-request-id",
-  "x-codex-turn-state",
-  "openai-model",
-  "x-models-etag",
-  "x-reasoning-included",
-]);
 
 export interface WsData {
   headers?: Headers; // base inbound forward headers only; per-turn auth refresh injects current pool tokens
@@ -109,22 +103,6 @@ export function selectForwardHeaders(
 
 export function selectForwardHeadersForAuthContext(headers: Headers, ctx: CodexAuthContext): Headers {
   return headersForCodexAuthContext(headers, ctx);
-}
-
-export function safeResponseHeaders(headers: Headers): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [name, value] of headers) {
-    const lower = name.toLowerCase();
-    if (
-      SAFE_RESPONSE_HEADER_EXACT.has(lower) ||
-      lower.startsWith("x-ratelimit-") ||
-      /^x-codex(?:-[a-z0-9-]+)?-(primary|secondary|tertiary)-(used-percent|window-minutes|reset-at)$/.test(lower) ||
-      /^x-codex(?:-[a-z0-9-]+)?-limit-name$/.test(lower)
-    ) {
-      out[lower] = value;
-    }
-  }
-  return out;
 }
 
 export function buildWarmupCompletionFrames(frame: Record<string, unknown>): string[] {

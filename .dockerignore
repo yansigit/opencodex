@@ -1,5 +1,37 @@
+**
+
+!.dockerignore
+!Dockerfile
+!compose.yaml
+!package.json
+!bun.lock
+!tsconfig.json
+
+!src/
+!src/**
+# Prepared on the host with the canonical Git-tracked-source generator.
+!src/generated/compatibility-version.json
+
+!scripts/
+scripts/**
+!scripts/model-metadata.source.json
+
+!docker/
+docker/**
+!docker/bootstrap-tls.ts
+!docker/bootstrap-token.ts
+!docker/config.json
+!docker/healthcheck.ts
+!docker/verify-compatibility.ts
+
+!gui/
+!gui/**
+gui/node_modules/
+gui/dist/
+gui/.vite/
+
 # Keep recursive credential, state, and generated-artifact exclusions after
-# any subtree inclusions.
+# the source allowlist above so nested local files cannot be re-admitted.
 **/node_modules
 **/dist
 **/coverage
@@ -9,12 +41,15 @@
 **/*.tar
 **/*.tar.gz
 **/*.zip
+
+# Re-apply credential and state exclusions after the source allowlist above.
+# Negation patterns can otherwise admit local files that Vite or a remote
+# container builder would consume.
 **/.git
 **/.tmp
 **/.worktrees
 **/.codex
 **/.opencode
-**/.opencodex
 **/.planning
 **/.agents
 **/.claude
@@ -26,6 +61,7 @@
 **/.docker/config.json
 **/.config/containers/auth.json
 **/.config/gh/hosts.yml
+**/.opencodex
 **/.env
 **/.env.*
 **/.npmrc
@@ -44,5 +80,3 @@
 **/*.sqlite-*
 **/*.sqlite3-*
 **/*.db-*
-!tests/fixtures/network-tls-test-cert.pem
-!tests/fixtures/network-tls-test-key.pem

@@ -12,7 +12,22 @@ export interface CompatibilityVersionManifest {
   files: Array<{ path: string; sha256: string }>;
 }
 
-const REQUIRED_ROOT_FILES = ["package.json", "bun.lock", "scripts/model-metadata.source.json"] as const;
+// These files define the container's build/runtime trust boundary and must move
+// in lockstep with the source identity. Keep this list mirrored in the
+// Git-free container verifier, which cannot safely import unverified source.
+export const REQUIRED_COMPATIBILITY_FILES = [
+  ".dockerignore",
+  "Dockerfile",
+  "bun.lock",
+  "compose.yaml",
+  "docker/bootstrap-tls.ts",
+  "docker/bootstrap-token.ts",
+  "docker/config.json",
+  "docker/healthcheck.ts",
+  "docker/verify-compatibility.ts",
+  "package.json",
+  "scripts/model-metadata.source.json",
+] as const;
 const SELF_PATH = "src/generated/compatibility-version.json";
 
 function decodeGitPaths(bytes: Uint8Array): string[] {
@@ -41,12 +56,12 @@ function sha256(bytes: Uint8Array): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** Build the frozen CL-00 compatibility-version manifest from exact Git-tracked working-tree bytes. */
+/** Build the frozen CL-00 manifest from exact Git-tracked source and container-authority bytes. */
 export function buildCompatibilityVersionManifest(repoRoot: string): CompatibilityVersionManifest {
   const root = resolve(repoRoot);
   const output = execFileSync(
     "git",
-    ["ls-files", "-z", "--", "src", ...REQUIRED_ROOT_FILES],
+    ["ls-files", "-z", "--", "src", "docker", ...REQUIRED_COMPATIBILITY_FILES],
     { cwd: root },
   );
   const rawPaths = decodeGitPaths(new Uint8Array(output));
@@ -65,7 +80,7 @@ export function buildCompatibilityVersionManifest(repoRoot: string): Compatibili
     rows.push({ path, sha256: sha256(readFileSync(fullPath)) });
   }
 
-  for (const required of REQUIRED_ROOT_FILES) {
+  for (const required of REQUIRED_COMPATIBILITY_FILES) {
     if (!seen.has(required)) throw new Error(`required compatibility manifest path is not tracked: ${required}`);
   }
   if (!rows.some(row => row.path.startsWith("src/"))) {
