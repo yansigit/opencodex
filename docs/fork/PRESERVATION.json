@@ -11049,9 +11049,9 @@
           "forkInvariant": "Explicit OAuth failover opt-outs remain authoritative for both generic and Anthropic reactive failover paths, with regression coverage retained after the layout move.",
           "equivalentOrBetter": false,
           "disposition": "preserve",
-          "implementationEvidence": "Reviewed base absent, fork 824e516280fb0d2d59996adeb2b3702de125faa1, upstream absent, and integrated result absent at the original path for fork-path-deleted-in-result. The fork-only suite is preserved at tests/oauth/oauth-failover-optout-security.test.ts as blob cbbc2eb491f3d45944465b5735fef4711abd018a with all three security assertions intact; only import and helper depth changed.",
+          "implementationEvidence": "Reviewed base absent, fork 824e516280fb0d2d59996adeb2b3702de125faa1, upstream absent, and integrated result absent at the original path for fork-path-deleted-in-result. The fork-only suite is preserved at tests/oauth/oauth-failover-optout-security.test.ts as blob cbbc2eb491f3d45944465b5735fef4711abd018a with all three security assertions intact; only import and helper depth changed. Because oauth is already a migrated test domain, the resolved tree must also map this basename to oauth in both scripts/test-layout/layout.json and the independent tests/fixtures/test-layout-expected.json oracle.",
           "exactTests": [
-            "bun test tests/oauth/oauth-failover-optout-security.test.ts"
+            "bun test tests/oauth/oauth-failover-optout-security.test.ts tests/test-layout.test.ts tests/test-layout-tooling.test.ts"
           ],
           "forkBlob": "824e516280fb0d2d59996adeb2b3702de125faa1"
         },
