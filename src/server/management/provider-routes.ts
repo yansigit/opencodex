@@ -364,6 +364,24 @@ function applyProviderPatchFields(
       return { error: "apiKeyTransport must be x-api-key, bearer, or empty to clear" };
     }
   }
+  if (Object.hasOwn(rawBody, "azureCredential")) {
+    const value = rawBody.azureCredential;
+    if (value === null) {
+      delete next.azureCredential;
+    } else {
+      if (!isPlainRecord(value)) return { error: "azureCredential must be an object or null" };
+      const credential = structuredClone(value) as Record<string, unknown>;
+      if (typeof credential.managedIdentityClientId === "string") {
+        credential.managedIdentityClientId = credential.managedIdentityClientId.trim();
+      }
+      next.azureCredential = credential as OcxProviderConfig["azureCredential"];
+      // Selecting Azure identity is an explicit credential replacement. A stale key or
+      // pool must not survive underneath the new keyless identity mode.
+      delete next.apiKey;
+      delete next.apiKeyPool;
+    }
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "note")) {
     if (typeof rawBody.note !== "string") return { error: "note must be a string" };
     const note = rawBody.note.trim();
@@ -891,6 +909,13 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const name = typeof body.name === "string" ? body.name.trim() : "";
     if (!isPlainRecord(body.provider)) return jsonResponse({ error: "provider must be a plain object" }, 400);
+    const submittedProvider = body.provider as Record<string, unknown>;
+    const submittedCredential = isPlainRecord(submittedProvider.azureCredential)
+      ? submittedProvider.azureCredential as Record<string, unknown>
+      : undefined;
+    if (typeof submittedCredential?.managedIdentityClientId === "string") {
+      submittedCredential.managedIdentityClientId = submittedCredential.managedIdentityClientId.trim();
+    }
     const existing = config.providers[name];
     const aliasOwnershipError = providerAliasOverlayOwnershipError(body.provider, existing);
     if (aliasOwnershipError) return jsonResponse({ error: aliasOwnershipError }, 400);
@@ -956,7 +981,7 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // Overwriting an existing provider must not drop its multi-key pool: carry it over, then
     // let the (possibly new) apiKey join the pool as the active entry.
     const existingPool = config.providers[name]?.apiKeyPool;
-    if (existingPool && !prov.apiKeyPool) prov.apiKeyPool = existingPool;
+    if (existingPool && !prov.apiKeyPool && !prov.azureCredential) prov.apiKeyPool = existingPool;
     // The same rule applies to user-configured price overlays: the dashboard's
     // add/edit form does not send modelCosts, so an overwrite must not silently
     // erase hand-edited per-model prices from Logs/Usage estimates.
@@ -1020,6 +1045,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       if (latest?.xaiResponsesDefaultVersion !== undefined) {
         prov.xaiResponsesDefaultVersion = latest.xaiResponsesDefaultVersion;
       }
+    }
+    if (prov.azureCredential) {
+      // The provider body selected a keyless Azure identity. Do not retain a prior key
+      // generation underneath it when the full editor payload omitted credential fields.
+      delete prov.apiKey;
+      delete prov.apiKeyPool;
     }
     initializeProviderModelSelection(name, prov, config.providers[name], config);
     config.providers[name] = stripRegistryOnlyStaticHeaders(name, prov);

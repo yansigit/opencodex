@@ -8,6 +8,7 @@ import { DEFAULT_SUBAGENT_MODELS, SUBAGENT_MODELS_VERSION } from "./config/subag
 export { DEFAULT_SUBAGENT_MODELS } from "./config/subagent-models";
 import {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   modelDisplayNamesConfigError,
@@ -522,6 +523,12 @@ const modelDisplayNamesSchema = z.unknown().superRefine((value, ctx) => {
 const providerConfigSchema = z.object({
   adapter: z.string().min(1),
   baseUrl: z.string().min(1),
+  azureCredential: z.object({
+    type: z.literal("default-azure-credential"),
+    managedIdentityClientId: z.string().trim().min(1).optional(),
+  }).strict().transform(value => value.managedIdentityClientId === undefined
+    ? value
+    : { ...value, managedIdentityClientId: value.managedIdentityClientId.trim() }).optional(),
   alias: z.string().optional(),
   modelAliases: z.record(z.string(), z.string()).optional(),
   modelDisplayNames: modelDisplayNamesSchema.optional(),
@@ -590,6 +597,8 @@ const providerConfigSchema = z.object({
 export { isValidProviderName, hasOwnProvider } from "./config/provider-name";
 export {
   apiKeyTransportConfigError,
+  azureCredentialConfigError,
+  isAzureIdentityProvider,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
   modelDisplayNamesConfigError,
@@ -1380,6 +1389,14 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "apiKeyTransport"],
         message: apiKeyTransportError,
+      });
+    }
+    const azureCredentialError = azureCredentialConfigError(provider);
+    if (azureCredentialError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "azureCredential"],
+        message: azureCredentialError,
       });
     }
     const modelAdaptersError = modelAdapterRecordConfigError(
