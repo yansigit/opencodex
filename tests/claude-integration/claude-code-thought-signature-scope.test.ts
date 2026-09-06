@@ -125,4 +125,16 @@ describe("Claude Code Anthropic inbound reasoning-replay scope", () => {
     const parsed = await drive({ promptCacheKey: "   ", promptCacheKeyIsSharedCohort: false });
     expect(parsed._reasoningReplayScope).toBeUndefined();
   });
+
+  test("distinct session identities remain distinct and bounded", async () => {
+    const first = await drive({ promptCacheKey: "session-a", promptCacheKeyIsSharedCohort: false });
+    const second = await drive({ promptCacheKey: "session-b", promptCacheKeyIsSharedCohort: false });
+    const a = first._reasoningReplayScope?.clientThreadId;
+    const b = second._reasoningReplayScope?.clientThreadId;
+    expect(a).toBeDefined();
+    expect(b).toBeDefined();
+    expect(a).not.toBe(b);
+    expect(a).not.toContain("session-a");
+    expect(b).not.toContain("session-b");
+  });
 });
