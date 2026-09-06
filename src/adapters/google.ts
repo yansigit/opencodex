@@ -1051,7 +1051,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       if (provider.googleMode === "ai-studio-web") {
         const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
         const url = `${base}/v1internal:${method}${streamParam}`;
-        const credentials = resolveAiStudioCredentials(provider);
+        const credentials = resolveAiStudioCredentials(provider, undefined, url);
         if (credentials.kind !== "ready") throw new Error(credentials.reason);
         const jar = parseGoogleCookieJar(credentials.cookieHeader);
         const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");

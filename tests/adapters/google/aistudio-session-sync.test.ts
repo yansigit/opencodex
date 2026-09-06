@@ -198,6 +198,27 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
     expect(cookieHeaderFromSession(undefined)).toBe("");
   });
 
+  test("cookieHeaderFromSession sends only cookies scoped to the destination host and path", () => {
+    const session = {
+      selectedProject: "p",
+      windowId: "w",
+      cookies: [
+        { name: "SAPISID", value: "root", domain: ".google.com", path: "/" },
+        { name: "CLIENTS6", value: "exact", domain: "alkalimakersuite-pa.clients6.google.com", path: "/v1internal:streamGenerateContent" },
+        { name: "AISTUDIO_ONLY", value: "private", domain: "aistudio.google.com", path: "/" },
+        { name: "ACCOUNTS_ONLY", value: "private", domain: ".accounts.google.com", path: "/" },
+        { name: "WRONG_PATH", value: "private", domain: ".google.com", path: "/accounts" },
+        { name: "PREFIX_ONLY", value: "private", domain: ".google.com", path: "/v1internal" },
+      ],
+    };
+
+    expect(cookieHeaderFromSession(
+      session,
+      "https://alkalimakersuite-pa.clients6.google.com/v1internal:streamGenerateContent",
+    )).toBe("SAPISID=root; CLIENTS6=exact");
+    expect(cookieHeaderFromSession(session, "not a URL")).toBe("");
+  });
+
   test("getAiStudioSessionPath returns path in user home directory", () => {
     const expected = join(getConfigDir(), "aistudio-session.json");
     expect(getAiStudioSessionPath()).toBe(expected);

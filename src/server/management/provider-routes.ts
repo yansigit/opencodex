@@ -202,10 +202,10 @@ async function probeAiStudioLiveSession(
   name: string,
   prov: OcxProviderConfig,
 ): Promise<{ ok: boolean; latencyMs: number; authState?: "connected"; message?: string; error?: string }> {
-  const credentials = resolveAiStudioCredentials(prov);
-  if (credentials.kind !== "ready") return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
   const base = (prov.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
   const url = base + "/v1internal:generateContent";
+  const credentials = resolveAiStudioCredentials(prov, undefined, url);
+  if (credentials.kind !== "ready") return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
   const jar = parseGoogleCookieJar(credentials.cookieHeader);
   const headers = await buildAiStudioHeaders(jar, AI_STUDIO_ORIGIN);
   const body = JSON.stringify({

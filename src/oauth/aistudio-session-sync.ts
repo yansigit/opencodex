@@ -171,10 +171,38 @@ export function loadAiStudioSession(path = getAiStudioSessionPath()): AiStudioSe
   }
 }
 
-export function cookieHeaderFromSession(session: AiStudioSessionData | null | undefined): string {
+function cookieDomainMatches(hostname: string, domain: string | undefined): boolean {
+  if (!domain) return true;
+  const cookieDomain = domain.toLowerCase().replace(/^\./, "");
+  return hostname === cookieDomain || hostname.endsWith(`.${cookieDomain}`);
+}
+
+function cookiePathMatches(requestPath: string, cookiePath: string | undefined): boolean {
+  if (!cookiePath) return true;
+  if (requestPath === cookiePath) return true;
+  if (!requestPath.startsWith(cookiePath)) return false;
+  return cookiePath.endsWith("/") || requestPath[cookiePath.length] === "/";
+}
+
+export function cookieHeaderFromSession(
+  session: AiStudioSessionData | null | undefined,
+  target: string | URL = "https://alkalimakersuite-pa.clients6.google.com/",
+): string {
   if (!session?.cookies?.length) return "";
+  let destination: URL;
+  try {
+    destination = target instanceof URL ? target : new URL(target);
+  } catch {
+    return "";
+  }
   return session.cookies
-    .filter((c) => c && c.name && c.value && !/[\r\n\u0000]/.test(c.name) && !/[\r\n\u0000]/.test(c.value))
+    .filter((c) => c
+      && c.name
+      && c.value
+      && !/[\r\n\u0000]/.test(c.name)
+      && !/[\r\n\u0000]/.test(c.value)
+      && cookieDomainMatches(destination.hostname.toLowerCase(), c.domain)
+      && cookiePathMatches(destination.pathname || "/", c.path))
     .map((c) => c.name.trim() + "=" + c.value.trim())
     .join("; ");
 }
