@@ -2,7 +2,7 @@ import { useRef } from "react";
 import type { TFn } from "../i18n/shared";
 import { IconX } from "../icons";
 import { formatProviderDisplayName } from "../provider-icons";
-import type { LogFilterState, LogStatusFilter, LogTimeWindow } from "./logs-filter";
+import type { LogAgentKind, LogFilterState, LogStatusFilter, LogTimeWindow } from "./logs-filter";
 import { logsSurfaceKeyDown } from "./logs-surface-keydown";
 
 interface LogsFilterBarProps {
@@ -79,11 +79,30 @@ export function LogsFilterBar({
         </label>
 
         <label className="muted text-control logs-filter-field">
-          {t("logs.filter.model.label")}
-          <select className="input select-sm" value={filters.model} aria-label={t("logs.filter.model.label")} onChange={event => onFilterChange({ ...filters, model: event.target.value })}>
-            <option value="">{t("logs.filter.model.all")}</option>
-            {options.models.map(model => <option key={model} value={model}>{model}</option>)}
+          {t("logs.filter.agent.label")}
+          <select className="input select-sm" value={filters.agentKind} aria-label={t("logs.filter.agent.label")} onChange={event => onFilterChange({ ...filters, agentKind: event.target.value as LogAgentKind })}>
+            <option value="all">{t("logs.filter.agent.all")}</option>
+            <option value="main">{t("logs.filter.agent.main")}</option>
+            <option value="subagent">{t("logs.filter.agent.subagent")}</option>
+            <option value="internal">{t("logs.filter.agent.internal")}</option>
+            <option value="unknown">{t("logs.filter.agent.unknown")}</option>
           </select>
+        </label>
+
+        <label className="muted text-control logs-filter-field">
+          {t("logs.filter.model.label")}
+          <input
+            type="search"
+            className="input select-sm"
+            value={filters.model}
+            aria-label={t("logs.filter.model.label")}
+            onChange={event => onFilterChange({ ...filters, model: event.target.value })}
+            placeholder={t("logs.filter.model.placeholder")}
+            list="logs-filter-model-options"
+          />
+          <datalist id="logs-filter-model-options">
+            {options.models.map(model => <option key={model} value={model} />)}
+          </datalist>
         </label>
 
         <label className="muted text-control logs-filter-field">

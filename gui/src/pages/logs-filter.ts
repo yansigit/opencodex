@@ -5,6 +5,7 @@ import { logMatchesSurface } from "./logs-surface-filter";
 export type LogTimeWindow = "all" | "15m" | "1h" | "24h";
 export type LogStatusFilter = "all" | "success" | "errors";
 export type LogAgentKind = "all" | "main" | "subagent" | "internal" | "unknown";
+export type PersistedAgentKind = Exclude<LogAgentKind, "all" | "unknown">;
 
 export interface LogFilterState {
   surface: LogSurfaceFilter;
@@ -74,7 +75,7 @@ export function hasActiveLogFilters(filters: LogFilterState): boolean {
     || filters.agentKind !== "all";
 }
 
-function normalizedAgentKind(value: unknown): Exclude<LogAgentKind, "all" | "unknown"> | "unknown" {
+export function normalizedAgentKind(value: unknown): Exclude<LogAgentKind, "all"> {
   return value === "main" || value === "subagent" || value === "internal" ? value : "unknown";
 }
 
@@ -138,15 +139,15 @@ export function filterLogs<T extends FilterableLogEntry>(
         || log.status > 599)) return false;
 
     const logAttempts = attempts(log);
-    // Model options represent complete identities from the current log snapshot. Match
-    // selections exactly (case/whitespace-insensitive), while the standalone
-    // logMatchesModelQuery helper retains its free-text substring semantics.
+    // The model control is a free-text search with datalist suggestions. Match requested,
+    // resolved, and attempted model ids by substring so operators can search by family or
+    // suffix without knowing the complete provider-specific identity.
     if (modelQuery) {
       const primaryMatches = [normalized(log.model), normalized(log.resolvedModel)]
-        .some(value => value === modelQuery);
+        .some(value => value?.includes(modelQuery));
       const attemptMatches = logAttempts
         .map(attempt => normalized(attempt.model))
-        .some(value => value === modelQuery || value?.endsWith(`-${modelQuery}`));
+        .some(value => value?.includes(modelQuery));
       if (!primaryMatches && !attemptMatches) return false;
     }
 

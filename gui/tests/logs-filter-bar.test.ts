@@ -84,7 +84,7 @@ async function withFilterBar(
 
 test("LogsFilterBar changes labeled selects without dropping other filters", async () => {
   await withFilterBar({ ...DEFAULT_LOG_FILTER_STATE, conversationId: "conversation-a" }, async ui => {
-    for (const [field, value] of [["provider", "xai"], ["model", "model-a"], ["time", "15m"], ["status", "errors"]] as const) {
+    for (const [field, value] of [["provider", "xai"], ["agent", "subagent"], ["time", "15m"], ["status", "errors"]] as const) {
       const select = ui.container.querySelector<HTMLSelectElement>(`select[aria-label="logs.filter.${field}.label"]`);
       expect(select).not.toBeNull();
       await act(async () => {
@@ -93,10 +93,18 @@ test("LogsFilterBar changes labeled selects without dropping other filters", asy
       });
       expect(select!.value).toBe(value);
     }
+    const model = ui.container.querySelector<HTMLInputElement>('input[aria-label="logs.filter.model.label"]')!;
+    expect(model.getAttribute("list")).toBe("logs-filter-model-options");
+    expect([...ui.container.querySelectorAll<HTMLDataListElement>("#logs-filter-model-options option")].map(option => option.getAttribute("value")))
+      .toEqual(["model-a", "model-a-plus"]);
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(ui.win.HTMLInputElement.prototype, "value")!.set!.call(model, "model");
+      model.dispatchEvent(new ui.win.Event("input", { bubbles: true }));
+    });
     const intercepted = ui.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
     await act(async () => { intercepted.click(); });
     expect(ui.filters()).toMatchObject({
-      provider: "xai", model: "model-a", timeWindow: "15m", status: "errors",
+      provider: "xai", agentKind: "subagent", model: "model", timeWindow: "15m", status: "errors",
       conversationId: "conversation-a", interceptedOnly: true,
     });
     expect(ui.container.querySelector('input[aria-label="logs.filter.conversation.label"]')).not.toBeNull();
@@ -124,7 +132,7 @@ test("LogsFilterBar speed choices have non-overlapping bounds and clear both bou
 test.each(["pointer", "keyboard"] as const)("LogsFilterBar %s reset restores focus to All and clears every field", async activation => {
   await withFilterBar({
     ...DEFAULT_LOG_FILTER_STATE, surface: "grok", status: "errors", provider: "xai",
-    model: "model-a", timeWindow: "1h", minTokPerSec: 50, interceptedOnly: true,
+    agentKind: "internal", model: "model-a", timeWindow: "1h", minTokPerSec: 50, interceptedOnly: true,
     conversationId: "conversation-a", conversationQueryHash: "cached-hash",
   }, async ui => {
     expect(ui.container.textContent).toContain("Showing 1 of 2");
@@ -151,7 +159,8 @@ test.each(["pointer", "keyboard"] as const)("LogsFilterBar %s reset restores foc
     }
     expect(ui.filters()).toEqual(DEFAULT_LOG_FILTER_STATE);
     expect(ui.container.querySelector(".logs-filter-status")).toBeNull();
-    expect(ui.container.querySelector<HTMLInputElement>('input[type="search"]')!.value).toBe("");
+    expect(ui.container.querySelector<HTMLInputElement>('input[aria-label="logs.filter.model.label"]')!.value).toBe("");
+    expect(ui.container.querySelector<HTMLSelectElement>('select[aria-label="logs.filter.agent.label"]')!.value).toBe("all");
     expect(ui.container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(false);
     expect(ui.container.querySelector<HTMLSelectElement>('select[aria-label="logs.filter.speed.label"]')!.value).toBe("all");
   });
