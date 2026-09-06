@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -14,11 +14,15 @@ import { saveCodexAccountCredential } from "../src/codex/account-store";
 import { clearAccountNeedsReauth } from "../src/codex/account-runtime-state";
 import { clearAccountQuota } from "../src/codex/quota";
 import { clearCodexUpstreamHealthForAccount } from "../src/codex/routing";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 let testDir: string;
 const savedCodexHome = process.env.CODEX_HOME;
 const savedOpencodexHome = process.env.OPENCODEX_HOME;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function installPoolCredential(accountId: string, now = Date.now()): void {
   saveCodexAccountCredential(accountId, {
@@ -65,6 +69,10 @@ function cfg(overrides: Partial<OcxConfig> = {}): OcxConfig {
 }
 
 beforeEach(() => {
+  // This suite exercises subagent fallback, not Windows ACL behavior. Stub both
+  // hardening paths so no icacls child can retain the disposable credential home.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testDir = mkdtempSync(join(tmpdir(), "ocx-candidates-test-"));
   process.env.OPENCODEX_HOME = testDir;
   process.env.CODEX_HOME = testDir;
@@ -73,17 +81,22 @@ beforeEach(() => {
   clearAccountNeedsReauth("main");
 });
 
-afterEach(() => {
-  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
-  else process.env.CODEX_HOME = savedCodexHome;
-  if (savedOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = savedOpencodexHome;
+afterEach(async () => {
   clearAccountQuota();
   resetSubagentModelFallbackStateForTests();
   clearAccountNeedsReauth("pool-a");
   clearAccountNeedsReauth("main");
   clearCodexUpstreamHealthForAccount("pool-a");
-  rmSync(testDir, { recursive: true, force: true });
+  // Keep the scratch environment installed until state cleanup and queued
+  // hardening settle; Windows otherwise reports EBUSY and poisons later tests.
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = savedCodexHome;
+  if (savedOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = savedOpencodexHome;
+  removeTreeWithRetry(testDir);
 });
 
 describe("subagentCandidates model overwrite and candidate failover", () => {
