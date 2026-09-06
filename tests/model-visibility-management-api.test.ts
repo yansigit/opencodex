@@ -356,6 +356,27 @@ describe("atomic model visibility management", () => {
     expect(loadConfig().disabledModels).toEqual(["other/keep"]);
   });
 
+  test("re-enabling an individual native model clears legacy namespaced disable keys", async () => {
+    saveConfig({ ...loadConfig(), disabledModels: ["openai/gpt-5.6-sol", "other/keep"] });
+    const disableResponse = await put({
+      scope: "models",
+      provider: "openai",
+      targets: [{ id: "gpt-5.6-sol", native: true }],
+      enabled: false,
+    });
+    expect(disableResponse.status).toBe(200);
+    expect(loadConfig().disabledModels).toEqual(["openai/gpt-5.6-sol", "other/keep"]);
+
+    const response = await put({
+      scope: "models",
+      provider: "openai",
+      targets: [{ id: "gpt-5.6-sol", native: true }],
+      enabled: true,
+    });
+    expect(response.status).toBe(200);
+    expect(loadConfig().disabledModels).toEqual(["other/keep"]);
+  });
+
   test("an unknown native id is still rejected (#2886)", async () => {
     // The validation set widens to what this build knows, not to anything a caller names.
     const before = loadConfig();
