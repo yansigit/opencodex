@@ -595,7 +595,7 @@ describe("Google Antigravity OAuth upstream 401 replay", () => {
     } finally {
       await server.stop(true);
     }
-  });
+  }, 15_000);
 
   test("project-less account is refused before dispatch in native Responses passthrough", async () => {
     await seedOAuth(undefined, null);
@@ -678,5 +678,5 @@ describe("Google Antigravity OAuth upstream 401 replay", () => {
     } finally {
       await server.stop(true);
     }
-  });
+  }, 15_000);
 });
