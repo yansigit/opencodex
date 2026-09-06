@@ -32,6 +32,12 @@ import {
   observeAntigravityReplay,
 } from "./google-antigravity-replay";
 import { canonicalAntigravityUsageModel, resolveAntigravityEffortWireModel } from "../providers/antigravity-models";
+import {
+  extractCcaGroundingSources,
+  formatCcaGroundingSourcesAppendix,
+  isCcaSearchSuggestionHtml,
+} from "../web-search/gemini-executor";
+import type { WebSearchSource } from "../web-search/parse";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { forgetThoughtSignatureForReplay, lookupReplayThoughtSignature } from "../responses/thought-signature-replay";
 import {
@@ -449,19 +455,26 @@ function messagesToGeminiFormat(
   return { systemInstruction, contents, replayedCallIds };
 }
 
-function toolsToGeminiFormat(parsed: OcxParsedRequest): unknown[] | undefined {
-  if (!parsed.context.tools?.length) return undefined;
+function toolsToGeminiFormat(
+  parsed: OcxParsedRequest,
+  wireModelId: string,
+): unknown[] | undefined {
+  const grounding = parsed._ccaInTurnGrounding;
   const tools = isAllowedToolChoice(parsed.options.toolChoice)
-    ? parsed.context.tools.filter(toolChoiceToolPredicate(parsed.options.toolChoice, parsed.context.tools))
-    : parsed.context.tools;
-  if (tools.length === 0) return undefined;
-  return [{
-    functionDeclarations: tools.map(t => ({
-      name: namespacedToolName(t.namespace, t.name),
-      description: t.description,
-      parameters: t.parameters,
-    })),
-  }];
+    ? parsed.context.tools?.filter(toolChoiceToolPredicate(parsed.options.toolChoice, parsed.context.tools)) ?? []
+    : parsed.context.tools ?? [];
+  const functionDeclarations = tools.map(t => ({
+    name: namespacedToolName(t.namespace, t.name),
+    description: t.description,
+    parameters: t.parameters,
+  }));
+  const wireTools: unknown[] = [];
+  if (functionDeclarations.length > 0) wireTools.push({ functionDeclarations });
+  if (grounding && !/claude/i.test(wireModelId)) {
+    if (grounding.search) wireTools.push({ google_search: {} });
+    if (grounding.urlContext) wireTools.push({ url_context: {} });
+  }
+  return wireTools.length > 0 ? wireTools : undefined;
 }
 
 /**
@@ -573,11 +586,12 @@ function googleToolCallMetadataFromPart(
  * Keep that provider visibility bit authoritative here so the streaming and buffered parsers
  * cannot accidentally expose the same hidden reasoning through different event types.
  */
-function googlePartTextEvent(part: GoogleResponsePart): AdapterEvent | undefined {
+function googlePartTextEvent(part: GoogleResponsePart, filterCcaSearchSuggestionHtml = false): AdapterEvent | undefined {
   // A malformed scalar/object is not text and must not cross the AdapterEvent boundary. Dropping
   // only this optional field preserves the rest of the part without inventing assistant output by
   // coercion; an empty string keeps its existing no-event behavior.
   if (typeof part.text !== "string" || part.text.length === 0) return undefined;
+  if (filterCcaSearchSuggestionHtml && isCcaSearchSuggestionHtml(part.text)) return undefined;
   return part.thought === true
     ? { type: "reasoning_raw_delta", text: part.text }
     : { type: "text_delta", text: part.text };
@@ -734,6 +748,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
   let vertexReplayModel: string | undefined;
   let vertexReplaySession: string | undefined;
   let restoreGoogleToolName = (name: string): string => name;
+  const emitInTurnGroundingSourcesQueue: boolean[] = [];
   let lastInjectedCallIds: string[] = [];
   let lastReasoningReplayScope: OcxParsedRequest["_reasoningReplayScope"];
 
@@ -829,7 +844,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       );
       lastInjectedCallIds = [...replayedCallIds];
       lastReasoningReplayScope = parsed._reasoningReplayScope;
-      const tools = toolsToGeminiFormat(parsed);
+      const tools = toolsToGeminiFormat(parsed, routedModelId);
 
       const body: Record<string, unknown> = { contents };
       if (systemInstruction) body.systemInstruction = systemInstruction;
@@ -963,6 +978,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         };
         headers["User-Agent"] = ANTIGRAVITY_REQUEST_UA;
         headers["Authorization"] = `Bearer ${token}`;
+        emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
         return { url, method: "POST", headers, body: JSON.stringify(envelope) };
       }
 
@@ -992,6 +1008,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         if (apiKey) {
           const url = `https://aiplatform.googleapis.com/v1/publishers/google/models/${parsed.modelId}:${method}${streamParam}`;
           headers["x-goog-api-key"] = apiKey;
+          emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
           return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
         }
         const project = provider.project || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
@@ -1004,6 +1021,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         const url = `https://${host}/v1/projects/${project}/locations/${location}/publishers/google/models/${parsed.modelId}:${method}${streamParam}`;
         const token = await getVertexAccessToken();
         headers["Authorization"] = `Bearer ${token}`;
+        emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
         return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
       }
 
@@ -1023,6 +1041,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
             (compiled.body as { contents: unknown[] }).contents,
           );
         }
+        emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
         return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
       }
 
@@ -1034,10 +1053,14 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
       const compiled = compileGoogleWireBody(body);
       restoreGoogleToolName = compiled.restoreToolName;
+      emitInTurnGroundingSourcesQueue.push(!!parsed._ccaInTurnGrounding);
       return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
     },
 
     async *parseStream(response: Response, budget: TranslatorBudget): AsyncGenerator<AdapterEvent> {
+      const emitInTurnGroundingSources = emitInTurnGroundingSourcesQueue.shift() ?? false;
+      const filterCcaSearchSuggestionHtml =
+        provider.googleMode === "cloud-code-assist" && emitInTurnGroundingSources;
       if (provider.googleMode === "ai-studio-web" && (response.status === 401 || response.status === 403 || (response.status >= 300 && response.status < 400))) {
         try { await response.body?.cancel(); } catch { /* ignore */ }
         yield { type: "error", message: "Google AI Studio session expired — re-authentication required" };
@@ -1074,6 +1097,14 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       let sawAnyFrame = false;
       let sawTerminalSignal = false;
       let pendingStreamThoughtSig: string | undefined;
+      const groundingSources: WebSearchSource[] = [];
+      let groundingSourcesEmitted = false;
+
+      const mergeGroundingSources = (groundingMetadata: unknown): void => {
+        for (const source of extractCcaGroundingSources(groundingMetadata)) {
+          if (!groundingSources.some(existing => existing.url === source.url)) groundingSources.push(source);
+        }
+      };
 
       const handleDataLine = async function* (line: string): AsyncGenerator<AdapterEvent, "continue" | "content" | "terminate"> {
         const payload = line.slice(5).trim();
@@ -1176,7 +1207,12 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         const candidate = rawCandidate as {
           content?: unknown;
           finishReason?: string;
+          groundingMetadata?: unknown;
         };
+
+        if (emitInTurnGroundingSources && candidate.groundingMetadata) {
+          mergeGroundingSources(candidate.groundingMetadata);
+        }
 
         if (typeof candidate.finishReason === "string" && candidate.finishReason) {
           lastFinishReason = candidate.finishReason;
@@ -1227,7 +1263,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
             if (part.thought === true && sig && isLikelyRealThoughtSignature(sig)) {
               pendingStreamThoughtSig = sig;
             }
-            const textEvent = googlePartTextEvent(part);
+            const textEvent = googlePartTextEvent(part, filterCcaSearchSuggestionHtml);
             if (textEvent) {
               emittedContentEvent = true;
               yield textEvent;
@@ -1366,6 +1402,13 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         if (!sawAnyFrame || !sawTerminalSignal) {
           yield { type: "error", message: "upstream stream ended without a terminal signal — possible truncation" };
           return;
+        }
+        if (emitInTurnGroundingSources && !groundingSourcesEmitted && groundingSources.length > 0) {
+          const appendix = formatCcaGroundingSourcesAppendix(groundingSources);
+          if (appendix) {
+            groundingSourcesEmitted = true;
+            yield { type: "text_delta", text: appendix };
+          }
         }
         const stopReason = lastFinishReason === "MAX_TOKENS"
           ? "max_tokens"

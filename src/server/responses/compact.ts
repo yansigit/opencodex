@@ -1144,6 +1144,9 @@ export async function handleResponsesCompact(
     body: JSON.stringify(internalBody),
   });
   const response = await handleResponses(internalReq, config, logCtx, { abortSignal: req.signal, turnAdmissionLease, ...(admission ? { admission } : {}) });
+  // The internal summarizer is a routed Responses turn, but compact logs retain the
+  // caller's selector just like the native compact branch above.
+  logCtx.requestedModel = requestedModel;
   if (!response.ok) return response;
   let json: { output?: unknown[]; status?: unknown; error?: unknown };
   if (response.headers.get("content-type")?.includes("text/event-stream")) {

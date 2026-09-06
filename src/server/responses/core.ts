@@ -170,7 +170,7 @@ import {
   rotateGenericOAuthAccountOn429,
 } from "../../oauth/generic-account-failover";
 import { resolveCopilotApiBaseUrl } from "../../oauth/github-copilot";
-import { buildWebSearchTool, planWebSearch, runWithWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../web-search";
+import { buildWebSearchTool, mediaBridgeWillRun, planWebSearch, resolveCcaInTurnGrounding, runWithWebSearch, shouldResolveOpenAiWebSearchSidecar } from "../../web-search";
 import { buildImageTool, buildVideoTool, planImageBridge, planVideoBridge, runWithImageBridge, clampImageMaxRounds, IMAGE_GEN_TOOL_NAME, VIDEO_GEN_TOOL_NAME } from "../../images";
 import { describeImagesInPlace, isModelTextOnly, planVisionSidecar, resolveOpenAiVisionModel, shouldResolveOpenAiVisionSidecar, stripImagesInPlace } from "../../vision";
 import { createAdapterEventQueue, preflightAdapterEvents, type AdapterEventQueue } from "../../adapters/run-turn-queue";
@@ -5027,6 +5027,7 @@ async function handleResponsesInner(
     linkAbortSignal(upstream, options.abortSignal);
     const connectMs = config.connectTimeoutMs ?? 200_000;
     let upstreamResponse: Response;
+    const replayBudget = route.provider.replayTransientFailures ? { remaining: 2 } : undefined;
     /**
      * Refuse a built body that exceeds the operator's configured ceiling, before it is sent.
      *
@@ -5614,6 +5615,54 @@ async function handleResponsesInner(
         poolRetryOutcome = upstreamResponse.status >= 500 ? 429 : upstreamResponse.status;
       }
 
+      // Wrapped quota in 5xx: mirror the transient-5xx immediate-retry budget on the
+      // exhausted account before pool rotation. The ordinary transient layer is opt-in
+      // (replayTransientFailures), so a plain quota-wrapped 502 would otherwise rotate
+      // after one send. The docs and tests require up to three sends on the same
+      // credential before the alternate attempt, and three sends + cooldown for sole
+      // accounts.
+      if (poolRetryOutcome === 429 && upstreamResponse.status >= 500) {
+        const maxSameAccountQuotaRetries = 2;
+        for (let wrappedRetry = 0; wrappedRetry < maxSameAccountQuotaRetries; wrappedRetry++) {
+          if (options.abortSignal?.aborted || upstream.signal.aborted) break;
+          try { void upstreamResponse.body?.cancel().catch(() => {}); } catch { /* ignore */ }
+          if (replayBudget) replayBudget.remaining = Math.max(0, replayBudget.remaining - 1);
+          try {
+            noteAttemptSend(logCtx.activeAttempt, passthroughEstimate);
+            noteDiagnosticAttempt(logCtx.activeAttempt, passthroughEstimate, "transient-5xx", route.provider.adapter);
+            upstreamResponse = await fetchWithHeaderTimeout(
+              request.url,
+              {
+                method: request.method,
+                headers: request.headers,
+                body: request.body,
+              },
+              upstream.signal,
+              connectMs,
+              parsed.stream,
+              providerFetch(route.provider, options.codexWsRuntimeIdentity, {
+                providerName: route.providerName,
+                modelId: route.modelId,
+                onCodexWsQuota: codexWsQuotaObserver(authCtx, route.provider),
+                beforeDispatch: isCanonicalOpenAiForwardProvider(route.provider)
+                  ? createCodexReserveDispatchGuard(authCtx, options.codexAuthPolicy ?? config, route.modelId, options.admission, options.visionDescribeTerminal === true) : undefined,
+              }),
+              route.provider.authMode === "forward",
+            );
+            settleObservedHostResponse();
+            captureAffinityResponse(upstreamResponse);
+          } catch (err) {
+            upstream.abort();
+            break;
+          }
+          const stillQuota = await shouldRetryCodexPoolAccountQuota(upstreamResponse, options.abortSignal);
+          if (!stillQuota) {
+            poolRetryOutcome = undefined;
+            break;
+          }
+        }
+      }
+
       if (poolRetryOutcome !== undefined) {
         // A stored Pool 401 spent this request's account budget on its own refresh and replay, so
         // nothing afterwards may be paid for out of a DIFFERENT account. One flag carries that,
@@ -6093,7 +6142,7 @@ async function handleResponsesInner(
       const clientBlockRewrite = blockRewrites.length > 0
         ? composeSseBlockRewrites(...blockRewrites)
         : undefined;
-      const needsClientRewrite = clientBlockRewrite !== undefined;
+      const needsClientRewrite = bridgeSseRewrite !== undefined || clientBlockRewrite !== undefined;
       // #864: win32 rewrite traffic must never enter the tee()+JS-pull chain
       // (Bun#32111 JS-sink segfault — text frames pass, the terminal block is
       // lost). The eager single reader applies the same rewrites inline.
@@ -6483,14 +6532,26 @@ async function handleResponsesInner(
   //   - non-runTurn: web-search wins over image when both eligible (documented priority)
   //   - runTurn: image bridge may run (it supports runTurn); web-search is skipped so runTurn
   //     can proceed for web-search-only turns
-  const wsPlan = !routedCompaction
-    ? planWebSearch(config, parsed, false, route.provider, route.modelId, openAiSidecar, {
-      admission: options.admission, codexAuthPolicy: options.codexAuthPolicy,
-    })
-    : undefined;
   const imgPlan = !routedCompaction ? await planImageBridge(config, parsed, route.provider) : undefined;
   const vidPlan = !routedCompaction ? await planVideoBridge(config, parsed, route.provider) : undefined;
-  const canRunWebSearch = !!wsPlan && !adapter.runTurn;
+  const hasMediaPlan = !!(imgPlan || vidPlan);
+  // A media plan is not enough to suppress Gemini 2.x grounding: both bridges inject tools only
+  // on streaming turns. This is the potential-injection value used to resolve sidecar precedence.
+  const mediaMayInject = mediaBridgeWillRun(hasMediaPlan, false, !!adapter.runTurn, parsed.stream);
+  const wsPlan = !routedCompaction
+    ? planWebSearch(config, parsed, false, route.provider, route.modelId, openAiSidecar, {
+      admission: options.admission,
+      codexAuthPolicy: options.codexAuthPolicy,
+      hasMediaBridge: mediaMayInject,
+    })
+    : undefined;
+  const webSearchWinsMedia = !!wsPlan && !adapter.runTurn;
+  const mediaWillRun = mediaBridgeWillRun(hasMediaPlan, !!wsPlan, !!adapter.runTurn, parsed.stream);
+  const ccaInTurnGrounding = !routedCompaction
+    ? resolveCcaInTurnGrounding(config, parsed, false, route.provider, route.modelId, mediaWillRun)
+    : undefined;
+  if (ccaInTurnGrounding) parsed._ccaInTurnGrounding = ccaInTurnGrounding;
+  const canRunWebSearch = webSearchWinsMedia && !ccaInTurnGrounding;
   const rotateSidecarProviderOn429 = async (retryAfter: string | null): Promise<ProviderAdapter | null> => {
     const rotated = rotateProviderTransportOn429(config, route.providerName, route.provider, {
       retryAfter,
