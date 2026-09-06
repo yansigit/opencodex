@@ -1280,6 +1280,7 @@ function startBoundedInspectionPump(options: InspectionPumpOptions): void {
     try {
       for (;;) {
         const { done, value } = await reader.read();
+        if (clientGoneSignal?.aborted) markClientGone();
         if (drainStopped) {
           // stopDrain() cancelled the reader; the settled read is the wake-up.
           clientGoneWithoutTerminal = !inspector.terminalSeen();
@@ -1317,6 +1318,9 @@ function startBoundedInspectionPump(options: InspectionPumpOptions): void {
         }
       }
     } catch {
+      // Bun can settle a fetch body read before dispatching all abort listeners.
+      // Observe the signal itself before classifying that rejection as upstream.
+      if (clientGoneSignal?.aborted) markClientGone();
       // A read error can follow a final SSE block without its blank-line
       // delimiter. Flush that candidate before classifying the transport as a
       // synthetic reset; otherwise a real completed/failed/policy terminal is

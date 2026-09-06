@@ -80,11 +80,10 @@ It went `DIRTY` because **I merged #1305**. The overlap is
 `src/codex/catalog/provider-fetch.ts` and `tests/codex-catalog.test.ts`:
 
 ```
-<<<<<<< dev (from #1305 / #1163)
+dev (from #1305 / #1163):
     const members = combo.targets.map(target => resolveComboCatalogMember(...))
-=======  #1244
+#1244:
     const discoveredMembers = combo.targets.map(target => memberByKey.get(targetKey(target)))
->>>>>>>
 ```
 
 `dev` now synthesizes a combo member whose provider row is incomplete instead of

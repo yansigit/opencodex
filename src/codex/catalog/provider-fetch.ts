@@ -1,3 +1,5 @@
+import { effectiveProviderAlias, effectiveProviderAliasDecision } from "../../providers/default-aliases";
+import { initialModelSelectionPending } from "../../providers/initial-model-selection";
 import { execFileSync } from "node:child_process";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
@@ -32,7 +34,7 @@ import type { OcxConfig, OcxProviderConfig } from "../../types";
 import { modelInList } from "../../types";
 import { CODEX_REASONING_LEVELS, codexEffortRank, configuredReasoningEfforts, modelRecordValue, sanitizeCodexReasoningEfforts } from "../../reasoning-effort";
 import { isModelVisionSidecarConsumer } from "../../vision/eligibility";
-import { getModelMetadata, getModelMetadataCaseInsensitive, listModelMetadata, resolveMetadataProvider } from "../../generated/model-metadata";
+import { getModelMetadata, getModelMetadataCaseInsensitive, listModelMetadata, resolveMetadataProvider, type ModelMetadata } from "../../generated/model-metadata";
 import { enrichProviderFromRegistry, shouldCaseFoldMetadataModelId } from "../../providers/derive";
 import {
   captureFastPolicyAuthority,
@@ -69,6 +71,7 @@ import { redactSecretString } from "../../lib/redact";
 import { isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
 import {
   extractProviderModelItems,
+  isRegistryModelDiscoveryUrl,
   readBoundedDiscoveryJson,
   resolveProviderModelDiscovery,
   type ModelDiscoveryResponseFailure,
@@ -165,6 +168,7 @@ interface CapturedProviderGather {
   readonly request: CapturedModelsRequest;
   readonly fastPolicyAuthority: FastPolicyAuthority;
   readonly metadataModelIdCaseFold: boolean;
+  readonly effectiveAlias?: string | null;
   readonly observedAuth?: ModelsAuthResolution;
   /**
    * Configured model ids this provider must keep even when live discovery omits
@@ -381,6 +385,7 @@ function captureTrustedOpenAiApiPolicy(
     models: entry.models,
     ...(entry.modelContextWindows ? { modelContextWindows: entry.modelContextWindows } : {}),
     ...(entry.modelMaxInputTokens ? { modelMaxInputTokens: entry.modelMaxInputTokens } : {}),
+    ...(entry.modelMaxOutputTokens ? { modelMaxOutputTokens: entry.modelMaxOutputTokens } : {}),
     ...(entry.virtualModels ? { virtualModels: entry.virtualModels } : {}),
     ...(entry.modelInputModalities ? { modelInputModalities: entry.modelInputModalities } : {}),
     ...(entry.modelReasoningEfforts ? { modelReasoningEfforts: entry.modelReasoningEfforts } : {}),
@@ -414,6 +419,7 @@ function captureProviderGather(
   configured: OcxProviderConfig,
   authResolver: ModelsAuthResolver,
   retainConfiguredModelIds?: ReadonlySet<string>,
+  config?: Pick<OcxConfig, "providers">,
 ): CapturedProviderGather {
   const enriched = detachedClone(withCanonicalOpenAiForwardAuthDefault(name, configured));
   enrichProviderFromRegistry(name, enriched);
@@ -455,6 +461,7 @@ function captureProviderGather(
     maxModels: discovery.maxModels,
     trustedOpenAiApi,
   });
+  const effectiveAlias = effectiveProviderAliasDecision(name, configured, config);
   return Object.freeze({
     name,
     provider,
@@ -463,6 +470,7 @@ function captureProviderGather(
     request,
     fastPolicyAuthority,
     metadataModelIdCaseFold,
+    effectiveAlias,
     ...(observedAuth ? { observedAuth: Object.freeze({ ...observedAuth }) } : {}),
     ...(retainConfiguredModelIds && retainConfiguredModelIds.size > 0
       ? { retainConfiguredModelIds }
@@ -504,6 +512,7 @@ function captureGatherFlight(
       provider,
       authResolver,
       comboTargetsByProvider.get(name),
+      config,
     ));
   const discoveryPolicySnapshots = Object.freeze(providers.map(provider => provider.policy));
   return Object.freeze({
@@ -626,8 +635,36 @@ export function clearGatherRoutedModelsInflight(): void {
   gatherInflight.clear();
 }
 
+const NUMERIC_MODEL_ID_SEGMENT = /^\d+$/;
+
+/**
+ * Resolve an unknown Claude point release or date pin from the nearest configured
+ * family row. Only numeric tail segments are removed so unrelated model families
+ * cannot inherit one another's limits.
+ */
+function anthropicFamilyContextWindow(
+  record: Record<string, number> | undefined,
+  id: string,
+): number | undefined {
+  if (!record || !id.toLowerCase().startsWith("claude-")) return undefined;
+  let candidate = id;
+  while (true) {
+    const cut = candidate.lastIndexOf("-");
+    if (cut <= 0 || !NUMERIC_MODEL_ID_SEGMENT.test(candidate.slice(cut + 1))) return undefined;
+    candidate = candidate.slice(0, cut);
+    const value = modelRecordValue(record, candidate);
+    if (typeof value === "number" && value > 0) return value;
+  }
+}
+
+/**
+ * Resolve the configured context window in exact-model, Anthropic numeric-family,
+ * then provider-wide order. Return undefined when the selected value is not positive.
+ */
 export function configuredContextWindow(prov: OcxProviderConfig, id: string): number | undefined {
-  const configured = modelRecordValue(prov.modelContextWindows, id) ?? prov.contextWindow;
+  const configured = modelRecordValue(prov.modelContextWindows, id)
+    ?? (prov.adapter === "anthropic" ? anthropicFamilyContextWindow(prov.modelContextWindows, id) : undefined)
+    ?? prov.contextWindow;
   return typeof configured === "number" && configured > 0 ? configured : undefined;
 }
 
@@ -718,7 +755,7 @@ function configuredVerbositySupport(name: string, prov: OcxProviderConfig | unde
   // Read from the PROVIDER CONFIG, never from PROVIDER_REGISTRY. A gather flight captures its
   // registry authority up front and forbids any later registry read, so consulting the registry
   // here made a custom-destination flight fall back to "configured" instead of serving its own
-  // discovery result (tests/codex-gather-authority.test.ts). `applyVerbosityDefaults` in
+  // discovery result (tests/codex-integration/codex-gather-authority.test.ts). `applyVerbosityDefaults` in
   // providers/derive.ts materializes the registry default into the config at seed/enrich time.
   return prov.supportsVerbosity;
 }
@@ -729,8 +766,17 @@ export function applyProviderConfigHints(
   model: CatalogModel,
   providerCap?: number,
   metadataModelIdCaseFold?: boolean,
+  effectiveAlias?: string | null,
 ): CatalogModel {
   const displayName = configuredModelDisplayName(prov, model.id);
+  // The alias decision is resolved once at flight admission (captureProviderGather) and threaded
+  // through as `effectiveAlias`. Re-deriving it here would read PROVIDER_REGISTRY after admission,
+  // which is exactly the authority leak tests/codex-integration/codex-gather-authority.test.ts
+  // forbids: a flight must not consult the live registry once its transport has been captured.
+  // When no decision was threaded in, carry whatever the row already resolved to instead.
+  const providerAlias = typeof effectiveAlias === "string" || effectiveAlias === null
+    ? effectiveAlias
+    : model.providerAlias;
   const configuredCap = configuredContextWindow(prov, model.id);
   const configuredMaxInput = configuredMaxInputTokens(prov, model.id);
   const maxOutputTokens = routedMaxOutputTokens(name, prov, model, model.id, metadataModelIdCaseFold);
@@ -756,6 +802,7 @@ export function applyProviderConfigHints(
   const {
     supportsServiceTier: _staleServiceTier,
     fastTierDescription: _staleFastTierDescription,
+    providerAlias: _staleProviderAlias,
     ...modelWithoutServiceTier
   } = model;
   // 已发现窗口只允许被配置值压低；缺窗口时，已开的 Context cap 就是实际窗口。
@@ -768,6 +815,7 @@ export function applyProviderConfigHints(
   const hinted = {
     ...modelWithoutServiceTier,
     ...(displayName !== undefined ? { displayName } : {}),
+    ...(providerAlias !== undefined ? { providerAlias } : {}),
     ...(hintedWindow !== undefined ? { contextWindow: hintedWindow } : {}),
     ...(inputModalities ? { inputModalities } : {}),
     ...(reasoningEfforts !== undefined ? { reasoningEfforts } : {}),
@@ -827,8 +875,9 @@ export function catalogHintsFromProviderConfig(
   id: string,
   contextCap?: number,
   metadataModelIdCaseFold?: boolean,
+  effectiveAlias?: string | null,
 ): Partial<CatalogModel> {
-  const hinted = applyProviderConfigHints(name, prov, { id, provider: name }, contextCap, metadataModelIdCaseFold);
+  const hinted = applyProviderConfigHints(name, prov, { id, provider: name }, contextCap, metadataModelIdCaseFold, effectiveAlias);
   const { provider: _provider, id: _id, ...hints } = hinted;
   return hints;
 }
@@ -839,8 +888,9 @@ export function applyConfigHintsToCachedModels(
   models: CatalogModel[],
   contextCap?: number,
   metadataModelIdCaseFold?: boolean,
+  effectiveAlias?: string | null,
 ): CatalogModel[] {
-  return models.map(model => applyProviderConfigHints(name, prov, model, contextCap, metadataModelIdCaseFold));
+  return models.map(model => applyProviderConfigHints(name, prov, model, contextCap, metadataModelIdCaseFold, effectiveAlias));
 }
 
 
@@ -864,6 +914,62 @@ interface ComboCatalogMemberFallback {
 }
 
 /**
+ * Ladder advertised for a combo member whose vendor metadata says it reasons but
+ * carries no explicit ladder (Claude, Grok). Codex needs a non-empty ladder to show
+ * the effort control; the routed adapters clamp to the real upstream top rung.
+ */
+const ROUTED_COMBO_MEMBER_REASONING_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Vendor-table lookup tolerant of point releases and date pins. Configured combo
+ * targets often name a variant the table does not carry (`claude-fable-5-1`,
+ * `claude-opus-4-5-20251101`); the base family row still describes its modality
+ * and reasoning capability, so fall back to it before giving up.
+ */
+function comboMemberVendorMetadata(provider: string, modelId: string): ModelMetadata | undefined {
+  const exact = getModelMetadataCaseInsensitive(provider, modelId);
+  if (exact) return exact;
+  let candidate = modelId.replace(/\[[^\]]*\]$/, "");
+  while (true) {
+    const trimmed = candidate.replace(/-\d+$/, "");
+    if (trimmed === candidate || !trimmed.includes("-")) return undefined;
+    const hit = getModelMetadataCaseInsensitive(provider, trimmed);
+    if (hit) return hit;
+    candidate = trimmed;
+  }
+}
+
+/**
+ * Combo members are usually thin discovery rows (id + context window). Without a
+ * capability source the combo intersection collapses to text-only / no effort ladder,
+ * and the Codex app then refuses image attachments and hides the effort picker for
+ * every Claude combo. The generated vendor table knows both, so use it as the
+ * last-resort fallback when the caller supplied none.
+ *
+ * `ModelMetadata.maxTokens` is the OUTPUT ceiling, so it fills `maxOutputTokens`.
+ * Mapping it onto `maxInputTokens` would be read by the combo intersection
+ * (`aggregation.ts` `Math.min` over member input ceilings) as a 128k input limit and
+ * shrink a 1M Claude combo window to 128k, taking autoCompactTokenLimit down with it.
+ */
+function vendorMetadataComboFallback(target: { provider: string; model: string }): ComboCatalogMemberFallback | undefined {
+  const metadataProvider = resolveMetadataProvider(target.provider);
+  const metadata = metadataProvider ? comboMemberVendorMetadata(metadataProvider, target.model) : undefined;
+  if (!metadata) return undefined;
+  return {
+    ...(typeof metadata.contextWindow === "number" && metadata.contextWindow > 0
+      ? { contextWindow: metadata.contextWindow }
+      : {}),
+    ...(typeof metadata.maxTokens === "number" && metadata.maxTokens > 0
+      ? { maxOutputTokens: metadata.maxTokens }
+      : {}),
+    ...(Array.isArray(metadata.input) && metadata.input.length > 0
+      ? { inputModalities: [...metadata.input] }
+      : {}),
+    ...(metadata.reasoning === true ? { reasoningEfforts: [...ROUTED_COMBO_MEMBER_REASONING_EFFORTS] } : {}),
+  };
+}
+
+/**
  * Resolve a combo target to a catalog member for derivation.
  * Prefer discovery metadata; when the target is missing from the gather map or
  * lacks a positive contextWindow, synthesize from the (registry-enriched)
@@ -878,11 +984,12 @@ export function resolveComboCatalogMember(
   memberByKey: ReadonlyMap<string, CatalogModel>,
   providers: ReadonlyMap<string, OcxProviderConfig>,
   contextCap?: number,
-  fallback?: ComboCatalogMemberFallback,
+  callerFallback?: ComboCatalogMemberFallback,
   metadataModelIdCaseFold?: boolean,
 ): CatalogModel | undefined {
   const existing = memberByKey.get(targetKey(target));
   const prov = providers.get(target.provider);
+  const fallback = callerFallback ?? vendorMetadataComboFallback(target);
   // Disabled providers never contribute members — even a complete discovery row
   // is unusable for catalog derivation while the provider is off.
   if (prov?.disabled === true) return undefined;
@@ -1424,7 +1531,7 @@ async function fetchProviderModelsWithAuth(
   const configured: CatalogModel[] = configuredIds.map(id => ({
     id,
     provider: name,
-    ...catalogHintsFromProviderConfig(name, prov, id, contextCap, metadataModelIdCaseFold),
+    ...catalogHintsFromProviderConfig(name, prov, id, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
   }));
   const withConfiguredRetention = (
     models: CatalogModel[],
@@ -1482,7 +1589,7 @@ async function fetchProviderModelsWithAuth(
     : [{
       id: prov.defaultModel,
       provider: name,
-      ...catalogHintsFromProviderConfig(name, prov, prov.defaultModel, contextCap, metadataModelIdCaseFold),
+      ...catalogHintsFromProviderConfig(name, prov, prov.defaultModel, contextCap, metadataModelIdCaseFold, captured.effectiveAlias),
     }];
   const vertexDefaultSeed = seedVertexDefault ? configured[0] : undefined;
   const withVertexDefaultSeed = (models: CatalogModel[]): CatalogModel[] => (
@@ -1499,7 +1606,7 @@ async function fetchProviderModelsWithAuth(
     const cachedCursor = getFreshCached(name, ttlMs);
     if (cachedCursor) {
       return observed(
-        withConfiguredRetention(applyConfigHintsToCachedModels(name, prov, cachedCursor, undefined, metadataModelIdCaseFold)),
+        withConfiguredRetention(applyConfigHintsToCachedModels(name, prov, cachedCursor, undefined, metadataModelIdCaseFold, captured.effectiveAlias)),
         "authoritative",
       );
     }
@@ -1507,7 +1614,7 @@ async function fetchProviderModelsWithAuth(
       const cooling = getStaleCached(name);
       return observed(
         withConfiguredRetention(
-          cooling ? applyConfigHintsToCachedModels(name, prov, cooling, undefined, metadataModelIdCaseFold) : configured,
+          cooling ? applyConfigHintsToCachedModels(name, prov, cooling, undefined, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
         ),
         "degraded",
       );
@@ -1548,7 +1655,7 @@ async function fetchProviderModelsWithAuth(
     const staleCursor = getStaleCached(name);
     return observed(
       withConfiguredRetention(
-        staleCursor ? applyConfigHintsToCachedModels(name, prov, staleCursor, undefined, metadataModelIdCaseFold) : configured,
+        staleCursor ? applyConfigHintsToCachedModels(name, prov, staleCursor, undefined, metadataModelIdCaseFold, captured.effectiveAlias) : configured,
       ),
       "degraded",
     );
@@ -1566,7 +1673,7 @@ async function fetchProviderModelsWithAuth(
   if (fresh) {
     return observed(
       withConfiguredRetention(
-        withVertexDefaultSeed(applyConfigHintsToCachedModels(name, prov, fresh, contextCap, metadataModelIdCaseFold)),
+        withVertexDefaultSeed(applyConfigHintsToCachedModels(name, prov, fresh, contextCap, metadataModelIdCaseFold, captured.effectiveAlias)),
       ),
       "authoritative",
     ); // dedups Codex's frequent /v1/models polling within the TTL
@@ -1578,7 +1685,7 @@ async function fetchProviderModelsWithAuth(
     return observed(
       withConfiguredRetention(
         stale
-          ? withVertexDefaultSeed(applyConfigHintsToCachedModels(name, prov, stale, contextCap, metadataModelIdCaseFold))
+          ? withVertexDefaultSeed(applyConfigHintsToCachedModels(name, prov, stale, contextCap, metadataModelIdCaseFold, captured.effectiveAlias))
           : failedDiscoveryConfigured,
       ),
       "degraded",
@@ -1618,7 +1725,7 @@ async function fetchProviderModelsWithAuth(
     return {
       models: withConfiguredRetention(
         stale
-          ? withVertexDefaultSeed(applyConfigHintsToCachedModels(name, prov, stale, contextCap, metadataModelIdCaseFold))
+          ? withVertexDefaultSeed(applyConfigHintsToCachedModels(name, prov, stale, contextCap, metadataModelIdCaseFold, captured.effectiveAlias))
           : failedDiscoveryConfigured,
       ),
       fallback: stale ? "stale" : "configured",
@@ -1626,16 +1733,24 @@ async function fetchProviderModelsWithAuth(
     };
   };
   try {
+    // Canonical-URL TUN transparency for Clash/Surge/Mihomo fake-IP DNS:
+    // `isRegistryModelDiscoveryUrl` proves the FINAL request URL is the
+    // registry's own fixed discovery URL, so a purely-benchmark DNS answer may
+    // be pin-connected through the intercepting TUN without proxy env. The
+    // proof is on the URL — not the provider name — because an OAuth/forward
+    // name matches any baseUrl by design. Retargeted or renamed custom rows
+    // fetch a different URL and keep the rejection.
+    const outboundDependencies = { isCanonicalUrl: isRegistryModelDiscoveryUrl };
     const res = request.method === "POST"
       ? await providerOutboundPost(name, prov, url, {
         headers,
         body: JSON.stringify({ project }),
         signal: AbortSignal.timeout(8000),
-      })
+      }, outboundDependencies)
       : await providerOutboundGet(name, prov, url, {
         headers,
         signal: AbortSignal.timeout(8000),
-      });
+      }, outboundDependencies);
     const redirectError = await providerRedirectError(res, url);
     if (redirectError) {
       const { models, fallback, shouldLog } = failedDiscoveryFallback({ reason: "http", httpStatus: res.status });
@@ -1699,7 +1814,7 @@ async function fetchProviderModelsWithAuth(
           metadataFieldSources: { contextWindow: "live" as const },
         } : {}),
         ...(model.inputModalities ? { inputModalities: model.inputModalities } : {}),
-      }, contextCap, metadataModelIdCaseFold));
+      }, contextCap, metadataModelIdCaseFold, captured.effectiveAlias));
       const forCache = withConfiguredRetention(live, { retainComboTargets: false });
       if (!setCached(name, forCache, Date.now(), cacheGeneration)) {
         return observed(withConfiguredRetention(configured), "degraded");
@@ -1762,7 +1877,7 @@ async function fetchProviderModelsWithAuth(
         provider: name,
         ...(ownedBy ? { owned_by: ownedBy } : {}),
         ...discoveredHints,
-      }, contextCap, metadataModelIdCaseFold);
+      }, contextCap, metadataModelIdCaseFold, captured.effectiveAlias);
     })
       .filter(m => shouldExposeProviderModel(name, m.id));
     // Capture the count BEFORE the alias/configured augmentation below pushes extra rows into
@@ -1924,6 +2039,7 @@ export function filterCatalogVisibleModels(
     }
   }
   return models.filter(m => {
+    if (initialModelSelectionPending(config.providers[m.provider])) return false;
     const nativeAlias = m.provider === COMBO_NAMESPACE && m.nativeAlias === true;
     // disabledModels may be stored raw (canonical) or encoded (legacy UI writes).
     for (const stored of disabled) {
@@ -2064,6 +2180,18 @@ async function gatherRoutedModelsUncached(
     config,
     capture.openAiApiPolicy,
   );
+  const apiProvider = activeProviders.find(provider => provider.name === OPENAI_API_PROVIDER_ID);
+  // Trusted reconstruction replaces whole rows, including the earlier Fast hints.
+  // Restore only that capability from the same captured authority used by discovery.
+  if (apiProvider) {
+    for (const model of apiAugmented) {
+      if (model.provider !== OPENAI_API_PROVIDER_ID) continue;
+      const policy = fastPolicyForModel(apiProvider.provider, model.id, apiProvider.name);
+      const supported = serviceTierSupportFromPolicy(policy);
+      if (supported !== undefined) model.supportsServiceTier = supported;
+      if (supported === true && policy.fastTierDescription !== undefined) model.fastTierDescription = policy.fastTierDescription;
+    }
+  }
   const metadataModelIdCaseFoldByProvider = new Map(
     activeProviders.map(provider => [provider.name, provider.metadataModelIdCaseFold]),
   );
@@ -2154,7 +2282,7 @@ async function gatherRoutedModelsUncached(
     const nativeAliasMaxInput = combo.nativeAlias && combo.alias
       ? (combo.alias.startsWith("gpt-5.6-") || combo.alias.includes("daybreak")
         ? NATIVE_GPT56_MAX_INPUT_TOKENS
-        : nativeOpenAiMaxInputTokens(combo.alias) ?? nativeOpenAiContextWindow(combo.alias))
+        : nativeOpenAiMaxInputTokens(combo.alias, comboNativeLimits) ?? nativeOpenAiContextWindow(combo.alias, comboNativeLimits))
       : undefined;
     const nativeAliasAutoCompact = combo.nativeAlias && combo.alias
       ? nativeOpenAiAutoCompactTokenLimit(combo.alias, comboNativeLimits)
@@ -2477,7 +2605,9 @@ function augmentRoutedModelsWithCapturedOpenAiApiRows(
     const maxOutputTokens = routedMaxOutputTokens(
       OPENAI_API_PROVIDER_ID,
       configured,
-      existingById.get(id) ?? { provider: OPENAI_API_PROVIDER_ID, id },
+      policy.modelMaxOutputTokens?.[id] !== undefined
+        ? { provider: OPENAI_API_PROVIDER_ID, id, maxOutputTokens: policy.modelMaxOutputTokens[id] }
+        : existingById.get(id) ?? { provider: OPENAI_API_PROVIDER_ID, id },
       policy.virtualModels?.[id]?.wireModelId ?? id,
     );
     return {

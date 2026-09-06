@@ -69,7 +69,7 @@ import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, pu
 import { applySystemEnvToggle } from "../system-env";
 import { routeModel } from "../../router";
 
-import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels, fetchGrokCandidateModels, buildClaudeDesktopState } from "./shared";
+import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchInitializedModels as fetchAllModels, fetchGrokCandidateModels, buildClaudeDesktopState } from "./shared";
 import {
   agentRolesSyncEffective,
   parseSubagentRoles,
@@ -683,7 +683,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     // sequence after the transition. A failure here is a persistence failure (the
     // writers' ok:false result or a throw from the underlying atomic write helper),
     // reported as 502 naming the failed key plus the writes that already landed.
-    // NOTE: do not name that helper literally here — tests/grok-writer-boundary.test.ts
+    // NOTE: do not name that helper literally here — tests/providers/xai/grok-writer-boundary.test.ts
     // asserts this route file contains no direct write primitive, and matches on the
     // symbol name even inside a comment.
     const scalarWrites: Array<{ field: string; run: () => { ok: true; changed: boolean } | { ok: false; error: string } }> = [];

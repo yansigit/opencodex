@@ -60,7 +60,58 @@ OAuth запускается через `POST /api/oauth/login`. Если callba
 
 ## Docker и устранение неполадок
 
-Официального Docker-образа нет. Закрепите Bun-образ по digest, используйте volume для `/home/bun/.opencodex` и secret `/run/secrets/ocx_api_token`. Публикуйте только `10100`, не `10101`. Не помещайте секреты в `ARG`, `ENV`, `COPY`, Compose, историю образа или argv. После healthcheck отдельно проверьте readiness, каталог и реальный запрос.
+Официального Docker-образа нет, но репозиторий содержит поддерживаемые `Dockerfile` и `compose.yaml` для локальной сборки Bun-образа, закреплённого по digest. При первом обычном запуске контейнер создаёт самоподписанный TLS-сертификат `/home/bun/.opencodex/container-tls/cert.pem` и закрытый ключ `/home/bun/.opencodex/container-tls/key.pem`. Ключ доступен только владельцу в volume `ocx-state`, а endpoint данных с этого момента работает по HTTPS.
+
+До первого запуска один раз передайте токен данных через stdin. Bootstrap принимает не более одной строки размером 512 байт, никогда не выводит токен, отказывается заменять существующий и сохраняет его в каноническом защищённом файле `service-api-token`.
+
+На хосте нужны Git и Bun. Перед каждой сборкой создавайте канонический манифест из отслеживаемых Git исходников и файлов, определяющих контейнер, и не меняйте их до завершения сборки. Сгенерированный JSON не добавляйте в Git; `.git` исключён из контекста Docker. По умолчанию порт хоста привязан к `127.0.0.1`. Для удалённого доступа явно задайте `OPENCODEX_BIND_ADDRESS=<LAN-или-Tailscale-IP> docker compose up -d`; `0.0.0.0` открывает все интерфейсы. Защитите доступ брандмауэром и аутентифицированным TLS/tailnet-фронтендом.
+
+Манифест аутентифицирует `Dockerfile`, `compose.yaml`, `.dockerignore`, каждый отслеживаемый управляющий файл в `docker/`, исходники в `src/` и обязательные файлы пакета, включая `package.json`, `bun.lock` и `scripts/model-metadata.source.json`. Сборка сверяет каждый SHA-256 с контекстом и затем образом; отсутствующие или изменённые файлы, любой лишний исходник или управляющий файл Docker и символические ссылки запрещены.
+
+```bash
+git clone https://github.com/lidge-jun/opencodex.git
+cd opencodex
+bun scripts/generate-compatibility-version.ts
+docker compose build
+openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
+docker compose up -d
+```
+
+Для проверки локального HTTPS endpoint скопируйте только открытый сертификат:
+
+```bash
+mkdir -p .tmp
+docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
+```
+
+`OPENCODEX_PORT` одновременно задаёт опубликованный порт хоста и управляемое Compose значение `tls.publicOrigin`; внутренний listener остаётся на `10100`:
+
+```bash
+OPENCODEX_PORT=10190 docker compose up -d
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10190/healthz
+```
+
+Сохранённый volume, созданный до появления TLS, мигрирует автоматически при запуске: для него создаётся отдельная TLS-идентификация, а HTTPS origin использует опубликованный порт. Пути к сертификатам, которыми управляет оператор, не изменяются. Созданный сертификат покрывает только `localhost` и `127.0.0.1`. Для прямой публикации по удалённому имени установите сертификат и ключ для этого имени, затем передайте точный HTTPS origin через `OPENCODEX_PUBLIC_ORIGIN` вместе с адресом публикации:
+
+```bash
+OPENCODEX_PUBLIC_ORIGIN=https://hub-name.tailnet-name.ts.net \
+OPENCODEX_BIND_ADDRESS=100.64.0.10 \
+docker compose up -d
+```
+
+Внутренние проверки здоровья и готовности могут отключать проверку сертификата только при обращении к фиксированному loopback-адресу контейнера `https://127.0.0.1:10100`. Это исключение не подходит для внешней приёмки: при проверке развёртывания необходимо проверять точное имя хоста с помощью скопированного открытого сертификата или системного хранилища доверия.
+
+Используйте те же переменные при последующих вызовах Compose. Для возврата к старому HTTP-образу удалите настройку TLS, пока текущий образ ещё доступен, и только затем запустите старый образ. Файлы идентификации можно оставить в volume:
+
+```bash
+docker compose down
+docker compose run --rm hub bun run src/cli/index.ts config unset tls
+# выбрать или собрать старый образ, затем заново создать hub
+docker compose up -d
+```
+
+Контейнер работает от непривилегированного пользователя `bun`, с корневой файловой системой только для чтения и публикует только `10100`. Не публикуйте `10101` и не помещайте секреты в `ARG`, `ENV`, `COPY`, Compose, историю образа или argv. После healthcheck отдельно проверьте readiness, аутентифицированный каталог и реальный запрос. `docker compose down` сохраняет volume; `docker compose down --volumes` удаляет также конфигурацию, учётные данные и ключ.
 
 - При недоступном hub можно отключиться офлайн, но отзыв ключа останется незавершённым.
 - LKG сохраняется только при временном сбое; при ошибке auth, схемы, размера или протокола локального fallback нет.

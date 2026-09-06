@@ -21,11 +21,11 @@ Add the `subagentCandidates` configuration field to config types and schema.
   - Supports string record of string arrays: `z.record(z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1))`.
   - Union of both, optional, with graceful degradation on malformed hand-edits (`.catch(undefined)`).
 - Add helper `resolveSubagentCandidates(config: OcxConfig, roleOrModel?: string): string[]` to normalize candidate arrays.
-- Add focused unit tests in `tests/subagent-candidates-config.test.ts` verifying array, record, degradation, and resolution.
+- Add focused unit tests in `tests/routing/subagent-candidates-config.test.ts` verifying array, record, degradation, and resolution.
 
 Focused verification:
 ```bash
-bun test tests/subagent-candidates-config.test.ts
+bun test tests/routing/subagent-candidates-config.test.ts
 bun run typecheck
 ```
 
@@ -39,14 +39,14 @@ Implement driver model overwrite and candidate failover in `src/codex/subagent-m
 - Broaden failure classification in `noteSubagentModelFailure`:
   - Accept network errors, 5xx server errors, timeouts, and stream disconnects (`stream closed before response.completed`), placing the failed candidate in a 60s cooldown.
 - In `src/server/responses/core.ts`, call `recordSubagentFailureForThreadSpawn` on stream disconnects and 5xx errors so failed candidates are immediately cooled down for subsequent retries.
-- Add focused tests in `tests/subagent-candidates-overwrite.test.ts` covering:
+- Add focused tests in `tests/routing/subagent-candidates-overwrite.test.ts` covering:
   - Overwriting requested `gpt-5.6-luna` with candidate array.
   - Role-specific candidate resolution (e.g., `coder` -> Flash).
   - Automatic hop to Candidate 2 when Candidate 1 is in cooldown after failure.
 
 Focused verification:
 ```bash
-bun test tests/subagent-candidates-overwrite.test.ts tests/subagent-model-fallback.test.ts
+bun test tests/routing/subagent-candidates-overwrite.test.ts tests/routing/subagent-model-fallback.test.ts
 bun run typecheck
 ```
 
@@ -59,11 +59,11 @@ Prevent Codex router 400 errors when subagents route to models like Composer 2.5
 - In `src/server/effort-policy.ts` / `src/server/responses/core.ts`:
   - Check if the routed model supports reasoning effort (via `supportedLadderFor`).
   - If the model has an empty effort ladder (e.g. `cursor/composer-2.5`), strip `reasoning` from `parsed.options` and `parsed._rawBody`.
-- Add focused tests in `tests/subagent-effort-sanitization.test.ts` verifying that requests with `reasoning: { effort: "high" }` routed to Composer 2.5 have effort sanitized without triggering rejection.
+- Add focused tests in `tests/routing/subagent-effort-sanitization.test.ts` verifying that requests with `reasoning: { effort: "high" }` routed to Composer 2.5 have effort sanitized without triggering rejection.
 
 Focused verification:
 ```bash
-bun test tests/subagent-effort-sanitization.test.ts tests/effort-policy.test.ts
+bun test tests/routing/subagent-effort-sanitization.test.ts tests/codex-integration/effort-policy.test.ts
 bun run typecheck
 ```
 
@@ -77,11 +77,11 @@ Improve subagent stability through targeted prompt guidance in `src/server/respo
   - When `collabSurface(parsed) === "v2"`, append guidance:
     - Advise orchestrator to omit `agent_type` or use `worker` when specifying model overrides to avoid client-side model locks.
     - Inject code-mode isolate guidance: clarify that `exec` has no `require('fs')`, and demonstrate proper template literal escaping for `apply_patch` calls.
-- Add unit tests in `tests/subagent-code-mode-guidance.test.ts` asserting that the guidance appears in rendered v2 multi-agent guidance text.
+- Add unit tests in `tests/routing/subagent-code-mode-guidance.test.ts` asserting that the guidance appears in rendered v2 multi-agent guidance text.
 
 Focused verification:
 ```bash
-bun test tests/subagent-code-mode-guidance.test.ts tests/collaboration-mode.test.ts
+bun test tests/routing/subagent-code-mode-guidance.test.ts tests/collaboration-mode.test.ts
 bun run typecheck
 ```
 
@@ -92,7 +92,7 @@ bun run typecheck
 Verify end-to-end functionality including live inference smoke tests.
 
 - Run full test suite: `bun run test`.
-- Verify core-lab boundary: `bun test tests/core-lab-boundary.test.ts`.
+- Verify core-lab boundary: `bun test tests/lab/core-lab-boundary.test.ts`.
 - Run typecheck: `bun run typecheck`.
 - Run privacy scan: `bun run privacy:scan`.
 - Execute live inference check through OpenCodex proxy on port 10100 testing candidate selection and response completion.

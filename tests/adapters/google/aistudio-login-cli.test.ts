@@ -1,0 +1,217 @@
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { getProviderRegistryEntry } from "../../../src/providers/registry";
+import {
+  parseSessionBundle,
+  saveAiStudioSessionFromToken,
+  serializeSessionBundle,
+} from "../../../src/oauth/aistudio-session-sync";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as readline from "node:readline";
+import { enrichProviderFromRegistry } from "../../../src/providers/derive";
+import type { OcxProviderConfig } from "../../../src/types";
+
+describe("google-aistudio provider registration & instructions", () => {
+  test("registry entry has clear label, description, and dashboard instructions", () => {
+    const entry = getProviderRegistryEntry("google-aistudio");
+    expect(entry).toBeDefined();
+    expect(entry?.label).toBe("Google AI Studio (Web)");
+    expect(entry?.googleMode).toBe("ai-studio-web");
+    expect(entry?.note).toContain("direct HTTP transport");
+    expect(entry?.baseUrl).toBe("https://alkalimakersuite-pa.clients6.google.com");
+    expect(entry?.authKind).toBe("local");
+    expect(entry?.keyOptional).toBe(true);
+    expect(entry?.featured).toBe(true);
+    expect(entry?.defaultModel).toBe("gemini-3.7-flash");
+    expect(entry?.models).toEqual([
+      "gemini-3.8-flash",
+      "gemini-3.7-flash",
+      "gemini-3.1-pro-preview",
+      "gemini-2.5-pro",
+      "gemini-2.5-flash",
+      "gemini-3.5-flash",
+    ]);
+    expect(entry?.requestPacing).toEqual({
+      enabled: true,
+      requestsPerMinute: 8,
+      minIntervalMs: 7500,
+      jitterMs: 1500,
+    });
+    expect(entry?.extraMetadataAliases).toContain("aistudio");
+    expect(entry?.extraMetadataAliases).toContain("gemini-aistudio");
+  });
+
+  test("refreshes only the untouched legacy static model seed", () => {
+    const legacy = {
+      adapter: "google",
+      baseUrl: "https://alkalimakersuite-pa.clients6.google.com",
+      authMode: "local",
+      googleMode: "ai-studio-web",
+      liveModels: false,
+      defaultModel: "gemini-3.7-flash",
+      models: ["gemini-3.7-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-3.5-flash"],
+    } satisfies OcxProviderConfig;
+    enrichProviderFromRegistry("google-aistudio", legacy);
+    expect(legacy.models[0]).toBe("gemini-3.8-flash");
+
+    const customized = { ...legacy, models: ["gemini-3.7-flash", "operator-model"] };
+    enrichProviderFromRegistry("google-aistudio", customized);
+    expect(customized.models).toEqual(["gemini-3.7-flash", "operator-model"]);
+  });
+
+  test("validates base64 session bundle exchange", () => {
+    const sample = {
+      selectedProject: "gen-lang-test-001",
+      windowId: "win-test",
+      cookies: [{ name: "SAPISID", value: "sapisid_token" }],
+    };
+    const encoded = serializeSessionBundle(sample);
+    const decoded = parseSessionBundle(encoded);
+    expect(decoded.selectedProject).toBe("gen-lang-test-001");
+    expect(decoded.cookies[0]?.name).toBe("SAPISID");
+  });
+
+  test("round-trips full session bundle with domain, path, and windowId", () => {
+    const fullSession = {
+      selectedProject: "project-xyz-999",
+      windowId: "window-abc-123",
+      cookies: [
+        { name: "SAPISID", value: "sapisid_val_1", domain: ".google.com", path: "/" },
+        { name: "__Secure-1PSID", value: "psid_val_2", domain: ".google.com", path: "/" },
+        { name: "SSID", value: "ssid_val_3", domain: ".google.com", path: "/aistudio" },
+      ],
+    };
+    const token = serializeSessionBundle(fullSession);
+    expect(token.length).toBeGreaterThan(20);
+
+    const tempDest = join(mkdtempSync(join(tmpdir(), "cli-token-")), "session.json");
+    const saved = saveAiStudioSessionFromToken(token, tempDest);
+    expect(existsSync(saved)).toBe(true);
+
+    const parsed = JSON.parse(readFileSync(saved, "utf-8"));
+    expect(parsed.selectedProject).toBe("project-xyz-999");
+    expect(parsed.windowId).toBe("window-abc-123");
+    expect(parsed.cookies.length).toBe(3);
+    expect(parsed.cookies[2].path).toBe("/aistudio");
+  });
+});
+
+describe("handleAiStudioLogin uses native login without bridge fallback", () => {
+  let previousHome: string | undefined;
+  let tempHome: string;
+  let openUrlMod: typeof import("../../../src/lib/open-url");
+  let proxyLivenessMod: typeof import("../../../src/server/proxy-liveness");
+  let configMod: typeof import("../../../src/config");
+
+  beforeEach(async () => {
+    previousHome = process.env.OPENCODEX_HOME;
+    tempHome = mkdtempSync(join(tmpdir(), "ocx-aistudio-cli-"));
+    process.env.OPENCODEX_HOME = tempHome;
+    openUrlMod = await import("../../../src/lib/open-url");
+    proxyLivenessMod = await import("../../../src/server/proxy-liveness");
+    configMod = await import("../../../src/config");
+  });
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (tempHome) rmSync(tempHome, { recursive: true, force: true });
+  });
+
+  async function runWithChoice(
+    choice: string,
+    opts: { platform?: string; nativeResult?: { kind: "authenticated" | "cancelled" | "failed"; error?: string } } = {},
+  ): Promise<{ opened: string[]; logs: string[]; errors: string[] }> {
+    const opened: string[] = [];
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation((url: string) => { opened.push(url); });
+    const findSpy = spyOn(proxyLivenessMod, "findLiveProxy").mockResolvedValue(null as any);
+    const loadSpy = spyOn(configMod, "loadConfig").mockReturnValue({ providers: {} } as any);
+    const saveSpy = spyOn(configMod, "saveConfig").mockImplementation(() => {});
+    const rlClose = () => {};
+    const rlMock = { close: rlClose } as any;
+    const createSpy = spyOn(readline, "createInterface").mockReturnValue({
+      question: (_prompt: string, cb: (ans: string) => void) => cb(choice),
+      close: rlClose,
+    } as any);
+    const nativeResult = opts.nativeResult ?? { kind: "authenticated" as const };
+    const nativeSpy = spyOn(await import("../../../src/oauth/aistudio-native-daemon"), "runAiStudioNativeLogin")
+      .mockResolvedValue(
+        nativeResult.kind === "authenticated"
+          ? { kind: "authenticated", sessionPath: join(tempHome, "aistudio-session.json") }
+          : nativeResult.kind === "failed"
+            ? { kind: "failed", error: nativeResult.error ?? "Native AI Studio login failed" }
+            : { kind: "cancelled" },
+      );
+    const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logs.push(args.map(String).join(" ")); });
+    const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => { errors.push(args.map(String).join(" ")); });
+    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    let platformSpy: ReturnType<typeof spyOn> | null = null;
+    if (opts.platform !== undefined) {
+      // process.platform is read-only on some runtimes; redefine via getter
+      const original = Object.getOwnPropertyDescriptor(process, "platform");
+      try {
+        Object.defineProperty(process, "platform", { value: opts.platform, configurable: true });
+        platformSpy = { mockRestore: () => { if (original) Object.defineProperty(process, "platform", original); } } as any;
+      } catch { platformSpy = null; }
+    }
+    try {
+      const { handleLogin } = await import("../../../src/oauth/login-cli");
+      await handleLogin("google-aistudio");
+    } finally {
+      openSpy.mockRestore();
+      findSpy.mockRestore();
+      loadSpy.mockRestore();
+      saveSpy.mockRestore();
+      createSpy.mockRestore();
+      nativeSpy.mockRestore();
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+      platformSpy?.mockRestore();
+    }
+    return { opened, logs, errors };
+  }
+
+  test("token paste does NOT open bridge URL", async () => {
+    const token = serializeSessionBundle({
+      selectedProject: "proj-token-1",
+      windowId: "win-token-1",
+      cookies: [{ name: "SAPISID", value: "tok" }],
+    });
+    expect(token.length).toBeGreaterThan(20);
+    const { opened } = await runWithChoice(token);
+    const bridgeOpens = opened.filter(u => u.includes("/aistudio/bridge"));
+    expect(bridgeOpens).toEqual([]);
+  });
+
+  test("native WebKit login (empty choice on darwin) does NOT open bridge URL", async () => {
+    const { opened } = await runWithChoice("", { platform: "darwin" });
+    const bridgeOpens = opened.filter(u => u.includes("/aistudio/bridge"));
+    expect(bridgeOpens).toEqual([]);
+  });
+
+  test("non-darwin empty choice does not open bridge URL", async () => {
+    const { opened, errors } = await runWithChoice("", { platform: "linux" });
+    const bridgeOpens = opened.filter(u => u.includes("/aistudio/bridge"));
+    expect(bridgeOpens).toEqual([]);
+    expect(errors.join("\n")).toContain("only available on macOS");
+  });
+
+  test("failed native login does not print success", async () => {
+    const { logs, errors } = await runWithChoice("", {
+      platform: "darwin",
+      nativeResult: { kind: "failed", error: "Native AI Studio login failed (exit code 1)" },
+    });
+    expect(logs.join("\n")).not.toContain("authenticated successfully");
+    expect(errors.join("\n")).toContain("Native AI Studio login failed (exit code 1)");
+  });
+
+  test("cancelled native login does not print success", async () => {
+    const { logs } = await runWithChoice("", { platform: "darwin", nativeResult: { kind: "cancelled" } });
+    expect(logs.join("\n")).not.toContain("authenticated successfully");
+    expect(logs.join("\n")).toContain("cancelled");
+  });
+});
