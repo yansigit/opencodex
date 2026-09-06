@@ -13,7 +13,7 @@ import {
   TRANSLATOR_MAX_CALL_ARGUMENT_BYTES,
   type TranslatorBudget,
 } from "../../src/lib/translator-budget";
-import { encodeReasoningEnvelope } from "../../src/responses/reasoning-envelope";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope } from "../../src/responses/reasoning-envelope";
 
 const streamBudgets = new WeakMap<ReadableStream<Uint8Array>, TranslatorBudget>();
 
@@ -275,6 +275,8 @@ describe("claude outbound SSE", () => {
       "**A**\n\nOne.\n\n**B**\n\nTwo.",
       "Three.",
     ]);
+    expect(decodeReasoningEnvelope(thinkingBlocks[0].signature)?.txt)
+      .toBe("**A**\n\nOne.\n\n**B**\n\nTwo.");
 
     // Parity: the non-streaming translator joins the same summary parts identically.
     const json = responsesJsonToAnthropicMessage({
@@ -285,6 +287,59 @@ describe("claude outbound SSE", () => {
     }, "m") as Record<string, any>;
     const jsonThinking = json.content.find((b: Record<string, unknown>) => b.type === "thinking");
     expect(jsonThinking.thinking).toBe("**A**\n\nOne.\n\n**B**\n\nTwo.");
+  });
+
+  test("reasoning fallback buffering is bounded and releases its retained budget", async () => {
+    const budget = createTestTranslatorBudget({ maxTurnBytes: 8 * 1024 });
+    let reasoningCommitted = 0;
+    let reasoningReleased = 0;
+    const trackedBudget: TranslatorBudget = {
+      openCall: id => budget.openCall(id),
+      closeCall: id => budget.closeCall(id),
+      reserveTransient(bytes, scope) {
+        const reservation = budget.reserveTransient(bytes, scope);
+        return {
+          commitRetained() {
+            reservation.commitRetained();
+            if (scope.kind === "reasoning") reasoningCommitted += bytes;
+          },
+          release: () => reservation.release(),
+        };
+      },
+      chargeRetained(bytes, scope) {
+        budget.chargeRetained(bytes, scope);
+        if (scope.kind === "reasoning") reasoningCommitted += bytes;
+      },
+      releaseRetained(bytes, scope) {
+        budget.releaseRetained(bytes, scope);
+        if (scope.kind === "reasoning") reasoningReleased += bytes;
+      },
+      observeAcceptedRequestCopy: bytes => budget.observeAcceptedRequestCopy(bytes),
+      observeExternallyCapped: (kind, bytes) => budget.observeExternallyCapped(kind, bytes),
+      snapshot: () => budget.snapshot(),
+      dispose: () => budget.dispose(),
+    };
+    const frames = [
+      sse("response.created", { response: { id: "resp_1", status: "in_progress" } }),
+      ...Array.from({ length: 32 }, (_, index) => sse("response.reasoning_text.delta", {
+        item_id: "rs_1",
+        content_index: 0,
+        delta: `${index}:` + "x".repeat(512),
+      })),
+    ];
+    const events = await collectEvents(responsesSseToAnthropicSse(
+      streamFromChunks(frames),
+      "m",
+      { translatorBudget: trackedBudget },
+    ));
+
+    expect(events.at(-1)).toMatchObject({
+      name: "error",
+      data: { error: { type: "request_too_large", code: "translation_buffer_limit" } },
+    });
+    expect(budget.snapshot().overflows).toBe(1);
+    expect(reasoningCommitted).toBeGreaterThan(0);
+    expect(reasoningReleased).toBe(reasoningCommitted);
   });
 
   test("same-part deltas and index-free reasoning frames never get a separator", async () => {

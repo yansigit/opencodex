@@ -18,7 +18,11 @@ describe("reasoning and tool/result envelopes", () => {
   });
 
   test("rejects malformed or nested OpenCodex signatures", () => {
-    for (const signature of ["ocxr1:not-base64!!!", encodeReasoningEnvelope({ sig: "nested" })]) {
+    for (const signature of [
+      "ocxr1:not-base64!!!",
+      encodeReasoningEnvelope({ sig: "nested" }),
+      encodeReasoningEnvelope({ sig: "", txt: "nested-empty-signature" }),
+    ]) {
       expect(() => anthropicToResponsesBody({
         model: "m", messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "x", signature }] }],
       })).toThrow();
@@ -44,6 +48,10 @@ describe("reasoning and tool/result envelopes", () => {
     const signature = message.content[0].signature as string;
     expect(signature.startsWith("ocxr1:")).toBe(true);
     expect(decodeReasoningEnvelope(signature)).toEqual({ txt: "think" });
+  });
+
+  test("preserves an explicitly empty fallback text", () => {
+    expect(decodeReasoningEnvelope(encodeReasoningEnvelope({ txt: "" }))).toEqual({ txt: "" });
   });
 
   test("inbound preserves redacted-only reasoning when visible text is empty", () => {

@@ -216,6 +216,7 @@ interface OpenBlock {
   /** Last fixed-size reasoning identity (item + summary/content index) seen by this block. */
   reasoningPartKey?: string;
   thinkingBuf?: string;
+  thinkingBufBytes?: number;
   reasoningSig?: string;
 }
 
@@ -255,6 +256,11 @@ export function responsesSseToAnthropicSse(
   const releaseDeliveredFrame = () => {
     const bytes = queuedLiveFrameBytes.shift();
     if (bytes !== undefined) translatorBudget.releaseRetained(bytes, { kind: "live_transient" });
+  };
+  const releaseThinkingBuffer = (block: OpenBlock | null | undefined) => {
+    if (block?.kind !== "thinking") return;
+    translatorBudget.releaseRetained(block.thinkingBufBytes ?? 0, { kind: "reasoning" });
+    block.thinkingBufBytes = 0;
   };
 
   return new ReadableStream<Uint8Array>({
@@ -306,6 +312,7 @@ export function responsesSseToAnthropicSse(
           });
         }
         emit("content_block_stop", { type: "content_block_stop", index: open.index });
+        releaseThinkingBuffer(open);
         if (open.callId) translatorBudget.closeCall(open.callId);
         open = null;
       };
@@ -318,7 +325,7 @@ export function responsesSseToAnthropicSse(
           ? { type: "text", text: "" }
           : { type: "thinking", thinking: "", signature: "" };
         emit("content_block_start", { type: "content_block_start", index, content_block: contentBlock });
-        open = { kind, index, thinkingBuf: "" };
+        open = { kind, index, thinkingBuf: "", thinkingBufBytes: 0 };
       };
       const finish = (stopReason: string, usage: unknown) => {
         if (terminated) return;
@@ -342,6 +349,7 @@ export function responsesSseToAnthropicSse(
         if (terminated) return;
         terminated = true;
         if (code === "translation_buffer_limit") {
+          releaseThinkingBuffer(open);
           if (open?.callId) translatorBudget.closeCall(open.callId);
           open = null;
           // No normal close frames are valid after overflow. Emit exactly one bounded
@@ -402,7 +410,24 @@ export function responsesSseToAnthropicSse(
             // components while retaining item and part equality, rather than dropping item_id and
             // accidentally joining distinct malformed reasoning items.
             const partKey = `${boundedReasoningIdentity(data.item_id)}:${slot}`;
-            if (active.reasoningPartKey !== undefined && active.reasoningPartKey !== partKey) {
+            const needsPartSeparator = active.reasoningPartKey !== undefined
+              && active.reasoningPartKey !== partKey;
+            const appended = `${needsPartSeparator ? "\n\n" : ""}${data.delta}`;
+            const previous = active.thinkingBuf ?? "";
+            const previousBytes = active.thinkingBufBytes ?? 0;
+            const nextBytes = appendedUtf8Bytes(previous, previousBytes, appended);
+            const scope = { kind: "reasoning" } as const;
+            const reservation = translatorBudget.reserveTransient(nextBytes, scope);
+            try {
+              active.thinkingBuf = previous + appended;
+              active.thinkingBufBytes = nextBytes;
+              reservation.commitRetained();
+              translatorBudget.releaseRetained(previousBytes, scope);
+            } catch (error) {
+              reservation.release();
+              throw error;
+            }
+            if (needsPartSeparator) {
               emit("content_block_delta", {
                 type: "content_block_delta", index: active.index,
                 delta: { type: "thinking_delta", thinking: "\n\n" },
@@ -413,7 +438,6 @@ export function responsesSseToAnthropicSse(
               type: "content_block_delta", index: active.index,
               delta: { type: "thinking_delta", thinking: data.delta },
             });
-            active.thinkingBuf = (active.thinkingBuf ?? "") + data.delta;
             break;
           }
           case "response.output_item.added": {
@@ -725,6 +749,7 @@ export function responsesSseToAnthropicSse(
             fail(413, "upstream translation buffer exceeded the safe limit", false, "translation_buffer_limit");
           } else fail(500, err instanceof Error ? err.message : String(err));
         } finally {
+          releaseThinkingBuffer(open);
           translatorBudget.releaseRetained(bufferBytes, { kind: "live_transient" });
           if (pingTimer !== undefined) clearInterval(pingTimer);
           reader.releaseLock();
@@ -738,6 +763,7 @@ export function responsesSseToAnthropicSse(
     cancel(reason) {
       cancelled = true;
       while (queuedLiveFrameBytes.length > 0) releaseDeliveredFrame();
+      releaseThinkingBuffer(open);
       if (open?.callId) translatorBudget.closeCall(open.callId);
       if (pingTimer !== undefined) clearInterval(pingTimer);
       return reader?.cancel(reason);

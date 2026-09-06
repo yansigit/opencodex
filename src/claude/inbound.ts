@@ -242,7 +242,7 @@ function assistantMessageToItems(content: unknown, input: Rec[]): void {
         if (signature.startsWith(OCX_REASONING_PREFIX)) {
           const owned = decodeReasoningEnvelope(signature);
           if (!owned) throw new AnthropicRequestError("malformed ocxr1 reasoning signature");
-          if (owned.sig) throw new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature");
+          if (Object.hasOwn(owned, "sig")) throw new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature");
         }
         const encrypted = signature.length === 0 ? undefined : signature.startsWith(OCX_REASONING_PREFIX) ? signature : encodeReasoningEnvelope({ sig: signature });
         if (thinking.length === 0 && !encrypted) break;

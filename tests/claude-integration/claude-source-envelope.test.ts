@@ -7,7 +7,11 @@ describe("Claude source envelope boundaries", () => {
       model: "m",
       messages: [
         { role: "assistant", content: [{ type: "tool_use", id: "call-1", name: "lookup", input: { q: "x" } }] },
-        { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", content: [{ type: "text", text: "ok" }, { type: "document", title: "report" }] }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "call-1", content: [
+          { type: "text", text: "ok" },
+          { type: "document", title: "report" },
+          { type: "future_block", payload: "secret-payload" },
+        ] }] },
       ],
     }) as any;
     expect(body.input.map((item: any) => item.type)).toEqual(["function_call", "function_call_output"]);
