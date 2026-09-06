@@ -224,6 +224,7 @@ describe("headless GUI parity CLI", () => {
       ["/api/claude-code", "ocx claude config"],
       ["/api/claude-desktop", "ocx claude desktop"],
       ["/api/claude/", "ocx observe"],
+      ["/api/aistudio", "(none — GUI-only native auth)"],
       ["/api/codex-auth", "ocx account"],
       // GUI-only affordance: starring the repo from the sidebar. There is deliberately
       // no CLI mirror — the headless surface has nothing to gain from a one-click
