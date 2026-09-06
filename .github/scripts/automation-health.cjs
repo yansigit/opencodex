@@ -11,6 +11,7 @@ const API_RETRY_MAX_MS = 60 * 1000;
 const API_REQUEST_TIMEOUT_MS = 15 * 1000;
 const HEALTH_CHECK_DEADLINE_MS = 4 * 60 * 1000;
 const PROMOTION_RECONCILIATION_GRACE_MS = HOUR_MS;
+const ACTIVE_WORKFLOW_RUN_STATUSES = new Set(["queued", "in_progress", "requested", "waiting", "pending"]);
 
 // The extra checker interval is deliberate: a six-hour checker can observe a
 // missed cron window only on its next tick. The two-window portion is the SLO;
@@ -319,7 +320,7 @@ function promotionReconciliationPending({ relation, mainCiSignal, now }) {
   ) {
     return false;
   }
-  if (latest.status === "queued" || latest.status === "in_progress") {
+  if (ACTIVE_WORKFLOW_RUN_STATUSES.has(latest.status)) {
     const observedAt = asTime(latest.updatedAt) ?? asTime(latest.createdAt);
     return observedAt !== null && nowMs - observedAt <= PROMOTION_RECONCILIATION_GRACE_MS;
   }

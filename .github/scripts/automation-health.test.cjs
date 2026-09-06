@@ -396,10 +396,31 @@ describe("automation health SLO checker", () => {
       },
     };
 
-    assert.deepEqual(evaluateRepositoryState({ relation, prs, mainCiSignal, now: NOW }), {
-      status: "warning",
-      reason: "main promotion is awaiting protected dev reconciliation",
-    });
+    for (const status of ["queued", "in_progress", "requested", "waiting", "pending"]) {
+      assert.deepEqual(evaluateRepositoryState({
+        relation,
+        prs,
+        mainCiSignal: {
+          ...mainCiSignal,
+          latestRun: { ...mainCiSignal.latestRun, status },
+        },
+        now: NOW,
+      }), {
+        status: "warning",
+        reason: "main promotion is awaiting protected dev reconciliation",
+      });
+    }
+    for (const conclusion of ["failure", "cancelled", "stale"]) {
+      assert.equal(evaluateRepositoryState({
+        relation,
+        prs,
+        mainCiSignal: {
+          ...mainCiSignal,
+          latestRun: { ...mainCiSignal.latestRun, status: "completed", conclusion },
+        },
+        now: NOW,
+      }).status, "alert");
+    }
     assert.equal(evaluateRepositoryState({
       relation,
       prs,
@@ -476,13 +497,35 @@ describe("automation health SLO checker", () => {
       },
       pullRequests: [],
     };
-    const result = evaluateHealth(input);
+    for (const status of ["queued", "in_progress", "requested", "waiting", "pending"]) {
+      const result = evaluateHealth({
+        ...input,
+        ciRuns: {
+          ...input.ciRuns,
+          main: [{ ...input.ciRuns.main[0], status }, input.ciRuns.main[1]],
+        },
+      });
 
-    assert.ok(result.workflowSignals["ci.yml"].branches.main.lastSuccessAgeHours > 18);
-    assert.equal(result.workflowSignals["ci.yml"].branches.main.status, "warning");
-    assert.equal(result.workflowSignals["ci.yml"].status, "warning");
-    assert.equal(result.repositoryState.status, "warning");
-    assert.equal(result.status, "warning");
+      assert.ok(result.workflowSignals["ci.yml"].branches.main.lastSuccessAgeHours > 18);
+      assert.equal(result.workflowSignals["ci.yml"].branches.main.status, "warning");
+      assert.equal(result.workflowSignals["ci.yml"].status, "warning");
+      assert.equal(result.repositoryState.status, "warning");
+      assert.equal(result.status, "warning");
+    }
+
+    for (const conclusion of ["failure", "cancelled", "stale"]) {
+      const result = evaluateHealth({
+        ...input,
+        ciRuns: {
+          ...input.ciRuns,
+          main: [{ ...input.ciRuns.main[0], status: "completed", conclusion }, input.ciRuns.main[1]],
+        },
+      });
+
+      assert.equal(result.workflowSignals["ci.yml"].branches.main.status, "alert");
+      assert.equal(result.repositoryState.status, "alert");
+      assert.equal(result.status, "alert");
+    }
 
     const contentChangingPromotion = evaluateHealth({
       ...input,
