@@ -703,6 +703,12 @@ jobs:
         if: hashFiles('.bun-timings.json') != ''
         run: bun scripts/ci/validate-timings.ts .bun-timings.json --discard-invalid
 
+      # Validate a fresh Windows Bun/CLI process before the process-heavy shard.
+      # A hosted VM can otherwise finish every test and then fail the loader with
+      # STATUS_DLL_INIT_FAILED before the CLI executes at all.
+      - name: CLI help smoke
+        run: bun run src/cli/index.ts help
+
       - name: Test
         # --timeout: the Linux batches and the macOS control both pass 60000; this leg was
         # the only one left on Bun's 5s default, and it is the slowest hardware on the board.
@@ -787,9 +793,6 @@ jobs:
           done
           echo "::error::Bun runtime crash repeated on Windows shard ${{ matrix.shard }}/6; failing after one retry."
           exit 1
-
-      - name: CLI help smoke
-        run: bun run src/cli/index.ts help
 
   # Keep every OS credential-store check on a disposable GitHub-hosted machine.
   # A force-cancelled process cannot run its in-process finally cleanup, so no

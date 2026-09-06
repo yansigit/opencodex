@@ -42,6 +42,9 @@ describe("CI lane manifest", () => {
       "tests/storage/storage-policy-job-responsive.test.ts",
       "tests/storage/storage-restore-job-responsive.test.ts",
       "tests/ci-workflows/test-runner.test.ts",
+      "tests/usage/user-cost-overlay-coderabbit-regressions.test.ts",
+      "tests/usage/user-cost-overlay-live-reconcile.test.ts",
+      "tests/usage/user-cost-overlay-provider-delete.test.ts",
     ]) expect(lanes.serial).toContain(historicallyLoadSensitive);
     expect(lanes.dedicated).toEqual(DEDICATED_TEST_FILES);
     expect(laneFiles("general", process.cwd())).toEqual(lanes.general);

@@ -46,6 +46,12 @@ export const SERIAL_TEST_FILES = [
   "tests/storage/storage-restore-job-responsive.test.ts",
   "tests/ci-workflows/test-runner.test.ts",
   "tests/update/update-stop-first.test.ts",
+  // These suites share the interval-based overlay reconciler singleton and
+  // OPENCODEX_HOME. Parallel files can stop or reset the process-wide poller
+  // while a sibling is waiting for an observation, so isolate the whole family.
+  "tests/usage/user-cost-overlay-coderabbit-regressions.test.ts",
+  "tests/usage/user-cost-overlay-live-reconcile.test.ts",
+  "tests/usage/user-cost-overlay-provider-delete.test.ts",
   // Builds and parses 500,001 JSONL entries to prove the entry cap. It reached
   // the 30s test budget under pool contention and completes in ~5s in isolation.
   "tests/usage/usage-log.test.ts",
