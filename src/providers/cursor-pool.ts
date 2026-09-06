@@ -356,10 +356,7 @@ export interface CursorPoolStatusDto {
 export function getCursorAccountPoolStatus(
   config?: { providers?: Record<string, OcxProviderConfig> },
   now = Date.now(),
-  storeAccounts?: ReadonlyArray<
-    | CursorPoolAccount
-    | { id?: string; alias?: string; email?: string; credential?: CursorPoolAccount; needsReauth?: boolean }
-  >,
+  storeAccounts?: ReadonlyArray<CursorPoolAccount & { readonly alias?: string }>,
 ): CursorPoolStatusDto {
   const source =
     storeAccounts ??
