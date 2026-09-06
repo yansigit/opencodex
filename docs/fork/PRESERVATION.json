@@ -18267,13 +18267,14 @@
         },
         "src/server/responses/core.ts": {
           "upstreamIntent": "Adopt the upstream v2.44.0 changes to src/server/responses/core.ts.",
-          "forkInvariant": "Claude Code adapter responses retain the always-SSE transport contract. Subagent candidate and role fallback remains synchronous where required and preserves configured ordering. Upstream control flow is retained while all fork-specific routing, failover, and request-path behavior is re-fitted and verified. The Antigravity 429 carousel runs before opaque-blob recovery.",
+          "forkInvariant": "Claude Code adapter responses retain the always-SSE transport contract. Subagent candidate and role fallback remains synchronous where required and preserves configured ordering. Upstream control flow is retained while all fork-specific routing, failover, and request-path behavior is re-fitted and verified. The Antigravity 429 carousel runs before opaque-blob recovery. Azure managed identity remains outside API-key selection and mutation while binding each physical dispatch to the current credential and destination.",
           "equivalentOrBetter": false,
           "disposition": "preserve",
-          "implementationEvidence": "Reviewed base 9e087bcc901fb427a72fb3359e7b115de8a33994, fork a45b95d4cd570aed53af78464e26389f1342e191, upstream debba5c707ea106e9388781c76e3b929dfc0ef68, and integrated result 4ef4b3dcd6ec2a8d399f464f869f8b9bf1392b13 for overlapping-logical-path, preservation-registry-path-changed. Candidate commit b26bf75d5684d2c4191c54f5062f01d5f1e6067b (fix(sync): preserve Google replay and Spark contracts) records the path-specific integration. The registry records this as a human-reviewed draft decision; the named focused checks bind the retained contract before attestation.",
+          "implementationEvidence": "Reviewed base 9e087bcc901fb427a72fb3359e7b115de8a33994, fork a45b95d4cd570aed53af78464e26389f1342e191, upstream debba5c707ea106e9388781c76e3b929dfc0ef68, and integrated result c9e39945c700e8369ae9d48cff6f058ac04347f6 for overlapping-logical-path, preservation-registry-path-changed. Candidate commits b26bf75d5684d2c4191c54f5062f01d5f1e6067b (fix(sync): preserve Google replay and Spark contracts) and 655e233d3a2ccdfa85702beeedc40de3407118de (fix(azure): preserve identity dispatch binding) record the path-specific integration. The Azure regression checks prove that a concurrent identity and destination change is rebound atomically and that a removed provider causes zero physical dispatches. The registry records this as a human-reviewed preserve decision; the named focused checks bind the retained contract before attestation.",
           "exactTests": [
             "bun test tests/responses/core-fork-preservation.test.ts",
             "bun test tests/config/settings-stream-mode.test.ts tests/responses/chat-completions-endpoint.test.ts tests/routing/subagent-fallback-handle-responses.test.ts tests/server/config.test.ts",
+            "bun test tests/providers/azure-routed-server.test.ts",
             "bun run typecheck"
           ],
           "baseBlob": "9e087bcc901fb427a72fb3359e7b115de8a33994",
