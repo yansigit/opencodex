@@ -2468,6 +2468,7 @@ async function applyFinalRouteRequestNormalization(args: {
       subagentModels: config.subagentModels,
       subagentModelFallback: config.subagentModelFallback,
       injectionPrompt: config.injectionPrompt,
+      syncCodexSubagentDefaults: config.syncCodexSubagentDefaults === true,
     });
     if (guidance) {
       injectDeveloperMessage(parsed, guidance);
