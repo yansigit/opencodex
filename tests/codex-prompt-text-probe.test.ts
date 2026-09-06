@@ -13,6 +13,7 @@ import { join } from "node:path";
 import {
   extractSectionsForTests,
   probePromptText,
+  promptTextProbeCloseEventsForTests,
   promptTextProbeSpawnAttemptsForTests,
   resetPromptTextProbeForTests,
   setPromptTextProbeCloseBarrierForTests,
@@ -229,19 +230,14 @@ describe("prompt probe process lifecycle", () => {
   });
 
   test("admission stays occupied between child exit and close handling", async () => {
-    const pidPath = join(root(), "exited-parent-pid.txt");
     let releaseClose!: () => void;
     setPromptTextProbeCloseBarrierForTests(new Promise<void>(resolve => { releaseClose = resolve; }));
     const delayedCloseSource = [
-      `const fs = require("node:fs");`,
-      `fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));`,
       `process.stdout.write(${JSON.stringify(VALID_PROBE_OUTPUT)});`,
     ].join("");
     setPromptTextProbeCommandForTests({ binary: process.execPath, args: ["-e", delayedCloseSource] });
     const first = probePromptText(2_000);
-    await waitUntil(() => existsSync(pidPath), "exit-close parent pid");
-    const pid = Number(readFileSync(pidPath, "utf8"));
-    await waitUntil(() => !isProcessAlive(pid), "probe parent exit");
+    await waitUntil(() => promptTextProbeCloseEventsForTests() === 1, "probe close event");
 
     setPromptTextProbeCommandForTests({
       binary: process.execPath,
