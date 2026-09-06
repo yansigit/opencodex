@@ -133,9 +133,11 @@ would change across restarts while already-running app-servers kept the previous
 
 The listener serves only `POST /v1/responses`, its WebSocket upgrade, `POST /v1/responses/compact`,
 `POST /v1/alpha/search` (the native Codex web-search relay), `GET /v1/models`, `POST /v1/messages`,
-`POST /v1/messages/count_tokens`, and the standalone realtime voice WebSocket upgrades. The two Messages
-routes support local Claude Code clients speaking the Anthropic protocol. Everything else, including
-`/api/*` and the dashboard, returns `404`.
+`POST /v1/messages/count_tokens`, and the realtime voice surface: standalone WebSocket upgrades,
+WebRTC call creation (`POST /v1/live`, `POST /v1/realtime/calls`), and keyed sideband join upgrades
+(`/v1/live/{callId}`, `/v1/realtime/calls/{callId}`, `/v1/realtime?call_id=`). The two Messages routes
+support local Claude Code clients speaking the Anthropic protocol. Everything else, including `/api/*`
+and the dashboard, returns `404`.
 
 :::danger[This is an unauthenticated surface]
 Every process on the machine can use this listener. It spends account quota and paid provider

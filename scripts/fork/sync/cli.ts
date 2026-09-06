@@ -24,7 +24,7 @@ import type {
 } from "./types";
 
 const DEFAULT_UPSTREAM_REPO = "https://github.com/lidge-jun/opencodex.git";
-const usage = "usage: bun scripts/fork/sync/cli.ts detect|pin|prepare|publish|draft-pr|emit|overlap|verify|preservation-check";
+const usage = "usage: bun scripts/fork/sync/cli.ts detect|pin|prepare|publish|draft-pr|emit|overlap|attest|verify|preservation-check";
 
 export interface CliOptions {
   env?: Record<string, string | undefined>;
@@ -198,6 +198,7 @@ export async function runCli(
     && command !== "draft-pr"
     && command !== "emit"
     && command !== "overlap"
+    && command !== "attest"
     && command !== "verify"
     && command !== "preservation-check"
   ) {
@@ -217,7 +218,7 @@ export async function runCli(
     }));
     return;
   }
-  if (command === "overlap" || command === "verify") {
+  if (command === "overlap" || command === "attest" || command === "verify") {
     const input = options.stdin ? JSON.parse(options.stdin) : JSON.parse(await readStdin());
     const { base, fork, upstream, merge, dev, tag, provenance } = input as {
       base: string;
@@ -230,15 +231,30 @@ export async function runCli(
     };
     if (!base || !fork || !upstream || !merge || !dev || !tag) throw new Error("overlap requires base/fork/upstream/merge/dev/tag");
     const report = await analyzeOverlap({ runner, base, fork, upstream, merge, dev, tag });
-    if (command === "verify") {
-      if (!provenance) throw new Error("verify requires exact-head provenance");
+    if (command === "attest" || command === "verify") {
       const release = loadRegistry(env).releases[tag];
       if (!release || release.tagSha !== upstream || release.baseSha !== base) {
         throw new Error("preservation release ancestry does not match verification input");
       }
       const headSha = await runOk(runner, ["rev-parse", "HEAD"]);
       const reportHash = preservationReportHash(report);
-      if (headSha !== merge || provenance.headSha !== headSha) throw new Error("stale preservation head SHA");
+      if (headSha !== merge) throw new Error("stale preservation head SHA");
+      if (command === "attest") {
+        if (report.status !== "passed") {
+          throw new Error(`overlap candidates detected: ${report.candidates.map(c => c.path).join(", ")}`);
+        }
+        write(JSON.stringify({ report, provenance: {
+          headSha,
+          tagSha: upstream,
+          baseSha: base,
+          registryHash: report.registryHash,
+          decisionHash: report.decisionHash,
+          reportHash,
+        } }));
+        return;
+      }
+      if (!provenance) throw new Error("verify requires exact-head provenance");
+      if (provenance.headSha !== headSha) throw new Error("stale preservation head SHA");
       if (provenance.tagSha !== upstream || provenance.baseSha !== base) throw new Error("stale preservation ancestry");
       if (provenance.registryHash !== report.registryHash
         || provenance.decisionHash !== report.decisionHash
