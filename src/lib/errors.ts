@@ -506,3 +506,12 @@ export function httpStatusFromTerminalError(error: {
   }
   return 502;
 }
+/** A local request validation failure that must remain a client-visible HTTP 400. */
+export class OcxRequestValidationError extends Error {
+  readonly status = 400;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "OcxRequestValidationError";
+  }
+}

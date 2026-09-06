@@ -42,10 +42,14 @@ import {
   copyPreviousResponseReplayProvenance,
   expandPreviousResponseInput,
   markBodyNonPersistable,
+  prepareResponseStateReplay,
+  prepareSensitiveResponsePersistence,
   previousResponseProviderState,
+  previousResponseReplayPrefixLength,
   previousResponseReplayFailure,
   previousResponseScopeMismatch,
   rememberResponseState,
+  type ResponseStateDurability,
 } from "../../responses/state";
 import {
   bindTurnTerminationScope,
@@ -94,6 +98,7 @@ import {
   adapterFailureFromMessage,
   isCyberPolicyCode,
   isCyberPolicyMessage,
+  OcxRequestValidationError,
 } from "../../lib/errors";
 import { injectionDebugLog } from "../../lib/injection-debug-log";
 import { antigravityOAuthDestinationConfigError, isAntigravityOAuthProvider } from "../../lib/provider-tls-profile";
@@ -378,11 +383,20 @@ import {
   scrubSelfNamedToolCallNamespaceInJson,
 } from "../responses-self-named-namespace-scrub";
 import type { EffectiveSubagentRoster, SpawnAgentSurface } from "../../codex/catalog";
+import { isMultiAgentV2Enabled } from "../../codex/features";
 
 import { buildToolBridgeMaps, collabSurface, injectDeveloperMessage, multiAgentGuidanceText } from "./collaboration";
+import { decideV2RoutedDelegationBridge } from "./v2-routed-delegation-policy";
+import { decideV2NativeParentOverride } from "./v2-native-parent-override";
+import {
+  createV2RoutedDelegationSseRewrite,
+  injectV2RoutedDelegationBridge,
+  rewriteV2RoutedDelegationCallsInJson,
+  type V2RoutedDelegationBridgeContext,
+} from "./v2-routed-delegation-bridge";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
 import { hasUnreadableEncryptedAgentTask, looksLikeBackendCiphertext, sanitizeEncryptedContentInPlace } from "./encrypted-payload";
-import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier, type ProviderFetchOptions } from "./fetch-helpers";
+import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel, storedPoolReplayDispatchNotifier, UpstreamRedirectError, type ProviderFetchOptions } from "./fetch-helpers";
 import { classifyTransportFailureKind, transportErrorCode } from "../../lib/upstream-reachability";
 import {
   acquireUpstreamHostAdmission,
@@ -1764,6 +1778,10 @@ export interface HandleResponsesOptions {
    * rebuilds headers and carries the fact through this flag.
    */
   visionDescribeTerminal?: boolean;
+  /** Synchronous callback invoked after each newly resolved route; must be pure and fast. */
+  onResolvedRoute?: (info: ResolvedRouteInfo) => void;
+  /** Privacy-safe, benchmark-only raw-usage observer. */
+  claudeBenchmarkObserver?: (observation: ClaudeBenchmarkRawUsage) => void;
 }
 
 
@@ -2365,6 +2383,20 @@ async function applyFinalRouteRequestNormalization(args: {
     }
   }
 
+  // The private ChatGPT Codex Responses endpoint accepts only streaming
+  // requests, even when the downstream HTTP client asked for a unary JSON
+  // response. The caller preference was captured before this normalization;
+  // the passthrough response path drains this SSE back into bounded JSON.
+  if (
+    isCanonicalOpenAiForwardProvider(route.provider)
+    && route.provider.adapter === "openai-responses"
+  ) {
+    parsed.stream = true;
+    if (parsed._rawBody && typeof parsed._rawBody === "object") {
+      (parsed._rawBody as Record<string, unknown>).stream = true;
+    }
+  }
+
   // Generic Responses clients (e.g. AI-SDK apps) omit `store`, but the canonical
   // forward Codex backend rejects a native request without an explicit store:false.
   // Default it only there — every other Responses upstream (key-auth providers and
@@ -2508,6 +2540,7 @@ export async function handleComboResponses(
   // continuation that only references prior images still fails closed when
   // imageInput is disabled (and so targets see the full replayed input).
   const inboundClientThreadId = req.headers.get("x-codex-parent-thread-id")?.trim() || undefined;
+  await prepareResponseStateReplay(rawBody);
   const body = expandPreviousResponseInput(rawBody, inboundClientThreadId);
   const scopeMismatch = previousResponseScopeMismatch(body);
   if (scopeMismatch) {
@@ -3058,8 +3091,75 @@ export async function handleResponses(
     });
     return ownsBudget ? finalizeOwnedTranslatorBudget(response, translatorBudget) : response;
   } catch (error) {
+    if (error instanceof OcxRequestValidationError) {
+      const response = formatErrorResponse(error.status, "invalid_request_error", redactSecretString(error.message));
+      return ownsBudget ? finalizeOwnedTranslatorBudget(response, translatorBudget) : response;
+    }
     if (ownsBudget) translatorBudget.dispose();
     throw error;
+  }
+}
+
+export type ResolvedRouteInfo = {
+  parsed: OcxParsedRequest;
+  route: RouteResult;
+  provider: OcxProviderConfig;
+  modelId: string;
+  adapterName: string;
+  headers: Headers;
+};
+
+/** Benchmark-only observation passed to the optional raw-usage observer. */
+export interface ClaudeBenchmarkRawUsage {
+  adapterKind: string;
+  modelId: string;
+  usage: OcxUsage | undefined;
+}
+
+/** Invoke the benchmark observer at most once per attempt context (per registration). */
+function observeBenchmarkUsage(
+  observer: HandleResponsesOptions["claudeBenchmarkObserver"],
+  gate: { done: boolean },
+  adapterKind: string,
+  modelId: string,
+  usage: OcxUsage | undefined,
+): void {
+  if (!observer || gate.done) return;
+  gate.done = true;
+  const safeUsage = usage ? {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(usage.contextTotalTokens !== undefined ? { contextTotalTokens: usage.contextTotalTokens } : {}),
+    ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
+    ...(usage.cachedInputTokens !== undefined ? { cachedInputTokens: usage.cachedInputTokens } : {}),
+    ...(usage.cacheReadInputTokens !== undefined ? { cacheReadInputTokens: usage.cacheReadInputTokens } : {}),
+    ...(usage.cacheCreationInputTokens !== undefined ? { cacheCreationInputTokens: usage.cacheCreationInputTokens } : {}),
+    ...(usage.reasoningOutputTokens !== undefined ? { reasoningOutputTokens: usage.reasoningOutputTokens } : {}),
+    ...(usage.estimated !== undefined ? { estimated: usage.estimated } : {}),
+  } : undefined;
+  try {
+    observer({ adapterKind, modelId, usage: safeUsage });
+  } catch {
+    // Benchmark-only seam: ordinary requests must be unaffected by the observer.
+  }
+}
+
+function maybeInvokeResolvedRoute(
+  options: HandleResponsesOptions,
+  parsed: OcxParsedRequest,
+  route: RouteResult,
+  provider: OcxProviderConfig,
+  adapterName: string,
+  headers: Headers,
+): void {
+  const callback = options.onResolvedRoute;
+  if (!callback) return;
+  try {
+    callback({ parsed, route, provider, modelId: route.modelId, adapterName, headers });
+  } catch (error) {
+    throw error instanceof OcxRequestValidationError
+      ? error
+      : new OcxRequestValidationError(redactSecretString(error instanceof Error ? error.message : String(error)));
   }
 }
 
@@ -3129,6 +3229,7 @@ async function handleResponsesInner(
       onRequestBodyRead: undefined,
     });
   }
+  await prepareResponseStateReplay(body);
   let unreadableEncryptedAgentTask = hasUnreadableEncryptedAgentTask(
     (body as { input?: unknown } | undefined)?.input,
   );
@@ -3239,9 +3340,16 @@ async function handleResponsesInner(
     return formatErrorResponse(400, "invalid_request_error", err instanceof Error ? err.message : String(err));
   }
   options.onRequestBodyRead?.();
-  const responseStateOptions = (force = false): { force?: boolean; clientThreadId?: string } => ({
+  let v2RoutedDelegationBridge: V2RoutedDelegationBridgeContext | undefined;
+  let v2BridgeStateDurability: ResponseStateDurability | undefined;
+  const responseStateOptions = (force = false): {
+    force?: boolean;
+    clientThreadId?: string;
+    durability?: ResponseStateDurability;
+  } => ({
     ...(force ? { force: true } : {}),
     ...(parsed._clientThreadId ? { clientThreadId: parsed._clientThreadId } : {}),
+    ...(v2BridgeStateDurability ? { durability: v2BridgeStateDurability } : {}),
   });
   const resolvedConversationId = conversationIdFromResponsesRequest({
     clientThreadId: parsed._clientThreadId,
@@ -3281,6 +3389,7 @@ async function handleResponsesInner(
   logCtx.configuredServiceTier = readConfiguredCodexServiceTier();
   logCtx.configuredSpeedLabel = requestLogSpeedLabel(logCtx.configuredServiceTier);
 
+  let shadowIntercepted = false;
   let route: RouteResult;
   try {
     // A `compaction_trigger` turn may name a bare native model the operator has
@@ -3303,6 +3412,7 @@ async function handleResponsesInner(
       } catch { /* Native Codex helper calls remain OpenAI-owned without an enabled OpenAI route. */ }
       const targetRoute = resolveRoute(_sci.model);
       if (shouldInterceptShadowCall(parsed.modelId, _sci.sourceModels, sourceIdentity, targetRoute)) {
+        shadowIntercepted = true;
         const _sciOriginal = parsed.modelId;
         parsed.modelId = _sci.model;
         if (parsed._rawBody && typeof parsed._rawBody === "object") {
@@ -3334,6 +3444,27 @@ async function handleResponsesInner(
       logCtx.routeDecision = err.trace;
     }
     return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
+  }
+
+  const parentOverride = decideV2NativeParentOverride({
+    kind: "responses",
+    config,
+    headers: req.headers,
+    parsed,
+    sourceRoute: route,
+    comboAttempt: options.comboAttempt,
+    targetEvidence: evidenceFromBody(parsed._rawBody),
+  });
+  if (parentOverride.kind === "reject") {
+    if (parentOverride.trace) logCtx.routeDecision = parentOverride.trace as typeof logCtx.routeDecision;
+    return formatErrorResponse(404, "invalid_request_error", parentOverride.message);
+  }
+  if (parentOverride.kind === "override") {
+    route = parentOverride.route;
+    parsed.modelId = route.modelId;
+    if (parsed._rawBody && typeof parsed._rawBody === "object") {
+      (parsed._rawBody as { model?: string }).model = route.modelId;
+    }
   }
 
   const hasUnexpandedPreviousResponse = !!parsed.previousResponseId
@@ -3615,6 +3746,58 @@ async function handleResponsesInner(
       "invalid_request_error",
       "OpenAI forward continuation state is unavailable or expired; start a new session instead of reusing this previous_response_id.",
     );
+  }
+
+  // Child fallback and encrypted-task recovery can change both the parsed catalog and the
+  // destination. Arm the plaintext mirror only after that selection is final.
+  const turnMetadataHasSubagentKind = (() => {
+    const value = req.headers.get("x-codex-turn-metadata");
+    if (!value) return false;
+    try {
+      const metadata = JSON.parse(value) as { subagent_kind?: unknown };
+      return typeof metadata.subagent_kind === "string" && metadata.subagent_kind.length > 0;
+    } catch {
+      return false;
+    }
+  })();
+  const bridgeDecision = decideV2RoutedDelegationBridge({
+    enabled: config.v2RoutedDelegationBridge === true,
+    inboundWire,
+    multiAgentMode: config.multiAgentMode,
+    upstreamV2Enabled: isMultiAgentV2Enabled(),
+    canonicalNativeRoute: isCanonicalOpenAiForwardProvider(route.provider),
+    hasSubagentMarker: req.headers.has("x-openai-subagent") || turnMetadataHasSubagentKind,
+    threadSpawn,
+    comboAttempt: options.comboAttempt === true,
+    compaction: parsed._compactionRequest === true,
+    shadowRoute: shadowIntercepted,
+    collaborationSurface: collabSurface(parsed),
+    body: parsed._rawBody,
+    replayPrefixLength: previousResponseReplayPrefixLength(parsed._rawBody),
+  });
+  if (config.v2RoutedDelegationBridge === true) {
+    Object.assign(logCtx, {
+      v2BridgeDecision: bridgeDecision.decision,
+      ...(bridgeDecision.active ? { v2BridgeScope: bridgeDecision.scope } : {}),
+    });
+  }
+  if (bridgeDecision.active) {
+    try {
+      v2RoutedDelegationBridge = injectV2RoutedDelegationBridge(parsed);
+      if (v2RoutedDelegationBridge) {
+        copyPreviousResponseReplayProvenance(
+          parsed._rawBody,
+          v2RoutedDelegationBridge.requestStateBody,
+        );
+        v2BridgeStateDurability = await prepareSensitiveResponsePersistence(
+          v2RoutedDelegationBridge.requestStateBody,
+        );
+        Object.assign(logCtx, { v2BridgeStateDurability });
+        toolBridgeMaps = buildToolBridgeMaps(parsed, translatorBudget);
+      }
+    } catch (error) {
+      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+    }
   }
 
   // Captured before normalization: whether the CLIENT asked for SSE. The
@@ -4253,6 +4436,7 @@ async function handleResponsesInner(
     delete logCtx.accountLogLabel;
   }
   adapter = resolveSelectionAdapter(adapterProvider, config.cacheRetention);
+  maybeInvokeResolvedRoute(options, parsed, route, adapterProvider, adapter.name, selectedForwardHeaders);
   bindRouteReasoningReplayScope({
     parsed,
     providerName: route.providerName,
@@ -4480,7 +4664,12 @@ async function handleResponsesInner(
       && (!parsed.previousResponseId || parsed._previousResponseInputExpanded === true);
     const rememberPassthroughResponse = passthroughRecordEligible
       ? (response: { id?: unknown; output?: unknown; status?: unknown }) =>
-        rememberResponseState(parsed._rawBody, response, undefined, responseStateOptions(true))
+        rememberResponseState(
+          v2RoutedDelegationBridge?.requestStateBody ?? parsed._rawBody,
+          response,
+          undefined,
+          responseStateOptions(true),
+        )
       : undefined;
     if (parsed.previousResponseId && !parsed._previousResponseInputExpanded) {
       console.warn(
@@ -5505,7 +5694,7 @@ async function handleResponsesInner(
     // The chatgpt backend may omit Content-Type on SSE responses. Fall back to
     // treating a successful body as SSE when the caller requested streaming.
     const passthroughCt = headers.get("content-type")?.toLowerCase();
-    const isEventStream = passthroughCt?.includes("text/event-stream")
+    let isEventStream = passthroughCt?.includes("text/event-stream")
       || (upstreamResponse.ok && !!upstreamResponse.body && !passthroughCt && parsed.stream);
     const recordTerminalOutcome = codexForwardTerminalOutcomeRecorder(
       config,
@@ -5626,6 +5815,137 @@ async function handleResponsesInner(
     // (src/server/relay-eager.ts; policy:
     // devlog/_fin/260731_macos_rss_retention/100_darwin_eager_optin.md).
     // The bundled known-bad runtime remains on tee by default on both platforms.
+    if (isEventStream && upstreamResponse.body && clientRequestedStream !== true) {
+      commitReasoningReplayServingRoute();
+      const bridgeSseRewrite = createV2RoutedDelegationSseRewrite(v2RoutedDelegationBridge);
+      const normalizedBody = bridgeSseRewrite
+        ? relaySseWithBlockRewrite(
+          upstreamResponse.body,
+          payloadRewriteAsBlockRewrite(bridgeSseRewrite),
+          translatorBudget,
+        )
+        : upstreamResponse.body;
+      const terminalBoundedBody = relaySseWithFailedTail(
+        normalizedBody,
+        upstream,
+        undefined,
+        { synthesizeMissingTerminal: false },
+      );
+      let completedResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
+      let terminalResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
+      let rawTerminalResponse: { id?: unknown; output?: unknown; status?: unknown } | undefined;
+      let terminalEventType: "response.completed" | "response.failed" | "response.incomplete" | undefined;
+      let observedTerminal: { status: ResponsesTerminalStatus; httpStatusOverride?: number } | undefined;
+      const reportNativeTerminal = recordTerminalOutcomes
+        ? (status: ResponsesTerminalStatus, httpStatusOverride?: number) => {
+          terminalRecorder?.(status, httpStatusOverride);
+          options.onNativePassthroughTerminal?.(status);
+        }
+        : undefined;
+      let aggregationFailureSettled = false;
+      const failUnarySseAggregation = (message: string): Response => {
+        if (!aggregationFailureSettled) {
+          aggregationFailureSettled = true;
+          logCtx.transportPhase = "mid_stream";
+          logCtx.terminalSource = "synthetic";
+          if (logCtx.activeAttempt) logCtx.activeAttempt.streamAborted = true;
+          reportNativeTerminal?.("failed", 502);
+        }
+        return formatErrorResponse(502, "upstream_error", message);
+      };
+      const inspector = createSseInspector({
+        onTerminal: (status, httpStatusOverride) => {
+          observedTerminal ??= {
+            status,
+            ...(httpStatusOverride !== undefined ? { httpStatusOverride } : {}),
+          };
+        },
+        logCtx,
+        onCompletedResponse: response => { completedResponse = response; },
+        onParsedPayload: payload => {
+          noteInspectedPayload(payload);
+          if (!payload || typeof payload !== "object" || Array.isArray(payload)) return;
+          const event = payload as { type?: unknown; response?: unknown };
+          if (
+            event.type !== "response.completed"
+            && event.type !== "response.failed"
+            && event.type !== "response.incomplete"
+          ) return;
+          terminalEventType ??= event.type;
+          if (!event.response || typeof event.response !== "object" || Array.isArray(event.response)) return;
+          rawTerminalResponse ??= event.response as { id?: unknown; output?: unknown; status?: unknown };
+          if (event.type !== "response.completed") terminalResponse = rawTerminalResponse;
+        },
+        onFirstOutput: options.onFirstOutput,
+        pinCompletedResponseIdToFirstSeen: route.providerName === "github-copilot",
+      });
+      let bounded;
+      try {
+        bounded = await readBoundedResponseBody(
+          new Response(terminalBoundedBody),
+          { ...UPSTREAM_JSON_BODY_READ_OPTIONS, signal: upstream.signal, fatalUtf8: true },
+        );
+        if (!bounded.oversized && !bounded.truncated) {
+          inspector.feed(new TextEncoder().encode(bounded.text));
+          inspector.finish();
+        }
+      } catch (error) {
+        inspector.dispose();
+        if (options.abortSignal?.aborted || req.signal.aborted) {
+          releaseCodexAuthContextProbeLease(authCtx);
+          options.onNativePassthroughCancel?.();
+          return clientCancelledResponse();
+        }
+        if (isTranslatorBudgetExceededError(error)) {
+          return failUnarySseAggregation("upstream translation buffer exceeded the safe limit");
+        }
+        return failUnarySseAggregation("upstream response stream could not be decoded");
+      } finally {
+        inspector.dispose();
+      }
+      if (bounded.oversized) return failUnarySseAggregation("upstream response stream exceeded the safe body limit");
+      if (bounded.truncated) return failUnarySseAggregation("upstream response stream stalled before completing");
+      if (inspectionSawUndeclaredTool) return failUnarySseAggregation("upstream emitted a tool call outside the request catalog");
+      const collected = completedResponse ?? terminalResponse;
+      const expectedStatus = terminalEventType === "response.completed"
+        ? "completed"
+        : terminalEventType === "response.failed"
+          ? "failed"
+          : terminalEventType === "response.incomplete"
+            ? "incomplete"
+            : undefined;
+      if (
+        !collected
+        || !rawTerminalResponse
+        || !observedTerminal
+        || !expectedStatus
+        || observedTerminal.status !== expectedStatus
+        || typeof rawTerminalResponse.id !== "string"
+        || rawTerminalResponse.id.length === 0
+        || rawTerminalResponse.status !== expectedStatus
+        || !Array.isArray(rawTerminalResponse.output)
+        || typeof collected.id !== "string"
+        || collected.id.length === 0
+        || collected.status !== expectedStatus
+        || !Array.isArray(collected.output)
+      ) {
+        return failUnarySseAggregation(
+          terminalEventType
+            ? "upstream response stream carried an invalid terminal response"
+            : "upstream response stream closed before a terminal response",
+        );
+      }
+      reportNativeTerminal?.(observedTerminal.status, observedTerminal.httpStatusOverride);
+      headers.set("content-type", "application/json");
+      headers.delete("cache-control");
+      upstreamResponse = new Response(JSON.stringify(collected), {
+        status: upstreamResponse.status,
+        statusText: upstreamResponse.statusText,
+        headers,
+      });
+      isEventStream = false;
+    }
+
     if (isEventStream && upstreamResponse.body) {
       // For streamed passthrough, a successful terminal response means non-error upstream status
       // before relay starts. Waiting for SSE completion would retain request state across the whole
@@ -5645,6 +5965,16 @@ async function handleResponsesInner(
           options.responsesTerminalRepairScheduler,
         )
         : upstreamResponse.body;
+      // Apply request-scoped bridge admission before the stream is split so the
+      // client, inspector, and continuation cache observe the same event history.
+      const bridgeSseRewrite = createV2RoutedDelegationSseRewrite(v2RoutedDelegationBridge);
+      const normalizedPassthroughSseBody = bridgeSseRewrite
+        ? relaySseWithBlockRewrite(
+          passthroughSseBody,
+          payloadRewriteAsBlockRewrite(bridgeSseRewrite),
+          translatorBudget,
+        )
+        : passthroughSseBody;
       const repairConfig = route.provider.responsesItemIdRepair;
       // Grok Build renders deltas live but reconstructs its durable assistant
       // turn from the completed response snapshot. Native Responses streams
@@ -5774,7 +6104,7 @@ async function handleResponsesInner(
           onFirstOutput: options.onFirstOutput,
           pinCompletedResponseIdToFirstSeen: githubCopilotRepairEnabled,
         });
-        const eagerBody = relaySseEagerBounded(passthroughSseBody, turnAc, {
+        const eagerBody = relaySseEagerBounded(normalizedPassthroughSseBody, turnAc, {
           inspectChunk: chunk => inspector.feed(chunk),
           finishInspection: () => inspector.finish(),
           disposeInspection: () => inspector.dispose(),
@@ -5818,7 +6148,7 @@ async function handleResponsesInner(
           })),
         );
       }
-      const [nativeBody, inspectBody] = passthroughSseBody.tee();
+      const [nativeBody, inspectBody] = normalizedPassthroughSseBody.tee();
       const turnAc = new AbortController();
       const clientGone = new AbortController();
       linkAbortSignal(upstream, turnAc.signal);
@@ -5926,8 +6256,12 @@ async function handleResponsesInner(
           restoredNamespace,
           authorizedBareNamespaceToolAliases,
         );
-        const restored = restoreRoutedCustomCallsInJson(
+        const bridgeNormalized = rewriteV2RoutedDelegationCallsInJson(
           restoredAuthorizedBareNamespace,
+          v2RoutedDelegationBridge,
+        );
+        const restored = restoreRoutedCustomCallsInJson(
+          bridgeNormalized,
           routedCustomToolNames,
           routedCustomToolRepairNames,
           declaredWireToolNames,
@@ -5973,7 +6307,7 @@ async function handleResponsesInner(
       if (rememberPassthroughResponseChecked) {
         try {
           rememberPassthroughResponseChecked(
-            JSON.parse(text) as { id?: unknown; output?: unknown; status?: unknown },
+            JSON.parse(clientJson) as { id?: unknown; output?: unknown; status?: unknown },
           );
         } catch { /* non-JSON despite content-type; recording is best-effort */ }
       }
@@ -6249,6 +6583,7 @@ async function handleResponsesInner(
       options.codexWsRuntimeIdentity,
       { providerName: route.providerName, modelId: route.modelId },
     );
+    const benchmarkUsageGate = { done: false };
     const imgResponse = await runWithImageBridge({
       parsed, adapter,
       incomingMeta: { headers: selectedForwardHeaders, abortSignal: options.abortSignal, translatorBudget },
@@ -6281,6 +6616,7 @@ async function handleResponsesInner(
       },
       ...(vidPlan?.timeoutMs ? { videoTimeoutMs: vidPlan.timeoutMs } : {}),
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, adapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         // Cursor may assign _cursorConversationId inside the image loop's first runTurn;
         // backfill so Logs can filter/total that opening request (parity with the normal
         // runTurn branch).
@@ -6333,6 +6669,7 @@ async function handleResponsesInner(
         providerName: route.providerName,
         modelId: route.modelId,
       })(input, init)) as typeof globalThis.fetch;
+    const benchmarkUsageGate = { done: false };
     const wsResponse = await runWithWebSearch({
       parsed, adapter,
       fetchForRequest: (request, iterParsed) => providerFetch(route.provider, options.codexWsRuntimeIdentity, {
@@ -6368,6 +6705,7 @@ async function handleResponsesInner(
         noteDiagnosticAttempt(logCtx.activeAttempt, logCtx.usageLogInputTokens, recovery, adapter.name),
       ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, adapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -6614,6 +6952,7 @@ async function handleResponsesInner(
         : observeEmptyCompletion(eventSource, () => {
           console.warn(emptyCompletionNotice(route.providerName, route.modelId));
         });
+      const benchmarkUsageGate = { done: false };
       const sseStream = bridgeToResponsesSSE(
         guardedSource, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
         () => {
@@ -6637,6 +6976,7 @@ async function handleResponsesInner(
           onUsage: usage => {
             // Raw adapter usage, pre wire-normalization: the bridged SSE now always carries
             // zero-default detail objects, so provenance must come from here (cache_detail_missing).
+            observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, runTurnAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
             logCtx.usageFromBridge = true;
             if (usage) {
               logCtx.usage = usage;
@@ -6695,6 +7035,7 @@ async function handleResponsesInner(
       }
     }
     let providerState: OcxProviderContinuationState | undefined;
+    const benchmarkUsageGate = { done: false };
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
@@ -6707,6 +7048,7 @@ async function handleResponsesInner(
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, runTurnAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;
@@ -6907,7 +7249,9 @@ async function handleResponsesInner(
     cleanupUpstreamAbort();
     upstream.abort();
     if (options.abortSignal?.aborted) return clientCancelledResponse();
-    const msg = describeUpstreamConnectFailure(err, connectMs);
+    const msg = route.provider.googleMode === "ai-studio-web" && err instanceof UpstreamRedirectError
+      ? "Google AI Studio session expired — re-authentication required"
+      : describeUpstreamConnectFailure(err, connectMs);
     return formatErrorResponse(502, "upstream_error", msg);
   } finally {
     builtInitialRequest.releaseBodyObservation?.();
@@ -8109,6 +8453,7 @@ async function handleResponsesInner(
         })
       : eventStream;
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
+    const benchmarkUsageGate = { done: false };
     const sseStream = bridgeToResponsesSSE(
       guardedEventStream, parsed._responseModelId ?? parsed.modelId, toolNsMap, freeformToolNames, toolSearchToolNames,
       () => upstream.abort(), 2_000,
@@ -8127,6 +8472,7 @@ async function handleResponsesInner(
         ...(diagnosticContext ? { diagnostic: diagnosticContext } : {}),
         onUsage: usage => {
           // Raw adapter usage, pre wire-normalization (see the runTurn branch above).
+          observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, activeAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
           logCtx.usageFromBridge = true;
           if (usage) {
             logCtx.usage = usage;
@@ -8192,6 +8538,7 @@ async function handleResponsesInner(
     }
     const { toolNsMap, declaredToolNames, toolParameterSchemas, freeformToolNames, toolSearchToolNames } = toolBridgeMaps;
     let providerState: OcxProviderContinuationState | undefined;
+    const benchmarkUsageGate = { done: false };
     const json = buildResponseJSON(events, parsed._responseModelId ?? parsed.modelId, {
       translatorBudget,
       replayCacheScope: parsed._reasoningReplayScope,
@@ -8204,6 +8551,7 @@ async function handleResponsesInner(
       ...(routedCompaction ? { compaction: true } : {}),
       onProviderState: state => { providerState = state; },
       onUsage: usage => {
+        observeBenchmarkUsage(options.claudeBenchmarkObserver, benchmarkUsageGate, activeAdapter.name, parsed._responseModelId ?? parsed.modelId, usage);
         logCtx.usageFromBridge = true;
         if (usage) {
           logCtx.usage = usage;

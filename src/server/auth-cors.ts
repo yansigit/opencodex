@@ -21,7 +21,9 @@ import {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
 import { redactSecretString } from "../lib/redact";
@@ -33,6 +35,7 @@ import { modelAutoCompactTokenLimitsConfigError } from "../providers/auto-compac
 import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-routing";
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -617,6 +620,9 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // validation and then rejected by the seed comparison, so canonical OpenAI could never
     // set OR clear it — the value was admitted and then refused in the same request.
     delete canonicalCandidate.annotateEmptyToolOutputs;
+    // Transport controls are user-owned overlays, not part of the immutable seed.
+    delete canonicalCandidate.wsUpstream;
+    delete canonicalCandidate.maxWsFrameBytes;
     const canonical = seed && sameCanonicalProviderSeed(canonicalCandidate, seed);
     if (!canonical) {
       return `provider ${name} must equal the canonical built-in provider seed`;
@@ -649,6 +655,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (upstreamHttpVersionError) {
     return `provider ${JSON.stringify(redactSecretString(name))} ${upstreamHttpVersionError}`;
   }
+  const wsUpstreamError = wsUpstreamConfigError(raw.wsUpstream);
+  if (wsUpstreamError) return `provider ${name} ${wsUpstreamError}`;
+  const maxWsFrameBytesError = maxWsFrameBytesConfigError(raw.maxWsFrameBytes);
+  if (maxWsFrameBytesError) return `provider ${name} ${maxWsFrameBytesError}`;
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
   if (modelCostsError) {
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
@@ -791,6 +801,8 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   decodesNativeCompactionBlobs: "editor",
   allowEncryptedV2AgentTasks: "editor",
   allowPrivateNetwork: "editor",
+  wsUpstream: "editor",
+  maxWsFrameBytes: "editor",
   upstreamHttpVersion: "editor",
   upstreamWebsocket: "editor",
   directGeminiWireRenames: "editor",
@@ -1013,6 +1025,13 @@ export function safeConfigDTO(config: OcxConfig): unknown {
     };
     if (name === "xai") {
       dto.xaiResponsesOptInState = xaiResponsesOptInState(provider);
+    }
+    if (effectiveGoogleMode(name, provider) === "ai-studio-web" || name === "google-aistudio") {
+      const credentials = resolveAiStudioCredentials(provider);
+      dto.hasAiStudioSession = credentials.kind === "ready";
+      dto.aiStudioAuthState = credentials.kind === "ready"
+        ? "checking"
+        : process.platform !== "darwin" ? "unsupported" : "needs_reauth";
     }
     const selection = initialModelSelection(provider);
     if (selection) dto.initialModelSelection = selection;

@@ -19,7 +19,9 @@ import {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "./config/provider-validation";
 import {
   bumpConfigGenerationAtPath,
@@ -555,6 +557,8 @@ const providerConfigSchema = z.object({
   decodesNativeCompactionBlobs: z.boolean().optional(),
   allowEncryptedV2AgentTasks: z.boolean().optional(),
   allowPrivateNetwork: z.boolean().optional(),
+  wsUpstream: z.boolean().nullish().transform(value => value ?? undefined),
+  maxWsFrameBytes: z.number().int().positive().nullish().transform(value => value ?? undefined),
   // The management API accepts `null` as "clear this", so a config written before the POST
   // canonicalization below can hold one on disk. Rejecting it here would send the operator
   // through invalid-config recovery for a value the API told them was fine.
@@ -609,7 +613,9 @@ export {
   providerBaseUrlConfigError,
   providerHeadersConfigError,
   reasoningSummaryDeliveryRecordConfigError,
+  maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
+  wsUpstreamConfigError,
 } from "./config/provider-validation";
 
 function providerResponsesPathConfigError(responsesPath: string | undefined): string | null {
@@ -958,6 +964,11 @@ const agentTaskRecoverySchema = z.object({
   cacheEntries: z.number().int().min(1).max(512).optional(),
 }).strict();
 
+const v2NativeParentOverrideSchema = z.object({
+  enabled: z.boolean().optional(),
+  model: z.string().trim().min(1).optional(),
+}).strict();
+
 const runtimeRoleSchema = z.enum(["standalone", "hub", "client"]);
 
 function canonicalHttpOrigin(value: string): string | null {
@@ -1164,6 +1175,10 @@ const configSchema = z.object({
   providerContextCapValues: z.record(z.string(), z.number().int().positive()).optional(),
   contextCapValue: z.number().int().positive().optional(),
   multiAgentGuidanceEnabled: z.boolean().optional(),
+  // Invalid hand edits disable only this experimental opt-in.
+  v2RoutedDelegationBridge: z.boolean().optional().catch(undefined),
+  // Invalid hand edits disable only this experimental opt-in subtree.
+  v2NativeParentOverride: v2NativeParentOverrideSchema.optional().catch(undefined),
   // Invalid optional recovery config must not discard unrelated provider/account state.
   agentTaskRecovery: agentTaskRecoverySchema.optional().catch(undefined),
   // Same rationale: a bad notify section must not cost the operator their providers.
@@ -1353,6 +1368,22 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "responsesPath"],
         message: responsesPathError,
+      });
+    }
+    const wsUpstreamError = wsUpstreamConfigError((provider as { wsUpstream?: unknown }).wsUpstream);
+    if (wsUpstreamError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "wsUpstream"],
+        message: wsUpstreamError,
+      });
+    }
+    const maxWsFrameBytesError = maxWsFrameBytesConfigError((provider as { maxWsFrameBytes?: unknown }).maxWsFrameBytes);
+    if (maxWsFrameBytesError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "maxWsFrameBytes"],
+        message: maxWsFrameBytesError,
       });
     }
     const headersError = providerHeadersConfigError((provider as { headers?: unknown }).headers);
@@ -3115,7 +3146,7 @@ export const withExpectedConfigGenerationSync: WithExpectedConfigGenerationSync 
  * cost-overlay registry from the persisted config so runtime estimates follow
  * every save path.
  */
-function persistConfigUnlocked(config: OcxConfig): boolean {
+function persistConfigUnlocked(config: OcxConfig, authority: "ordinary" | "replacement" = "ordinary"): boolean {
   const configPath = getConfigPath();
   const rawBeforeWrite = readRawConfigJson();
   const clientPersistenceError = failClosedClientPersistenceError(rawBeforeWrite, config);
@@ -3126,7 +3157,7 @@ function persistConfigUnlocked(config: OcxConfig): boolean {
   // Provider preservation reads symbol-keyed live-owner state, which structuredClone
   // intentionally drops. Resolve that ownership before projecting JSON provenance.
   const provenanceProjection = projectConfigRebaseProvenance(config);
-  const persisted = withPreservedDiskOnlyProviders(config);
+  const persisted = authority === "replacement" ? config : withPreservedDiskOnlyProviders(config);
   if (provenanceProjection.configRebaseProvenance === undefined) delete persisted.configRebaseProvenance;
   else persisted.configRebaseProvenance = provenanceProjection.configRebaseProvenance;
   const bytes = JSON.stringify(persisted, null, 2) + "\n";
@@ -3164,6 +3195,22 @@ export function saveConfig(config: OcxConfig): void {
     adoptCustomModelCatalogMigration(config, withProvenance);
     if (withProvenance.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
     else config.configRebaseProvenance = structuredClone(withProvenance.configRebaseProvenance);
+    clearPendingConfigTopLevelDeletions(config);
+  });
+}
+
+/** Replace a validated config under the shared lock for confirmed import/init flows. */
+export function replacePersistedConfig(config: OcxConfig): void {
+  assertNotRealHomeUnderTest(getConfigDir());
+  withConfigMutationLockSync(() => {
+    const projected = projectCustomModelCatalogMigration(
+      readRawConfigJson(),
+      projectConfigRebaseProvenance(config),
+    );
+    if (persistConfigUnlocked(projected, "replacement")) bumpGenerationForCooperatingConfigWrite();
+    adoptCustomModelCatalogMigration(config, projected);
+    if (projected.configRebaseProvenance === undefined) delete config.configRebaseProvenance;
+    else config.configRebaseProvenance = structuredClone(projected.configRebaseProvenance);
     clearPendingConfigTopLevelDeletions(config);
   });
 }

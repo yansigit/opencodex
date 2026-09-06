@@ -150,6 +150,7 @@ import {
 } from "./core";
 import { fetchWithHeaderTimeout, providerFetch, safeHostLabel, safeOriginLabel } from "./fetch-helpers";
 import { mapCodexAuthContextErrorToResponse, nativeMainRefreshFailureResponse } from "./codex-auth-error";
+import { decideV2NativeParentOverride } from "./v2-native-parent-override";
 import { sessionLaneIdFromRequest } from "../request-log-conversation";
 
 export const COMPACT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
@@ -536,6 +537,7 @@ export async function handleResponsesCompact(
   // base id above, and logCtx.requestedModel is assigned from it further down, so without
   // this the log would lose which id the client actually asked for.
   const compactRequestedModel = compactFastRow ? compactFastRow.baseId + "--fast" : raw.model;
+  const requestedModel = raw.model;
 
   let route;
   try {
@@ -554,6 +556,29 @@ export async function handleResponsesCompact(
       logCtx.routeDecision = err.trace;
     }
     return formatErrorResponse(404, "invalid_request_error", err instanceof Error ? err.message : String(err));
+  }
+  // Populate source-route identity before the opt-in decision can fail closed.
+  logCtx.requestedModel = compactRequestedModel;
+  logCtx.model = route.modelId;
+  logCtx.routeDecision = route.routeDecision;
+  logCtx.provider = route.codexAccountNamespace
+    ? `${route.providerName}-${route.codexAccountNamespace}`
+    : route.providerName;
+  logCtx.providerAdapter = route.provider.adapter;
+  const parentOverride = decideV2NativeParentOverride({
+    kind: "compact",
+    config,
+    headers: req.headers,
+    sourceRoute: route,
+    targetEvidence: evidenceFromBody(raw),
+  });
+  if (parentOverride.kind === "reject") {
+    if (parentOverride.trace) logCtx.routeDecision = parentOverride.trace as typeof logCtx.routeDecision;
+    return formatErrorResponse(404, "invalid_request_error", parentOverride.message);
+  }
+  if (parentOverride.kind === "override") {
+    route = parentOverride.route;
+    raw.model = route.modelId;
   }
   const selectedModelId = route.modelId;
   // Derive from the RESOLVED route model, not the caller's raw string. An account-qualified
@@ -1063,7 +1088,7 @@ export async function handleResponsesCompact(
       inspectResponseLogJson(logCtx, await buffered.clone().text());
       forgetCompactHandoffRoute(req);
     } else if (quotaFailure && !storedPool401ReplayAttempted) {
-      const fallbackModel = compactHandoffRoute(req, raw.model);
+      const fallbackModel = compactHandoffRoute(req, requestedModel);
       if (fallbackModel && !req.signal.aborted) {
         const fallbackReq = new Request(req.url, {
           method: "POST",
@@ -1188,7 +1213,7 @@ export async function handleResponsesCompact(
     const result = new Response(JSON.stringify({ output: compactionItems }), {
       headers: { "Content-Type": "application/json" },
     });
-    rememberCompactHandoffRoute(req, raw.model);
+    rememberCompactHandoffRoute(req, requestedModel);
     return result;
   }
   const encrypted = compactionItems[0]!.encrypted_content;
@@ -1199,6 +1224,6 @@ export async function handleResponsesCompact(
   }
   const summary = decoded;
   const output = buildCompactV1Output(extractCompactUserMessages(inputItems), summary);
-  rememberCompactHandoffRoute(req, raw.model);
+  rememberCompactHandoffRoute(req, requestedModel);
   return new Response(JSON.stringify({ output }), { headers: { "Content-Type": "application/json" } });
 }

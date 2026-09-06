@@ -4603,6 +4603,124 @@ describe("provider transport option management contract (#1668, #2816)", () => {
     });
   });
 
+  test("provider PATCH persists, exposes, validates, and clears Codex WebSocket controls", async () => {
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig = makeConfig();
+    saveConfig(liveConfig);
+    await withRequest(liveConfig, async (request) => {
+      expect((await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: "true" }),
+      }))?.status).toBe(400);
+      expect((await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ maxWsFrameBytes: -1 }),
+      }))?.status).toBe(400);
+
+      const set = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: true, maxWsFrameBytes: 1234 }),
+      });
+      expect(set?.status).toBe(200);
+      expect(liveConfig.providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+      expect(loadConfig().providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+      expect(await (await request("/api/providers"))?.json()).toContainEqual(expect.objectContaining({
+        name: "nvidia",
+        wsUpstream: true,
+        maxWsFrameBytes: 1234,
+      }));
+      const dto = safeConfigDTO(liveConfig) as { providers: Record<string, Record<string, unknown>> };
+      expect(dto.providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+
+      const clear = await request("/api/providers?name=nvidia", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: null, maxWsFrameBytes: null }),
+      });
+      expect(clear?.status).toBe(200);
+      expect(liveConfig.providers.nvidia.wsUpstream).toBeUndefined();
+      expect(liveConfig.providers.nvidia.maxWsFrameBytes).toBeUndefined();
+      expect(loadConfig().providers.nvidia.wsUpstream).toBeUndefined();
+      expect(loadConfig().providers.nvidia.maxWsFrameBytes).toBeUndefined();
+    });
+  });
+
+  test("canonical OpenAI management writes preserve valid Codex WebSocket controls", async () => {
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig: OcxConfig = {
+      ...makeConfig(),
+      providers: { ...makeConfig().providers, openai: { ...canonicalDirect } },
+    };
+    saveConfig(liveConfig);
+    await withRequest(liveConfig, async (request) => {
+      const set = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: true, maxWsFrameBytes: 1234 }),
+      });
+      expect(set?.status).toBe(200);
+      expect(liveConfig.providers.openai).toMatchObject({ ...canonicalDirect, wsUpstream: true, maxWsFrameBytes: 1234 });
+      expect(loadConfig().providers.openai).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+
+      const clear = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: null, maxWsFrameBytes: null }),
+      });
+      expect(clear?.status).toBe(200);
+      expect(liveConfig.providers.openai.wsUpstream).toBeUndefined();
+      expect(liveConfig.providers.openai.maxWsFrameBytes).toBeUndefined();
+    });
+  });
+
+  test("provider POST normalizes null controls and preserves omitted Codex WebSocket settings", async () => {
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig = makeConfig();
+    saveConfig(liveConfig);
+    await withRequest(liveConfig, async (request) => {
+      const create = (name: string, provider: Record<string, unknown>) => request("/api/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, provider }),
+      });
+
+      expect((await create("ws-null", {
+        adapter: "openai-responses",
+        baseUrl: "https://ws-null.example.test/v1",
+        wsUpstream: null,
+        maxWsFrameBytes: null,
+      }))?.status).toBe(200);
+      expect(Object.hasOwn(liveConfig.providers["ws-null"]!, "wsUpstream")).toBe(false);
+      expect(Object.hasOwn(liveConfig.providers["ws-null"]!, "maxWsFrameBytes")).toBe(false);
+
+      expect((await create("ws-overwrite", {
+        adapter: "openai-responses",
+        baseUrl: "https://ws-overwrite.example.test/v1",
+        wsUpstream: true,
+        maxWsFrameBytes: 1234,
+      }))?.status).toBe(200);
+      expect((await create("ws-overwrite", {
+        adapter: "openai-responses",
+        baseUrl: "https://ws-overwrite-2.example.test/v1",
+      }))?.status).toBe(200);
+      expect(liveConfig.providers["ws-overwrite"]).toMatchObject({
+        baseUrl: "https://ws-overwrite-2.example.test/v1",
+        wsUpstream: true,
+        maxWsFrameBytes: 1234,
+      });
+      expect(loadConfig().providers["ws-overwrite"]).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
+    });
+  });
+
   test("safeConfigDTO exposes upstreamHttpVersion without leaking it into the live row", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });

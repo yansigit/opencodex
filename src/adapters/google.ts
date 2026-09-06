@@ -40,6 +40,8 @@ import {
 } from "../lib/translator-budget";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { configuredReasoningEfforts, mapReasoningEffort } from "../reasoning-effort";
+import { buildAiStudioHeaders, parseGoogleCookieJar } from "../oauth/google-aistudio-auth";
+import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
 
 // Google-family models (Gemini/Vertex/Antigravity) tend to emit long running commentary between
 // tool calls. This steers them to keep the BETWEEN-STEP text to one line and reason internally
@@ -963,6 +965,25 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
       }
 
+      if (provider.googleMode === "ai-studio-web") {
+        const base = (provider.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
+        const url = `${base}/v1internal:${method}${streamParam}`;
+        const credentials = resolveAiStudioCredentials(provider);
+        if (credentials.kind !== "ready") throw new Error(credentials.reason);
+        const jar = parseGoogleCookieJar(credentials.cookieHeader);
+        const aiStudioHeaders = await buildAiStudioHeaders(jar, "https://aistudio.google.com");
+        Object.assign(headers, aiStudioHeaders);
+        const compiled = compileGoogleWireBody({ ...body, model: routedModelId });
+        restoreGoogleToolName = compiled.restoreToolName;
+        if (Array.isArray((compiled.body as { contents?: unknown[] }).contents)) {
+          applyAntigravityThoughtSignatureFallback(
+            routedModelId,
+            (compiled.body as { contents: unknown[] }).contents,
+          );
+        }
+        return { url, method: "POST", headers, body: JSON.stringify(compiled.body) };
+      }
+
       // ai-studio (default): Generative Language API + x-goog-api-key.
       const url = `${provider.baseUrl}/v1beta/models/${routedModelId}:${method}${streamParam}`;
       const apiKey = provider.apiKey?.trim();
@@ -975,6 +996,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
     },
 
     async *parseStream(response: Response, budget: TranslatorBudget): AsyncGenerator<AdapterEvent> {
+      if (provider.googleMode === "ai-studio-web" && (response.status === 401 || response.status === 403 || (response.status >= 300 && response.status < 400))) {
+        try { await response.body?.cancel(); } catch { /* ignore */ }
+        yield { type: "error", message: "Google AI Studio session expired — re-authentication required" };
+        return;
+      }
       if (!response.body) {
         yield { type: "error", message: "No response body" };
         return;
@@ -987,6 +1013,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       const budgetEncoder = new TextEncoder();
+      const contentType = response.headers.get("content-type") ?? "";
+      if (provider.googleMode === "ai-studio-web" && contentType.toLowerCase().includes("text/html")) {
+        yield { type: "error", message: "Google AI Studio session expired — re-authentication required" };
+        return;
+      }
       let buffer = "";
       let bufferBytes = 0;
       let pendingUsage: OcxUsage | undefined;

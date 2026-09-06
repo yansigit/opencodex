@@ -52,6 +52,14 @@ export interface PaceAwareFetch {
 
 export type ProviderFetch = typeof globalThis.fetch & PaceAwareFetch;
 
+export class UpstreamRedirectError extends Error {
+  override readonly name = "UpstreamRedirectError";
+
+  constructor(readonly status: number) {
+    super(`upstream returned ${status} redirect; configure the final upstream URL directly`);
+  }
+}
+
 export interface ProviderFetchOptions {
   providerName?: string;
   modelId?: string;
@@ -89,12 +97,19 @@ export function providerFetch(
   // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
   const unpaced = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
     const upstreamWebsocket = provider.upstreamWebsocket === true;
-    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, upstreamWebsocket)) {
+    const wsOpts = {
+      // Keep the canonical ChatGPT fast lane independent: upstreamWebsocket opts a
+      // configured HTTPS /responses endpoint in, but must not silently enable Codex WS.
+      wsUpstream: provider.wsUpstream,
+      maxWsFrameBytes: provider.maxWsFrameBytes,
+      upstreamWebsocket,
+    };
+    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, wsOpts)) {
       // The fallback has to be the same HTTP fetch the non-WS branch would have
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOpts, options.onCodexWsQuota, options.beforeDispatch);
     }
     return httpFetch(input, init);
   };
@@ -170,7 +185,7 @@ export async function fetchWithHeaderTimeout(
   timeoutMs: number,
   preferIdentityEncoding = false,
   executor: typeof globalThis.fetch = globalThis.fetch,
-  manualRedirect = false,
+  _manualRedirect = true,
 ): Promise<Response> {
   const pacing = executor as ProviderFetch;
   await pacing.waitForPacing?.(abortSignal);
@@ -186,16 +201,20 @@ export async function fetchWithHeaderTimeout(
     headers.set("accept-encoding", "identity");
   }
   try {
-    return await fetchExecutor(url, {
+    const response = await fetchExecutor(url, {
       ...init,
       headers,
-      // Credential-bearing sends opt into manual redirects so a 3xx is relayed
-      // as a Response instead of being followed into a rejection that is
-      // indistinguishable from a pre-connection failure (#914).
-      ...(manualRedirect ? { redirect: "manual" as const } : {}),
+      // Upstream URLs are configuration, not navigation. Refuse every redirect
+      // so POST bodies and provider headers are never replayed to another hop.
+      redirect: "manual",
       signal: AbortSignal.any([abortSignal, timeout.signal]),
       timeout: 0,
     });
+    if (response.status >= 300 && response.status < 400) {
+      try { await response.body?.cancel(); } catch { /* ignore cancellation failures */ }
+      throw new UpstreamRedirectError(response.status);
+    }
+    return response;
   } finally {
     clearTimeout(timer);
   }

@@ -11,6 +11,7 @@ import {
   hasOwnProvider,
   isValidProviderName,
   modelDisplayNamesConfigError,
+  maxWsFrameBytesConfigError,
   multiAgentGuidanceEnabled,
   mutatePersistedConfig,
   nonBlankStringArrayConfigError,
@@ -23,6 +24,7 @@ import {
   upstreamHttpVersionConfigError,
   validateConfigCandidate,
   withConfigMutationLockSync,
+  wsUpstreamConfigError,
 } from "../../config";
 import {
   clearLoginState,
@@ -108,6 +110,8 @@ import {
   xaiResponsesOptInState,
 } from "../../providers/xai-responses-opt-in";
 import { dropProviderCustomModels } from "../../providers/provider-id-rewrite";
+import { resolveAiStudioCredentials } from "../../oauth/aistudio-credentials";
+import { buildAiStudioHeaders, parseGoogleCookieJar } from "../../oauth/google-aistudio-auth";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
@@ -123,6 +127,65 @@ type ProviderPatchApplication =
       enablingOpenAi: boolean;
       headersTouched: boolean;
     };
+
+const AI_STUDIO_REAUTH_ERROR = "Session expired or missing — re-authentication required";
+const AI_STUDIO_PROBE_TIMEOUT_MS = 8_000;
+const AI_STUDIO_PROBE_MODEL = "gemini-2.5-flash";
+const AI_STUDIO_ORIGIN = "https://aistudio.google.com";
+
+let aiStudioProbeFetchForTests: typeof fetch | undefined;
+
+export function setAiStudioProbeFetchForTests(fetchImpl?: typeof fetch): void {
+  aiStudioProbeFetchForTests = fetchImpl;
+}
+
+function isAiStudioHtmlSignIn(text: string): boolean {
+  const lower = text.trim().toLowerCase();
+  return lower.startsWith("<!doctype") || lower.startsWith("<html") || lower.includes("accounts.google.com/v3/signin");
+}
+
+async function probeAiStudioLiveSession(
+  name: string,
+  prov: OcxProviderConfig,
+): Promise<{ ok: boolean; latencyMs: number; authState?: "connected"; message?: string; error?: string }> {
+  const credentials = resolveAiStudioCredentials(prov);
+  if (credentials.kind !== "ready") return { ok: false, latencyMs: 0, error: AI_STUDIO_REAUTH_ERROR };
+  const base = (prov.baseUrl || "https://alkalimakersuite-pa.clients6.google.com").replace(/\/+$/, "");
+  const url = base + "/v1internal:generateContent";
+  const jar = parseGoogleCookieJar(credentials.cookieHeader);
+  const headers = await buildAiStudioHeaders(jar, AI_STUDIO_ORIGIN);
+  const body = JSON.stringify({
+    model: AI_STUDIO_PROBE_MODEL,
+    contents: [{ role: "user", parts: [{ text: "ping" }] }],
+    generationConfig: { maxOutputTokens: 1 },
+  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_STUDIO_PROBE_TIMEOUT_MS);
+  const started = Date.now();
+  try {
+    const outboundProvider = aiStudioProbeFetchForTests ? { ...prov, fetch: aiStudioProbeFetchForTests } : prov;
+    const response = await providerOutboundPost(name, outboundProvider, url, { headers, body, signal: controller.signal });
+    const latencyMs = Date.now() - started;
+    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    const text = await response.text().catch(() => "");
+    if ((response.status >= 300 && response.status < 400) || response.status === 401 || response.status === 403) {
+      return { ok: false, latencyMs, error: AI_STUDIO_REAUTH_ERROR };
+    }
+    if (contentType.includes("text/html") || isAiStudioHtmlSignIn(text)) {
+      return { ok: false, latencyMs, error: AI_STUDIO_REAUTH_ERROR };
+    }
+    if (response.status !== 200) return { ok: false, latencyMs, error: "AI Studio connection probe failed" };
+    try { JSON.parse(text); } catch { return { ok: false, latencyMs, error: "AI Studio connection probe failed" }; }
+    return { ok: true, latencyMs, authState: "connected", message: "AI Studio session verified" };
+  } catch (error) {
+    if (error instanceof ProviderOutboundPolicyError && /\breturned 3\d\d redirect\b/.test(error.message)) {
+      return { ok: false, latencyMs: Date.now() - started, error: AI_STUDIO_REAUTH_ERROR };
+    }
+    return { ok: false, latencyMs: Date.now() - started, error: "AI Studio connection probe failed" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 const PROVIDER_ALIAS_OVERLAY_FIELDS = ["alias", "modelAliases", "defaultAliases"] as const;
 type ProviderAliasOverlayField = typeof PROVIDER_ALIAS_OVERLAY_FIELDS[number];
@@ -452,6 +515,28 @@ function applyProviderPatchFields(
     }
     touched = true;
   }
+  if (Object.hasOwn(rawBody, "wsUpstream")) {
+    const value = rawBody.wsUpstream;
+    if (value === null) {
+      delete next.wsUpstream;
+    } else {
+      const error = wsUpstreamConfigError(value);
+      if (error) return { error };
+      next.wsUpstream = value as boolean;
+    }
+    touched = true;
+  }
+  if (Object.hasOwn(rawBody, "maxWsFrameBytes")) {
+    const value = rawBody.maxWsFrameBytes;
+    if (value === null) {
+      delete next.maxWsFrameBytes;
+    } else {
+      const error = maxWsFrameBytesConfigError(value);
+      if (error) return { error };
+      next.maxWsFrameBytes = value as number;
+    }
+    touched = true;
+  }
   if (Object.hasOwn(rawBody, "upstreamWebsocket")) {
     if (typeof rawBody.upstreamWebsocket !== "boolean") return { error: "upstreamWebsocket must be a boolean" };
     next.upstreamWebsocket = rawBody.upstreamWebsocket;
@@ -708,6 +793,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       contextWindow: p.contextWindow,
       modelContextWindows: p.modelContextWindows,
       modelAutoCompactTokenLimits: p.modelAutoCompactTokenLimits,
+      wsUpstream: p.wsUpstream,
+      maxWsFrameBytes: p.maxWsFrameBytes,
       modelSupportsServiceTier: p.modelSupportsServiceTier,
       noStructuredOutputModels: p.noStructuredOutputModels,
       retainModels: p.retainModels,
@@ -934,6 +1021,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // reached disk and the next loadConfig() refused it. Canonicalize to absent, which is what
     // "clear" means everywhere else.
     if (prov && prov.upstreamHttpVersion === null) delete prov.upstreamHttpVersion;
+    if (prov && prov.wsUpstream === null) delete prov.wsUpstream;
+    if (prov && (prov as unknown as Record<string, unknown>).maxWsFrameBytes === null) delete prov.maxWsFrameBytes;
     if (!name || !prov?.adapter || !prov?.baseUrl) {
       return jsonResponse({ error: "name, provider.adapter and provider.baseUrl are required" }, 400);
     }
@@ -971,6 +1060,8 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const submittedModelDisplayNames = Object.hasOwn(prov, "modelDisplayNames");
     const submittedRequestPacing = Object.hasOwn(prov, "requestPacing");
     const submittedUpstreamWebsocket = Object.hasOwn(prov, "upstreamWebsocket");
+    const submittedWsUpstream = Object.hasOwn(prov, "wsUpstream");
+    const submittedMaxWsFrameBytes = Object.hasOwn(prov, "maxWsFrameBytes");
     // Same trap, one more field: DeepSeek carries a registry default of `true` for
     // annotateEmptyToolOutputs, so enrichment cannot distinguish "the client omitted it"
     // from "the registry supplied it" either. Without this sample, an unrelated edit that
@@ -1010,6 +1101,12 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     // an explicit `false` must survive, and `false` is falsy.
     if (!submittedAnnotateEmptyToolOutputs && existing?.annotateEmptyToolOutputs !== undefined) {
       prov.annotateEmptyToolOutputs = existing.annotateEmptyToolOutputs;
+    }
+    if (!submittedWsUpstream && existing?.wsUpstream !== undefined) {
+      prov.wsUpstream = existing.wsUpstream;
+    }
+    if (!submittedMaxWsFrameBytes && existing?.maxWsFrameBytes !== undefined) {
+      prov.maxWsFrameBytes = existing.maxWsFrameBytes;
     }
     // The provider add/edit form may omit this transport option. Preserve the stored value
     // during a full overwrite; PATCH remains the explicit mutation path, and `!== undefined`
@@ -1251,6 +1348,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         latencyMs: 0,
         message: "Passthrough provider is configured (forwards your Codex login; no upstream /models).",
       });
+    }
+    if (prov.googleMode === "ai-studio-web" || name === "google-aistudio") {
+      return jsonResponse(await probeAiStudioLiveSession(name, prov));
     }
     if (prov.liveModels === false) {
       // A static catalog has no live discovery endpoint to test. This is neither

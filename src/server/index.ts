@@ -19,6 +19,7 @@ import {
   getConfigDir,
   websocketsEnabled,
 } from "../config";
+import { prepareSensitiveResponsePersistence } from "../responses/state";
 import { grokDefaultReasoningEffort } from "../grok/effort";
 import { flushConfigDirHardening } from "../config/paths";
 import { migrateStartupSubagentModels } from "./subagent-models-startup";
@@ -237,6 +238,7 @@ import { recordCursorSeen } from "../integrations/cursor-seen";
 import { detectCursorInstalls } from "../integrations/cursor-detect";
 import { loadCursorEffortTable } from "../integrations/cursor-effort-table";
 import { expandCursorEffortRow, knownEffortRowIds } from "./effort-row";
+import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
 import { catalogFastRowEligible, expandFastRow } from "./fast-row";
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
@@ -591,6 +593,8 @@ export interface StartServerDeps {
   readinessGate?: ReadinessGate;
   /** Test-only package-tree observation; production captures package.json identity at boot. */
   packageTreeIntegrity?: PackageTreeIntegrityGuard;
+  /** Test-only seam for the awaited native AI Studio login process. */
+  runAiStudioNativeLogin?: typeof runAiStudioNativeLogin;
   /** Test-only seam for observing quota-worker registration ownership. */
   registerCodexQuotaAutoRefreshWorker?: typeof registerCodexQuotaAutoRefreshWorker;
 }
@@ -1166,6 +1170,30 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
+      }
+
+      if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
+        const admission = resolveApiAuth(req, policy);
+        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
+        if (!isAllowedRequestOrigin(req, policy)) {
+          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
+        }
+        try {
+          const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
+          if (login.kind === "unsupported") return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
+          if (login.kind === "cancelled") return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
+          if (login.kind === "failed") return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
+          const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
+            method: "POST",
+            headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
+          });
+          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, deps.managementApi);
+          const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+          if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
+          return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
+        } catch (error) {
+          return jsonResponse({ ok: false, error: String(error) }, 500, req, policy);
+        }
       }
 
       if (url.pathname === "/healthz" && req.method === "GET") {
@@ -2540,6 +2568,13 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   const labConfigDir = getConfigDir();
   if (labActivationRequired(config, labConfigDir)) {
     activateLab(config, labConfigDir);
+  }
+
+  // Prime secure continuation storage without delaying listen or suspending the
+  // synchronous startup window above. A failed credential-store lookup degrades
+  // bridge turns to memory-only state at their admission boundary.
+  if (config.v2RoutedDelegationBridge === true) {
+    void prepareSensitiveResponsePersistence();
   }
 
   // Reset-credit auto-redemption (#822) is opt-in; a default install constructs nothing here.

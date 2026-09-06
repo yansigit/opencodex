@@ -293,6 +293,13 @@ export interface OcxProviderConfig {
    */
   allowPrivateNetwork?: boolean;
   /**
+   * ChatGPT Codex backend WebSocket upstream transport. Defaults to false (HTTP/SSE).
+   * The OCX_CODEX_WS_UPSTREAM environment value applies only when this is omitted.
+   */
+  wsUpstream?: boolean;
+  /** Maximum request frame size before falling back to HTTP/SSE. */
+  maxWsFrameBytes?: number;
+  /**
    * Pin the HTTP version used for upstream provider requests. Bun's fetch negotiates
    * HTTP/2 via TLS ALPN by default; some Cloudflare-fronted SSE endpoints hang on
    * HTTP/2 streaming responses (issue #1668). "http1.1" / "h1" forces HTTP/1.1,

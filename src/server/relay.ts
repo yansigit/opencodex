@@ -287,7 +287,7 @@ export function relaySseWithFailedTail(
   body: ReadableStream<Uint8Array>,
   upstream: AbortController,
   onClientGone?: (reason?: unknown) => void,
-  opts?: { upstreamError?: string },
+  opts?: { upstreamError?: string; synthesizeMissingTerminal?: boolean },
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const encoder = new TextEncoder();
@@ -330,7 +330,7 @@ export function relaySseWithFailedTail(
             if (tail.byteLength > 0) controller.enqueue(tail);
             if (terminalBoundary.terminalSeen()) {
               if (!terminalBoundary.doneSeen()) controller.enqueue(doneFrame(encoder));
-            } else {
+            } else if (opts?.synthesizeMissingTerminal !== false) {
               // A clean upstream EOF is still a failed Responses turn when no
               // protocol terminal arrived. Make that state explicit so Codex
               // does not treat HTTP 200 + bare EOF as a retryable disconnect.
@@ -364,9 +364,13 @@ export function relaySseWithFailedTail(
           if (partial.byteLength > 0) controller.enqueue(partial);
           if (tailTerminal) {
             if (!terminalBoundary.doneSeen()) controller.enqueue(doneFrame(encoder));
-          } else {
+          } else if (opts?.synthesizeMissingTerminal !== false) {
             // Leading blank line terminates a partial SSE block so the failed frame parses cleanly.
             controller.enqueue(failedTailFrame(encoder, err));
+          } else {
+            controller.error(err);
+            upstream.abort();
+            return;
           }
           controller.close();
         } catch { /* client already torn down */ }
