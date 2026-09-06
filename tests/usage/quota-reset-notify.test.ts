@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { INTERNAL_DEADLINE_MS, SERVER_BUDGET_MS } from "../helpers/test-budget";
@@ -13,12 +13,10 @@ import {
 } from "../../src/quota/reset-seen-store";
 import type { QuotaResetEvent } from "../../src/quota/reset-detector";
 import {
-  currentQuotaResetNotify,
   resetQuotaResetNotifyCacheForTests,
   resolveQuotaResetNotify,
 } from "../../src/quota/reset-notify-config";
 import {
-  deactivateQuotaResetActivation,
   resetQuotaResetActivationForTests,
   syncQuotaResetActivation,
 } from "../../src/quota/reset-activation";
@@ -31,12 +29,9 @@ import {
 import {
   deliverQuotaResetEvent,
   quotaResetPayloadForTests,
-  setQuotaResetSinkDependenciesForTests,
 } from "../../src/quota/reset-sinks";
 
 const NOW = Date.now();
-
-afterEach(() => setQuotaResetSinkDependenciesForTests(null));
 
 function event(overrides: Partial<QuotaResetEvent> = {}): QuotaResetEvent {
   return {
@@ -92,108 +87,6 @@ describe("the delivered payload carries no identity", () => {
 });
 
 describe("webhook sink", () => {
-  test("public delivery pins the validated DNS answer against rebinding", async () => {
-    const pinnedCalls: Array<{ address: string; body: string }> = [];
-    let resolutions = 0;
-    const config = resolveQuotaResetNotify({
-      enabled: true,
-      webhookUrl: "https://rebind.example.test/hook",
-    });
-
-    const results = await deliverQuotaResetEvent(event(), config, {
-      resolveAddresses: async () => {
-        resolutions += 1;
-        return {
-          hostname: "rebind.example.test",
-          addresses: [{ address: "93.184.216.34", family: 4 }],
-          privateNetwork: false,
-        };
-      },
-      pinnedPost: async (_url, pinned, body) => {
-        pinnedCalls.push({ address: pinned.address, body });
-        return new Response("ok");
-      },
-    });
-
-    expect(results).toEqual([{ sink: "webhook", ok: true }]);
-    expect(resolutions).toBe(1);
-    expect(pinnedCalls).toHaveLength(1);
-    expect(pinnedCalls[0]?.address).toBe("93.184.216.34");
-    expect(JSON.parse(pinnedCalls[0]?.body ?? "{}")).toHaveProperty("type", "quota_reset");
-  });
-
-  test("private-network delivery pins the admitted answer against rebinding", async () => {
-    const pinnedCalls: Array<{ address: string; body: string }> = [];
-    let resolutions = 0;
-    const config = resolveQuotaResetNotify({
-      enabled: true,
-      webhookUrl: "https://internal.example.test/hook",
-      allowPrivateNetwork: true,
-    });
-
-    const results = await deliverQuotaResetEvent(event(), config, {
-      resolveAddresses: async (_url, options) => {
-        resolutions += 1;
-        expect(options).toMatchObject({ allowPrivateNetwork: true });
-        return {
-          hostname: "internal.example.test",
-          addresses: [{ address: "10.0.0.7", family: 4 }],
-          privateNetwork: true,
-        };
-      },
-      pinnedPost: async (_url, pinned, body) => {
-        pinnedCalls.push({ address: pinned.address, body });
-        return new Response("ok");
-      },
-    });
-
-    expect(results).toEqual([{ sink: "webhook", ok: true }]);
-    expect(resolutions).toBe(1);
-    expect(pinnedCalls).toHaveLength(1);
-    expect(pinnedCalls[0]?.address).toBe("10.0.0.7");
-    expect(JSON.parse(pinnedCalls[0]?.body ?? "{}")).toHaveProperty("type", "quota_reset");
-  });
-
-  test.each([
-    "https://169.254.169.254/hook",
-    "https://[fe80::1]/hook",
-  ])("private-network opt-in still refuses %s", async (webhookUrl) => {
-    let pinnedPosts = 0;
-    const config = resolveQuotaResetNotify({
-      enabled: true,
-      webhookUrl,
-      allowPrivateNetwork: true,
-    });
-
-    expect(await deliverQuotaResetEvent(event(), config, {
-      pinnedPost: async () => {
-        pinnedPosts += 1;
-        return new Response("must not connect");
-      },
-    })).toEqual([
-      { sink: "webhook", ok: false, reason: "blocked-destination" },
-    ]);
-    expect(pinnedPosts).toBe(0);
-  });
-
-  test("the delivery timeout includes DNS resolution", async () => {
-    let pinnedPosts = 0;
-    const config = resolveQuotaResetNotify({
-      enabled: true,
-      webhookUrl: "https://slow-dns.example.test/hook",
-      timeoutMs: 50,
-    });
-
-    expect(await deliverQuotaResetEvent(event(), config, {
-      resolveAddresses: () => new Promise(() => { /* never resolves */ }),
-      pinnedPost: async () => {
-        pinnedPosts += 1;
-        return new Response("must not connect");
-      },
-    })).toEqual([{ sink: "webhook", ok: false, reason: "timeout" }]);
-    expect(pinnedPosts).toBe(0);
-  });
-
   test("a fired event POSTs exactly one JSON body with no identifying data", async () => {
     const bodies: string[] = [];
     const server = Bun.serve({
@@ -265,30 +158,27 @@ describe("webhook sink", () => {
     // 302 the POST to loopback or a metadata address, which would re-open the SSRF hole the
     // destination check just closed. Stubbed rather than served: this asserts the request
     // mode itself, and a real listener is unavailable under the sandbox.
-    const pinnedPosts: string[] = [];
-    const config = resolveQuotaResetNotify({
-      enabled: true,
-      webhookUrl: "https://hooks.example.test/hook",
-      allowPrivateNetwork: true,
-    });
-    expect(await deliverQuotaResetEvent(event(), config, {
-      resolveAddresses: async () => ({
-        hostname: "hooks.example.test",
-        addresses: [{ address: "10.0.0.8", family: 4 }],
-        privateNetwork: true,
-      }),
-      pinnedPost: async (url) => {
-        pinnedPosts.push(url);
-        return new Response(null, {
-          status: 302,
-          headers: { location: "http://127.0.0.1:9/" },
-        });
-      },
-    })).toEqual([
-      { sink: "webhook", ok: false, reason: "blocked-destination" },
-    ]);
-    // The pinned primitive never follows redirects; the sink classifies the single response.
-    expect(pinnedPosts).toEqual(["https://hooks.example.test/hook"]);
+    const seen: Array<RequestInit | undefined> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      seen.push(init);
+      return new Response(null, { status: 302, headers: { location: "http://127.0.0.1:9/" } });
+    }) as unknown as typeof globalThis.fetch;
+    try {
+      const config = resolveQuotaResetNotify({
+        enabled: true,
+        webhookUrl: "https://hooks.example.test/hook",
+        allowPrivateNetwork: true,
+      });
+      expect(await deliverQuotaResetEvent(event(), config)).toEqual([
+        { sink: "webhook", ok: false, reason: "blocked-destination" },
+      ]);
+      // The refusal must come from not following, not from a followed request that failed.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.redirect).toBe("manual");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 
   test("a hanging receiver times out rather than blocking forever", async () => {
@@ -574,132 +464,6 @@ describe("GET /api/quota-resets", () => {
 });
 
 describe("activation is the single switch", () => {
-  test("same-size same-mtime in-place rewrite invalidates the notify cache", () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-notify-cache-in-place-"));
-    const configPath = join(home, "config.json");
-    const enabled = JSON.stringify({
-      port: 10100,
-      defaultProvider: "openai",
-      providers: {
-        openai: { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1" },
-      },
-      quotaResetNotify: { enabled: true, command: ["true"] },
-    });
-    const disabled = enabled.replace(
-      '"enabled":true,"command":["true"]',
-      '"enabled":false,"command":["tru"]',
-    );
-    expect(disabled.length).toBe(enabled.length);
-    const fixedTime = new Date("2026-01-01T00:00:00.000Z");
-    writeFileSync(configPath, enabled);
-    utimesSync(configPath, fixedTime, fixedTime);
-
-    const previousHome = process.env["OPENCODEX_HOME"];
-    const realNow = Date.now;
-    let now = realNow();
-    process.env["OPENCODEX_HOME"] = home;
-    Date.now = () => now;
-    try {
-      resetQuotaResetNotifyCacheForTests();
-      expect(currentQuotaResetNotify().enabled).toBe(true);
-      const before = statSync(configPath);
-
-      writeFileSync(configPath, disabled);
-      utimesSync(configPath, fixedTime, fixedTime);
-      const after = statSync(configPath);
-      expect(after.ino).toBe(before.ino);
-      expect(after.size).toBe(before.size);
-      expect(after.mtimeMs).toBe(before.mtimeMs);
-
-      now += 5_001;
-      expect(currentQuotaResetNotify().enabled).toBe(false);
-    } finally {
-      Date.now = realNow;
-      resetQuotaResetNotifyCacheForTests();
-      if (previousHome === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = previousHome;
-    }
-  });
-
-  test("same-size same-mtime config replacement invalidates the notify cache", () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-notify-cache-"));
-    const configPath = join(home, "config.json");
-    const replacementPath = join(home, "replacement.json");
-    const enabled = JSON.stringify({
-      port: 10100,
-      defaultProvider: "openai",
-      providers: {
-        openai: { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1" },
-      },
-      quotaResetNotify: { enabled: true, command: ["true"] },
-    });
-    const disabled = enabled.replace(
-      '"enabled":true,"command":["true"]',
-      '"enabled":false,"command":["tru"]',
-    );
-    expect(disabled.length).toBe(enabled.length);
-    const fixedTime = new Date("2026-01-01T00:00:00.000Z");
-    writeFileSync(configPath, enabled);
-    utimesSync(configPath, fixedTime, fixedTime);
-
-    const previousHome = process.env["OPENCODEX_HOME"];
-    const realNow = Date.now;
-    let now = realNow();
-    process.env["OPENCODEX_HOME"] = home;
-    Date.now = () => now;
-    try {
-      resetQuotaResetNotifyCacheForTests();
-      expect(currentQuotaResetNotify().enabled).toBe(true);
-      const before = statSync(configPath);
-
-      writeFileSync(replacementPath, disabled);
-      utimesSync(replacementPath, fixedTime, fixedTime);
-      renameSync(replacementPath, configPath);
-      const after = statSync(configPath);
-      expect(after.size).toBe(before.size);
-      expect(after.mtimeMs).toBe(before.mtimeMs);
-
-      now += 5_001;
-      expect(currentQuotaResetNotify().enabled).toBe(false);
-    } finally {
-      Date.now = realNow;
-      resetQuotaResetNotifyCacheForTests();
-      if (previousHome === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = previousHome;
-    }
-  });
-
-  test("a cancelled pending activation cannot install the process-wide sink", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-cancelled-activation-"));
-    writeFileSync(join(home, "config.json"), JSON.stringify({
-      port: 10100,
-      defaultProvider: "openai",
-      providers: {
-        openai: { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1", authMode: "forward" },
-      },
-      quotaResetNotify: { enabled: true, command: ["true"], pollSeconds: 0 },
-    }));
-
-    const previousHome = process.env["OPENCODEX_HOME"];
-    process.env["OPENCODEX_HOME"] = home;
-    try {
-      resetQuotaResetNotifyCacheForTests();
-      resetQuotaResetActivationForTests();
-      setQuotaResetSink(null);
-      let current = true;
-      const pending = syncQuotaResetActivation(() => current);
-      current = false;
-
-      expect(await pending).toBe(false);
-      expect(hasQuotaResetSink()).toBe(false);
-    } finally {
-      await deactivateQuotaResetActivation();
-      resetQuotaResetNotifyCacheForTests();
-      if (previousHome === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = previousHome;
-    }
-  });
-
   test("an absent config section installs no sink at all", async () => {
     const home = mkdtempSync(join(tmpdir(), "ocx-inert-"));
     writeFileSync(join(home, "config.json"), JSON.stringify({
@@ -750,6 +514,7 @@ describe("activation is the single switch", () => {
     // This proves activation/delivery, not TLS integration.
     const webhookUrl = "https://hooks.example.test/activation";
     const receiverUrl = `http://127.0.0.1:${server.port}/hook`;
+    const realFetch = globalThis.fetch;
     const dispatched: string[] = [];
     let receiveTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -772,23 +537,13 @@ describe("activation is the single switch", () => {
     const previousHome = process.env["OPENCODEX_HOME"];
     process.env["OPENCODEX_HOME"] = home;
     try {
-      setQuotaResetSinkDependenciesForTests({
-        resolveAddresses: async input => ({
-          hostname: new URL(input).hostname,
-          addresses: [{ address: "127.0.0.1", family: 4 }],
-          privateNetwork: true,
-        }),
-        pinnedPost: async (input, _pinned, body, signal, options) => {
+      globalThis.fetch = Object.assign((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (input === webhookUrl) {
           dispatched.push(input);
-          return fetch(receiverUrl, {
-            method: "POST",
-            headers: options?.headers,
-            body,
-            redirect: "manual",
-            signal,
-          });
-        },
-      });
+          return realFetch(receiverUrl, init);
+        }
+        return realFetch(input, init);
+      }, realFetch);
       resetQuotaResetNotifyCacheForTests();
       resetQuotaResetStoreForTests();
       resetQuotaResetActivationForTests();
@@ -828,7 +583,7 @@ describe("activation is the single switch", () => {
       expect(payload).not.toHaveProperty("key");
     } finally {
       if (receiveTimeout !== undefined) clearTimeout(receiveTimeout);
-      setQuotaResetSinkDependenciesForTests(null);
+      globalThis.fetch = realFetch;
       setQuotaResetSink(null);
       resetQuotaResetActivationForTests();
       resetQuotaResetNotifyCacheForTests();

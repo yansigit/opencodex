@@ -1,10 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, setDefaultTimeout, test } from "bun:test";
 import { logsFromApiBody } from "../helpers/logs-api";
-import {
-  isolatedDiskManagementPersistence,
-  managementFetch as fetch,
-  ManagementRequest as Request,
-} from "../helpers/management-auth";
+import { managementFetch as fetch, ManagementRequest as Request } from "../helpers/management-auth";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -119,7 +115,6 @@ mock.module("../../src/lib/upstream-retry", () => ({
 }));
 
 const { handleResponses } = await import("../../src/server/responses");
-const { handleChatCompletions } = await import("../../src/server/chat-completions");
 const { handleResponsesCompact } = await import("../../src/server/responses/compact");
 type HandleOptions = NonNullable<Parameters<typeof handleResponses>[3]>;
 
@@ -396,7 +391,6 @@ async function management(
   });
   return handleManagementAPI(request, new URL(request.url), config, {
     createManagementConvergeCodex: catalogConvergenceFactory(),
-    ...isolatedDiskManagementPersistence(),
   });
 }
 
@@ -1447,138 +1441,6 @@ describe("server combo failover 030 activation matrix", () => {
     expect(response.status).toBe(200);
     expect(JSON.stringify(await collectSse(response))).toContain("cursor backup");
     expect(bHits).toBe(1);
-  });
-
-  test("Cursor structured output returns a 400 before transport for buffered and streaming Responses", async () => {
-    let transportFactoryCalls = 0;
-    customCursorTransportFactory = () => {
-      transportFactoryCalls += 1;
-      return {
-        async *run() { yield { type: "done" } satisfies import("../../src/adapters/cursor/types").CursorServerMessage; },
-        writeClient() {},
-      };
-    };
-    const config = {
-      port: 0,
-      defaultProvider: "cursor-fixture",
-      providers: {
-        "cursor-fixture": {
-          adapter: "cursor",
-          baseUrl: "https://api2.cursor.sh",
-          authMode: "key",
-          apiKey: "cursor-key",
-          models: ["m1"],
-        },
-      },
-    } as OcxConfig;
-
-    for (const stream of [false, true]) {
-      const response = await postModelLogged(config, "cursor-fixture/m1", {
-        stream,
-        text: { format: { type: stream ? "json_schema" : "json_object", schema: { type: "object" } } },
-      });
-      expect(response.status).toBe(400);
-      expect(await response.json()).toMatchObject({
-        error: {
-          type: "invalid_request_error",
-          message: "Cursor does not support structured output",
-        },
-      });
-    }
-    expect(transportFactoryCalls).toBe(0);
-  });
-
-  test("Cursor Chat Completions structured output returns 400 before transport", async () => {
-    let transportFactoryCalls = 0;
-    customCursorTransportFactory = () => {
-      transportFactoryCalls += 1;
-      return {
-        async *run() { yield { type: "done" } satisfies import("../../src/adapters/cursor/types").CursorServerMessage; },
-        writeClient() {},
-      };
-    };
-    const config = {
-      port: 0,
-      defaultProvider: "cursor-fixture",
-      providers: {
-        "cursor-fixture": {
-          adapter: "cursor",
-          baseUrl: "https://api2.cursor.sh",
-          authMode: "key",
-          apiKey: "cursor-key",
-          models: ["m1"],
-        },
-      },
-    } as OcxConfig;
-
-    const response = await handleChatCompletions(
-      new Request("http://localhost/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "cursor-fixture/m1",
-          stream: false,
-          messages: [{ role: "user", content: "return JSON" }],
-          response_format: {
-            type: "json_schema",
-            json_schema: { name: "answer", schema: { type: "object" } },
-          },
-        }),
-      }),
-      config,
-      { model: "", provider: "" },
-    );
-
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
-      error: {
-        type: "invalid_request_error",
-        message: "Cursor does not support structured output",
-      },
-    });
-    expect(transportFactoryCalls).toBe(0);
-  });
-
-  test("Cursor structured output is a terminal combo client error without failover", async () => {
-    let backupHits = 0;
-    const backup = serve(() => {
-      backupHits += 1;
-      return chatStream("backup");
-    });
-    let transportFactoryCalls = 0;
-    customCursorTransportFactory = () => {
-      transportFactoryCalls += 1;
-      return {
-        async *run() { yield { type: "done" } satisfies import("../../src/adapters/cursor/types").CursorServerMessage; },
-        writeClient() {},
-      };
-    };
-    const config = comboConfig({
-      "cursor-fixture": {
-        adapter: "cursor",
-        baseUrl: "https://api2.cursor.sh",
-        authMode: "key",
-        apiKey: "cursor-key",
-        models: ["m1"],
-      },
-      backup: provider("openai-chat", baseUrl(backup), "backup-key"),
-    });
-
-    const response = await postLogged(config, {
-      text: { format: { type: "json_schema", schema: { type: "object" } } },
-    });
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
-      error: {
-        type: "invalid_request_error",
-        message: expect.stringContaining("Cursor does not support structured output"),
-      },
-    });
-    expect(backupHits).toBe(0);
-    expect(transportFactoryCalls).toBe(0);
-    const { log, usage } = await latestAttemptReceipts(config);
-    expect(log).not.toHaveProperty("attempts");
-    expect(usage).not.toHaveProperty("attempts");
   });
 
   test("runTurn combo attempts retain requested effort without adapter wire metadata", async () => {
@@ -2963,11 +2825,9 @@ describe("server combo failover 030 activation matrix", () => {
   test("connect cancellation wins with 499, no backup, warning, or cooldown", async () => {
     let bHits = 0;
     const aStarted = deferred();
-    let releaseA!: (response: Response) => void;
-    const aPending = new Promise<Response>(resolve => { releaseA = resolve; });
     const a = serve(() => {
       aStarted.resolve();
-      return aPending;
+      return new Promise<Response>(() => {});
     });
     const b = serve(() => { bHits += 1; return chatSuccess("must not run"); });
     const config = comboConfig({
@@ -2991,7 +2851,6 @@ describe("server combo failover 030 activation matrix", () => {
       expect(isComboTargetInCooldown("free", { provider: "a", model: "m1" })).toBe(false);
     } finally {
       console.warn = originalWarn;
-      releaseA(chatSuccess("released after cancellation"));
     }
   });
 
@@ -3133,9 +2992,7 @@ describe("server combo failover 030 activation matrix", () => {
     let cancels = 0;
     let bHits = 0;
     const cancelled = deferred();
-    customTransientResponse = async () => {
-      customTransientResponse = undefined;
-      return new Response(new ReadableStream<Uint8Array>({
+    customTransientResponse = async () => new Response(new ReadableStream<Uint8Array>({
         start(controller) {
           reads += 1;
           controller.enqueue(new TextEncoder().encode("hostile-stalled-prefix"));
@@ -3145,7 +3002,6 @@ describe("server combo failover 030 activation matrix", () => {
           cancelled.resolve();
         },
       }), { status: 429, headers: { "content-type": "application/json" } });
-    };
     const b = serve(() => {
       bHits += 1;
       return chatSuccess("bounded backup", "m2");

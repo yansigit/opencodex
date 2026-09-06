@@ -2,7 +2,7 @@ import * as readline from "node:readline";
 import { modelSelectionGuidance } from "../cli/model-selection-guidance";
 import { initializeProviderModelSelection } from "../providers/initial-model-selection";
 import { openUrl } from "../lib/open-url";
-import { initializePersistedConfigIfMissing, loadConfig, mutatePersistedConfig } from "../config";
+import { loadConfig, saveConfig } from "../config";
 import { findLiveProxy } from "../server/proxy-liveness";
 import {
   requestBoundLocalProviderReload,
@@ -13,14 +13,10 @@ import { KEY_LOGIN_PROVIDERS, isKeyLoginProvider, validateApiKey, type KeyLoginP
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import { configuredAdminToken } from "../lib/admin-secrets";
 import { codexAccountNamespaceProviderCollisionError } from "../codex/account-namespace-match";
-import { apiKeyPoolEntryId } from "../providers/api-keys";
-import { getProviderRegistryEntry } from "../providers/registry";
-import { providerConfigSeed } from "../providers/derive";
 
 const LIVE_RELOAD_PROVIDERS = new Set<string>([
   ...listOAuthProviders(),
   ...Object.keys(KEY_LOGIN_PROVIDERS),
-  "google-aistudio",
 ]);
 
 export function runningProxyUpdateHeaders(): Headers {
@@ -71,70 +67,14 @@ export function warnIfLiveReloadSkipped(result: LocalProviderReloadResult | null
 
 export async function handleLogin(provider?: string): Promise<void> {
   const name = (provider ?? "").trim().toLowerCase();
-  if (name === "google-aistudio" || name === "aistudio" || name === "gemini-aistudio") {
-    return handleAiStudioLogin();
-  }
   if (isPublicOAuthProvider(name)) return handleOAuthLogin(name);
   if (isKeyLoginProvider(name)) return handleKeyLogin(name);
   console.error(
     `Usage: ocx login <provider>\n` +
-      `  OAuth / Web:   ${[...listOAuthProviders(), "google-aistudio"].join(", ")}\n` +
+      `  OAuth login:   ${listOAuthProviders().join(", ")}\n` +
       `  API-key login: ${Object.keys(KEY_LOGIN_PROVIDERS).join(", ")}`,
   );
   process.exit(1);
-}
-
-async function handleAiStudioLogin(): Promise<void> {
-  console.log("\n🌐 Google AI Studio Sign-In & Session Setup:");
-  console.log("   Option 1: Paste Session Token from the Brave/Chrome extension popup (Passkey-friendly)");
-  console.log("   Option 2: Open native macOS sign-in window\n");
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const choice = await new Promise<string>((res) => {
-      rl.question("Paste Session Token (or press Enter for native window): ", (ans) => res(ans.trim()));
-    });
-
-    if (choice.length > 20) {
-      const { saveAiStudioSessionFromToken } = await import("./aistudio-session-sync");
-      saveAiStudioSessionFromToken(choice);
-      console.log("\n✅ Session token imported successfully! Saved to ~/.opencodex/aistudio-session.json");
-    } else if (process.platform === "darwin") {
-      const { runAiStudioNativeLogin } = await import("./aistudio-native-daemon");
-      console.log("\n🚀 Opening native Google AI Studio login window...");
-      const result = await runAiStudioNativeLogin();
-      if (result.kind === "cancelled") {
-        console.log("\nNative Google AI Studio login cancelled.");
-        return;
-      }
-      if (result.kind === "unsupported") {
-        console.error("\nGoogle AI Studio native login is only available on macOS.");
-        return;
-      }
-      if (result.kind === "failed") {
-        console.error(`\n${result.error}`);
-        return;
-      }
-      console.log("\n✅ Google AI Studio authenticated successfully! Session saved to ~/.opencodex/aistudio-session.json");
-    } else {
-      console.error("\nGoogle AI Studio native login is only available on macOS. Paste a session token from the extension instead.");
-      return;
-    }
-  } finally {
-    rl.close();
-  }
-
-  const config = loadConfig();
-  if (!config.providers["google-aistudio"]) {
-    const entry = getProviderRegistryEntry("google-aistudio");
-    if (!entry) throw new Error("Google AI Studio provider registry entry is missing");
-    await commitKeyLoginProvider(config, "google-aistudio", providerConfigSeed(entry));
-    console.log("\n   ✓ Configured 'google-aistudio' in ~/.opencodex/config.json");
-  }
-
-  const reload = await notifyRunningProxy("google-aistudio");
-  console.log("\n✅ Ready! Use models with 'google-aistudio' provider in your coding agents.");
-  warnIfLiveReloadSkipped(reload);
 }
 
 async function handleOAuthLogin(name: string): Promise<void> {
@@ -199,28 +139,10 @@ export function mergeKeyLoginProviderRow(
   provider: OcxProviderConfig,
   existing: OcxProviderConfig | undefined,
 ): OcxProviderConfig {
-  if (!existing) return structuredClone(provider);
-  const merged = structuredClone(existing);
-  merged.adapter = provider.adapter;
-  merged.baseUrl = provider.baseUrl;
-  if (provider.authMode !== undefined) merged.authMode = provider.authMode;
-  else delete merged.authMode;
-  delete merged.azureCredential;
-  if (provider.apiKeyTransport !== undefined) merged.apiKeyTransport = provider.apiKeyTransport;
-  if (provider.apiKey) {
-    const pool = merged.apiKeyPool ?? (merged.apiKey
-      ? [{ id: apiKeyPoolEntryId(merged.apiKey), key: merged.apiKey }]
-      : []);
-    const existingKey = pool.find(entry => entry.key === provider.apiKey);
-    if (!existingKey) {
-      const id = apiKeyPoolEntryId(provider.apiKey);
-      if (pool.some(entry => entry.id === id)) throw new Error("API-key pool ID collision");
-      pool.push({ id, key: provider.apiKey, addedAt: Date.now() });
-    }
-    if (pool.length > 0) merged.apiKeyPool = pool;
-    merged.apiKey = provider.apiKey;
-  }
-  return merged;
+  return {
+    ...provider,
+    ...(existing?.modelCosts !== undefined ? { modelCosts: existing.modelCosts } : {}),
+  };
 }
 
 /**
@@ -236,35 +158,10 @@ export async function commitKeyLoginProvider(
   provider: OcxProviderConfig,
   onLiveReload?: (result: LocalProviderReloadResult | null) => void,
 ): Promise<OcxProviderConfig> {
-  let mergedProvider = mergeKeyLoginProviderRow(provider, config.providers[name]);
-  const mutate = () => mutatePersistedConfig(fresh => {
-    const collision = codexAccountNamespaceProviderCollisionError(fresh.codexAccountNamespaces, name);
-    if (collision) throw new Error(collision);
-    mergedProvider = mergeKeyLoginProviderRow(provider, fresh.providers[name]);
-    initializeProviderModelSelection(name, mergedProvider, fresh.providers[name], fresh);
-    fresh.providers[name] = mergedProvider;
-    return { changed: true, value: { config: structuredClone(fresh), provider: structuredClone(mergedProvider) } };
-  });
-  let outcome = mutate();
-  if (outcome.status === "unavailable" && outcome.reason === "missing") {
-    const initial = structuredClone(config);
-    const collision = codexAccountNamespaceProviderCollisionError(initial.codexAccountNamespaces, name);
-    if (collision) throw new Error(collision);
-    mergedProvider = mergeKeyLoginProviderRow(provider, initial.providers[name]);
-    initializeProviderModelSelection(name, mergedProvider, initial.providers[name], initial);
-    initial.providers[name] = mergedProvider;
-    const initialized = initializePersistedConfigIfMissing(initial);
-    if (initialized === "invalid") throw new Error("config is invalid");
-    outcome = initialized === "created"
-      ? { status: "committed", value: { config: initial, provider: structuredClone(mergedProvider) } }
-      : mutate();
-  }
-  if (outcome.status === "unavailable") throw new Error(outcome.reason === "conflict"
-    ? "config changed while saving provider; retry"
-    : `config is ${outcome.reason}`);
-  for (const key of Object.keys(config)) delete (config as unknown as Record<string, unknown>)[key];
-  Object.assign(config, outcome.value.config);
-  mergedProvider = outcome.value.provider;
+  const mergedProvider = mergeKeyLoginProviderRow(provider, config.providers[name]);
+  initializeProviderModelSelection(name, mergedProvider, config.providers[name], config);
+  config.providers[name] = mergedProvider;
+  saveConfig(config);
   // Evaluate the reload BEFORE the optional call: `onLiveReload?.(await ...)` short-circuits
   // the whole argument list when no callback is supplied, so the reload would never fire for
   // callers that do not care about the outcome.

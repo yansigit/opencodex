@@ -453,22 +453,6 @@ describe("candidateCapabilityEvidence model matching", () => {
     expect(evidence.reasoningEfforts).toEqual(registryEntry.modelReasoningEfforts![family]);
   });
 
-  test("registry noReasoningModels is known-negative capability evidence", () => {
-    const registryEntry = PROVIDER_REGISTRY.find(entry => entry.id === "xai");
-    if (!registryEntry) throw new Error("fixture drift: no `xai` entry in PROVIDER_REGISTRY");
-    const model = "grok-4.20-0309-non-reasoning";
-    expect(registryEntry.noReasoningModels).toContain(model);
-
-    // Persisted providers need not duplicate registry metadata. The registry's negative
-    // must still beat unknown-evidence permissiveness just like a configured negative does.
-    const config = {
-      providers: {
-        xai: { adapter: "openai-responses", authMode: "oauth", baseUrl: "https://api.x.ai" },
-      },
-    } as unknown as OcxConfig;
-    expect(candidateCapabilityEvidence(config, "xai", model).reasoningEfforts).toEqual([]);
-  });
-
   test("noVisionModels beats an exact modality entry, as isModelTextOnly does", () => {
     // `isModelTextOnly` matches the no-vision list and returns true before it ever
     // reads `modelInputModalities`, so the `gpt-oss` no-vision entry wins over an

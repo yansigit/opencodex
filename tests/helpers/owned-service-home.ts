@@ -1,6 +1,5 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 export interface OwnedServiceHome {
   /** Add this only to child-process environments that also receive `preloadPath`. */
@@ -11,9 +10,6 @@ export interface OwnedServiceHome {
 
 const WINDOWS_SERVICE_PROBE_PRELOAD = resolve(import.meta.dir, "owned-service-home-preload.ts");
 const WINDOWS_SERVICE_PROBE_FLAG = "OCX_TEST_SERVICE_HOME_PROBE";
-const WINDOWS_SECRET_ACL_MODULE = pathToFileURL(
-  resolve(import.meta.dir, "../../src/lib/windows-secret-acl.ts"),
-).href;
 
 /**
  * Insert a test preload into a Bun command without relying on BUN_OPTIONS.
@@ -42,7 +38,6 @@ function windowsServiceProbeEnv(): Record<string, string> {
   // keeps it out of the parent test environment and unrelated nested children.
   return {
     [WINDOWS_SERVICE_PROBE_FLAG]: "1",
-    OCX_TEST_WINDOWS_ACL_MODULE: WINDOWS_SECRET_ACL_MODULE,
   };
 }
 

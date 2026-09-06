@@ -671,7 +671,7 @@ describe("ocx opencode admission key", () => {
   test("falls back to the hardened service token file before config.apiKeys", () => {
     const dir = mkdtempSync(join(tmpdir(), "ocx-opencode-token-"));
     const tokenFile = join(dir, "service-api-token");
-    writeFileSync(tokenFile, "sk-service\n", { encoding: "utf8", mode: 0o600 });
+    writeFileSync(tokenFile, "sk-service\n", "utf8");
     const config = cfg({ apiKeys: [{ id: "1", name: "main", key: "sk-cfg", createdAt: "2026-01-01" }] });
     expect(opencodeApiKey(config, { OCX_API_TOKEN_FILE: tokenFile })).toBe("sk-service");
   });
@@ -690,7 +690,7 @@ describe("ocx opencode proxy auto-start env", () => {
   test("passes OCX_API_TOKEN_FILE to ocx start when only the hardened service token exists", () => {
     const dir = mkdtempSync(join(tmpdir(), "ocx-opencode-start-"));
     const tokenFile = join(dir, "service-api-token");
-    writeFileSync(tokenFile, "sk-service-only\n", { encoding: "utf8", mode: 0o600 });
+    writeFileSync(tokenFile, "sk-service-only\n", "utf8");
     const config = cfg({ hostname: "0.0.0.0", apiKeys: [] as OcxConfig["apiKeys"] });
 
     const startEnv = opencodeProxyStartEnv({ OCX_API_TOKEN_FILE: tokenFile });

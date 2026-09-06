@@ -56,3 +56,4 @@ diagnosed rather than waived.
 
 Mirrored into the goalplan as c-1..c-7. c-7 is the real bar: **open bug-labelled PRs plus
 issues total 3 or fewer**, 5 acceptable with recorded blockers.
+

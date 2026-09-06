@@ -2,26 +2,18 @@ import { matchesLogConversationId } from "../log-conversation-id";
 import type { LogSurface, LogSurfaceFilter } from "./logs-surface-filter";
 import { logMatchesSurface } from "./logs-surface-filter";
 
-export type { LogSurface, LogSurfaceFilter };
 export type LogTimeWindow = "all" | "15m" | "1h" | "24h";
 export type LogStatusFilter = "all" | "success" | "errors";
-export type LogAgentKind = "all" | "main" | "subagent" | "internal" | "unknown";
-export type PersistedAgentKind = Exclude<LogAgentKind, "all" | "unknown">;
-
-export function normalizedAgentKind(value: unknown): Exclude<LogAgentKind, "all"> {
-  return value === "main" || value === "subagent" || value === "internal" ? value : "unknown";
-}
 
 export interface LogFilterState {
   surface: LogSurfaceFilter;
   model: string;
   provider: string;
-  agentKind: LogAgentKind;
-  statusFilter: LogStatusFilter;
+  status: LogStatusFilter;
   timeWindow: LogTimeWindow;
   minTokPerSec?: number;
   maxTokPerSec?: number;
-  interceptedHelpersOnly: boolean;
+  interceptedOnly: boolean;
   conversationId: string;
   conversationQueryHash?: string;
 }
@@ -30,10 +22,9 @@ export const DEFAULT_LOG_FILTER_STATE: LogFilterState = {
   surface: "all",
   model: "",
   provider: "",
-  agentKind: "all",
-  statusFilter: "all",
+  status: "all",
   timeWindow: "all",
-  interceptedHelpersOnly: false,
+  interceptedOnly: false,
   conversationId: "",
 };
 
@@ -47,7 +38,6 @@ export interface FilterableLogEntry {
   model?: unknown;
   resolvedModel?: unknown;
   provider?: unknown;
-  agentKind?: unknown;
   surface?: LogSurface;
   status?: unknown;
   conversationId?: string;
@@ -58,25 +48,18 @@ export interface FilterableLogEntry {
   };
 }
 
-export type MinimalLogAttempt = FilterableLogAttempt;
-export type MinimalLogEntry = FilterableLogEntry;
-
 /** Return whether any filter differs from the inert default state. */
-export function hasActiveFilters(filters: LogFilterState): boolean {
+export function hasActiveLogFilters(filters: LogFilterState): boolean {
   return filters.surface !== "all"
     || filters.model.trim() !== ""
     || filters.provider.trim() !== ""
-    || filters.agentKind !== "all"
-    || filters.statusFilter !== "all"
+    || filters.status !== "all"
     || filters.timeWindow !== "all"
     || filters.minTokPerSec !== undefined
     || filters.maxTokPerSec !== undefined
-    || filters.interceptedHelpersOnly
+    || filters.interceptedOnly
     || filters.conversationId.trim() !== "";
 }
-
-// Keep the upstream helper name available while the wired fork UI uses its existing name.
-export const hasActiveLogFilters = hasActiveFilters;
 
 /** Safely retain only object-shaped failover attempts from untrusted log data. */
 function attempts(log: FilterableLogEntry): FilterableLogAttempt[] {
@@ -114,20 +97,19 @@ export function filterLogs<T extends FilterableLogEntry>(
 
   return logs.filter(log => {
     if (!logMatchesSurface(log, filters.surface)) return false;
-    if (filters.agentKind !== "all" && normalizedAgentKind(log.agentKind) !== filters.agentKind) return false;
-    if (filters.interceptedHelpersOnly && typeof log.shadowCallRewrittenFrom !== "string") return false;
+    if (filters.interceptedOnly && typeof log.shadowCallRewrittenFrom !== "string") return false;
     if (conversationQuery && !matchesLogConversationId(
       log.conversationId,
       conversationQuery,
       filters.conversationQueryHash,
     )) return false;
 
-    if (filters.statusFilter === "success"
+    if (filters.status === "success"
       && (typeof log.status !== "number"
         || !Number.isInteger(log.status)
         || log.status < 200
         || log.status >= 300)) return false;
-    if (filters.statusFilter === "errors"
+    if (filters.status === "errors"
       && (typeof log.status !== "number"
         || !Number.isInteger(log.status)
         || log.status < 400

@@ -19,15 +19,10 @@ import type { AdapterTierMetadata } from "../providers/fastwire";
 import { redactSecretString, sanitizeLogMetadataString } from "../lib/redact";
 import {
   appendUsageEntry,
-  isKnownAgentKind,
   isKnownAdmissionKind,
   isKnownInboundProtocol,
-  isKnownV2BridgeDecision,
-  isKnownV2BridgeScope,
-  isKnownV2BridgeStateDurability,
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
-  isPersistableAccountLogLabel,
   isValidReasoningWireValue,
   readRecentUsageEntries,
   usageForFinalLog,
@@ -38,7 +33,6 @@ import {
   type PersistedUsageEntry,
   type UsageStatus,
 } from "../usage/log";
-import type { AgentKind } from "./effort-policy";
 import {
   appendUsageDebug,
   isUsageDebugEnabled,
@@ -52,8 +46,6 @@ import { capEstimateAtContextWindow } from "../lib/token-estimate";
 import { inferCursorContextWindow } from "../adapters/cursor/discovery";
 import { KIRO_MODEL_CONTEXT_WINDOWS, normalizeKiroModelId } from "../providers/kiro-models";
 import { modelRecordValue } from "../reasoning-effort";
-import type { TurnProgressTelemetry } from "../types/progress";
-import { finishConversationTurn } from "./conversation-progress";
 
 export interface RequestLogContext {
   model: string;
@@ -62,11 +54,6 @@ export interface RequestLogContext {
   firstOutputMs?: number;
   /** Best-effort chat/session correlation for Logs grouping (#330). Opaque; omit when unknown. */
   conversationId?: string;
-  turnProgress?: TurnProgressTelemetry;
-  /** Process-local HMAC key for conversation progress state; never persisted. */
-  turnProgressTrackerKey?: string;
-  /** Internal marker preventing a locally blocked 429 from extending its own circuit. */
-  turnProgressCircuitBlocked?: boolean;
   surface?: "claude" | "claude-desktop" | "grok";
   /** The matched configured key's id. Set ONLY for admissionKind "configured" —
    *  never a sentinel, so a hand-edited entry whose id happens to be "loopback"
@@ -78,11 +65,6 @@ export interface RequestLogContext {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  /** Closed-set bridge diagnostics; deliberately contains no request-derived text. */
-  v2BridgeScope?: "root" | "child";
-  v2BridgeDecision?: "active" | "disabled" | "not_v2" | "non_native_route"
-    | "maintenance_turn" | "no_collaboration_catalog" | "combo" | "compaction" | "shadow_route";
-  v2BridgeStateDurability?: "standard" | "encrypted" | "memory-only";
   /**
    * Set when an adapter answered the turn locally and no upstream request was made
    * (`ProviderAdapter.localTerminal`). A fixed identifier naming the code path, never
@@ -90,7 +72,6 @@ export interface RequestLogContext {
    * rather than looking like a lost request.
    */
   localTerminalReason?: string;
-  agentKind?: AgentKind;
   /** Stable non-PII Codex Pool account identity for durable usage attribution. */
   accountLogLabel?: string;
   requestedModel?: string;
@@ -183,14 +164,9 @@ export interface RequestLogEntry {
    *  product: widening that enum would merge Responses and Chat Completions,
    *  since both leave it undefined. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  v2BridgeScope?: RequestLogContext["v2BridgeScope"];
-  v2BridgeDecision?: RequestLogContext["v2BridgeDecision"];
-  v2BridgeStateDurability?: RequestLogContext["v2BridgeStateDurability"];
-  agentKind?: AgentKind;
   accountLogLabel?: string;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
-  turnProgress?: TurnProgressTelemetry;
   requestedModel?: string;
   requestedAlias?: string;
   /** Original bare helper model when the opt-in shadow-call route rewrote this request. */
@@ -300,15 +276,8 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     timestamp: entry.timestamp,
     model: entry.model,
     provider: entry.provider,
-    ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
     ...(entry.firstOutputMs !== undefined ? { firstOutputMs: entry.firstOutputMs } : {}),
-    ...(entry.turnProgress ? { turnProgress: { ...entry.turnProgress } } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
-    ...(isKnownV2BridgeScope(entry.v2BridgeScope) ? { v2BridgeScope: entry.v2BridgeScope } : {}),
-    ...(isKnownV2BridgeDecision(entry.v2BridgeDecision) ? { v2BridgeDecision: entry.v2BridgeDecision } : {}),
-    ...(isKnownV2BridgeStateDurability(entry.v2BridgeStateDurability)
-      ? { v2BridgeStateDurability: entry.v2BridgeStateDurability }
-      : {}),
     ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
     ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
@@ -429,17 +398,10 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.apiKeyId ? { apiKeyId: entry.apiKeyId } : {}),
       ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
       ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-      ...(isKnownV2BridgeScope(entry.v2BridgeScope) ? { v2BridgeScope: entry.v2BridgeScope } : {}),
-      ...(isKnownV2BridgeDecision(entry.v2BridgeDecision) ? { v2BridgeDecision: entry.v2BridgeDecision } : {}),
-      ...(isKnownV2BridgeStateDurability(entry.v2BridgeStateDurability)
-        ? { v2BridgeStateDurability: entry.v2BridgeStateDurability }
-        : {}),
-      ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
-      ...(isPersistableAccountLogLabel(entry.accountLogLabel)
+      ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
         ? { accountLogLabel: entry.accountLogLabel }
         : {}),
       ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
-      ...(entry.turnProgress ? { turnProgress: { ...entry.turnProgress } } : {}),
       ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
       ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
       ...(entry.requestedAlias ? { requestedAlias: entry.requestedAlias } : {}),
@@ -612,7 +574,6 @@ export function requestLogErrorCode(
   // Keep the high-confidence message fallback for runtimes/providers that stripped the
   // structured code before emitting response.failed.
   if (classifiedCode === CYBER_POLICY_ERROR_CODE) return CYBER_POLICY_ERROR_CODE;
-  if (classifiedCode === "insufficient_quota") return classifiedCode;
   if (status === 400 || status === 409) return "invalid_request_error";
   if (status === 401) return "invalid_api_key";
   if (status === 403) {
@@ -988,11 +949,6 @@ export function addFinalRequestLog(
   const closeReason = effectiveStatus === 499
     ? "client_cancel"
     : meta?.closeReason;
-  if (logCtx.turnProgressTrackerKey && logCtx.turnProgress) {
-    finishConversationTurn(logCtx.turnProgressTrackerKey, logCtx.turnProgress, effectiveStatus, {
-      circuitBlocked: logCtx.turnProgressCircuitBlocked,
-    });
-  }
   if (logCtx.activeAttempt) {
     finishRequestAttempt(
       logCtx.activeAttempt,
@@ -1038,20 +994,13 @@ export function addFinalRequestLog(
     ...(logCtx.apiKeyId ? { apiKeyId: logCtx.apiKeyId } : {}),
     ...(logCtx.admissionKind ? { admissionKind: logCtx.admissionKind } : {}),
     ...(logCtx.inboundProtocol ? { inboundProtocol: logCtx.inboundProtocol } : {}),
-    ...(isKnownV2BridgeScope(logCtx.v2BridgeScope) ? { v2BridgeScope: logCtx.v2BridgeScope } : {}),
-    ...(isKnownV2BridgeDecision(logCtx.v2BridgeDecision) ? { v2BridgeDecision: logCtx.v2BridgeDecision } : {}),
-    ...(isKnownV2BridgeStateDurability(logCtx.v2BridgeStateDurability)
-      ? { v2BridgeStateDurability: logCtx.v2BridgeStateDurability }
-      : {}),
     ...(logCtx.localTerminalReason
       ? { localTerminalReason: sanitizeLogMetadataString(logCtx.localTerminalReason) }
       : {}),
-    ...(logCtx.agentKind ? { agentKind: logCtx.agentKind } : {}),
-    ...(isPersistableAccountLogLabel(logCtx.accountLogLabel)
+    ...(isCodexUsageAccountLogLabel(logCtx.accountLogLabel)
       ? { accountLogLabel: logCtx.accountLogLabel }
       : {}),
     ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
-    ...(logCtx.turnProgress ? { turnProgress: { ...logCtx.turnProgress } } : {}),
     ...(logCtx.requestedModel ? { requestedModel: logCtx.requestedModel } : {}),
     ...(logCtx.requestedAlias ? { requestedAlias: logCtx.requestedAlias } : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),
@@ -1119,18 +1068,7 @@ export function filterRequestLogs(logs: RequestLogEntry[], params: URLSearchPara
   const model = params.get("model")?.trim();
   if (model) {
     filtered = filtered.filter(entry => entry.model === model
-      || entry.resolvedModel === model
       || entry.attempts?.some(attempt => attempt.model === model));
-  }
-  const sinceRaw = params.get("since")?.trim();
-  if (sinceRaw) {
-    const since = Number(sinceRaw);
-    if (Number.isFinite(since)) filtered = filtered.filter(entry => entry.timestamp >= since);
-  }
-  const untilRaw = params.get("until")?.trim();
-  if (untilRaw) {
-    const until = Number(untilRaw);
-    if (Number.isFinite(until)) filtered = filtered.filter(entry => entry.timestamp <= until);
   }
   const status = params.get("status")?.trim().toLowerCase();
   if (status) {
@@ -1333,7 +1271,6 @@ export function finishRequestAttempt(
   status: number,
   durationMs: number,
   usage?: OcxUsage,
-  upstreamError?: string,
 ): PersistedUsageAttempt {
   const finalized = finalizedUsage(
     attempt.adapter,
@@ -1349,7 +1286,7 @@ export function finishRequestAttempt(
   else delete attempt.usage;
   if (finalized.totalTokens !== undefined) attempt.totalTokens = finalized.totalTokens;
   else delete attempt.totalTokens;
-  const errorCode = requestLogErrorCode(status, upstreamError);
+  const errorCode = requestLogErrorCode(status);
   if (errorCode) attempt.errorCode = errorCode;
   else delete attempt.errorCode;
   return attempt;

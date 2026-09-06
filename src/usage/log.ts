@@ -9,26 +9,31 @@ import { usageDisplayTotalTokens } from "./totals";
 import type { AttemptTierOutcome, OcxUsage } from "../types";
 import { normalizeRouteDecisionTrace, type RouteDecisionTraceV1 } from "../routing/trace";
 import { ACCOUNT_LOG_LABEL_RE, CODEX_ACCOUNT_LOG_LABEL_RE } from "../codex/account-label";
-import type { AgentKind } from "../server/effort-policy";
-import type { TurnProgressTelemetry } from "../types/progress";
 
 export type UsageStatus = "reported" | "unreported" | "unsupported" | "estimated";
+/**
+ * A persisted account label: a Codex pool account (`main`/`p<hex6>`) or a non-Codex OAuth
+ * provider account (`o<hex6>`, #2699).
+ *
+ * The old name `CodexUsageAccountLogLabel` is kept as an alias because it is exported and used
+ * across modules; the two predicates below are what callers should choose between.
+ */
 export type UsageAccountLogLabel = "main" | `p${string}` | `o${string}`;
 export type CodexUsageAccountLogLabel = UsageAccountLogLabel;
 
-export const OAUTH_ACCOUNT_LOG_LABEL_RE = /^[a-f0-9]{8,64}(?:-\d+)?$/;
-
-export function isPersistableAccountLogLabel(value: unknown): value is string {
-  return (
-    typeof value === "string"
-    && (ACCOUNT_LOG_LABEL_RE.test(value) || OAUTH_ACCOUNT_LOG_LABEL_RE.test(value))
-  );
-}
-
+/**
+ * Accepts EITHER label family. This is the predicate the persistence writers use, so widening
+ * it here is what stops six separate call sites from silently dropping an `o`-label -- including
+ * two in the live request path (`request-log.ts:972` and `:1187`).
+ *
+ * The name is unchanged deliberately: renaming it would touch every call site for no behavior,
+ * and the widened contract is what every one of those sites wanted.
+ */
 export function isCodexUsageAccountLogLabel(value: unknown): value is UsageAccountLogLabel {
-  return typeof value === "string" && ACCOUNT_LOG_LABEL_RE.test(value);
+  return value === "main" || (typeof value === "string" && ACCOUNT_LOG_LABEL_RE.test(value));
 }
 
+/** Strictly a Codex pool label. Use when the Codex-only distinction actually matters. */
 export function isCodexPoolAccountLogLabel(value: unknown): value is "main" | `p${string}` {
   return value === "main" || (typeof value === "string" && CODEX_ACCOUNT_LOG_LABEL_RE.test(value));
 }
@@ -45,17 +50,12 @@ export type AttemptRecoveryKind =
   | "key-429"
   | "rate-limit-429"
   | "anthropic-oauth-429"
+  | "oauth-account-429"
   | "cursor-oauth-auth"
   | "cursor-oauth-429"
-  | "oauth-account-429"
   | "image-413"
   | "opaque-blob-rejection"
-  | "empty-completion"
-  | "cursor-envelope-echo"
-  | "cursor-routing-commentary"
-  | "cursor-duplicate-tool-call"
-  | "cursor-overflow-remint"
-  | "cursor-invalid-argument";
+  | "empty-completion";
 
 /** Request-time upstream credential class, never a credential or account identifier. */
 export type UsageCredentialSource = "grok-oauth" | "xai-api-key";
@@ -87,8 +87,8 @@ export interface PersistedUsageAttempt {
    * one of them that was missed. Absent on ordinary attempts so old rows keep their exact shape.
    */
   locallyAnswered?: boolean;
-  /** Stable non-PII identity for the account that served this attempt. */
-  accountLogLabel?: string;
+  /** Stable non-PII identity for the Codex pool account that served this attempt. */
+  accountLogLabel?: CodexUsageAccountLogLabel;
   inputTokenEstimate?: number;
   usage?: OcxUsage;
   totalTokens?: number;
@@ -105,8 +105,6 @@ export interface PersistedUsageAttempt {
 }
 
 export interface PersistedUsageEntry {
-  /** Responses request origin; absent for unrelated traffic and old rows. */
-  agentKind?: AgentKind;
   requestedAlias?: string;
   requestId: string;
   timestamp: number;
@@ -119,16 +117,10 @@ export interface PersistedUsageEntry {
   admissionKind?: "configured" | "environment" | "loopback";
   /** The inbound wire, not the client product — see `surface`. */
   inboundProtocol?: "responses" | "chat" | "messages";
-  v2BridgeScope?: "root" | "child";
-  v2BridgeDecision?: "active" | "disabled" | "not_v2" | "non_native_route"
-    | "maintenance_turn" | "no_collaboration_catalog" | "combo" | "compaction" | "shadow_route";
-  v2BridgeStateDurability?: "standard" | "encrypted" | "memory-only";
-  /** Stable non-PII identity for the account that served this request. */
-  accountLogLabel?: string;
+  /** Stable non-PII identity for Codex Pool usage; absent for Direct/non-Codex traffic. */
+  accountLogLabel?: CodexUsageAccountLogLabel;
   /** Best-effort chat/session correlation for Logs grouping (#330). */
   conversationId?: string;
-  /** Protocol-only per-call progress counters; contains no text, arguments, or identifiers. */
-  turnProgress?: TurnProgressTelemetry;
   resolvedModel?: string;
   requestedModel?: string;
   /** Original bare helper model when the opt-in shadow-call route rewrote this request. */
@@ -196,19 +188,6 @@ const KNOWN_ADMISSION_KINDS = new Set<NonNullable<PersistedUsageEntry["admission
 const KNOWN_INBOUND_PROTOCOLS = new Set<NonNullable<PersistedUsageEntry["inboundProtocol"]>>([
   "responses", "chat", "messages",
 ]);
-const KNOWN_V2_BRIDGE_SCOPES = new Set<NonNullable<PersistedUsageEntry["v2BridgeScope"]>>(["root", "child"]);
-const KNOWN_V2_BRIDGE_DECISIONS = new Set<NonNullable<PersistedUsageEntry["v2BridgeDecision"]>>([
-  "active", "disabled", "not_v2", "non_native_route", "maintenance_turn",
-  "no_collaboration_catalog", "combo", "compaction", "shadow_route",
-]);
-const KNOWN_V2_BRIDGE_DURABILITIES = new Set<NonNullable<PersistedUsageEntry["v2BridgeStateDurability"]>>([
-  "standard", "encrypted", "memory-only",
-]);
-const KNOWN_AGENT_KINDS = new Set<AgentKind>(["main", "subagent", "internal"]);
-
-export function isKnownAgentKind(value: unknown): value is AgentKind {
-  return typeof value === "string" && KNOWN_AGENT_KINDS.has(value as AgentKind);
-}
 
 /** Same closed-set discipline as `isKnownUsageSurface`: an old or corrupted row
  *  carrying an unexpected value drops the field instead of poisoning the enum. */
@@ -218,18 +197,6 @@ export function isKnownAdmissionKind(value: unknown): value is NonNullable<Persi
 
 export function isKnownInboundProtocol(value: unknown): value is NonNullable<PersistedUsageEntry["inboundProtocol"]> {
   return typeof value === "string" && KNOWN_INBOUND_PROTOCOLS.has(value as NonNullable<PersistedUsageEntry["inboundProtocol"]>);
-}
-
-export function isKnownV2BridgeScope(value: unknown): value is NonNullable<PersistedUsageEntry["v2BridgeScope"]> {
-  return typeof value === "string" && KNOWN_V2_BRIDGE_SCOPES.has(value as NonNullable<PersistedUsageEntry["v2BridgeScope"]>);
-}
-
-export function isKnownV2BridgeDecision(value: unknown): value is NonNullable<PersistedUsageEntry["v2BridgeDecision"]> {
-  return typeof value === "string" && KNOWN_V2_BRIDGE_DECISIONS.has(value as NonNullable<PersistedUsageEntry["v2BridgeDecision"]>);
-}
-
-export function isKnownV2BridgeStateDurability(value: unknown): value is NonNullable<PersistedUsageEntry["v2BridgeStateDurability"]> {
-  return typeof value === "string" && KNOWN_V2_BRIDGE_DURABILITIES.has(value as NonNullable<PersistedUsageEntry["v2BridgeStateDurability"]>);
 }
 
 export function usageLogPath(configDir?: string): string {
@@ -302,17 +269,12 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "key-429",
   "rate-limit-429",
   "anthropic-oauth-429",
+  "oauth-account-429",
   "cursor-oauth-auth",
   "cursor-oauth-429",
-  "oauth-account-429",
   "image-413",
   "opaque-blob-rejection",
   "empty-completion",
-  "cursor-envelope-echo",
-  "cursor-routing-commentary",
-  "cursor-duplicate-tool-call",
-  "cursor-overflow-remint",
-  "cursor-invalid-argument",
 ]);
 const USAGE_STATUSES = new Set<UsageStatus>([
   "reported",
@@ -463,7 +425,7 @@ function normalizeUsageAttempt(raw: unknown): PersistedUsageAttempt | null {
     sendCount: attempt.sendCount as number,
     recoveryKinds,
     usageStatus: attempt.usageStatus as UsageStatus,
-    ...(isPersistableAccountLogLabel(attempt.accountLogLabel)
+    ...(isCodexUsageAccountLogLabel(attempt.accountLogLabel)
       ? { accountLogLabel: attempt.accountLogLabel }
       : {}),
     ...(isNonNegativeFiniteNumber(attempt.inputTokenEstimate)
@@ -516,64 +478,6 @@ function normalizedAttempts(raw: unknown): PersistedUsageAttempt[] {
     .filter((attempt): attempt is PersistedUsageAttempt => attempt !== null);
 }
 
-function normalizeTurnProgress(raw: unknown): TurnProgressTelemetry | undefined {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
-  const value = raw as Record<string, unknown>;
-  const integer = (key: keyof TurnProgressTelemetry): number | undefined => {
-    const candidate = value[key];
-    return typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0
-      ? candidate
-      : undefined;
-  };
-  const required = {
-    logicalCallOrdinal: integer("logicalCallOrdinal"),
-    consecutive429sBeforeCall: integer("consecutive429sBeforeCall"),
-    logicalCallsSinceToolCompletion: integer("logicalCallsSinceToolCompletion"),
-    textDeltaCount: integer("textDeltaCount"),
-    textBytes: integer("textBytes"),
-    commentaryTextBytes: integer("commentaryTextBytes"),
-    finalTextBytes: integer("finalTextBytes"),
-    thinkingDeltaCount: integer("thinkingDeltaCount"),
-    toolCallsStarted: integer("toolCallsStarted"),
-    toolCallsCompleted: integer("toolCallsCompleted"),
-    assistantBoundaries: integer("assistantBoundaries"),
-    terminalEvents: integer("terminalEvents"),
-  };
-  if (Object.values(required).some(candidate => candidate === undefined)) return undefined;
-  return {
-    logicalCallOrdinal: required.logicalCallOrdinal!,
-    consecutive429sBeforeCall: required.consecutive429sBeforeCall!,
-    logicalCallsSinceToolCompletion: required.logicalCallsSinceToolCompletion!,
-    textDeltaCount: required.textDeltaCount!,
-    textBytes: required.textBytes!,
-    commentaryTextBytes: required.commentaryTextBytes!,
-    finalTextBytes: required.finalTextBytes!,
-    preToolTextBytes: integer("preToolTextBytes") ?? 0,
-    thinkingDeltaCount: required.thinkingDeltaCount!,
-    toolCallsStarted: required.toolCallsStarted!,
-    toolCallsCompleted: required.toolCallsCompleted!,
-    assistantBoundaries: required.assistantBoundaries!,
-    terminalEvents: required.terminalEvents!,
-    ...(typeof value.exactOutputRepeat === "boolean" ? { exactOutputRepeat: value.exactOutputRepeat } : {}),
-    ...(typeof value.normalizedCommentaryRepeat === "boolean"
-      ? { normalizedCommentaryRepeat: value.normalizedCommentaryRepeat }
-      : {}),
-    ...(typeof value.normalizedPreToolTextRepeat === "boolean"
-      ? { normalizedPreToolTextRepeat: value.normalizedPreToolTextRepeat }
-      : {}),
-    ...(typeof value.repeatedPreToolNarration === "boolean"
-      ? { repeatedPreToolNarration: value.repeatedPreToolNarration }
-      : {}),
-    ...(typeof value.suppressedRepeatedPreToolText === "boolean"
-      ? { suppressedRepeatedPreToolText: value.suppressedRepeatedPreToolText }
-      : {}),
-    ...(typeof value.commentaryOnlyRound === "boolean" ? { commentaryOnlyRound: value.commentaryOnlyRound } : {}),
-    ...(typeof value.emptyProtocolRound === "boolean" ? { emptyProtocolRound: value.emptyProtocolRound } : {}),
-    ...(typeof value.rateLimitCircuitOpen === "boolean" ? { rateLimitCircuitOpen: value.rateLimitCircuitOpen } : {}),
-    ...(typeof value.repetitionCircuitOpen === "boolean" ? { repetitionCircuitOpen: value.repetitionCircuitOpen } : {}),
-  };
-}
-
 const MAX_METADATA_STRING_LEN = 64;
 function capMetadataString(s: string): string {
   return s.length > MAX_METADATA_STRING_LEN ? s.slice(0, MAX_METADATA_STRING_LEN) : s;
@@ -593,13 +497,11 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
   const routeDecision = entry.routeDecision
     ? normalizeRouteDecisionTrace(entry.routeDecision)
     : undefined;
-  const turnProgress = normalizeTurnProgress(entry.turnProgress);
   return {
     requestId: entry.requestId,
     timestamp: entry.timestamp,
     provider: entry.provider,
     model: entry.model,
-    ...(isKnownAgentKind(entry.agentKind) ? { agentKind: entry.agentKind } : {}),
     ...(isKnownUsageSurface(entry.surface) ? { surface: entry.surface } : {}),
     ...(typeof entry.apiKeyId === "string" && entry.apiKeyId.trim()
       // Deliberately NOT capped. `capMetadataString` protects free-form metadata
@@ -610,18 +512,12 @@ function normalizeUsageEntry(entry: PersistedUsageEntry): PersistedUsageEntry {
       : {}),
     ...(isKnownAdmissionKind(entry.admissionKind) ? { admissionKind: entry.admissionKind } : {}),
     ...(isKnownInboundProtocol(entry.inboundProtocol) ? { inboundProtocol: entry.inboundProtocol } : {}),
-    ...(isKnownV2BridgeScope(entry.v2BridgeScope) ? { v2BridgeScope: entry.v2BridgeScope } : {}),
-    ...(isKnownV2BridgeDecision(entry.v2BridgeDecision) ? { v2BridgeDecision: entry.v2BridgeDecision } : {}),
-    ...(isKnownV2BridgeStateDurability(entry.v2BridgeStateDurability)
-      ? { v2BridgeStateDurability: entry.v2BridgeStateDurability }
-      : {}),
-    ...(isPersistableAccountLogLabel(entry.accountLogLabel)
+    ...(isCodexUsageAccountLogLabel(entry.accountLogLabel)
       ? { accountLogLabel: entry.accountLogLabel }
       : {}),
     ...(typeof entry.conversationId === "string" && entry.conversationId.trim()
       ? { conversationId: entry.conversationId.trim().slice(0, 128) }
       : {}),
-    ...(turnProgress ? { turnProgress } : {}),
     ...(entry.resolvedModel ? { resolvedModel: entry.resolvedModel } : {}),
     ...(entry.requestedModel ? { requestedModel: entry.requestedModel } : {}),
     ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}),

@@ -21,7 +21,6 @@ import {
   setProviderQuotaBeforePublishForTests,
 } from "../../src/providers/quota";
 import type { OcxConfig } from "../../src/types";
-import { resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../../src/lib/provider-tls-profile";
 import { repoPath } from "../helpers/repo-root";
 const originalFetch = globalThis.fetch;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
@@ -88,15 +87,10 @@ beforeEach(() => {
   clearCodexUpstreamHealth();
   clearProviderQuotaCache();
   setProviderQuotaBeforePublishForTests(null);
-  setAntigravityAccountQuotaTransportForTests({
-    resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
-    pinnedPost: async () => new Response("not found", { status: 404 }),
-  });
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  resetProviderTlsProfileForTests();
   clearAccountQuota();
   clearProviderQuotaCache();
   setProviderQuotaBeforePublishForTests(null);
@@ -110,57 +104,6 @@ afterEach(() => {
 });
 
 describe("fetchProviderQuotaReports", () => {
-  test("Antigravity quota probes use the opt-in profiled executor", async () => {
-    await saveCredential("google-antigravity", {
-      access: "agy-access-secret",
-      refresh: "agy-refresh-secret",
-      expires: Date.now() + 3600_000,
-      projectId: "agy-project-secret",
-    });
-    let nativeCalls = 0;
-    let bunCalls = 0;
-    let project: string | undefined;
-    globalThis.fetch = (async () => {
-      bunCalls += 1;
-      return new Response(null, { status: 500 });
-    }) as typeof fetch;
-    setProviderTlsRuntimeForTest({
-      importWreq: async () => ({
-        createTransport: async () => ({ close: async () => undefined }),
-        fetch: async (_input, init) => {
-          nativeCalls += 1;
-          project = (JSON.parse(String(init?.body)) as { project?: string }).project;
-          return new Response(JSON.stringify({
-            models: {
-              "gemini-3.6-flash-medium": {
-                displayName: "Gemini 3.6 Flash",
-                quotaInfo: { remainingFraction: 0.64 },
-              },
-            },
-          }), { status: 200, headers: { "content-type": "application/json" } });
-        },
-      }),
-    });
-    const config: OcxConfig = {
-      defaultProvider: "google-antigravity",
-      providers: {
-        "google-antigravity": {
-          adapter: "google",
-          authMode: "oauth",
-          googleMode: "cloud-code-assist",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-          project: "configured-stale-project",
-          tlsProfile: "antigravity-browser",
-        },
-      },
-    } as OcxConfig;
-    const result = await fetchProviderQuotaReports(config, true);
-    expect(result.reports[0]?.provider).toBe("google-antigravity");
-    expect(project).toBe("agy-project-secret");
-    expect(nativeCalls).toBeGreaterThanOrEqual(1);
-    expect(bunCalls).toBe(0);
-  });
-
   test("provider quota probes have no direct Response.json calls", () => {
     const source = readFileSync(repoPath("src/providers/quota.ts"), "utf8");
     expect(source).not.toMatch(/\.\s*json\s*\(/);
@@ -268,16 +211,11 @@ describe("fetchProviderQuotaReports", () => {
       pinnedPost: async () => new Response("not found", { status: 404 }),
     });
 
-    const seen: { url: string; authorization?: string; body?: string; redirect?: RequestRedirect }[] = [];
+    const seen: { url: string; authorization?: string; body?: string }[] = [];
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const headers = init?.headers as Record<string, string> | undefined;
-      seen.push({
-        url,
-        authorization: headers?.Authorization,
-        body: typeof init?.body === "string" ? init.body : undefined,
-        redirect: init?.redirect,
-      });
+      seen.push({ url, authorization: headers?.Authorization, body: typeof init?.body === "string" ? init.body : undefined });
       if (url === "https://chatgpt.com/backend-api/wham/usage") {
         return new Response(JSON.stringify({
           email: "person@example.com",
@@ -407,46 +345,7 @@ describe("fetchProviderQuotaReports", () => {
     expect(seen.find(row => row.url.includes("anthropic.com"))?.authorization).toBe("Bearer claude-access-secret");
     expect(seen.find(row => row.url.includes("cloudcode-pa.googleapis.com"))?.authorization).toBe("Bearer agy-access-secret");
     expect(seen.find(row => row.url.includes("cloudcode-pa.googleapis.com"))?.body).toBe(JSON.stringify({ project: "agy-project-secret" }));
-    expect(seen.find(row => row.url.endsWith("/v1internal:fetchAvailableModels"))?.redirect).toBe("error");
     expect(seen.find(row => row.url === "https://api.kimi.com/coding/v1/usages")?.authorization).toBe("Bearer kimi-access-secret");
-  });
-
-  test("treats remainingPercentage as a percentage at values one and below", async () => {
-    await saveCredential("google-antigravity", {
-      access: "agy-access-secret",
-      refresh: "agy-refresh-secret",
-      expires: Date.now() + 3600_000,
-      projectId: "agy-project-secret",
-    });
-    const config = {
-      defaultProvider: "google-antigravity",
-      providers: {
-        "google-antigravity": {
-          adapter: "google",
-          authMode: "oauth",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-        },
-      },
-    } as OcxConfig;
-
-    for (const [remainingPercentage, expectedUsedPercentage] of [[1, 99], [0.75, 99.25], [75, 25]]) {
-      clearProviderQuotaCache();
-      globalThis.fetch = (async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.includes(":retrieveUserQuota")) return new Response("not found", { status: 404 });
-        if (url.endsWith("/v1internal:fetchAvailableModels")) {
-          return new Response(JSON.stringify({
-            models: {
-              "gemini-test": { quotaInfo: { remainingPercentage } },
-            },
-          }), { status: 200 });
-        }
-        return new Response("not found", { status: 404 });
-      }) as typeof fetch;
-
-      const result = await fetchProviderQuotaReports(config, true);
-      expect(result.reports[0]?.quota.customWindows?.[0]?.percent).toBe(expectedUsedPercentage);
-    }
   });
 
   function kimiOnlyConfig(baseUrl = "https://api.kimi.com/coding/v1"): OcxConfig {

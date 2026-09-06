@@ -1662,8 +1662,6 @@ describe("codex-auth API", () => {
       expect(quota).toMatchObject({
         weeklyPercent: 1,
         weeklyResetAt: 2_000_586_800,
-        fiveHourPercent: 0,
-        fiveHourResetAt: 2_000_000_000,
         shortPercent: 0,
         shortResetAt: 2_000_000_000,
         shortWindowSeconds: 18_000,
@@ -2056,7 +2054,7 @@ describe("codex-auth API", () => {
     await fetchStarted;
     const editedOnDisk = loadConfig();
     editedOnDisk.providers.custom!.note = "manual-disk-note";
-    writeFileSync(getConfigPath(), `${JSON.stringify(editedOnDisk, null, 2)}\n`);
+    saveConfig(editedOnDisk);
     releaseFetch();
     const resp = await pending;
     expect(resp!.status).toBe(200);
@@ -2085,7 +2083,7 @@ describe("codex-auth API", () => {
       injected = true;
       const concurrent = loadConfig();
       concurrent.providers.custom!.note = "concurrent-disk-note";
-      writeFileSync(getConfigPath(), `${JSON.stringify(concurrent, null, 2)}\n`);
+      saveConfig(concurrent);
     });
     globalThis.fetch = (async () => Response.json({
       plan_type: "prolite",

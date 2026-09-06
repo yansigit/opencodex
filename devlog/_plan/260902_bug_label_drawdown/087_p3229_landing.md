@@ -15,3 +15,4 @@
   without the guard; security file 14/14 again. This is exactly the "CI behind the work, repair
   as its own cycle" contract — the focused check on the next PR caught it before CI did.
 - Checks on the landed tip: recovery security 14 pass / 0 fail; typecheck; privacy.
+

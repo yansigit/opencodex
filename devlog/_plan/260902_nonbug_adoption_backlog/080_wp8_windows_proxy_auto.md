@@ -24,3 +24,4 @@ PAC/WPAD, ProxyOverride → NO_PROXY, periodic re-check, direct fallback, live m
 - `auto` + user env set → env untouched.
 - Parser unit cases: bare, `http=;https=`, `https=` only, `socks=` only, credentials stripped from log.
 - tsc, privacy, focused test file.
+

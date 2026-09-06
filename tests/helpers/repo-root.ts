@@ -1,12 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-const PACKAGE_NAMES = new Set(["@yansigit/opencodex", "@bitkyc08/opencodex"]);
+const PACKAGE_NAME = "@bitkyc08/opencodex";
 let cached: string | null = null;
-
-export function isRepoPackageName(name: unknown): boolean {
-  return typeof name === "string" && PACKAGE_NAMES.has(name);
-}
 
 /**
  * Repository root, found by walking up from this helper to the package.json that names
@@ -21,7 +17,7 @@ export function repoRoot(): string {
     const candidate = join(dir, "package.json");
     if (existsSync(candidate)) {
       const parsed = JSON.parse(readFileSync(candidate, "utf8")) as { name?: unknown };
-      if (isRepoPackageName(parsed.name)) {
+      if (parsed.name === PACKAGE_NAME) {
         cached = dir;
         return dir;
       }
@@ -30,7 +26,7 @@ export function repoRoot(): string {
     if (parent === dir) break;
     dir = parent;
   }
-  throw new Error(`tests/helpers/repo-root: opencodex package.json not found above ${import.meta.dir}`);
+  throw new Error(`tests/helpers/repo-root: package.json for ${PACKAGE_NAME} not found above ${import.meta.dir}`);
 }
 
 /** Absolute path under the repository, for source-oracle reads. */

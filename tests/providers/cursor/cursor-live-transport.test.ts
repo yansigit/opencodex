@@ -5,7 +5,7 @@ import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { afterEach, describe, expect, test } from "bun:test";
 import { createLiveCursorTransport, CursorMissingCredentialError, parseConnectEndStreamError, resolveCursorToken } from "../../../src/adapters/cursor/live-transport";
 import { createTestTranslatorBudget } from "../../helpers/translator-budget";
-import { CURSOR_EXTERNAL_ROOT_BLOB_LIMIT, CURSOR_EXTERNAL_ROOT_BYTE_LIMIT, externalToolContinuationText, prepareCursorRunRequest } from "../../../src/adapters/cursor/protobuf-request";
+import { CURSOR_EXTERNAL_ROOT_BLOB_LIMIT, CURSOR_EXTERNAL_ROOT_BYTE_LIMIT, CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT, prepareCursorRunRequest } from "../../../src/adapters/cursor/protobuf-request";
 import { estimateTokens } from "../../../src/lib/token-estimate";
 import type { OcxMessage } from "../../../src/types";
 import type { CursorRunRequest } from "../../../src/adapters/cursor/types";
@@ -42,9 +42,7 @@ function spawnTransportOwnedShell(sessionId: string) {
   let killCalls = 0;
   setBackgroundShellRuntimeForTests({
     spawn: (() => child as unknown as ChildProcessWithoutNullStreams) as typeof import("node:child_process").spawn,
-    platform: "win32",
     kill: () => { killCalls++; return true; },
-    killTree: () => { killCalls++; return true; },
   });
   backgroundShellSpawnExec(create(ExecServerMessageSchema, {
     id: 1,
@@ -443,11 +441,7 @@ describe("Cursor live transport context estimate wiring (#373)", () => {
     };
   }
 
-  function expectScreenshots(
-    capture: Awaited<ReturnType<typeof captureOpen>>,
-    images: Uint8Array[],
-    prefix = externalToolContinuationText(undefined, baseRequest.system),
-  ) {
+  function expectScreenshots(capture: Awaited<ReturnType<typeof captureOpen>>, images: Uint8Array[], prefix = CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT) {
     expect(capture.encoded).toBeInstanceOf(Uint8Array);
     const action = capture.run?.action?.action;
     if (action?.case !== "userMessageAction") throw new Error("expected active user action");
@@ -534,9 +528,7 @@ describe("Cursor live transport context estimate wiring (#373)", () => {
     const action = capture.run?.action?.action;
     if (modelId === "composer-2.5") {
       if (action?.case !== "userMessageAction") throw new Error("expected Composer continuation");
-      expect(action.value.userMessage?.text).toBe(
-        externalToolContinuationText(request.rawMessages, request.system),
-      );
+      expect(action.value.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
       expect(action.value.userMessage?.selectedContext?.selectedImages).toEqual([]);
     } else {
       expect(action?.case).toBe("resumeAction");

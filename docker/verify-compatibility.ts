@@ -3,21 +3,8 @@ import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { join, posix, resolve } from "node:path";
 
 // Match the canonical generator without importing any not-yet-verified source.
-const REQUIRED_COMPATIBILITY_FILES = [
-  ".dockerignore",
-  "Dockerfile",
-  "bun.lock",
-  "compose.yaml",
-  "docker/bootstrap-tls.ts",
-  "docker/bootstrap-token.ts",
-  "docker/config.json",
-  "docker/healthcheck.ts",
-  "docker/verify-compatibility.ts",
-  "package.json",
-  "scripts/model-metadata.source.json",
-];
+const REQUIRED_ROOT_FILES = ["package.json", "bun.lock", "scripts/model-metadata.source.json"];
 const MANIFEST_PATH = "src/generated/compatibility-version.json";
-const BUILD_CONTEXT_ONLY_FILES = new Set([".dockerignore", "Dockerfile", "compose.yaml"]);
 
 interface ManifestRow {
   path: string;
@@ -44,8 +31,7 @@ function parseRows(raw: unknown): ManifestRow[] {
     const path = row.path;
     if (!path || /[\\\0]/.test(path) || posix.normalize(path) !== path
       || path.split("/").some(part => !part || part === "." || part === "..")
-      || (!path.startsWith("src/") && !path.startsWith("docker/")
-        && !REQUIRED_COMPATIBILITY_FILES.includes(path))
+      || (!path.startsWith("src/") && !REQUIRED_ROOT_FILES.includes(path))
       || path === MANIFEST_PATH) {
       throw new Error(`Invalid compatibility manifest path: ${JSON.stringify(path)}`);
     }
@@ -71,26 +57,23 @@ function regularFile(root: string, path: string): string {
   return current;
 }
 
-function treeFiles(root: string, path: string, label: string): string[] {
+function sourceFiles(root: string, path = "src"): string[] {
   const stat = lstatSync(join(root, path));
-  if (stat.isSymbolicLink()) throw new Error(`Symlink in ${label} tree: ${JSON.stringify(path)}`);
+  if (stat.isSymbolicLink()) throw new Error(`Symlink in source tree: ${JSON.stringify(path)}`);
   if (stat.isFile()) return [path];
-  if (!stat.isDirectory()) throw new Error(`Non-regular ${label} entry: ${JSON.stringify(path)}`);
-  return readdirSync(join(root, path)).flatMap(name => treeFiles(root, `${path}/${name}`, label));
+  if (!stat.isDirectory()) throw new Error(`Non-regular source entry: ${JSON.stringify(path)}`);
+  return readdirSync(join(root, path)).flatMap(name => sourceFiles(root, `${path}/${name}`));
 }
 
-/** Validate a Git-free build snapshot against the host-generated tracked-authority manifest. */
-export function verifyCompatibilitySnapshot(
-  snapshotRoot: string,
-  options: { runtime?: boolean } = {},
-): void {
+/** Validate a Git-free build snapshot against the host-generated tracked-source manifest. */
+export function verifyCompatibilitySnapshot(snapshotRoot: string): void {
   const root = resolve(snapshotRoot);
   const stat = lstatSync(root);
   if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("Invalid compatibility snapshot root");
   const manifestFile = regularFile(root, MANIFEST_PATH);
   const rows = parseRows(JSON.parse(readFileSync(manifestFile, "utf8")));
   const expected = new Set(rows.map(row => row.path));
-  for (const required of REQUIRED_COMPATIBILITY_FILES) {
+  for (const required of REQUIRED_ROOT_FILES) {
     if (!expected.has(required)) throw new Error(`Missing required manifest entry: ${required}`);
   }
   if (!rows.some(row => row.path.startsWith("src/"))) {
@@ -98,18 +81,12 @@ export function verifyCompatibilitySnapshot(
   }
 
   // Inspect the full tree, including symlinks to files/directories not named in the manifest.
-  for (const path of treeFiles(root, "src", "source")) {
+  for (const path of sourceFiles(root)) {
     if (path !== MANIFEST_PATH && !expected.has(path)) {
       throw new Error(`Source file absent from compatibility manifest: ${JSON.stringify(path)}`);
     }
   }
-  for (const path of treeFiles(root, "docker", "container authority")) {
-    if (!expected.has(path)) {
-      throw new Error(`Container authority file absent from compatibility manifest: ${JSON.stringify(path)}`);
-    }
-  }
   for (const row of rows) {
-    if (options.runtime && BUILD_CONTEXT_ONLY_FILES.has(row.path)) continue;
     const bytes = readFileSync(regularFile(root, row.path));
     const actual = createHash("sha256").update(bytes).digest("hex");
     if (actual !== row.sha256) {
@@ -119,7 +96,5 @@ export function verifyCompatibilitySnapshot(
 }
 
 if (import.meta.main) {
-  const runtime = process.argv.includes("--runtime");
-  const rootArg = process.argv.slice(2).find(arg => arg !== "--runtime");
-  verifyCompatibilitySnapshot(rootArg ?? resolve(import.meta.dir, ".."), { runtime });
+  verifyCompatibilitySnapshot(process.argv[2] ?? resolve(import.meta.dir, ".."));
 }

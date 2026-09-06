@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 import {
   classifyCodexUpstreamOutcome,
   clearCodexUpstreamHealth,
@@ -19,17 +19,13 @@ import { fetchWithResetRetry, fetchWithTransientRetry } from "../../src/lib/upst
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { getConfigPath } from "../../src/config";
 import type { OcxConfig } from "../../src/types";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync} from "node:fs";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 
-let TEST_DIR = "";
+const TEST_DIR = join(import.meta.dir, ".tmp-issue-914-test");
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -62,9 +58,8 @@ function makeTwoAccountConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
 beforeEach(() => {
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-issue-914-transport-"));
+  removeTreeWithRetry(TEST_DIR);
+  mkdirSync(TEST_DIR, { recursive: true });
   process.env.OPENCODEX_HOME = TEST_DIR;
   process.env.CODEX_HOME = TEST_DIR;
   clearCodexUpstreamHealth();
@@ -72,20 +67,13 @@ beforeEach(() => {
   clearUpstreamHostHealth();
 });
 
-afterEach(async () => {
-  clearCodexUpstreamHealth();
-  clearThreadAccountMap();
-  clearUpstreamHostHealth();
-  await flushConfigDirHardeningForTests();
-  setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
+function restoreEnv(): void {
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
-  if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
-  TEST_DIR = "";
-});
+  removeTreeWithRetry(TEST_DIR);
+}
 
 function coded(message: string, code: string): Error {
   return Object.assign(new Error(message), { code });
@@ -93,53 +81,65 @@ function coded(message: string, code: string): Error {
 
 describe("issue #914 — pre-connection failures never touch account health", () => {
   test("three concurrent neutral failures leave streak, affinity, and active account untouched", () => {
-    const config = makeTwoAccountConfig({ upstreamFailoverThreshold: 3 });
-    expect(getConfigPath().startsWith(TEST_DIR)).toBe(true);
-    // Pin the thread to account A the way a real continue would.
-    resolveCodexAccountForThread(config, "thread-914", { now: Date.now() });
-    expect(getEffectiveActiveCodexAccountId(config)).toBe("a");
+    try {
+      const config = makeTwoAccountConfig({ upstreamFailoverThreshold: 3 });
+      expect(getConfigPath().startsWith(TEST_DIR)).toBe(true);
+      // Pin the thread to account A the way a real continue would.
+      resolveCodexAccountForThread(config, "thread-914", { now: Date.now() });
+      expect(getEffectiveActiveCodexAccountId(config)).toBe("a");
 
-    const hostKey = upstreamHostHealthKey("openai", "chatgpt.com");
-    for (let i = 0; i < 3; i++) {
-      recordCodexUpstreamOutcome(config, "a", "connect_neutral", {
-        threadId: "thread-914",
-        hostKey,
-        lastFailureCode: "ECONNREFUSED",
-      });
+      const hostKey = upstreamHostHealthKey("openai", "chatgpt.com");
+      for (let i = 0; i < 3; i++) {
+        recordCodexUpstreamOutcome(config, "a", "connect_neutral", {
+          threadId: "thread-914",
+          hostKey,
+          lastFailureCode: "ECONNREFUSED",
+        });
+      }
+
+      // No account evidence at the failover threshold: no streak, no soft-avoid,
+      // no affinity loss, no rotation. The host ledger carries the failure instead.
+      expect(getCodexUpstreamHealth("a")).toBeNull();
+      expect(isCodexAccountSoftAvoided("a")).toBe(false);
+      expect(getEffectiveActiveCodexAccountId(config)).toBe("a");
+      expect(getUpstreamHostHealth(hostKey)).toMatchObject({ consecutiveFailures: 3, lastFailureCode: "ECONNREFUSED" });
+    } finally {
+      restoreEnv();
     }
-
-    // No account evidence at the failover threshold: no streak, no soft-avoid,
-    // no affinity loss, no rotation. The host ledger carries the failure instead.
-    expect(getCodexUpstreamHealth("a")).toBeNull();
-    expect(isCodexAccountSoftAvoided("a")).toBe(false);
-    expect(getEffectiveActiveCodexAccountId(config)).toBe("a");
-    expect(getUpstreamHostHealth(hostKey)).toMatchObject({ consecutiveFailures: 3, lastFailureCode: "ECONNREFUSED" });
   });
 
   test("a relayed 3xx is the neutral class: no account and no host evidence", () => {
-    const config = makeTwoAccountConfig();
-    for (const status of [301, 302, 307, 308]) {
-      expect(classifyCodexUpstreamOutcome(status)).toBe("neutral");
-      recordCodexUpstreamOutcome(config, "a", status);
+    try {
+      const config = makeTwoAccountConfig();
+      for (const status of [301, 302, 307, 308]) {
+        expect(classifyCodexUpstreamOutcome(status)).toBe("neutral");
+        recordCodexUpstreamOutcome(config, "a", status);
+      }
+      expect(getCodexUpstreamHealth("a")).toBeNull();
+      expect(isCodexAccountSoftAvoided("a")).toBe(false);
+      expect(getUpstreamHostHealth(upstreamHostHealthKey("openai", "chatgpt.com"))).toBeNull();
+    } finally {
+      restoreEnv();
     }
-    expect(getCodexUpstreamHealth("a")).toBeNull();
-    expect(isCodexAccountSoftAvoided("a")).toBe(false);
-    expect(getUpstreamHostHealth(upstreamHostHealthKey("openai", "chatgpt.com"))).toBeNull();
   });
 
   test("mixed evidence: 503 then a reachability rejection stays account-attributed", async () => {
-    const config = makeTwoAccountConfig({ upstreamFailoverThreshold: 1 });
-    let calls = 0;
-    const rejection = coded("refused", "ECONNREFUSED");
-    const outcome = classifyTransportFailureKind(await fetchWithTransientRetry(async () => {
-      calls++;
-      if (calls === 1) return new Response("gw", { status: 503 });
-      throw rejection;
-    }, { slowAttemptMs: 60_000, replayTransientFailures: true }).catch(err => err));
-    expect(calls).toBe(2);
-    expect(outcome).toBe("connect_error");
-    recordCodexUpstreamOutcome(config, "a", outcome, { threadId: "t-mixed" });
-    expect(getCodexUpstreamHealth("a")).toMatchObject({ consecutiveFailures: 1 });
+    try {
+      const config = makeTwoAccountConfig({ upstreamFailoverThreshold: 1 });
+      let calls = 0;
+      const rejection = coded("refused", "ECONNREFUSED");
+      const outcome = classifyTransportFailureKind(await fetchWithTransientRetry(async () => {
+        calls++;
+        if (calls === 1) return new Response("gw", { status: 503 });
+        throw rejection;
+      }, { slowAttemptMs: 60_000 }).catch(err => err));
+      expect(calls).toBe(2);
+      expect(outcome).toBe("connect_error");
+      recordCodexUpstreamOutcome(config, "a", outcome, { threadId: "t-mixed" });
+      expect(getCodexUpstreamHealth("a")).toMatchObject({ consecutiveFailures: 1 });
+    } finally {
+      restoreEnv();
+    }
   });
 
   test("mixed evidence: a reset then a reachability rejection stays account-attributed", async () => {

@@ -11,7 +11,6 @@ import StorageWorkspace, {
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton, DataSurfaceStatus } from "../components/data-surface";
-import { useModalDialog } from "./dashboard-shared";
 
 
 interface CleanupPreview {
@@ -119,9 +118,8 @@ function ArchivedCleanupPanel({
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const busyRef = useRef(false);
-  const dialogTriggerRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useModalDialog(confirmOpen, dialogTriggerRef);
 
   const closeConfirm = useCallback((clearPreview = false) => {
     setConfirmOpen(false);
@@ -135,8 +133,17 @@ function ArchivedCleanupPanel({
 
   useEffect(() => {
     if (!confirmOpen) return;
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
     cancelRef.current?.focus();
-  }, [confirmOpen]);
+    const onKey = (e: WindowEventMap["keydown"]) => {
+      if (e.key === "Escape" && !busyRef.current) closeConfirm();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previousFocusRef.current?.focus();
+    };
+  }, [confirmOpen, closeConfirm]);
 
   const mapCleanupError = (code: string | undefined, fallback?: string, trashDir?: string) => {
     switch (code) {
@@ -262,10 +269,7 @@ function ArchivedCleanupPanel({
             </button>
           ))}
         </div>
-        <button type="button" className="btn btn-sm" disabled={busy} onClick={event => {
-          dialogTriggerRef.current = event.currentTarget;
-          void runPreview();
-        }}>
+        <button type="button" className="btn btn-sm" disabled={busy} onClick={() => void runPreview()}>
           {t("storage.cleanup.preview")}
         </button>
       </div>
@@ -274,16 +278,13 @@ function ArchivedCleanupPanel({
       {error && !confirmOpen && <p className="storage-manual-panel__status" style={{ color: "var(--red)" }}>{error}</p>}
 
       {confirmOpen && preview && (
-        <dialog
-          ref={dialogRef}
+        <div
           className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
           aria-labelledby="storage-cleanup-confirm-title"
-          onCancel={event => {
-            event.preventDefault();
-            if (!busyRef.current) closeConfirm();
-          }}
+          onClick={() => !busy && closeConfirm()}
         >
-          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={busy} onClick={() => closeConfirm()} />
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <h3 id="storage-cleanup-confirm-title">{t("storage.cleanup.confirmTitle")}</h3>
             <p>
@@ -336,7 +337,7 @@ function ArchivedCleanupPanel({
               </button>
             </div>
           </div>
-        </dialog>
+        </div>
       )}
     </section>
   );
@@ -362,9 +363,8 @@ function QuarantineTrashPanel({
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const busyRef = useRef(false);
-  const dialogTriggerRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useModalDialog(confirmEntry !== null, dialogTriggerRef);
 
   useEffect(() => {
     busyRef.current = busy;
@@ -374,8 +374,17 @@ function QuarantineTrashPanel({
 
   useEffect(() => {
     if (!confirmEntry) return;
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
     cancelRef.current?.focus();
-  }, [confirmEntry]);
+    const onKey = (e: WindowEventMap["keydown"]) => {
+      if (e.key === "Escape" && !busyRef.current) closeConfirm();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previousFocusRef.current?.focus();
+    };
+  }, [confirmEntry, closeConfirm]);
 
   const loadTrash = useCallback(async (signal: AbortSignal): Promise<TrashEntry[]> => {
     const res = await fetch(`${apiBase}/api/storage/trash`, { signal });
@@ -500,8 +509,7 @@ function QuarantineTrashPanel({
                       type="button"
                       className="btn btn-sm"
                       disabled={busy}
-                      onClick={event => {
-                        dialogTriggerRef.current = event.currentTarget;
+                      onClick={() => {
                         setError(null);
                         setConfirmEntry(entry);
                       }}
@@ -517,16 +525,13 @@ function QuarantineTrashPanel({
       )}
 
       {confirmEntry && (
-        <dialog
-          ref={dialogRef}
+        <div
           className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
           aria-labelledby="storage-trash-confirm-title"
-          onCancel={event => {
-            event.preventDefault();
-            if (!busyRef.current) closeConfirm();
-          }}
+          onClick={() => !busy && closeConfirm()}
         >
-          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={busy} onClick={() => closeConfirm()} />
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <h3 id="storage-trash-confirm-title">{t("storage.trash.confirmTitle")}</h3>
             <p>
@@ -557,7 +562,7 @@ function QuarantineTrashPanel({
               </button>
             </div>
           </div>
-        </dialog>
+        </div>
       )}
     </section>
   );

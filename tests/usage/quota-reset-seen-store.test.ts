@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../../src/config";
-import { detectQuotaReset, type QuotaResetEvent } from "../../src/quota/reset-detector";
+import type { QuotaResetEvent } from "../../src/quota/reset-detector";
 import {
   claimCountForTests,
   claimQuotaReset,
@@ -186,37 +186,6 @@ describe("quota reset claim store", () => {
 });
 
 describe("the observed-window map evicts the least recently observed row", () => {
-  test("hydrates persisted Codex epoch-second baselines in milliseconds", () => {
-    const path = join(getConfigDir(), "quota-reset-state.json");
-    const futureResetMs = NOW + 5 * 60 * 60_000;
-    const previousObservedAt = NOW - 60_000;
-    writeFileSync(path, JSON.stringify({
-      version: 1,
-      claims: {},
-      events: [],
-      observed: {
-        ["codex\u0000legacy00"]: [{
-          window: "5h",
-          percent: 96,
-          resetAt: futureResetMs / 1000,
-          observedAt: previousObservedAt,
-        }],
-      },
-    }));
-    resetQuotaResetStoreForTests();
-
-    const next = { window: "5h", percent: 96, resetAt: futureResetMs + 60_000 } as const;
-    const previous = swapLastObservedWindows("codex", "legacy00", [next]);
-    expect(previous?.[0]?.resetAt).toBe(futureResetMs);
-    expect(detectQuotaReset({
-      scope: "codex",
-      accountTag: "legacy00",
-      previous: previous?.[0],
-      next,
-      now: NOW,
-    })).toBeNull();
-  });
-
   test("a continuously observed scope survives 64 newcomers", () => {
     // The bound is 64 rows. Re-setting an existing key does NOT move it in a Map, so before
     // the delete-then-set fix the EARLIEST-INSERTED row was evicted — which on a real install

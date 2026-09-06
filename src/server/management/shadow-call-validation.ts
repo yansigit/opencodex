@@ -1,13 +1,11 @@
 import { shadowCallTargetsIntersect, shadowSourceModels } from "../../lib/shadow-call";
-import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
+import { OPENAI_CODEX_PROVIDER_ID } from "../../providers/openai-tiers";
 import { routeConcreteModel, routeModel } from "../../router";
 import type { OcxConfig } from "../../types";
 
 /** Validate a prospective persisted shadow-call target against its resolved source identities. */
 export function shadowCallTargetError(config: OcxConfig, targetModel: string | undefined): string | null {
   if (!targetModel) return null;
-  const openai = config.providers[OPENAI_CODEX_PROVIDER_ID];
-  if (openai && !isCanonicalOpenAiForwardProvider(openai)) return null;
 
   let target;
   try {

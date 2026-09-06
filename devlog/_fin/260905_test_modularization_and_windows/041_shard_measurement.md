@@ -37,3 +37,4 @@ Windows shards were not part of this measurement; `platform-windows` stays
 Met: shard count on macOS 1 -> 2, measured per-job critical path 14.9 -> 7.6
 min, wall on an unqueued run 15.4 -> 9.4 min, unsharded whole-pool control
 preserved on `workflow_dispatch` (`lane=macos-control`, run 33904336284 green).
+

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { parseRequest } from "../../src/responses/parser";
 import { planWebSearch, shouldResolveOpenAiWebSearchSidecar, webSearchStallTimeoutSec } from "../../src/web-search";
 import { runWithWebSearch as runWithWebSearchProduction, type WebSearchLoopDeps } from "../../src/web-search/loop";
@@ -13,8 +13,20 @@ import type { AdapterFetchContext, ProviderAdapter } from "../../src/adapters/ba
 import type { OcxMessage, OcxParsedRequest } from "../../src/types";
 import { fakeChatGptJwt } from "../helpers/fake-chatgpt-jwt";
 import { createTestTranslatorBudget } from "../helpers/translator-budget";
-import { getDebugLogEntries, resetDebugLogBufferForTests } from "../../src/lib/debug-log-buffer";
-import { resetDebugSettingsForTests } from "../../src/lib/debug-settings";
+import { withUpstreamHttpVersion } from "../../src/lib/upstream-http-version";
+
+/**
+ * Wrap a fetch so it applies the provider's HTTP-version pin the way `providerFetch` does in
+ * production. The reset-recovery tests need a provider-scoped executor that pins a protocol, so the
+ * composition order in the loop leg is observable without standing up the whole server path.
+ */
+function withUpstreamHttpVersionExecutor(
+  inner: typeof globalThis.fetch,
+  provider: Pick<OcxProviderConfig, "upstreamHttpVersion">,
+): typeof globalThis.fetch {
+  return ((input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
+    inner(input, withUpstreamHttpVersion(input, init, provider))) as typeof globalThis.fetch;
+}
 
 /** Run the web-search loop with a default test translator budget. */
 function runWithWebSearch(
@@ -384,46 +396,7 @@ describe("web-search sidecar planning", () => {
 });
 
 const originalFetch = globalThis.fetch;
-const originalDebug = process.env.OCX_DEBUG;
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-  resetDebugSettingsForTests();
-  resetDebugLogBufferForTests();
-  if (originalDebug === undefined) delete process.env.OCX_DEBUG;
-  else process.env.OCX_DEBUG = originalDebug;
-});
-
-test("routed web-search streams carry adapter and bridge diagnostics", async () => {
-  process.env.OCX_DEBUG = "1";
-  const error = spyOn(console, "error").mockImplementation(() => {});
-  try {
-    const adapter: ProviderAdapter = {
-      name: "diagnostic-search",
-      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
-      fetchResponse: async () => new Response("wire", { status: 200 }),
-      async *parseStream() {
-        yield { type: "text_delta", text: "search diagnostic secret" };
-        yield { type: "done" };
-      },
-    };
-    const response = await runWithWebSearch({
-      parsed: parseRequest({ model: "routed/model", input: "hi", stream: true, tools: [{ type: "web_search" }] }),
-      adapter,
-      forwardProvider,
-      hostedTool: { type: "web_search" },
-      selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
-      maxSearches: 1,
-      diagnostic: { requestId: "search-diagnostic", adapterName: "diagnostic-search" },
-    });
-    await response.text();
-    const lines = getDebugLogEntries().map(entry => entry.line);
-    expect(lines.some(line => line.includes('"stage":"adapter"') && line.includes('"eventType":"text_delta"'))).toBe(true);
-    expect(lines.some(line => line.includes('"stage":"bridge"') && line.includes('"eventType":"text_delta"'))).toBe(true);
-  } finally {
-    error.mockRestore();
-  }
-});
+afterEach(() => { globalThis.fetch = originalFetch; });
 
 test("issue #2885 — Zhipu-shaped web-search routing preserves the provider HTTP version pin", async () => {
   let routedProtocol: string | undefined;
@@ -2140,30 +2113,20 @@ describe("web-search batched sources -> url_citation annotations", () => {
 });
 
 describe("web-search stall deadline", () => {
-  function sidecar(headers: Headers) {
-    return {
-      providerName: "openai" as const,
-      provider: forwardProvider,
-      accountMode: "direct" as const,
-      authContext: { kind: "main" as const, accountId: null },
-      headers,
-    };
-  }
-
   test("planWebSearch computes the effective stall deadline covering bounded silent units", () => {
     const parsed = parsedWithWebSearch();
     const auth = new Headers({ authorization: "Bearer chatgpt" });
     // defaults: max(300 bridge, connect 200s, sidecar 200s) + 30 margin
-    expect(planWebSearch(config(), parsed, false, routedProvider, "model", sidecar(auth))?.stallTimeoutSec).toBe(330);
+    expect(planWebSearch(config(), parsed, false, auth, routedProvider, "model")?.stallTimeoutSec).toBe(330);
     // a larger user-configured stallTimeoutSec dominates
-    expect(planWebSearch(config({ stallTimeoutSec: 600 }), parsed, false, routedProvider, "model", sidecar(auth))?.stallTimeoutSec).toBe(630);
+    expect(planWebSearch(config({ stallTimeoutSec: 600 }), parsed, false, auth, routedProvider, "model")?.stallTimeoutSec).toBe(630);
     // small unit budgets -> the bridge's 300s default dominates
     expect(planWebSearch(
       config({
         connectTimeoutMs: 30_000,
         webSearchSidecar: { timeoutMs: 30_000, routedModelStallTimeoutMs: 30_000 },
       }),
-      parsed, false, routedProvider, "model", sidecar(auth),
+      parsed, false, auth, routedProvider, "model",
     )?.stallTimeoutSec).toBe(330);
   });
 
@@ -2179,12 +2142,12 @@ describe("web-search stall deadline", () => {
     const auth = new Headers({ authorization: "Bearer chatgpt" });
     // With no explicit webSearchSidecar.timeoutMs, the plan must carry the lowered 60s default so
     // an unavailable/limit-exhausted backend degrades within ~1 min instead of the old 200s hang.
-    const plan = planWebSearch(config(), parsed, false, routedProvider, "model", sidecar(auth));
+    const plan = planWebSearch(config(), parsed, false, auth, routedProvider, "model");
     expect(plan?.settings.timeoutMs).toBe(60_000);
     // An explicit override still wins.
     const overridden = planWebSearch(
       config({ webSearchSidecar: { timeoutMs: 90_000 } }),
-      parsed, false, routedProvider, "model", sidecar(auth),
+      parsed, false, auth, routedProvider, "model",
     );
     expect(overridden?.settings.timeoutMs).toBe(90_000);
   });
@@ -2570,32 +2533,122 @@ describe("web-search sidecar live streaming (streamRoutedModelOutput)", () => {
   });
 });
 
-describe("Antigravity sidecar accountId", () => {
-  test("forwards AdapterFetchContext.accountId to fetchResponse", async () => {
-    let received: string | undefined;
-    const adapter: ProviderAdapter = {
-      name: "antigravity-sidecar",
-      buildRequest: () => ({ url: "https://routed.test/v1", method: "POST", headers: {}, body: "{}" }),
-      fetchResponse: async (_request, ctx) => {
-        received = ctx?.accountId;
-        return new Response("wire", { status: 200 });
-      },
-      async *parseStream() {
-        yield { type: "text_delta", text: "ok" };
-        yield { type: "done" };
-      },
+describe("connection-reset recovery parity on the web-search legs", () => {
+  const originalGlobalFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = originalGlobalFetch; });
+
+  /** Bun's reset rejection shape, as matched by isConnectionResetError. */
+  function bunResetError(): Error {
+    return new Error("The socket connection was closed unexpectedly. For more information, pass `verbose: true` in the second argument to fetch()");
+  }
+
+  type Observed = { keepalive: unknown; connection: string | null; protocol: string | undefined; body: unknown; redirect: string | undefined };
+
+  function observe(init: RequestInit | undefined): Observed {
+    const withExtras = init as (RequestInit & { keepalive?: unknown; protocol?: string }) | undefined;
+    return {
+      keepalive: withExtras?.keepalive,
+      connection: new Headers(init?.headers).get("connection"),
+      protocol: withExtras?.protocol,
+      body: init?.body,
+      redirect: init?.redirect,
     };
+  }
+
+  test("the sidecar leg replays a reset on a fresh connection while keeping the provider HTTP version pin", async () => {
+    const attempts: Observed[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      attempts.push(observe(init));
+      if (attempts.length === 1) throw bunResetError();
+      return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+    }) as typeof fetch;
+
+    await runOpenAiWebSearch(
+      "current docs",
+      { type: "web_search" },
+      {
+        adapter: "openai-responses",
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        authMode: "forward",
+        codexAccountMode: "direct",
+        upstreamHttpVersion: "http1.1",
+      },
+      new Headers({ authorization: "Bearer selected-token" }),
+      { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 1_000 },
+    );
+
+    expect(attempts.length).toBe(2);
+    // The first attempt must NOT force a fresh connection: pooling is the normal, faster path.
+    expect(attempts[0]!.keepalive).toBeUndefined();
+    expect(attempts[0]!.connection).toBeNull();
+    // The replay must leave the half-closed pooled socket. `keepalive: false` is the field that
+    // actually does it — Bun has ignored a bare `Connection: close` (oven-sh/bun#20492) — so
+    // assert both rather than treating the header as sufficient.
+    expect(attempts[1]!.keepalive).toBe(false);
+    expect(attempts[1]!.connection).toBe("close");
+    // Composition order guard: recovery must not displace the protocol pin, or a user who set
+    // http1.1 to work around a transport failure loses it on exactly the retry that needs it.
+    expect(attempts[0]!.protocol).toBe("http1.1");
+    expect(attempts[1]!.protocol).toBe("http1.1");
+    // Credential-boundary and replayability fields survive the composition.
+    expect(attempts[1]!.redirect).toBe("manual");
+    expect(typeof attempts[1]!.body).toBe("string");
+  });
+
+  test("the routed loop leg replays a reset on a fresh connection through the provider-scoped fetch", async () => {
+    const attempts: Observed[] = [];
+    const routedProvider: OcxProviderConfig = {
+      adapter: "openai-chat",
+      baseUrl: "https://routed.test/v1",
+      apiKey: "routed-key",
+      upstreamHttpVersion: "http1.1",
+    };
+    const providerScopedFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      attempts.push(observe(init));
+      if (attempts.length === 1) throw bunResetError();
+      return new Response(
+        'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":null}]}\n\n'
+          + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+          + "data: [DONE]\n\n",
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    }) as typeof fetch;
+    globalThis.fetch = (async () => {
+      throw new Error("the routed leg must use the provider-scoped fetch, not the global one");
+    }) as typeof fetch;
+
+    const parsed = parseRequest({ model: "routed/model", input: "search please", stream: true });
     const response = await runWithWebSearch({
-      parsed: parseRequest({ model: "routed/model", input: "hi", stream: true, tools: [{ type: "web_search" }] }),
-      adapter,
-      accountId: "antigravity-account-a",
-      forwardProvider,
+      parsed,
+      adapter: createOpenAIChatAdapter(routedProvider),
       hostedTool: { type: "web_search" },
-      selectedForwardHeaders: new Headers({ authorization: "Bearer token" }),
-      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 30_000 },
+      settings: { model: "gpt-5.6-luna", reasoning: "low", timeoutMs: 1_000 },
       maxSearches: 1,
+      selectedForwardHeaders: new Headers(),
+      forwardProvider: {
+        adapter: "openai-responses",
+        baseUrl: "https://chatgpt.com/backend-api/codex",
+        authMode: "forward",
+        codexAccountMode: "direct",
+      },
+      incomingMeta: {
+        headers: new Headers(),
+        translatorBudget: createTestTranslatorBudget(),
+        providerFetch: withUpstreamHttpVersionExecutor(providerScopedFetch, routedProvider),
+      },
     });
+
+    expect(response.status).toBe(200);
     await response.text();
-    expect(received).toBe("antigravity-account-a");
+    expect(attempts.length).toBeGreaterThanOrEqual(2);
+    expect(attempts[0]!.keepalive).toBeUndefined();
+    expect(attempts[0]!.connection).toBeNull();
+    expect(attempts[1]!.keepalive).toBe(false);
+    expect(attempts[1]!.connection).toBe("close");
+    expect(attempts[1]!.protocol).toBe("http1.1");
+    // The loop sets accept-encoding: identity so raw byte progress stays observable; the recovery
+    // helper clones headers into a Headers instance and must not drop it.
+    expect(typeof attempts[1]!.body).toBe("string");
   });
 });
+

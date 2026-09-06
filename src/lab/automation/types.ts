@@ -53,7 +53,6 @@ export interface PlannedLabRunV1 {
   eligibleAt: number;
   providerName?: string;
   modelId?: string;
-  oracleRunId?: string;
 }
 
 export type LabAutomationRunState =
@@ -90,7 +89,6 @@ export interface LabAutomationRunRecordV1 {
   terminalCode?: string;
   providerName?: string;
   modelId?: string;
-  oracleRunId?: string;
 }
 
 export interface LabAutomationRouteRefV1 {

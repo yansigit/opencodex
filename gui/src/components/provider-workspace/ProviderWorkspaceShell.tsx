@@ -45,7 +45,6 @@ export type AddProviderIntent = { tier?: "accounts" | "free" | "paid"; custom?: 
 export interface DetailSlotData {
   usageTotals?: import("./types").ProviderUsageTotals;
   modelUsage?: ProviderModelUsageRow[];
-  accountUsage?: import("./types").ProviderAccountUsageRow[];
   quotaReport?: ProviderQuotaReportView;
   availableModels: string[];
   /** Did the last successful discovery return rows? Server-reported, never inferred. */
@@ -157,9 +156,6 @@ export default function ProviderWorkspaceShell({
   const [usageModels, setUsageModels] = useState<Record<string, ProviderModelUsageRow[]>>(() => (
     readSessionListCache<{ models: Record<string, ProviderModelUsageRow[]> }>(usageCacheKey)?.models ?? {}
   ));
-  const [usageAccounts, setUsageAccounts] = useState<Record<string, import("./types").ProviderAccountUsageRow[]>>(() => (
-    readSessionListCache<{ accounts: Record<string, import("./types").ProviderAccountUsageRow[]> }>(usageCacheKey)?.accounts ?? {}
-  ));
   const [quotaReports, setQuotaReports] = useState<Record<string, ProviderQuotaReportView>>(() => (
     readFreshQuotaReportCache(quotasCacheKey) ?? {}
   ));
@@ -229,7 +225,7 @@ export default function ProviderWorkspaceShell({
   useEffect(() => {
     let cancelled = false;
     const timeout = window.setTimeout(() => {
-      const data = usageResource.data as { providers?: Array<{ provider: string; requests: number; totalTokens?: number }>; models?: Array<ProviderModelUsageRow & { provider: string }>; accounts?: Array<{ accountLogLabel: string; provider?: string; requests: number; totalTokens: number; estimatedCostUsd?: number }> } | undefined;
+      const data = usageResource.data as { providers?: Array<{ provider: string; requests: number; totalTokens?: number }>; models?: Array<ProviderModelUsageRow & { provider: string }> } | undefined;
       if (cancelled) return;
       if (!data) {
         if (usageResource.loading) setUsageLoading(!readSessionListCache(usageCacheKey));
@@ -239,20 +235,7 @@ export default function ProviderWorkspaceShell({
       setUsageTotals(byProvider);
       const byProviderModels = buildProviderModelUsage(data.models ?? [], byProvider);
       setUsageModels(byProviderModels);
-      const byProviderAccounts: Record<string, import("./types").ProviderAccountUsageRow[]> = {};
-      for (const a of data.accounts ?? []) {
-        const key = a.provider ?? "openai";
-        if (!byProviderAccounts[key]) byProviderAccounts[key] = [];
-        byProviderAccounts[key].push({
-          accountLogLabel: a.accountLogLabel,
-          provider: a.provider,
-          requests: a.requests,
-          totalTokens: a.totalTokens,
-          ...(a.estimatedCostUsd !== undefined ? { estimatedCostUsd: a.estimatedCostUsd } : {}),
-        });
-      }
-      setUsageAccounts(byProviderAccounts);
-      writeSessionListCache(usageCacheKey, { totals: byProvider, models: byProviderModels, accounts: byProviderAccounts });
+      writeSessionListCache(usageCacheKey, { totals: byProvider, models: byProviderModels });
       setUsageLoading(false);
     }, 0);
     return () => { cancelled = true; window.clearTimeout(timeout); };
@@ -577,7 +560,7 @@ export default function ProviderWorkspaceShell({
           })}
         </div>
         </aside>
-        <section className="pws-main" aria-label={t("pws.workspaceMainAria")}>
+        <main className="pws-main" aria-label={t("pws.workspaceMainAria")}>
         {jsonEditor?.open ? (
           <ProviderJsonEditor
             editor={jsonEditor}
@@ -589,7 +572,6 @@ export default function ProviderWorkspaceShell({
           detail?.(selectedItem, {
             usageTotals: usageTotals[selectedItem.name],
             modelUsage: usageModels[selectedItem.name],
-            accountUsage: usageAccounts[selectedItem.name],
             quotaReport: quotaReports[selectedItem.name],
             availableModels: modelSnapshot?.selection.available[selectedItem.name] ?? [],
             hasLiveModels: (modelSnapshot?.selection.liveModelCounts[selectedItem.name] ?? 0) > 0,
@@ -621,7 +603,7 @@ export default function ProviderWorkspaceShell({
             {...(onRefreshAllQuotas ? { onRefreshAllQuotas } : {})}
           />
         )}
-        </section>
+        </main>
       </div>
     </div>
   );

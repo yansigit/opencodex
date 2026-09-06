@@ -53,7 +53,7 @@ function init(input = "first", signal?: AbortSignal): RequestInit {
 
 const fallback = (async () => { throw new Error("unexpected HTTP fallback"); }) as typeof fetch;
 const request = (options = init(), guard?: (headers: Headers) => void) =>
-  codexWsUpstreamFetch(URL, options, fallback, "1.4.0", { wsUpstream: true }, undefined, guard);
+  codexWsUpstreamFetch(URL, options, fallback, "1.4.0", undefined, guard);
 const drain = async (options = init()) => (await request(options)).text();
 function bodyWith(fields: Record<string, unknown>) {
   const options = init();
@@ -96,8 +96,8 @@ test("proxy changes and NO_PROXY retire the old route while unchanged routes reu
 
 test("same account/thread/turn reuses one socket without trimming either HTTP input", async () => {
   globalThis.WebSocket = Socket as unknown as typeof WebSocket;
-  await (await codexWsUpstreamFetch(URL, init("first full input"), fallback, "1.4.0", { wsUpstream: true })).text();
-  await (await codexWsUpstreamFetch(URL, init("second full input"), fallback, "1.4.0", { wsUpstream: true })).text();
+  await (await codexWsUpstreamFetch(URL, init("first full input"), fallback, "1.4.0")).text();
+  await (await codexWsUpstreamFetch(URL, init("second full input"), fallback, "1.4.0")).text();
   expect(Socket.all).toHaveLength(1);
   expect(Socket.all[0]!.frames.map(frame => frame.input)).toEqual(["first full input", "second full input"]);
   expect(Socket.all[0]!.frames.every(frame => !Object.hasOwn(frame, "previous_response_id"))).toBe(true);
@@ -280,7 +280,7 @@ test("quota prelude and callbacks belong to each warm exchange, not its predeces
   });
   const observed: string[][] = [[], []];
   for (let index = 0; index < 2; index++) {
-    const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", { wsUpstream: true }, headers => {
+    const response = await codexWsUpstreamFetch(URL, init(), fallback, "1.4.0", headers => {
       observed[index]!.push(headers.get("x-codex-primary-used-percent")!);
     });
     expect(response.headers.get("x-codex-primary-used-percent")).toBe(String(index + 1));

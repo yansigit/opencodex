@@ -40,7 +40,6 @@ import {
   writeJournal,
 } from "./journal";
 import { withCatalogWriteSerialization } from "./catalog-write-serialization";
-import { resetCodexAppServerCatalogStateCache } from "./app-server-processes";
 import { restoreCodexCatalogWithPermit } from "./catalog/sync";
 import { syncCodexHistoryProvider, type CodexHistoryFailureReason } from "./history-provider";
 import {
@@ -74,7 +73,6 @@ import {
   tomlString,
 } from "./paths";
 import { resolveEffectiveProjectModelProvider } from "./project-config-warnings";
-import { syncCodexAgentRoles } from "./agent-roles-sync";
 import {
   transformManagedSubagentDefaults,
   type ManagedSubagentDefaults,
@@ -199,12 +197,6 @@ function validateCodexRoutingTarget(target: CodexRoutingTarget): CodexRoutingTar
   return { ...target, baseUrl: `${parsed.origin}/v1` };
 }
 
-function normalizePublicOriginToBaseUrl(publicOrigin: string): string {
-  let trimmed = publicOrigin;
-  while (trimmed.endsWith("/")) trimmed = trimmed.slice(0, -1);
-  return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
-}
-
 /** Provider-table form is used for non-loopback admission and for the authless Desktop opt-in. */
 function usesProviderTable(target: CodexRoutingTarget): boolean {
   return target.requiresAdmissionToken || target.desktopAuthless === true;
@@ -212,17 +204,14 @@ function usesProviderTable(target: CodexRoutingTarget): boolean {
 
 export function standaloneCodexRoutingTarget(
   port: number,
-  config?: Pick<OcxConfig, "hostname" | "tls" | "unauthenticatedLoopbackListener" | "codexDesktopAuthless">,
+  config?: Pick<OcxConfig, "hostname" | "unauthenticatedLoopbackListener" | "codexDesktopAuthless">,
 ): CodexRoutingTarget {
   const loopback = config?.unauthenticatedLoopbackListener;
   const effectivePort = loopback?.enabled ? loopback.port : port;
   const hostname = loopback?.enabled ? undefined : config?.hostname;
-  const publicOrigin = loopback?.enabled ? undefined : config?.tls?.publicOrigin;
   const requiresAdmissionToken = loopback?.enabled ? false : shouldInjectApiAuthHeader(config);
   return {
-    baseUrl: publicOrigin
-      ? normalizePublicOriginToBaseUrl(publicOrigin)
-      : `http://${providerBaseHost(hostname)}:${effectivePort}/v1`,
+    baseUrl: `http://${providerBaseHost(hostname)}:${effectivePort}/v1`,
     requiresAdmissionToken,
     tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
     ...(config?.codexDesktopAuthless === true && !requiresAdmissionToken
@@ -282,7 +271,6 @@ export function buildProviderTableBlock(
   supportsWebsockets?: boolean,
   includeApiAuthHeader?: boolean,
   hostname?: string,
-  publicOrigin?: string,
 ): string;
 export function buildProviderTableBlock(
   target: CodexRoutingTarget,
@@ -293,12 +281,10 @@ export function buildProviderTableBlock(
   supportsWebsockets = false,
   includeApiAuthHeader = false,
   hostname?: string,
-  publicOrigin?: string,
 ): string {
-  const normalizedPublicOrigin = publicOrigin ? normalizePublicOriginToBaseUrl(publicOrigin) : undefined;
   const target = typeof portOrTarget === "number"
     ? validateCodexRoutingTarget({
-        baseUrl: normalizedPublicOrigin ?? `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
+        baseUrl: `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
         requiresAdmissionToken: includeApiAuthHeader,
         tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
       })
@@ -336,19 +322,15 @@ function buildProviderTableBlockForTarget(
 export function buildOpenaiBaseUrlLine(
   port: number,
   hostname?: string,
-  publicOrigin?: string,
 ): string;
 export function buildOpenaiBaseUrlLine(target: CodexRoutingTarget): string;
 export function buildOpenaiBaseUrlLine(
   portOrTarget: number | CodexRoutingTarget,
   hostname?: string,
-  publicOrigin?: string,
 ): string {
-  if (typeof portOrTarget !== "number") {
-    return buildOpenaiBaseUrlLineForTarget(validateCodexRoutingTarget(portOrTarget));
-  }
-  const baseUrl = publicOrigin ? normalizePublicOriginToBaseUrl(publicOrigin) : `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`;
-  return `openai_base_url = ${tomlString(baseUrl)}`;
+  return typeof portOrTarget === "number"
+    ? `openai_base_url = "http://${providerBaseHost(hostname)}:${portOrTarget}/v1"`
+    : buildOpenaiBaseUrlLineForTarget(validateCodexRoutingTarget(portOrTarget));
 }
 
 function buildOpenaiBaseUrlLineForTarget(target: CodexRoutingTarget): string {
@@ -379,7 +361,6 @@ export function setRootOpenaiBaseUrl(
   content: string,
   port: number,
   hostname?: string,
-  publicOrigin?: string,
 ): { content: string; keptUserBaseUrl: boolean };
 export function setRootOpenaiBaseUrl(
   content: string,
@@ -389,7 +370,6 @@ export function setRootOpenaiBaseUrl(
   content: string,
   portOrTarget: number | CodexRoutingTarget,
   hostname?: string,
-  publicOrigin?: string,
 ): { content: string; keptUserBaseUrl: boolean } {
   if (typeof portOrTarget !== "number") {
     return setRootOpenaiBaseUrlForTarget(content, validateCodexRoutingTarget(portOrTarget));
@@ -397,7 +377,7 @@ export function setRootOpenaiBaseUrl(
   const lines = content.split("\n");
   const firstTable = lines.findIndex((l) => /^\s*\[/.test(l));
   const rootEnd = firstTable === -1 ? lines.length : firstTable;
-  const key = buildOpenaiBaseUrlLine(portOrTarget, hostname, publicOrigin);
+  const key = buildOpenaiBaseUrlLine(portOrTarget, hostname);
 
   for (let i = 0; i < rootEnd; i++) {
     if (!isRootOpenaiBaseUrlLine(lines[i])) continue;
@@ -818,7 +798,7 @@ function stripOpencodexCatalogPath(content: string): string {
     .join("\n");
 }
 
-export function buildProfileFile(port: number, catalogPath?: string | null, supportsWebsockets?: boolean, includeApiAuthHeader?: boolean, hostname?: string, fastMode?: boolean, publicOrigin?: string): string;
+export function buildProfileFile(port: number, catalogPath?: string | null, supportsWebsockets?: boolean, includeApiAuthHeader?: boolean, hostname?: string, fastMode?: boolean): string;
 export function buildProfileFile(target: CodexRoutingTarget, catalogPath?: string | null, supportsWebsockets?: boolean, fastMode?: boolean): string;
 export function buildProfileFile(
   portOrTarget: number | CodexRoutingTarget,
@@ -827,17 +807,20 @@ export function buildProfileFile(
   includeApiAuthHeaderOrFastMode?: boolean,
   hostname?: string,
   fastMode?: boolean,
-  publicOrigin?: string,
 ): string {
-  if (typeof portOrTarget !== "number") {
-    return buildProfileFileForTarget(validateCodexRoutingTarget(portOrTarget), catalogPath, supportsWebsockets, includeApiAuthHeaderOrFastMode as boolean | undefined);
-  }
-  const target = validateCodexRoutingTarget({
-    baseUrl: publicOrigin ? normalizePublicOriginToBaseUrl(publicOrigin) : `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
-    requiresAdmissionToken: includeApiAuthHeaderOrFastMode === true,
-    tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
-  });
-  return buildProfileFileForTarget(target, catalogPath, supportsWebsockets, fastMode);
+  const target = typeof portOrTarget === "number"
+    ? validateCodexRoutingTarget({
+        baseUrl: `http://${providerBaseHost(hostname)}:${portOrTarget}/v1`,
+        requiresAdmissionToken: includeApiAuthHeaderOrFastMode === true,
+        tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
+      })
+    : validateCodexRoutingTarget(portOrTarget);
+  return buildProfileFileForTarget(
+    target,
+    catalogPath,
+    supportsWebsockets,
+    typeof portOrTarget === "number" ? fastMode : includeApiAuthHeaderOrFastMode,
+  );
 }
 
 function buildProfileFileForTarget(
@@ -895,7 +878,6 @@ export interface CodexInjectResult {
   status?: "skipped";
   skippedReason?: "desired_disabled" | "desired_enabled";
   nativeSubagentDefaultsWarning?: string;
-  agentRolesSyncWarning?: string;
 }
 
 export async function injectCodexConfig(
@@ -920,14 +902,6 @@ export async function injectCodexConfig(
   } catch (error) {
     return { success: false, message: error instanceof Error ? error.message : "Invalid Codex routing target" };
   }
-  // Fork: sync agent roles (independent of config.toml)
-  let agentRolesSyncWarning: string | undefined;
-  if (!options.validateOnly && config) {
-    const roleSync = syncCodexAgentRoles(config);
-    if (roleSync.warnings.length > 0) agentRolesSyncWarning = roleSync.warnings.join(" ");
-  }
-  const withRoleWarning = <T extends CodexInjectResult>(result: T): T =>
-    agentRolesSyncWarning ? { ...result, agentRolesSyncWarning } : result;
   if (!existsSync(CODEX_CONFIG_PATH)) {
     return {
       success: false,
@@ -1199,7 +1173,6 @@ export async function injectCodexConfig(
       owner: options.journalOwner,
     });
     atomicWriteFile(CODEX_CONFIG_PATH, content);
-    resetCodexAppServerCatalogStateCache();
     atomicWriteFile(CODEX_PROFILE_PATH, profileContent);
     markJournalInjectedState(content, profileContent, {
       // A root override is ours only in loopback Design B when no user-owned value won.

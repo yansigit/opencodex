@@ -29,3 +29,4 @@ for the carry and confirmation that the author's read of the red CI was correct.
 ## Count
 
 Bug-labelled items: **24 → 19** (10 PRs + 9 issues).
+

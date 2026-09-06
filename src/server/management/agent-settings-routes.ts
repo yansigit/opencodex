@@ -10,8 +10,10 @@ import {
   isValidProviderName,
   loadConfig,
   multiAgentGuidanceEnabled,
+  mutatePersistedConfig,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  saveConfigPreservingClaudeCode,
   subagentDefaultSyncEffective,
 } from "../../config";
 import {
@@ -67,16 +69,8 @@ import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerS
 import type { PersistedUsageAttempt } from "../../usage/log";
 import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { applySystemEnvToggle } from "../system-env";
-import { routeModel } from "../../router";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchInitializedModels as fetchAllModels, fetchGrokCandidateModels, buildClaudeDesktopState } from "./shared";
-import {
-  agentRolesSyncEffective,
-  parseSubagentRoles,
-  routedOnV2Warnings,
-  unionRoleModelsIntoRoster,
-} from "../../codex/agent-roles";
-import { syncCodexAgentRoles } from "../../codex/agent-roles-sync";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import { readManagementJsonBody, readOptionalManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 
@@ -86,123 +80,6 @@ const grokApplyEncoder = new TextEncoder();
 let grokApplyFlight: { startedAt: number; promise: Promise<unknown>; bytes: number } | null = null;
 let grokApplyHighWaterBytes = 0;
 let grokApplyTestHooks: { now?: () => number; run?: () => Promise<unknown> } | null = null;
-
-type V2NativeParentOverrideInput = { enabled: boolean; model: string | null };
-type AgentTaskRecoveryInput = { enabled: boolean; model: string | null };
-const V2_CONFIG_KEYS = ["multiAgentMode", "keepNativeChatGptOnV1", "v2NativeParentOverride", "v2RoutedDelegationBridge", "agentTaskRecovery"] as const;
-type V2ConfigKey = typeof V2_CONFIG_KEYS[number];
-type V2ConfigSnapshot = Pick<OcxConfig, V2ConfigKey>;
-
-function v2ConfigSnapshot(config: OcxConfig): V2ConfigSnapshot {
-  return Object.fromEntries(V2_CONFIG_KEYS.map(key => [key, structuredClone(config[key])])) as V2ConfigSnapshot;
-}
-
-function setV2ConfigField(config: OcxConfig, key: V2ConfigKey, value: OcxConfig[V2ConfigKey]): void {
-  if (value === undefined) delete (config as unknown as Record<string, unknown>)[key];
-  else (config as unknown as Record<string, unknown>)[key] = structuredClone(value);
-}
-
-function sameV2ConfigField(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function persistV2RoutedDelegationBridge(
-  deps: ManagementApiDeps,
-  config: OcxConfig,
-  enabled: boolean,
-): { ok: true } | { ok: false; reason: string } {
-  const outcome = mutateManagementConfig(deps, persisted => {
-    const changed = persisted.v2RoutedDelegationBridge !== enabled;
-    if (changed) persisted.v2RoutedDelegationBridge = enabled;
-    return { changed, value: true };
-  });
-  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
-  config.v2RoutedDelegationBridge = enabled;
-  return { ok: true };
-}
-
-function agentTaskRecoveryDto(
-  config: OcxConfig,
-): { enabled: boolean; model: string | null } {
-  const recovery = config.agentTaskRecovery;
-  return {
-    enabled: recovery?.enabled === true,
-    model: recovery?.model ?? null,
-  };
-}
-
-function persistAgentTaskRecovery(
-  deps: ManagementApiDeps,
-  config: OcxConfig,
-  next: AgentTaskRecoveryInput,
-): { ok: true } | { ok: false; reason: string } {
-  const outcome = mutateManagementConfig(deps, persisted => {
-    const nextPersisted = {
-      enabled: next.enabled,
-      ...(next.model === null ? {} : { model: next.model }),
-    };
-    const previous = persisted.agentTaskRecovery;
-    const changed = previous?.enabled !== nextPersisted.enabled || previous?.model !== nextPersisted.model;
-    if (changed) persisted.agentTaskRecovery = nextPersisted;
-    return { changed, value: true };
-  });
-  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
-  config.agentTaskRecovery = {
-    enabled: next.enabled,
-    ...(next.model === null ? {} : { model: next.model }),
-  };
-  return { ok: true };
-}
-
-function v2NativeParentOverrideDto(
-  config: OcxConfig,
-  upstreamEnabled: boolean,
-): { enabled: boolean; model: string | null; active: boolean } {
-  const override = config.v2NativeParentOverride;
-  const enabled = override?.enabled === true;
-  const model = override?.model ?? null;
-  return {
-    enabled,
-    model,
-    active: enabled
-      && model !== null
-      && v2NativeParentOverrideTargetIsNoncanonical(config, model)
-      && config.multiAgentMode === "v2"
-      && upstreamEnabled
-      && config.keepNativeChatGptOnV1 !== true,
-  };
-}
-
-function v2NativeParentOverrideTargetIsNoncanonical(config: OcxConfig, model: string): boolean {
-  try {
-    return !isCanonicalOpenAiForwardProvider(routeModel(config, model).provider);
-  } catch {
-    return false;
-  }
-}
-
-function persistV2NativeParentOverride(
-  deps: ManagementApiDeps,
-  config: OcxConfig,
-  next: V2NativeParentOverrideInput,
-): { ok: true } | { ok: false; reason: string } {
-  const outcome = mutateManagementConfig(deps, persisted => {
-    const nextPersisted = {
-      enabled: next.enabled,
-      ...(next.model === null ? {} : { model: next.model }),
-    };
-    const previous = persisted.v2NativeParentOverride;
-    const changed = previous?.enabled !== nextPersisted.enabled || previous?.model !== nextPersisted.model;
-    if (changed) persisted.v2NativeParentOverride = nextPersisted;
-    return { changed, value: true };
-  });
-  if (outcome.status === "unavailable") return { ok: false, reason: outcome.reason };
-  config.v2NativeParentOverride = {
-    enabled: next.enabled,
-    ...(next.model === null ? {} : { model: next.model }),
-  };
-  return { ok: true };
-}
 
 class GrokApplyBusyError extends Error {}
 
@@ -235,11 +112,10 @@ function mirrorDesiredEnabledOntoSnapshot(config: OcxConfig, client: "claude-des
  * unrelated key another writer just committed.
  */
 function persistDesktopProfileField(
-  deps: ManagementApiDeps,
   config: OcxConfig,
   desktopProfile: NonNullable<OcxConfig["claudeCode"]>["desktopProfile"],
 ): { ok: true } | { ok: false; reason: "missing" | "invalid" | "conflict" } {
-  const outcome = mutateManagementConfig(deps, persisted => {
+  const outcome = mutatePersistedConfig(persisted => {
     persisted.claudeCode = { ...(persisted.claudeCode ?? {}), desktopProfile };
     return { changed: true, value: true };
   });
@@ -302,7 +178,7 @@ export function setGrokApplyFlightTestHooks(
   grokApplyFlight = null;
   grokApplyHighWaterBytes = 0;
 }
-import { ManagementPersistenceError, MissingManagementPersistenceError, mutateManagementConfig, saveManagementConfig, type ManagementApiDeps, type ManagementContext } from "./context";
+import type { ManagementContext } from "./context";
 
 export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
@@ -342,7 +218,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       );
       if (result.written && result.fingerprint) {
         current.claudeCode = { ...current.claudeCode, desktopProfile: { ...current.claudeCode.desktopProfile, appliedFingerprint: result.fingerprint, appliedAt: new Date().toISOString() } };
-        saveManagementConfig(deps, current);
+        saveConfigPreservingClaudeCode(current);
       }
     } catch { /* best-effort */ }
   }
@@ -359,7 +235,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       getMultiAgentModeHintText,
     } = await import("../../codex/features");
     const enabled = isMultiAgentV2Enabled();
-    const v2NativeParentOverride = v2NativeParentOverrideDto(config, enabled);
     return jsonResponse({
       enabled,
       agentsMaxThreadsConflict: enabled && hasAgentsMaxThreads(),
@@ -373,9 +248,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       // max_depth is V1-only upstream; this is the global-flag statement, derived
       // server-side so no client can present it as an effective V2 limit.
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
-      v2NativeParentOverride,
-      v2RoutedDelegationBridge: config.v2RoutedDelegationBridge === true,
-      agentTaskRecovery: agentTaskRecoveryDto(config),
     });
   }
   if (url.pathname === "/api/v2" && req.method === "PUT") {
@@ -388,9 +260,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       agentsMaxDepth?: unknown;
       subagentDeveloperInstructions?: unknown;
       multiAgentModeHintText?: unknown;
-      v2NativeParentOverride?: unknown;
-      v2RoutedDelegationBridge?: unknown;
-      agentTaskRecovery?: unknown;
     };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const wantsFlag = body.enabled !== undefined;
@@ -401,11 +270,8 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     const wantsMaxDepth = body.agentsMaxDepth !== undefined;
     const wantsSubagentInstructions = body.subagentDeveloperInstructions !== undefined;
     const wantsModeHintText = body.multiAgentModeHintText !== undefined;
-    const wantsV2NativeParentOverride = body.v2NativeParentOverride !== undefined;
-    const wantsV2RoutedDelegationBridge = body.v2RoutedDelegationBridge !== undefined;
-    const wantsAgentTaskRecovery = body.agentTaskRecovery !== undefined;
-    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride && !wantsV2RoutedDelegationBridge && !wantsAgentTaskRecovery) {
-      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, multiAgentModeHintText, v2NativeParentOverride, v2RoutedDelegationBridge, and/or agentTaskRecovery" }, 400);
+    if (!wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText) {
+      return jsonResponse({ error: "body must set enabled, multiAgentMode, keepNativeChatGptOnV1, maxConcurrentThreadsPerSession, agentsEnabled, agentsMaxDepth, subagentDeveloperInstructions, and/or multiAgentModeHintText" }, 400);
     }
     if (wantsFlag && typeof body.enabled !== "boolean") return jsonResponse({ error: "body.enabled must be a boolean" }, 400);
     if (wantsMode && body.multiAgentMode !== "v1" && body.multiAgentMode !== "default" && body.multiAgentMode !== "v2") {
@@ -413,9 +279,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     }
     if (wantsKeepNative && typeof body.keepNativeChatGptOnV1 !== "boolean") {
       return jsonResponse({ error: "body.keepNativeChatGptOnV1 must be a boolean" }, 400);
-    }
-    if (wantsV2RoutedDelegationBridge && typeof body.v2RoutedDelegationBridge !== "boolean") {
-      return jsonResponse({ error: "body.v2RoutedDelegationBridge must be a boolean" }, 400);
     }
     if (wantsThreads && (typeof body.maxConcurrentThreadsPerSession !== "number" || !Number.isInteger(body.maxConcurrentThreadsPerSession) || body.maxConcurrentThreadsPerSession < 1)) {
       return jsonResponse({ error: "body.maxConcurrentThreadsPerSession must be an integer >= 1" }, 400);
@@ -457,98 +320,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
           : `body.enabled conflicts with multiAgentMode '${mode}'`,
       }, 400);
     }
-    const { isMultiAgentV2Enabled: readMultiAgentV2Enabled } = await import("../../codex/features");
-    const currentUpstreamEnabled = readMultiAgentV2Enabled();
-    const prospectiveMode = mode ?? config.multiAgentMode ?? "default";
-    const prospectiveKeepNative = wantsKeepNative
-      ? body.keepNativeChatGptOnV1 === true
-      : config.keepNativeChatGptOnV1 === true;
-    const prospectiveUpstreamEnabled = wantsFlag
-      ? body.enabled as boolean
-      : modeFlag ?? currentUpstreamEnabled;
-    let v2NativeParentOverride: V2NativeParentOverrideInput | undefined;
-    if (wantsV2NativeParentOverride) {
-      const raw = body.v2NativeParentOverride;
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        return jsonResponse({ error: "body.v2NativeParentOverride must be an object" }, 400);
-      }
-      const keys = Object.keys(raw as object);
-      if (keys.length !== 2 || !keys.includes("enabled") || !keys.includes("model")) {
-        return jsonResponse({ error: "body.v2NativeParentOverride must contain enabled and model" }, 400);
-      }
-      const candidate = raw as { enabled?: unknown; model?: unknown };
-      if (typeof candidate.enabled !== "boolean") {
-        return jsonResponse({ error: "body.v2NativeParentOverride.enabled must be a boolean" }, 400);
-      }
-      if (candidate.model !== null && (typeof candidate.model !== "string" || candidate.model.trim().length === 0)) {
-        return jsonResponse({ error: "body.v2NativeParentOverride.model must be a nonblank string or null" }, 400);
-      }
-      v2NativeParentOverride = {
-        enabled: candidate.enabled,
-        model: candidate.model === null ? null : (candidate.model as string).trim(),
-      };
-      if (v2NativeParentOverride.model !== null) {
-        let target;
-        try {
-          target = routeModel(config, v2NativeParentOverride.model);
-        } catch {
-          return jsonResponse({ error: "body.v2NativeParentOverride.model must resolve to a configured provider" }, 400);
-        }
-        if (isCanonicalOpenAiForwardProvider(target.provider)) {
-          return jsonResponse({ error: "body.v2NativeParentOverride.model must resolve to a noncanonical provider" }, 400);
-        }
-      }
-      if (v2NativeParentOverride.enabled) {
-        if (v2NativeParentOverride.model === null) {
-          return jsonResponse({ error: "enabling v2NativeParentOverride requires a model" }, 400);
-        }
-        if (prospectiveMode !== "v2") {
-          return jsonResponse({ error: "enabling v2NativeParentOverride requires multiAgentMode 'v2'" }, 400);
-        }
-        if (!prospectiveUpstreamEnabled) {
-          return jsonResponse({ error: "enabling v2NativeParentOverride requires the upstream V2 feature" }, 400);
-        }
-        if (prospectiveKeepNative) {
-          return jsonResponse({ error: "enabling v2NativeParentOverride conflicts with keepNativeChatGptOnV1" }, 400);
-        }
-      }
-    }
-    let agentTaskRecovery: AgentTaskRecoveryInput | undefined;
-    if (wantsAgentTaskRecovery) {
-      const raw = body.agentTaskRecovery;
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        return jsonResponse({ error: "body.agentTaskRecovery must be an object" }, 400);
-      }
-      const candidate = raw as { enabled?: unknown; model?: unknown };
-      if (typeof candidate.enabled !== "boolean") {
-        return jsonResponse({ error: "body.agentTaskRecovery.enabled must be a boolean" }, 400);
-      }
-      if (candidate.model !== undefined && candidate.model !== null && (typeof candidate.model !== "string" || candidate.model.trim().length === 0)) {
-        return jsonResponse({ error: "body.agentTaskRecovery.model must be a nonblank string or null" }, 400);
-      }
-      agentTaskRecovery = {
-        enabled: candidate.enabled,
-        model: candidate.model === null || candidate.model === undefined ? null : (candidate.model as string).trim(),
-      };
-    }
-    if (wantsV2RoutedDelegationBridge && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
-        && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride && !wantsAgentTaskRecovery) {
-      const persisted = persistV2RoutedDelegationBridge(deps, config, body.v2RoutedDelegationBridge as boolean);
-      if (!persisted.ok) return jsonResponse({ error: `persisting v2RoutedDelegationBridge failed: ${persisted.reason}` }, 502);
-      return jsonResponse({ ok: true, v2RoutedDelegationBridge: config.v2RoutedDelegationBridge === true });
-    }
-    if (agentTaskRecovery && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
-        && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText && !wantsV2NativeParentOverride) {
-      const persisted = persistAgentTaskRecovery(deps, config, agentTaskRecovery);
-      if (!persisted.ok) return jsonResponse({ error: `persisting agentTaskRecovery failed: ${persisted.reason}` }, 502);
-      return jsonResponse({ ok: true, agentTaskRecovery: agentTaskRecoveryDto(config) });
-    }
-    if (v2NativeParentOverride && !wantsFlag && !wantsThreads && !wantsMode && !wantsKeepNative
-        && !wantsAgentsEnabled && !wantsMaxDepth && !wantsSubagentInstructions && !wantsModeHintText) {
-      const persisted = persistV2NativeParentOverride(deps, config, v2NativeParentOverride);
-      if (!persisted.ok) return jsonResponse({ error: `persisting v2NativeParentOverride failed: ${persisted.reason}` }, 502);
-      return jsonResponse({ ok: true, v2NativeParentOverride: v2NativeParentOverrideDto(config, readMultiAgentV2Enabled()) });
-    }
     const {
       isMultiAgentV2Enabled, hasAgentsMaxThreads, getLogicalMaxThreads, transitionMultiAgentV2,
       getAgentsEnabled, getAgentsMaxDepth, getSubagentDeveloperInstructions,
@@ -570,87 +341,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         error: "body.enabled=true conflicts with keepNativeChatGptOnV1: Codex's global multi_agent_v2 override outranks catalog pins",
       }, 400);
     }
-    let rollbackV2Config: (() => string | null) | undefined;
-    if (wantsMode || wantsKeepNative || v2NativeParentOverride || wantsV2RoutedDelegationBridge || agentTaskRecovery) {
-      const requestedKeys = V2_CONFIG_KEYS.filter(key => (
-        (key === "multiAgentMode" && wantsMode)
-        || (key === "keepNativeChatGptOnV1" && wantsKeepNative)
-        || (key === "v2NativeParentOverride" && v2NativeParentOverride !== undefined)
-        || (key === "v2RoutedDelegationBridge" && wantsV2RoutedDelegationBridge)
-        || (key === "agentTaskRecovery" && agentTaskRecovery !== undefined)
-      ));
-      let before!: V2ConfigSnapshot;
-      let committed!: OcxConfig;
-      const persisted = mutateManagementConfig(deps, disk => {
-        before = v2ConfigSnapshot(disk);
-        if (wantsMode) {
-          if (mode === "default") deleteConfigTopLevelKey(disk, "multiAgentMode");
-          else disk.multiAgentMode = mode;
-        }
-        if (wantsKeepNative) {
-          if (body.keepNativeChatGptOnV1 === true) disk.keepNativeChatGptOnV1 = true;
-          else deleteConfigTopLevelKey(disk, "keepNativeChatGptOnV1");
-        }
-        if (v2NativeParentOverride) {
-          disk.v2NativeParentOverride = {
-            enabled: v2NativeParentOverride.enabled,
-            ...(v2NativeParentOverride.model === null ? {} : { model: v2NativeParentOverride.model }),
-          };
-        }
-        if (wantsV2RoutedDelegationBridge) disk.v2RoutedDelegationBridge = body.v2RoutedDelegationBridge as boolean;
-        if (agentTaskRecovery) {
-          disk.agentTaskRecovery = {
-            enabled: agentTaskRecovery.enabled,
-            ...(agentTaskRecovery.model === null ? {} : { model: agentTaskRecovery.model }),
-          };
-        }
-        committed = structuredClone(disk);
-        return { changed: true, value: true };
-      });
-      if (persisted.status === "unavailable") {
-        return jsonResponse({ error: `persisting V2 settings failed: ${persisted.reason}` }, 502);
-      }
-      if (wantsMode) {
-        if (committed.multiAgentMode === undefined) deleteConfigTopLevelKey(config, "multiAgentMode");
-        else config.multiAgentMode = committed.multiAgentMode;
-      }
-      if (wantsKeepNative) {
-        if (committed.keepNativeChatGptOnV1 === undefined) deleteConfigTopLevelKey(config, "keepNativeChatGptOnV1");
-        else config.keepNativeChatGptOnV1 = committed.keepNativeChatGptOnV1;
-      }
-      if (v2NativeParentOverride) config.v2NativeParentOverride = committed.v2NativeParentOverride;
-      if (wantsV2RoutedDelegationBridge) config.v2RoutedDelegationBridge = committed.v2RoutedDelegationBridge;
-      if (agentTaskRecovery) config.agentTaskRecovery = committed.agentTaskRecovery;
-      const committedSnapshot = v2ConfigSnapshot(committed);
-      rollbackV2Config = () => {
-        let finalSnapshot!: V2ConfigSnapshot;
-        try {
-          const rollback = mutateManagementConfig(deps, disk => {
-            let changed = false;
-            for (const key of requestedKeys) {
-              if (!sameV2ConfigField(disk[key], committedSnapshot[key])) continue;
-              setV2ConfigField(disk, key, before[key]);
-              changed = true;
-            }
-            finalSnapshot = v2ConfigSnapshot(disk);
-            return { changed, value: true };
-          });
-          if (rollback.status === "unavailable") return rollback.reason;
-        } catch (error) {
-          return error instanceof Error ? error.message : String(error);
-        }
-        for (const key of requestedKeys) setV2ConfigField(config, key, finalSnapshot[key]);
-        return null;
-      };
-    }
-    const rollbackDiagnostic = (message: string): string => {
-      const failure = rollbackV2Config?.();
-      return failure ? `${message}; config rollback failed: ${failure}` : message;
-    };
-    const externalChanged: string[] = [];
-    const scalarFailureDiagnostic = (message: string): string => externalChanged.length > 0
-      ? `${message}; config retained because earlier external side effects were applied: ${externalChanged.join(", ")}`
-      : rollbackDiagnostic(message);
     const requestedFlag = wantsFlag
       ? body.enabled as boolean
       : modeFlag ?? (wantsKeepNative && hybridPinActive ? false : undefined);
@@ -664,15 +354,19 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const result = transitionMultiAgentV2(targetFlag, toggle, {
         ...(wantsThreads ? { threadLimit: body.maxConcurrentThreadsPerSession as number } : {}),
       });
-      if (!result.ok) return jsonResponse({ error: rollbackDiagnostic(`multi_agent_v2 transition failed: ${result.error}`) }, 502);
-      if (result.changed) externalChanged.push("multi_agent_v2");
+      if (!result.ok) return jsonResponse({ error: `multi_agent_v2 transition failed: ${result.error}` }, 502);
       if (result.changed && result.threadLimit !== null) warnings.push(`Thread limit ${result.threadLimit} preserved for ${targetFlag ? "v2" : "v1"}.`);
     }
     if (wantsMode) {
+      if (mode === "default") deleteConfigTopLevelKey(config, "multiAgentMode");
+      else config.multiAgentMode = mode;
+      saveConfigPreservingClaudeCode(config);
       warnings.push(`Multi-agent mode set to '${mode}'. Applies to new sessions.`);
     }
     if (wantsKeepNative) {
-      const effectiveMode = mode ?? config.multiAgentMode ?? "default";
+      if (body.keepNativeChatGptOnV1 === true) config.keepNativeChatGptOnV1 = true;
+      else deleteConfigTopLevelKey(config, "keepNativeChatGptOnV1");
+      saveConfigPreservingClaudeCode(config);
       warnings.push(body.keepNativeChatGptOnV1 === true
         ? (effectiveMode === "v2"
           ? "ChatGPT-native models stay on v1 while other models use v2. Applies to new sessions."
@@ -687,22 +381,21 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     // asserts this route file contains no direct write primitive, and matches on the
     // symbol name even inside a comment.
     const scalarWrites: Array<{ field: string; run: () => { ok: true; changed: boolean } | { ok: false; error: string } }> = [];
-    if (wantsAgentsEnabled) scalarWrites.push({ field: "agentsEnabled", run: () => (deps.v2ScalarWriters?.setAgentsEnabled ?? setAgentsEnabled)(body.agentsEnabled as boolean | null) });
-    if (wantsMaxDepth) scalarWrites.push({ field: "agentsMaxDepth", run: () => (deps.v2ScalarWriters?.setAgentsMaxDepth ?? setAgentsMaxDepth)(body.agentsMaxDepth as number | null) });
-    if (wantsSubagentInstructions) scalarWrites.push({ field: "subagentDeveloperInstructions", run: () => (deps.v2ScalarWriters?.setSubagentDeveloperInstructions ?? setSubagentDeveloperInstructions)(body.subagentDeveloperInstructions as string | null) });
-    if (wantsModeHintText) scalarWrites.push({ field: "multiAgentModeHintText", run: () => (deps.v2ScalarWriters?.setMultiAgentModeHintText ?? setMultiAgentModeHintText)(body.multiAgentModeHintText as string | null) });
+    if (wantsAgentsEnabled) scalarWrites.push({ field: "agentsEnabled", run: () => setAgentsEnabled(body.agentsEnabled as boolean | null) });
+    if (wantsMaxDepth) scalarWrites.push({ field: "agentsMaxDepth", run: () => setAgentsMaxDepth(body.agentsMaxDepth as number | null) });
+    if (wantsSubagentInstructions) scalarWrites.push({ field: "subagentDeveloperInstructions", run: () => setSubagentDeveloperInstructions(body.subagentDeveloperInstructions as string | null) });
+    if (wantsModeHintText) scalarWrites.push({ field: "multiAgentModeHintText", run: () => setMultiAgentModeHintText(body.multiAgentModeHintText as string | null) });
     const landed: string[] = [];
     for (const write of scalarWrites) {
       try {
         const result = write.run();
         if (!result.ok) {
-          return jsonResponse({ error: scalarFailureDiagnostic(`writing ${write.field} failed: ${result.error}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}`) }, 502);
+          return jsonResponse({ error: `writing ${write.field} failed: ${result.error}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
         }
         landed.push(write.field);
-        if (result.changed) externalChanged.push(write.field);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        return jsonResponse({ error: scalarFailureDiagnostic(`writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}`) }, 502);
+        return jsonResponse({ error: `writing ${write.field} failed: ${message}${landed.length > 0 ? ` (already applied: ${landed.join(", ")})` : ""}` }, 502);
       }
     }
     // Derived from fresh post-write readers (readConfigText is uncached): upstream
@@ -726,9 +419,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       subagentDeveloperInstructions: getSubagentDeveloperInstructions(),
       multiAgentModeHintText: getMultiAgentModeHintText(),
       agentsMaxDepthAppliesWhenV2Disabled: !enabled,
-      v2NativeParentOverride: v2NativeParentOverrideDto(config, enabled),
-      v2RoutedDelegationBridge: config.v2RoutedDelegationBridge === true,
-      agentTaskRecovery: agentTaskRecoveryDto(config),
       warnings,
       catalogRefresh,
     });
@@ -792,24 +482,11 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
   // dynamically injected into the v1 proactive prompt, plus an optional reasoning
   // effort the prompt tells the agent to pass to spawn_agent. GET returns the current
   // picks + available models/efforts; PUT sets or clears them.
-  if (url.pathname === "/api/subagent-model-authority" && req.method === "POST") {
-    let body: unknown;
-    try { body = await readManagementJsonBody(req); } catch (error) {
-      rethrowManagementBodyTooLarge(error);
-      return jsonResponse({ error: "invalid JSON body" }, 400);
-    }
-    const { parseSubagentModelAuthorityInput, resolveOpenCodexSubagentModelAuthority } = await import("../../codex/subagent-model-authority");
-    const input = parseSubagentModelAuthorityInput(body);
-    if (!input) return jsonResponse({ error: "invalid subagent model authority input" }, 400);
-    return jsonResponse(await resolveOpenCodexSubagentModelAuthority(input, config));
-  }
-
   if (url.pathname === "/api/injection-model" && req.method === "GET") {
     const models = await fetchAllModels(config);
     const disabled = new Set(config.disabledModels ?? []);
     const { listCatalogNativeSlugs } = await import("../../codex/catalog");
     const { CODEX_REASONING_LEVELS } = await import("../../reasoning-effort");
-    const { resolveNativeDefaultState } = await import("../../codex/subagent-defaults");
     const nativeModels = listCatalogNativeSlugs()
       .filter(slug => !disabled.has(slug))
       .map(slug => ({ provider: "openai", model: slug, namespaced: slug }));
@@ -824,7 +501,6 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       model: config.injectionModel ?? null,
       effort: config.injectionEffort ?? null,
       prompt: config.injectionPrompt ?? null,
-      nativeDefaultState: await resolveNativeDefaultState(config),
       efforts: CODEX_REASONING_LEVELS.map(l => l.effort),
       available: [...nativeModels, ...routedModels],
     });
@@ -907,7 +583,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     if (nextPrompt) config.injectionPrompt = nextPrompt;
     else deleteConfigTopLevelKey(config, "injectionPrompt");
 
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     return jsonResponse({
       ok: true,
       multiAgentGuidanceEnabled: multiAgentGuidanceEnabled(config),
@@ -942,7 +618,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       }
       config[key] = value;
     }
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     return jsonResponse({ ok: true, effortCap: config.effortCap ?? null, subagentEffortCap: config.subagentEffortCap ?? null });
   }
 
@@ -988,97 +664,12 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     const chosen = Array.isArray(body.models) ? body.models.filter((m): m is string => typeof m === "string").slice(0, 5) : [];
     config.subagentModels = chosen;
-    saveManagementConfig(deps, config);
+    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
+    save(config);
     const catalogRefresh = await convergeCodexCatalog();
     await syncClaudeAgentDefsBestEffort();
     await autoApplyDesktopBestEffort();
     return jsonResponse({ ok: true, applied: chosen, catalogRefresh });
-  }
-
-  if (url.pathname === "/api/subagent-roles" && req.method === "GET") {
-    const models = await fetchAllModels(config);
-    const disabled = new Set(config.disabledModels ?? []);
-    const { listCatalogNativeSlugs } = await import("../../codex/catalog");
-    const { CODEX_REASONING_LEVELS } = await import("../../reasoning-effort");
-    const nativeModels = listCatalogNativeSlugs()
-      .filter(slug => !disabled.has(slug))
-      .map(slug => ({ provider: "openai", model: slug, namespaced: slug }));
-    const routedModels = uniqueCatalogModelsForPublicList(models)
-      .map(m => ({ provider: m.provider, model: m.id, namespaced: catalogModelSlug(m) }))
-      .filter(m => ![...disabled].some(stored => (
-        stored === m.namespaced || slugEquals(stored, m.provider, m.model)
-      )));
-    return jsonResponse({
-      roles: config.subagentRoles ?? [],
-      ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
-      syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
-      efforts: CODEX_REASONING_LEVELS.map(l => l.effort),
-      available: [...nativeModels, ...routedModels],
-    });
-  }
-  if (url.pathname === "/api/subagent-roles" && req.method === "PUT") {
-    let parsedBody: unknown;
-    try {
-      parsedBody = await readManagementJsonBody(req);
-    } catch (error) {
-      rethrowManagementBodyTooLarge(error);
-      return jsonResponse({ error: "invalid JSON body" }, 400);
-    }
-    if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
-      return jsonResponse({ error: "body must be a JSON object" }, 400);
-    }
-    const body = parsedBody as { roles?: unknown; remove?: unknown; syncCodexAgentRoles?: unknown };
-    if ("remove" in body) {
-      if ("roles" in body) return jsonResponse({ error: "body.remove cannot be combined with body.roles" }, 400);
-      if (typeof body.remove !== "string" || body.remove.trim().length === 0) {
-        return jsonResponse({ error: "body.remove must be a non-empty role id" }, 400);
-      }
-      const id = body.remove.trim();
-      config.subagentRoles = (config.subagentRoles ?? []).filter(role => role.id !== id);
-      saveManagementConfig(deps, config);
-      const warnings = [...syncCodexAgentRoles(config).warnings];
-      const catalogRefresh = await convergeCodexCatalog();
-      await syncClaudeAgentDefsBestEffort();
-      await autoApplyDesktopBestEffort();
-      return jsonResponse({
-        ok: true,
-        roles: config.subagentRoles,
-        ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
-        syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
-        warnings,
-        catalogRefresh,
-      });
-    }
-    if (!("roles" in body)) return jsonResponse({ error: "body.roles is required" }, 400);
-    const parsed = parseSubagentRoles(body.roles);
-    if (!parsed.ok) return jsonResponse({ error: parsed.error, index: parsed.index }, 400);
-    if ("syncCodexAgentRoles" in body && body.syncCodexAgentRoles !== null && typeof body.syncCodexAgentRoles !== "boolean") {
-      return jsonResponse({ error: "syncCodexAgentRoles must be a boolean" }, 400);
-    }
-    const warnings: string[] = [];
-    const union = unionRoleModelsIntoRoster(config.subagentModels, parsed.roles);
-    if (union.droppedRoleIds.length > 0) {
-      warnings.push(`Featured roster truncated to 5 models; dropped role id(s): ${union.droppedRoleIds.join(", ")}`);
-    }
-    warnings.push(...routedOnV2Warnings(parsed.roles, config));
-    config.subagentRoles = parsed.roles;
-    config.subagentModels = union.models;
-    if ("syncCodexAgentRoles" in body && typeof body.syncCodexAgentRoles === "boolean") {
-      config.syncCodexAgentRoles = body.syncCodexAgentRoles;
-    }
-    saveManagementConfig(deps, config);
-    warnings.push(...syncCodexAgentRoles(config).warnings);
-    const catalogRefresh = await convergeCodexCatalog();
-    await syncClaudeAgentDefsBestEffort();
-    await autoApplyDesktopBestEffort();
-    return jsonResponse({
-      ok: true,
-      roles: config.subagentRoles,
-      ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
-      syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
-      warnings,
-      catalogRefresh,
-    });
   }
 
   // Priority-ordered subagent model fallback chain for quota-aware spawn routing.
@@ -1143,7 +734,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     else deleteConfigTopLevelKey(config, "subagentModelFallback");
     if (nextPollMs !== undefined) config.subagentModelFallbackPollMs = nextPollMs;
     else deleteConfigTopLevelKey(config, "subagentModelFallbackPollMs");
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     return jsonResponse({
       ok: true,
       models: config.subagentModelFallback ?? [],
@@ -1185,7 +776,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     if (excluded.length > 2000) return jsonResponse({ error: "excluded list is too large" }, 400);
     if (excluded.length === 0) deleteConfigTopLevelKey(config, "grokExcludedModels");
     else config.grokExcludedModels = excluded;
-    saveManagementConfig(deps, config);
+    saveConfigPreservingClaudeCode(config);
     return jsonResponse({ ok: true, excluded });
   }
 
@@ -1226,35 +817,27 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       const { parseDesktopProfile, reconcileDesktopProfile } = await import("../../claude/desktop-profile");
       const parsed = parseDesktopProfile(body.profile);
       const current = await buildClaudeDesktopState(config);
-      const catalogChanged = (route: string, message: string) => {
-        const runtimePort = Number(url.port) || config.port;
-        return jsonResponse({
-          error: { code: "catalog_changed", message, route },
-          current: { ...current, port: runtimePort },
-        }, 409);
-      };
       for (const model of current.models.filter(item => !item.available)) {
         const before = current.profile.assignments[model.route];
         const after = parsed.assignments[model.route];
         if (JSON.stringify(before) !== JSON.stringify(after)) {
-          return catalogChanged(model.route, `현재 사용할 수 없는 모델은 옮길 수 없습니다: ${model.route}`);
+          throw new Error(`현재 사용할 수 없는 모델은 옮길 수 없습니다: ${model.route}`);
         }
       }
       for (const family of ["opus", "fable", "sonnet", "haiku"] as const) {
         const nextDefault = parsed.defaults[family];
         const target = nextDefault ? current.models.find(model => model.route === nextDefault) : undefined;
         if (target && !target.available && current.profile.defaults[family] !== nextDefault) {
-          return catalogChanged(target.route, `현재 사용할 수 없는 모델은 기본값으로 지정할 수 없습니다: ${nextDefault}`);
+          throw new Error(`현재 사용할 수 없는 모델은 기본값으로 지정할 수 없습니다: ${nextDefault}`);
         }
       }
       const state = await buildClaudeDesktopState(config, parsed);
       config.claudeCode = { ...(config.claudeCode ?? {}), desktopProfile: reconcileDesktopProfile(state.profile, state.models) };
-      saveManagementConfig(deps, config);
+      saveConfigPreservingClaudeCode(config);
       const saved = await buildClaudeDesktopState(config);
       const runtimePort = Number(url.port) || config.port;
       return jsonResponse({ ok: true, ...saved, port: runtimePort });
     } catch (error) {
-      if (error instanceof MissingManagementPersistenceError || error instanceof ManagementPersistenceError) throw error;
       return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
     }
   }
@@ -1303,7 +886,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       // its stale `clientIntegrations` back over that write and turn the enable
       // action into an immediate self-cancelling OFF — the guard below would then
       // refuse the apply it was asked to perform. Persist ONLY the profile field.
-      const profileSaved = persistDesktopProfileField(deps, config, state.profile);
+      const profileSaved = persistDesktopProfileField(config, state.profile);
       if (!profileSaved.ok) {
         return jsonResponse({
           error: `Claude Desktop profile could not be saved (${profileSaved.reason}); nothing was applied.`,
@@ -1351,7 +934,7 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
       if (result.fingerprint) {
         // The Desktop write already landed, so a failed bookkeeping save is not
         // an apply failure: report the miss instead of claiming a clean apply.
-        const marked = persistDesktopProfileField(deps, config, {
+        const marked = persistDesktopProfileField(config, {
           ...state.profile,
           appliedFingerprint: result.fingerprint,
           appliedAt: new Date().toISOString(),
@@ -1780,6 +1363,8 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
         else delete next.modelMap;
       }
     }
+    if (body.fastMode !== undefined) config.fastMode = nextFastMode;
+    config.claudeCode = next;
     // Stamp the migration sentinel on EVERY persist of this block. The migration reads
     // "a claudeCode block with no authMode" as a pre-upgrade subscriber and pins it to
     // literal subscription — correct for a config written before `auto` existed, fatal
@@ -1788,46 +1373,8 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     // would be converted into a sticky manual subscription by the next startServer, and
     // auto would survive exactly one proxy lifetime with no way back.
     if (!next.authModeMigratedAt) next.authModeMigratedAt = new Date().toISOString();
-    let committedClaude!: OcxClaudeCodeConfig;
-    const persisted = mutateManagementConfig(deps, disk => {
-      const latest = { ...(disk.claudeCode ?? {}) };
-      for (const field of ["enabled", "authMode", "model", "smallFastModel", "modelMap", "classifierModel", "classifierFallbacks", "systemEnv", "alwaysEnableEffort", "maxContextTokens", "autoContext", "injectAgents", "autoCompactWindow", "blockedSkills", "tierModels"] as const) {
-        if (!Object.hasOwn(body, field)) continue;
-        if (Object.hasOwn(next, field)) latest[field] = next[field] as never;
-        else delete latest[field];
-      }
-      for (const field of ["webSearchSidecar", "visionSidecar"] as const) {
-        const section = body[field];
-        if (section === undefined) continue;
-        if (section === null || Object.keys(section as Record<string, unknown>).length === 0) {
-          delete latest[field];
-          continue;
-        }
-        const override = { ...latest[field] } as { backend?: string; model?: string };
-        const desired = next[field] as { backend?: string; model?: string } | undefined;
-        for (const key of ["backend", "model"] as const) {
-          if (!Object.hasOwn(section, key)) continue;
-          if (Object.hasOwn(desired ?? {}, key)) override[key] = desired![key];
-          else delete override[key];
-        }
-        if (Object.keys(override).length > 0) latest[field] = override as never;
-        else delete latest[field];
-      }
-      latest.authModeMigratedAt = next.authModeMigratedAt;
-      disk.claudeCode = latest;
-      committedClaude = structuredClone(latest);
-      if (body.fastMode !== undefined) {
-        if (nextFastMode === undefined) delete disk.fastMode;
-        else disk.fastMode = nextFastMode;
-      }
-      return { changed: true, value: true };
-    });
-    if (persisted.status === "unavailable") return jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
-    config.claudeCode = committedClaude;
-    if (body.fastMode !== undefined) {
-      if (nextFastMode === undefined) deleteConfigTopLevelKey(config, "fastMode");
-      else config.fastMode = nextFastMode;
-    }
+    const { saveConfigPreservingClaudeCode: save } = await import("../../config");
+    save(config);
     const warnings: string[] = [];
     // authMode changes must reconcile the injected system env too: switching back to
     // Subscription has to remove the opencodex-owned dummy ANTHROPIC_AUTH_TOKEN

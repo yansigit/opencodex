@@ -11,14 +11,12 @@ import { diagnoseCodexShim } from "../codex/shim";
 import { displayCodexRuntimePath, effortClampAppliesToRuntime, loadLastEffortClamp, resolveCodexRuntime } from "../codex/runtime";
 import { packageVersion } from "./help";
 import { computeVersionSkew, type VersionSkew } from "./version-skew";
-import { canonicalServerOrigin } from "../lib/server-tls";
 import { redactSecretString, redactUserPath } from "../lib/redact";
 import { collectOrcaCodexHomeDiagnostic, type OrcaCodexHomeDiagnostic } from "../codex/home";
 import { grokFenceEndpointDrift, readGrokStatus } from "../grok/status";
 import { claudeDesktopIntegrationEnabled } from "../codex/desired-state";
 import { claudeDesktopPolicyHealth, probeClaudeDesktopPolicy, type ClaudeDesktopPolicyHealth } from "../claude/desktop-policy";
 import { collectClientConnectionStatus } from "./connect";
-import { probeClaudeClientVersion, type ClaudeClientProbeDeps, type ClaudeClientVersion } from "../claude/client-version";
 export { proxyHealthFailureReason, isConnectionRefused, isUncleanExitEvidence, probeUncleanExitState } from "./status-probes";
 export type { ListenTarget } from "./status-probes";
 import { checkProxyHealth, probeUncleanExitState, type ListenTarget } from "./status-probes";
@@ -90,8 +88,6 @@ export type CliStatusJson = {
     desiredEnabled: boolean;
     policy: ClaudeDesktopPolicyHealth;
   };
-  /** Advisory local Claude Code client evidence; deliberately contains no process details. */
-  claudeClient?: ClaudeClientVersion;
   /**
    * This CLI's version against the running proxy's (#2701).
    *
@@ -107,15 +103,10 @@ export type CliStatusView = {
   healthLabel: string;
 };
 
-export function claudeClientStatusView(deps: ClaudeClientProbeDeps = {}): ClaudeClientVersion {
-  return probeClaudeClientVersion(deps);
-}
 
-
-type StatusListenConfig = Pick<OcxConfig, "port" | "hostname" | "runtimeRole" | "hub" | "tls">;
+type StatusListenConfig = Pick<OcxConfig, "port" | "hostname" | "runtimeRole" | "hub">;
 
 function statusDashboardUrl(config: StatusListenConfig, hostname: string | undefined, port: number): string {
-  if (config.tls) return canonicalServerOrigin(config, port);
   const managementOrigin = config.runtimeRole === "hub" ? config.hub?.managementPublicOrigin : undefined;
   if (managementOrigin) return managementOrigin.endsWith("/") ? managementOrigin : `${managementOrigin}/`;
 
@@ -136,13 +127,11 @@ export function selectListenTarget(
   const currentRuntimePort = pid && runtimePort?.pid === pid ? runtimePort : null;
   const port = currentRuntimePort ? currentRuntimePort.port : config.port ?? 10100;
   const hostname = currentRuntimePort?.hostname ?? config.hostname;
-  const host = probeHostname(hostname);
-  const protocol = config.tls ? "https" : "http";
   return {
     port,
     hostname,
     source: currentRuntimePort ? "runtime" : "config",
-    healthUrl: `${protocol}://${host}:${port}/healthz`,
+    healthUrl: `http://${probeHostname(hostname)}:${port}/healthz`,
     dashboardUrl: statusDashboardUrl(config, hostname, port),
   };
 }
@@ -180,7 +169,6 @@ export function unusedProxyWarningLines(input: {
 
 export async function collectStatus(): Promise<CliStatusView> {
   const configDiagnostics = readConfigDiagnostics();
-  const claudeClient = claudeClientStatusView();
   const config = configDiagnostics.config;
   const claudeDesktop = {
     desiredEnabled: claudeDesktopIntegrationEnabled(config),
@@ -191,7 +179,7 @@ export async function collectStatus(): Promise<CliStatusView> {
   // Pass the already-resolved diagnostics config so findLiveProxy does not re-load and
   // warn on malformed config.json (status --json must stay stderr-clean).
   const live = await findLiveProxy({
-    configFn: () => ({ port: config.port, hostname: config.hostname, tls: config.tls }),
+    configFn: () => ({ port: config.port, hostname: config.hostname }),
   });
   const pidFile = readPid();
   // Preserve an authoritative null from orphan/legacy liveness — do not restore pidFile.
@@ -200,17 +188,13 @@ export async function collectStatus(): Promise<CliStatusView> {
   // healthz body, so the version came back with the liveness result.
   const versionSkew = computeVersionSkew(packageVersion(), live?.version);
   const listen = live
-    ? (() => {
-      const liveHost = probeHostname(live.hostname);
-      const liveProtocol = config.tls ? "https" : "http";
-      return {
-        port: live.port,
-        hostname: live.hostname,
-        source: live.source,
-        healthUrl: `${liveProtocol}://${liveHost}:${live.port}/healthz`,
-        dashboardUrl: statusDashboardUrl(config, live.hostname, live.port),
-      };
-    })()
+    ? {
+      port: live.port,
+      hostname: live.hostname,
+      source: live.source,
+      healthUrl: `http://${probeHostname(live.hostname)}:${live.port}/healthz`,
+      dashboardUrl: statusDashboardUrl(config, live.hostname, live.port),
+    }
     : selectListenTarget(config, pidFile, pidFile ? readRuntimePort(pidFile) : null);
   // findLiveProxy already identity-probed /healthz; avoid a second fetch that can race.
   const health = live
@@ -227,7 +211,6 @@ export async function collectStatus(): Promise<CliStatusView> {
     live: Boolean(live),
     port: config.port,
     hostname: config.hostname,
-    tls: config.tls,
   });
   const bunRuntime = durableBunRuntime();
   const service = diagnoseService();
@@ -392,7 +375,6 @@ export async function collectStatus(): Promise<CliStatusView> {
       codexRuntime,
       codexHome,
       claudeDesktop,
-      claudeClient,
       // Own field rather than a line in `codexRuntime.warning`: a stale ocx on PATH is a
       // fact about this install, not about the Codex runtime, and filing it there would
       // print it under the wrong heading (#2701).

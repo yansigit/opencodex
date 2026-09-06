@@ -1,7 +1,8 @@
 /**
  * The web-search sidecar is a rotation site of its own, and it reaches Anthropic through the
- * shared 429 hook rather than the main response loop. With no pool setting, two usable accounts
- * still enable the presence-based recovery default at this independent rotation site.
+ * shared 429 hook rather than the main response loop. A pool that is switched off must still
+ * recover there: `anthropicAccountPool.enabled: false` declines PROACTIVE routing, not the
+ * reactive retry that runs only after upstream has already refused the request.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -11,8 +12,6 @@ import type { ProviderAdapter } from "../../../src/adapters/base";
 import { clearAnthropicAccountPoolState } from "../../../src/oauth/anthropic-routing";
 import { clearGenericFailoverHealth } from "../../../src/oauth/generic-account-failover";
 import { getAccountSet, saveCredential, setActiveAccount } from "../../../src/oauth/store";
-import { flushConfigDirHardeningForTests } from "../../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../../src/lib/windows-secret-acl";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
 import { removeTreeWithRetry } from "../../helpers/remove-tree";
 
@@ -21,7 +20,6 @@ let testHome = "";
 let handleResponses: typeof import("../../../src/server/responses")["handleResponses"];
 let observedKeys: string[] = [];
 let sidecarMode = false;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function fixtureAdapter(provider: OcxProviderConfig): ProviderAdapter {
   return {
@@ -56,12 +54,6 @@ beforeAll(async () => {
       name: "web_search",
       parameters: { type: "object", properties: {} },
     }),
-    mediaBridgeWillRun: (
-      hasMediaPlan: boolean,
-      hasWebSearchPlan: boolean,
-      adapterRunsTurn: boolean,
-      isStreaming = true,
-    ) => hasMediaPlan && isStreaming && (!hasWebSearchPlan || adapterRunsTurn),
     planWebSearch: () => sidecarMode
       ? {
           backend: "anthropic",
@@ -70,7 +62,6 @@ beforeAll(async () => {
           maxSearches: 1,
         }
       : undefined,
-    resolveCcaInTurnGrounding: () => undefined,
     shouldResolveOpenAiWebSearchSidecar: () => false,
     runWithWebSearch: async (args: {
       parsed: OcxParsedRequest;
@@ -91,8 +82,6 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testHome = mkdtempSync(join(tmpdir(), "ocx-oauth-429-boundaries-"));
   process.env.OPENCODEX_HOME = testHome;
   observedKeys = [];
@@ -101,25 +90,19 @@ beforeEach(() => {
   clearGenericFailoverHealth();
 });
 
-afterEach(async () => {
+afterEach(() => {
   clearAnthropicAccountPoolState();
   clearGenericFailoverHealth();
-  try {
-    await flushConfigDirHardeningForTests();
-  } finally {
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousHome;
-    removeTreeWithRetry(testHome);
-  }
+  removeTreeWithRetry(testHome);
 });
 
 afterAll(() => {
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
   mock.restore();
 });
 
-test("Anthropic web-search sidecar rotates on 429 when the pool setting is absent", async () => {
+test("Anthropic web-search sidecar rotates on 429 when proactive pooling is disabled", async () => {
   sidecarMode = true;
   for (let index = 0; index < 2; index += 1) {
     await saveCredential("anthropic", {
@@ -135,6 +118,7 @@ test("Anthropic web-search sidecar rotates on 429 when the pool setting is absen
   const config = {
     port: 0,
     defaultProvider: "anthropic",
+    anthropicAccountPool: { enabled: false, strategy: "round-robin" },
     providers: {
       anthropic: {
         adapter: "test-anthropic-sidecar",

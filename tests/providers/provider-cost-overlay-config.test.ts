@@ -5,7 +5,6 @@ import { join } from "node:path";
 import {
   getConfigPath,
   loadConfig,
-  mutatePersistedConfig,
   providerModelCostsConfigError,
   saveConfig,
   validateConfigCandidate,
@@ -180,10 +179,8 @@ describe("modelCosts config persistence and registry refresh", () => {
     expect(reloaded.providers.blsc.modelCosts).toEqual(VALID_COSTS);
     expect(activeUserCostOverlays()).toHaveLength(2);
     // Removing the overlay clears the registry rows.
-    expect(mutatePersistedConfig(persisted => {
-      delete persisted.providers.blsc.modelCosts;
-      return { changed: true, value: undefined };
-    }).status).toBe("committed");
+    delete reloaded.providers.blsc.modelCosts;
+    saveConfig(reloaded);
     expect(activeUserCostOverlays()).toHaveLength(0);
   });
 

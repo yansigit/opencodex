@@ -18,7 +18,7 @@ import { isWslRuntime, resolveCodexHomeDir, type CodexHomeDeps } from "./codex/h
 import { BUN_RUNTIME_PATH_ENV, BUN_RUNTIME_SOURCE_ENV, durableBunRuntime } from "./lib/bun-runtime";
 import type { BunRuntimeSource, DurableBunRuntime } from "./lib/bun-runtime";
 import { isProcessAlive, stopProxy } from "./lib/process-control";
-import { readInstalledServiceToken, serviceApiTokenFilePath } from "./lib/service-secrets";
+import { serviceApiTokenFilePath } from "./lib/service-secrets";
 import { tokenCollidesWithAdmin } from "./lib/admin-secrets";
 import { PROXY_ENV_KEYS } from "./lib/proxy-env";
 import { randomUUID } from "node:crypto";
@@ -57,7 +57,6 @@ import { withWindowsServiceMutationLock } from "./lib/windows-service-mutation-l
 import { maybeShowStarPrompt } from "./cli/star-prompt";
 import { systemdProperty } from "./service-manager-probe";
 import { isTestHomeGuardArmed } from "./lib/test-home-guard";
-import type { OcxConfig } from "./types";
 
 const LABEL = "com.opencodex.proxy";
 const TASK = "opencodex-proxy";
@@ -456,19 +455,10 @@ export function assertServiceAuthEnvironment(): void {
   const config = loadConfig();
   // Check the collision before the loopback short-circuit: a loopback install writes
   // the token file too, so returning early here is what let the broken state through.
-  let present = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
-  if (!present) {
-    const installed = readInstalledServiceToken();
-    if (installed) {
-      present = installed;
-      // Preserve env precedence (env wins), but export the recovered token so
-      // subsequent install/repair steps that read process.env see the same value.
-      process.env.OPENCODEX_API_AUTH_TOKEN = installed;
-    }
-  }
+  const present = process.env.OPENCODEX_API_AUTH_TOKEN?.trim();
   if (present) assertNotAdminToken(present);
   if (isLoopbackHostname(config.hostname)) return;
-  if (present) return;
+  if (process.env.OPENCODEX_API_AUTH_TOKEN?.trim()) return;
   // Reached from `service repair` as well as `install`, so name a command that can
   // actually succeed (see serviceRetryCommand).
   const diag = diagnoseService();
@@ -708,12 +698,22 @@ export function installedServiceListenPort(): number {
     ?? resolveServiceListenPort();
 }
 
-export const SERVICE_INSTALL_HEALTH_MS = Number(process.env.OCX_SERVICE_HEALTH_TIMEOUT_MS) || 30_000;
+export const SERVICE_INSTALL_HEALTH_MS = 20_000;
 
-/** Windows cold starts include ACL hardening and journal recovery before binding. */
+/**
+ * Windows gets a longer budget because its cold start does more before the
+ * listener exists: NTFS ACL hardening and previous-session journal recovery
+ * both run first, and #3009 recorded a service that bound a few seconds past
+ * the 20s deadline and then stayed healthy. Reporting that as a terminal
+ * repair failure is worse than waiting — the caller's fallback is to start a
+ * second proxy against a port that is about to be taken.
+ */
 export const SERVICE_INSTALL_HEALTH_WINDOWS_MS = 45_000;
 
-export function serviceInstallHealthMs(platform: NodeJS.Platform = process.platform): number {
+/** The health budget for the platform this is running on. */
+export function serviceInstallHealthMs(
+  platform: NodeJS.Platform = process.platform,
+): number {
   return platform === "win32" ? SERVICE_INSTALL_HEALTH_WINDOWS_MS : SERVICE_INSTALL_HEALTH_MS;
 }
 
@@ -736,33 +736,32 @@ export async function confirmServiceServing(
   deps: {
     port?: number;
     hostname?: string;
-    configFn?: () => Pick<OcxConfig, "hostname" | "tls">;
-    probe?: (port: number, hostname: string, scheme: "http" | "https") => Promise<boolean>;
+    probe?: (port: number, hostname: string) => Promise<boolean>;
     sleep?: (ms: number) => Promise<void>;
     now?: () => number;
     timeoutMs?: number;
   } = {},
 ): Promise<{ ok: true; port: number } | { ok: false; port: number }> {
-  const config = (deps.configFn ?? loadConfig)();
   const port = deps.port ?? installedServiceListenPort();
-  const hostname = deps.hostname ?? config.hostname ?? "127.0.0.1";
+  const hostname = deps.hostname ?? loadConfig().hostname ?? "127.0.0.1";
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
-  const scheme: "http" | "https" = config.tls ? "https" : "http";
-  const probe = deps.probe ?? (async (p, h, s) => !!(await proxyIdentityAt(p, { hostname: h, scheme: s })));
+  const probe = deps.probe ?? (async (p, h) => !!(await proxyIdentityAt(p, { hostname: h })));
   const deadline = now() + (deps.timeoutMs ?? serviceInstallHealthMs());
   let waited = false;
   for (;;) {
-    if (await probe(port, hostname, scheme)) return { ok: true, port };
+    if (await probe(port, hostname)) return { ok: true, port };
     if (now() >= deadline) break;
     await sleep(500);
     waited = true;
   }
-  // The final probe began before the deadline. Give a service that binds during that
-  // probe one last post-deadline knock; a zero timeout still means exactly one probe.
+  // The probe that ran last started before the deadline, so a service that binds
+  // during it is reported as dead (#3009). Knock once more after a short grace
+  // before calling it a failure. A zero budget means the caller asked not to
+  // wait, so it gets exactly the single probe it asked for and nothing more.
   if (waited) {
     await sleep(500);
-    if (await probe(port, hostname, scheme)) return { ok: true, port };
+    if (await probe(port, hostname)) return { ok: true, port };
   }
   return { ok: false, port };
 }
@@ -781,6 +780,11 @@ export async function reportServiceServing(
   deps: Parameters<typeof confirmServiceServing>[0] = {},
 ): Promise<void> {
   const healthBudgetMs = deps.timeoutMs ?? serviceInstallHealthMs();
+  // Timed here rather than reported from the budget. confirmServiceServing knocks once
+  // more after a grace sleep whenever it waited at all, so the real wait is the budget
+  // plus that grace — and printing the budget states a number the run did not spend.
+  // What the reader is deciding is whether the service was still coming up, which is a
+  // judgement about elapsed time (#3009).
   const now = deps.now ?? Date.now;
   const startedAt = now();
   const serving = await confirmServiceServing({ ...deps, timeoutMs: healthBudgetMs });
@@ -1885,11 +1889,9 @@ export function buildWindowsTaskXml(
   // keeps spaces intact, and /b (batch mode) suppresses script error popups.
   const escapedLauncherArgs = taskXmlString(`/b /nologo "${launcher}"`);
   // `UserId` is optional in the schema, and omitting it makes a SessionStateChangeTrigger
-  // fire for ANY account's session change. Scope it to the installing account when that
-  // account is already known. The lookup is never forced here: this builder is synchronous
-  // and its output is validated before registration, so a failed or unavailable lookup must
-  // degrade to the unscoped trigger rather than leave the task with no recovery at all.
-  // `LogonTrigger` above is unscoped for the same reason and predates this change.
+  // fire for ANY account's session change. Production registration resolves and passes the
+  // installing account SID explicitly; the optional parameter remains only for deterministic
+  // builders/tests, and the live validator rejects an unscoped recovery trigger.
   const sessionUserIdElement = sessionTriggerUserId
     ? `\n      <UserId>${taskXmlString(sessionTriggerUserId)}</UserId>`
     : "";
@@ -2037,25 +2039,54 @@ function taskXmlDecodedValueEquals(xml: string, tag: string, expected: string): 
   return taskXmlDecodeEntities(value).trim().toLowerCase() === expected.trim().toLowerCase();
 }
 
+/**
+ * Characters a console code page substitutes when it cannot carry the original.
+ * Windows writes `?` per unrepresentable character, some layers write U+FFFD, and a
+ * few drop them entirely.
+ */
 const CODE_PAGE_SUBSTITUTIONS = /^[?\uFFFD]*$/;
 
+/**
+ * Compare a value that OpenCodex itself wrote against what `schtasks /query /xml` read
+ * back, tolerating ONLY the characters the console code page could not carry.
+ *
+ * `runFile` already reads the query as bytes, so this is not a spawn-decoding bug: the
+ * conversion happens inside `schtasks` before the bytes exist. A profile named outside
+ * the active code page — `C:\\Users\\김병준\\...` — comes back as `C:\\Users\\???\\...`, so an
+ * exact comparison rejected a registration this process had just created correctly and
+ * `ocx service install` rolled it back (#3064).
+ *
+ * The tolerance is deliberately narrow. Each unrepresentable RUN in the expected value
+ * may match only a run of substitution characters — never arbitrary text, and never a
+ * path separator. A wildcard as wide as `[^\\\\/]*` would leave a fully non-ASCII segment with
+ * no anchors at all, so `C:\\Users\\김병준\\x.vbs` would match `C:\\Users\\Admin\\x.vbs` and this
+ * process would adopt, repair, or delete another account's task. Accepting a foreign
+ * live task is a worse failure than the rollback this fixes.
+ */
 function taskXmlLossyValueEquals(reported: string, expected: string): boolean {
   const a = reported.trim().toLowerCase();
   const b = expected.trim().toLowerCase();
   if (a === b) return true;
+  // Nothing unrepresentable in the expectation means there was nothing to mangle,
+  // so any difference is a real one.
   if (!/[^\x00-\x7F]/.test(b)) return false;
   const parts = b.split(/([^\x00-\x7F]+)/);
   let rest = a;
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i]!;
     if (i % 2 === 0) {
+      // Literal ASCII run: it must be present verbatim, which is what keeps every
+      // directory boundary and file name in the path verified.
       if (!rest.startsWith(part)) return false;
       rest = rest.slice(part.length);
       continue;
     }
+    // Unrepresentable run: consume only substitution characters, and stop at the
+    // next literal so a trailing run cannot swallow the remainder of the string.
     const next = parts[i + 1] ?? "";
     const end = next === "" ? rest.length : rest.indexOf(next);
-    if (end < 0 || !CODE_PAGE_SUBSTITUTIONS.test(rest.slice(0, end))) return false;
+    if (end < 0) return false;
+    if (!CODE_PAGE_SUBSTITUTIONS.test(rest.slice(0, end))) return false;
     rest = rest.slice(end);
   }
   return rest === "";
@@ -2065,7 +2096,8 @@ function taskXmlDecodedLossyValueEquals(xml: string, tag: string, expected: stri
   if (taskXmlHasPrefixedTag(xml, tag)) return false;
   if (taskXmlElementCount(xml, tag) !== 1) return false;
   const value = new RegExp(`<${tag}(?:\\s[^>]*?)?>([^<]*)<\\/${tag}>`, "i").exec(xml)?.[1];
-  return value !== undefined && taskXmlLossyValueEquals(taskXmlDecodeEntities(value), expected);
+  if (value === undefined) return false;
+  return taskXmlLossyValueEquals(taskXmlDecodeEntities(value), expected);
 }
 
 function taskXmlOptionalValueEquals(xml: string, tag: string, expected: string): boolean {
@@ -2101,7 +2133,10 @@ export function windowsTaskRegistrationOwnedByAttempt(xml: string, attemptNonce:
  * carrying one disabled trigger plus a different enabled one must not pass because the two
  * halves were found in unrelated elements.
  */
-function windowsTaskHasSessionRecoveryTriggers(triggers: string, expectedUserId: ExpectedWindowsTaskUserId | undefined): boolean {
+function windowsTaskHasSessionRecoveryTriggers(
+  triggers: string,
+  expectedUserId: ExpectedWindowsTaskUserId | undefined,
+): boolean {
   const scoped = triggers.match(/<SessionStateChangeTrigger(?:\s[^>]*)?>[\s\S]*?<\/SessionStateChangeTrigger>/gi) ?? [];
   return WINDOWS_SESSION_RECOVERY_STATE_CHANGES.every(stateChange =>
     scoped.some(element =>
@@ -2113,13 +2148,16 @@ function windowsTaskHasSessionRecoveryTriggers(triggers: string, expectedUserId:
 /**
  * A trigger's scope is acceptable only when it names the expected account exactly.
  *
- * An unscoped session trigger is unsafe because it can wake the per-user proxy for another
- * interactive logon. An explicitly scoped trigger is accepted only when the current account
- * is known and matches.
+ * An unscoped recovery trigger is not identity proof. Production registration resolves a SID
+ * before writing XML; a missing scope therefore means the fixed-name task is legacy or foreign
+ * and must be refreshed from an exact legacy snapshot or preserved for manual review.
  * Treating an unknown expected identity as a wildcard would let a fresh status process accept a
  * task bound to another user's session and suppress the repair that should replace it.
  */
-function windowsTaskTriggerScopeAcceptable(element: string, expectedUserId: ExpectedWindowsTaskUserId | undefined): boolean {
+function windowsTaskTriggerScopeAcceptable(
+  element: string,
+  expectedUserId: ExpectedWindowsTaskUserId | undefined,
+): boolean {
   // A prefixed `<t:UserId>` is a real scope this validator cannot read: taskXmlElementCount()
   // counts only unprefixed tags, so without this the element below would look ABSENT and the
   // trigger would be accepted as unscoped even though it is bound to some other account.
@@ -2129,6 +2167,11 @@ function windowsTaskTriggerScopeAcceptable(element: string, expectedUserId: Expe
   if (userIdCount === 0) return false;
   if (userIdCount !== 1) return false;
   if (expectedUserId === undefined) return false;
+  // Scope is an identity boundary, unlike the launcher path. Newly generated tasks
+  // use the locale-independent SID from cachedCurrentWindowsIdentity(), so there is
+  // no reason to forgive code-page substitutions here. A lossy account-name compare
+  // lets two non-ASCII users collapse to the same `???` value and can make repair
+  // start another account's fixed-name task.
   const expectedValues = typeof expectedUserId === "string" ? [expectedUserId] : expectedUserId;
   return expectedValues.some(value => taskXmlDecodedValueEquals(element, "UserId", value));
 }
@@ -2164,6 +2207,10 @@ function windowsTaskRegistrationBaseHealthy(
     // quotes we wrote as `&quot;` back to literal `"` on export, so an escaped
     // needle never matched and a healthy task read as permanently stale (#608).
     // Case-insensitive: elevated `schtasks /create` may rewrite System32 casing.
+    // Lossy on purpose: both name paths under the user profile, which the query
+    // cannot carry when the profile is named outside the code page (#3064). Only
+    // unrepresentable characters are forgiven; every ASCII segment and every
+    // separator is still matched literally.
     && (allowLossyPaths
       ? taskXmlDecodedLossyValueEquals(action, "Command", wscript)
         && taskXmlDecodedLossyValueEquals(action, "Arguments", `/b /nologo "${launcher}"`)
@@ -2189,13 +2236,13 @@ export function windowsTaskRegistrationHealthy(
 
 /**
  * The only stale definition repair may replace automatically: the previous OpenCodex task
- * shape whose action/principal/settings are still exact and which has no session triggers yet.
+ * shape whose action/principal/settings are byte-exact and which has no session triggers yet.
  * Arbitrary unhealthy or partially modified fixed-name tasks are preserved for manual review.
  */
 function windowsTaskRegistrationRefreshableLegacy(
   xml: string,
-  wscript?: string,
-  launcher?: string,
+  wscript = windowsWscript(),
+  launcher = windowsLauncherVbsPath(),
 ): boolean {
   const scrubbed = taskXmlWithoutCommentsAndCdata(xml);
   const triggers = taskXmlSection(scrubbed, "Triggers");
@@ -2920,6 +2967,8 @@ export async function repairService(deps: RepairServiceDeps = {}): Promise<void>
       : typeof expectedUserId === "string" ? [expectedUserId] : expectedUserId;
     const preferredSid = expectedValues[0];
     const triggers = taskXmlSection(taskXmlWithoutCommentsAndCdata(registeredXml), "Triggers");
+    // An exact legacy account name is safe to recognize, but rewrite it to the
+    // locale-independent SID while repair already owns the mutation boundary.
     const identityUpgradeNeeded = registrationHealthy
       && preferredSid !== undefined
       && !windowsTaskHasSessionRecoveryTriggers(triggers, preferredSid);
@@ -4039,7 +4088,7 @@ export interface WindowsTaskDiagnosticIdentityDeps {
 export function resolveWindowsTaskDiagnosticUserId(
   schedulerXml: string,
   deps: WindowsTaskDiagnosticIdentityDeps = {},
-): ExpectedWindowsTaskUserId | null {
+): readonly string[] | null {
   const currentIdentity = deps.currentIdentity ?? cachedCurrentWindowsIdentity;
   const cached = currentIdentity();
   if (cached) return [cached.sid, cached.name];
@@ -4341,9 +4390,6 @@ export type ServiceCommandPlan =
   | { ok: true; parsed: ParsedServiceArgs; command: string }
   | { ok: false; message: string };
 
-const SERVICE_SUBCOMMANDS = new Set(["install", "repair", "start", "stop", "status", "uninstall", "remove"]);
-const SERVICE_USAGE = "Usage: ocx service [install|repair|restart|start|stop|status|uninstall|remove] [--native|--scheduler]";
-
 export function planServiceCommand(
   args: string[],
   options: { platform?: NodeJS.Platform; probeInstallation?: () => ServiceInstallationProbe } = {},
@@ -4351,12 +4397,6 @@ export function planServiceCommand(
   const parsed = parseServiceArgs(args);
   if (parsed.invalid.length > 0) {
     return { ok: false, message: `Unknown service option: ${parsed.invalid.join(" ")}` };
-  }
-  // Validate the requested action before touching platform probes. In a Linux
-  // test container (and on a host without systemd), invalid CLI input must
-  // report usage rather than an unrelated service-manager capability error.
-  if (!SERVICE_SUBCOMMANDS.has(parsed.sub)) {
-    return { ok: false, message: SERVICE_USAGE };
   }
   if (parsed.backend && parsed.sub !== "install") {
     return { ok: false, message: "--native/--scheduler apply to `ocx service install` only; other subcommands use the installed backend." };
@@ -4566,7 +4606,7 @@ export async function serviceCommand(...args: (string | undefined)[]): Promise<v
       console.log("✅ service uninstalled.");
       break;
     default:
-      console.error(SERVICE_USAGE);
+      console.error("Usage: ocx service [install|repair|restart|start|stop|status|uninstall|remove] [--native|--scheduler]");
       console.error("       With no subcommand, installs when absent or repairs/restarts an existing service.");
       console.error("       repair: refresh and restart the installed backend; stale Windows tasks may request admin approval.");
       console.error("       restart: alias of repair.");

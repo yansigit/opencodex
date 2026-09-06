@@ -914,7 +914,7 @@ function probeUnixShimInstall(wrapperPath: string): UnixShimProbeResult {
     if (launcherStderr === null) return shimProbeCleanup("stderr", result.error, probeStatus, probeSignal);
     if (!Number.isInteger(groupId) || groupId <= 0) return shimProbeCleanup("group-id", result.error, probeStatus, probeSignal);
     const groupSurvived = unixProcessGroupAlive(groupId);
-    if (groupSurvived) {
+    if (timedOut || marker || reentryMarker || groupSurvived) {
       try {
         terminateUnixProcessGroup(groupId);
       } catch (error) {

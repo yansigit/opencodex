@@ -259,7 +259,3 @@ ocx system codex-cli-update check --json
 
 Inspectez et modifiez en toute sécurité la configuration OpenCodex validée. `show` et `get` masquent les secrets. Importer
 valide avant d'écrire et nécessite `--yes`.
-
-#### Diagnostic de compatibilité Claude Code
-
-Sous **2.1.201**, `ocx claude` avertit sans bloquer. Utilisez `npm install -g @anthropic-ai/claude-code`; l'état est aussi dans `ocx doctor` et `ocx status --json`. Ce seuil est distinct du sélecteur `/model` **2.1.129**.

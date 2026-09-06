@@ -823,6 +823,10 @@ export interface OcxConfig {
   oauthAccountFailover?: {
     enabled?: boolean;
   };
+  /** Opt-in Cursor OAuth account pool (fork; default off). */
+  cursorAccountPool?: {
+    enabled?: boolean;
+  };
   /** Virtual `combo/<id>` models spanning concrete provider/model targets (issue #133). */
   combos?: Record<string, OcxComboConfig>;
   /**

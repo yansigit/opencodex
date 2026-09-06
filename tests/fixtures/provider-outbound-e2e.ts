@@ -89,6 +89,15 @@ try {
     models: [],
   }, 0);
 
+  for (const key of proxyKeys) delete process.env[key];
+  process.env.ALL_PROXY = proxyUrl;
+  const allProxyResponse = await providerOutboundGet(
+    "all-proxy",
+    { baseUrl: "http://all-proxy-only.invalid/v1", allowPrivateNetwork: false },
+    "http://all-proxy-only.invalid/v1/models",
+  );
+  const allProxy = { status: allProxyResponse.status, body: await allProxyResponse.text() };
+
   const localConfig = {
     port: 0,
     hostname: "127.0.0.1",
@@ -118,6 +127,7 @@ try {
 
   console.log(JSON.stringify({
     outbound,
+    allProxy,
     managementProxy,
     proxyModels: proxyModels.map(model => model.id),
     managementNoProxy,

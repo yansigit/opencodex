@@ -118,7 +118,7 @@ const builtinToolSchema = z.object({ type: z.string() }).loose();
 
 const hostedToolType = z.enum([
   "web_search", "web_search_preview", "file_search", "computer_use_preview",
-  "code_interpreter", "image_generation", "mcp", "tool_search",
+  "code_interpreter", "image_generation", "mcp",
 ]);
 
 const allowedToolEntrySchema = z.object({ type: z.string(), name: z.string().optional() });
@@ -137,42 +137,6 @@ export const reasoningConfigSchema = z.object({
   effort: z.string().optional(),
   summary: z.enum(["auto", "concise", "detailed", "none"]).optional(),
 });
-
-const googleSafetyCategorySchema = z.enum([
-  "HARM_CATEGORY_HATE_SPEECH",
-  "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-  "HARM_CATEGORY_DANGEROUS_CONTENT",
-  "HARM_CATEGORY_HARASSMENT",
-  "HARM_CATEGORY_CIVIC_INTEGRITY",
-  "HARM_CATEGORY_JAILBREAK",
-]);
-const googleSafetyThresholdSchema = z.enum([
-  "HARM_BLOCK_THRESHOLD_UNSPECIFIED",
-  "BLOCK_LOW_AND_ABOVE",
-  "BLOCK_MEDIUM_AND_ABOVE",
-  "BLOCK_ONLY_HIGH",
-  "BLOCK_NONE",
-  "OFF",
-]);
-const googleSafetySettingSchema = z.object({
-  category: googleSafetyCategorySchema,
-  threshold: googleSafetyThresholdSchema,
-}).strict();
-const googleProviderOptionsSchema = z.object({
-  thinking_budget: z.number().safe().int().gte(-1).optional(),
-  include_thoughts: z.boolean().optional(),
-  safety_settings: z.array(googleSafetySettingSchema).max(16).superRefine((settings, ctx) => {
-    const categories = new Set(settings.map(setting => setting.category));
-    if (categories.size !== settings.length) {
-      ctx.addIssue({ code: "custom", message: "safety_settings categories must be unique" });
-    }
-  }).optional(),
-  cached_content: z.string().regex(
-    /^(?:cachedContents\/[^/?#\s]+|projects\/[^/?#\s]+\/locations\/[^/?#\s]+\/cachedContents\/[^/?#\s]+)$/,
-    "cached_content must be a valid Google cached content resource name",
-  ).optional(),
-}).strict();
-const providerOptionsSchema = z.object({ google: googleProviderOptionsSchema.optional() }).strict();
 
 export const stopSchema = z.union([z.string(), z.array(z.string()), z.null()]);
 
@@ -202,5 +166,4 @@ export const responsesRequestSchema = z.object({
   prompt: z.unknown().optional(),
   text: z.unknown().optional(),
   truncation: z.unknown().optional(),
-  provider_options: providerOptionsSchema.optional(),
 });

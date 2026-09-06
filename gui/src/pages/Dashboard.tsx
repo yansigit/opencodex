@@ -2,7 +2,7 @@ import { type ReactNode } from "react";
 import { IconAlert } from "../icons";
 import { Trans } from "../i18n/provider";
 import { navigateHash } from "../hash-routing";
-import { EmptyState, Notice } from "../ui";
+import { EmptyState } from "../ui";
 import { DashboardDialogs } from "./dashboard-dialogs";
 import { DashboardModelsSection } from "./dashboard-models-section";
 import { DashboardOverviewSection } from "./dashboard-overview-section";
@@ -21,7 +21,7 @@ function selectDashboardTab(next: DashboardSection) {
 export default function Dashboard({ apiBase }: { apiBase: string }) {
   const d = useDashboardData(apiBase);
   const {
-    t, error, overviewReconnecting, retryOverview, selectedSection,
+    t, error, selectedSection,
     providers, models, modelsLoading, modelQuery, setModelQuery,
     filteredGroups, expandedProviders, setExpandedProviders,
   } = d;
@@ -31,7 +31,6 @@ export default function Dashboard({ apiBase }: { apiBase: string }) {
       <EmptyState style={{ marginTop: 40 }} icon={<IconAlert />}
         title={<span style={{ color: "var(--red)" }}>{t("dash.cannotConnect")}</span>}>
         <Trans k="dash.runStart" cmd="ocx start" />
-        <button type="button" className="btn btn-ghost btn-sm" onClick={() => retryOverview()}>{t("common.retry")}</button>
       </EmptyState>
     );
   }
@@ -79,11 +78,6 @@ export default function Dashboard({ apiBase }: { apiBase: string }) {
         <h2>{t("nav.dashboard")}</h2>
       </div>
       <p className="page-sub">{t("dash.subtitle")}</p>
-      {overviewReconnecting && (
-        <Notice tone="warn">
-          {t("dash.connectionReconnecting")} <button type="button" className="btn btn-ghost btn-sm" onClick={() => retryOverview()}>{t("common.retry")}</button>
-        </Notice>
-      )}
       <div className="page-tabs" role="tablist" aria-label={t("dash.workspace.sections")}>
         {sections.map(s => (
           <button

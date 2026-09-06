@@ -171,7 +171,6 @@ describe("Responses account usage attribution", () => {
           updateAccountQuota("untouched-account", 7);
           const config = poolConfig(accountId === MAIN_CODEX_ACCOUNT_ID ? [] : [accountId]);
           config.activeCodexAccountId = accountId;
-          config.providers.openai!.wsUpstream = true;
           const req = new Request("http://localhost/v1/responses", {
             method: "POST", headers: { "content-type": "application/json" },
             body: JSON.stringify({ model: "gpt-5.5", input: "hello", stream: true }),

@@ -2,7 +2,7 @@
  * Read-only view of recently detected quota resets.
  *
  * Loaded on demand from src/server/management-api.ts, which is the FOURTH entry in the protected
- * set of tests/lab/core-lab-boundary.test.ts — added precisely because eagerly importing handlers
+ * set of tests/core-lab-boundary.test.ts — added precisely because eagerly importing handlers
  * there put ~70 modules on every dashboard request. A static import here would make this
  * subsystem the next instance of that bug.
  *

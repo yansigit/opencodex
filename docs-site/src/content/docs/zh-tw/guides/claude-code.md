@@ -13,7 +13,7 @@ Code 可以使用每一個已路由的供應商——包括 OAuth 登入、帳�
 每個請求只使用**作用中**帳號。
 
 **實驗性、opt-in** 的 Claude 帳號池（`anthropicAccountPool.enabled`）會在這些 OAuth 帳號之間加入
-sticky session affinity 與依用量的新工作階段選擇。省略此設定時，存在兩個以上可用帳號會預設啟用 429 容錯移轉，被限流的請求可能切換到另一個帳號。明確設為 `anthropicAccountPool.enabled: false` 會同時關閉此反應式容錯移轉和帳號池。僅對**新**工作階段，`anthropicAccountPool.strategy`
+sticky session affinity 與依用量的新工作階段選擇。它**不**控制 429 容錯移轉：只要儲存了兩個以上可用帳號，被限流的請求無論此開關開或關都會切換到另一個帳號，且無法關閉。僅對**新**工作階段，`anthropicAccountPool.strategy`
 會在合格帳號之間選擇：`quota`（預設）在用量高於 `autoSwitchThreshold` 時，依
 `anthropicAccountPool.quotaWindow` 所設定的視窗挑選已知用量最低者（`five-hour` 為預設，亦可選
 `weekly` 或 `max-utilization`）；
@@ -21,7 +21,7 @@ sticky session affinity 與依用量的新工作階段選擇。省略此設定�
 或達到閾值，然後前進。它**預設關閉**、會在 GUI 顯示警告，而且尚未經過實戰驗證——Anthropic 可能
 限制看起來像自動輪換的帳號；輪換並不能保護你免受供應商執行機制的處置。
 
-容錯移轉啟用時的營運契約：
+啟用時的營運契約：
 
 - 上游 **429** 會讓該帳號冷卻（有 `Retry-After` 時使用它，否則用預設 backoff）、清除其 affinity，
   並可能在同一個請求內輪換到另一個合格帳號（有上限）。
@@ -314,14 +314,6 @@ user-agent 會獲得易讀的 CLI 形式，其他用戶端會獲得 Desktop 雜�
 
 派發方式：`subagent_type: "ocx-gpt-5-6-sol"`。支援 1M 的目標會自動攜帶 `[1m]`。
 
-**指令信任：**生成的定義都經過簽署。每個 `ocx-*` 代理正文都帶有 `<!-- ocx-route: ... -->`（設定 effort 時另帶 `<!-- ocx-effort: ... -->`）以及相符的 `<!-- ocx-sig: ... -->` 簽章；OpenCodex 會使用其自動管理的本機簽署金鑰建立這些簽章。`ocx doctor` 會回報該金鑰是否存在及其權限，但絕不會印出金鑰本身。代理會在每次請求、**任何供應商派發之前**驗證簽章：已存在但遭修改、損毀或其他無效的簽章會以 `400 invalid_request_error` 拒絕請求；絕不會改派至其他供應商，也不會將它當成未簽署指令重新處理。未簽署的定義僅在其指令與作用中的 OpenCodex 所有名冊項目完全相符時才會採用；簽章檢查失敗時絕不會回退到該名冊路徑。
-
-## 未驗證的回環監聽器（opt-in）
-
-當代理繫結至需要憑證的非回環位址時，無法取得該憑證的本機用戶端會被拒絕。針對這種情況，OpenCodex 可以開啟第二個繫結至 `127.0.0.1` 的監聽器：在設定中設定 `unauthenticatedLoopbackListener`（**預設關閉**；必須指定埠號，且不得與代理埠號相同，絕不由作業系統自動配置）。請參閱[無法取得 token 的本機用戶端](/zh-tw/reference/configuration/#無法接收-token-的本機用戶端)。
-
-啟用後，Claude Code 監聽器只允許兩條路由：`POST /v1/messages` 與 `POST /v1/messages/count_tokens`（僅限 POST）。其他所有方法與路徑（包括 `/api/*` 和儀表板）都會回傳 `404`。公用監聽器的身分驗證維持不變：啟用此監聽器絕不會放寬主要監聽器。Codex 專用路由請見設定參考。
-
 ## 內建技能省略（blockedSkills）
 
 Claude Code 內建的 `claude-api` 技能會注入約 840KB（約 136k token）的 Anthropic 文件內容，
@@ -538,32 +530,3 @@ Claude 模型時自動載入。對於原生透傳，這是正常現象；對於�
 
 **子代理派發到錯誤模型**——名冊代理（`ocx-*`）使用 `<!-- ocx-route: ... -->` 指令，
 而不是 Agent 工具的 `model` 引數。請確保指令與預期路由一致。傳入 `"haiku"` 作為模型佔位符。
-
-## 用戶端相容性診斷
-
-在 `ocx claude` 啟動前，opencodex 會依 **2.1.201** 相容性最低版本檢查 Claude Code 版本。探測結果有五種狀態，各自附帶可採取的指引：
-
-| 狀態 | 意義 | 處理方式 |
-| --- | --- | --- |
-| `compatible` | 版本等於或高於最低版本 | 無需處理 |
-| `outdated` | 版本低於最低版本 | `npm install -g @anthropic-ai/claude-code` |
-| `missing` | 未安裝 Claude Code | 使用 `npm install -g @anthropic-ai/claude-code` 安裝 |
-| `timed-out` | 版本檢查逾時 | 重試；若持續發生，修復或升級 Claude Code |
-| `unparseable` | 無法辨識版本 | 修復或升級 Claude Code 後重試 |
-
-此探測僅供參考：低於最低版本、缺少、逾時或無法辨識的用戶端**絕不會阻擋啟動**——會印出警告，而 `ocx claude` 仍會繼續。`ocx doctor` 與 `ocx status --json` 會顯示相同的用戶端狀態。此最低版本不同於 **2.1.129** 的原生 `/model` 閘道器選擇器功能。
-
-### Token-count 基準測試（opt-in，可能產生費用）
-
-可以使用下列命令，將已路由路徑的 token 近似值與真實供應商計數比較：`bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`。
-該命令**本身就是同意**：沒有 `--confirm-live-provider-charges` 時只會驗證引數，不會傳送任何內容。確認後會傳送真實請求，且**可能產生供應商費用**。絕不要自動化或無人值守地腳本化——請刻意執行，並留意帳號。
-
-它會：
-
-- 僅針對 Anthropic adapter 的供應商/模型組合（供應商必須使用金鑰驗證且列出該模型），讓上游回報權威的 `input_tokens`。
-- 傳送一組確定性且已清理的 fixture——不會讀取或嵌入客戶文字。
-- 逐一傳送 fixture；失敗會分類且絕不重試，不使用並行或回退。
-- 輸出封閉、非持久化的報告：僅含 fixture ID、摘要、狀態、指標，以及供應商種類和模型 ID。絕不寫入請求本文、憑證或帳號識別碼。
-- 套用每個 fixture 的 `max(32 tokens, 20%)` 容差，且只有加權總體絕對誤差維持在 10% 以內才算通過。
-
-基準測試不會改變已路由 `/v1/messages/count_tokens` 的行為：它對已路由模型維持本機處理，僅在具備原生 `sk-ant-` 憑證時透傳至 Anthropic。

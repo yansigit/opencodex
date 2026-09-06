@@ -70,21 +70,12 @@ Sayaç eşleşen ve yüklü toplam sayıları gösterir; sıfırlama tüm satır
 
 ### Bir bölüme bağlantı verme
 
-Tek bir duyarlı düzen vardır, bu nedenle yapılandırılacak bir düzen anahtarı yoktur. Masaüstünde ana
-navigasyon kenar çubuğundadır; dar ekranlarda aynı sayfa bağlantılarını **Menüyü aç** ile açın.
+Tek bir düzen vardır, bu nedenle yapılandırılacak bir düzen anahtarı yoktur.
 Bunun yerine kontrol paneli bölümleri adreslenebilirdir: `#dashboard` Genel
 Bakış'ı açar, `#dashboard/providers` ve `#dashboard/models` diğer ikisini açar.
 Yeniden Yükle, yer imi ve Geri işlemlerinin tümü bulunduğunuz bölümü korur.
 **Günlükler** `#logs` ve `#logs/debug` ile aynı şekilde çalışır. Daha eski bir
 `#providers/workspace` yer imi artık `#providers` üzerine iner.
-
-Genel Bakış ayrıca 30 günlük istek ve belirteç eğilimlerini gösteren **30 günlük
-etkinlik** panelini içerir. Gün toplamlarını görmek için kıvılcım grafiklerinden
-birinde bir gün seçin veya tam Kullanım sayfasını açmak için **Kullanımı görüntüle**'yi
-seçin. Genel Bakış yüklendikten sonra yenileme kesilirse son başarılı veriler
-görünür kalır ve yeniden bağlanma bildirimi **Tekrar Dene** seçeneği sunar. İlk
-bağlantı başarısız olursa `ocx start` yönergeleri ve aynı yeniden deneme işlemi
-gösterilir.
 
 **Günlükler** ve **Kullanım**'daki maliyet değerleri bildirilen belirteçlerden
 hesaplanan API liste fiyatı eşdeğerleridir. Bunlar fatura makbuzları veya gerçek
@@ -264,7 +255,7 @@ noktalar şunları içerir:
 
 | Uç nokta | Amaç |
 | --- | --- |
-| `GET` / `PUT /api/settings` | Ayarları okuyun veya Codex otomatik başlatmayı, akış/bellek ayarlarını, hesap hedefli seçici görünürlüğünü ve sunucu dinleyicisi ayarlarını güncelleyin. Dinleyici ve sertifika değişiklikleri proxy'nin yeniden başlatılmasını gerektirir. |
+| `GET` / `PUT /api/settings` | Ayarları okuyun veya Codex otomatik başlatmayı, akış/bellek ayarlarını ve hesap hedefli seçici görünürlüğünü güncelleyin. |
 | `GET` / `POST /api/github/star` | `gh` kaynaklı yıldız durumunu okuyun veya depoya yıldız verin. POST, bir kontrol paneli oturumu olmayan ajan odaklı arayanlar için `403` `agent_consent_required` ile reddedilir. |
 | `GET /api/startup-health` | Sırsız yönlendirme, servis, dolgu ve yeniden başlatma güvenliği tanılamalarını okuyun. |
 | `POST /api/startup-action` | Sabit, izin listesine alınmış eylemler aracılığıyla arka plan servisini veya Codex başlatıcı dolgusunu kurun. |
@@ -293,3 +284,4 @@ metin ve vizyon sınıflandırmasını kaydedilen sağlayıcı yapılandırması
 kopyalar, böylece [vizyon sidecar'ı](/tr/guides/sidecars/) manuel sınıflandırma
 olmadan doğru şekilde geçişlenir.
 :::
+

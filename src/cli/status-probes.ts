@@ -1,10 +1,7 @@
 import { readPidFileValue, readRuntimePort } from "../config/process-state";
-import { loadConfig } from "../config";
 import { isOpencodexHealthz, probeHostname } from "../server/proxy-liveness";
 import { directLocalHttpFetch } from "../server/direct-local-http";
 import { isProcessAlive } from "../lib/process-control";
-import { canonicalServerOrigin } from "../lib/server-tls";
-import type { OcxConfig } from "../types";
 
 type HealthCheck = {
   ok: boolean;
@@ -136,7 +133,6 @@ export async function probeUncleanExitState(input: {
   live: boolean;
   port?: number;
   hostname?: string | null;
-  tls?: OcxConfig["tls"];
 }): Promise<boolean> {
   if (input.live) return false;
   const pidRecordBefore = readPidFileValue();
@@ -149,18 +145,12 @@ export async function probeUncleanExitState(input: {
   // no runtime record exists, which is the pid-file-only case.
   const port = runtimeBefore?.port ?? input.port ?? 10100;
   const hostname = runtimeBefore?.hostname ?? input.hostname ?? undefined;
-  const tls = (() => {
-    if (input.tls !== undefined) return input.tls;
-    try { return loadConfig().tls; } catch { return undefined; }
-  })();
-  const protocol = tls ? "https" : "http";
-  const host = probeHostname(hostname);
   const health = await checkProxyHealth({
     port,
     hostname,
     source: runtimeBefore ? "runtime" : "config",
-    healthUrl: `${protocol}://${host}:${port}/healthz`,
-    dashboardUrl: tls ? canonicalServerOrigin({ hostname, tls }, port) : `http://localhost:${port}/`,
+    healthUrl: `http://${probeHostname(hostname)}:${port}/healthz`,
+    dashboardUrl: `http://localhost:${port}/`,
   });
   const pidRecordAfter = readPidFileValue();
   const runtimePidAfter = readRuntimePort()?.pid ?? null;

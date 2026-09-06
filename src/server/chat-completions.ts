@@ -9,7 +9,6 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import {
   assertChatCompletionsRoutingBody,
   ChatCompletionsRequestError,
-  copyChatResponsesSessionHeaders,
   chatCompletionsToResponsesBody,
 } from "../chat/inbound";
 import {
@@ -155,7 +154,6 @@ async function handleChatCompletionsWithBudget(
       return chatCompletionsErrorResponse(404, err.message, "invalid_request_error");
     }
     if (err instanceof NoEligiblePolicyCandidateError) {
-      logCtx.requestedModel = requestedModel;
       logCtx.routeDecision = err.trace;
       if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
       return chatCompletionsErrorResponse(404, err.message, "invalid_request_error");
@@ -227,7 +225,6 @@ async function handleChatCompletionsWithBudget(
   // Unresolved combos are checked after their concrete child route is selected in Responses.
   if (settledRoute && !settledRoute.combo && isCanonicalOpenAiForwardProvider(settledRoute.provider)
     && isCodexReserveHelperUnsupported(config, settledRoute.modelId, logIds?.admission, visionDescribeTerminal)) {
-    if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 400, { closeReason: "non_stream" });
     return chatCompletionsErrorResponse(400, CODEX_RESERVE_HELPER_UNSUPPORTED_MESSAGE, "invalid_request_error");
   }
   const headers = new Headers({ "content-type": "application/json" });
@@ -236,7 +233,6 @@ async function handleChatCompletionsWithBudget(
     const value = req.headers.get(name);
     if (value) headers.set(name, value);
   }
-  copyChatResponsesSessionHeaders(req.headers, headers);
   // Prefer main ChatGPT auth so OpenAI-backed sidecars remain reachable on routed turns.
   if (!directRoute) {
     // This enrichment is optional for routed/non-main providers. If native main

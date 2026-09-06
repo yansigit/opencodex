@@ -5,7 +5,7 @@ import ProviderDetails from "../components/provider-workspace/ProviderDetails";
 import { isAccountProvider, type WorkspaceProvider } from "../provider-workspace/catalog";
 import { ensureOpenAiProvider, openAiAccountProviderState, OpenAiEnableError } from "../provider-payload";
 import { oauthTosRisk } from "../oauth-tos-risk";
-import { Notice, ToastNotice, type NoticeTone } from "../ui";
+import { ToastNotice, type NoticeTone } from "../ui";
 import { IconPlus } from "../icons";
 import { useT } from "../i18n/shared";
 import { useProviderAccountPools, type AccountSelectionTarget } from "../hooks/useProviderAccountPools";
@@ -213,11 +213,9 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     () => readSessionListCache<ProvidersConfig>(configCacheKey),
   );
   const [adding, setAdding] = useState(false);
-  const [replitWizardOpen, setReplitWizardOpen] = useState(false);
   const [status, setStatus] = useState("");
   const [statusOk, setStatusOk] = useState(false);
   const [statusTone, setStatusTone] = useState<NoticeTone>("err");
-  const [configLoadFailed, setConfigLoadFailed] = useState(false);
   /** Bumped on every notify so repeated identical success toasts restart the dismiss timer. */
   const [statusRevision, setStatusRevision] = useState(0);
   const [oauthProviders, setOauthProviders] = useState<string[]>([]);
@@ -329,7 +327,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
   const { fetchConfig: refreshConfigResult, fetchOauth, fetchProviderQuotas } = useProvidersFetch({
     apiBase, t, setConfig, setOauthProviders, setOauthStatus, notify,
     invalidateProviderQuotas,
-    setConfigLoadFailed,
     configCacheKey,
   });
   const fetchConfig = useCallback(async () => { await refreshConfigResult(); }, [refreshConfigResult]);
@@ -379,7 +376,7 @@ export default function Providers({ apiBase }: { apiBase: string }) {
     accountSets, setAccountSets, accountLoadStates, switchingAccount, keyPools, fetchAccountSets, fetchKeyPools,
     refreshAccountRosters, oauthCardProviders, keyCardProviders,
     switchAccount, switchApiKey, removeApiKey, addApiKeyValue, editCredentialAlias,
-    removeAccount, clearCooldown, activeAccountNeedsReauth,
+    removeAccount, activeAccountNeedsReauth,
   } = pools;
   const refreshSelection = useCallback((target?: AccountSelectionTarget) => {
     if (target && !(target.kind === "oauth" ? oauthCardProviders : keyCardProviders).includes(target.provider)) return Promise.resolve(true);
@@ -498,19 +495,16 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         <div className="page-head">
           <h2>{t("nav.providers")}</h2>
         </div>
-        {status && <ToastNotice tone={statusTone} onDismiss={clearStatus} dismissLabel={t("common.close")}>{status}</ToastNotice>}
-        {configLoadFailed ? (
-          <Notice tone="err">
-            {t("prov.loadConfigFail")} <button type="button" className="btn btn-ghost btn-sm" onClick={() => void fetchConfig()}>{t("common.retry")}</button>
-          </Notice>
-        ) : !status ? (
+        {status
+          ? <ToastNotice tone={statusTone} onDismiss={clearStatus} dismissLabel={t("common.close")}>{status}</ToastNotice>
+          : (
             <div className="providers-workspace providers-workspace--boot" aria-busy="true">
               <div className="providers-workspace-rail providers-workspace-rail--boot" aria-hidden="true" />
               <div className="providers-workspace-main">
                 <p className="muted"><span className="spin" aria-hidden="true" /> {t("prov.loadingConfig")}</p>
               </div>
             </div>
-          ) : null}
+          )}
       </>
     );
   }
@@ -566,17 +560,11 @@ export default function Providers({ apiBase }: { apiBase: string }) {
       <div className="page-head">
         <h2>{t("nav.providers")}</h2>
         <div className="row">
-          <button type="button" className="btn" onClick={() => setReplitWizardOpen(true)}>{t("replitGateway.openButton")}</button>
           <button type="button" className="btn btn-primary" onClick={() => setAdding(true)}><IconPlus />{t("prov.add")}</button>
         </div>
       </div>
       {status && (
         <ToastNotice tone={statusTone} onDismiss={clearStatus} dismissLabel={t("common.close")}>{status}</ToastNotice>
-      )}
-      {configLoadFailed && (
-        <Notice tone="err">
-          {t("prov.loadConfigFail")} <button type="button" className="btn btn-ghost btn-sm" onClick={() => void fetchConfig()}>{t("common.retry")}</button>
-        </Notice>
       )}
       <ProviderWorkspaceShell
         onRemoveProvider={removeProvider}
@@ -612,7 +600,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
             item={item}
             usageTotals={data.usageTotals}
             modelUsage={data.modelUsage}
-            accountUsage={data.accountUsage}
             quotaReport={data.quotaReport}
             availableModels={data.availableModels}
             hasLiveModels={data.hasLiveModels}
@@ -648,7 +635,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
               onSwitchApiKey: switchApiKey,
               onRemoveApiKey: removeApiKey,
               onEditAlias: editCredentialAlias,
-              onClearCooldown: clearCooldown,
               onRefreshQuota: refreshProviderQuota,
             }}
             onRefreshQuota={() => refreshProviderQuota(item.name)}
@@ -666,7 +652,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
         apiBase={apiBase}
         config={config}
         adding={adding}
-        replitWizardOpen={replitWizardOpen}
         modelsNotice={modelsNotice.notice ? {
           provider: modelsNotice.notice.context.provider,
           initialRegistration: modelsNotice.notice.context.initialRegistration,
@@ -703,15 +688,6 @@ export default function Providers({ apiBase }: { apiBase: string }) {
           if (busy) void cancelLoginOAuth(busy);
           setAdding(false);
           setAddIntent(null);
-        }}
-        onCloseReplitWizard={() => setReplitWizardOpen(false)}
-        onReplitInstalled={(name) => {
-          setReplitWizardOpen(false);
-          notify(t("prov.added", { name, cmd: "ocx sync" }), true);
-          fetchConfig();
-          fetchProviderQuotas(true);
-          bumpModelsRefresh();
-          setWorkspaceSelected(name);
         }}
         onAdded={(name) => {
           setAdding(false);

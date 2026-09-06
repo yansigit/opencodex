@@ -86,13 +86,11 @@ ocx connect rotate --admin-token-stdin
 
 ## Docker
 
-opencodex는 공식 컨테이너 이미지를 배포하지 않지만, 저장소 루트의 `Dockerfile`과 `compose.yaml`로 digest가 고정된 소스 이미지를 직접 빌드할 수 있습니다. 최초 정상 시작 시 자체 서명 TLS 인증서와 개인 키를 `ocx-state` 볼륨의 `/home/bun/.opencodex/container-tls/cert.pem`과 `/home/bun/.opencodex/container-tls/key.pem`에 생성합니다. 개인 키는 소유자만 읽을 수 있으며 이후 시작에서는 같은 인증서와 키를 검증한 뒤 다시 사용합니다. 데이터 엔드포인트는 HTTPS입니다.
+opencodex는 공식 컨테이너 이미지를 배포하지 않지만, 저장소 루트의 `Dockerfile`과 `compose.yaml`로 digest가 고정된 소스 이미지를 직접 빌드할 수 있습니다. 최초 실행 전에 데이터 키를 stdin으로 초기화하세요. 키는 출력되지 않으며 `ocx-state` 볼륨의 owner-only `service-api-token`에 저장됩니다.
 
-최초 정상 시작 전에 데이터 키를 stdin으로 한 번만 초기화하세요. bootstrap helper는 최대 512바이트인 한 줄만 허용합니다. 키를 출력하거나 기존 키를 덮어쓰지 않고 `ocx-state` 볼륨의 소유자 전용 `service-api-token`에 저장합니다.
+호스트에 Git과 Bun이 필요합니다. 이미지를 빌드할 때마다 Git이 추적하는 소스로 정식 매니페스트를 생성하고, 생성부터 빌드 사이에는 소스를 변경하지 마세요. 생성된 JSON은 Git에 추가하지 않으며 `.git`은 Docker 컨텍스트에서 제외됩니다. 호스트 포트는 기본적으로 `127.0.0.1`에 바인딩됩니다. 원격 공개는 `OPENCODEX_BIND_ADDRESS=<LAN-또는-Tailscale-IP> docker compose up -d`로 명시적으로 선택하며, `0.0.0.0`은 모든 인터페이스에 공개합니다. 방화벽과 인증된 TLS/tailnet 프런트엔드로 보호하세요.
 
-호스트에 Git과 Bun이 필요합니다. 이미지를 빌드할 때마다 Git이 추적하는 소스로 정식 매니페스트를 생성하고, 생성부터 빌드 사이에는 소스를 변경하지 마세요. 생성된 JSON은 Git에 추가하지 않으며 `.git`은 Docker 컨텍스트에서 제외됩니다. 호스트 포트는 기본적으로 `127.0.0.1:10100`에 바인딩됩니다. `OPENCODEX_PORT`는 호스트 포트와 관리되는 TLS의 `publicOrigin`을 함께 변경하지만 컨테이너 내부 리스너는 `10100`을 유지합니다.
-
-빌드는 오래된 매니페스트를 거부하며 모든 SHA-256을 컨텍스트와 복사된 파일에 각각 대조합니다. 매니페스트는 `Dockerfile`, `compose.yaml`, `.dockerignore`, Git이 추적하는 모든 Docker authority 파일, `src/`, `package.json`, `bun.lock`, `scripts/model-metadata.source.json`을 인증합니다. 누락되거나 일치하지 않는 파일, 매니페스트에 없는 추가 소스 또는 Docker authority 파일, 심볼릭 링크는 거부됩니다.
+빌드는 오래된 매니페스트를 거부하며 모든 SHA-256을 컨텍스트와 복사된 파일에 각각 대조합니다. 누락·불일치 파일, 매니페스트에 없는 추가 소스, 심볼릭 링크는 거부됩니다. `package.json`, `bun.lock`과 `scripts/`에서 유일하게 포함하는 `scripts/model-metadata.source.json`이 필수입니다.
 
 ```bash
 git clone https://github.com/lidge-jun/opencodex.git
@@ -103,35 +101,9 @@ openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-t
 docker compose up -d
 ```
 
-호스트에서 기본 게시를 확인하려면 공개 인증서만 복사해 로컬 CA로 사용하세요. 개인 키는 복사하지 마세요.
-
-```bash
-mkdir -p .tmp
-docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
-curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
-```
-
-다른 호스트 포트를 사용한다면 이후 Compose 실행에도 같은 값을 지정하세요.
-
-```bash
-OPENCODEX_PORT=10190 docker compose up -d
-curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10190/healthz
-```
-
-원격 공개는 `OPENCODEX_BIND_ADDRESS=<LAN-또는-Tailscale-IP>`로 명시적으로 선택하며, `0.0.0.0`은 모든 인터페이스에 공개합니다. 생성된 인증서는 `localhost`와 `127.0.0.1`만 포함합니다. 원격으로 직접 공개하려면 생성된 인증서와 키를 정확한 원격 이름에 맞는 인증서와 키로 교체하고, `OPENCODEX_PUBLIC_ORIGIN=https://hub.example.com:10100`처럼 경로, 자격 증명, 쿼리, 프래그먼트가 없는 정확한 HTTPS origin을 지정하세요. 방화벽과 인증된 TLS/tailnet 프런트엔드로 보호해야 합니다.
-
-TLS 도입 전에 만든 볼륨을 유지하고 있다면 다음 시작에서 볼륨별 TLS identity와 게시된 호스트 포트를 사용하는 HTTPS origin으로 자동 마이그레이션합니다. 운영자가 지정한 인증서 경로는 보존됩니다. 이전 HTTP 전용 이미지로 롤백하려면 현재 이미지를 사용할 수 있을 때 hub를 중지하고 TLS 설정만 제거한 뒤 이전 이미지를 시작하세요. 인증서 파일은 볼륨에 남아 있어도 됩니다.
-
-```bash
-docker compose down
-docker compose run --rm hub bun run src/cli/index.ts config unset tls
-# 이전 이미지를 선택하거나 빌드한 다음 hub를 다시 생성
-docker compose up -d
-```
-
 이미지는 non-root `bun` 사용자로 실행되고 루트 파일 시스템은 read-only이며 공개 포트는 `10100` 하나뿐입니다. 토큰을 `ARG`, `ENV`, `COPY`, Compose YAML, 이미지 기록, 명령행에 넣지 마세요. Docker socket, 호스트 홈, Codex 홈, SSH agent, 프로바이더 키도 마운트하지 마세요. 컨테이너 안의 `127.0.0.1:10101` 관리 포트는 같은 네트워크 네임스페이스의 TLS/tailnet 프런트엔드로만 연결하고 직접 publish하지 마세요.
 
-컨테이너 내부 health/readiness probe가 인증서 검증을 생략할 수 있는 범위는 고정된 컨테이너 루프백 연결뿐입니다. 외부 인수 검사에서는 복사한 공개 인증서나 시스템 신뢰 저장소를 사용해 실제로 접속하는 정확한 호스트 이름을 반드시 검증하세요. 컨테이너 healthcheck의 `/healthz`가 통과한 뒤 인증된 `/v1/catalog`와 실제 모델 응답도 별도로 확인해야 합니다.
+컨테이너 healthcheck의 `/healthz`가 통과한 뒤 `/readyz`, 인증된 `/v1/catalog`, 실제 모델 응답을 별도로 확인하세요.
 
 `docker compose down`은 `ocx-state` 볼륨을 보존합니다. `docker compose down --volumes`는 설정, OAuth 인증 정보, 사용량 기록, 데이터 키를 함께 삭제하므로 파괴적 작업으로 취급하세요.
 

@@ -6,3 +6,4 @@ no blockers: labels keyed by native id only (`configuredModelDisplayName` provid
 validation at schema/load/POST/PUT with prototype guards and 2,000 cap; reset deterministic; no new
 imports into router/lifecycle/responses core; merge conflict resolution preserved both retainModels
 and modelDisplayNames without dropping the POST carry-over.
+

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useI18n, type TFn, type Locale } from "../i18n/shared";
 import { formatProviderDisplayName } from "../provider-icons";
 import { formatTokens } from "../format-tokens";
@@ -10,8 +10,6 @@ import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
 import { SectionTabs } from "../components/section-tabs";
 import { sectionAnchorId } from "../section-anchors";
-import { buildCalendarSeries, formatCalendarDate, type CalendarSeriesDay } from "../usage-calendar-series";
-import { createPortal } from "react-dom";
 
 type Range = "all" | "30d" | "7d";
 type UsageSurface = "all" | "codex" | "claude" | "grok";
@@ -51,10 +49,6 @@ interface UsageDayModel {
   provider: string;
   requests: number;
   totalTokens: number;
-}
-
-interface UsageChartDay extends CalendarSeriesDay {
-  models: UsageDayModel[];
 }
 
 interface UsageModel {
@@ -115,55 +109,28 @@ function modelColor(model: string, provider: string): string {
   return `hsl(${h % 360} 55% 55%)`;
 }
 
-function weekChartDays(days: UsageDay[]): UsageChartDay[] {
-  const byDate = new Map(days.map(day => [day.date, day]));
-  return buildCalendarSeries(days, 7).map(day => ({ ...day, models: byDate.get(day.date)?.models ?? [] }));
-}
-
-function chartTipPosition(rect: DOMRect): CSSProperties {
-  const gutter = 8;
-  const viewportWidth = window.innerWidth;
-  const viewportHeight = window.innerHeight;
-  const maxWidth = Math.min(240, Math.max(0, viewportWidth - gutter * 2));
-  const left = Math.max(gutter, Math.min(rect.left + rect.width / 2 - maxWidth / 2, viewportWidth - gutter - maxWidth));
-  const above = rect.top - gutter > viewportHeight - rect.bottom - gutter;
-  const vertical = above
-    ? (() => {
-        const bottom = Math.max(gutter, Math.min(viewportHeight - gutter, viewportHeight - rect.top + gutter));
-        return { bottom, maxHeight: Math.max(0, viewportHeight - bottom - gutter) };
-      })()
-    : (() => {
-        const top = Math.max(gutter, Math.min(viewportHeight - gutter, rect.bottom + gutter));
-        return { top, maxHeight: Math.max(0, viewportHeight - top - gutter) };
-      })();
-  return {
-    left,
-    maxWidth,
-    ...vertical,
-  };
-}
-
-function UsageChartOverlay({
-  anchor,
-  className,
-  children,
-}: {
-  anchor: DOMRect;
-  className: string;
-  children: ReactNode;
-}) {
-  return createPortal(
-    <div className={`${className} chart-overlay`} role="tooltip" style={chartTipPosition(anchor)}>{children}</div>,
-    document.body,
-  );
-}
-
-function dayDetail(day: CalendarSeriesDay, locale: Locale, t: TFn): string {
-  return t("usage.chart.dayDetail", {
-    date: formatCalendarDate(day.date, locale),
-    requests: day.requests,
-    tokens: formatTokens(day.totalTokens, locale),
-  });
+// Last 7 calendar days (oldest → newest), zero-filled, for the 7d bar chart. The API's `days` only
+// carries dates with activity, so missing days are backfilled to 0 to keep a stable 7-bar axis.
+function lastSevenDays(days: UsageDay[]): UsageDay[] {
+  const byDate = new Map(days.map(d => [d.date, d]));
+  const out: UsageDay[] = [];
+  const cursor = new Date();
+  cursor.setHours(0, 0, 0, 0);
+  cursor.setDate(cursor.getDate() - 6);
+  for (let i = 0; i < 7; i++) {
+    const iso = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}-${String(cursor.getDate()).padStart(2, "0")}`;
+    const d = byDate.get(iso);
+    out.push({
+      date: iso,
+      requests: d?.requests ?? 0,
+      measuredRequests: d?.measuredRequests ?? 0,
+      reportedRequests: d?.reportedRequests ?? 0,
+      totalTokens: d?.totalTokens ?? 0,
+      models: d?.models ?? [],
+    });
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return out;
 }
 
 function quantileBuckets(values: number[]): number[] {
@@ -189,7 +156,7 @@ interface HeatmapCell {
   dayOfWeek: number;
 }
 
-function buildHeatmap(days: UsageDay[], locale: Locale): { weeks: HeatmapCell[][]; months: { label: string; col: number }[]; buckets: number[] } {
+function buildHeatmap(days: UsageDay[]): { weeks: HeatmapCell[][]; months: { label: string; col: number }[]; buckets: number[] } {
   const buckets = quantileBuckets(days.map(d => d.totalTokens));
   const dayMap = new Map(days.map(d => [d.date, d]));
 
@@ -202,7 +169,7 @@ function buildHeatmap(days: UsageDay[], locale: Locale): { weeks: HeatmapCell[][
 
   const weeks: HeatmapCell[][] = [];
   const months: { label: string; col: number }[] = [];
-  const monthName = new Intl.DateTimeFormat(locale, { month: "short" });
+  const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   let lastMonthCol = -4;
   let prevMonthIdx = -1;
   let week: HeatmapCell[] = [];
@@ -212,7 +179,7 @@ function buildHeatmap(days: UsageDay[], locale: Locale): { weeks: HeatmapCell[][
     const iso = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}-${String(cursor.getDate()).padStart(2, "0")}`;
     const m = cursor.getMonth();
     if (cursor.getDay() === 0 && m !== prevMonthIdx && weeks.length - lastMonthCol >= 4) {
-      months.push({ label: monthName.format(cursor), col: weeks.length });
+      months.push({ label: monthNames[m], col: weeks.length });
       lastMonthCol = weeks.length;
       prevMonthIdx = m;
     }
@@ -350,34 +317,21 @@ function UsageSummaryCards({
   );
 }
 
-function WeekDayBars({ weekBars, locale, t }: { weekBars: UsageChartDay[]; locale: Locale; t: TFn }) {
-  const [active, setActive] = useState<{ date: string; anchor: DOMRect } | null>(null);
+function WeekDayBars({ weekBars, locale, t }: { weekBars: UsageDay[]; locale: Locale; t: TFn }) {
+  const [hoverDay, setHoverDay] = useState<string | null>(null);
   const max = Math.max(1, ...weekBars.map(day => day.totalTokens));
-  const activeDay = weekBars.find(day => day.date === active?.date);
-  const show = (day: UsageChartDay, element: HTMLElement) => {
-    setActive({ date: day.date, anchor: element.getBoundingClientRect() });
-  };
 
   return (
-    <div className="daybars" role="group" aria-label={t("usage.section.heatmap")}>
+    <div className="daybars" role="img" aria-label={t("usage.section.heatmap")}>
       {weekBars.map(day => {
         const percentage = Math.round((day.totalTokens / max) * 100);
-        const label = new Intl.DateTimeFormat(locale, { weekday: "short" }).format(new Date(`${day.date}T12:00:00`));
+        const label = day.date.slice(5);
         return (
-          <button
-            type="button"
+          <div
             key={day.date}
             className="daybar"
-            aria-label={dayDetail(day, locale, t)}
-            onFocus={event => show(day, event.currentTarget)}
-            onBlur={() => setActive(current => current?.date === day.date ? null : current)}
-            onPointerEnter={event => show(day, event.currentTarget)}
-            onPointerDown={event => show(day, event.currentTarget)}
-            onPointerLeave={event => {
-              if (event.pointerType !== "touch" && document.activeElement !== event.currentTarget) {
-                setActive(current => current?.date === day.date ? null : current);
-              }
-            }}
+            onMouseEnter={() => setHoverDay(day.date)}
+            onMouseLeave={() => setHoverDay(current => (current === day.date ? null : current))}
           >
             <div className="daybar-track">
               <div
@@ -396,27 +350,23 @@ function WeekDayBars({ weekBars, locale, t }: { weekBars: UsageChartDay[]; local
                 )}
               </div>
             </div>
+            {hoverDay === day.date && day.totalTokens > 0 && (
+              <div className="daybar-tip" role="tooltip">
+                <div className="daybar-tip-date">{day.date}</div>
+                {day.models.slice(0, 8).map(model => (
+                  <div key={`${model.provider}/${model.model}`} className="daybar-tip-row">
+                    <span className="daybar-tip-swatch" style={{ background: modelColor(model.model, model.provider) }} />
+                    <span className="daybar-tip-name">{modelLabel(model.model)}</span>
+                    <span className="daybar-tip-val">{formatTokens(model.totalTokens, locale)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             <span className="daybar-count">{formatTokens(day.totalTokens, locale)}</span>
             <span className="daybar-label muted">{label}</span>
-          </button>
+          </div>
         );
       })}
-      {active && activeDay && (
-        <UsageChartOverlay className="daybar-tip" anchor={active.anchor}>
-          <div className="daybar-tip-date">{formatCalendarDate(activeDay.date, locale)}</div>
-          <div className="daybar-tip-row">
-            <span>{t("usage.heatmap.tooltipRequests", { requests: activeDay.requests })}</span>
-            <span className="daybar-tip-val">{t("usage.heatmap.tooltipTokens", { tokens: formatTokens(activeDay.totalTokens, locale) })}</span>
-          </div>
-          {activeDay.models.slice(0, 8).map(model => (
-            <div key={`${model.provider}/${model.model}`} className="daybar-tip-row">
-              <span className="daybar-tip-swatch" style={{ background: modelColor(model.model, model.provider) }} />
-              <span className="daybar-tip-name">{modelLabel(model.model)}</span>
-              <span className="daybar-tip-val">{formatTokens(model.totalTokens, locale)}</span>
-            </div>
-          ))}
-        </UsageChartOverlay>
-      )}
     </div>
   );
 }
@@ -430,39 +380,12 @@ function UsageHeatmapPanel({
 }: {
   range: Range;
   heatmap: ReturnType<typeof buildHeatmap>;
-  weekBars: UsageChartDay[];
+  weekBars: UsageDay[];
   locale: Locale;
   t: TFn;
 }) {
   const heatmapRef = useRef<HTMLDivElement | null>(null);
-  const cells = useMemo(() => heatmap.weeks.flat().filter(cell => cell.date), [heatmap]);
-  const [selectedDate, setSelectedDate] = useState(() => cells.at(-1)?.date ?? "");
-  const [tip, setTip] = useState<{ date: string; anchor: DOMRect } | null>(null);
-  const hintId = useId();
-  const rovingDate = cells.some(cell => cell.date === selectedDate) ? selectedDate : (cells.at(-1)?.date ?? "");
-
-  const selectCell = (cell: HeatmapCell, element: HTMLElement) => {
-    setSelectedDate(cell.date);
-    setTip({ date: cell.date, anchor: element.getBoundingClientRect() });
-  };
-
-  const onCellKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, cell: HeatmapCell) => {
-    const index = cells.findIndex(candidate => candidate.date === cell.date);
-    const offset = event.key === "ArrowUp" ? -1
-      : event.key === "ArrowDown" ? 1
-        : event.key === "ArrowLeft" ? -7
-          : event.key === "ArrowRight" ? 7
-            : 0;
-    if (!offset || index < 0) return;
-    event.preventDefault();
-    const next = cells[Math.max(0, Math.min(cells.length - 1, index + offset))]!;
-    setSelectedDate(next.date);
-    const element = heatmapRef.current?.querySelector<HTMLElement>(`[data-date="${next.date}"]`);
-    if (element) {
-      element.focus();
-      setTip({ date: next.date, anchor: element.getBoundingClientRect() });
-    }
-  };
+  const [hoverCell, setHoverCell] = useState<{ weekIndex: number; dayIndex: number; x: number; y: number } | null>(null);
 
   useEffect(() => {
     const element = heatmapRef.current;
@@ -480,7 +403,7 @@ function UsageHeatmapPanel({
       {range === "7d" ? (
         <WeekDayBars weekBars={weekBars} locale={locale} t={t} />
       ) : (
-        <div className="heatmap" ref={heatmapRef}>
+        <div className="heatmap" ref={heatmapRef} role="img" aria-labelledby="usage-heatmap-title">
           <div className="heatmap-months" style={{ gridTemplateColumns: `28px repeat(${heatmap.weeks.length}, calc(var(--hm-cell) + var(--hm-gap)))` }}>
             <span className="heatmap-day-spacer" />
             {heatmap.months.map(month => (
@@ -491,54 +414,36 @@ function UsageHeatmapPanel({
             <div className="heatmap-days">
               <span /><span>{t("usage.dayMon")}</span><span /><span>{t("usage.dayWed")}</span><span /><span>{t("usage.dayFri")}</span><span />
             </div>
-            <div
-              className="heatmap-grid"
-              role="group"
-              aria-labelledby="usage-heatmap-title"
-              aria-describedby={hintId}
-              style={{ gridTemplateColumns: `repeat(${heatmap.weeks.length}, var(--hm-cell))` }}
-            >
+            <div className="heatmap-grid" style={{ gridTemplateColumns: `repeat(${heatmap.weeks.length}, var(--hm-cell))` }}>
               {heatmap.weeks.map((week, weekIndex) => (
                 <div key={week[0]?.date || `week-${weekIndex}`} className="heatmap-week">
-                  {week.map((cell, dayIndex) => cell.date ? (
-                    <button
-                      type="button"
-                      key={cell.date}
+                  {week.map((cell, dayIndex) => (
+                    <div
+                      key={cell.date || `pad-${weekIndex}-${dayIndex}`}
                       className={`heatmap-cell heatmap-cell-${cell.level}`}
-                      data-date={cell.date}
-                      tabIndex={rovingDate === cell.date ? 0 : -1}
-                      aria-label={dayDetail(cell, locale, t)}
-                      onFocus={event => selectCell(cell, event.currentTarget)}
-                      onBlur={() => setTip(current => current?.date === cell.date ? null : current)}
-                      onKeyDown={event => onCellKeyDown(event, cell)}
-                      onPointerEnter={event => selectCell(cell, event.currentTarget)}
-                      onPointerDown={event => selectCell(cell, event.currentTarget)}
-                      onPointerLeave={event => {
-                        if (event.pointerType !== "touch" && document.activeElement !== event.currentTarget) {
-                          setTip(current => current?.date === cell.date ? null : current);
-                        }
+                      onMouseEnter={event => {
+                        if (!cell.date) return;
+                        const rect = event.currentTarget.getBoundingClientRect();
+                        setHoverCell({ weekIndex, dayIndex, x: rect.left + rect.width / 2, y: rect.top });
                       }}
+                      onMouseLeave={() => setHoverCell(current => (
+                        current?.weekIndex === weekIndex && current.dayIndex === dayIndex ? null : current
+                      ))}
                     />
-                  ) : (
-                    <span key={`pad-${weekIndex}-${dayIndex}`} className="heatmap-cell heatmap-cell-0" aria-hidden="true" />
                   ))}
                 </div>
               ))}
             </div>
           </div>
-          <span id={hintId} className="sr-only">{t("usage.heatmap.keyboardLabel")}</span>
-          <span className="sr-only" aria-live="polite">
-            {cells.find(cell => cell.date === rovingDate) ? dayDetail(cells.find(cell => cell.date === rovingDate)!, locale, t) : ""}
-          </span>
-          {tip && (() => {
-            const cell = cells.find(candidate => candidate.date === tip.date);
+          {hoverCell && (() => {
+            const cell = heatmap.weeks[hoverCell.weekIndex]?.[hoverCell.dayIndex];
             if (!cell?.date) return null;
             return (
-              <UsageChartOverlay className="heatmap-tip" anchor={tip.anchor}>
-                <div className="heatmap-tip-date">{formatCalendarDate(cell.date, locale)}</div>
+              <div className="heatmap-tip" role="tooltip" style={{ left: hoverCell.x, top: hoverCell.y }}>
+                <div className="heatmap-tip-date">{cell.date}</div>
                 <div className="heatmap-tip-val">{t("usage.heatmap.tooltipTokens", { tokens: formatTokens(cell.totalTokens, locale) })}</div>
                 <div className="heatmap-tip-req muted">{t("usage.heatmap.tooltipRequests", { requests: cell.requests })}</div>
-              </UsageChartOverlay>
+              </div>
             );
           })()}
           <div className="heatmap-legend muted">
@@ -760,7 +665,7 @@ function UsageWorkspaceBody({
 }: {
   data: UsageResponse | null;
   heatmap: ReturnType<typeof buildHeatmap>;
-  weekBars: UsageChartDay[];
+  weekBars: UsageDay[];
   activeDays: number;
   filteredModels: UsageModel[];
   modelQuery: string;
@@ -881,8 +786,8 @@ export default function Usage({ apiBase, connected = false, apiKeyId }: { apiBas
   const { state } = resource;
   const data = state.data ?? cached ?? null;
 
-  const heatmap = useMemo(() => buildHeatmap(data?.days ?? [], locale), [data?.days, locale]);
-  const weekBars = useMemo(() => weekChartDays(data?.days ?? []), [data?.days]);
+  const heatmap = useMemo(() => buildHeatmap(data?.days ?? []), [data?.days]);
+  const weekBars = useMemo(() => lastSevenDays(data?.days ?? []), [data?.days]);
   const activeDays = useMemo(() => (data?.days ?? []).filter(d => d.requests > 0).length, [data?.days]);
   const filteredModels = useMemo(() => {
     const q = modelQuery.trim().toLowerCase();

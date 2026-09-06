@@ -24,3 +24,4 @@ C1 docs plus the final measurement.
 ## Verification
 
 `bun run privacy:scan`; `bun test tests/ci-workflows/repo-hygiene.test.ts`; exact-head CI on the docs PR.
+

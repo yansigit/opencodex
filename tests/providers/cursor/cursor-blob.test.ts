@@ -23,7 +23,6 @@ import {
   commitCursorCheckpoint,
   CURSOR_CHECKPOINT_TTL_MS,
   cursorCheckpointStoreMetricsForTests,
-  getCursorCheckpointForPrefix,
   installCursorCheckpointClockForTests,
   invalidateCursorCheckpoint,
 } from "../../../src/adapters/cursor/checkpoint-store";
@@ -511,7 +510,7 @@ describe("Cursor blob handshake", () => {
 
     expect(run?.action?.action.case).toBe("userMessageAction");
     expect(rootBytes).toBeLessThanOrEqual(CURSOR_EXTERNAL_ROOT_BYTE_LIMIT);
-    expect(JSON.stringify(roots)).toContain("Tool output for read_file");
+    expect(JSON.stringify(roots)).toContain("[Tool Result]");
     expect(JSON.stringify(roots)).toContain("truncated for Cursor external replay budget");
     // #1527: the result surviving is not enough. Byte pressure used to consume the whole budget
     // with this one result and drop the user turn that asked for it, and `conversationTurns()`
@@ -673,37 +672,6 @@ describe("Cursor blob handshake", () => {
     expect(roots).toContain("neighboring-agent tool names `Read`, `Grep`, `Glob`, `Bash`, `LS`");
     expect(roots).toContain("unless a tool result was actually returned");
 
-  });
-
-  test("external tool continuations repeat bounded active instructions in the action text", () => {
-    const rawMessages = [
-      { role: "user" as const, content: "Run lookup.", timestamp: 1 },
-      {
-        role: "assistant" as const,
-        content: [{ type: "toolCall" as const, id: "call_1", name: "lookup", arguments: { q: "x" } }],
-        timestamp: 2,
-      },
-      {
-        role: "toolResult" as const,
-        toolCallId: "call_1",
-        toolName: "lookup",
-        content: "VALUE=x",
-        isError: false,
-        timestamp: 3,
-      },
-    ];
-    const request = {
-      modelId: "cursor-grok-4.6-xhigh",
-      conversationId: "c-instruction-reminder",
-      messages: [{ role: "tool" as const, content: "VALUE=x" }],
-      rawMessages,
-    };
-
-    const bounded = encodeCursorRunRequest({ ...request, system: ["Reply exactly FINAL=x."] });
-    expect(actionText(bounded)).toContain("Active instructions:\nReply exactly FINAL=x.");
-
-    const oversized = encodeCursorRunRequest({ ...request, system: ["x".repeat(2_049)] });
-    expect(actionText(oversized)).not.toContain("Active instructions:");
   });
 
   test("keeps exec_command guidance in the system prompt without mutating the user request", () => {
@@ -869,7 +837,7 @@ describe("Cursor blob handshake", () => {
     }
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
+    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
   });
 
   test("native protobuf replay leaves an opaque escape lookalike byte-identical", () => {
@@ -935,26 +903,6 @@ describe("Cursor blob handshake", () => {
     expect(JSON.stringify(roots)).toContain("hidden reasoning");
   });
 
-  test("composer-2.5 hybrid replay collapses repeated roots and adds a strategy-change note", () => {
-    const bytes = encodeCursorRunRequest({
-      modelId: "composer-2.5",
-      conversationId: "c-composer-repetition",
-      system: ["You are helpful."],
-      messages: [{ role: "user", content: "continue" }],
-      rawMessages: [
-        { role: "user", content: "work through it", timestamp: 1 },
-        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 2 },
-        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 3 },
-        { role: "assistant", content: [{ type: "text", text: "Still working on it." }], timestamp: 4 },
-        { role: "user", content: "continue", timestamp: 5 },
-      ],
-    });
-    const serialized = JSON.stringify(decodeRootMessages(bytes));
-    expect(serialized.match(/Still working on it\./g)).toHaveLength(1);
-    expect(serialized).toContain("this exact output was produced 3 times in a row");
-    expect(serialized).toContain("Take a DIFFERENT action now");
-  });
-
   test("external Cursor replay uses text history instead of native tool/thinking structures", () => {
     const bytes = encodeCursorRunRequest({
       modelId: "gpt-5.6-sol-xhigh",
@@ -984,7 +932,7 @@ describe("Cursor blob handshake", () => {
     const roots = decodeRootMessages(bytes) as Array<{ role?: string; content?: unknown }>;
     const historicalUser = roots.find(root => root.role === "user");
     expect(historicalUser?.content).toEqual([{ type: "text", text: "read a file" }]);
-    const toolResultRoot = roots.find(root => JSON.stringify(root).includes("Tool output for read_file"));
+    const toolResultRoot = roots.find(root => JSON.stringify(root).includes("[Tool Result]"));
     expect(toolResultRoot?.role).toBe("assistant");
     expect(run?.action?.action.case).toBe("userMessageAction");
     expect(JSON.stringify(roots)).toContain("contents");
@@ -1077,7 +1025,7 @@ describe("Cursor blob handshake", () => {
 
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
+    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
     const roots = decodeRootMessages(bytes) as Array<{ role?: string }>;
     expect(JSON.stringify(roots)).toContain("contents");
   });
@@ -1106,7 +1054,7 @@ describe("Cursor blob handshake", () => {
 
     expect(run?.action?.action.case).toBe("userMessageAction");
     const value = run?.action?.action.case === "userMessageAction" ? run.action.action.value : undefined;
-    expect(value?.userMessage?.text).toBe(`${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT}\n\nActive instructions:\nYou are helpful.`);
+    expect(value?.userMessage?.text).toBe(CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT);
     // Tool results are still replayed via history blobs.
     const roots = decodeRootMessages(bytes) as Array<{ role?: string }>;
     expect(JSON.stringify(roots)).toContain("contents");
@@ -1945,30 +1893,6 @@ describe("Cursor blob ID key channel bounds", () => {
 });
 
 describe("Cursor checkpoint request construction", () => {
-  test("duplicate prefix identities select the newest checkpoint", () => {
-    clearCursorCheckpointsForTests();
-    let clock = 1_000;
-    installCursorCheckpointClockForTests({ now: () => clock });
-    const checkpointBytes = toBinary(ConversationStateStructureSchema, create(ConversationStateStructureSchema, { selfSummaryCount: 1 }));
-    const common = {
-      conversationId: "cursor_duplicate",
-      identityScope: "acct",
-      modelId: "grok-4.6",
-      checkpointBytes,
-      coveredMessageCount: 2,
-      prefixDigest: "prefix",
-      systemDigest: "system",
-    };
-    const first = commitCursorCheckpoint(common);
-    clock += 1;
-    const second = commitCursorCheckpoint(common);
-    expect(first).toBeDefined();
-    expect(second).toBeDefined();
-    expect(second).not.toBe(first);
-    expect(getCursorCheckpointForPrefix(common)?.ref).toBe(second);
-    clearCursorCheckpointsForTests();
-  });
-
   test("uses decoded ConversationStateStructure and skips historical root replay", () => {
     const checkpoint = create(ConversationStateStructureSchema, {
       rootPromptMessagesJson: [new Uint8Array(32).fill(7)],

@@ -13,8 +13,6 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveCredential } from "../../src/oauth/store";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import {
   clearAccountQuotaCache,
   clearProviderQuotaCache,
@@ -28,7 +26,6 @@ import type { OcxConfig } from "../../src/types";
 const originalHome = process.env.OPENCODEX_HOME;
 const originalFetch = globalThis.fetch;
 let home: string;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 /** The exact age measured on the live proxy when the missing-Meta-usage defect was reported. */
 const OBSERVED_AGE_MS = 5.39 * 60 * 60_000;
@@ -47,8 +44,6 @@ function config(): OcxConfig {
 }
 
 beforeEach(() => {
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   home = mkdtempSync(join(tmpdir(), "ocx-observed-marker-"));
   process.env.OPENCODEX_HOME = home;
   clearProviderQuotaCache();
@@ -59,19 +54,13 @@ beforeEach(() => {
   }) as typeof globalThis.fetch;
 });
 
-afterEach(async () => {
+afterEach(() => {
   globalThis.fetch = originalFetch;
   clearProviderQuotaCache();
   clearAccountQuotaCache("meta-muse");
-  try {
-    await flushConfigDirHardeningForTests();
-  } finally {
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = originalHome;
-    removeTreeWithRetry(home);
-  }
+  if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = originalHome;
+  removeTreeWithRetry(home);
 });
 
 async function seedObservation(ageMs: number): Promise<void> {

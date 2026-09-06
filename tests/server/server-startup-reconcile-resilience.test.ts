@@ -17,11 +17,9 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, loadConfig, replacePersistedConfig, saveConfig } from "../../src/config";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
 import * as configStore from "../../src/config";
 import * as stateStores from "../../src/lib/state-store-registrations";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { OAUTH_PROVIDERS, reconcileOAuthProviders } from "../../src/oauth";
 import { runModelRenameStartupMigration } from "../../src/providers/model-rename-startup";
 import { startServer } from "../../src/server";
@@ -52,7 +50,6 @@ function canBindLoopback(): boolean {
 }
 
 const CAN_BIND = canBindLoopback();
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 test.skipIf(!CAN_BIND)("startServer persists the Astra-first legacy roster upgrade", async () => {
   saveConfig({
@@ -85,7 +82,7 @@ test.skipIf(!CAN_BIND)("startServer migrates old Grok Chat choices once and pres
       expect(resolveWireProtocolOverride("xai", model, upgraded.providers.xai!).adapter).toBe("openai-responses");
     }
     upgraded.providers.xai!.modelAdapters = { "grok-4.6": "openai-chat", "grok-4.5": "openai-chat" };
-    replacePersistedConfig(upgraded);
+    saveConfig(upgraded);
   } finally { await server.stop(true); }
   const restarted = startServer(0);
   try {
@@ -157,26 +154,18 @@ function runStartupReconciliation(config: OcxConfig): void {
 }
 
 beforeEach(() => {
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   previousHome = process.env.OPENCODEX_HOME;
   isolatedCodexHome = installIsolatedCodexHome("ocx-startup-reconcile-codex-");
   testDir = mkdtempSync(join(tmpdir(), "ocx-startup-reconcile-"));
   process.env.OPENCODEX_HOME = testDir;
 });
 
-afterEach(async () => {
-  try {
-    await flushConfigDirHardeningForTests();
-  } finally {
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousHome;
-    isolatedCodexHome?.restore();
-    isolatedCodexHome = null;
-    if (testDir) removeTreeWithRetry(testDir);
-  }
+afterEach(() => {
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
+  isolatedCodexHome?.restore();
+  isolatedCodexHome = null;
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 test("a config removed between loadConfig() and reconcile does not throw on the boot path", () => {

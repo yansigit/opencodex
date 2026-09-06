@@ -227,23 +227,6 @@ function isAuthorizedProviderExecutedCall(
   return false;
 }
 
-function uniquelyMatchesNamespacedDeclaration(
-  name: string,
-  declared: ReadonlySet<string>,
-): boolean {
-  let matches = 0;
-  for (const candidate of declared) {
-    const separator = candidate.lastIndexOf(":");
-    if (separator < 1) continue;
-    const bare = candidate.slice(separator + 1);
-    const sanitized = candidate.replaceAll(":", "_");
-    if (name !== bare && name !== sanitized) continue;
-    matches += 1;
-    if (matches > 1) return false;
-  }
-  return matches === 1;
-}
-
 /** Nameless client-call item types authorized by supported request tool declarations. */
 export function collectDeclaredNamelessClientCallTypes(body: unknown): Set<string> {
   const callTypes = new Set<string>();
@@ -338,10 +321,6 @@ function undeclaredNameInItem(
     ) return undefined;
     return name;
   }
-  // Some Responses providers echo a namespaced declaration as its bare inner
-  // name, or sanitize ':' to '_'. Accept that compatibility spelling only
-  // when it identifies exactly one declared wire tool; ambiguity stays denied.
-  if (uniquelyMatchesNamespacedDeclaration(name, declared)) return undefined;
   const effectiveName = normalizeDeclaredToolName(name, declared);
   if (declared.has(effectiveName)) return undefined;
   return name;

@@ -22,8 +22,6 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   // than prose. Translating it would invent a difference the UI does not have.
   "models.aliasAuto",
   "common.github",
-  // The template contains only a localized page slot, punctuation, and the product name.
-  "app.pageTitle",
   // A filename and a product name. "AGENTS.md" is the literal file Codex reads,
   // and translating "Plugins" would invent a difference French does not have.
   "codexSet.layer.agents-md",
@@ -54,7 +52,6 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "provider.name.commandCodeAuth",
   "provider.name.commandCodeApi",
   "provider.name.volcengine",
-  "pws.aiStudio",
   "provider.name.volcengineCodingPlan",
   "provider.name.volcengineAgentPlan",
   "routing.unavailable",
@@ -68,9 +65,6 @@ const INTENTIONAL_ENGLISH = new Set<TKey>([
   "dash.updateVersionTransition",
   "prov.accountId",
   "models.shadowCallOriginal",
-  "logs.filter.speed.slow",
-  "logs.filter.speed.medium",
-  "logs.filter.speed.fast",
   // One-glyph marker plus a model id in a narrow column; the meaning lives in the translated
   // tooltip (`logs.badge.interceptedHelperTitle`), not in the glyph.
   "logs.badge.interceptedHelper",

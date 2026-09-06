@@ -4,8 +4,8 @@
 // a measurably faster queue than the plain SSE POST path. Measured 2026-08-12
 // KST (same account, same payload, strictly sequential): gpt-5.6-luna TTFT p50
 // ~1.0s over WS vs ~3.9s over SSE. Codex CLI itself defaults to the WS
-// transport; opencodex keeps HTTP/SSE as its reliable default and allows
-// operators to opt into WS when the lower latency is worth the risk.
+// transport; opencodex previously always POSTed SSE, which is where its extra
+// 2-3s of TTFT came from.
 //
 // The wrapper only swaps the transport. It dials wss:// with the same headers,
 // sends the JSON body as a single `response.create` frame, and re-encodes the
@@ -19,11 +19,12 @@ import { CODEX_RESPONSES_HTTP_URL, CODEX_RESPONSES_WS_URL, prepareCodexHttpInit,
 import { codexWsExchange } from "./codex-ws-exchange";
 import { CodexWsSession } from "./codex-ws-session";
 import { codexWsPool, codexWsReuseIdentity } from "./codex-ws-pool";
-import { CODEX_WS_CREATE_FRAME_LIMIT_BYTES, codexWsCreateFrameExceedsLimit } from "./codex-ws-wire";
+import { codexWsCreateFrameExceedsLimit } from "./codex-ws-wire";
 export { CODEX_WS_RESPONSE_PRELUDE_TIMEOUT_MS, MAX_CODEX_WS_FRAME_BYTES, MAX_CODEX_WS_QUEUE_BYTES,
   MAX_CODEX_WS_CREATE_FRAME_BYTES, CODEX_WS_CREATE_FRAME_LIMIT_BYTES, codexWsCreateFrameExceedsLimit,
   isCodexWsQuotaObservedResponse, isCodexWsUpstreamResponse } from "./codex-ws-wire";
 export const MIN_BOUNDED_CODEX_WS_BUN_VERSION = "1.4.0";
+
 /**
  * Dial URL for a request URL. The canonical ChatGPT backend keeps its constant;
  * an operator-opted OpenAI-compatible upstream swaps https for wss on the same
@@ -32,9 +33,9 @@ export const MIN_BOUNDED_CODEX_WS_BUN_VERSION = "1.4.0";
  * a provider WS handshake would otherwise send credentials and request data
  * without transport encryption.
  */
-export function wsUpstreamUrlFor(httpUrl: string): string {
+function wsUpstreamUrlFor(httpUrl: string): string {
   if (httpUrl === CODEX_RESPONSES_HTTP_URL) return CODEX_RESPONSES_WS_URL;
-  return httpUrl.replace(/^http(s?):/, "ws\$1:");
+  return httpUrl.replace(/^http(s?):/, "ws$1:");
 }
 
 /**
@@ -43,14 +44,15 @@ export function wsUpstreamUrlFor(httpUrl: string): string {
  * and every downstream consumer (adapter parsers, usage sniffing, SSE relay)
  * assumes that wire. Other paths (chat completions, images, search) stay HTTP.
  */
-export function isResponsesWebsocketEligibleUrl(url: string): boolean {
+function isResponsesWebsocketEligibleUrl(url: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
     return false;
   }
-  return parsed.protocol === "https:" && parsed.pathname.endsWith("/responses");
+  return parsed.protocol === "https:"
+    && parsed.pathname.endsWith("/responses");
 }
 export type BunRuntimeIdentity = {
   version: string;
@@ -59,29 +61,6 @@ export type BunRuntimeIdentity = {
 
 export type BunRuntimeGateInput = string | BunRuntimeIdentity;
 
-export interface CodexWsUpstreamOptions {
-  wsUpstream?: boolean;
-  maxWsFrameBytes?: number;
-  upstreamWebsocket?: boolean;
-}
-
-export function isCodexWsUpstreamDisabled(options?: CodexWsUpstreamOptions): boolean {
-  if (options?.wsUpstream !== undefined) return options.wsUpstream !== true;
-  const env = process.env.OCX_CODEX_WS_UPSTREAM;
-  return env !== "true" && env !== "1";
-}
-
-export function resolveCodexWsMaxFrameBytes(options?: CodexWsUpstreamOptions): number {
-  if (typeof options?.maxWsFrameBytes === "number" && Number.isFinite(options.maxWsFrameBytes) && options.maxWsFrameBytes > 0) {
-    return Math.min(options.maxWsFrameBytes, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
-  }
-  const envVal = process.env.OCX_CODEX_WS_MAX_FRAME_BYTES;
-  if (envVal) {
-    const parsed = Number.parseInt(envVal, 10);
-    if (Number.isFinite(parsed) && parsed > 0) return Math.min(parsed, CODEX_WS_CREATE_FRAME_LIMIT_BYTES);
-  }
-  return CODEX_WS_CREATE_FRAME_LIMIT_BYTES;
-}
 export function currentBunRuntimeIdentity(): BunRuntimeIdentity {
   return {
     version: Bun.version,
@@ -122,26 +101,11 @@ export function shouldUseCodexWsUpstream(
   url: string,
   init?: RequestInit,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  options?: CodexWsUpstreamOptions | boolean,
+  upstreamWebsocketConfigured = false,
 ): boolean {
-  // Union: accept boolean legacy (vendor upstreamWebsocketConfigured) and object (fork CodexWsUpstreamOptions).
-  let opts: CodexWsUpstreamOptions | undefined;
-  let upstreamWebsocketConfigured = false;
-  if (typeof options === "boolean") {
-    upstreamWebsocketConfigured = options;
-  } else {
-    opts = options;
-    upstreamWebsocketConfigured = opts?.upstreamWebsocket === true;
-  }
   if (!bunSupportsBoundedCodexWsRelay(runtime)) return false;
-  if (url === CODEX_RESPONSES_HTTP_URL) {
-    // A custom-upstream opt-in never enables the canonical ChatGPT fast lane.
-    if (typeof options !== "boolean" && isCodexWsUpstreamDisabled(opts)) return false;
-  } else if (upstreamWebsocketConfigured) {
-    if (!isResponsesWebsocketEligibleUrl(url)) return false;
-  } else {
-    return false;
-  }
+  if (url !== CODEX_RESPONSES_HTTP_URL && !upstreamWebsocketConfigured) return false;
+  if (upstreamWebsocketConfigured && !isResponsesWebsocketEligibleUrl(url)) return false;
   if ((init?.method ?? "GET").toUpperCase() !== "POST") return false;
   const body = init?.body;
   if (typeof body !== "string") return false;
@@ -163,18 +127,15 @@ export function codexWsUpstreamFetch(
   init: RequestInit,
   sseFallback: typeof globalThis.fetch,
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
-  options?: CodexWsUpstreamOptions | boolean,
   onQuota?: CodexWsQuotaObserver,
   beforeDispatch?: (headers: Headers) => void,
 ): Promise<Response> {
-  const opts = typeof options === "boolean" ? undefined : options;
-  const customUpstream = options === true || opts?.upstreamWebsocket === true;
-  if ((!customUpstream && isCodexWsUpstreamDisabled(opts)) || !bunSupportsBoundedCodexWsRelay(runtime)) {
-    return sseFallback(url, prepareCodexHttpInit(url, init));
-  }
   const prepared = prepareCodexWsRequest(url, init);
   if (!prepared) return sseFallback(url, prepareCodexHttpInit(url, init));
   init = prepared.httpInit;
+  if (!bunSupportsBoundedCodexWsRelay(runtime)) {
+    return sseFallback(url, init);
+  }
   const signal = init.signal ?? undefined;
   if (signal?.aborted) {
     return Promise.reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
@@ -186,8 +147,7 @@ export function codexWsUpstreamFetch(
   // streaming Response, so the oversized close can only be surfaced as a stream
   // error — and a resend at that point could double-generate. Measuring the
   // frame we are about to send keeps the whole failure mode unreachable.
-  const maxFrameBytes = resolveCodexWsMaxFrameBytes(opts);
-  if (codexWsCreateFrameExceedsLimit(frameText, maxFrameBytes)) {
+  if (codexWsCreateFrameExceedsLimit(frameText)) {
     return sseFallback(url, init);
   }
 

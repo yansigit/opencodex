@@ -14,7 +14,6 @@ import { loadConfig, saveConfig } from "../../src/config";
 import { isMultiAgentV2Enabled } from "../../src/codex/features";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
-import { inMemoryManagementPersistence, isolatedDiskManagementPersistence } from "../helpers/management-auth";
 import type { OcxConfig } from "../../src/types";
 
 describe("keepNativeChatGptOnV1", () => {
@@ -107,9 +106,9 @@ function isolateHomes(): void {
  * WHICH executable is being launched — it never sees `file`, and it accepts any
  * `.cmd`/`.bat` target, so `evil.cmd` parses as readily as `codex.cmd`.
  * Executable identity belongs to the launcher contract, which is pinned
- * independently by `tests/codex-integration/codex-v2-gate.test.ts` (`codexFeaturesInvocation`
+ * independently by `tests/codex-v2-gate.test.ts` (`codexFeaturesInvocation`
  * resolving `codex` on POSIX, `.cmd` and `.exe` on win32) and
- * `tests/windows/win-exec.test.ts` (PATH×PATHEXT resolution and escaping). Duplicating
+ * `tests/win-exec.test.ts` (PATH×PATHEXT resolution and escaping). Duplicating
  * that here would couple these state tests to resolution behaviour again, which
  * is the defect this helper exists to remove.
  *
@@ -366,13 +365,7 @@ describe("/api/v2 keepNativeChatGptOnV1", () => {
     isolateHomes();
     const codexConfig = join(process.env.CODEX_HOME!, "config.toml");
     writeFileSync(codexConfig, "[features.multi_agent_v2]\nenabled = false\n");
-    const config: OcxConfig = {
-      providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" } },
-      hostname: "127.0.0.1",
-      port: 10100,
-      defaultProvider: "openai",
-    } as OcxConfig;
-    saveConfig(config);
+    const config: OcxConfig = { providers: {}, hostname: "127.0.0.1", port: 10100, defaultProvider: "openai" } as OcxConfig;
     const seen: Array<{ keepNativeChatGptOnV1?: boolean; multiAgentMode?: string }> = [];
     let converges = 0;
     const factory = catalogConvergenceFactory(() => {
@@ -383,7 +376,6 @@ describe("/api/v2 keepNativeChatGptOnV1", () => {
       });
     });
     const deps = {
-      ...isolatedDiskManagementPersistence(),
       createManagementConvergeCodex: factory,
       toggleCodexMultiAgentV2: (enabled: boolean) => {
         writeFileSync(codexConfig, readFileSync(codexConfig, "utf8").replace(/enabled = (?:true|false)/, `enabled = ${enabled}`));
@@ -449,55 +441,5 @@ describe("/api/v2 keepNativeChatGptOnV1", () => {
     );
     expect(bad?.status).toBe(400);
     expect(converges).toBe(3);
-  });
-});
-describe("/api/v2 v2RoutedDelegationBridge", () => {
-  test("GET defaults false and PUT persists only the scalar setting", async () => {
-    isolateHomes();
-    const config = {
-      providers: { relay: { adapter: "openai-chat", baseUrl: "https://relay.example/v1" } },
-      port: 10100,
-      defaultProvider: "relay",
-      multiAgentMode: "v2",
-      agentTaskRecovery: { enabled: true, model: "gpt-5.6-luna" },
-      unrelated: "preserve",
-    } as OcxConfig;
-    saveConfig(config);
-
-    const initial = await handleManagementAPI(getV2(), new URL("http://localhost/api/v2"), config);
-    expect((await initial?.json()).v2RoutedDelegationBridge).toBe(false);
-
-    const saved = await handleManagementAPI(
-      putV2({ v2RoutedDelegationBridge: true }),
-      new URL("http://localhost/api/v2"),
-      config,
-      inMemoryManagementPersistence(config),
-    );
-    expect(saved?.status).toBe(200);
-    expect((await saved?.json()).v2RoutedDelegationBridge).toBe(true);
-    expect(config).toMatchObject({
-      v2RoutedDelegationBridge: true,
-      agentTaskRecovery: { enabled: true, model: "gpt-5.6-luna" },
-      unrelated: "preserve",
-    });
-  });
-
-  test("PUT rejects a non-boolean bridge before writing any requested setting", async () => {
-    isolateHomes();
-    const config = {
-      providers: { relay: { adapter: "openai-chat", baseUrl: "https://relay.example/v1" } },
-      port: 10100,
-      defaultProvider: "relay",
-      unrelated: "preserve",
-    } as OcxConfig;
-    saveConfig(config);
-    const before = JSON.stringify(loadConfig());
-
-    const response = await handleManagementAPI(
-      putV2({ keepNativeChatGptOnV1: true, v2RoutedDelegationBridge: "yes" }),
-      new URL("http://localhost/api/v2"), config,
-    );
-    expect(response?.status).toBe(400);
-    expect(JSON.stringify(loadConfig())).toBe(before);
   });
 });

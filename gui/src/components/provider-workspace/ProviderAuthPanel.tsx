@@ -4,7 +4,7 @@
  * handlers via props-down; no internal auth machinery.
  */
 import { useEffect, useRef, useState } from "react";
-import { useT, useI18n } from "../../i18n/shared";
+import { useT } from "../../i18n/shared";
 import { IconLock, IconRefresh, IconTrash } from "../../icons";
 import type { WorkspaceItem } from "../../provider-workspace/catalog";
 import { oauthAccountDisplayLabel, providerAuthSurface } from "../../provider-workspace/auth";
@@ -18,8 +18,6 @@ import {
 } from "../../oauth-health-display";
 import CodexAccountPool from "../CodexAccountPool";
 import AnthropicAccountPoolSettings from "./AnthropicAccountPoolSettings";
-import CursorAccountPoolSettings from "./CursorAccountPoolSettings";
-import AntigravityFailoverNote from "./AntigravityFailoverNote";
 import { LoginHint as LoginHintView } from "../login-url-block";
 import { OpenBrowserPrefToggle } from "../open-browser-pref-toggle";
 import ProviderAccountQuota from "./ProviderAccountQuota";
@@ -30,12 +28,10 @@ import type {
   OAuthAccountRow,
   ApiKeyRow,
   LoginHint,
-  ProviderAccountUsageRow,
   ProviderAuthHandlers,
   ProviderUpdatePatch,
   ProviderUpdateResult,
 } from "./types";
-import { formatCostUsd } from "../../provider-workspace/usage";
 
 const COCKPIT_IMPORT_MAX_BYTES = 256 * 1024;
 const EMPTY_OAUTH_ACCOUNTS: OAuthAccountRow[] = [];
@@ -167,7 +163,7 @@ function safeCockpitImportResult(value: unknown): CockpitImportResult | null {
 }
 
 export default function ProviderAuthPanel({
-  item, apiBase, oauth, accounts = EMPTY_OAUTH_ACCOUNTS, accountUsage, keys = EMPTY_API_KEYS, accountLoadState = "ready",
+  item, apiBase, oauth, accounts = EMPTY_OAUTH_ACCOUNTS, keys = EMPTY_API_KEYS, accountLoadState = "ready",
   switchingAccountId = null, busy = false, loginHint, authHandlers, onCodexActiveNeedsReauthChange,
   codexController, onUpdateProvider,
 }: {
@@ -175,7 +171,6 @@ export default function ProviderAuthPanel({
   apiBase: string;
   oauth?: { loggedIn: boolean; email?: string; error?: string };
   accounts?: OAuthAccountRow[];
-  accountUsage?: ProviderAccountUsageRow[];
   keys?: ApiKeyRow[];
   accountLoadState?: AccountLoadState;
   switchingAccountId?: string | null;
@@ -188,7 +183,6 @@ export default function ProviderAuthPanel({
   codexController?: CodexAccountPoolController;
 }) {
   const t = useT();
-  const { locale } = useI18n();
   const [addingKey, setAddingKey] = useState(false);
   const [newKey, setNewKey] = useState("");
   const [keyBusy, setKeyBusy] = useState(false);
@@ -393,10 +387,6 @@ export default function ProviderAuthPanel({
             {item.name === "anthropic" && (
               <AnthropicAccountPoolSettings apiBase={apiBase} accountCount={accounts.length} />
             )}
-            {item.name === "cursor" && (
-              <CursorAccountPoolSettings apiBase={apiBase} accountCount={accounts.length} />
-            )}
-            {item.name === "google-antigravity" && <AntigravityFailoverNote />}
             {item.name === "google-antigravity" && (
               <div className="pwi-auth-add-key">
                 <div>
@@ -510,7 +500,6 @@ export default function ProviderAuthPanel({
                   const maskedId = displayAccountId(account.id);
                   const healthLabel = formatOAuthHealthLabel(t, account.health);
                   const healthSummary = formatOAuthHealthSummary(t, item.name, account.id, account.health);
-                  const accUsage = accountUsage?.find(a => a.accountLogLabel === account.id);
                   return (
                   <li key={account.id} className={`pwi-auth-acct${account.active ? " pwi-auth-acct--active" : ""}`}>
                     <div className={`pwi-auth-row${account.active ? " pwi-auth-row--active" : ""}`}>
@@ -535,11 +524,6 @@ export default function ProviderAuthPanel({
                       )}
                       {showReauth && !healthLabel && <span className="badge badge-amber">{t("pws.reauth")}</span>}
                       {account.active && <span className="badge badge-primary">{t("prov.accountActive")}</span>}
-                      {accUsage?.estimatedCostUsd !== undefined && (
-                        <span className="badge badge-subtle mono" title={t("pws.estimatedCost")}>
-                          {formatCostUsd(accUsage.estimatedCostUsd, locale)}
-                        </span>
-                      )}
                       {switching && <span className="badge badge-muted">{t("pws.accountSwitching")}</span>}
                     </button>
                     {showReauth && (
@@ -550,16 +534,6 @@ export default function ProviderAuthPanel({
                         onClick={() => void authHandlers.onReauth(item.name, account.id)}
                       >
                         {t("pws.reauthenticate")}
-                      </button>
-                    )}
-                    {inCooldown && authHandlers.onClearCooldown && (
-                      <button
-                        type="button"
-                        className="btn btn-ghost btn-sm"
-                        disabled={busy || Boolean(switchingAccountId)}
-                        onClick={() => void authHandlers.onClearCooldown?.(item.name, account.id)}
-                      >
-                        {t("pws.clearCooldown")}
                       </button>
                     )}
                     <button type="button" className="btn btn-ghost btn-sm"

@@ -169,11 +169,10 @@ export default function Combos({
         ? model.reasoningEfforts.filter((effort): effort is string => typeof effort === "string")
         : undefined;
       const inputModalities = Array.isArray(model.inputModalities)
-        ? model.inputModalities.flatMap((modality) => {
-          if (typeof modality !== "string") return [];
-          const trimmed = modality.trim();
-          return trimmed ? [trimmed] : [];
-        })
+        ? model.inputModalities
+          .filter((modality): modality is string => typeof modality === "string")
+          .map((modality) => modality.trim())
+          .filter(Boolean)
         : undefined;
       models.push({
         provider,

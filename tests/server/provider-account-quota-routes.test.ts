@@ -6,8 +6,6 @@ import { handleOauthAccountRoutes } from "../../src/server/management/oauth-acco
 import { clearAccountQuotaCache, clearProviderQuotaCache } from "../../src/providers/quota";
 import * as quotaApi from "../../src/providers/quota";
 import { getAccountSet, saveCredential } from "../../src/oauth/store";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -15,30 +13,21 @@ const originalFetch = globalThis.fetch;
 const originalHome = process.env.OPENCODEX_HOME;
 const originalFixtureKey = process.env.OCX_QUOTA_ROW_FIXTURE;
 let home = "";
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 beforeEach(() => {
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   home = mkdtempSync(join(tmpdir(), "ocx-quota-rows-"));
   process.env.OPENCODEX_HOME = home;
   clearAccountQuotaCache();
   clearProviderQuotaCache();
 });
-afterEach(async () => {
-  try {
-    clearAccountQuotaCache();
-    clearProviderQuotaCache();
-    await flushConfigDirHardeningForTests();
-  } finally {
-    globalThis.fetch = originalFetch;
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = originalHome;
-    if (originalFixtureKey === undefined) delete process.env.OCX_QUOTA_ROW_FIXTURE;
-    else process.env.OCX_QUOTA_ROW_FIXTURE = originalFixtureKey;
-    removeTreeWithRetry(home);
-  }
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  clearAccountQuotaCache();
+  clearProviderQuotaCache();
+  if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = originalHome;
+  if (originalFixtureKey === undefined) delete process.env.OCX_QUOTA_ROW_FIXTURE;
+  else process.env.OCX_QUOTA_ROW_FIXTURE = originalFixtureKey;
+  removeTreeWithRetry(home);
 });
 
 function keyConfig(): OcxConfig {

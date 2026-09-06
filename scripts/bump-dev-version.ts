@@ -19,10 +19,9 @@
  *
  * This decides a version. It does no git and no network work, which is what makes it
  * unit-testable and what keeps the credential surface in the workflow that calls it.
- * It does not merge anything. The dormant `.github/workflows/dev-version-bump.yml`
- * fallback can use the output to open a pull request if maintainers deliberately make
- * it the sole post-release authority again. The fork's live release path instead uses
- * the exact-SHA promotion controller; the two mechanisms must never run together.
+ * It does not merge anything: `.github/workflows/dev-version-bump.yml` uses the
+ * output to open a pull request, and a human still merges that. Until they do, the
+ * red persists. This is a prepared repair, not an automatic one.
  *
  * THE RULE
  *
@@ -53,12 +52,8 @@
  * inputs by the repository's own comparator.
  */
 
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 
-import {
-  renameAtomicFile,
-  type AtomicRenameIO,
-} from "../src/lib/windows-atomic-replace";
 import { compareReleaseTags } from "./release-notes";
 import { nextDevelopmentVersion } from "./version-line";
 
@@ -95,29 +90,6 @@ export interface BumpDecision {
   /** The version dev should carry. Equals `current` when `changed` is false. */
   version: string;
   reason: string;
-}
-
-/**
- * Publish rewritten package metadata through the repository's bounded Windows
- * sharing-violation retry. The I/O seam makes the EPERM path deterministic in tests.
- */
-export function replacePackageJsonAtomically(
-  packageJsonPath: string,
-  rewritten: string,
-  renameIo?: AtomicRenameIO,
-): void {
-  const temp = `${packageJsonPath}.tmp-${process.pid}`;
-  try {
-    writeFileSync(temp, rewritten, "utf8");
-    renameAtomicFile(temp, packageJsonPath, renameIo, "dev-version-bump");
-  } catch (error) {
-    try {
-      if (existsSync(temp)) unlinkSync(temp);
-    } catch {
-      // Nothing more to do: the original file is untouched, which is the point.
-    }
-    throw error;
-  }
 }
 
 /**
@@ -175,9 +147,8 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  // Use a synchronous read whose descriptor is closed before the atomic replacement.
-  // Retaining a Bun.file object here can leave Windows observing a self-held handle.
-  const raw = readFileSync(packageJsonPath, "utf8");
+  const file = Bun.file(packageJsonPath);
+  const raw = await file.text();
   const parsed = JSON.parse(raw) as { version?: unknown };
   if (typeof parsed.version !== "string") {
     console.error(`${packageJsonPath} has no string version`);
@@ -209,9 +180,16 @@ if (import.meta.main) {
     // full disk mid-write would leave a truncated package.json and no way to install.
     // Write a sibling temp file, rename it into place (atomic within one filesystem), and
     // remove the temp on any failure so a crash leaves no debris.
+    const temp = `${packageJsonPath}.tmp-${process.pid}`;
     try {
-      replacePackageJsonAtomically(packageJsonPath, rewritten);
+      writeFileSync(temp, rewritten, "utf8");
+      renameSync(temp, packageJsonPath);
     } catch (err) {
+      try {
+        if (existsSync(temp)) unlinkSync(temp);
+      } catch {
+        // Nothing more to do: the original file is untouched, which is the point.
+      }
       console.error(`✗ could not write ${packageJsonPath}: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }

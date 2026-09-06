@@ -33,11 +33,6 @@ describe("rateLimitRetryPolicyFor", () => {
       authMode: "key",
       retryOn429: {},
     } as OcxProviderConfig)).not.toBeNull();
-    expect(rateLimitRetryPolicyFor({
-      adapter: "azure-openai",
-      azureCredential: { type: "default-azure-credential" },
-      retryOn429: {},
-    } as OcxProviderConfig)).toBeNull();
   });
 
   test("applies defaults when the object is present", () => {

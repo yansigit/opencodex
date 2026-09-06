@@ -90,20 +90,11 @@ executor contract. Main-request migration must not treat that branch as fixed-tr
 provider, lets the selected adapter speak the upstream protocol, then bridges adapter events back to
 Responses-compatible streaming output.
 
-Canonical ChatGPT forward requests always use upstream SSE because the private Codex endpoint
-rejects unary Responses requests. A downstream `stream: false` preference is retained separately:
-the proxy drains the upstream stream under the ordinary 32 MiB and body-timeout limits, reconstructs
-an empty terminal snapshot from indexed `response.output_item.done` events, applies the same
-client-facing bridge and tool-call guards, and returns one JSON response. Missing, malformed,
-oversized, or stalled terminals fail closed instead of returning partial output.
-
 ### Fetch-helper import boundary
 
 `src/server/responses/fetch-helpers.ts` is a transport leaf shared by Responses, compact, and native
-Chat. Its runtime imports are limited to the Codex WebSocket transport, provider request pacing, the
-upstream HTTP-version helper, and the provider TLS-profile leaf. Server, provider, and WebSocket data
-types remain type-only edges. The TLS leaf lazy-loads its optional native module and otherwise keeps
-the default Bun executor unchanged; it must not pull OAuth, routing, or adapter code into this boundary.
+Chat. Its runtime imports are limited to the Codex WebSocket transport, provider request pacing, and
+the upstream HTTP-version helper. Server, provider, and WebSocket data types remain type-only edges.
 It must not import routing, combos, OAuth, adapters, sidecars, response parsing, logging, or relay
 modules merely because those imports existed in the pre-split `responses.ts` monolith.
 
@@ -540,11 +531,9 @@ These are standalone Images API routes, not the hosted Responses `image_generati
 selects a custom API-key `openai-responses` provider. Explicit selection fails closed when the
 provider is missing, disabled, registry-managed, incompatible, or lacks a usable key; it never
 falls through to another paid upstream. The relay accepts bounded JSON generation and edit requests,
-then forwards the decoded JSON without rewriting Codex's edit schema. Each paid Images POST,
-including the Google Antigravity fallback, receives one upstream attempt; an ambiguous transport
-failure is never replayed on a peer host because the generation may already have been accepted.
-Client cancellation aborts the upstream and pool-only failures update the existing account-health
-state. Unknown Images subpaths still reach the JSON `/v1/*` 404 guard.
+then forwards the decoded JSON without rewriting Codex's edit schema. Each paid Images POST receives
+one upstream attempt; client cancellation aborts the upstream and pool-only failures update the
+existing account-health state. Unknown Images subpaths still reach the JSON `/v1/*` 404 guard.
 
 When the OpenAI credential path is unavailable or its authentication fails, `generations` (not
 `edits`) may fall back to Google Antigravity if that provider is logged in. The fallback is
@@ -634,11 +623,6 @@ approval and sandbox path. `nativeLocalExec: "on"` is the explicit config-owner 
 local experiments; `off` and the backwards-compatible `codex-sandbox` spelling both fail closed.
 MCP, screen recording, and computer-use stay on their separate explicit executor/MCP config paths.
 
-When `nativeLocalExec` is not `"on"` but the turn advertises a bare Codex `shell_command` or
-`exec_command` bridge tool, native Shell/Read/Ls/Grep/Fetch exec frames map to one Codex shell tool
-call through the existing MCP split-turn instead of writing proxy-local policy rejections. Write and
-delete stay refused; `nativeLocalExec: "on"` still runs native exec on the proxy host.
-
 [Decision Log]
 - 목적과 의도: prevent caller-controlled Responses text from authorizing Cursor native local shell, filesystem, or fetch execution.
 - 기존 구현 및 제약 조건: the adapter preserved top-level `instructions`, system messages, and developer messages, then treated a `sandbox_mode ... danger-full-access` prose marker as an exec allow signal in `codex-sandbox` mode.
@@ -646,14 +630,6 @@ delete stay refused; `nativeLocalExec: "on"` still runs native exec on the proxy
 - 선택한 방식: keep marker detection only as diagnostic/context and make `nativeLocalExec: "on"` the only non-legacy mode that enables built-in local exec; unset, `off`, and `codex-sandbox` all deny.
 - 다른 대안 대신 이 방식을 선택한 이유: opencodex has no trustworthy per-request sandbox attestation in request text or headers, so any prompt-carried marker is spoofable by data-plane callers.
 - 장점, 단점 및 영향: this closes prompt-to-native-exec escalation while preserving an explicit operator escape hatch; existing configs that relied on `codex-sandbox` must switch to `nativeLocalExec: "on"` for trusted local experiments.
-
-[Decision Log]
-- 목적과 의도: when default-off policy blocks proxy-local native exec, route read-class native execs to the advertised Codex shell bridge instead of writing `#604` retry prose that stalls the Cursor run.
-- 기존 구현 및 제약 조건: `handleServerMessage` fell through every native exec to `handleCursorNativeExec`, which wrote policy-rejection Connect frames even when `shell_command`/`exec_command` was already in the catalog.
-- 검토한 주요 대안: keep pure rejection; auto-enable proxy-local exec in codex-sandbox mode; add a new operator flag for bridging.
-- 선택한 방식: pure mapper plus reuse of `planMcpArgsHandling` / client-tool finalize; no new config flag; write/delete stay on the policy path.
-- 다른 대안 대신 이 방식을 선택한 이유: the MCP bridge already ends the Cursor turn correctly without fake native results; bridging reuses that path and keeps Codex execution on the client host.
-- 장점, 단점 및 영향: default-off turns stop looping on native retries; POSIX command templates may need client-side adaptation on non-POSIX Codex hosts.
 
 Cursor's generic tool-use prompt filter must preserve every Responses-owned execution-path tool
 that survives the transport budget: unified Desktop `exec` as well as the legacy
@@ -749,15 +725,6 @@ routed compaction stay excluded. Pre-content reasoning is retained under named e
 caps and emits liveness heartbeats while held. A second empty result or retry failure becomes typed
 502 `empty_completion_retry_failed`; usage is merged across sends, and the Logs attempt records
 recovery kind `empty-completion`.
-
-Cursor Composer 2.5 is a narrower exception to the default observe-only policy. Live traffic has
-verified that this model can end a tool continuation with an empty successful stop. Such a turn is
-therefore converted to typed 502 `empty_completion` even when automatic retry is disabled. It is
-not replayed unless `emptyCompletionRetry: true` explicitly accepts the existing billing and
-side-effect tradeoff. Cursor conversation progress also fingerprints tool-bearing output without
-including volatile call ids; after three consecutive exact repeats, the next request receives one
-typed `cursor_repetition_circuit_open` failure and the one-shot circuit resets. Different tool names
-or arguments do not trip it.
 
 The web-search loop requests `stream: true` for every routed-model iteration, but buffers the events
 needed to decide whether to intercept a synthetic search call. Text explicitly phased as
@@ -1024,8 +991,6 @@ before Cursor emits a new checkpoint; those turns carry forward the last observe
 Cursor conversation instead of reporting only the tiny current-turn output delta. The carry-forward
 cache is process-local, numeric-only, bounded, and keyed by Cursor conversation id. Compaction
 boundaries clear the carry so pre-compaction totals are not reused after Codex replaces history.
-When Cursor reports a lower authoritative checkpoint itself, that latest value replaces the prior
-carry and a material drop is emitted as a numeric-only `context-compacted` diagnostic.
 Historical compaction markers restored by `previous_response_id` expansion are acknowledged as a
 replayed prefix and do not clear a fresh post-compaction checkpoint again on every later turn.
 Compaction summarizer turns may still report their own checkpoint for that response, but their
@@ -1038,7 +1003,7 @@ pre-compaction checkpoint is not persisted for later carry-forward.
 - 검토한 주요 대안: Add a longer wait for late checkpoints; infer prior+output totals; store full prompt/history state; carry forward only the last numeric checkpoint per Cursor conversation.
 - 선택한 방식: Carry forward the last numeric absolute checkpoint per Cursor conversation with bounded LRU/TTL storage, update it only from live checkpoint frames, and clear/suppress it once when a newly appended compaction boundary starts an epoch; previous_response replay provenance acknowledges historical markers without serializing private metadata upstream.
 - 다른 대안 대신 이 방식을 선택한 이유: It fixes the UI regression without delaying tool turns, fabricating token growth, storing prompt/tool content, or repeatedly clearing valid post-compaction usage when historical markers replay; one-time compaction resets still prevent stale over-report when history is replaced.
-- 장점, 단점 및 영향: Active-context reporting follows the latest authoritative checkpoint and can decrease when Cursor compacts; no-checkpoint turns remain estimated; a process restart loses the numeric cache, and when neither a checkpoint nor a carry-forward is available the turn reports a request-local estimate derived from the same pruned payload sent to Cursor (#373 — reporting output-only usage made Codex read the context as nearly empty). Estimates are never persisted or promoted into checkpoint carry-forward; only live checkpoint frames update the cache.
+- 장점, 단점 및 영향: Active-context reporting stays monotonic within an uncompacted Cursor conversation; no-checkpoint turns remain estimated; a process restart loses the numeric cache, and when neither a checkpoint nor a carry-forward is available the turn reports a request-local estimate derived from the same pruned payload sent to Cursor (#373 — reporting output-only usage made Codex read the context as nearly empty). Estimates are never persisted or promoted into checkpoint carry-forward; only live checkpoint frames update the cache.
 ```
 
 ## Cursor conversation checkpoint reuse
@@ -1392,9 +1357,6 @@ JSON object or schema. A mixed-capability gateway may list exact native model id
 `noStructuredOutputModels`; only those models omit the wire field, while siblings keep the normal
 translation. The proxy does not infer this from provider names, localhost destinations, or a model
 family shared by unrelated upstreams.
-The Google adapter lowers the same internal `textFormat` to Gemini JSON mode; Kiro still rejects
-structured output. Cursor has no structured-output wire field and rejects before transport.
-`requested_model.parameters` and MCP `input_schema` are not output-format channels.
 
 [Decision Log]
 - 목적과 의도: Recover chat models that reject `response_format` without removing structured output from models that support it.
@@ -1542,16 +1504,6 @@ combo whose remaining eligible targets use other providers.
 - 장점, 단점 및 영향: Same-account model fallback works without weakening explicit upstream backoff; the account health map intentionally does not remember that one deferred reset-derived failure, while the combo target map does.
 ```
 
-## Antigravity transport failover
-
-CCA chat/adapter requests use `streamGenerateContent?alt=sse`, including unary callers; the adapter
-buffers those SSE events for the unary contract. Built-in image generation uses the separate unary
-`v1internal:generateContent` endpoint outside the adapter. The configured daily or production host
-is tried first, then only its maintained peer (`daily-cloudcode-pa.googleapis.com` or
-`cloudcode-pa.googleapis.com`) is eligible for a single retry after a first-host transport
-failure, empty stream, 404, or `UNAVAILABLE`. Authentication, geoblock, invalid-request, and
-exhausted-quota responses do not trigger host failover.
-
 ## Combo streaming commit boundary
 
 An HTTP 200 does not by itself commit a streaming combo child. The combo parent runs the child's
@@ -1593,7 +1545,7 @@ surface is listed here so a maintainer can find the owner without grepping:
 | Transport | Owner | Invariant worth knowing |
 | --- | --- | --- |
 | Azure OpenAI Responses | `src/adapters/azure.ts` | Deployment-shaped URLs on top of the Responses contract. |
-| Google / Vertex / Antigravity | `src/adapters/google.ts`, `src/adapters/google-http.ts`, `src/adapters/google-antigravity-hosts.ts`, `src/adapters/google-wire-compiler.ts`, `src/adapters/google-tool-schema.ts`, `src/adapters/google-truncation.ts`, `src/adapters/google-errors.ts`, `src/adapters/google-antigravity-wire.ts`, `src/adapters/google-antigravity-replay.ts` | Vertex and Antigravity install a Google-family `fetchResponse` and so own their retry policy, while AI Studio Gemini leaves it undefined and uses the default server fetch path. The Google-family wrapper reuses the shared abort/deadline helpers (`src/lib/upstream-retry.ts`), wire-body repair, and upstream error normalization. CCA host failover is daily/prod only (`google-antigravity-hosts.ts`). |
+| Google / Vertex / Antigravity | `src/adapters/google.ts`, `src/adapters/google-http.ts`, `src/adapters/google-wire-compiler.ts`, `src/adapters/google-tool-schema.ts`, `src/adapters/google-truncation.ts`, `src/adapters/google-errors.ts`, `src/adapters/google-antigravity-wire.ts`, `src/adapters/google-antigravity-replay.ts` | Vertex and Antigravity install a Google-family `fetchResponse` and so own their retry policy, while AI Studio Gemini leaves it undefined and uses the default server fetch path. The Google-family wrapper reuses the shared abort/deadline helpers (`src/lib/upstream-retry.ts`), wire-body repair, and upstream error normalization. |
 | Mimo Free | `src/adapters/mimo-free.ts` | Client identity and JWT handling are transport-local; the per-install client id lives in the opencodex state root. |
 | Anthropic image ingress | `src/adapters/anthropic-image-guard.ts`, `src/adapters/anthropic-image-normalize.ts` | Oversized or unsupported images are normalized or rejected before reaching upstream. |
 | Adapter execution support | `src/adapters/run-turn-queue.ts`, `src/adapters/tool-catalog-nudge.ts`, `src/adapters/identity.ts`, `src/adapters/image.ts`, `src/adapters/upstream-http-error.ts` | Shared machinery: turn ordering, tool-catalog nudging, client fingerprinting, image conversion, upstream error normalization. |

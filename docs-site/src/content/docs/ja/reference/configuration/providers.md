@@ -5,12 +5,6 @@ description: プロバイダー エントリ、認証、エンドポイント、
 
 プロバイダーは、opencodex に、モデルが存在する場所、モデルが通信するワイヤー アダプター、およびリクエストの認証方法を伝えます。
 
-Azure identity configurations use `azureCredential` and are documented in the
-[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
-including `managedIdentityClientId`, the exact scope, `liveModels: false`,
-mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
-remains supported separately.
-
 ## 初回登録時のモデル選択
 
 新しい非 OAuth 接続では、信頼できるモデル一覧の取得が完了するまでモデルの公開を保留します。Models タブの重複しないモデル行が20個以上なら、モデルのスイッチをすべて OFF にします。プロバイダー自体は ACTIVE のままです。実際の認証方式が OAuth または ChatGPT ログインなら既定値を維持します。
@@ -78,8 +72,7 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`、`openai-responses`、`anthropic`、`google`、`kiro`、`cursor`、`ollama-native`、`azure-openai` (または別名 `azure`) のいずれか。 |
 | `baseUrl` | `string` |アップストリーム API のベース URL。ほとんどの組み込み固定エンドポイントは不一致を無視します。衝突安全キー プリセットは、古い同じ名前のカスタム宛先を保持します。 |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | 上流の使用量などとは別の送信間隔調整です。`jitterMs` は 0～60,000 ms の正のランダム遅延だけを追加し、モデル設定は遅延を増やす場合のみ有効です。 |
-| `tlsProfile?` | `"antigravity-browser"` | Google Antigravity Cloud Code Assist の正規ホストだけで使える、実験的で非公式な TLS/HTTP2 互換プロファイルです。利用規約への準拠や停止防止を保証せず、トラフィックを特徴的にする可能性があり、初期化に失敗すると Bun に戻ります。 |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | 上流の使用量、請求、レート制限表示とは別の、クライアント側の送信開始間隔調整です。プロバイダー制限は全モデルに適用され、`models` は上流の正確なモデル ID に一致し、遅延を増やす場合のみ有効です。キュー待機は応答ヘッダーのタイムアウトを消費しません。HTTP、Responses WebSocket、明示的なアダプターの `fetchResponse`/`runTurn` 送信を対象にします。 |
 | `responsesPath?` | `string` |キー認証 `openai-responses` リクエストの相対リソース パス。 `/` で始まり、スキーム、クエリ、またはフラグメントが含まれていない必要があります。 |
 | `upstreamWebsocket?` | `boolean` | `openai-responses` リクエストで使用するアップストリーム Responses WebSocket トランスポート（既定値は無効）。アップストリームがこのプロトコルに対応している場合、ストリーミング POST は設定済みの Responses パス（既定値 `/v1/responses`）へ HTTPS の WSS で接続し、通常の処理向けに SSE へ再エンコードされます。forward プロバイダーは `{baseUrl}/responses`、キー認証プロバイダーは `responsesPath`（未設定時は従来の `/v1/responses`）を使用します。HTTP のベース URL は SSE のままとなり、Responses 以外のパスと `openai-chat` リクエストは HTTP を使用します。 |
 | `supportsServiceTier?` | `boolean` | `service_tier` ケイパビリティの 3 状態です。`true`: fast モードが注入でき、呼び出し元の値も保持されます。`false`: フィールドは削除され、注入もされません (非対応と文書化されたアップストリームには送りません)。未設定: 未分類 — 呼び出し元の値はそのまま保持され、fast モードは注入しません。レジストリは正規 OpenAI (`true`)、DeepSeek、Volcengine Ark (`false`) を分類します。実際にティアをサポートするカスタム ゲートウェイにのみ明示的に設定してください。 |
@@ -146,8 +139,6 @@ account を削除しても mapping は保持され、同じ id を再追加す�
 | `desktopExecutor?` | `DesktopExecutorConfig` |カーソルのみ: 外部コンピュータ使用および画面録画コマンド。 |
 | `unsafeAllowNativeLocalExec?` | `boolean` |カーソルのレガシー ブール値。新しいフィールドが設定されていない場合のみ、`nativeLocalExec: "on"` と同等です。 |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` |カーソルのローカル実行ポリシー。 `off` がデフォルトです。 `codex-sandbox` は現在、`off` と同様にフェールクローズされます。 |
-| `commandCodeVersion?` | `string` | Command Code OAuth (`adapter: "command-code"`) のみ。`/alpha/generate` リクエストの `x-command-code-version` ヘッダーを固定します。未設定時はアダプターのデフォルト (`0.52.1`) を使います。API キーの `commandcode` プリセット (`openai-chat` / `/provider/v1`) では読みません。 |
-| `projectContext?` | `"off" \| "on"` | Command Code OAuth (`adapter: "command-code"`) のみ。`"on"` のとき、プロキシプロセスの作業ディレクトリから上限付きのプロジェクトファイルを `/alpha/generate` の `memory` / `taste` / `skills` エンベロープへコピーします。未設定または `"off"` のときは、ディスク上にファイルがあっても空のエンベロープのままです。API キーの `commandcode` プリセットでは読みません。`providers.command-code` に設定し、トップレベルには置きません。ダッシュボードでは **Providers → Command Code → Edit JSON** を使います。`process.cwd()` が意図したリポジトリになるよう、信頼できる Codex プロジェクトディレクトリからプロキシを起動してください。fail-soft: 欠落・読取不能・タイムアウト・パス逸脱はその部分を省略し、ターン全体は失敗しません。`~/.commandcode/skills` などホーム配下の skill は読みません。このフラグに関係なく `x-taste-learning` は `"false"` のままです。 |
 
 API キープロバイダーは、リテラルキーまたは環境参照を保持する場合があります。 OAuth プロバイダーは、`ocx login` によって設定された資格情報ストアを使用します。サブスクリプションに基づくクロード コードの起動動作は、[`claudeCode.authMode`](/reference/configuration/server/#claude-code) で構成されます。
 
@@ -192,13 +183,13 @@ affinity を維持します。これらの戦略は provider enforcement を回�
 
 |キー |タイプ |デフォルト |説明 |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` | スティッキー セッション アフィニティと使用量に基づく新規セッション選択を有効にします。このキーを省略すると、使用可能なアカウントが 2 つ以上存在する場合にリアクティブな 429 フェイルオーバーが有効になります。明示的な `false` は、プールとそのフェイルオーバーの両方を無効にします。 |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | スティッキー セッション アフィニティと使用量に基づく新規セッション選択を有効にします。**429 フェイルオーバーはここでは制御しません**: 使用可能なアカウントが 2 つ以上あれば他の複数資格情報プロバイダーと同様に有効になり、無効にはできません。 |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` |新しいセッションでは、アクティブなアカウントがこのしきい値に達すると、設定した期間で既知のキャッシュ使用量が最も低いアカウントを選択します。 `0` はクォータ選択を無効にします。 |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` |新しいセッション戦略。`quota` は `quotaWindow` で指定した期間（既定は 5 時間足）でアカウントを順位付けし、`fill-first` も同じ期間で使い切りのしきい値を判定します。 |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` |使用量ベースのアカウント選択で使う、プロバイダー報告のキャッシュ済み使用率です。`five-hour` は従来の動作を維持します。`weekly` は週次使用量を使い、他に対象アカウントが残る間だけ 5 時間使用量が上限に達したアカウントを除外し、残らない場合はそれらへフォールバックします。`max-utilization` は判明している値のうち最も高いものを使うため、週次使用量が未取得でも 5 時間使用量を利用できます。どちらも不明なら unknown の順位付けに従います。既知の使用量は unknown より先ですが、対象がすべて unknown でも対象順の先頭を選択します。記載した 5 時間使用量による同点判定後も完全に同点なら、対象順を維持します。正常な affinity セッションを先回りして再配置することはありません。新規セッションの割り当てと、対象となる 429 代替後のルーティング復旧では、`quota` はこの期間で対象候補を直接順位付けし、`fill-first` はこの期間のしきい値と上限到達ルールを使って安定順に進み、`round-robin` はこの設定を無視します。クールダウン、フェイルオーバー上限、再認証の適格性は別のローカル状態です。アカウント別の週次使用量は、ダッシュボードのプロバイダーページで取得した後にのみ利用できます。 |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` |成功した新しいセッションのバインドは 1 つのラウンドロビン選択で保持されます。範囲は 1 ～ 100。 |
 
-リアクティブ フェイルオーバーが有効な場合、429 レコードは `Retry-After` またはデフォルトのバックオフからの制限されたクールダウンを記録し、リクエスト内でローテーションする可能性があります。アフィニティはプロセスローカルであり、サイズ制限があります。資格情報 401/403 は、アカウントに再認証が必要であることをマークします。すべての対象となるアカウントが冷却されている場合、クライアントは、既知の場合、認証エラーではなく、`Retry-After` を含む 429 を受け取ります。
+有効にすると、429 レコードは `Retry-After` またはデフォルトのバックオフからの制限されたクールダウンを記録し、リクエスト内でローテーションする可能性があります。アフィニティはプロセスローカルであり、サイズ制限があります。資格情報 401/403 は、アカウントに再認証が必要であることをマークします。すべての対象となるアカウントが冷却されている場合、クライアントは、既知の場合、認証エラーではなく、`Retry-After` を含む 429 を受け取ります。
 
 :::caution[実験的]
 Anthropic アカウント ポリシーのリスクを理解していない限り、これは無効のままにしてください。不明な場合は、`ocx account use anthropic <id>` を手動で切り替えることをお勧めします。
@@ -273,8 +264,8 @@ Anthropic アカウント ポリシーのリスクを理解していない限り
 
 カーソル サーバー駆動のローカル ツールは、デフォルトでは無効になっています。 Codex は、独自の承認とサンドボックス ポリシーを備えた `apply_patch` や `exec_command` などの独自のツールを引き続き使用します。
 
-- `"off"` (デフォルト) は、プロキシ上での Cursor ネイティブ `read`、`write`、`delete`、`ls`、`grep`、`shell`、および
-  `fetch` 実行を拒否します。ターンが素の Codex `shell_command` または `exec_command` を公開している場合、ネイティブ Shell/Read/Ls/Grep/Fetch はプロキシではなくその Codex シェルブリッジへマップされ、write/delete は引き続き拒否されます。
+- `"off"` (デフォルト) は、カーソルネイティブの `read`、`write`、`delete`、`ls`、`grep`、`shell`、および
+`fetch`実行。
 - `"on"` は、信頼できるローカルでの実行を選択し、Codex 承認/サンドボックス セマンティクスをバイパスします。
 - `"codex-sandbox"` は互換性のために残されていますが、`"off"` と同様にフェールクローズされます。散文のリクエストは
 信頼できるサンドボックス証明書ではありません。
@@ -431,4 +422,3 @@ Vercel AI Gateway は、1 つのモデルを複数の基盤となる推論プロ
   "visionSidecar": { "enabled": true }
 }
 ```
-`replayTransientFailures`（既定は無効）はストリーム前の一時的な失敗を再試行します。リクエストが複数回配信される可能性があります。

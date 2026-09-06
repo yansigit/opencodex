@@ -215,8 +215,6 @@ describe("combo catalog capability intersection", () => {
       contextWindow: 128_000,
       maxInputTokens: 100_000,
       autoCompactTokenLimit: 100_000,
-      metadataSource: "derived",
-      detectedContextWindow: 128_000,
       inputModalities: ["text"],
       reasoningEfforts: ["low", "medium"],
       defaultReasoningEffort: "medium",
@@ -232,71 +230,6 @@ describe("combo catalog capability intersection", () => {
       contextWindow: 700_000,
       maxInputTokens: 700_000,
       autoCompactTokenLimit: 630_000,
-      metadataSource: "derived",
-      detectedContextWindow: 700_000,
-    });
-  });
-
-  test("derives detected capacity and conservative cap provenance across tied limiters", () => {
-    const capped = deriveComboCatalogModel("capped", normalizedCombo(), [
-      {
-        provider: "a", id: "m1", contextWindow: 128_000,
-        detectedContextWindow: 200_000, contextCapped: true,
-      },
-      {
-        provider: "b", id: "m2", contextWindow: 160_000,
-        detectedContextWindow: 150_000,
-      },
-    ]);
-    expect(capped).toMatchObject({
-      metadataSource: "derived",
-      contextWindow: 128_000,
-      detectedContextWindow: 150_000,
-      contextCapped: true,
-    });
-
-    const tiedUncapped = deriveComboCatalogModel("uncapped-tie", normalizedCombo(), [
-      { provider: "a", id: "m1", contextWindow: 128_000, detectedContextWindow: 200_000, contextCapped: true },
-      { provider: "b", id: "m2", contextWindow: 128_000, detectedContextWindow: 128_000, contextCapped: false },
-    ]);
-    expect(tiedUncapped).toMatchObject({
-      metadataSource: "derived",
-      detectedContextWindow: 128_000,
-      contextCapped: false,
-    });
-
-    const detectedButUncapped = deriveComboCatalogModel("detected-uncapped", normalizedCombo(), [
-      { provider: "a", id: "m1", contextWindow: 128_000, detectedContextWindow: 128_000 },
-      { provider: "b", id: "m2", contextWindow: 160_000, detectedContextWindow: 160_000 },
-    ]);
-    expect(detectedButUncapped).toMatchObject({
-      metadataSource: "derived",
-      contextWindow: 128_000,
-      detectedContextWindow: 128_000,
-      contextCapped: false,
-    });
-  });
-
-  test("emits derived provenance while retaining upstream max-input and auto-compact ceilings", () => {
-    const derived = deriveComboCatalogModel("budgets", normalizedCombo(), [
-      {
-        provider: "a", id: "m1", contextWindow: 700_000,
-        detectedContextWindow: 800_000, maxInputTokens: 922_000,
-        autoCompactTokenLimit: 880_000,
-      },
-      {
-        provider: "b", id: "m2", contextWindow: 800_000,
-        detectedContextWindow: 900_000, maxInputTokens: 900_000,
-        autoCompactTokenLimit: 850_000,
-      },
-    ]);
-    expect(derived).toMatchObject({
-      contextWindow: 700_000,
-      detectedContextWindow: 800_000,
-      metadataSource: "derived",
-      maxInputTokens: 700_000,
-      autoCompactTokenLimit: 630_000,
-      contextCapped: true,
     });
   });
 
@@ -4822,7 +4755,7 @@ describe("Codex catalog routed normalization", () => {
       });
       const warningText = warning.mock.calls.flat().join(" ");
       expect(warningText).toContain("blocked by destination policy");
-      expect(warningText).toContain("credential-bearing provider GET URL must use HTTPS");
+      expect(warningText).toContain("benchmark address");
       expect(warningText).toContain("fallback=configured");
     } finally {
       warning.mockRestore();
@@ -4848,6 +4781,7 @@ describe("Codex catalog routed normalization", () => {
             adapter: "openai-chat",
             baseUrl: "http://198.18.0.1/v1",
             allowPrivateNetwork: true,
+            apiKey: "sk-test",
             fetch: globalThis.fetch,
           },
         },
@@ -6905,7 +6839,7 @@ describe("auto_review_model configuration (#1225)", () => {
     expect(entries[1].auto_review_model_override).toBe(trimmedValue);
   });
 });
-import { ManagementRequest as Request, inMemoryManagementPersistence } from "../helpers/management-auth";
+import { ManagementRequest as Request } from "../helpers/management-auth";
 
 describe("#2465 model preset management routes", () => {
   const originalFetchForPresets = globalThis.fetch;
@@ -6939,7 +6873,7 @@ describe("#2465 model preset management routes", () => {
     const init: RequestInit = body === undefined
       ? { method }
       : { method, body: JSON.stringify(body), headers: { "content-type": "application/json" } };
-    const response = await handleManagementAPI(new Request(url, init), url, config, inMemoryManagementPersistence(config));
+    const response = await handleManagementAPI(new Request(url, init), url, config);
     return { status: response!.status, body: await response!.json() as Record<string, unknown> };
   }
 

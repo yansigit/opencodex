@@ -84,7 +84,6 @@ export interface ManagementRoute {
 /** Every reachable management route. */
 export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   // server/management-api
-  { method: "POST", path: "/api/providers/test", module: "server/management-api", mutates: true },
   { method: "POST", path: "/api/stop", module: "server/management-api", mutates: true },
   // codex/auth-api
   { method: "DELETE", path: "/api/codex-auth/accounts", module: "codex/auth-api", mutates: true },
@@ -128,11 +127,9 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/injection-model", module: "server/management/agent-settings-routes", mutates: false },
   { method: "GET", path: "/api/subagent-model-fallback", module: "server/management/agent-settings-routes", mutates: false },
   { method: "GET", path: "/api/subagent-models", module: "server/management/agent-settings-routes", mutates: false },
-  { method: "GET", path: "/api/subagent-roles", module: "server/management/agent-settings-routes", mutates: false },
   { method: "GET", path: "/api/v2", module: "server/management/agent-settings-routes", mutates: false },
   { method: "POST", path: "/api/claude-desktop/apply", module: "server/management/agent-settings-routes", mutates: true },
   { method: "POST", path: "/api/grok/apply", module: "server/management/agent-settings-routes", mutates: true },
-  { method: "POST", path: "/api/subagent-model-authority", module: "server/management/agent-settings-routes", mutates: false },
   { method: "PUT", path: "/api/claude-code", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/claude-desktop", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/codex-auth/features/default-mode-request-user-input", module: "server/management/agent-settings-routes", mutates: true },
@@ -141,7 +138,6 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "PUT", path: "/api/injection-model", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/subagent-model-fallback", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/subagent-models", module: "server/management/agent-settings-routes", mutates: true },
-  { method: "PUT", path: "/api/subagent-roles", module: "server/management/agent-settings-routes", mutates: true },
   { method: "PUT", path: "/api/v2", module: "server/management/agent-settings-routes", mutates: true },
   // server/management/aside-profile-routes
   { method: "GET", path: "/api/client-integrations/aside", module: "server/management/aside-profile-routes", mutates: false, mechanism: "path-constant", exempt: { reason: "compatibility-alias", why: "Legacy Aside status alias; the current CLI reads the same aggregate through GET /api/client-integrations/aside/profiles." } },
@@ -298,8 +294,6 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "POST", path: "/api/providers/test", module: "server/management/provider-routes", mutates: true },
   { method: "PUT", path: "/api/providers", module: "server/management/provider-routes", mutates: true, exempt: { reason: "deferred-verb", why: "Issue #3280 scopes this atomic batch endpoint to the GUI JSON editor; a matching CLI verb is outside wp5 and remains owed.", owner: "wp5-followup", ownerDoc: "devlog/_plan/260903_bug_drawdown_bcda/050_phase5.md" } },
   { method: "PUT", path: "/api/provider-context-caps", module: "server/management/provider-routes", mutates: true },
-  // server/management/replit-provider-routes
-  { method: "POST", path: "/api/providers/replit-pair", module: "server/management/replit-provider-routes", mutates: true },
   // server/management/quota-reset-routes
   { method: "GET", path: "/api/quota-resets", module: "server/management/quota-reset-routes", mutates: false, mechanism: "negated-guard" },
   // server/management/request-history-routes

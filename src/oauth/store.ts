@@ -840,11 +840,9 @@ export async function upsertCredentialByIdentity(
  * Deciding inside the mutation is the only place the answer is true when it is returned.
  */
 export async function removeCredential(provider: string): Promise<"removed" | "not-found"> {
-  let removedAccountId: string | undefined;
-  const result = await mutateStore(store => {
+  return await mutateStore(store => {
     const set = store[provider];
     if (!set) return "not-found" as const;
-    removedAccountId = set.activeAccountId;
     set.accounts = set.accounts.filter(a => a.id !== set.activeAccountId);
     if (set.accounts.length === 0) {
       delete store[provider];
@@ -853,11 +851,6 @@ export async function removeCredential(provider: string): Promise<"removed" | "n
     set.activeAccountId = set.accounts[0]!.id;
     return "removed" as const;
   }, [provider]);
-  if (result === "removed" && provider === "google-antigravity" && removedAccountId) {
-    const { clearAntigravityRoutingStateForAccount } = await import("./antigravity-routing");
-    clearAntigravityRoutingStateForAccount(removedAccountId);
-  }
-  return result;
 }
 
 // ---------------------------------------------------------------------------

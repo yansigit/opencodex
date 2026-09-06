@@ -192,7 +192,3 @@ ocx system codex-cli-update check --json
 ### `ocx config <show|get|set|unset|validate|export|import> ...`
 
 検証された OpenCodex 設定を検査し、安全に変更します。 `show` および `get` はシークレットをマスクします。インポートは書き込む前に検証され、`--yes` が必要です。
-
-#### Claude Code 互換性診断
-
-**2.1.201** 未満では `ocx claude` は警告のみで起動を止めません。`npm install -g @anthropic-ai/claude-code` で更新し、`ocx doctor` と `ocx status --json` で状態を確認できます。これは **2.1.129** の `/model` ピッカー要件とは別です。

@@ -42,3 +42,4 @@ records the boundary: no caller bearer is persisted, no Pool affinity, health, o
 state is written, and the physical main credential is not read. Documented in
 `structure/08_openai-provider-tiers.md`; regressions in `tests/codex-auth-context.test.ts`
 (68 pass).
+

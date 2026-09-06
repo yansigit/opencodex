@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { autoRestoreCodexShim, buildUnixCodexShim, buildWindowsCodexShim, buildWindowsPowerShellCodexShim, diagnoseCodexShim, findCodexOnPath, inspectCodexShimBackingForCommand, installCodexShim, isLocalAbsoluteInspectionPath, isVersionManagerOwnedCodexPath, isWindowsInteropDir, lastCodexDiscoveryError, setCodexShimFreshWriteHookForTests, setCodexShimGuardedWriteHookForTests, setCodexShimProbeHookForTests, setCodexShimProbeObservationMsForTests, setCodexShimProbeShellForTests, setCodexShimRollbackRestoreHookForTests, uninstallCodexShim } from "../../src/codex/shim";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath, repoRoot } from "../helpers/repo-root";
-import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "../helpers/test-budget";
+import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
 
 const SHIM_MARKER = "opencodex codex autostart shim";
 const UNIX_SHIM_REVISION_MARKER = "opencodex unix codex shim revision 2";
@@ -360,7 +360,6 @@ exit 64
 
       expect(installed.installed).toBe(false);
       expect(installed.message).toContain("saved launcher resolved back to the generated shim");
-      expect(installed.message).not.toContain("probe process group could not be terminated cleanly");
       expect(installed.message).toContain("original launcher was restored");
       expect(readFileSync(codexPath, "utf8")).toBe(original);
       expect(existsSync(`${codexPath}.opencodex-real`)).toBe(false);
@@ -688,7 +687,7 @@ os._exit(0)
       try {
         process.env.PATH = prependPath(binDir, oldPath);
         process.env.OPENCODEX_HOME = home;
-        setCodexShimProbeObservationMsForTests(3_000);
+        setCodexShimProbeObservationMsForTests(1_500);
         writeFileSync(codexPath, original, "utf8");
         chmodSync(codexPath, 0o755);
 
@@ -1262,7 +1261,7 @@ printf '%s\\n' child-codex
     expect(existsSync(join(dir, "real-pwned"))).toBe(false);
     expect(readFileSync(logPath, "utf8")).toContain(`bun:${cliPath} ensure`);
     expect(readFileSync(logPath, "utf8")).toContain("codex:hello");
-  }, SPAWN_BUDGET_MS);
+  });
 
   test("Unix shim exports persisted service API token before running Codex", () => {
     if (process.platform === "win32") return;
@@ -1315,15 +1314,30 @@ printf '%s\\n' child-codex
     const env = { ...process.env };
     delete env.OCX_SHIM_BYPASS;
 
+    const doctor = spawnSync(shimPath, ["doctor"], { encoding: "utf8", env });
+    expect(doctor.status).toBe(0);
+    expect(readFileSync(logPath, "utf8")).toBe("codex:doctor\n");
+
+    const flaggedAppServer = spawnSync(
+      shimPath,
+      ["-s", "read-only", "-a", "untrusted", "app-server"],
+      { encoding: "utf8", env },
+    );
+    expect(flaggedAppServer.status).toBe(0);
+    expect(readFileSync(logPath, "utf8")).toBe(
+      "codex:doctor\ncodex:-s read-only -a untrusted app-server\n",
+    );
+
+    const exec = spawnSync(shimPath, ["exec", "hello"], { encoding: "utf8", env });
+    expect(exec.status).toBe(0);
+    expect(readFileSync(logPath, "utf8")).toBe(
+      "codex:doctor\ncodex:-s read-only -a untrusted app-server\nbun:/opt/opencodex/src/cli.ts ensure\ncodex:exec hello\n",
+    );
+
     const prompt = spawnSync(shimPath, ["hello"], { encoding: "utf8", env });
     expect(prompt.status).toBe(0);
     expect(readFileSync(logPath, "utf8")).toBe(
-      "bun:/opt/opencodex/src/cli.ts ensure\ncodex:hello\n",
-    );
-    const management = spawnSync(shimPath, ["app-server", "--flagged"], { encoding: "utf8", env });
-    expect(management.status).toBe(0);
-    expect(readFileSync(logPath, "utf8")).toBe(
-      "bun:/opt/opencodex/src/cli.ts ensure\ncodex:hello\ncodex:app-server --flagged\n",
+      "codex:doctor\ncodex:-s read-only -a untrusted app-server\nbun:/opt/opencodex/src/cli.ts ensure\ncodex:exec hello\nbun:/opt/opencodex/src/cli.ts ensure\ncodex:hello\n",
     );
   });
 
@@ -1828,15 +1842,10 @@ exit 127
         stdout: "pipe",
         stderr: "pipe",
       });
-      // A cold Bun child importing the shim graph exceeded the old 5s marker
-      // deadline on a loaded Windows shard. This wait proves process ownership,
-      // so give startup the shared bounded child-process deadline; the aged-lock
-      // assertions below remain unchanged.
+      // Spawned holder child writing its ready marker: 8-19 s on windows-latest.
       const deadline = Date.now() + INTERNAL_DEADLINE_MS;
       while (!existsSync(readyPath) && Date.now() < deadline) await Bun.sleep(5);
-      if (!existsSync(readyPath)) {
-        throw new Error(`Timed out waiting ${INTERNAL_DEADLINE_MS}ms for aged-lock holder startup`);
-      }
+      expect(existsSync(readyPath)).toBe(true);
 
       const second = spawnSync(process.execPath, ["-e", secondScript], {
         cwd: repoRoot(),
@@ -1865,7 +1874,7 @@ exit 127
       removeTreeWithRetry(binDir);
       removeTreeWithRetry(home);
     }
-  }, SPAWN_BUDGET_MS);
+  });
 
   test("stale-lock compare-and-delete never unlinks a successor lock", () => {
     withInstalledShim(({ home, wrappers, backups }) => {

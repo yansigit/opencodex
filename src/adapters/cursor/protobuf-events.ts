@@ -55,12 +55,7 @@ interface CursorContextUsageEntry {
  * a real active-context value with the current turn's tiny output delta. Context text, tool args,
  * and model output are never stored here.
  */
-export function createCursorContextUsageTracker(options: {
-  maxEntries?: number;
-  ttlMs?: number;
-  now?: () => number;
-  onContextDrop?: (previousTokens: number, currentTokens: number) => void;
-} = {}): CursorContextUsageTracker {
+export function createCursorContextUsageTracker(options: { maxEntries?: number; ttlMs?: number; now?: () => number } = {}): CursorContextUsageTracker {
   const maxEntries = options.maxEntries ?? DEFAULT_CONTEXT_USAGE_MAX_ENTRIES;
   const ttlMs = options.ttlMs ?? DEFAULT_CONTEXT_USAGE_TTL_MS;
   const now = options.now ?? (() => Date.now());
@@ -82,7 +77,11 @@ export function createCursorContextUsageTracker(options: {
     if (!Number.isFinite(tokens) || tokens <= 0) return;
     prune();
     const existing = entries.get(conversationId);
-    if (existing && tokens < existing.tokens) options.onContextDrop?.(existing.tokens, tokens);
+    if (existing && existing.tokens >= tokens) {
+      entries.delete(conversationId);
+      entries.set(conversationId, { tokens: existing.tokens, updatedAt: now() });
+      return;
+    }
     entries.delete(conversationId);
     entries.set(conversationId, { tokens, updatedAt: now() });
     prune();
@@ -151,18 +150,12 @@ export interface CursorProtobufEventState {
   /**
    * Session-level last-known absolute context size for this Cursor conversation. This is a fallback
    * for no-checkpoint client-tool finalize turns only; any checkpoint observed during the current
-   * turn remains authoritative. A lower live checkpoint replaces the carry because Cursor may
-   * compact independently of a Codex-authored compaction boundary.
+   * turn remains authoritative, with monotonic max semantics unless a compaction boundary reset the
+   * conversation cache before the turn.
    */
   contextCarryForwardTokens?: number;
   recordContextTokens?: (tokens: number) => void;
-  openToolCalls: Map<string, {
-    name: string;
-    args: string;
-    announcementArgs?: Record<string, unknown>;
-    awaitingNativeArgs?: boolean;
-    normalizeFreeformArgs?: boolean;
-  }>;
+  openToolCalls: Map<string, { name: string; args: string; awaitingNativeArgs?: boolean }>;
   completedToolCalls: Set<string>;
   /** Set once a terminal `done`/truncation has been emitted, so post-terminal frames stay inert. */
   terminated?: boolean;
@@ -183,7 +176,6 @@ export interface CursorProtobufEventState {
    */
   syntheticStructuredEditToolNames?: ReadonlySet<string>;
   translatorBudget?: TranslatorBudget;
-  textToolCallBuffer?: string;
 }
 
 
@@ -257,20 +249,16 @@ export function createCursorProtobufEventState(options: {
 
 function observeContextTokens(state: CursorProtobufEventState, usedTokens: number): void {
   if (!Number.isFinite(usedTokens) || usedTokens <= 0) return;
-  // Checkpoints within one response can arrive stale/out of order, so retain that turn's maximum.
-  // The first checkpoint of a later turn still outranks its carry-forward, allowing a real
-  // cross-turn compaction drop to become visible.
-  if (usedTokens > (state.contextTokens ?? 0)) {
-    state.contextTokens = usedTokens;
-    state.recordContextTokens?.(usedTokens);
-  }
+  if (usedTokens > (state.contextTokens ?? 0)) state.contextTokens = usedTokens;
+  state.recordContextTokens?.(usedTokens);
 }
 
 export function reportableContextTokens(state: CursorProtobufEventState): number | undefined {
   const current = state.contextTokens;
   const carry = state.contextCarryForwardTokens;
   if (current === undefined) return carry;
-  return current;
+  if (carry === undefined) return current;
+  return Math.max(current, carry);
 }
 
 export function usageFromContextTokens(state: CursorProtobufEventState, contextTokens: number): OcxUsage {
@@ -339,36 +327,9 @@ function isCompleteJson(text: string): boolean {
   }
 }
 
-const BLOCKED_ARG_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-
-function safeArgObject(value: unknown): Record<string, unknown> | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const out = Object.create(null) as Record<string, unknown>;
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (!BLOCKED_ARG_KEYS.has(key)) out[key] = entry;
-  }
-  return out;
-}
-
-function parsedArgObject(text: string): Record<string, unknown> | undefined {
-  try { return safeArgObject(JSON.parse(text)); } catch { return undefined; }
-}
-
-function announcementArgs(toolCall: ToolCall | undefined): Record<string, unknown> | undefined {
-  const args = mcpArgsFromToolCall(toolCall);
-  return hasMcpArgBytes(args) ? safeArgObject(decodeCursorArgsMap(args?.args)) : undefined;
-}
-
-function wouldDowngradeStructured(previous: unknown, next: unknown): boolean {
-  const structured = Array.isArray(previous) || (!!previous && typeof previous === "object");
-  if (!structured) return false;
-  if (!next || typeof next !== "object") return true;
-  return Object.keys(next as object).length === 0 && Object.keys(previous as object).length > 0;
-}
-
 /** Schema-normalize a JSON-text argument blob for a named tool, if a schema is known. */
 function normalizeJsonText(text: string, toolName: string | undefined, state: CursorProtobufEventState): string {
-  const schema = toolSchemaForWireName(state, toolName) ?? (toolName ? defaultShellBridgeArgNormalizeSchema(toolName) : undefined);
+  const schema = toolSchemaForWireName(state, toolName);
   if (!schema) return text;
   try {
     const parsed = JSON.parse(text);
@@ -391,27 +352,10 @@ function normalizeJsonText(text: string, toolName: string | undefined, state: Cu
  * preserved verbatim so the bridge can reject malformed or truncated JSON instead of silently
  * converting it to `{}`. A genuinely empty buffer remains the no-argument case.
  */
-function resolveCompletedArgs(
-  buffered: string,
-  args: McpArgs | undefined,
-  state: CursorProtobufEventState,
-  announced?: Record<string, unknown>,
-  fallbackName?: string,
-): string {
-  const streamed = parsedArgObject(buffered);
-  const completed = hasMcpArgBytes(args) ? safeArgObject(decodeCursorArgsMap(args?.args)) : undefined;
-  if (announced || streamed || completed) {
-    const merged = Object.create(null) as Record<string, unknown>;
-    for (const source of [announced, streamed]) {
-      for (const [key, value] of Object.entries(source ?? {})) merged[key] = value;
-    }
-    for (const [key, value] of Object.entries(completed ?? {})) {
-      if (!wouldDowngradeStructured(merged[key], value)) merged[key] = value;
-    }
-    const name = mcpWireNameFromArgs(args) ?? fallbackName;
-    return normalizeJsonText(JSON.stringify(merged), name, state);
-  }
-  if (isCompleteJson(buffered)) return normalizeJsonText(buffered, mcpWireNameFromArgs(args) ?? fallbackName, state);
+function resolveCompletedArgs(buffered: string, args: McpArgs | undefined, state: CursorProtobufEventState): string {
+  if (hasMcpArgBytes(args)) return decodeMcpArgsNormalized(args, state);
+  const name = mcpWireNameFromArgs(args);
+  if (isCompleteJson(buffered)) return normalizeJsonText(buffered, name, state);
   return buffered;
 }
 
@@ -1115,7 +1059,7 @@ export function mapSyntheticMcpExecToToolEvents(
     const out: CursorServerMessage[] = [...recordToolCall(options.state, callId, cursorWireName)];
     if (out.some(event => event.type === "error")) return out;
     const open = options.state.openToolCalls.get(callId);
-    const finalArgs = resolveCompletedArgs(open?.args ?? "", args, options.state, open?.announcementArgs, open?.name);
+    const finalArgs = resolveCompletedArgs(open?.args ?? "", args, options.state);
     out.push(...commitToolCall(options.state, callId, finalArgs));
     return out;
   }
@@ -1154,7 +1098,7 @@ export function mapSyntheticMcpExecToToolEvents(
  * call bridge until a call completes, and completed calls are emitted whole, one after another.
  * Returns an error only for a genuinely unknown (un-advertised) tool name.
  */
-function recordToolCall(state: CursorProtobufEventState, callId: string, cursorWireName: string, toolCall?: ToolCall): CursorServerMessage[] {
+function recordToolCall(state: CursorProtobufEventState, callId: string, cursorWireName: string): CursorServerMessage[] {
   if (state.completedToolCalls.has(callId)) return [];
   if (state.openToolCalls.has(callId)) return [];
   const advertisedName = resolveAdvertisedClientToolName(state, cursorWireName);
@@ -1167,14 +1111,7 @@ function recordToolCall(state: CursorProtobufEventState, callId: string, cursorW
   // Prefer the advertised catalog name for Responses mapping so shell_command/exec_command aliases
   // land on the tool Codex actually exposed this turn (#399).
   const mapKey = advertisedName ?? normalizeCursorWireName(cursorWireName);
-  const announced = announcementArgs(toolCall);
-  const responseName = responsesToolNameFromCursorWire(mapKey, state.cursorToolNameMap);
-  state.openToolCalls.set(callId, {
-    name: responseName,
-    args: "",
-    ...(responseName === mapKey ? { normalizeFreeformArgs: true } : {}),
-    ...(announced ? { announcementArgs: announced } : {}),
-  });
+  state.openToolCalls.set(callId, { name: responsesToolNameFromCursorWire(mapKey, state.cursorToolNameMap), args: "" });
   state.translatorBudget?.openCall(callId);
   state.startedClientToolCalls++;
   return [];
@@ -1195,31 +1132,6 @@ function cursorFreeformWrapperValid(args: string): boolean {
       && typeof (parsed as Record<string, unknown>).input === "string";
   } catch {
     return false;
-  }
-}
-
-/**
- * Cursor sometimes sends a freeform body as a JSON string or as a one-key object instead of the
- * advertised `{input: string}` wrapper. Preserve incomplete JSON for the late native-args path,
- * but wrap complete/raw bodies before the Responses bridge validates them.
- */
-function normalizeFreeformArgs(args: string): string {
-  if (args.length === 0) return args;
-  try {
-    const parsed = JSON.parse(args) as unknown;
-    if (typeof parsed === "string") return JSON.stringify({ input: parsed });
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const object = parsed as Record<string, unknown>;
-      if ("input" in object || Object.keys(object).length === 0) return args;
-      const values = Object.values(object);
-      const input = values.length === 1 && typeof values[0] === "string" ? values[0] : JSON.stringify(object);
-      return JSON.stringify({ input });
-    }
-    return args;
-  } catch {
-    return args.trimStart().startsWith("{") || args.trimStart().startsWith("[")
-      ? args
-      : JSON.stringify({ input: args });
   }
 }
 
@@ -1249,9 +1161,6 @@ function dropStructuredEditCall(state: CursorProtobufEventState, callId: string,
 function commitToolCall(state: CursorProtobufEventState, callId: string, finalArgs: string): CursorServerMessage[] {
   const open = state.openToolCalls.get(callId);
   if (!open) return [];
-  if (state.freeformToolNames?.has(open.name) && open.normalizeFreeformArgs) {
-    finalArgs = normalizeFreeformArgs(finalArgs);
-  }
   if (state.freeformToolNames?.has(open.name) && !cursorFreeformWrapperValid(finalArgs)) {
     return dropInvalidFreeformCall(state, callId, open.name);
   }
@@ -1292,21 +1201,17 @@ function commitToolCall(state: CursorProtobufEventState, callId: string, finalAr
  * non-canonical streamed blob can still be repaired before Codex sees it. `argsTextDelta` is
  * cumulative; keep the longest value seen.
  */
-function bufferToolArgs(state: CursorProtobufEventState, callId: string, incoming: string): void {
+function bufferToolArgs(state: CursorProtobufEventState, callId: string, cumulative: string): void {
   const open = state.openToolCalls.get(callId);
-  if (!open || incoming.length === 0 || incoming === open.args) return;
-  let next: string;
-  if (incoming.startsWith(open.args)) next = incoming;
-  else if (open.args.startsWith(incoming)) return;
-  else next = open.args + incoming;
-  if (next !== open.args) {
+  if (!open) return;
+  if (cumulative.length >= open.args.length) {
     const encoder = new TextEncoder();
     const previousBytes = encoder.encode(open.args).byteLength;
     const reservation = state.translatorBudget?.reserveTransient(
-      encoder.encode(next).byteLength,
+      encoder.encode(cumulative).byteLength,
       { kind: "tool_args", callId },
     );
-    open.args = next;
+    open.args = cumulative;
     reservation?.commitRetained();
     state.translatorBudget?.releaseRetained(previousBytes, { kind: "tool_args", callId });
   }
@@ -1329,336 +1234,31 @@ export function mapCursorProtobufServerMessage(
   if (serverMessage.message.case === "conversationCheckpointUpdate") {
     const usedTokens = serverMessage.message.value.tokenDetails?.usedTokens ?? 0;
     // `usedTokens` is the ABSOLUTE conversation context size, not a per-turn output delta. Track it
-    // separately and surface the current turn's checkpoint as `done.usage.totalTokens`; folding it into
+    // separately (monotonic max) and surface it as `done.usage.totalTokens`; folding it into
     // `outputTokens` (which also accumulates `tokenDelta`) double-counts in Codex. See contextTokens.
     observeContextTokens(state, usedTokens);
     return [];
   }
 
-const TOOL_CALL_START_PREFIX = "[TOOL_CALL]";
-const TOOL_CALL_ARGS_MARKER = "[ARGS]";
-const XML_TOOL_CALL_START = "<tool_call>";
-const XML_TOOL_CALL_END = "</tool_call>";
-const MAX_XML_TOOL_CALL_BYTES = 256 * 1_024;
-
-function findPotentialMarkerPrefix(text: string): number {
-  for (const marker of [TOOL_CALL_START_PREFIX, XML_TOOL_CALL_START]) {
-    for (let len = Math.min(marker.length - 1, text.length); len >= 1; len--) {
-      const candidate = text.slice(text.length - len);
-      if (marker.startsWith(candidate)) return text.length - len;
-    }
-  }
-  return -1;
-}
-
-function cursorXmlToolName(rawName: string): string {
-  const trimmedName = rawName.trim();
-  const withoutFunctionNamespace = trimmedName.startsWith("functions.")
-    ? trimmedName.slice("functions.".length)
-    : trimmedName;
-  return normalizeCursorWireName(withoutFunctionNamespace);
-}
-
-function completeJsonObjectEnd(text: string, start: number): number {
-  if (text[start] !== "{") return -1;
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  for (let i = start; i < text.length; i++) {
-    const char = text[i];
-    if (escape) {
-      escape = false;
-      continue;
-    }
-    if (char === "\\") {
-      escape = true;
-      continue;
-    }
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (char === "{") depth++;
-    else if (char === "}" && --depth === 0) return i + 1;
-  }
-  return -1;
-}
-
-function parseCursorXmlToolCall(
-  candidate: string,
-  state: CursorProtobufEventState,
-): CursorServerMessage[] | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(candidate.slice(XML_TOOL_CALL_START.length, -XML_TOOL_CALL_END.length).trim());
-  } catch {
-    return undefined;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const record = parsed as Record<string, unknown>;
-  return commitCursorTextToolRecord(record, state);
-}
-
-function commitCursorTextToolRecord(
-  record: Record<string, unknown>,
-  state: CursorProtobufEventState,
-): CursorServerMessage[] | undefined {
-  if (typeof record.name !== "string" || !record.arguments || typeof record.arguments !== "object"
-    || Array.isArray(record.arguments)) return undefined;
-  const wireName = cursorXmlToolName(record.name);
-  const advertisedName = resolveAdvertisedClientToolName(state, wireName);
-  if (!advertisedName) return undefined;
-
-  const callId = `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  const out = recordToolCall(state, callId, wireName);
-  if (out.some(event => event.type === "error")) return out;
-  const open = state.openToolCalls.get(callId);
-  if (!open) return undefined;
-  const argsJson = JSON.stringify(record.arguments);
-  open.args = argsJson;
-  out.push(...commitToolCall(state, callId, normalizeJsonText(argsJson, wireName, state)));
-  return out;
-}
-
-function parseCursorPlainJsonToolCall(
-  candidate: string,
-  state: CursorProtobufEventState,
-): CursorServerMessage[] | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(candidate);
-  } catch {
-    return undefined;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-  const record = parsed as Record<string, unknown>;
-  const keys = Object.keys(record);
-  if (typeof record.id !== "string" || keys.some(key => key !== "id" && key !== "name" && key !== "arguments")) {
-    return undefined;
-  }
-  return commitCursorTextToolRecord(record, state);
-}
-
-function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState): CursorServerMessage[] {
-  if (!state.clientToolNames) {
-    return text ? [{ type: "text", text: normalizeCursorTextToolMarkers(text) }] : [];
-  }
-
-  let remaining = (state.textToolCallBuffer ?? "") + text;
-  state.textToolCallBuffer = undefined;
-
-  if (!remaining) return [];
-
-  const out: CursorServerMessage[] = [];
-
-  while (remaining.length > 0) {
-    const leadingWhitespace = remaining.search(/\S/);
-    if (leadingWhitespace >= 0 && remaining[leadingWhitespace] === "{") {
-      const jsonEnd = completeJsonObjectEnd(remaining, leadingWhitespace);
-      if (jsonEnd === -1) {
-        if (Buffer.byteLength(remaining) > MAX_XML_TOOL_CALL_BYTES) out.push({ type: "text", text: remaining });
-        else state.textToolCallBuffer = remaining;
-        break;
-      }
-      const parsedEvents = parseCursorPlainJsonToolCall(remaining.slice(leadingWhitespace, jsonEnd), state);
-      if (!parsedEvents) {
-        out.push({ type: "text", text: remaining });
-        break;
-      }
-      out.push(...parsedEvents);
-      let consumed = jsonEnd;
-      while (consumed < remaining.length && /\s/.test(remaining[consumed]!)) consumed++;
-      remaining = remaining.slice(consumed);
-      continue;
-    }
-    const markedStartIndex = remaining.indexOf(TOOL_CALL_START_PREFIX);
-    const xmlStartIndex = remaining.indexOf(XML_TOOL_CALL_START);
-    const startIndex = markedStartIndex === -1
-      ? xmlStartIndex
-      : xmlStartIndex === -1 ? markedStartIndex : Math.min(markedStartIndex, xmlStartIndex);
-    if (startIndex === -1) {
-      const partialIndex = findPotentialMarkerPrefix(remaining);
-      if (partialIndex !== -1) {
-        if (partialIndex > 0) {
-          out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining.slice(0, partialIndex)) });
-        }
-        state.textToolCallBuffer = remaining.slice(partialIndex);
-        break;
-      }
-      out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining) });
-      break;
-    }
-
-    if (startIndex === xmlStartIndex) {
-      if (startIndex > 0) {
-        out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining.slice(0, startIndex)) });
-        remaining = remaining.slice(startIndex);
-        continue;
-      }
-      const bodyStart = XML_TOOL_CALL_START.length;
-      const nonWhitespaceOffset = remaining.slice(bodyStart).search(/\S/);
-      if (nonWhitespaceOffset === -1) {
-        if (Buffer.byteLength(remaining) > MAX_XML_TOOL_CALL_BYTES) out.push({ type: "text", text: remaining });
-        else state.textToolCallBuffer = remaining;
-        break;
-      }
-      const jsonStart = bodyStart + nonWhitespaceOffset;
-      if (remaining[jsonStart] !== "{") {
-        out.push({ type: "text", text: remaining });
-        break;
-      }
-      const jsonEnd = completeJsonObjectEnd(remaining, jsonStart);
-      if (jsonEnd === -1) {
-        if (Buffer.byteLength(remaining) > MAX_XML_TOOL_CALL_BYTES) out.push({ type: "text", text: remaining });
-        else state.textToolCallBuffer = remaining;
-        break;
-      }
-      let closingStart = jsonEnd;
-      while (closingStart < remaining.length && /\s/.test(remaining[closingStart]!)) closingStart++;
-      const closingCandidate = remaining.slice(closingStart);
-      if (closingCandidate.length < XML_TOOL_CALL_END.length
-        && XML_TOOL_CALL_END.startsWith(closingCandidate)) {
-        state.textToolCallBuffer = remaining;
-        break;
-      }
-      if (!closingCandidate.startsWith(XML_TOOL_CALL_END)) {
-        out.push({ type: "text", text: remaining });
-        break;
-      }
-      const candidateEnd = closingStart + XML_TOOL_CALL_END.length;
-      const candidate = remaining.slice(0, candidateEnd);
-      const parsedEvents = parseCursorXmlToolCall(candidate, state);
-      if (parsedEvents) out.push(...parsedEvents);
-      else out.push({ type: "text", text: candidate });
-      remaining = remaining.slice(candidateEnd);
-      continue;
-    }
-
-    // Check if the candidate at startIndex is actually a tool call
-    const candidateAfter = remaining.slice(startIndex + TOOL_CALL_START_PREFIX.length);
-    const argsPos = candidateAfter.indexOf(TOOL_CALL_ARGS_MARKER);
-    const namePart = argsPos !== -1 ? candidateAfter.slice(0, argsPos).trim() : candidateAfter;
-    const isCandidateValid = namePart.length > 0 && namePart.length <= 64 && /^[a-zA-Z0-9_-]+$/.test(namePart);
-
-    if (!isCandidateValid && argsPos === -1) {
-      // Not a valid tool call and no [ARGS]; treat as plain text
-      out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining) });
-      break;
-    }
-
-    if (startIndex > 0) {
-      out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining.slice(0, startIndex)) });
-      remaining = remaining.slice(startIndex);
-      continue;
-    }
-
-    const argsMarkerIndex = remaining.indexOf(TOOL_CALL_ARGS_MARKER, TOOL_CALL_START_PREFIX.length);
-    if (argsMarkerIndex === -1) {
-      const nameCandidate = remaining.slice(TOOL_CALL_START_PREFIX.length);
-      if (nameCandidate.length > 64 || /[^a-zA-Z0-9_-]/.test(nameCandidate)) {
-        out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining) });
-        break;
-      }
-      state.textToolCallBuffer = remaining;
-      break;
-    }
-
-    const rawName = remaining.slice(TOOL_CALL_START_PREFIX.length, argsMarkerIndex).trim();
-    const wireName = normalizeCursorWireName(rawName);
-    const advertisedName = resolveAdvertisedClientToolName(state, wireName);
-
-    if (!advertisedName) {
-      const endOfMarker = argsMarkerIndex + TOOL_CALL_ARGS_MARKER.length;
-      out.push({ type: "text", text: normalizeCursorTextToolMarkers(remaining.slice(0, endOfMarker)) });
-      remaining = remaining.slice(endOfMarker);
-      continue;
-    }
-
-    const argsStart = argsMarkerIndex + TOOL_CALL_ARGS_MARKER.length;
-    let argsEnd = -1;
-    const trimmedOffset = remaining.slice(argsStart).search(/\S/);
-    if (trimmedOffset !== -1 && remaining[argsStart + trimmedOffset] === "{") {
-      let depth = 0;
-      let inString = false;
-      let escape = false;
-      const jsonStart = argsStart + trimmedOffset;
-      for (let i = jsonStart; i < remaining.length; i++) {
-        const char = remaining[i];
-        if (escape) {
-          escape = false;
-          continue;
-        }
-        if (char === "\\") {
-          escape = true;
-          continue;
-        }
-        if (char === '"') {
-          inString = !inString;
-          continue;
-        }
-        if (!inString) {
-          if (char === "{") depth++;
-          else if (char === "}") {
-            depth--;
-            if (depth === 0) {
-              argsEnd = i + 1;
-              break;
-            }
-          }
-        }
-      }
-    }
-
-    if (argsEnd === -1) {
-      state.textToolCallBuffer = remaining;
-      break;
-    }
-
-    const argsJson = remaining.slice(argsStart, argsEnd).trim();
-    const toolCallId = `call_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-
-    const recordEvents = recordToolCall(state, toolCallId, wireName);
-    out.push(...recordEvents);
-    if (!recordEvents.some(e => e.type === "error")) {
-      const open = state.openToolCalls.get(toolCallId);
-      if (open) open.args = argsJson;
-      let finalArgs = normalizeJsonText(argsJson, wireName, state);
-      if (state.freeformToolNames?.has(open?.name ?? "") && !cursorFreeformWrapperValid(finalArgs)) {
-        try {
-          const parsed = JSON.parse(finalArgs) as unknown;
-          if (typeof parsed === "string") {
-            finalArgs = JSON.stringify({ input: parsed });
-          }
-        } catch {
-          finalArgs = JSON.stringify({ input: finalArgs });
-        }
-      }
-      out.push(...commitToolCall(state, toolCallId, finalArgs));
-    }
-
-    remaining = remaining.slice(argsEnd);
-  }
-
-  return out;
-}
-
   if (serverMessage.message.case !== "interactionUpdate") return [];
   const update = serverMessage.message.value.message;
   switch (update.case) {
     case "textDelta":
-      return update.value.text ? parseCursorTextToolCalls(update.value.text, state) : [];
+      // #2305: fold Cursor display aliases inside textual pseudo tool-call markers back to
+      // the advertised wire name before any client sees the text. Real frames are already
+      // normalized structurally (mcpWireNameFromArgs above).
+      return update.value.text ? [{ type: "text", text: normalizeCursorTextToolMarkers(update.value.text) }] : [];
     case "thinkingDelta":
       return update.value.text ? [{ type: "thinking", thinking: update.value.text }] : [];
     case "toolCallStarted": {
       const name = mcpCursorWireName(update.value.toolCall);
       // Record the open call but defer the outward tool_call_start to completion (atomic emission).
-      return name ? recordToolCall(state, update.value.callId, name, update.value.toolCall) : [];
+      return name ? recordToolCall(state, update.value.callId, name) : [];
     }
     case "partialToolCall": {
       const out: CursorServerMessage[] = [];
       const name = mcpCursorWireName(update.value.toolCall);
-      if (name) out.push(...recordToolCall(state, update.value.callId, name, update.value.toolCall));
+      if (name) out.push(...recordToolCall(state, update.value.callId, name));
       if (out.some(event => event.type === "error")) return out;
       // Buffer cumulative args; do not emit a delta. Args are emitted once, normalized, at completion.
       if (state.openToolCalls.has(update.value.callId)) {
@@ -1690,7 +1290,7 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
         && (
           (name !== undefined && openBeforeStart.args.length === 0)
           || (state.freeformToolNames?.has(openBeforeStart.name) === true
-            && !cursorFreeformWrapperValid(normalizeFreeformArgs(openBeforeStart.args))
+            && !cursorFreeformWrapperValid(openBeforeStart.args)
           )
         )
       ) {
@@ -1705,7 +1305,7 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
       }
       // Ensure the call is recorded (covers a completion with no prior started/partial event), then
       // emit it as one atomic start -> delta -> end unit so parallel Cursor calls serialize cleanly.
-      if (name) out.push(...recordToolCall(state, update.value.callId, name, update.value.toolCall));
+      if (name) out.push(...recordToolCall(state, update.value.callId, name));
       if (out.some(event => event.type === "error")) return out;
       const open = state.openToolCalls.get(update.value.callId);
       // A request-declared freeform call may first appear only in its completion frame. Record it so
@@ -1714,13 +1314,13 @@ function parseCursorTextToolCalls(text: string, state: CursorProtobufEventState)
       if (
         !openBeforeStart && open && !hasMcpArgBytes(args)
         && state.freeformToolNames?.has(open.name) === true
-        && !cursorFreeformWrapperValid(normalizeFreeformArgs(open.args))
+        && !cursorFreeformWrapperValid(open.args)
       ) {
         open.awaitingNativeArgs = true;
         return [];
       }
       if (open) {
-        const finalArgs = resolveCompletedArgs(open.args, args, state, open.announcementArgs, open.name);
+        const finalArgs = resolveCompletedArgs(open.args, args, state);
         out.push(...commitToolCall(state, update.value.callId, finalArgs));
       }
       return out;
@@ -1764,46 +1364,18 @@ export function resolvedTurnUsage(state: CursorProtobufEventState): OcxUsage {
  */
 export function finalizeTurnEvents(state: CursorProtobufEventState): CursorServerMessage[] {
   state.terminated = true;
-  const prefixEvents: CursorServerMessage[] = [];
-  if (state.textToolCallBuffer) {
-    prefixEvents.push({ type: "text", text: normalizeCursorTextToolMarkers(state.textToolCallBuffer) });
-    state.textToolCallBuffer = undefined;
-  }
   if (state.openToolCalls.size > 0) {
     const openCallIds = [...state.openToolCalls.keys()];
-    const retainable = openCallIds.filter(callId => {
-      const open = state.openToolCalls.get(callId);
-      return open && !open.awaitingNativeArgs && (open.announcementArgs !== undefined || isCompleteJson(open.args));
-    });
-    if (retainable.length > 0) {
-      const out = [...prefixEvents];
-      for (const callId of retainable) {
-        const open = state.openToolCalls.get(callId);
-        if (!open) continue;
-        out.push(...commitToolCall(state, callId, resolveCompletedArgs(
-          open.args,
-          undefined,
-          state,
-          open.announcementArgs,
-          open.name,
-        )));
-      }
-      if (state.openToolCalls.size === 0) return [...out, { type: "done", usage: resolvedTurnUsage(state) }];
-      const incomplete = [...state.openToolCalls.keys()];
-      for (const callId of incomplete) state.translatorBudget?.closeCall(callId);
-      state.openToolCalls.clear();
-      return [...out, { type: "error", message: `Cursor stream ended with incomplete tool call(s): ${incomplete.join(", ")}. Arguments may be truncated; the call was not committed.` }];
-    }
     const openIds = openCallIds.join(", ");
     // Clear so a second turnEnded (should not happen, but defensive) doesn't re-emit.
     for (const callId of openCallIds) state.translatorBudget?.closeCall(callId);
     state.openToolCalls.clear();
-    return [...prefixEvents, { type: "error", message: `Cursor stream ended with incomplete tool call(s): ${openIds}. Arguments may be truncated; the call was not committed.` }];
+    return [{ type: "error", message: `Cursor stream ended with incomplete tool call(s): ${openIds}. Arguments may be truncated; the call was not committed.` }];
   }
   // Surface the absolute context size (when Cursor reported a checkpoint) as both totalTokens and
   // the estimated input side of Codex's visible `input + output` counter. Codex status lines can
   // render the additive pair instead of total_tokens, so leaving inputTokens at 0 makes a 16k-context
   // first turn display as "9 used". Keep outputTokens as the per-turn delta and clamp the inferred
   // input to 0 in case Cursor reports a checkpoint smaller than the streamed output delta.
-  return [...prefixEvents, { type: "done", usage: resolvedTurnUsage(state) }];
+  return [{ type: "done", usage: resolvedTurnUsage(state) }];
 }

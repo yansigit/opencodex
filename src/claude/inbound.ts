@@ -1,31 +1,22 @@
 /**
  * Claude Code inbound: Anthropic Messages API request -> internal /v1/responses body.
  *
- * Design (devlog/260711_claude_inbound/010, 003_evidence.md + hardening slice):
+ * Design (devlog/260711_claude_inbound/010, 003_evidence.md):
  *  - translate-and-replay: the produced body MUST pass the real responsesRequestSchema
  *    parse so routing/OAuth/pool/failover are inherited unchanged.
- *  - thinking/redacted_thinking blocks are preserved as Responses reasoning items via
- *    the existing ocxr1 envelope (src/responses/reasoning-envelope.ts), keeping
- *    multiple-block order and interleaving with tool_use; malformed ocxr1 signatures
- *    (value starting with ocxr1: but failing decode) return 400.
+ *  - thinking/redacted_thinking blocks on replay are DROPPED (v1 policy) — routed
+ *    providers carry reasoning in Responses items/ocxr1 envelopes instead.
  *  - thinking.budget_tokens is NEVER forwarded raw; it maps to an effort tier.
  *  - top_k is accepted and silently dropped (no Responses equivalent, CCR parity).
  */
 import type { OcxClaudeCodeConfig } from "../types";
-import { isClaudeWebSearchToolName } from "./outbound";
-import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
-import { verifyDirectiveSignature } from "./directive-sign";
 import { createHash } from "node:crypto";
 
 export { AnthropicRequestError, DesktopModelMappingUnavailableError } from "./inbound-records";
 export { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, extractOcxRouteDirective, extractOcxEffortDirective } from "./inbound-model-options";
 import { AnthropicRequestError, isRec, type Rec } from "./inbound-records";
 import { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, formatFromOutputConfig } from "./inbound-model-options";
-import { systemToInstructions } from "./inbound-content-options";
-
-function uuid(): string {
-  return crypto.randomUUID().replace(/-/g, "");
-}
+import { systemToInstructions, toolsToResponses, toolChoiceToResponses } from "./inbound-content-options";
 
 
 
@@ -78,53 +69,6 @@ function pushUserMessage(input: Rec[], blocks: Rec[]): void {
   input.push({ type: "message", role: "user", content: blocks });
 }
 
-function isToolSearchName(value: unknown): value is string {
-  return value === "tool_search"
-    || (typeof value === "string" && value.startsWith("tool_search_tool_"));
-}
-
-function functionToolToResponses(raw: Rec): Rec | null {
-  if (typeof raw.name !== "string" || raw.name.length === 0 || !isRec(raw.input_schema)) return null;
-  return {
-    type: "function",
-    name: raw.name,
-    ...(typeof raw.description === "string" ? { description: raw.description } : {}),
-    parameters: raw.input_schema,
-    ...(raw.defer_loading === true ? { defer_loading: true } : {}),
-    ...(typeof raw.strict === "boolean" ? { strict: raw.strict } : {}),
-  };
-}
-
-function toolDefinitionsByName(tools: unknown): ReadonlyMap<string, Rec> {
-  const definitions = new Map<string, Rec>();
-  if (!Array.isArray(tools)) return definitions;
-  for (const raw of tools) {
-    if (!isRec(raw)) continue;
-    const mapped = functionToolToResponses(raw);
-    if (mapped && typeof mapped.name === "string") definitions.set(mapped.name, mapped);
-  }
-  return definitions;
-}
-
-function toolSearchOutputItem(raw: Rec, definitions: ReadonlyMap<string, Rec>): Rec | null {
-  if (typeof raw.tool_use_id !== "string" || raw.tool_use_id.length === 0) {
-    throw new AnthropicRequestError("tool_search_tool_result requires tool_use_id");
-  }
-  const content = isRec(raw.content) ? raw.content : {};
-  const failed = content.type === "tool_search_tool_result_error";
-  const names = Array.isArray(content.tool_references)
-    ? content.tool_references.flatMap(ref =>
-      isRec(ref) && typeof ref.tool_name === "string" ? [ref.tool_name] : [])
-    : [];
-  return {
-    type: "tool_search_output",
-    call_id: raw.tool_use_id,
-    status: failed ? "failed" : "completed",
-    execution: "client",
-    tools: names.flatMap(name => definitions.get(name) ?? []),
-  };
-}
-
 /**
  * Bundled-skill elision for routed models (devlog 060). Claude Code loads a skill
  * by calling the `Skill` tool; the ~136k-token document bundle then rides the
@@ -144,142 +88,6 @@ export function effectiveBlockedSkillNames(cc?: Pick<OcxClaudeCodeConfig, "block
     .filter(name => name.length > 0))];
 }
 
-
-interface ScannedDirectives {
-  routes: string[];
-  efforts: string[];
-  sigs: string[];
-}
-
-function getSystemBlocks(body: unknown): string[] {
-  if (!isRec(body)) return [];
-  const system = body.system;
-  if (typeof system === "string") return [system];
-  if (Array.isArray(system)) {
-    return system
-      .filter((b): b is Rec => isRec(b) && b.type === "text" && typeof b.text === "string")
-      .map(b => b.text as string);
-  }
-  return [];
-}
-
-function scanSystemDirectives(body: unknown): ScannedDirectives {
-  const blocks = getSystemBlocks(body);
-  const routes: string[] = [];
-  const efforts: string[] = [];
-  const sigs: string[] = [];
-  const re = /<!--\s*ocx-(route|effort|sig):\s*([^>]*?)\s*-->/g;
-
-  for (const block of blocks) {
-    re.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(block)) !== null) {
-      const kind = match[1];
-      const val = match[2]?.trim() ?? "";
-      if (kind === "route") routes.push(val);
-      else if (kind === "effort") efforts.push(val);
-      else if (kind === "sig") sigs.push(val);
-    }
-  }
-  return { routes, efforts, sigs };
-}
-
-export function extractSignedDirective(body: unknown): {
-  route: string | null;
-  effort: string | null;
-  signature: string | null;
-  version: string | null;
-} {
-  const scanned = scanSystemDirectives(body);
-  const route = scanned.routes.length > 0 && scanned.routes[0] ? scanned.routes[0] : null;
-  const effort = scanned.efforts.length > 0 && scanned.efforts[0] ? scanned.efforts[0] : null;
-  let signature: string | null = null;
-  let version: string | null = null;
-  if (scanned.sigs.length > 0) {
-    const m = /^(v[0-9]+):([0-9a-fA-F]+)$/.exec(scanned.sigs[0].trim());
-    if (m) {
-      version = m[1] ?? null;
-      signature = m[2] ?? null;
-    }
-  }
-  return { route, effort, signature, version };
-}
-
-export function verifyAndExtractDirectives(
-  body: unknown,
-  key: string,
-  allowLegacyDirective?: (
-    route: string,
-    effort: NonNullable<OcxClaudeCodeConfig["subagentEffort"]> | null,
-  ) => boolean,
-): {
-  route: string | null;
-  effort: NonNullable<OcxClaudeCodeConfig["subagentEffort"]> | null;
-  isSigned: boolean;
-  isLegacyMatch?: boolean;
-} {
-  const scanned = scanSystemDirectives(body);
-  if (scanned.routes.length > 1 || scanned.efforts.length > 1 || scanned.sigs.length > 1) {
-    throw new AnthropicRequestError("conflicting subagent directives in system prompt");
-  }
-
-  if (scanned.sigs.length === 1) {
-    const rawSig = scanned.sigs[0].trim();
-    const sigMatch = /^(v[0-9]+):([0-9a-fA-F]+)$/.exec(rawSig);
-    if (!sigMatch) {
-      throw new AnthropicRequestError("malformed signed subagent directive: invalid format");
-    }
-    const version = sigMatch[1];
-    const signature = sigMatch[2];
-    if (version !== "v1") {
-      throw new AnthropicRequestError(`unsupported signed subagent directive version: ${version}`);
-    }
-    if (signature.length !== 64 || !/^[0-9a-f]{64}$/i.test(signature)) {
-      throw new AnthropicRequestError("malformed signed subagent directive: invalid signature length or encoding");
-    }
-    if (scanned.routes.length === 0 || !scanned.routes[0].trim()) {
-      throw new AnthropicRequestError("malformed signed subagent directive: missing route");
-    }
-    const route = scanned.routes[0].trim();
-    const effort = scanned.efforts.length > 0 && scanned.efforts[0].trim() ? scanned.efforts[0].trim() : null;
-    const valid = verifyDirectiveSignature(route, effort, signature, key);
-    if (!valid) {
-      throw new AnthropicRequestError("invalid signed subagent directive: signature verification failed");
-    }
-    const validEffort = effort && ["low", "medium", "high", "xhigh", "max"].includes(effort)
-      ? (effort as NonNullable<OcxClaudeCodeConfig["subagentEffort"]>)
-      : null;
-    return {
-      route,
-      effort: validEffort,
-      isSigned: true,
-    };
-  }
-
-  // Unsigned path
-  // If unsigned ocx-effort is present without ocx-route: it is ignored and does not override effort or routing.
-  if (scanned.routes.length === 0 || !scanned.routes[0].trim()) {
-    return { route: null, effort: null, isSigned: false, isLegacyMatch: false };
-  }
-
-  const route = scanned.routes[0].trim();
-  const rawEffort = scanned.efforts.length > 0 && scanned.efforts[0].trim() ? scanned.efforts[0].trim() : null;
-  const effort = rawEffort && ["low", "medium", "high", "xhigh", "max"].includes(rawEffort)
-    ? (rawEffort as NonNullable<OcxClaudeCodeConfig["subagentEffort"]>)
-    : null;
-
-  // Unsigned compatibility is opt-in and caller-authorized. Without the
-  // active-roster predicate, an untrusted prompt directive is ignored.
-  if (!allowLegacyDirective?.(route, effort)) {
-    return { route: null, effort: null, isSigned: false, isLegacyMatch: false };
-  }
-  return {
-    route,
-    effort,
-    isSigned: false,
-    isLegacyMatch: true,
-  };
-}
 
 /** Injected-skill payloads below this size are never stubbed (not worth it). */
 const SKILL_ELISION_MIN_CHARS = 10_000;
@@ -355,12 +163,7 @@ function systemMessageText(content: unknown): string {
   return parts.join("\n\n");
 }
 
-function userMessageToItems(
-  content: unknown,
-  input: Rec[],
-  elide: SkillElisionContext = NO_ELISION,
-  definitions: ReadonlyMap<string, Rec> = new Map(),
-): void {
+function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionContext = NO_ELISION): void {
   if (typeof content === "string") {
     if (content.length > 0) pushUserMessage(input, [{ type: "input_text", text: content }]);
     return;
@@ -394,13 +197,6 @@ function userMessageToItems(
         });
         break;
       }
-      case "tool_search_tool_result": {
-        pushUserMessage(input, pending);
-        pending = [];
-        const item = toolSearchOutputItem(raw, definitions);
-        if (item) input.push(item);
-        break;
-      }
       case "document":
         // No Responses equivalent for raw document blocks; surface the title so the
         // model at least sees the attachment happened.
@@ -413,11 +209,7 @@ function userMessageToItems(
   pushUserMessage(input, pending);
 }
 
-function assistantMessageToItems(
-  content: unknown,
-  input: Rec[],
-  definitions: ReadonlyMap<string, Rec> = new Map(),
-): void {
+function assistantMessageToItems(content: unknown, input: Rec[]): void {
   if (typeof content === "string") {
     if (content.length > 0) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: content }] });
     return;
@@ -439,69 +231,12 @@ function assistantMessageToItems(
         if (typeof raw.id !== "string" || raw.id.length === 0 || typeof raw.name !== "string" || raw.name.length === 0) {
           throw new AnthropicRequestError("tool_use requires id and name");
         }
-        // Lossless mapping for tool_search (Responses private tool_search_call) — reuse existing
-        // function_call wire where direct would collapse the tool identity.
-        if (isToolSearchName(raw.name) && !definitions.has(raw.name)) {
-          let args: string;
-          try { args = JSON.stringify(raw.input ?? {}); } catch { args = "{}"; }
-          input.push({ type: "tool_search_call", call_id: raw.id, arguments: args });
-          break;
-        }
         input.push({ type: "function_call", call_id: raw.id, name: raw.name, arguments: JSON.stringify(raw.input ?? {}) });
         break;
       }
-      case "server_tool_use": {
-        if (!isToolSearchName(raw.name)) break;
-        flush();
-        if (typeof raw.id !== "string" || raw.id.length === 0) {
-          throw new AnthropicRequestError("server_tool_use requires id");
-        }
-        let args: string;
-        try { args = JSON.stringify(raw.input ?? {}); } catch { args = "{}"; }
-        input.push({ type: "tool_search_call", call_id: raw.id, arguments: args });
-        break;
-      }
-      case "tool_search_tool_result": {
-        flush();
-        const item = toolSearchOutputItem(raw, definitions);
-        if (item) input.push(item);
-        break;
-      }
-      case "thinking": {
-        flush();
-        const thinking = typeof raw.thinking === "string" ? raw.thinking : "";
-        const signature = typeof raw.signature === "string" ? raw.signature : "";
-        if (signature.startsWith(OCX_REASONING_PREFIX)) {
-          const owned = decodeReasoningEnvelope(signature);
-          if (!owned) throw new AnthropicRequestError("malformed ocxr1 reasoning signature");
-          if (owned.sig) throw new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature");
-        }
-        // Preserve order with interleaved tool_use: each thinking block becomes its own reasoning item.
-        const encrypted = signature.length === 0
-          ? undefined
-          : signature.startsWith(OCX_REASONING_PREFIX)
-            ? signature
-            : encodeReasoningEnvelope({ sig: signature });
-        const summary = thinking.length > 0 ? [{ type: "summary_text", text: thinking }] : [];
-        // Always emit a reasoning item to preserve block order; empty thinking with a
-        // signature still carries replay continuity. Skip only fully empty blocks.
-        if (summary.length === 0 && !encrypted) break;
-        input.push({
-          type: "reasoning",
-          id: `rs_${uuid()}`,
-          ...(summary.length > 0 ? { summary } : { summary: [] }),
-          ...(encrypted ? { encrypted_content: encrypted } : {}),
-        });
-        break;
-      }
-      case "redacted_thinking": {
-        flush();
-        const data = typeof raw.data === "string" ? raw.data : "";
-        if (data.length === 0) break;
-        const encrypted = encodeReasoningEnvelope({ red: [data] } as any);
-        input.push({ type: "reasoning", id: `rs_${uuid()}`, summary: [], encrypted_content: encrypted });
-        break;
-      }
+      case "thinking":
+      case "redacted_thinking":
+        break; // v1 policy: dropped on replay (003 evidence — safe for routed providers)
       default:
         break;
     }
@@ -509,73 +244,6 @@ function assistantMessageToItems(
   flush();
 }
 
-function toolsToResponses(tools: unknown): Rec[] | undefined {
-  if (!Array.isArray(tools) || tools.length === 0) return undefined;
-  const out: Rec[] = [];
-  for (const raw of tools) {
-    if (!isRec(raw)) continue;
-    const type = typeof raw.type === "string" ? raw.type : "";
-    if (type.startsWith("web_search")) {
-      out.push({ type: "web_search" }); // hosted sidecar path
-      continue;
-    }
-    if (type === "tool_search" || type.startsWith("tool_search_tool_")) {
-      out.push({ type: "tool_search" });
-      continue;
-    }
-    const mapped = functionToolToResponses(raw);
-    if (mapped) {
-      out.push(mapped);
-      continue;
-    }
-    // Other server tools (bash_*, text_editor_*, ...) have no routed equivalent: drop.
-  }
-  return out.length > 0 ? out : undefined;
-}
-
-function findDeclaredTool(tools: unknown, name: string): Rec | undefined {
-  if (!Array.isArray(tools)) return undefined;
-  for (const raw of tools) {
-    if (!isRec(raw)) continue;
-    if (raw.name === name) return raw;
-  }
-  for (const raw of tools) {
-    if (!isRec(raw)) continue;
-    const type = typeof raw.type === "string" ? raw.type : "";
-    if (type.startsWith("web_search") && isClaudeWebSearchToolName(name)) return raw;
-    if ((type === "tool_search" || type.startsWith("tool_search_tool_")) && isToolSearchName(name)) return raw;
-  }
-  return undefined;
-}
-
-function toolChoiceToResponses(choice: unknown, body: Rec, rawTools?: unknown): void {
-  if (!isRec(choice)) return;
-  if (choice.disable_parallel_tool_use === true) body.parallel_tool_calls = false;
-  switch (choice.type) {
-    case "auto": body.tool_choice = "auto"; break;
-    case "none": body.tool_choice = "none"; break;
-    case "any": body.tool_choice = "required"; break;
-    case "tool": {
-      if (typeof choice.name !== "string" || choice.name.length === 0) {
-        throw new AnthropicRequestError("tool_choice.tool requires a name");
-      }
-      // Anthropic represents hosted WebSearch as a named tool choice, while
-      // Responses requires the choice type to match the hosted declaration.
-      // Preserve forced-tool intent rather than weakening it to `auto`.
-      const declared = findDeclaredTool(rawTools, choice.name);
-      const declType = declared && typeof declared.type === "string" ? declared.type : "";
-      if (declType.startsWith("web_search")) {
-        body.tool_choice = { type: "web_search" };
-      } else if (declType === "tool_search" || declType.startsWith("tool_search_tool_")) {
-        body.tool_choice = { type: "tool_search" };
-      } else {
-        body.tool_choice = { type: "function", name: choice.name };
-      }
-      break;
-    }
-    default: break;
-  }
-}
 
 /** Recursive canonical JSON (keys sorted at every depth) — stable cache-cohort input. */
 function canonicalJson(value: unknown): string {
@@ -626,11 +294,10 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
     callIds: blockedSkillCallIds(raw.messages, blockedNames),
     names: blockedNames,
   };
-  const definitions = toolDefinitionsByName(raw.tools);
   for (const msg of raw.messages) {
     if (!isRec(msg)) throw new AnthropicRequestError("each message must be an object");
-    if (msg.role === "user") userMessageToItems(msg.content, input, elide, definitions);
-    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, definitions);
+    if (msg.role === "user") userMessageToItems(msg.content, input, elide);
+    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
       if (text.length > 0) systemParts.push(text);
@@ -649,9 +316,8 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
 
   const tools = toolsToResponses(raw.tools);
   if (tools) body.tools = tools;
-  toolChoiceToResponses(raw.tool_choice, body, raw.tools);
+  toolChoiceToResponses(raw.tool_choice, body);
 
-  if (typeof raw.service_tier === "string" && raw.service_tier.length > 0) body.service_tier = raw.service_tier;
   if (typeof raw.max_tokens === "number") body.max_output_tokens = raw.max_tokens;
   if (typeof raw.temperature === "number") body.temperature = raw.temperature;
   if (typeof raw.top_p === "number") body.top_p = raw.top_p;
@@ -659,7 +325,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   if (Array.isArray(raw.stop_sequences) && raw.stop_sequences.length > 0) {
     body.stop = raw.stop_sequences.filter((s): s is string => typeof s === "string");
   }
-  const outputConfigFormat = formatFromOutputConfig(raw.output_config, raw.output_format);
+  const outputConfigFormat = formatFromOutputConfig(raw.output_config);
   if (outputConfigFormat) body.text = { format: outputConfigFormat };
   let cacheKeySource: ClaudeCacheKeySource = null;
   if (isRec(raw.metadata) && typeof raw.metadata.user_id === "string") {

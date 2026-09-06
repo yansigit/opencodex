@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
-import { getConfigDir, withConfigMutationLockSync } from "../config";
+import { getConfigDir } from "../config";
 import {
   forgetEphemeralSecretPath,
   forgetHardenedSecretPath,
@@ -27,7 +27,6 @@ import {
   windowsSecretAclApplies,
 } from "../lib/windows-secret-acl";
 import { isValidProviderContinuationOwner } from "./provider-continuation";
-import type { ResponseContinuationEncryptedEnvelope } from "./continuation-crypto";
 import type { OcxProviderContinuationState } from "../types";
 
 export const RESPONSE_SPILL_VERSION = 1;
@@ -39,10 +38,6 @@ export const RESPONSE_SPILL_CLEANUP_MAX = 512;
 const RESPONSE_SPILL_PUBLISH_RETRIES = 64;
 const OWNED_SPILL_NAME = /^([A-Za-z0-9._-]{1,80})\.([0-9a-f]{12})\.([0-9a-f]{24})\.(\d+)\.(\d+)\.spill\.json$/;
 const OWNED_SPILL_TEMP_NAME = /^\.response-spill\.[0-9]+\.[0-9a-f]{16}\.tmp$/;
-
-export function isOwnedResponseSpillFileName(fileName: string): boolean {
-  return OWNED_SPILL_NAME.test(fileName);
-}
 
 export interface ResponseSpillPayload {
   version: 1;
@@ -64,19 +59,8 @@ export interface ResponseSpillPayload {
   providers?: OcxProviderContinuationState;
 }
 
-export interface EncryptedResponseSpillPayload {
-  version: 2;
-  responseId: string;
-  createdAt: number;
-  clientThreadId?: string;
-  providerOutputStart?: number;
-  envelope: ResponseContinuationEncryptedEnvelope;
-}
-
-export type AnyResponseSpillPayload = ResponseSpillPayload | EncryptedResponseSpillPayload;
-
 export interface ResponseSpillRef {
-  version: 1 | 2;
+  version: 1;
   fileName: string;
   digest: string;
   payloadBytes: number;
@@ -92,16 +76,10 @@ export interface ResponseSpillRef {
 export const MAX_RESPONSE_SPILL_PAYLOAD_BYTES = 256 * 1024 * 1024;
 
 let spillPayloadCapOverride: number | null = null;
-let afterSpillOwnershipTransferForTest: (() => void) | null = null;
 
 /** Test-only: lower/restore the single-spill payload ceiling (null restores). */
 export function setResponseSpillPayloadCapForTests(bytes: number | null): void {
   spillPayloadCapOverride = bytes;
-}
-
-/** Test-only: simulate shared-lock commit failure after a stub accepts ownership. */
-export function setAfterSpillOwnershipTransferForTests(hook: (() => void) | null): void {
-  afterSpillOwnershipTransferForTest = hook;
 }
 
 export function responseSpillPayloadCap(): number {
@@ -109,7 +87,7 @@ export function responseSpillPayloadCap(): number {
 }
 
 export type ResponseSpillReadResult =
-  | { ok: true; payload: AnyResponseSpillPayload }
+  | { ok: true; payload: ResponseSpillPayload }
   | { ok: false; reason: "missing" | "corrupt" | "too_large" };
 
 export interface ResponseSpillCleanupResult {
@@ -117,18 +95,6 @@ export interface ResponseSpillCleanupResult {
   removed: number;
   failed: number;
   bytesRemoved: number;
-}
-
-export interface ResponseSpillRetirementResult extends ResponseSpillCleanupResult {
-  /** True only after an error-free end-of-directory pass. */
-  complete: boolean;
-}
-
-export interface ResponseSpillRetirementScan {
-  readonly dir: string;
-  handle: ReturnType<typeof opendirSync> | null;
-  opened: boolean;
-  injected: boolean;
 }
 
 export interface ResponseSpillIoForTest {
@@ -147,8 +113,6 @@ export interface ResponseSpillIoForTest {
    *  null for end-of-directory. Lets tests prove the scan cap binds without
    *  materializing thousands of real files. */
   readdirEntry?: () => string | null;
-  /** Legacy-retirement stat seam for bounded scan/failure coverage. */
-  inspect?: (path: string) => { isFile: boolean; isSymbolicLink: boolean; mtimeMs: number; size: number };
   record?: (event: "write" | "fsync" | "close" | "harden" | "publish" | "dir-fsync" | "stub-swap") => void;
 }
 
@@ -161,21 +125,12 @@ interface ResponseSpillWriteOptions {
   /** Total caller-owned ACL budget shared by every harden in this publication. */
   aclBudgetMs?: number;
   publicationControl?: ResponseSpillPublicationControl;
-  /** Keeps a cleanup-resistant path charged after this synchronous write settles. */
-  onCleanupResidual?: (path: string, bytes: number) => void;
-  /**
-   * Runs synchronously while the shared-home mutation lock still covers the
-   * newly published destination. Returning false removes the destination
-   * before another process can observe an unowned spill.
-   */
-  commitUnderLock?: (ref: ResponseSpillRef) => boolean;
 }
 
 export interface ResponseSpillPublicationControl {
   superseded: boolean;
   tempPath: string | null;
   destinationPath: string | null;
-  destinationOwned: boolean;
 }
 
 interface SpillAclBudget {
@@ -184,7 +139,7 @@ interface SpillAclBudget {
 }
 
 export function createResponseSpillPublicationControl(): ResponseSpillPublicationControl {
-  return { superseded: false, tempPath: null, destinationPath: null, destinationOwned: false };
+  return { superseded: false, tempPath: null, destinationPath: null };
 }
 
 export function markResponseSpillPublicationSuperseded(control: ResponseSpillPublicationControl): void {
@@ -385,20 +340,14 @@ function clearOwnedPath(
 ): unknown {
   const path = control[key];
   if (!path) return null;
-  if (key === "destinationPath" && !control.destinationOwned) {
-    control.destinationPath = null;
-    return null;
-  }
   try {
     if (ephemeral) unlinkEphemeral(path);
     else unlink(path);
     control[key] = null;
-    if (key === "destinationPath") control.destinationOwned = false;
     return null;
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
       control[key] = null;
-      if (key === "destinationPath") control.destinationOwned = false;
       return null;
     }
     return error;
@@ -426,12 +375,10 @@ function publishNoReplace(
   tempPath: string,
   destinationPath: string,
   budget?: SpillAclBudget,
-  onCreated?: () => void,
 ): void {
   try {
     if (spillIoForTest?.link) spillIoForTest.link(tempPath, destinationPath);
     else linkSync(tempPath, destinationPath);
-    onCreated?.();
   } catch (error) {
     if (isErrno(error, "EEXIST")) throw error;
     if (!canUseExclusiveCopyFallback(error)) throw error;
@@ -440,7 +387,6 @@ function publishNoReplace(
       if (spillIoForTest?.copyFileExcl) spillIoForTest.copyFileExcl(tempPath, destinationPath);
       else copyFileSync(tempPath, destinationPath, constants.COPYFILE_EXCL);
       copied = true;
-      onCreated?.();
       harden(destinationPath, 0o600, budget);
       // "r+": a read-only handle cannot be fsynced on Windows (EPERM).
       const copyFd = openSync(destinationPath, "r+");
@@ -460,42 +406,63 @@ function publishNoReplace(
   record("publish");
 }
 
-export type ResponseSpillStateInput =
-  | ({ version?: 1 } & Omit<ResponseSpillPayload, "version" | "responseId">)
-  | ({ version: 2; envelope: ResponseContinuationEncryptedEnvelope } & Omit<EncryptedResponseSpillPayload, "version" | "responseId">);
+async function publishNoReplaceAsync(
+  tempPath: string,
+  destinationPath: string,
+  budget: SpillAclBudget,
+  retryTimedOutOnce: boolean,
+  publicationControl?: ResponseSpillPublicationControl,
+): Promise<void> {
+  throwIfPublicationSuperseded(publicationControl);
+  try {
+    if (spillIoForTest?.link) spillIoForTest.link(tempPath, destinationPath);
+    else linkSync(tempPath, destinationPath);
+  } catch (error) {
+    if (isErrno(error, "EEXIST")) throw error;
+    if (!canUseExclusiveCopyFallback(error)) throw error;
+    let copied = false;
+    try {
+      if (spillIoForTest?.copyFileExcl) spillIoForTest.copyFileExcl(tempPath, destinationPath);
+      else copyFileSync(tempPath, destinationPath, constants.COPYFILE_EXCL);
+      copied = true;
+      await hardenAsync(destinationPath, 0o600, budget, retryTimedOutOnce);
+      throwIfPublicationSuperseded(publicationControl);
+      const copyFd = openSync(destinationPath, "r+");
+      try {
+        if (spillIoForTest?.fsync) spillIoForTest.fsync(copyFd);
+        else fsyncSync(copyFd);
+      } finally {
+        closeSync(copyFd);
+      }
+    } catch (copyError) {
+      if (copied) {
+        try { unlink(destinationPath); } catch { /* startup GC reclaims an incomplete publication */ }
+      }
+      throw copyError;
+    }
+  }
+  throwIfPublicationSuperseded(publicationControl);
+  record("publish");
+}
 
 function serializedSpill(
   responseId: string,
-  state: ResponseSpillStateInput,
+  state: Omit<ResponseSpillPayload, "version" | "responseId">,
 ): {
   bytes: Buffer;
   digest: string;
   idDigest: string;
   contentDigest: string;
-  version: 1 | 2;
 } {
-  const isV2 = (state as { version?: unknown }).version === 2 || "envelope" in state;
-  const version: 1 | 2 = isV2 ? 2 : 1;
-  const payload: AnyResponseSpillPayload = isV2
-    ? {
-        version: 2,
-        responseId,
-        createdAt: state.createdAt,
-        ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
-        ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
-        envelope: (state as { envelope: ResponseContinuationEncryptedEnvelope }).envelope,
-      }
-    : {
-        version: 1,
-        responseId,
-        createdAt: state.createdAt,
-        ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
-        items: (state as { items: unknown[] }).items,
-        ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
-        ...((state as { providers?: OcxProviderContinuationState }).providers
-          ? { providers: (state as { providers?: OcxProviderContinuationState }).providers }
-          : {}),
-      };
+  const payload: ResponseSpillPayload = {
+    version: 1,
+    responseId,
+    createdAt: state.createdAt,
+    ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
+    items: state.items,
+    ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
+    ...(state.providers ? { providers: state.providers } : {}),
+  };
   const serialized = JSON.stringify(payload);
   if (serialized === undefined) throw new Error("Response spill serialization failed");
   const bytes = Buffer.from(serialized, "utf8");
@@ -505,7 +472,6 @@ function serializedSpill(
     digest,
     idDigest: sha256(responseId).slice(0, 12),
     contentDigest: digest.slice(0, 24),
-    version,
   };
 }
 
@@ -520,7 +486,7 @@ function serializedSpill(
  */
 export function prospectiveResponseSpillBytes(
   responseId: string,
-  state: ResponseSpillStateInput,
+  state: Omit<ResponseSpillPayload, "version" | "responseId">,
 ): number | null {
   try {
     return serializedSpill(responseId, state).bytes.byteLength;
@@ -538,85 +504,53 @@ function responseSpillWriteError(cause: unknown): NodeJS.ErrnoException {
 }
 
 function validSpillRef(ref: ResponseSpillRef): boolean {
-  return (ref.version === 1 || ref.version === 2)
+  return ref.version === 1
     && OWNED_SPILL_NAME.test(ref.fileName)
     && /^[0-9a-f]{64}$/.test(ref.digest)
     && Number.isSafeInteger(ref.payloadBytes)
     && ref.payloadBytes >= 0;
 }
 
-function validPayload(value: unknown, responseId: string): value is AnyResponseSpillPayload {
+function validPayload(value: unknown, responseId: string): value is ResponseSpillPayload {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const payload = value as Record<string, unknown>;
-  if (payload.responseId !== responseId) return false;
+  const keys = Object.keys(payload);
+  if (keys.some(key => !["version", "responseId", "createdAt", "clientThreadId", "items", "providerOutputStart", "providers"].includes(key))) return false;
+  if (payload.version !== 1 || payload.responseId !== responseId) return false;
   if (typeof payload.createdAt !== "number" || !Number.isFinite(payload.createdAt)) return false;
   if (payload.clientThreadId !== undefined
     && (typeof payload.clientThreadId !== "string" || payload.clientThreadId.trim().length === 0)) return false;
-
-  if (payload.version === 1) {
-    const keys = Object.keys(payload);
-    if (keys.some(key => !["version", "responseId", "createdAt", "clientThreadId", "items", "providerOutputStart", "providers"].includes(key))) return false;
-    if (!Array.isArray(payload.items)) return false;
-    // A malformed boundary must degrade to "never skip", never to a bad index: reject the
-    // payload outright so materialization treats it as corrupt rather than trusting it.
-    if (payload.providerOutputStart !== undefined) {
-      const anchor = payload.providerOutputStart;
-      if (typeof anchor !== "number" || !Number.isSafeInteger(anchor)
-        || anchor < 0 || anchor > payload.items.length) return false;
-    }
-    if (payload.providers !== undefined) {
-      if (!payload.providers || typeof payload.providers !== "object" || Array.isArray(payload.providers)) return false;
-      const providers = payload.providers as Record<string, unknown>;
-      if (providers.__ocxOwner !== undefined
-        && !isValidProviderContinuationOwner(providers.__ocxOwner)) return false;
-      for (const [provider, providerState] of Object.entries(providers)) {
-        if (provider === "__ocxOwner") continue;
-        if (!providerState || typeof providerState !== "object" || Array.isArray(providerState)) return false;
-      }
-    }
-    return true;
+  if (!Array.isArray(payload.items)) return false;
+  // A malformed boundary must degrade to "never skip", never to a bad index: reject the
+  // payload outright so materialization treats it as corrupt rather than trusting it.
+  if (payload.providerOutputStart !== undefined) {
+    const anchor = payload.providerOutputStart;
+    if (typeof anchor !== "number" || !Number.isSafeInteger(anchor)
+      || anchor < 0 || anchor > payload.items.length) return false;
   }
-
-  if (payload.version === 2) {
-    const keys = Object.keys(payload);
-    if (keys.some(key => !["version", "responseId", "createdAt", "clientThreadId", "providerOutputStart", "envelope"].includes(key))) return false;
-    if (payload.providerOutputStart !== undefined) {
-      const anchor = payload.providerOutputStart;
-      if (typeof anchor !== "number" || !Number.isSafeInteger(anchor) || anchor < 0) return false;
+  if (payload.providers !== undefined) {
+    if (!payload.providers || typeof payload.providers !== "object" || Array.isArray(payload.providers)) return false;
+    const providers = payload.providers as Record<string, unknown>;
+    if (providers.__ocxOwner !== undefined
+      && !isValidProviderContinuationOwner(providers.__ocxOwner)) return false;
+    for (const [provider, providerState] of Object.entries(providers)) {
+      if (provider === "__ocxOwner") continue;
+      if (!providerState || typeof providerState !== "object" || Array.isArray(providerState)) return false;
     }
-    const env = payload.envelope as Record<string, unknown> | undefined;
-    if (!env || typeof env !== "object" || Array.isArray(env)) return false;
-    const envKeys = Object.keys(env);
-    if (envKeys.some(key => !["version", "cipher", "keyId", "nonce", "tag", "ciphertext"].includes(key))) return false;
-    if (
-      env.version !== 1
-      || env.cipher !== "aes-256-gcm"
-      || typeof env.keyId !== "string"
-      || typeof env.nonce !== "string"
-      || typeof env.tag !== "string"
-      || typeof env.ciphertext !== "string"
-    ) {
-      return false;
-    }
-    return true;
   }
-
   return true;
 }
 
-function writeResponseSpillDurablyUnlocked(
+export function writeResponseSpillDurably(
   responseId: string,
-  state: ResponseSpillStateInput,
+  state: Omit<ResponseSpillPayload, "version" | "responseId">,
   options: ResponseSpillWriteOptions = {},
 ): ResponseSpillRef {
   let tempPath: string | null = null;
-  let createdDestinationPath: string | null = null;
-  let payloadBytes = 0;
   let fd: number | null = null;
   try {
     const aclBudget = spillAclBudget(options.aclBudgetMs);
-    const { bytes, digest, idDigest, contentDigest, version } = serializedSpill(responseId, state);
-    payloadBytes = bytes.byteLength;
+    const { bytes, digest, idDigest, contentDigest } = serializedSpill(responseId, state);
     const dir = responseSpillDirectory();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     harden(dir, 0o700, aclBudget);
@@ -637,14 +571,11 @@ function writeResponseSpillDurablyUnlocked(
       if (!OWNED_SPILL_NAME.test(fileName)) throw new Error("Response spill name allocation failed");
       const destinationPath = join(dir, fileName);
       try {
-        publishNoReplace(publishTempPath, destinationPath, aclBudget, () => {
-          createdDestinationPath = destinationPath;
-        });
+        publishNoReplace(publishTempPath, destinationPath, aclBudget);
         fsyncDirectoryBestEffort(dir);
         unlinkEphemeral(publishTempPath);
         tempPath = null;
-        createdDestinationPath = null;
-        return { version, fileName, digest, payloadBytes: bytes.byteLength };
+        return { version: 1, fileName, digest, payloadBytes: bytes.byteLength };
       } catch (error) {
         if (isErrno(error, "EEXIST")) continue;
         throw error;
@@ -656,45 +587,9 @@ function writeResponseSpillDurablyUnlocked(
       try { closeSync(fd); } catch { /* best effort */ }
     }
     if (tempPath) {
-      try { unlinkEphemeral(tempPath); } catch { options.onCleanupResidual?.(tempPath, payloadBytes); }
-    }
-    if (createdDestinationPath) {
-      try { unlink(createdDestinationPath); } catch { options.onCleanupResidual?.(createdDestinationPath, payloadBytes); }
+      try { unlinkEphemeral(tempPath); } catch { /* best effort */ }
     }
     throw responseSpillWriteError(cause);
-  }
-}
-
-export function writeResponseSpillDurably(
-  responseId: string,
-  state: ResponseSpillStateInput,
-  options: ResponseSpillWriteOptions = {},
-): ResponseSpillRef {
-  let transferred: ResponseSpillRef | null = null;
-  try {
-    return withConfigMutationLockSync(() => {
-      const ref = writeResponseSpillDurablyUnlocked(responseId, state, options);
-      let accepted: boolean;
-      try {
-        accepted = !options.commitUnderLock || options.commitUnderLock(ref);
-      } catch (error) {
-        removePublishedResponseSpill(ref, options.onCleanupResidual);
-        throw error;
-      }
-      if (!accepted) {
-        removePublishedResponseSpill(ref, options.onCleanupResidual);
-        throw supersededPublicationError();
-      }
-      transferred = ref;
-      afterSpillOwnershipTransferForTest?.();
-      return ref;
-    });
-  } catch (error) {
-    // The shared database is only the mutex. Once the callback installed the
-    // stub, a later SQLite COMMIT failure cannot safely roll back filesystem
-    // ownership; the continuation is already live and remains valid.
-    if (transferred) return transferred;
-    throw error;
   }
 }
 
@@ -708,7 +603,7 @@ export function writeResponseSpillDurably(
  */
 export async function writeResponseSpillDurablyAsync(
   responseId: string,
-  state: ResponseSpillStateInput,
+  state: Omit<ResponseSpillPayload, "version" | "responseId">,
   options: ResponseSpillWriteOptions & { aclBudgetMs: number },
 ): Promise<ResponseSpillRef> {
   const publicationControl = options.publicationControl;
@@ -716,10 +611,9 @@ export async function writeResponseSpillDurablyAsync(
   if (!aclBudget) throw new Error("Response spill async ACL budget is required");
   let tempPath: string | null = null;
   let fd: number | null = null;
-  let transferred: ResponseSpillRef | null = null;
   try {
     throwIfPublicationSuperseded(publicationControl);
-    const { bytes, digest, idDigest, contentDigest, version } = serializedSpill(responseId, state);
+    const { bytes, digest, idDigest, contentDigest } = serializedSpill(responseId, state);
     const dir = responseSpillDirectory();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     await hardenAsync(dir, 0o700, aclBudget, options.retryTimedOutOnce === true);
@@ -743,73 +637,29 @@ export async function writeResponseSpillDurablyAsync(
       const fileName = `${sanitizeResponseId(responseId)}.${idDigest}.${contentDigest}.${spillGeneration}.${bytes.byteLength}.spill.json`;
       if (!OWNED_SPILL_NAME.test(fileName)) throw new Error("Response spill name allocation failed");
       const destinationPath = join(dir, fileName);
-      if (publicationControl) {
-        publicationControl.destinationPath = destinationPath;
-        publicationControl.destinationOwned = false;
-      }
+      if (publicationControl) publicationControl.destinationPath = destinationPath;
       try {
         throwIfPublicationSuperseded(publicationControl);
-        const ref = withConfigMutationLockSync(() => {
-          throwIfPublicationSuperseded(publicationControl);
-          // Required ACL work completed above. The final no-replace publish,
-          // directory durability, and owner stub installation are one shared-
-          // home transaction; no destination is visible between them.
-          publishNoReplace(publishTempPath, destinationPath, aclBudget, () => {
-            if (publicationControl) publicationControl.destinationOwned = true;
-          });
-          throwIfPublicationSuperseded(publicationControl);
-          fsyncDirectoryBestEffort(dir);
-          const published = { version, fileName, digest, payloadBytes: bytes.byteLength };
-          let accepted: boolean;
-          try {
-            accepted = !options.commitUnderLock || options.commitUnderLock(published);
-          } catch (error) {
-            removePublishedResponseSpill(published);
-            throw error;
-          }
-          if (!accepted) {
-            removePublishedResponseSpill(published);
-            throw supersededPublicationError();
-          }
-          transferred = published;
-          if (publicationControl) {
-            publicationControl.destinationPath = null;
-            publicationControl.destinationOwned = false;
-          }
-          afterSpillOwnershipTransferForTest?.();
-          return published;
-        });
-        try {
-          unlinkEphemeral(publishTempPath);
-          tempPath = null;
-        } catch {
-          // The committed destination has a live stub. Its redundant temp is
-          // reclaimed by startup GC; cleanup must never invalidate the stub.
-        }
+        await publishNoReplaceAsync(
+          publishTempPath,
+          destinationPath,
+          aclBudget,
+          options.retryTimedOutOnce === true,
+          publicationControl,
+        );
+        throwIfPublicationSuperseded(publicationControl);
+        fsyncDirectoryBestEffort(dir);
+        unlinkEphemeral(publishTempPath);
+        tempPath = null;
         if (publicationControl) {
-          if (tempPath === null) publicationControl.tempPath = null;
+          publicationControl.tempPath = null;
+          publicationControl.destinationPath = null;
         }
-        return ref;
+        return { version: 1, fileName, digest, payloadBytes: bytes.byteLength };
       } catch (error) {
-        if (transferred) {
-          try {
-            unlinkEphemeral(publishTempPath);
-            tempPath = null;
-          } catch {
-            // The committed destination has a live stub. Its redundant temp is
-            // reclaimed by startup GC; cleanup must never invalidate the stub.
-          }
-          if (publicationControl && tempPath === null) publicationControl.tempPath = null;
-          return transferred;
-        }
         if (publicationControl?.superseded) throw error;
-        if (isErrno(error, "EEXIST")) {
-          if (publicationControl) {
-            publicationControl.destinationPath = null;
-            publicationControl.destinationOwned = false;
-          }
-          continue;
-        }
+        if (publicationControl) publicationControl.destinationPath = null;
+        if (isErrno(error, "EEXIST")) continue;
         throw error;
       }
     }
@@ -830,19 +680,13 @@ export async function writeResponseSpillDurablyAsync(
     }
     if (publicationControl) {
       const destinationPath = publicationControl.destinationPath;
-      if (destinationPath && publicationControl.destinationOwned) {
+      if (destinationPath) {
         try {
           unlink(destinationPath);
           publicationControl.destinationPath = null;
-          publicationControl.destinationOwned = false;
         } catch (error) {
-          if (isErrno(error, "ENOENT")) {
-            publicationControl.destinationPath = null;
-            publicationControl.destinationOwned = false;
-          }
+          if (isErrno(error, "ENOENT")) publicationControl.destinationPath = null;
         }
-      } else if (destinationPath) {
-        publicationControl.destinationPath = null;
       }
     }
     throw responseSpillWriteError(cause);
@@ -874,147 +718,19 @@ export function readResponseSpill(responseId: string, ref: ResponseSpillRef): Re
   if (bytes.byteLength !== ref.payloadBytes || sha256(bytes) !== ref.digest) return { ok: false, reason: "corrupt" };
   try {
     const payload = JSON.parse(bytes.toString("utf8")) as unknown;
-    if (!validPayload(payload, responseId) || payload.version !== ref.version) return { ok: false, reason: "corrupt" };
-    return { ok: true, payload };
+    return validPayload(payload, responseId) ? { ok: true, payload } : { ok: false, reason: "corrupt" };
   } catch {
     return { ok: false, reason: "corrupt" };
   }
 }
 
-export function deleteResponseSpill(
-  ref: ResponseSpillRef,
-  onCleanupResidual?: (path: string, bytes: number) => void,
-): void {
+export function deleteResponseSpill(ref: ResponseSpillRef): void {
   if (!validSpillRef(ref)) return;
   const dir = responseSpillDirectory();
-  const path = join(dir, ref.fileName);
   try {
-    unlink(path);
+    unlink(join(dir, ref.fileName));
     fsyncDirectoryBestEffort(dir);
-  } catch (error) {
-    if (!isErrno(error, "ENOENT")) onCleanupResidual?.(path, ref.payloadBytes);
-  }
-}
-
-function removePublishedResponseSpill(
-  ref: ResponseSpillRef,
-  onCleanupResidual?: (path: string, bytes: number) => void,
-): void {
-  if (!validSpillRef(ref)) throw new Error("Invalid published response spill reference");
-  const dir = responseSpillDirectory();
-  const path = join(dir, ref.fileName);
-  try {
-    unlink(path);
-  } catch (error) {
-    if (!isErrno(error, "ENOENT")) {
-      onCleanupResidual?.(path, ref.payloadBytes);
-      throw error;
-    }
-  }
-  fsyncDirectoryBestEffort(dir);
-}
-
-export function createResponseSpillRetirementScan(
-  dir = responseSpillDirectory(),
-): ResponseSpillRetirementScan {
-  return { dir, handle: null, opened: false, injected: !!spillIoForTest?.readdirEntry };
-}
-
-export function closeResponseSpillRetirementScan(scan: ResponseSpillRetirementScan): void {
-  try { scan.handle?.closeSync(); } catch { /* best effort */ }
-  scan.handle = null;
-  scan.opened = false;
-}
-
-/** Retire one bounded batch while preserving caller-owned live/pending publications. */
-export function retirePreexistingResponseSpills(
-  scan: ResponseSpillRetirementScan,
-  protectedFileNames?: ReadonlySet<string>,
-  limits: { maxScanned?: number; maxRemoved?: number } = {},
-): ResponseSpillRetirementResult {
-  const result: ResponseSpillRetirementResult = {
-    scanned: 0,
-    removed: 0,
-    failed: 0,
-    bytesRemoved: 0,
-    complete: false,
-  };
-  if (!scan.opened) {
-    scan.injected = !!spillIoForTest?.readdirEntry;
-    scan.opened = true;
-  }
-  if (!scan.injected && !scan.handle) {
-    try {
-      scan.handle = opendirSync(scan.dir);
-    } catch (error) {
-      result.complete = isErrno(error, "ENOENT");
-      if (!result.complete) result.failed += 1;
-      closeResponseSpillRetirementScan(scan);
-      return result;
-    }
-  }
-  const nextName = (): string | null => {
-    if (scan.injected) {
-      const injected = spillIoForTest?.readdirEntry;
-      if (!injected) throw new Error("Response spill retirement scan seam disappeared");
-      return injected();
-    }
-    const entry = scan.handle!.readSync();
-    return entry ? entry.name : null;
-  };
-  while (
-    result.scanned < (limits.maxScanned ?? RESPONSE_SPILL_SCAN_MAX)
-    && result.removed < (limits.maxRemoved ?? RESPONSE_SPILL_CLEANUP_MAX)
-  ) {
-    let name: string | null;
-    try {
-      name = nextName();
-    } catch {
-      result.failed += 1;
-      closeResponseSpillRetirementScan(scan);
-      return result;
-    }
-    if (name === null) {
-      // Deleting while iterating can perturb directory enumeration, and a
-      // concurrent publisher can add a name behind the cursor. Only an empty
-      // follow-up pass proves the candidate set is drained.
-      result.complete = result.removed === 0;
-      closeResponseSpillRetirementScan(scan);
-      if (result.removed > 0) fsyncDirectoryBestEffort(scan.dir);
-      return result;
-    }
-    result.scanned += 1;
-    if (!OWNED_SPILL_NAME.test(name) && !OWNED_SPILL_TEMP_NAME.test(name)) continue;
-    if (protectedFileNames?.has(name)) continue;
-    const path = join(scan.dir, name);
-    let size: number;
-    try {
-      size = spillIoForTest?.inspect
-        ? spillIoForTest.inspect(path).size
-        : lstatSync(path).size;
-    } catch {
-      result.failed += 1;
-      closeResponseSpillRetirementScan(scan);
-      return result;
-    }
-    try {
-      // unlink never follows a symlink. Non-regular same-name entries also
-      // stay fail-closed if the platform refuses to unlink them.
-      const unlink = spillIoForTest?.unlink ?? unlinkSync;
-      unlink(path);
-      result.removed += 1;
-      result.bytesRemoved += size;
-    } catch (error) {
-      if (isErrno(error, "ENOENT")) result.removed += 1;
-      else result.failed += 1;
-      if (result.failed > 0) {
-        closeResponseSpillRetirementScan(scan);
-        return result;
-      }
-    }
-  }
-  if (result.removed > 0) fsyncDirectoryBestEffort(scan.dir);
-  return result;
+  } catch { /* best effort */ }
 }
 
 export function recoverOrphanedResponseSpills(

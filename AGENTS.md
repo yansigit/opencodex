@@ -221,15 +221,6 @@ Before creating or updating a non-trivial PR as review-ready, or before
 approving such a PR, run `bun run typecheck` and `bun run test`. CI runs these
 on Linux, Windows, and macOS.
 
-Tests that persist config, credentials, tokens, or other ACL-hardened state must
-use a unique `mkdtempSync(...)` home, not a fixed path under `tests/`. When the
-test is about higher-level behavior rather than ACLs, stub both the synchronous
-and asynchronous `icacls` runners. Always flush config-directory hardening
-before removing the scratch home; cleanup retries do not replace ownership of
-the child process lifecycle. This is required even when a test passes locally:
-Windows holds the directory open and turns one missed teardown into a cascade of
-later `beforeEach`/`afterEach` failures.
-
 Do not rerun passing checks on unchanged code merely for additional confidence.
 
 ## Minimal containers and agent sandboxes
@@ -262,29 +253,6 @@ They are not regressions; do not re-investigate them:
   that some container filesystems do not provide.
 
 Everything else passes (15480 pass / 16 skip / 5 fail as of 2.35.0).
-
-## Live inference testing
-
-Treat `127.0.0.1:10100` as the production local-usage proxy — the instance
-running agents (including Codex) on this machine. Do not restart, reconfigure,
-or run destructive smoke against it while developing or verifying changes.
-
-Real inference and provider smoke tests must use an isolated runtime instead:
-
-- **Container:** `bun run test:container` (Apple Container on macOS).
-- **Separate instance:** a fresh `OPENCODEX_HOME` under a temp directory and an
-  alternate listen port, e.g. `bun run src/cli/index.ts start --port <port>`.
-- **Isolated smoke harness:** follow
-  [`scripts/openai-provider-option-runtime-smoke.ts`](./scripts/openai-provider-option-runtime-smoke.ts)
-  — it refuses to bind `10100`, snapshots live `10100` listener identity, and
-  verifies real user config/credential hashes are unchanged.
-
-When targeting a live proxy for inference smoke, pass an explicit URL; never
-assume `10100` is disposable test infrastructure:
-
-```bash
-bun scripts/live-smoke.ts --url http://127.0.0.1:<port>/v1/responses
-```
 
 ## Issues and pull requests (agents)
 

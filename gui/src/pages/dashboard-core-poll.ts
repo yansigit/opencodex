@@ -50,6 +50,7 @@ export type EffortCapPoll = {
 export type DashboardOverviewPoll = {
   health: HealthData | null;
   providers: ProviderInfo[];
+  error: boolean;
 };
 
 /** Multi-agent extras — slower peers must not gate status/uptime/provider counts. */
@@ -252,40 +253,15 @@ export async function fetchDashboardOverview(
   signal: AbortSignal,
 ): Promise<DashboardOverviewPoll> {
   try {
-    // Primary health is the authenticated management route introduced with Remote Hub.
-    // Fall back to the unauthenticated liveness route so older servers and the
-    // fork's resilience suite (which mocks only /healthz) remain compatible.
-    const healthDataPromise = (async (): Promise<HealthData> => {
-      try {
-        const primary = await fetch(`${apiBase}/api/system/health`, { signal });
-        if (primary.ok) {
-          const data = (await primary.json()) as HealthData;
-          if (
-            data
-            && typeof (data as { status?: unknown }).status === "string"
-            && typeof (data as { version?: unknown }).version === "string"
-            && typeof (data as { uptime?: unknown }).uptime === "number"
-          ) {
-            return data as HealthData;
-          }
-        }
-      } catch (err) {
-        if (isAbortError(err, signal)) throw err;
-      }
-      const fallback = await fetch(`${apiBase}/healthz`, { signal });
-      return requireJson<HealthData>(fallback);
-    })();
-
-    const providersPromise = fetch(`${apiBase}/api/providers`, { signal }).then((r) =>
-      requireJson<ProviderInfo[]>(r),
-    );
-
-    const [health, providers] = await Promise.all([healthDataPromise, providersPromise]);
-    if (!Array.isArray(providers)) throw new Error("empty overview response");
-    return { health, providers };
-  } catch (error) {
-    if (isAbortError(error, signal)) throw error;
-    throw error instanceof Error ? error : new Error("overview unavailable");
+    const [hRes, pRes] = await Promise.all([
+      fetch(`${apiBase}/api/system/health`, { signal }),
+      fetch(`${apiBase}/api/providers`, { signal }),
+    ]);
+    const health = await requireJson<HealthData>(hRes);
+    const providers = await requireJson<ProviderInfo[]>(pRes);
+    return { health, providers, error: false };
+  } catch {
+    return { health: null, providers: [], error: true };
   }
 }
 

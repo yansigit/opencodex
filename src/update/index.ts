@@ -32,24 +32,8 @@ export function historyRestoreIncomplete(configDir = getConfigDir()): boolean {
   }
 }
 
+export const PKG = "@bitkyc08/opencodex";
 const HERE = dirname(fileURLToPath(import.meta.url)); // .../opencodex/src/update
-
-function readPackageIdentity(): { name: string; version: string } {
-  try {
-    const parsed = JSON.parse(readFileSync(join(HERE, "..", "..", "package.json"), "utf8")) as {
-      name?: unknown;
-      version?: unknown;
-    };
-    return {
-      name: typeof parsed.name === "string" && parsed.name ? parsed.name : "@yansigit/opencodex",
-      version: typeof parsed.version === "string" && parsed.version ? parsed.version : "?",
-    };
-  } catch {
-    return { name: "@yansigit/opencodex", version: "?" };
-  }
-}
-
-export const PKG = readPackageIdentity().name;
 
 export type Installer = "bun" | "npm" | "source";
 export type Channel = "latest" | "preview";
@@ -61,7 +45,11 @@ export function detectInstall(): Installer {
 }
 
 export function currentVersion(): string {
-  return readPackageIdentity().version;
+  try {
+    return (JSON.parse(readFileSync(join(HERE, "..", "..", "package.json"), "utf8")).version as string) ?? "?";
+  } catch {
+    return "?";
+  }
 }
 
 export function defaultUpdateTag(current: string): Channel {

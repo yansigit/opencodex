@@ -225,9 +225,8 @@ export function candidateCapabilityEvidence(
   // compatibility fingerprint (routing/compatibility/behavior.ts) all check it first.
   // Routing evidence did not, which was harmless only while no registry ladder existed to
   // contradict it — a provider-level ladder would otherwise report supported rungs for a
-  // model that either the operator or the built-in registry explicitly marks non-reasoning.
+  // model the operator explicitly disabled reasoning for.
   const reasoningEfforts = modelInList(provider?.noReasoningModels, modelId)
-    || modelInList(registryEntry?.noReasoningModels, modelId)
     ? []
     : modelRecordValue(provider?.modelReasoningEfforts, modelId)
       ?? modelRecordValue(registryEntry?.modelReasoningEfforts, modelId)

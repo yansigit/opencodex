@@ -69,8 +69,6 @@ async function putBatch(liveConfig: OcxConfig, body: unknown, onCatalog = () => 
   });
   return handleManagementAPI(request, new URL(request.url), liveConfig, {
     createManagementConvergeCodex: catalogConvergenceFactory(onCatalog),
-    saveConfigPreservingClaudeCode: configModule.saveConfigPreservingClaudeCode,
-    mutatePersistedConfig: configModule.mutatePersistedConfig,
   });
 }
 
@@ -333,11 +331,9 @@ describe("atomic provider editor batch", () => {
     const next = structuredClone(baseline);
     next.providers.alpha!.defaultModel = "stale-write";
 
-    const concurrent = configModule.mutatePersistedConfig(fresh => {
-      fresh.providers.alpha!.defaultModel = "concurrent-write";
-      return { changed: true, value: null };
-    });
-    expect(concurrent.status).toBe("committed");
+    const concurrent = loadConfig();
+    concurrent.providers.alpha!.defaultModel = "concurrent-write";
+    saveConfig(concurrent);
     const concurrentBytes = readFileSync(getConfigPath(), "utf8");
 
     const response = await putBatch(liveConfig, { baseline, next });

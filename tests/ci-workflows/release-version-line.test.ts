@@ -20,26 +20,21 @@ const repoRoot = resolveRepoRoot();
  *    claims to be the ALREADY-PUBLISHED 2.33.0 - a silent duplicate instead of a loud
  *    failure.
  *
- * Commit 32529c2b2 repaired precisely this by hand once, and nothing had enforced it
- * since. The durable repair moves `dev` forward before the release. This assertion reads
- * tags reachable from this repository's protected remote branches rather than the npm
- * registry, so it needs no network and does not mistake a second remote's newer upstream
- * tag for a release of this fork.
+ * Commit 32529c2b2 repaired precisely this by hand once, and nothing has enforced it
+ * since. The assertion reads the local tag set rather than the npm registry, so it needs
+ * no network and no edit at each release.
+ * The durable repair now moves `dev` forward before the release instead of catching it
+ * up afterward.
  *
  * compareReleaseTags comes from scripts/release-notes and not from scripts/release: the
  * latter parses process.argv and calls process.exit at module scope, so importing it from
  * a test kills the runner. release-notes guards its CLI behind import.meta.main.
  */
 
-/** Version shape accepted at scripts/release.ts's CLI entry point. */
-const RELEASE_CLI_VERSION = /^\d+\.\d+\.\d+(?:-[\w.]+)?$/;
-/** Release tags shaped from that CLI version. Non-release tags are ignored. */
-const RELEASE_TAG = /^v\d+\.\d+\.\d+(?:-[\w.]+)?$/;
+/** Release tags shaped vX.Y.Z[-pre]. Non-release tags are ignored, not an error. */
+const RELEASE_TAG = /^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
-type GitResult = { ok: boolean; out: string };
-type GitRunner = (args: string[]) => GitResult;
-
-function git(args: string[]): GitResult {
+function git(args: string[]): { ok: boolean; out: string } {
   const result = Bun.spawnSync(["git", ...args], { cwd: repoRoot });
   return {
     ok: result.exitCode === 0,
@@ -47,37 +42,15 @@ function git(args: string[]): GitResult {
   };
 }
 
-const RELEASE_BRANCH_REFS = [
-  "refs/remotes/origin/main",
-  "refs/remotes/origin/dev",
-  "refs/remotes/origin/preview",
-] as const;
-
-function parseReleaseTags(output: string): string[] {
-  return output
+function localReleaseTags(): string[] {
+  const result = git(["tag", "--list", "v*"]);
+  // A tarball install or a missing git binary lands here. Absent tags cannot prove a
+  // regression, so the check reports nothing rather than inventing a failure.
+  if (!result.ok) return [];
+  return result.out
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => RELEASE_TAG.test(line));
-}
-
-function localReleaseTags(runGit: GitRunner = git): string[] {
-  const availableRefs = RELEASE_BRANCH_REFS.filter(ref =>
-    runGit(["rev-parse", "--verify", "--quiet", ref]).ok,
-  );
-  // Stable releases live on main. If that authority is absent from a shallow or partial
-  // checkout, scan every local tag conservatively: omitting a released stable tag would turn
-  // this guard into a false green. Full CI checkouts have origin/main and take the scoped path.
-  const results = availableRefs.includes("refs/remotes/origin/main")
-    ? availableRefs.map(ref => runGit(["tag", "--merged", ref, "--list", "v*"]))
-    : [runGit(["tag", "--list", "v*"])];
-  // A tarball install or a missing git binary lands here. Absent tags cannot prove a
-  // regression, so the check reports nothing rather than inventing a failure.
-  const tags = new Set<string>();
-  for (const result of results) {
-    if (!result.ok) continue;
-    for (const tag of parseReleaseTags(result.out)) tags.add(tag);
-  }
-  return [...tags];
 }
 
 function inTreeVersion(): string {
@@ -110,11 +83,8 @@ function tagPointsAtHead(tag: string): boolean {
 }
 
 describe("release version line", () => {
-  test("package.json carries a version accepted by the release CLI", () => {
-    // This deliberately mirrors the command-line validation near `const version = args[0]`
-    // in scripts/release.ts. Its deeper comparison helper accepts build metadata, but that
-    // helper is unreachable for a `+build` CLI argument because entry validation rejects it.
-    expect(inTreeVersion()).toMatch(RELEASE_CLI_VERSION);
+  test("package.json carries a parseable SemVer version", () => {
+    expect(inTreeVersion()).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);
   });
 
   test("the in-tree version is never behind a released one", () => {
@@ -149,45 +119,6 @@ describe("release version line", () => {
         "merging into main resolves package.json to main's side and silently " +
         "republishes. Bump package.json.",
     ).toBeGreaterThan(0);
-  });
-
-  test("multi-remote upstream tags do not become releases of this repository", () => {
-    const calls: string[][] = [];
-    const runGit: GitRunner = args => {
-      calls.push(args);
-      if (args[0] === "rev-parse") {
-        return { ok: args[3] !== "refs/remotes/origin/preview", out: "commit" };
-      }
-      if (args[0] === "tag" && args[1] === "--merged") {
-        return {
-          ok: true,
-          out: args[2] === "refs/remotes/origin/main"
-            ? "v2.41.0\nv2.41.1-dev.1\nnot-a-release"
-            : "v2.41.1-dev.1",
-        };
-      }
-      return { ok: true, out: "v99.0.0" };
-    };
-
-    expect(localReleaseTags(runGit).sort(compareReleaseTags)).toEqual([
-      "v2.41.0",
-      "v2.41.1-dev.1",
-    ]);
-    expect(calls).not.toContainEqual(["tag", "--list", "v*"]);
-  });
-
-  test("a partial checkout without origin/main falls back fail-closed to all tags", () => {
-    const runGit: GitRunner = args => {
-      if (args[0] === "rev-parse") {
-        return { ok: args[3] === "refs/remotes/origin/dev", out: "commit" };
-      }
-      if (args[0] === "tag" && args[1] === "--list") {
-        return { ok: true, out: "v2.41.1-dev.1\nv2.41.0\nv2.42.0" };
-      }
-      return { ok: true, out: "v2.41.1-dev.1" };
-    };
-
-    expect(highestReleaseTag(localReleaseTags(runGit))).toBe("v2.42.0");
   });
 
   test("a version behind the tag set is detected rather than tolerated", () => {

@@ -1,8 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { initializePersistedConfigIfMissing, saveConfig } from "../../src/config";
 import { STORE_BUDGET_MS } from "../helpers/test-budget";
 import {
   CODEX_FAILURE_WINDOW_MS,
@@ -55,13 +53,10 @@ import { routeModel } from "../../src/router";
 import { consumeForInspection } from "../../src/server/relay";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 
-let TEST_DIR = "";
+const TEST_DIR = join(import.meta.dir, ".tmp-codex-routing-test");
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -95,9 +90,8 @@ function pendingInspectionStream(): ReadableStream<Uint8Array> {
 describe("codex routing", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-routing-"));
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
     // Isolate the main-account credential source: TEST_DIR has no auth.json, so the main
     // account is deterministically absent (these cases test the pool-only scenario).
@@ -113,29 +107,24 @@ describe("codex routing", () => {
     saveTestCredential("b");
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
     clearAccountNeedsReauth("a");
     clearAccountNeedsReauth("b");
     clearAccountNeedsReauth("c");
-    await flushConfigDirHardeningForTests();
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    removeTreeWithRetry(TEST_DIR);
-    TEST_DIR = "";
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   });
 
   test("usage score uses the hottest known quota window", () => {
     expect(computeCodexUsageScore({ weeklyPercent: 81 })).toBe(81);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 91 })).toBe(91);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 20, shortPercent: 92 })).toBe(92);
-    expect(computeCodexUsageScore({ weeklyPercent: 15, fiveHourPercent: 92 })).toBe(92);
     expect(computeCodexUsageScore({ weeklyPercent: 15 })).toBe(15);
   });
 
@@ -147,8 +136,7 @@ describe("codex routing", () => {
     expect(computeCodexUsageScore({ shortPercent: 0 })).toBe(CODEX_UNKNOWN_USAGE_SCORE);
     expect(computeCodexUsageScore({ shortPercent: 87 })).toBe(CODEX_UNKNOWN_USAGE_SCORE);
     // Once a governing window is known, the burst still wins when it is hotter.
-    expect(computeCodexUsageScore({ weeklyPercent: 1, shortPercent: 100,
-      shortResetAt: Date.now() + 60_000 })).toBe(100);
+    expect(computeCodexUsageScore({ weeklyPercent: 1, shortPercent: 100 })).toBe(100);
     expect(computeCodexUsageScore({ weeklyPercent: 40, shortPercent: 0 })).toBe(40);
   });
 
@@ -166,12 +154,9 @@ describe("codex routing", () => {
     // inverted into a recovered account that stays excluded.
     expect(computeCodexUsageScore({ shortPercent: 100, shortResetAt: now - 60_000 }, undefined, now))
       .toBe(CODEX_UNKNOWN_USAGE_SCORE);
-    expect(computeCodexUsageScore({ weeklyPercent: 20, shortPercent: 100, shortResetAt: now - 60_000 }, undefined, now))
-      .toBe(20);
     // No resetAt at all cannot be aged, so it stays unknown: a wrongly-selected account
     // fails one request, a wrongly-excluded one is invisible until someone reads the pool.
     expect(computeCodexUsageScore({ shortPercent: 100 }, undefined, now)).toBe(CODEX_UNKNOWN_USAGE_SCORE);
-    expect(computeCodexUsageScore({ weeklyPercent: 20, shortPercent: 100 }, undefined, now)).toBe(20);
     // Still narrow: a non-terminal short-only reading is unchanged.
     expect(computeCodexUsageScore({ shortPercent: 99, shortResetAt: now + 60_000 }, undefined, now))
       .toBe(CODEX_UNKNOWN_USAGE_SCORE);
@@ -250,20 +235,7 @@ describe("codex routing", () => {
     // clock far from wall time is the point: a fixture whose now matches Date.now() cannot
     // tell a threaded clock from one that was dropped somewhere in the helper chain.
     const now = 1_700_000_000_000;
-    const config = makeConfig({
-      activeCodexAccountId: "a",
-      defaultProvider: "test",
-      providers: {
-        test: {
-          adapter: "openai-responses",
-          baseUrl: "https://example.invalid/v1",
-          apiKey: "test-key",
-        },
-      },
-    });
-    // Automatic quota moves persist by design. Seed the fixture through the same
-    // fail-closed initialization boundary production uses instead of weakening it.
-    expect(initializePersistedConfigIfMissing(config)).toBe("created");
+    const config = makeConfig({ activeCodexAccountId: "a" });
 
     // A is full for the next hour, recorded in SECONDS. B has ordinary headroom.
     setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: (now + 3_600_000) / 1000 });
@@ -305,20 +277,7 @@ describe("codex routing", () => {
     setAccountQuotaFromParsed("a", { shortPercent: 100 });
     const now = Date.now();
     updateAccountQuota("b", 3);
-    const config = makeConfig({
-      activeCodexAccountId: "a",
-      defaultProvider: "test",
-      providers: {
-        test: {
-          adapter: "openai-responses",
-          baseUrl: "https://example.invalid/v1",
-          apiKey: "test-key",
-        },
-      },
-    });
-    // Moving away from an exhausted account persists the active selection. Seed the same
-    // valid on-disk boundary used by production so this regression can run in isolation.
-    expect(initializePersistedConfigIfMissing(config)).toBe("created");
+    const config = makeConfig({ activeCodexAccountId: "a" });
     expect(resolveCodexAccountForThread("thread-storm-new", config, now)).toBe("b");
 
     // A thread already bound to A must move too - this is the half the reporter saw as 118
@@ -329,7 +288,6 @@ describe("codex routing", () => {
     updateAccountQuota("a", 10);
     updateAccountQuota("b", 20);
     const bound = makeConfig({ activeCodexAccountId: "a" });
-    saveConfig(bound);
     expect(resolveCodexAccountForThread("thread-storm-bound", bound, now)).toBe("a");
     clearAccountQuota("a");
     setAccountQuotaFromParsed("a", { shortPercent: 100 });
@@ -655,11 +613,14 @@ describe("codex routing", () => {
     expect(resolveCodexAccountForThread("next", config)).toBe("a");
   });
 
-  test("a stale writer cannot recreate health for an account absent from the reconciled live set", () => {
-    // Removed-account fencing deliberately drops a terminal outcome captured before the
-    // latest reconciliation. Production populates the live set before listening, so a stale
-    // generation for an account that remains configured is accepted; this fixture exercises
-    // only the removed-account side of that boundary.
+  test("a stale writer generation drops the failure entirely, so the streak never trips (#3425)", () => {
+    // #3425: 118 consecutive 502s to one account with sendCount 1 and no recoveryKinds, and
+    // rotation only after a MANUAL pause. The quota selector is not the cause -- a known 100%
+    // account already switches (see the exhaustion tests above). This is the path that can
+    // swallow the evidence instead: recordCodexUpstreamOutcome returns before any health write
+    // when the writer's captured generation predates the last reconcile and the account is not
+    // in the live set. consecutiveFailures never increments, so upstreamFailoverThreshold is
+    // unreachable no matter how many failures arrive.
     const config = makeConfig();
     updateAccountQuota("a", 10);
     updateAccountQuota("b", 20);
@@ -670,7 +631,8 @@ describe("codex routing", () => {
       recordCodexUpstreamOutcome(config, "a", 502, { writerGeneration: -1 });
     }
 
-    // Nothing is recreated for the removed identity.
+    // Characterization, not an endorsement: nothing was recorded, so the account keeps
+    // serving. A fix for #3425 should turn these two assertions around.
     expect(getCodexUpstreamHealth("a")).toBeNull();
     expect(resolveCodexAccountForThread("stale-writer-next", config)).toBe("a");
 
@@ -1739,8 +1701,6 @@ describe("codex routing", () => {
         },
       }],
     })).toEqual({
-      fiveHourPercent: 11,
-      fiveHourResetAt: 1,
       shortPercent: 11,
       shortResetAt: 1,
       shortWindowSeconds: 5 * 60 * 60,
@@ -2216,9 +2176,8 @@ describe("codex routing", () => {
 describe("codex account selection order", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-routing-"));
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
     previousCodexHome = process.env.CODEX_HOME;
     process.env.CODEX_HOME = TEST_DIR;
@@ -2232,22 +2191,18 @@ describe("codex account selection order", () => {
     saveTestCredential("b");
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
     clearPoolRotationState();
     clearAccountNeedsReauth("a");
     clearAccountNeedsReauth("b");
-    await flushConfigDirHardeningForTests();
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    removeTreeWithRetry(TEST_DIR);
-    TEST_DIR = "";
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   });
 
   /** `a` is ordered above `b`; the persisted operator selection is the lower tier. */

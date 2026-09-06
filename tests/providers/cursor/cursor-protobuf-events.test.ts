@@ -36,7 +36,7 @@ function interaction(message: Parameters<typeof create<typeof InteractionUpdateS
   });
 }
 
-function mcpToolCall(toolName: string, args: Record<string, unknown>) {
+function mcpToolCall(toolName: string, args: Record<string, string>) {
   const encoded: Record<string, Uint8Array> = {};
   for (const [key, value] of Object.entries(args)) encoded[key] = encoder.encode(JSON.stringify(value));
   return create(ToolCallSchema, {
@@ -75,78 +75,6 @@ function turnEndedFrame() {
 }
 
 describe("Cursor protobuf tool-call events", () => {
-  test("retains announcement-only arguments on terminal flush", () => {
-    const state = createCursorProtobufEventState();
-    const toolCall = mcpToolCall("mcp__fs__read_file", { path: "announced.txt" });
-    expect(mapCursorProtobufServerMessage(interaction({
-      case: "toolCallStarted",
-      value: create(ToolCallStartedUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall }),
-    }), state)).toEqual([]);
-    const events = finalizeTurnEvents(state);
-    expect(events.slice(0, 3)).toEqual([
-      { type: "tool_call_start", id: "call_1", name: "mcp__fs__read_file" },
-      { type: "tool_call_delta", arguments: "{\"path\":\"announced.txt\"}" },
-      { type: "tool_call_end", id: "call_1" },
-    ]);
-    expect(events.at(-1)?.type).toBe("done");
-  });
-
-  test("preserves a large announced key omitted from the completion map", () => {
-    const state = createCursorProtobufEventState();
-    const tasks = ["x".repeat(256 * 1024)];
-    const announced = mcpToolCall("mcp__fs__read_file", { path: "a.txt", tasks });
-    const completed = mcpToolCall("mcp__fs__read_file", { path: "b.txt" });
-    mapCursorProtobufServerMessage(interaction({
-      case: "toolCallStarted",
-      value: create(ToolCallStartedUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall: announced }),
-    }), state);
-    const events = mapCursorProtobufServerMessage(interaction({
-      case: "toolCallCompleted",
-      value: create(ToolCallCompletedUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall: completed }),
-    }), state);
-    const delta = events.find(event => event.type === "tool_call_delta");
-    const args = JSON.parse(delta?.type === "tool_call_delta" ? delta.arguments : "{}");
-    expect(args.path).toBe("b.txt");
-    expect(args.tasks).toEqual(tasks);
-  });
-
-  test("serializes a ten-call parallel fan-out without losing an id or argument", () => {
-    const state = createCursorProtobufEventState();
-    const calls = Array.from({ length: 10 }, (_, index) => ({
-      id: `call_${index}`,
-      toolCall: mcpToolCall("mcp__fs__read_file", { path: `${index}.txt` }),
-    }));
-    for (const call of calls) {
-      expect(mapCursorProtobufServerMessage(interaction({
-        case: "toolCallStarted",
-        value: create(ToolCallStartedUpdateSchema, { callId: call.id, modelCallId: call.id, toolCall: call.toolCall }),
-      }), state)).toEqual([]);
-    }
-    const events = calls.flatMap(call => mapCursorProtobufServerMessage(interaction({
-      case: "toolCallCompleted",
-      value: create(ToolCallCompletedUpdateSchema, { callId: call.id, modelCallId: call.id, toolCall: call.toolCall }),
-    }), state));
-    expect(events.filter(event => event.type === "tool_call_start").map(event => event.type === "tool_call_start" ? event.id : "")).toEqual(calls.map(call => call.id));
-    expect(events.filter(event => event.type === "tool_call_delta")).toHaveLength(10);
-    expect(events.filter(event => event.type === "tool_call_end")).toHaveLength(10);
-  });
-
-  test("accepts incremental fragments and ignores shorter stale cumulative snapshots", () => {
-    const state = createCursorProtobufEventState();
-    const empty = mcpToolCall("mcp__fs__read_file", {});
-    for (const fragment of ["{\"path\":", "\"a.txt\"}", "{\"path\":" ]) {
-      mapCursorProtobufServerMessage(interaction({
-        case: "partialToolCall",
-        value: create(PartialToolCallUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall: empty, argsTextDelta: fragment }),
-      }), state);
-    }
-    const events = mapCursorProtobufServerMessage(interaction({
-      case: "toolCallCompleted",
-      value: create(ToolCallCompletedUpdateSchema, { callId: "call_1", modelCallId: "model_1", toolCall: empty }),
-    }), state);
-    expect(events).toContainEqual({ type: "tool_call_delta", arguments: "{\"path\":\"a.txt\"}" });
-  });
-
   test("maps MCP tool-call updates to Cursor tool call messages", () => {
     const state = createCursorProtobufEventState();
     const toolCall = mcpToolCall("mcp__fs__read_file", { path: "a.txt" });
@@ -923,55 +851,6 @@ describe("Cursor protobuf tool-call events", () => {
     expect(delta && delta.type === "tool_call_delta" ? JSON.parse(delta.arguments) : null).toEqual({ path: "a.txt" });
   });
 
-  test("wraps raw and missing-input freeform arguments for Codex", () => {
-    const freeformSchema = {
-      type: "object",
-      properties: { input: { type: "string" } },
-      required: ["input"],
-    };
-    const state = createCursorProtobufEventState({
-      clientToolNames: ["exec"],
-      freeformToolNames: ["exec"],
-      toolSchemas: new Map([["exec", freeformSchema]]),
-    });
-    const toolCall = mcpToolCall("exec", {});
-
-    mapCursorProtobufServerMessage(interaction({
-      case: "toolCallStarted",
-      value: create(ToolCallStartedUpdateSchema, { callId: "call_raw", modelCallId: "model_1", toolCall }),
-    }), state);
-    const rawEvents = mapCursorProtobufServerMessage(interaction({
-      case: "partialToolCall",
-      value: create(PartialToolCallUpdateSchema, {
-        callId: "call_raw", modelCallId: "model_1", toolCall, argsTextDelta: "echo hi",
-      }),
-    }), state);
-    expect(rawEvents).toEqual([]);
-    const rawCompleted = mapCursorProtobufServerMessage(interaction({
-      case: "toolCallCompleted",
-      value: create(ToolCallCompletedUpdateSchema, { callId: "call_raw", modelCallId: "model_1", toolCall }),
-    }), state);
-    expect(rawCompleted.find(event => event.type === "error")).toBeUndefined();
-    expect(rawCompleted.find(event => event.type === "tool_call_delta")).toEqual({
-      type: "tool_call_delta",
-      arguments: JSON.stringify({ input: "echo hi" }),
-    });
-
-    const missingInput = create(McpArgsSchema, {
-      name: "exec",
-      toolName: "exec",
-      toolCallId: "call_missing",
-      providerIdentifier: "opencodex-responses",
-      args: { script: encoder.encode(JSON.stringify("echo bye")) },
-    });
-    const missingEvents = mapSyntheticMcpExecToToolEvents(missingInput, "fallback", { state });
-    expect(missingEvents.find(event => event.type === "error")).toBeUndefined();
-    expect(missingEvents.find(event => event.type === "tool_call_delta")).toEqual({
-      type: "tool_call_delta",
-      arguments: JSON.stringify({ input: "echo bye" }),
-    });
-  });
-
   test("rewrites shell_command cmd args to command for Codex Responses validation", () => {
     const toolSchemas = new Map<string, unknown>([
       ["shell_command", { type: "object", properties: { command: { type: "string" }, workdir: { type: "string" } }, required: ["command"] }],
@@ -1125,11 +1004,8 @@ describe("Cursor protobuf tool-call events", () => {
     ]);
   });
 
-  test("a lower authoritative checkpoint replaces carried usage and reports compaction", () => {
-    const drops: Array<[number, number]> = [];
-    const tracker = createCursorContextUsageTracker({
-      onContextDrop: (previous, current) => drops.push([previous, current]),
-    });
+  test("same-session checkpoints cannot regress below a carried context total", () => {
+    const tracker = createCursorContextUsageTracker();
     tracker.record("cursor_conv_1", 10_300);
     const state = createCursorProtobufEventState({
       contextUsage: tracker.controlsForConversation("cursor_conv_1"),
@@ -1138,10 +1014,9 @@ describe("Cursor protobuf tool-call events", () => {
 
     expect(mapCursorProtobufServerMessage(checkpointUpdate(9_900), state)).toEqual([]);
     expect(mapCursorProtobufServerMessage(turnEndedFrame(), state)).toEqual([
-      { type: "done", usage: { inputTokens: 9_880, outputTokens: 20, totalTokens: 9_900, estimated: true } },
+      { type: "done", usage: { inputTokens: 10_280, outputTokens: 20, totalTokens: 10_300, estimated: true } },
     ]);
-    expect(tracker.get("cursor_conv_1")).toBe(9_900);
-    expect(drops).toEqual([[10_300, 9_900]]);
+    expect(tracker.get("cursor_conv_1")).toBe(10_300);
   });
 
   test("late checkpoint after terminal done is inert and does not seed carry-forward", () => {

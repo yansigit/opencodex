@@ -11,16 +11,15 @@ description: Listener, удалённый доступ, admission key, тайм�
 | Поле | Тип | По умолчанию | Значение |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Порт, который слушает прокси. |
-| `hostname?` | `string` | `"127.0.0.1"` | Адрес bind'а. Не-loopback bind требует TLS и credential data plane. |
-| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | Обслуживает HTTPS с указанными доступными файлами сертификата и закрытого ключа. `publicOrigin` должен быть точным HTTPS origin для клиентских URL. |
+| `hostname?` | `string` | `"127.0.0.1"` | Адрес bind'а. Не-loopback bind требует `OPENCODEX_API_AUTH_TOKEN`. |
 | `proxy?` | `string` | — | URL исходящего HTTP(S)-прокси или `${ENV_VAR}`. Применяется к `HTTP_PROXY` / `HTTPS_PROXY` только когда эти переменные не заданы; loopback всегда остаётся в `NO_PROXY`. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Явно включает один идентичный повтор Responses, если в turn нет ни текста, ни tool call, включая случай, когда stream завершается до terminal event. Повтор может тарифицироваться. `OCX_EMPTY_COMPLETION_RETRY=0` отключает его без изменения config; combo и routed-compaction turn исключены. |
 | `stallTimeoutSec?` | `number` | `300` | Секунды без upstream-данных до `response.incomplete`. Минимум 1. |
 | `connectTimeoutMs?` | `number` | `200000` | Дедлайн одной попытки DNS/TCP/TLS/final-header; он завершается до генерации тела ответа. |
 | `shutdownTimeoutMs?` | `number` | `5000` | Дедлайн graceful-drain до принудительного прерывания активных turn'ов. |
-| `websockets?` | `boolean` | `false` | Объявляет и разрешает клиентский WebSocket-путь Responses. При false клиенты используют HTTP/SSE. Upstream WS-оптимизация canonical ChatGPT включается отдельно: заданный `wsUpstream` провайдера имеет приоритет (`true` включает, `false` отключает); если поле не задано, её включает `OCX_CODEX_WS_UPSTREAM=true` или `1`, а `false`/`0`, отсутствие или неверное значение оставляют HTTP/SSE. |
+| `websockets?` | `boolean` | `false` | Объявляет и разрешает клиентский WebSocket-путь Responses. При false клиенты используют HTTP/SSE; это не отключает подходящую upstream WS-оптимизацию canonical ChatGPT. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Дополнительные точные origin, разрешённые CORS. Loopback-origin разрешены всегда. Поддерживаются authority-based origin браузерных расширений, например `chrome-extension://<extension-id>`; `*` не является маской. Firefox и Safari пересоздают UUID расширения (при каждой установке/запуске браузера), поэтому обновляйте запись при смене origin. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Сгенерированные credentials `ocx_…` для data-plane auth на не-loopback bind'ах. Управляются через дашборд; management API требует отдельный admin token. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Сгенерированные credentials `ocx_…`, принимаемые для management и data-plane auth на не-loopback bind'ах. Управляются через дашборд. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in policy очистки архивированных сессий. Никогда не включается неявно. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Лимит в MiB для eviction-friendly app-owned log'ов, cache'ей, blob'ов и continuation payload'ов. Это не RSS-cap. Диапазон 64–4096. |
 | `codexAutoStart?` | `boolean` | `true` | Разрешает shim'у Codex запускать `ocx ensure` перед стартом Codex. При false `ensure` становится no-op. |
@@ -39,16 +38,14 @@ native-provider history.
 ## Удалённый доступ
 
 По умолчанию bind `127.0.0.1` доступен только на loopback. Не-loopback-адрес, например
-`0.0.0.0`, требует TLS и credential для data plane. Удалённый dashboard дополнительно требует отдельный admin token
-(`OPENCODEX_ADMIN_AUTH_TOKEN` или сгенерированный файл admin token). Экспортируйте data-plane токен перед стартом:
+`0.0.0.0`, требует token-auth и для `/api/*`, и для data plane. Экспортируйте токен перед стартом:
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-Без TLS или этой переменной прокси откажется подниматься на удалённом bind'е. Изменения сертификата и listener
-вступают в силу после перезапуска. Для фоновой службы
+Без этой переменной прокси откажется подниматься на удалённом bind'е. Для фоновой службы
 экспортируйте её до `ocx service install`, чтобы launchd, systemd или Task Scheduler получили
 значение. Затем клиенты должны отправлять:
 
@@ -83,7 +80,7 @@ Bind на `0.0.0.0` открывает прокси и доступ к наст�
 Для удалённого использования удалённый bind не обязателен. Сохраняйте loopback и пробрасывайте его:
 
 ```bash
-ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 you@remote
+ssh -L 20100:localhost:10100 you@remote
 ```
 
 Локальный порт может быть любым. Если Host в запросе разрешается в `localhost`, `127.0.0.1` или
@@ -95,7 +92,7 @@ OAuth-callback провайдера слушает на фиксированно
 или пробрасывайте и этот порт:
 
 ```bash
-ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@remote
+ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 ```
 
 :::caution[Проброшенный loopback не аутентифицируется]
@@ -130,19 +127,6 @@ ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@r
 Авто-режим аутентификации выбирает subscription, если найдена сохранённая auth Claude, proxy —
 если auth нет, и subscription с предупреждением, если детектировать однозначно не удалось. См.
 [режим аутентификации Claude Code](/guides/claude-code/#auth-mode).
-
-Сгенерированные определения ростера (`~/.claude/agents/ocx-*.md`) содержат подписанные директивы
-`<!-- ocx-route -->` / `<!-- ocx-effort -->`, которые прокси проверяет перед диспетчеризацией:
-недействительная подписанная директива завершается отказом с `400 invalid_request_error`, а
-неподписанные директивы учитываются только для точных активных записей ростера, принадлежащих
-OpenCodex. `ocx doctor` сообщает о наличии и правах ключа подписи директив Claude в каталоге
-конфигурации OpenCodex, не выводя материал ключа.
-
-`POST /v1/messages` и `POST /v1/messages/count_tokens` — также единственные маршруты Claude,
-допущенные на опциональном `unauthenticatedLoopbackListener` (ключ уровня сервера; порт
-обязателен и должен отличаться от порта прокси). Аутентификация на публичном слушателе этим
-слушателем не меняется. См.
-[Локальные клиенты, которым нельзя передать токен](#удалённый-доступ).
 
 ## Shadow call'ы
 
@@ -225,9 +209,6 @@ context; в ключи OpenAI дополнительно входит reasoning 
 
 Sidecar'ы Anthropic OAuth повторно используют уже существующий OAuth fingerprint Claude Code от
 opencodex. Перед использованием прогоните soak-test на нужном аккаунте и ожидаемой нагрузке.
-### TLS и WebSocket
-
-`tls` принимает `certFile`, `keyFile` и `publicOrigin`. Тайм-аут простоя WebSocket — 255 секунд; при лимите обратного давления (1 МиБ) соединение закрывается.
 
 ## Ключи Remote Hub и значения по умолчанию
 

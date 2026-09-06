@@ -8,6 +8,8 @@ import type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } 
  */
 export type RefreshPolicy = "proactive" | "lazy-only" | "disabled";
 
+export type ProviderTlsProfile = "antigravity-browser";
+
 /** Request-owned identity of the configured key, before env/keychain resolution. */
 export interface ProviderApiKeySelection {
   entryId?: string;
@@ -194,6 +196,8 @@ export interface OcxProviderConfig {
   codexToolMode?: "code_mode_only" | "shell";
   /** Optional outbound request-start pacing shared by this provider and its model overrides. */
   requestPacing?: ProviderRequestPacingConfig;
+  /** Explicitly acknowledged experimental browser-compatible transport profile. */
+  tlsProfile?: ProviderTlsProfile;
   /** Cursor MCP compatibility bounds; positive integers when configured. */
   mcpMaxTools?: number;
   mcpMaxSchemaBytes?: number;
@@ -720,7 +724,7 @@ export interface OcxProviderConfig {
    * "vertex" = Vertex AI project/location endpoints with GCP ADC (or x-goog-api-key).
    * "cloud-code-assist" = Google Antigravity (Cloud Code Assist) OAuth + CCA envelope.
    */
-  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
+  googleMode?: "ai-studio" | "ai-studio-web" | "vertex" | "cloud-code-assist";
   /** Vertex AI GCP project id (or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env). */
   project?: string;
   /** Vertex AI location, e.g. "us-central1" or "global" (or GOOGLE_CLOUD_LOCATION env). */

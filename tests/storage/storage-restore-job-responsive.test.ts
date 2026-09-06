@@ -51,15 +51,6 @@ function seedArchived(codexHome: string): void {
   db.close();
 }
 
-async function waitForWorkerReady(buffer: SharedArrayBuffer): Promise<void> {
-  const ready = new Int32Array(buffer);
-  if (Atomics.load(ready, 0) === 0) {
-    const wait = Atomics.waitAsync(ready, 0, 0, 5_000);
-    if (wait.async) await wait.value;
-  }
-  expect(Atomics.load(ready, 0)).toBe(1);
-}
-
 beforeEach(async () => {
   previousHome = process.env.OPENCODEX_HOME;
   previousCleanupTestHooks = process.env.OPENCODEX_CLEANUP_TEST_HOOKS;
@@ -160,9 +151,8 @@ describe("storage trash restore job responsiveness", () => {
   }, { timeout: 10_000 });
 
   test("blocked worker keeps /healthz and streaming response responsive", async () => {
-    const blockMs = 250;
-    const workerReady = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
-    setRestoreTrashJobTestHooks({ blockMs, enableTestStream: true, workerReady });
+    const blockMs = 1200;
+    setRestoreTrashJobTestHooks({ blockMs, enableTestStream: true });
     seedArchived(isolatedCodexHome!.path);
 
     const server = startServer(0);
@@ -189,7 +179,6 @@ describe("storage trash restore job responsiveness", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ id: cleanup.trashDir }),
       });
-      await waitForWorkerReady(workerReady);
 
       const streamPromise = (async () => {
         const res = await fetch(new URL("/api/storage/trash/restore/test-stream", server.url));
@@ -204,13 +193,13 @@ describe("storage trash restore job responsiveness", () => {
         expect(health.status).toBe(200);
         const elapsed = Date.now() - t0;
         if (i > 0) healthSamples.push(elapsed);
-        await Bun.sleep(10);
+        await Bun.sleep(40);
       }
 
       const streamText = await streamPromise;
       expect(streamText.split("\n").filter(Boolean).length).toBe(8);
 
-      const maxHealthMs = 150;
+      const maxHealthMs = Math.floor(blockMs / 3);
       for (const sample of healthSamples) {
         expect(sample).toBeLessThan(maxHealthMs);
       }

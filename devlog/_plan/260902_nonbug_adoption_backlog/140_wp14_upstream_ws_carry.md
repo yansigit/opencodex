@@ -11,3 +11,4 @@ overwrite block (retainModels/displayNames vs upstreamWebsocket omit-preserve).
 Carry by merge in a side worktree (/tmp/ocx-wp14-c94721, branch `codex/carry-2817-upstream-ws`); conflict resolved by
 subagent keeping both omit-preserves; tsc/privacy/focused green at `d4914f52d`. Land via new PR,
 close #2817 as landed-via-carry, close #2816.
+

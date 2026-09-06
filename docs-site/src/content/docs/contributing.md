@@ -16,7 +16,7 @@ bun run dev:proxy    # proxy API in dev mode
 bun run dev:gui      # dashboard dev server (another terminal)
 bun run typecheck    # bun x tsc --noEmit
 bun run test:changed              # routine import-graph test selection
-bun scripts/test.ts tests/routing/router.test.ts     # routine focused test
+bun test tests/routing/router.test.ts     # routine focused test
 bun run test                      # complete suite (PR-ready / explicit ask)
 ```
 
@@ -32,8 +32,7 @@ scripts so local commands match CI:
 bun run typecheck                 # strict TypeScript check
 bun run test:changed              # import-graph tests against the resolved dev merge base
 bun run test                      # complete tests/ suite (PR-ready / explicit ask)
-bun run test:container            # macOS with Apple Container: isolated container suite
-bun scripts/test.ts tests/routing/router.test.ts     # focused test file
+bun test tests/routing/router.test.ts     # focused test file
 bun run build:gui                 # Vite GUI build + package preparation
 bun run privacy:scan              # credential/privacy scan used by CI
 bun run prepare:package           # refresh package launchers/assets
@@ -49,15 +48,8 @@ and `tests/test-layout.test.ts` enforces it, so a new test goes into its domain 
 an entry in the map (the tooling test tells you which one is missing). `tests/helpers/` holds
 shared fixtures and `tests/helpers/repo-root.ts` is how a test reaches repository files;
 `tests/e2e-style/` holds broader native-parity scenarios. Keep a focused regression near the
-existing tests for the subsystem you change (`bun scripts/test.ts tests/<domain>` runs one subsystem); run
+existing tests for the subsystem you change (`bun test tests/<domain>` runs one subsystem); run
 the full suite for shared routing, adapters, config, or server behavior.
-
-For a non-trivial pre-PR check on a Mac with Apple Container available, also run `bun run test:container`.
-Start the service with `container system start` first if needed. The test uses an ephemeral image and
-builder so repeated runs do not grow Apple Container's global cache. If a builder already exists, the
-command stops before modifying it; delete that builder explicitly, or set
-`OCX_CONTAINER_USE_SHARED_BUILDER=1` when retaining and managing its cache is intentional. Ordinary
-`bun run prepush` remains host-native and does not include this suite; it is not a GitHub-hosted CI job.
 
 The docs site you're reading lives in `docs-site/` (Astro + Starlight):
 
@@ -253,5 +245,5 @@ startup path must not import the manifest catalog or activate Compatibility Lab.
 ## Verify before you claim done
 
 Run the narrowest command that proves your change — `bun run typecheck` for types, a focused
-`bun scripts/test.ts tests/<domain>/<name>.test.ts` or runtime probe for behavior, then the broader gates appropriate to
+`bun test tests/<domain>/<name>.test.ts` or runtime probe for behavior, then the broader gates appropriate to
 the affected surface. opencodex favors small, verifiable commits over large batches.

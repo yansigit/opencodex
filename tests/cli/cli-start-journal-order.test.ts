@@ -9,12 +9,9 @@ import { repoPath } from "../helpers/repo-root";
 // Every wait here is bounded by a real `ocx start` child coming up: spawning Bun,
 // binding a port, and writing its runtime record. That is intrinsic to the
 // assertion, so the bound stays -- but a fixed 10s is a latency assertion on the
-// Windows leg, where four Bun pools share one runner. Hosted runs have observed
-// a healthy owner taking just over the shared 45s floor to publish its record,
-// so this process-heavy case keeps its own 90s readiness bound.
-const OWNER_WAIT_MS = process.env.CI === "true" && process.platform === "win32"
-  ? 90_000
-  : watchdogMs(10_000);
+// Windows leg, where four Bun pools share one runner. "timed out waiting for
+// owner runtime record" at 10.2s was that, not a journal-ownership defect.
+const OWNER_WAIT_MS = watchdogMs(10_000);
 
 // The surrounding budget has to clear the internal deadline, or the test dies on a
 // timeout before its own wait can report which step stalled -- the failure mode

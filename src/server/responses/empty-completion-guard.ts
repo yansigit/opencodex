@@ -48,25 +48,8 @@ export function emptyCompletionRetryEnabled(
   return config.emptyCompletionRetry === true && env[EMPTY_COMPLETION_RETRY_ENV] !== "0";
 }
 
-export type EmptyCompletionPolicy = "observe" | "fail" | "retry";
-
-/** Composer 2.5 has a verified pre-output empty-stop failure. Fail it statedly by default; only
- * replay when the operator explicitly accepts the billing/side-effect tradeoff. */
-export function emptyCompletionPolicy(
-  config: Pick<OcxConfig, "emptyCompletionRetry">,
-  adapterName: string,
-  modelId: string,
-  env: Record<string, string | undefined> = process.env,
-): EmptyCompletionPolicy {
-  if (emptyCompletionRetryEnabled(config, env)) return "retry";
-  const bareModel = modelId.startsWith("cursor/") ? modelId.slice("cursor/".length) : modelId;
-  return adapterName === "cursor" && bareModel === "composer-2.5" ? "fail" : "observe";
-}
-
 /** Surfaced when the single retry was also empty or failed upstream. */
 export const EMPTY_COMPLETION_RETRY_FAILED_CODE = "empty_completion_retry_failed";
-export const EMPTY_COMPLETION_REPLAY_UNSAFE_CODE = "empty_completion_replay_unsafe";
-export const EMPTY_COMPLETION_FAILED_CODE = "empty_completion";
 
 /**
  * Observe an event stream for the empty-completion shape WITHOUT changing it (#2472).
@@ -168,32 +151,6 @@ export function emptyCompletionRetryFailedEvent(
   };
 }
 
-export function emptyCompletionReplayUnsafeEvent(
-  usage?: OcxUsage,
-): Extract<AdapterEvent, { type: "error" }> {
-  return {
-    type: "error",
-    status: 502,
-    errorType: "upstream_error",
-    code: EMPTY_COMPLETION_REPLAY_UNSAFE_CODE,
-    message: "The model returned an empty completion after a local side effect; retrying this turn is unsafe.",
-    ...(usage ? { usage } : {}),
-  };
-}
-
-export function emptyCompletionFailedEvent(
-  usage?: OcxUsage,
-): Extract<AdapterEvent, { type: "error" }> {
-  return {
-    type: "error",
-    status: 502,
-    errorType: "upstream_error",
-    code: EMPTY_COMPLETION_FAILED_CODE,
-    message: "The model completed without output text or a tool call; the turn was not replayed automatically.",
-    ...(usage ? { usage } : {}),
-  };
-}
-
 /**
  * Sum two usage snapshots. Same semantics as terminal-guard's mergeUsage and
  * request-log's aggregateAttemptUsage: token totals add across the attempts;
@@ -271,7 +228,6 @@ export async function* guardEmptyCompletionEventStream(
   let passthrough = false;
   let retries = 0;
   let usage: OcxUsage | undefined;
-  let replayUnsafe = false;
 
   const withUsage = (event: AdapterEvent & { usage?: OcxUsage }): AdapterEvent => {
     const merged = mergeUsage(usage, event.usage);
@@ -288,7 +244,6 @@ export async function* guardEmptyCompletionEventStream(
     let terminalSeen = false;
     for await (const event of source) {
       if (event.type === "heartbeat") {
-        if (event.replayUnsafe) replayUnsafe = true;
         yield event;
         continue;
       }
@@ -318,10 +273,6 @@ export async function* guardEmptyCompletionEventStream(
           return;
         }
         if (retries < maxRetries) {
-          if (replayUnsafe) {
-            yield emptyCompletionReplayUnsafeEvent(usage);
-            return;
-          }
           // Suppress the terminal: the client must never see a completed event
           // for a turn that produced nothing. Retry the identical turn.
           retries += 1;
@@ -336,19 +287,10 @@ export async function* guardEmptyCompletionEventStream(
         }
         // The retry was also empty: a stated failure, not a second silent
         // success.
-        yield maxRetries === 0
-          ? emptyCompletionFailedEvent(usage)
-          : emptyCompletionRetryFailedEvent(usage);
+        yield emptyCompletionRetryFailedEvent(usage);
         return;
       }
       if (event.type === "error") {
-        // A local route/request validation failure from a continuation is already a complete,
-        // typed client error. Do not collapse it into the generic empty-completion retry failure.
-        if (event.status === 400 && event.errorType === "invalid_request_error") {
-          yield* releaseHeld();
-          yield withUsage(event);
-          return;
-        }
         if (retries > 0 && event.status !== 499) {
           // The retry failed upstream. Its body cannot reach the client (the
           // 200 head went out with the first attempt), so state the failure in
@@ -389,10 +331,6 @@ export async function* guardEmptyCompletionEventStream(
       // actionable reached the client. Retry once, then surface a stated error
       // instead of letting the bridge reduce the turn to adapter_eof.
       if (!sawContent && !passthrough && retries < maxRetries) {
-        if (replayUnsafe) {
-          yield emptyCompletionReplayUnsafeEvent(usage);
-          return;
-        }
         retries += 1;
         try {
           source = await options.continuation();
@@ -402,10 +340,8 @@ export async function* guardEmptyCompletionEventStream(
         }
         continue;
       }
-      if (!sawContent && (retries > 0 || maxRetries === 0)) {
-        yield maxRetries === 0
-          ? emptyCompletionFailedEvent(usage)
-          : emptyCompletionRetryFailedEvent(usage, true);
+      if (!sawContent && retries > 0) {
+        yield emptyCompletionRetryFailedEvent(usage, true);
         return;
       }
       // Post-output EOF remains incomplete; replaying could duplicate text or

@@ -34,8 +34,6 @@ export type RuntimePortState = {
   pid: number;
   port: number;
   hostname?: string;
-  /** Canonical listener origin. New clients prefer this; legacy records omit it. */
-  origin?: string;
   /** Per-process proof key; protected by the config directory and never served. */
   attestationSecret?: string;
 };
@@ -44,18 +42,6 @@ function isValidRuntimePortState(value: unknown): value is RuntimePortState {
   if (!value || typeof value !== "object") return false;
   const state = value as Record<string, unknown>;
   const hostnameOk = state.hostname === undefined || typeof state.hostname === "string";
-  const originOk = state.origin === undefined || (() => {
-    if (typeof state.origin !== "string") return false;
-    try {
-      const url = new URL(state.origin);
-      return (url.protocol === "http:" || url.protocol === "https:")
-        && !url.username && !url.password
-        && url.pathname === "/" && !url.search && !url.hash
-        && url.origin === state.origin;
-    } catch {
-      return false;
-    }
-  })();
   const attestationOk = state.attestationSecret === undefined || isLocalAttestationSecret(state.attestationSecret);
   return Number.isSafeInteger(state.pid)
     && Number(state.pid) > 0
@@ -63,7 +49,6 @@ function isValidRuntimePortState(value: unknown): value is RuntimePortState {
     && Number(state.port) > 0
     && Number(state.port) <= 65535
     && hostnameOk
-    && originOk
     && attestationOk;
 }
 
@@ -131,8 +116,8 @@ export function isOcxStartCommandLine(commandLine: string): boolean {
   // a service wrapper may respawn from `.opencodex-*` during a global update.
   const hasOcxEntrypoint = normalized.includes("src/cli.ts")
     || normalized.includes("src/cli/index.ts")
-    || /@[a-z0-9._-]+\/opencodex(?:[/'"\s]|$)/.test(normalized)
-    || /@[a-z0-9._-]+\/\.opencodex-/.test(normalized)
+    || normalized.includes("@bitkyc08/opencodex")
+    || /@bitkyc08\/\.opencodex-/.test(normalized)
     || /(?:^|[\s/"'])(?:ocx|opencodex)(?:\.cmd)?(?:$|[\s"'])/.test(normalized);
   return hasOcxEntrypoint && /(?:^|[\s"'])start(?:$|[\s"'])/.test(normalized);
 }

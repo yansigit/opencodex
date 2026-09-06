@@ -225,7 +225,7 @@ describe("Kiro review regressions", () => {
           events.push("load-config");
           return config();
         },
-        mutatePersistedConfig: () => {
+        saveConfig: () => {
           events.push("save-config");
           throw new Error("config write failed");
         },
@@ -241,6 +241,7 @@ describe("Kiro review regressions", () => {
     expect(events).toEqual([
       "load-config", // namespace preflight before browser/CLI auth
       "load-config", // provider validation before credential persistence
+      "load-config", // latest-row upsert after credential persistence
       "save-config",
       "settle:false",
     ]);

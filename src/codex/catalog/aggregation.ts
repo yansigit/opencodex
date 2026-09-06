@@ -157,17 +157,7 @@ export function deriveComboCatalogModel(
   // A combo is cap-limited only when every member defining its effective minimum was
   // itself reduced by a provider cap. An uncapped member at the same minimum means the
   // combo would have the same window even without the cap.
-  const detectedContextWindow = Math.min(
-    ...members.map(member => member.detectedContextWindow ?? member.contextWindow!),
-  );
-  const hasDetectedEvidence = members.some(member =>
-    typeof member.detectedContextWindow === "number",
-  );
-  const contextCapped = limitingMembers.every(member =>
-    member.contextCapped === true
-    || (typeof member.detectedContextWindow === "number"
-      && member.detectedContextWindow > member.contextWindow!),
-  );
+  const contextCapped = limitingMembers.every(member => member.contextCapped === true);
   const maxInputTokens = Math.min(
     contextWindow,
     ...members.map(member => member.maxInputTokens ?? member.contextWindow!),
@@ -198,9 +188,7 @@ export function deriveComboCatalogModel(
     maxInputTokens,
     ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
     autoCompactTokenLimit,
-    metadataSource: "derived" as const,
-    detectedContextWindow,
-    ...((hasLimitingContextCapMetadata || hasDetectedEvidence) ? { contextCapped } : {}),
+    ...(hasLimitingContextCapMetadata ? { contextCapped } : {}),
     inputModalities,
     reasoningEfforts,
     ...(combo.alias ? { alias: combo.alias } : {}),

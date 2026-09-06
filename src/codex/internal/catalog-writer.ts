@@ -16,7 +16,6 @@ import {
   forgetEphemeralSecretPath,
   hardenSecretPath,
 } from "../../lib/windows-secret-acl";
-import { resetCodexAppServerCatalogStateCache } from "../app-server-processes";
 
 export interface PreparedCatalogFileWrite {
   readonly path: string;
@@ -168,7 +167,6 @@ export function replaceActiveCodexCatalog(
 ): void {
   assertCatalogWritePermit(permit, owningCodexHome);
   atomicWriteFile(prepared.path, prepared.content, io);
-  resetCodexAppServerCatalogStateCache();
 }
 
 /** Atomically publish the catalog-path-keyed immutable backup without clobbering. */
@@ -202,5 +200,4 @@ export function replaceCodexModelsCache(
 ): void {
   assertCatalogWritePermit(permit, owningCodexHome);
   atomicWriteFile(prepared.path, prepared.content, io);
-  resetCodexAppServerCatalogStateCache();
 }

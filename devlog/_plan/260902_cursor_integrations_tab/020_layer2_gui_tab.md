@@ -48,3 +48,4 @@ unit on the branch and link the raw path in the PR body.
 
     cd gui && bun x tsc --noEmit ; bun run lint:gui ; bun run build:gui
     bun test gui/tests/integrations-tab-coverage.test.ts gui/tests/integration-marks.test.ts gui/tests/integrations-surfaces.test.tsx gui/tests/cursor-integration-page.test.tsx gui/tests/claude-desktop-locale.test.ts gui/tests/apikeys-layout.test.ts
+

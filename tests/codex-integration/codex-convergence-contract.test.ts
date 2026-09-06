@@ -379,7 +379,7 @@ test("the route inventory contains exactly the specified 8 + 14 + 2 + 2 converge
     ["provider-routes.ts", 8],
     ["model-routes.ts", 14],
     ["combo-routes.ts", 2],
-    ["agent-settings-routes.ts", 4],
+    ["agent-settings-routes.ts", 2],
   ].map(([file, expected]) => {
     const source = readFileSync(repoPath("src", "server", "management", file as string), "utf8");
     const direct = source.match(/await convergeCodexCatalog\(\)/g)?.length ?? 0;
@@ -398,7 +398,7 @@ test("the route inventory contains exactly the specified 8 + 14 + 2 + 2 converge
     "provider-routes.ts": 8,
     "model-routes.ts": 14,
     "combo-routes.ts": 2,
-    "agent-settings-routes.ts": 4,
+    "agent-settings-routes.ts": 2,
   });
 });
 

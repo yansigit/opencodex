@@ -470,10 +470,6 @@ function resetReviewReadinessSection(body) {
   );
 }
 
-function isPromotionPr(baseRef, title = "") {
-  return baseRef === "main" && /^promote:\s*dev\s*to\s*main/i.test(title.trim());
-}
-
 function collectPrQualityFailures({
   baseRef,
   allowedBases,
@@ -498,8 +494,7 @@ function collectPrQualityFailures({
   filesTruncated = false
 }) {
   const failures = [];
-  const promotionPr = isPromotionPr(baseRef, title);
-  const wrongBase = !allowedBases.includes(baseRef) && !stackedBase && !promotionPr;
+  const wrongBase = !allowedBases.includes(baseRef) && !stackedBase;
   if (wrongBase) {
     failures.push({ code: "wrong_base" });
   } else {
@@ -509,7 +504,6 @@ function collectPrQualityFailures({
     // PR is the temporary target.
     const skipAncestry =
       stackedBase ||
-      promotionPr ||
       ancestryLookupFailed ||
       (!permissionLookupFailed && authorHasPushPermission(authorPermission));
     if (
@@ -530,7 +524,6 @@ function collectPrQualityFailures({
   // not arm the gate when the diff is backend-only. A maintainer comment saying
   // the change does not touch the GUI still waives a gui/ diff false positive.
   if (
-    !promotionPr &&
     (guiPathsChanged(changedFilePaths) || filesTruncated) &&
     !hasScreenshotEvidence(body) &&
     !hasGuiOverride({ comments: guiOverrideComments })
@@ -547,7 +540,6 @@ module.exports = {
   REVIEW_READINESS_START,
   REVIEW_READINESS_END,
   isWrongAncestry,
-  isPromotionPr,
   authorHasPushPermission,
   assessPrDescription,
   guiPathsChanged,

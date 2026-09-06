@@ -24,10 +24,6 @@ const CONTEXT_272K = 272_000;
 const CONTEXT_262K = 262_144;
 const CONTEXT_256K = 256_000;
 const CONTEXT_200K = 200_000;
-// Live Composer 2.5 checkpoints plateau below 61k while the caller transcript continues growing.
-// Advertise the conservative 64k upstream boundary so Codex compacts at 57.6k instead of waiting
-// until the old, unverified 180k threshold.
-const CONTEXT_COMPOSER_2_5 = 64_000;
 
 export function inferCursorContextWindow(modelId: string): number {
   const id = modelId.trim().toLowerCase();
@@ -274,7 +270,7 @@ export const CURSOR_KNOWN_UNCALLABLE_MODEL_IDS: ReadonlySet<string> = new Set([]
 export const CURSOR_PRODUCT_MODELS: readonly (CursorModelInfo & { displayName: string })[] = [
   { id: "claude-4.5-haiku", displayName: "Claude Haiku 4.5", contextWindow: CONTEXT_200K },
   { id: "composer-1", displayName: "Composer 1", contextWindow: CONTEXT_200K },
-  { id: "composer-2.5", displayName: "Composer 2.5", contextWindow: CONTEXT_COMPOSER_2_5 },
+  { id: "composer-2.5", displayName: "Composer 2.5", contextWindow: CONTEXT_200K },
   { id: "gemini-2.5-flash", displayName: "Gemini 2.5 Flash", contextWindow: CONTEXT_GEMINI },
   { id: "gemini-3-flash", displayName: "Gemini 3 Flash", contextWindow: CONTEXT_GEMINI },
   { id: "gemini-3-pro", displayName: "Gemini 3 Pro", contextWindow: CONTEXT_GEMINI },

@@ -23,7 +23,6 @@
 
 const RESTRICTED_PREFIXES = [
   ".github/workflows/",
-  ".github/scripts/",
   "src/oauth/",
 ];
 
@@ -54,26 +53,8 @@ const RESTRICTED_FILES = new Set([
   "bun.lock",
 ]);
 
-const AGENT_PROTECTED_PREFIXES = ["src/adapters/", "src/providers/"];
-const AGENT_PROTECTED_FILES = new Set([
-  "src/router.ts",
-  "src/server/index.ts",
-  "src/server/lifecycle.ts",
-  "src/server/responses/core.ts",
-]);
-
 function isRestrictedPath(path) {
   return RESTRICTED_FILES.has(path) || RESTRICTED_PREFIXES.some((prefix) => path.startsWith(prefix));
-}
-
-function isAgentProtectedPath(file) {
-  const paths = [file?.filename, file?.previous_filename].filter(Boolean);
-  return paths.some(
-    (path) =>
-      isRestrictedPath(path) ||
-      AGENT_PROTECTED_FILES.has(path) ||
-      AGENT_PROTECTED_PREFIXES.some((prefix) => path.startsWith(prefix)),
-  );
 }
 
 function hasSponsorship(labels) {
@@ -101,9 +82,6 @@ function assessSponsoredSurface({
 module.exports = {
   RESTRICTED_FILES,
   RESTRICTED_PREFIXES,
-  AGENT_PROTECTED_FILES,
-  AGENT_PROTECTED_PREFIXES,
   assessSponsoredSurface,
-  isAgentProtectedPath,
   isRestrictedPath,
 };

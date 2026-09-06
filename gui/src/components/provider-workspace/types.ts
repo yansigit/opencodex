@@ -38,15 +38,6 @@ export interface ProviderModelUsageRow {
   estimatedCostUsd?: number;
 }
 
-/** Per-account usage row from /api/usage. */
-export interface ProviderAccountUsageRow {
-  accountLogLabel: string;
-  provider?: string;
-  requests: number;
-  totalTokens: number;
-  estimatedCostUsd?: number;
-}
-
 // Auth types consumed by ProviderAuthPanel (WP091).
 export type OAuthAccountHealthStatus = "healthy" | "cooldown" | "reauth_required" | "warning";
 
@@ -99,7 +90,6 @@ export interface ProviderAuthHandlers {
   onSwitchApiKey: (provider: string, entry: ApiKeyRow) => void | Promise<void>;
   onRemoveApiKey: (provider: string, entry: ApiKeyRow) => void | Promise<void>;
   onEditAlias: (provider: string, type: "oauth" | "api-key", id: string, current?: string) => void | Promise<void>;
-  onClearCooldown?: (provider: string, accountId: string) => void | Promise<void>;
   /**
    * Force a fresh quota read for this provider, resolving with whether it succeeded.
    *
@@ -121,11 +111,9 @@ export type ProviderUpdatePatch = {
   note?: string;
   disabled?: boolean;
   allowPrivateNetwork?: boolean;
-  replayTransientFailures?: boolean;
   liveModels?: boolean;
   upstreamHttpVersion?: "auto" | "http1.1" | "h1" | "http2" | "h2" | null;
   requestPacing?: WorkspaceItem["requestPacing"] | null;
-  tlsProfile?: "antigravity-browser" | null;
   /** Dedicated field: the API PATCHes it alone for the canonical `openai` provider. */
   codexAccountMode?: "direct" | "pool";
   /** Management-only write that atomically owns the two supported xAI Grok adapter rows. */

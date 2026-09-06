@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   primeCodexPoolQuotas,
@@ -33,16 +32,13 @@ import {
   getNativeMainProfileRequestCount,
   resetLifecycleDrainStateForTests,
 } from "../../src/server/lifecycle";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 // Phase 20 (260630_wsl-account-autoswitch): startup/lazy quota priming.
 
-let TEST_DIR = "";
-let TEST_CODEX_HOME = "";
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+const TEST_DIR = join(import.meta.dir, ".tmp-codex-quota-prime-test");
+const TEST_CODEX_HOME = join(TEST_DIR, "codex");
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
 
@@ -101,13 +97,7 @@ describe("primeCodexPoolQuotas", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
     previousCodexHome = process.env.CODEX_HOME;
-    // Quota behavior is the subject here, not Windows ACLs. A fixed repo-local home plus
-    // real async icacls made teardown race the child holding that directory, poisoning every
-    // following case with EPERM in main run 33905721824.
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-quota-prime-"));
-    TEST_CODEX_HOME = join(TEST_DIR, "codex");
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_CODEX_HOME, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
     // Isolate the main-account source: TEST_CODEX_HOME has no auth.json, so the
@@ -121,23 +111,18 @@ describe("primeCodexPoolQuotas", () => {
     resetLifecycleDrainStateForTests();
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     clearAccountQuota();
     clearThreadAccountMap();
     clearCodexQuotaPrimeState();
     clearMainAccountInfoCache();
     resetMainCodexAccountIdentityTrackingForTests();
     resetLifecycleDrainStateForTests();
-    await flushConfigDirHardeningForTests();
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
-    TEST_DIR = "";
-    TEST_CODEX_HOME = "";
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   });
 
   test("prime populates stale/unknown pool accounts", async () => {

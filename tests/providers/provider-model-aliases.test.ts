@@ -3,7 +3,7 @@ import { gatherRoutedModels } from "../../src/codex/catalog/provider-fetch";
 import { applyProviderConfigHints } from "../../src/codex/catalog/provider-fetch";
 import { buildCatalogEntries } from "../../src/codex/catalog/sync";
 import { describe, expect, test } from "bun:test";
-import { effectiveModelAliases, effectiveProviderAlias } from "../../src/providers/default-aliases";
+import { effectiveModelAliases } from "../../src/providers/default-aliases";
 import { routeModel } from "../../src/router";
 import type { OcxConfig } from "../../src/types";
 
@@ -90,47 +90,6 @@ describe("provider and model aliases", () => {
     });
 
     // Canonical full name remains valid and unaffected
-    expect(routeModel(c, "google-antigravity/gemini-3.8-flash")).toMatchObject({
-      providerName: "google-antigravity",
-      modelId: "gemini-3.8-flash",
-    });
-  });
-
-  test("registry alias is suppressed when another provider owns that canonical name", () => {
-    const c = {
-      port: 10100,
-      defaultProvider: "google-antigravity",
-      providers: {
-        agy: {
-          adapter: "openai-chat",
-          baseUrl: "https://agy.test/v1",
-          models: ["custom-model"],
-        },
-        "google-antigravity": {
-          adapter: "google",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-          authMode: "oauth",
-          // Registry seeds materialize this value, so it must follow registry-default
-          // collision rules even though it is present in the persisted provider row.
-          alias: "agy",
-          models: ["gemini-3.8-flash"],
-        },
-      },
-    } as unknown as OcxConfig;
-
-    expect(routeModel(c, "agy/custom-model")).toMatchObject({
-      providerName: "agy",
-      modelId: "custom-model",
-    });
-    expect(effectiveProviderAlias(
-      "google-antigravity",
-      c.providers["google-antigravity"],
-      c,
-    )).toBeUndefined();
-    expect(routeModel(c, "agy/gemini-3.8-flash")).toMatchObject({
-      providerName: "agy",
-      modelId: "gemini-3.8-flash",
-    });
     expect(routeModel(c, "google-antigravity/gemini-3.8-flash")).toMatchObject({
       providerName: "google-antigravity",
       modelId: "gemini-3.8-flash",
@@ -309,9 +268,7 @@ describe("provider and model aliases", () => {
         providers: {
           "google-antigravity": {
             adapter: "openai-chat",
-            // Keep the Antigravity name on its canonical credential boundary. The legacy
-            // mock host is now rejected before the repository-test fetch seam can run.
-            baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+            baseUrl: "https://mock.google.test/v1",
             authMode: "key",
             apiKey: "test-key",
             liveModels: true,
@@ -342,7 +299,7 @@ describe("provider and model aliases", () => {
           },
           "google-antigravity": {
             adapter: "openai-chat",
-            baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+            baseUrl: "https://mock.google.test/v1",
             authMode: "key",
             apiKey: "test-key",
             liveModels: true,

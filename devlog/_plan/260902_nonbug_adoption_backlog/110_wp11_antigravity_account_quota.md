@@ -34,3 +34,4 @@ configurable host without the repository's pinned provider-outbound transport.
 - `supportsPerAccountQuota("google-antigravity") === true`; unknown/failed never becomes 0%.
 - tsc, privacy, focused: provider-account-quota, provider-quota, oauth-account-routes-related file.
 - Close #2123 with credit for the account loop + token hygiene design and the reasons above.
+

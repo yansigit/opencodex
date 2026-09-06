@@ -63,7 +63,7 @@ test("run metadata commit rebases concurrent policy and unrelated config writes"
     enabled: true,
     trigger: { archivedBytesOver: 1234 },
     target: { removeOldestPercent: 40 },
-    schedule: "daily",
+    schedule: "manual",
     mode: "quarantine",
   };
   const initial = loadConfig();

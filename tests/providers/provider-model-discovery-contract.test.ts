@@ -152,46 +152,19 @@ describe("registry-owned provider model discovery", () => {
   });
 
   test("uses the registry discovery URL for API-key validation without following redirects", async () => {
-    const timeout = spyOn(AbortSignal, "timeout");
-    try {
-      await withTogetherDiscovery({
-        path: "catalog",
-        query: { capability: "chat", limit: "1" },
-      }, async () => {
-        globalThis.fetch = (async (input, init) => {
-          expect(String(input)).toBe("https://api.together.xyz/v1/catalog?capability=chat&limit=1");
-          expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
-          expect(init?.redirect).toBe("manual");
-          return Response.json({ data: [] });
-        }) as typeof fetch;
-
-        expect(await validateApiKey("together", KEY_LOGIN_PROVIDERS.together!, "secret", { fetch: globalThis.fetch })).toBe(true);
-        expect(timeout).toHaveBeenCalledWith(8_000);
-      });
-    } finally {
-      timeout.mockRestore();
-    }
-  });
-
-  test("validates LiteLLM keys over its explicitly allowed loopback HTTP transport", async () => {
-    let authorization: string | null = null;
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      fetch(request) {
-        authorization = request.headers.get("authorization");
+    await withTogetherDiscovery({
+      path: "catalog",
+      query: { capability: "chat", limit: "1" },
+    }, async () => {
+      globalThis.fetch = (async (input, init) => {
+        expect(String(input)).toBe("https://api.together.xyz/v1/catalog?capability=chat&limit=1");
+        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
+        expect(init?.redirect).toBe("error");
         return Response.json({ data: [] });
-      },
+      }) as typeof fetch;
+
+      expect(await validateApiKey("together", KEY_LOGIN_PROVIDERS.together!, "secret")).toBe(true);
     });
-    try {
-      expect(await validateApiKey("litellm", {
-        ...KEY_LOGIN_PROVIDERS.litellm!,
-        baseUrl: `http://127.0.0.1:${server.port}/v1`,
-      }, "local-key")).toBe(true);
-      expect(authorization).toBe("Bearer local-key");
-    } finally {
-      await server.stop(true);
-    }
   });
 
   test("pins fixed OAuth discovery before resolving relative and default endpoints", async () => {
@@ -292,74 +265,6 @@ describe("registry-owned provider model discovery", () => {
       context_size: Number.MAX_SAFE_INTEGER + 1,
       max_input_tokens: Number.MAX_SAFE_INTEGER + 1,
       max_output_tokens: Number.MAX_SAFE_INTEGER + 1,
-    })).toEqual({});
-  });
-
-  test("reads additional context, input, and output aliases from live /models rows", () => {
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "ctx-window",
-      context_window: 262_144,
-    })).toEqual({ contextWindow: 262_144 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "max-ctx-window",
-      max_context_window: 200_000,
-    })).toEqual({ contextWindow: 200_000 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "default-ctx",
-      default_context_size: 32_768,
-    })).toEqual({ contextWindow: 32_768 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "default-and-max",
-      default_context_size: 4_096,
-      max_context_size: 128_000,
-    })).toEqual({ contextWindow: 128_000 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "default-and-meta-n-ctx",
-      default_context_size: 4_096,
-      meta: { n_ctx: 131_072 },
-    })).toEqual({ contextWindow: 131_072 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "max-ctx-size",
-      max_context_size: 16_384,
-    })).toEqual({ contextWindow: 16_384 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "top-level-n-ctx",
-      n_ctx: 8_192,
-    })).toEqual({ contextWindow: 8_192 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "input-length",
-      max_input_length: 100_000,
-    })).toEqual({ maxInputTokens: 100_000 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "prompt-tokens",
-      max_prompt_tokens: 90_000,
-    })).toEqual({ maxInputTokens: 90_000 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "nested-output",
-      metadata: { limits: { max_output_tokens: 8_192 } },
-    })).toEqual({ maxOutputTokens: 8_192 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "output-tokens",
-      max_output_tokens: 4_096,
-    })).toEqual({ maxOutputTokens: 4_096 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "nested-max-tokens",
-      metadata: { limits: { max_tokens: 2_048 } },
-    })).toEqual({ maxOutputTokens: 2_048 });
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "openrouter-top-provider",
-      top_provider: { max_context_length: 1_048_576 },
-    })).toEqual({ contextWindow: 1_048_576 });
-  });
-
-  test("does not treat a top-level max_tokens or jawcode maxTokens as context", () => {
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "ambiguous-max-tokens",
-      max_tokens: 8_192,
-    })).toEqual({});
-    expect(catalogHintsFromModelsApiItem("example", {
-      id: "jawcode-max-tokens",
-      maxTokens: 8_192,
     })).toEqual({});
   });
 

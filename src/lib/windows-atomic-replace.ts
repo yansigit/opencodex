@@ -31,12 +31,10 @@ export type ReplacePublisher =
   | "prompt-journal"
   | "config-ownership"
   | "claude-agents"
-  | "codex-agent-roles"
   | "lab-automation"
   | "lab-ledger"
   | "storage-cleanup"
-  | "tray"
-  | "dev-version-bump";
+  | "tray";
 
 /** The Windows error codes this module treats as a momentary hold. */
 export type ReplaceRetryCode = "EBUSY" | "EPERM" | "EACCES";

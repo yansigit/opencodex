@@ -83,14 +83,10 @@ export function routedConfig(
 
 export function codexHeaders(accountId = "acct-caller", extra: HeadersInit = {}): Headers {
   const headers = new Headers(extra);
-  if (!headers.has("authorization")) {
-    headers.set("authorization", `Bearer ${fakeChatGptJwt(accountId)}`);
-  }
-  if (!headers.has("chatgpt-account-id")) {
-    headers.set("chatgpt-account-id", accountId);
-  }
-  if (!headers.has("originator")) headers.set("originator", "codex_cli_rs");
-  if (!headers.has("x-openai-subagent")) headers.set("x-openai-subagent", "collab_spawn");
+  headers.set("authorization", `Bearer ${fakeChatGptJwt(accountId)}`);
+  headers.set("chatgpt-account-id", accountId);
+  headers.set("originator", "codex_cli_rs");
+  headers.set("x-openai-subagent", "collab_spawn");
   return headers;
 }
 

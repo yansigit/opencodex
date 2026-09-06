@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderOutboundDependencies } from "../../src/lib/provider-outbound";
 import { PROXY_ENV_KEYS } from "../../src/lib/proxy-env";
-import { resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../../src/lib/provider-tls-profile";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const proxyKeys = PROXY_ENV_KEYS.flatMap(key => [key, key.toLowerCase()]);
@@ -16,7 +15,6 @@ afterEach(() => {
     if (previous === undefined) delete process.env[key];
     else process.env[key] = previous;
   }
-  resetProviderTlsProfileForTests();
 });
 
 function directDependencies(
@@ -54,196 +52,6 @@ function directDependencies(
 }
 
 describe("provider outbound GET transport", () => {
-  test("an irrelevant HTTP proxy does not disable HTTPS DNS pinning", async () => {
-    for (const key of proxyKeys) delete process.env[key];
-    process.env.HTTP_PROXY = "http://127.0.0.1:9";
-    const originalFetch = globalThis.fetch;
-    const fetchMock = mock(async () => new Response("unexpected")) as typeof fetch;
-    globalThis.fetch = fetchMock;
-    try {
-      const { providerOutboundGet } = await import("../../src/lib/provider-outbound");
-      const { dependencies, captured } = directDependencies(new Response("ok"));
-      const response = await providerOutboundGet(
-        "custom",
-        { baseUrl: "https://provider.example" },
-        "https://provider.example/models",
-        {},
-        dependencies,
-      );
-      expect(await response.text()).toBe("ok");
-      expect(captured.address).toBe("93.184.216.34");
-      expect(fetchMock).not.toHaveBeenCalled();
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("NO_PROXY keeps the direct DNS-pinned path", async () => {
-    for (const key of proxyKeys) delete process.env[key];
-    process.env.HTTPS_PROXY = "http://127.0.0.1:9";
-    process.env.NO_PROXY = "provider.example";
-    const originalFetch = globalThis.fetch;
-    const fetchMock = mock(async () => new Response("unexpected")) as typeof fetch;
-    globalThis.fetch = fetchMock;
-    try {
-      const { providerOutboundGet } = await import("../../src/lib/provider-outbound");
-      const { dependencies, captured } = directDependencies(new Response("ok"));
-      await providerOutboundGet(
-        "custom",
-        { baseUrl: "https://provider.example" },
-        "https://provider.example/models",
-        {},
-        dependencies,
-      );
-      expect(captured.address).toBe("93.184.216.34");
-      expect(fetchMock).not.toHaveBeenCalled();
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("credential-bearing public GET requires HTTPS", async () => {
-    for (const key of proxyKeys) delete process.env[key];
-    const { providerOutboundGet, ProviderOutboundPolicyError } = await import("../../src/lib/provider-outbound");
-    const { dependencies, captured } = directDependencies(new Response("unexpected"));
-    await expect(providerOutboundGet(
-      "custom",
-      { baseUrl: "http://provider.example" },
-      "http://provider.example/models",
-      { headers: { "x-api-key": "must-not-send" } },
-      dependencies,
-    )).rejects.toThrow(ProviderOutboundPolicyError);
-    expect(captured.address).toBeUndefined();
-  });
-
-  test("proxy DNS degradation cannot bypass credentialed GET HTTPS", async () => {
-    for (const key of proxyKeys) delete process.env[key];
-    process.env.HTTP_PROXY = "http://127.0.0.1:9";
-    const originalFetch = globalThis.fetch;
-    const fetchMock = mock(async () => new Response("unexpected")) as typeof fetch;
-    globalThis.fetch = fetchMock;
-    try {
-      const { providerOutboundGet, ProviderOutboundPolicyError } = await import("../../src/lib/provider-outbound");
-      await expect(providerOutboundGet(
-        "custom",
-        { baseUrl: "http://unresolved.example" },
-        "http://unresolved.example/models",
-        { headers: { authorization: "Bearer must-not-send" } },
-        {
-          resolveAddresses: mock(async () => {
-            const error = new Error("DNS failed");
-            error.name = "DestinationDnsResolutionError";
-            throw error;
-          }),
-        },
-      )).rejects.toThrow(ProviderOutboundPolicyError);
-      expect(fetchMock).not.toHaveBeenCalled();
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  test("rejects a noncanonical Antigravity OAuth destination before dispatch", async () => {
-    const { providerOutboundGet, ProviderOutboundPolicyError } = await import("../../src/lib/provider-outbound");
-    let resolveCalls = 0;
-    await expect(providerOutboundGet(
-      "google-antigravity",
-      { adapter: "google", authMode: "oauth", baseUrl: "https://evil.example.test" },
-      "https://evil.example.test/v1internal:fetchAvailableModels",
-      { headers: { authorization: "Bearer must-not-send" } },
-      { resolveAddresses: async () => { resolveCalls += 1; throw new Error("must not resolve"); } },
-    )).rejects.toThrow(ProviderOutboundPolicyError);
-    expect(resolveCalls).toBe(0);
-  });
-
-  test("Antigravity model discovery uses the opted-in profiled executor", async () => {
-    for (const key of proxyKeys) delete process.env[key];
-    let nativeCalls = 0;
-    let bunCalls = 0;
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async () => {
-      bunCalls += 1;
-      return new Response(null, { status: 200 });
-    }) as typeof fetch;
-    setProviderTlsRuntimeForTest({
-      resolveDestination: mock(async () => ({
-        hostname: "daily-cloudcode-pa.googleapis.com",
-        addresses: [{ address: "142.250.1.1", family: 4 }],
-        privateNetwork: false,
-      })),
-      importWreq: async () => ({
-        createTransport: async () => ({ close: async () => undefined }),
-        fetch: async () => {
-          nativeCalls += 1;
-          return new Response(null, { status: 200 });
-        },
-      }),
-    });
-    try {
-      const { providerOutboundPost } = await import("../../src/lib/provider-outbound");
-      const response = await providerOutboundPost(
-        "google-antigravity",
-        {
-          adapter: "google",
-          authMode: "oauth",
-          googleMode: "cloud-code-assist",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-          tlsProfile: "antigravity-browser",
-        },
-        "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
-        { headers: { authorization: "Bearer redacted" }, body: "{}" },
-        { resolveAddresses: mock(async () => ({
-          hostname: "daily-cloudcode-pa.googleapis.com",
-          addresses: [{ address: "142.250.1.1", family: 4 }],
-          privateNetwork: false,
-        })) },
-      );
-      expect(response.status).toBe(200);
-      expect(nativeCalls).toBe(1);
-      expect(bunCalls).toBe(0);
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-  });
-
-  test("rejects unsafe profiled DNS answers before native bearer dispatch", async () => {
-    for (const key of proxyKeys) delete process.env[key];
-    let nativeCalls = 0;
-    setProviderTlsRuntimeForTest({
-      resolveDestination: mock(async () => ({
-        hostname: "daily-cloudcode-pa.googleapis.com",
-        addresses: [{ address: "142.250.1.1", family: 4 }],
-        privateNetwork: false,
-      })),
-      importWreq: async () => ({
-        createTransport: async () => ({ close: async () => undefined }),
-        fetch: async () => {
-          nativeCalls += 1;
-          return new Response("must not send");
-        },
-      }),
-    });
-    const { providerOutboundPost } = await import("../../src/lib/provider-outbound");
-    await expect(providerOutboundPost(
-      "google-antigravity",
-      {
-        adapter: "google",
-        authMode: "oauth",
-        googleMode: "cloud-code-assist",
-        baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-        tlsProfile: "antigravity-browser",
-      },
-      "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
-      { headers: { authorization: "Bearer must-not-send" }, body: "{}" },
-      {
-        resolveAddresses: mock(async () => {
-          throw new Error("provider URL hostname daily-cloudcode-pa.googleapis.com resolves to a private-network address");
-        }),
-      },
-    )).rejects.toThrow(/private-network/);
-    expect(nativeCalls).toBe(0);
-  });
-
   test("direct HTTPS connects only to the validated address with TLS verification", async () => {
     for (const key of proxyKeys) delete process.env[key];
     const { providerOutboundGet } = await import("../../src/lib/provider-outbound");
@@ -427,35 +235,34 @@ describe("provider outbound GET transport", () => {
     expect(await response.json()).toEqual({ data: [{ id: "llama" }] });
   });
 
-  test("direct redirects return guidance without exposing Location", async () => {
+  test("direct redirects return the same credential-safe final-URL guidance", async () => {
     for (const key of proxyKeys) delete process.env[key];
     const redirectTarget = new URL("https://final.example/v1/models?token=secret#fragment");
     redirectTarget.username = "user";
     redirectTarget.password = "password";
-    const { providerOutboundGet, ProviderOutboundPolicyError } = await import("../../src/lib/provider-outbound");
+    const { providerOutboundGet, providerRedirectError } = await import("../../src/lib/provider-outbound");
     const { dependencies } = directDependencies(new Response(null, {
       status: 302,
       headers: { location: redirectTarget.toString() },
     }));
     const requestUrl = "https://provider.example/v1/models";
 
-    const error = await providerOutboundGet(
+    const response = await providerOutboundGet(
       "custom",
       { baseUrl: "https://provider.example/v1" },
       requestUrl,
       {},
       dependencies,
-    ).then(() => undefined, value => value as Error);
+    );
+    const error = await providerRedirectError(response, requestUrl);
 
-    expect(error).toBeInstanceOf(ProviderOutboundPolicyError);
-    expect(error?.message).toContain("returned 302 redirect");
-    expect(error?.message).toContain("https://provider.example/v1/models");
-    expect(error?.message).not.toContain("final.example");
-    expect(error?.message).not.toContain("user:password");
-    expect(error?.message).not.toContain("token=secret");
+    expect(error).toContain("returned 302 redirect");
+    expect(error).toContain("https://final.example/v1/models");
+    expect(error).not.toContain("user:password");
+    expect(error).not.toContain("token=secret");
   });
 
-  test("an explicit non-public dependency remains the transport injection boundary", async () => {
+  test("a per-provider fetch override remains the transport injection boundary", async () => {
     for (const key of proxyKeys) delete process.env[key];
     const override = mock(async (_url: string | URL | Request, init?: RequestInit) => {
       expect(init?.redirect).toBe("manual");
@@ -464,15 +271,16 @@ describe("provider outbound GET transport", () => {
         headers: { "content-type": "application/json" },
       });
     }) as typeof fetch;
-    const provider = { baseUrl: "https://override.example/v1" };
+    const provider = {
+      baseUrl: "https://override.example/v1",
+      fetch: override,
+    } as { baseUrl: string; fetch: typeof fetch };
     const { providerOutboundGet } = await import("../../src/lib/provider-outbound");
 
     const response = await providerOutboundGet(
       "override",
       provider,
       "https://override.example/v1/models",
-      {},
-      { fetch: override },
     );
 
     expect(await response.json()).toEqual({ data: [{ id: "override-model" }] });
@@ -505,6 +313,7 @@ describe("provider outbound GET transport", () => {
       }
       const result = JSON.parse(stdout.trim()) as {
         outbound: { status: number; body: string };
+        allProxy: { status: number; body: string };
         managementProxy: Record<string, unknown>;
         proxyModels: string[];
         managementNoProxy: Record<string, unknown>;
@@ -518,15 +327,24 @@ describe("provider outbound GET transport", () => {
           status: 200,
           body: '{"data":[{"id":"proxied-model"}]}',
       });
+      expect(result.allProxy).toEqual({
+        status: 200,
+        body: '{"data":[{"id":"proxied-model"}]}',
+      });
       expect(result.managementProxy.ok).toBe(false);
-      expect(String(result.managementProxy.error)).toContain("credential-bearing provider GET URL must use HTTPS");
-      expect(String(result.managementProxy.error)).not.toContain("sk-x");
-      expect(result.proxyModels).toEqual([]);
+      expect(String(result.managementProxy.error)).toContain("returned 302 redirect");
+      expect(String(result.managementProxy.error)).toContain("http://final.example/v1/models");
+      expect(String(result.managementProxy.error)).not.toContain("user:password");
+      expect(String(result.managementProxy.error)).not.toContain("token=secret");
+      expect(result.proxyModels).toEqual(["proxy-discovered-model"]);
       expect(result.managementNoProxy).toMatchObject({ ok: true, models: 1 });
       expect(result.managementDirect).toMatchObject({ ok: true, models: 1 });
       expect(result.directModels).toEqual(["local-model"]);
       expect(result.proxyRequests).toEqual([
         "http://proxy-only.invalid/v1/models",
+        "http://connection-proxy.invalid/v1/models",
+        "http://proxy-models.invalid/v1/models",
+        "http://all-proxy-only.invalid/v1/models",
       ]);
       expect(result.providerRequests).toEqual(["/v1/models", "/v1/models", "/v1/models"]);
       expect(stderr).toContain("cannot be pinned locally");
@@ -548,8 +366,8 @@ describe("provider outbound POST transport", () => {
 
     const response = await providerOutboundPost(
       "google-antigravity",
-      { baseUrl: "https://daily-cloudcode-pa.googleapis.com", adapter: "google", authMode: "oauth", googleMode: "cloud-code-assist" },
-      "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels",
+      { baseUrl: "https://provider.example" },
+      "https://provider.example/v1internal:fetchAvailableModels",
       { headers: { authorization: "Bearer test-token" }, body },
       dependencies,
     );

@@ -201,20 +201,6 @@ describe("resolvePublicAddresses — caller-specific diagnostics", () => {
     expect(resolved.addresses).toEqual([{ address: "192.168.1.50", family: 4 }]);
   });
 
-  test.each([
-    ["169.254.169.254", 4, "blocked metadata endpoint"],
-    ["fe80::1", 6, "link-local address"],
-  ] as const)(
-    "private-network opt-in still refuses a hostname resolving to %s",
-    async (address, family, detail) => {
-      lookupMock.mockResolvedValueOnce([{ address, family }]);
-      await expect(resolvePublicAddresses(
-        "https://webhook.example.test/hook",
-        { context: "quota reset webhook URL", allowPrivateNetwork: true },
-      )).rejects.toThrow(detail);
-    },
-  );
-
   test("hostname Clash fake-IP answers are accepted only under the explicit benchmark opt-in (#1748)", async () => {
     lookupMock.mockResolvedValueOnce([{ address: "198.18.56.214", family: 4 }]);
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
-import { inMemoryManagementPersistence, isolatedDiskManagementPersistence, managementFetch as fetch, ManagementRequest as Request } from "../helpers/management-auth";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { managementFetch as fetch, ManagementRequest as Request } from "../helpers/management-auth";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCodexAccountRecord, saveCodexAccountCredential } from "../../src/codex/account-store";
@@ -13,7 +13,7 @@ import {
   getCodexUpstreamHealth,
   recordCodexUpstreamOutcome,
 } from "../../src/codex/routing";
-import { loadConfig, mutatePersistedConfig, saveConfig } from "../../src/config";
+import { loadConfig, saveConfig } from "../../src/config";
 import { deriveProviderPresets } from "../../src/providers/derive";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/main-account";
 import {
@@ -47,8 +47,6 @@ import { LOCAL_PROVIDER_RELOAD_NAME_HEADER, LOCAL_PROVIDER_RELOAD_PATH } from ".
 import { getAccountSet, saveCredential } from "../../src/oauth/store";
 import { fastPolicyForModel } from "../../src/providers/service-tier";
 import { resolveWireProtocolOverride } from "../../src/server/adapter-resolve";
-import { providerTlsFetch, resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../../src/lib/provider-tls-profile";
-import { shouldUseCodexWsUpstream } from "../../src/server/responses/ws-upstream";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 // Full-suite Windows load: startServer + multi-step provider PATCH/GET flows exceed the
@@ -125,8 +123,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  resetProviderTlsProfileForTests();
-  setProviderTlsRuntimeForTest(undefined);
   globalThis.fetch = originalGlobalFetch;
   if (previousApiToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
@@ -141,77 +137,6 @@ afterEach(() => {
 });
 
 describe("provider management validation", () => {
-  test("accepts Azure identity and exposes only a safe credential presence bit", () => {
-    const provider = {
-      adapter: "azure-openai",
-      baseUrl: "https://resource.openai.azure.com/openai",
-      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " },
-    };
-    expect(providerManagementConfigError("azure", provider)).toBeNull();
-    expect(providerManagementConfigError("azure", { ...provider, apiKey: "${AZURE_KEY}" })).toContain("apiKey");
-    expect(providerManagementConfigError("azure", { ...provider, apiKeyPool: [] })).toContain("apiKeyPool");
-    expect(providerManagementConfigError("azure", { ...provider, authMode: "oauth" })).toContain("authMode");
-    expect(providerManagementConfigError("azure", { ...provider, azureCredential: { type: "default-azure-credential", managedIdentityClientId: "   " } })).toContain("non-empty");
-    expect(providerManagementConfigError("azure", { ...provider, azureCredential: { type: "default-azure-credential", token: "secret-token" } })).toContain("unrecognized");
-    const redactedNameError = providerManagementConfigError("sk-super-secret-9876", {
-      ...provider,
-      azureCredential: { type: "default-azure-credential", managedIdentityClientId: "   " },
-    })!;
-    expect(redactedNameError).not.toContain("sk-super-secret-9876");
-    expect(redactedNameError).toContain("[REDACTED]");
-
-    const dto = safeConfigDTO({ port: 10100, defaultProvider: "azure", providers: { azure: provider } } as OcxConfig) as {
-      providers: { azure: Record<string, unknown> };
-    };
-    expect(dto.providers.azure.hasAzureCredential).toBe(true);
-    expect(JSON.stringify(dto)).not.toContain("client-123");
-  });
-
-  test("provider POST does not carry a stale key pool into Azure identity and PATCH can set/clear it", async () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    saveConfig(config("127.0.0.1"));
-    const server = startServer(0);
-    try {
-      const base = {
-        adapter: "azure-openai",
-        baseUrl: "http://127.0.0.1:1/openai",
-        allowPrivateNetwork: true,
-        liveModels: false,
-        models: ["gpt-4o"],
-      };
-      expect((await fetch(new URL("/api/providers", server.url), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "azure", provider: { ...base, apiKey: "key", apiKeyPool: [{ id: "k1", key: "key" }, { id: "k2", key: "key2" }] } }),
-      })).status).toBe(200);
-      expect((await fetch(new URL("/api/providers", server.url), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: "azure", provider: { ...base, azureCredential: { type: "default-azure-credential", managedIdentityClientId: "  client-123  " } } }),
-      })).status).toBe(200);
-      expect(loadConfig().providers.azure?.apiKeyPool).toBeUndefined();
-      expect(loadConfig().providers.azure?.azureCredential?.managedIdentityClientId).toBe("client-123");
-
-      const patchResponse = await fetch(new URL("/api/providers?name=azure", server.url), {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ azureCredential: null }),
-      });
-      expect(patchResponse.status).toBe(200);
-      expect(loadConfig().providers.azure?.azureCredential).toBeUndefined();
-      const setResponse = await fetch(new URL("/api/providers?name=azure", server.url), {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ azureCredential: { type: "default-azure-credential" } }),
-      });
-      expect(setResponse.status).toBe(200);
-      expect(loadConfig().providers.azure?.azureCredential).toEqual({ type: "default-azure-credential" });
-    } finally {
-      await server.stop(true);
-    }
-  });
   test("provider reload adopts only the validated disk row without rewriting config", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
@@ -240,10 +165,7 @@ describe("provider management validation", () => {
       apiKey: "new-disk-key",
       headers: { "x-operator-header": "operator-owned" },
     };
-    expect(mutatePersistedConfig(fresh => {
-      fresh.providers.xai = structuredClone(diskConfig.providers.xai!);
-      return { changed: true, value: null };
-    }).status).toBe("committed");
+    saveConfig(diskConfig);
     const diskBefore = readFileSync(join(TEST_DIR, "config.json"));
     const stableBefore = structuredClone(liveConfig.providers.stable);
     const resolvedError = spyOn(destinationPolicy, "providerDestinationResolvedError")
@@ -288,10 +210,7 @@ describe("provider management validation", () => {
     saveConfig(liveConfig);
     const diskConfig = structuredClone(liveConfig);
     diskConfig.providers.xai = { ...diskConfig.providers.xai!, apiKey: "first-disk-key" };
-    expect(mutatePersistedConfig(fresh => {
-      fresh.providers.xai = structuredClone(diskConfig.providers.xai!);
-      return { changed: true, value: null };
-    }).status).toBe("committed");
+    saveConfig(diskConfig);
 
     const untrusted = new Request(`http://127.0.0.1${LOCAL_PROVIDER_RELOAD_PATH}`, {
       method: "POST",
@@ -309,10 +228,7 @@ describe("provider management validation", () => {
       .mockImplementation(async () => {
         const changed = loadConfig();
         changed.providers.xai = { ...changed.providers.xai!, apiKey: "second-disk-key" };
-        mutatePersistedConfig(fresh => {
-          fresh.providers.xai = structuredClone(changed.providers.xai!);
-          return { changed: true, value: null };
-        });
+        saveConfig(changed);
         return null;
       });
     try {
@@ -762,34 +678,6 @@ describe("provider management validation", () => {
     expect(secretNameError).toContain("[REDACTED]");
   });
 
-  test("provider management validates transient replay as a boolean", () => {
-    const base = { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" };
-    expect(providerManagementConfigError("custom", {
-      ...base,
-      replayTransientFailures: true,
-    })).toBeNull();
-    expect(providerManagementConfigError("custom", {
-      ...base,
-      replayTransientFailures: "true",
-    })).toContain("replayTransientFailures must be a boolean");
-  });
-
-  test("provider management bounds transient 5xx retry policies", () => {
-    const base = { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" };
-    expect(providerManagementConfigError("custom", {
-      ...base,
-      transientRetryOn5xx: { enabled: true, attempts: 10 },
-    })).toBeNull();
-    expect(providerManagementConfigError("custom", {
-      ...base,
-      transientRetryOn5xx: { attempts: 11 },
-    })).toContain("transientRetryOn5xx.attempts is invalid");
-    expect(providerManagementConfigError("custom", {
-      ...base,
-      transientRetryOn5xx: { typo: true },
-    })).toContain("transientRetryOn5xx has unrecognized field");
-  });
-
   test("provider management redacts provider names from auto-compaction validation errors", () => {
     const secretName = "sk-super-secret-9876";
     const error = providerManagementConfigError(secretName, {
@@ -822,7 +710,7 @@ describe("provider management validation", () => {
     let catalogRefreshes = 0;
     const request = async (path: string, init?: RequestInit) => {
       const req = new Request(`http://127.0.0.1${path}`, init);
-      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      return handleManagementAPI(req, new URL(req.url), liveConfig, {
         createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
       });
     };
@@ -2605,7 +2493,7 @@ describe("provider management validation", () => {
     }
   });
 
-  test("provider deletion drops dependent custom models atomically", async () => {
+  test("provider deletion removes that provider's custom models (#1273)", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -2643,10 +2531,10 @@ describe("provider management validation", () => {
         method: "DELETE",
       });
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({
-        droppedCustomModels: 1,
-      });
+      expect(await response.json()).toMatchObject({ success: true, droppedCustomModels: 1 });
 
+      // The dashboard model page reads this route; a surviving row here is the
+      // ghost model users see pointing at a provider that no longer exists.
       const customModels = await fetch(new URL("/api/custom-models", server.url));
       expect(await customModels.json()).toEqual([
         { id: "keep-1", provider: "test-openai", modelId: "kept-model" },
@@ -2960,7 +2848,7 @@ describe("provider management validation", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),
         });
-        return handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+        return handleManagementAPI(request, new URL(request.url), liveConfig, {
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
       };
@@ -3015,7 +2903,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: "openai", provider: canonicalDirect }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(400);
@@ -3048,10 +2936,6 @@ describe("provider management validation", () => {
         openai: { ...canonicalDirect },
       },
     };
-    // Provider PATCH now commits through the atomic persistence API. Seed the same
-    // config on disk so this direct-handler assertion exercises the current route
-    // contract instead of the removed in-memory-only write path.
-    saveConfig(liveConfig);
     const resolvedError = spyOn(destinationPolicy, "providerDestinationResolvedError")
       .mockResolvedValue(null);
 
@@ -3064,7 +2948,6 @@ describe("provider management validation", () => {
         });
         return handleManagementAPI(request, new URL(request.url), liveConfig, {
           createManagementConvergeCodex: catalogConvergenceFactory(),
-          mutatePersistedConfig,
         });
       };
 
@@ -3317,7 +3200,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(200);
@@ -3373,7 +3256,7 @@ describe("provider management validation", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ disabled: false }),
         });
-        const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+        const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
         expect(response?.status).toBe(400);
@@ -3432,7 +3315,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(400);
@@ -3484,7 +3367,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(200);
@@ -3578,7 +3461,6 @@ describe("provider management validation", () => {
     let catalogRefreshes = 0;
     const primes: string[] = [];
     const deps = {
-      ...isolatedDiskManagementPersistence(),
       clearThreadAccountMap: () => { affinityClears += 1; },
       clearProviderQuotaCache: () => { quotaCacheClears += 1; },
       createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
@@ -3667,7 +3549,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      return handleManagementAPI(req, new URL(req.url), liveConfig, {
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
     };
@@ -3678,7 +3560,7 @@ describe("provider management validation", () => {
         listedRequest,
         new URL(listedRequest.url),
         liveConfig,
-        { ...isolatedDiskManagementPersistence(), createManagementConvergeCodex: catalogConvergenceFactory() },
+        { createManagementConvergeCodex: catalogConvergenceFactory() },
       );
       const listed = await listedResponse!.json() as Array<Record<string, unknown>>;
       expect(listed.find(row => row.name === "xai")?.xaiResponsesOptInState).toBe("mixed");
@@ -3737,7 +3619,6 @@ describe("provider management validation", () => {
         } }),
       });
       const overwritten = await handleManagementAPI(overwrite, new URL(overwrite.url), liveConfig, {
-        ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(overwritten?.status).toBe(200);
@@ -3773,7 +3654,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      return handleManagementAPI(req, new URL(req.url), liveConfig, {
         createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
       });
     };
@@ -3812,14 +3693,6 @@ describe("provider management validation", () => {
     const clearTransport = await patch("gateway", { apiKeyTransport: "" });
     expect(clearTransport?.status).toBe(200);
     expect(liveConfig.providers.gateway.apiKeyTransport).toBeUndefined();
-
-    // Credential header names are case-insensitive at the HTTP boundary and must never persist.
-    for (const name of ["API-KEY", "api-key"]) {
-      const rejected = await patch("extra", { headers: { [name]: "should-not-persist" } });
-      expect(rejected?.status).toBe(400);
-      expect(liveConfig.providers.extra.headers).toBeUndefined();
-      expect(loadConfig().providers.extra?.headers).toBeUndefined();
-    }
 
     // authMode local is guarded by the registry: nvidia (key) → 400; ollama (local) → ok.
     const nvidiaLocal = await patch("nvidia", { authMode: "local" });
@@ -3874,7 +3747,7 @@ describe("provider management validation", () => {
         headers: body === undefined ? undefined : { "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      return handleManagementAPI(req, new URL(req.url), liveConfig, {
         createManagementConvergeCodex: catalogConvergenceFactory(() => {}),
       });
     };
@@ -3985,7 +3858,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      return handleManagementAPI(req, new URL(req.url), liveConfig, {
         // This branch replaced the best-effort `refreshCodexCatalog` dep with the
         // convergence entry point; every other test in this file already wires it
         // that way, and this one arrived from dev still using the old shape.
@@ -4047,7 +3920,6 @@ describe("provider management validation", () => {
           adapter: "openai-chat",
           baseUrl: "http://127.0.0.1:9/v1",
           allowPrivateNetwork: true,
-          replayTransientFailures: true,
           headers: { [sentinelName]: sentinelValue },
         },
       },
@@ -4057,228 +3929,12 @@ describe("provider management validation", () => {
     const res = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
     expect(res?.status).toBe(200);
     const raw = await res!.text();
-    const rows = JSON.parse(raw) as { name: string; hasHeaders?: boolean; replayTransientFailures?: boolean }[];
+    const rows = JSON.parse(raw) as { name: string; hasHeaders?: boolean }[];
     expect(rows.find(row => row.name === "hdr")?.hasHeaders).toBe(true);
-    expect(rows.find(row => row.name === "hdr")?.replayTransientFailures).toBe(true);
     expect(rows.find(row => row.name === "openai")?.hasHeaders).toBe(false);
     expect(raw).not.toContain(sentinelName);
     expect(raw).not.toContain(sentinelValue);
   });
-
-  test("GET /api/providers exposes only redacted Antigravity TLS profile state", async () => {
-    const liveConfig: OcxConfig = {
-      port: 0,
-      hostname: "127.0.0.1",
-      defaultProvider: "openai",
-      openaiProviderTierVersion: 2,
-      providers: {
-        openai: { ...canonicalDirect },
-        "google-antigravity": {
-          adapter: "google",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-          authMode: "oauth",
-          googleMode: "cloud-code-assist",
-          tlsProfile: "antigravity-browser",
-          apiKey: "must-not-leak",
-        },
-      },
-    };
-    const req = new Request("http://127.0.0.1/api/providers", { method: "GET" });
-    const res = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
-    expect(res?.status).toBe(200);
-    const raw = await res!.text();
-    const row = (JSON.parse(raw) as { name: string; tlsProfile?: string; tlsProfileStatus?: string }[])
-      .find(item => item.name === "google-antigravity");
-    expect(row).toMatchObject({ tlsProfile: "antigravity-browser", tlsProfileStatus: "disabled" });
-    expect(raw).not.toContain("must-not-leak");
-  });
-
-  test("PATCH /api/providers persists the validated Antigravity TLS profile", async () => {
-    const liveConfig: OcxConfig = {
-      port: 0,
-      hostname: "127.0.0.1",
-      defaultProvider: "openai",
-      openaiProviderTierVersion: 2,
-      providers: {
-        openai: { ...canonicalDirect },
-        "google-antigravity": {
-          adapter: "google",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-          authMode: "oauth",
-          googleMode: "cloud-code-assist",
-        },
-      },
-    };
-    const request = new Request("http://127.0.0.1/api/providers?name=google-antigravity", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
-    });
-    const response = await handleManagementAPI(request, new URL(request.url), liveConfig, inMemoryManagementPersistence(liveConfig));
-    expect(response?.status).toBe(200);
-    expect(liveConfig.providers["google-antigravity"]?.tlsProfile).toBe("antigravity-browser");
-  });
-
-  test("POST and PATCH reject Antigravity TLS profiles outside the canonical OAuth CCA contract", async () => {
-    const canonical = {
-      adapter: "google" as const,
-      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-      authMode: "oauth" as const,
-      googleMode: "cloud-code-assist" as const,
-      tlsProfile: "antigravity-browser" as const,
-    };
-    const cases = [
-      { name: "other-provider", provider: { ...canonical } },
-      { name: "google-antigravity", provider: { ...canonical, authMode: "key" as const } },
-      { name: "google-antigravity", provider: { ...canonical, googleMode: "ai-studio" as const } },
-      { name: "google-antigravity", provider: { ...canonical, baseUrl: "https://example.test" } },
-    ];
-    expect(providerManagementConfigError("google-antigravity", canonical)).toBeNull();
-    for (const candidate of cases) {
-      expect(providerManagementConfigError(candidate.name, candidate.provider)).toContain("tlsProfile");
-
-      const postConfig: OcxConfig = {
-        port: 0,
-        hostname: "127.0.0.1",
-        defaultProvider: "openai",
-        openaiProviderTierVersion: 2,
-        providers: { openai: { ...canonicalDirect } },
-      };
-      const post = new Request("http://127.0.0.1/api/providers", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ name: candidate.name, provider: candidate.provider }),
-      });
-      expect((await handleManagementAPI(post, new URL(post.url), postConfig, {}))?.status).toBe(400);
-
-      const patchConfig: OcxConfig = {
-        port: 0,
-        hostname: "127.0.0.1",
-        defaultProvider: "openai",
-        openaiProviderTierVersion: 2,
-        providers: {
-          openai: { ...canonicalDirect },
-          [candidate.name]: { ...candidate.provider, tlsProfile: undefined },
-        },
-      };
-      const patch = new Request(`http://127.0.0.1/api/providers?name=${encodeURIComponent(candidate.name)}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
-      });
-      expect((await handleManagementAPI(patch, new URL(patch.url), patchConfig, {}))?.status).toBe(400);
-    }
-  });
-
-  test("provider management rejects noncanonical Antigravity OAuth destinations", async () => {
-    const invalid = {
-      adapter: "google" as const,
-      baseUrl: "https://evil.example.test",
-      authMode: "oauth" as const,
-      googleMode: "cloud-code-assist" as const,
-    };
-    expect(providerManagementConfigError("google-antigravity", invalid)).toContain("canonical Antigravity");
-    const postConfig: OcxConfig = {
-      port: 0,
-      hostname: "127.0.0.1",
-      defaultProvider: "openai",
-      openaiProviderTierVersion: 2,
-      providers: { openai: { ...canonicalDirect } },
-    };
-    const post = new Request("http://127.0.0.1/api/providers", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "google-antigravity", provider: invalid }),
-    });
-    expect((await handleManagementAPI(post, new URL(post.url), postConfig, {}))?.status).toBe(400);
-  });
-
-  test("GET /api/providers clears active TLS status when the profile is removed", async () => {
-    const profiled = {
-      adapter: "google" as const,
-      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-      authMode: "oauth" as const,
-      googleMode: "cloud-code-assist" as const,
-      tlsProfile: "antigravity-browser" as const,
-    };
-    const liveConfig: OcxConfig = {
-      port: 0,
-      hostname: "127.0.0.1",
-      defaultProvider: "openai",
-      providers: { openai: { ...canonicalDirect }, "google-antigravity": profiled },
-    };
-    setProviderTlsRuntimeForTest({
-      importWreq: async () => ({
-        createTransport: async () => ({ close: async () => undefined }),
-        fetch: async () => new Response("ok"),
-      }),
-    });
-    await providerTlsFetch("google-antigravity", profiled, globalThis.fetch)("https://daily-cloudcode-pa.googleapis.com/v1internal");
-    const request = () => new Request("http://127.0.0.1/api/providers", { method: "GET" });
-    const active = await handleManagementAPI(request(), new URL(request().url), liveConfig, {});
-    const activeRow = (JSON.parse(await active!.text()) as Array<{ name: string; tlsProfileStatus?: string }>)
-      .find(row => row.name === "google-antigravity");
-    expect(activeRow?.tlsProfileStatus).toBe("active");
-
-    liveConfig.providers["google-antigravity"] = {
-      ...profiled,
-      baseUrl: "https://cloudcode-pa.googleapis.com",
-    };
-    const replacedRequest = request();
-    const replaced = await handleManagementAPI(replacedRequest, new URL(replacedRequest.url), liveConfig, {});
-    const replacedRow = (JSON.parse(await replaced!.text()) as Array<{ name: string; tlsProfileStatus?: string }>)
-      .find(row => row.name === "google-antigravity");
-    expect(replacedRow?.tlsProfileStatus).toBe("disabled");
-
-    liveConfig.providers["google-antigravity"] = profiled;
-
-    liveConfig.providers["google-antigravity"] = { ...profiled, tlsProfile: undefined };
-    const removedRequest = request();
-    const removed = await handleManagementAPI(removedRequest, new URL(removedRequest.url), liveConfig, {});
-    const removedRow = (JSON.parse(await removed!.text()) as Array<{ name: string; tlsProfile?: string; tlsProfileStatus?: string }>)
-      .find(row => row.name === "google-antigravity");
-    expect(removedRow).toMatchObject({ tlsProfileStatus: "disabled" });
-    expect(removedRow?.tlsProfile).toBeUndefined();
-  });
-
-  test("provider connectivity diagnostics redact profiled native errors", async () => {
-    const liveConfig: OcxConfig = {
-      port: 0,
-      hostname: "127.0.0.1",
-      defaultProvider: "openai",
-      providers: {
-        openai: { ...canonicalDirect },
-        "google-antigravity": {
-          adapter: "google",
-          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
-          authMode: "oauth",
-          googleMode: "cloud-code-assist",
-          tlsProfile: "antigravity-browser",
-        },
-      },
-    };
-    await saveCredential("google-antigravity", {
-      access: "management-access-token",
-      refresh: "management-refresh-token",
-      expires: Date.now() + 3_600_000,
-      projectId: "management-project",
-    });
-    setProviderTlsRuntimeForTest({
-      importWreq: async () => ({
-        createTransport: async () => ({ close: async () => undefined }),
-        fetch: async () => {
-          throw new Error("native management failure at http://proxy-user:proxy-secret@example.test:8080/?access_token=management-access-token");
-        },
-      }),
-    });
-    const req = new Request("http://127.0.0.1/api/providers/test?name=google-antigravity", { method: "POST" });
-    const response = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
-    expect(response?.status).toBe(200);
-    const body = await response!.json() as { ok: boolean; error?: string };
-    expect(body.ok).toBe(false);
-    expect(body.error).not.toMatch(/proxy-user|proxy-secret|management-access-token|access_token/);
-  });
-
   test("provider PATCH merges headers case-insensitively", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
@@ -4300,7 +3956,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      return handleManagementAPI(req, new URL(req.url), liveConfig, {
         refreshCodexCatalog: async () => {},
       });
     };
@@ -4340,7 +3996,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      return handleManagementAPI(req, new URL(req.url), liveConfig, {
         refreshCodexCatalog: async () => {},
       });
     };
@@ -4380,7 +4036,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+      return handleManagementAPI(req, new URL(req.url), liveConfig, {
         refreshCodexCatalog: async () => {},
       });
     };
@@ -4701,7 +4357,7 @@ describe("provider transport option management contract (#1668, #2816)", () => {
     try {
       const request = async (path: string, init?: RequestInit) => {
         const req = new Request(`http://127.0.0.1${path}`, init);
-        return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
+        return handleManagementAPI(req, new URL(req.url), liveConfig, {
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
       };
@@ -4788,62 +4444,6 @@ describe("provider transport option management contract (#1668, #2816)", () => {
     });
   });
 
-  test("POST with wsUpstream: null persists nothing and inherits the environment after reload", async () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    const liveConfig = makeConfig();
-    saveConfig(liveConfig);
-    const previousWsUpstream = process.env.OCX_CODEX_WS_UPSTREAM;
-    process.env.OCX_CODEX_WS_UPSTREAM = "true";
-    try {
-      await withRequest(liveConfig, async (request) => {
-        const created = await request("/api/providers", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            name: "ws-null-provider",
-            provider: {
-              adapter: "openai-chat",
-              baseUrl: "https://api.example.test/v1",
-              wsUpstream: null,
-            },
-          }),
-        });
-        expect(created?.status).toBe(200);
-
-        const liveProvider = liveConfig.providers["ws-null-provider"]!;
-        expect(Object.hasOwn(liveProvider, "wsUpstream")).toBe(false);
-        const onDisk = JSON.parse(readFileSync(join(TEST_DIR, "config.json"), "utf-8")) as any;
-        expect(Object.hasOwn(onDisk.providers["ws-null-provider"], "wsUpstream")).toBe(false);
-
-        const reloaded = loadConfig();
-        const reloadedProvider = reloaded.providers["ws-null-provider"]!;
-        expect(Object.hasOwn(reloadedProvider, "wsUpstream")).toBe(false);
-
-        const requestInit = {
-          method: "POST",
-          body: JSON.stringify({ model: "gpt-5.6-luna", stream: true }),
-        };
-        expect(shouldUseCodexWsUpstream(
-          "https://chatgpt.com/backend-api/codex/responses",
-          requestInit,
-          "1.4.0",
-          { wsUpstream: liveProvider.wsUpstream },
-        )).toBe(true);
-        expect(shouldUseCodexWsUpstream(
-          "https://chatgpt.com/backend-api/codex/responses",
-          requestInit,
-          "1.4.0",
-          { wsUpstream: reloadedProvider.wsUpstream },
-        )).toBe(true);
-      });
-    } finally {
-      if (previousWsUpstream === undefined) delete process.env.OCX_CODEX_WS_UPSTREAM;
-      else process.env.OCX_CODEX_WS_UPSTREAM = previousWsUpstream;
-    }
-  });
-
   test("a config already holding upstreamHttpVersion: null still loads", async () => {
     // Compatibility for anything the old POST path already wrote to disk.
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
@@ -4920,101 +4520,6 @@ describe("provider transport option management contract (#1668, #2816)", () => {
       expect(clear?.status).toBe(200);
       expect(liveConfig.providers.nvidia?.upstreamHttpVersion).toBeUndefined();
       expect(loadConfig().providers.nvidia?.upstreamHttpVersion).toBeUndefined();
-    });
-  });
-
-  test("provider PATCH persists, exposes, validates, and clears Codex WebSocket controls", async () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    const liveConfig = makeConfig();
-    saveConfig(liveConfig);
-    await withRequest(liveConfig, async (request) => {
-      const invalidType = await request("/api/providers?name=nvidia", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wsUpstream: "true" }),
-      });
-      expect(invalidType?.status).toBe(400);
-
-      const invalidLimit = await request("/api/providers?name=nvidia", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ maxWsFrameBytes: -1 }),
-      });
-      expect(invalidLimit?.status).toBe(400);
-
-      const set = await request("/api/providers?name=nvidia", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wsUpstream: true, maxWsFrameBytes: 1234 }),
-      });
-      expect(set?.status).toBe(200);
-      expect(liveConfig.providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
-      expect(loadConfig().providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
-      const list = await request("/api/providers");
-      expect(await list?.json()).toContainEqual(expect.objectContaining({
-        name: "nvidia",
-        wsUpstream: true,
-        maxWsFrameBytes: 1234,
-      }));
-      const dto = safeConfigDTO(liveConfig) as { providers: Record<string, Record<string, unknown>> };
-      expect(dto.providers.nvidia).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
-
-      const clear = await request("/api/providers?name=nvidia", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wsUpstream: null, maxWsFrameBytes: null }),
-      });
-      expect(clear?.status).toBe(200);
-      expect(liveConfig.providers.nvidia.wsUpstream).toBeUndefined();
-      expect(liveConfig.providers.nvidia.maxWsFrameBytes).toBeUndefined();
-      expect(loadConfig().providers.nvidia.wsUpstream).toBeUndefined();
-      expect(loadConfig().providers.nvidia.maxWsFrameBytes).toBeUndefined();
-    });
-  });
-
-  test("canonical OpenAI management writes preserve valid Codex WebSocket controls", async () => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    const liveConfig: OcxConfig = {
-      ...makeConfig(),
-      defaultProvider: "openai",
-      openaiProviderTierVersion: 2,
-      providers: { openai: { ...canonicalDirect } },
-    };
-    saveConfig(liveConfig);
-    await withRequest(liveConfig, async (request) => {
-      const set = await request("/api/providers?name=openai", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wsUpstream: true, maxWsFrameBytes: 1234 }),
-      });
-      expect(set?.status).toBe(200);
-      expect(liveConfig.providers.openai).toMatchObject({
-        ...canonicalDirect,
-        wsUpstream: true,
-        maxWsFrameBytes: 1234,
-      });
-      expect(loadConfig().providers.openai).toMatchObject({ wsUpstream: true, maxWsFrameBytes: 1234 });
-
-      const clear = await request("/api/providers?name=openai", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wsUpstream: null, maxWsFrameBytes: null }),
-      });
-      expect(clear?.status).toBe(200);
-      expect(liveConfig.providers.openai.wsUpstream).toBeUndefined();
-      expect(liveConfig.providers.openai.maxWsFrameBytes).toBeUndefined();
-
-      const forged = await request("/api/providers?name=openai", {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wsUpstream: "true" }),
-      });
-      expect(forged?.status).toBe(400);
-      expect(await forged?.json()).toMatchObject({ error: expect.stringContaining("wsUpstream") });
     });
   });
 

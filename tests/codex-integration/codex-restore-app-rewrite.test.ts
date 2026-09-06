@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach, setDefaultTimeout } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -21,18 +21,12 @@ import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 const repoRoot = dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
 
-// Every case here spawns a real Bun subprocess (runScript); on a loaded Windows
-// shard the flat 15s ceilings timed out (F-03) while the child was doing exactly
-// the work it claims. The spawn is bounded to SPAWN_BUDGET_MS so a hung child
-// fails as a subprocess error, not an unbounded runner process.
-setDefaultTimeout(SPAWN_BUDGET_MS);
-
 /** Inject, simulate the app's comment-dropping rewrite, then restore. */
 const INJECT_REWRITE_RESTORE = [
   'const fs = require("fs");',
   'const path = require("path");',
   'const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");',
-  "await (async () => {",
+  "(async () => {",
   "  await injectCodexConfig(10100, {",
   "    port: 10100,",
   "    providers: {},",
@@ -59,7 +53,7 @@ const CATALOG_REWRITE_RESTORE = [
   'const fs = require("fs");',
   'const path = require("path");',
   'const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");',
-  "await (async () => {",
+  "(async () => {",
   '  const cachePath = path.join(process.env.CODEX_HOME, "models_cache.json");',
   "  // The catalog file itself is written by catalog sync, which needs network state this",
   "  // test has no business standing up. Seed it directly: what is under test is WHICH file",
@@ -88,7 +82,7 @@ const REINJECT_AND_READ_JOURNAL = [
   'const fs = require("fs");',
   'const path = require("path");',
   'const { injectCodexConfig } = require("./src/codex/inject");',
-  "await (async () => {",
+  "(async () => {",
   '  const firstCatalog = path.join(process.env.CODEX_HOME, "first-catalog.json");',
   '  const secondCatalog = path.join(process.env.CODEX_HOME, "second-catalog.json");',
   "  const config = {",
@@ -110,7 +104,7 @@ const REINJECT_AFTER_USER_EDIT_RESTORE = [
   'const fs = require("fs");',
   'const path = require("path");',
   'const { injectCodexConfig, restoreNativeCodex } = require("./src/codex/inject");',
-  "await (async () => {",
+  "(async () => {",
   "  const config = {",
   "    port: 10100,",
   "    providers: {},",
@@ -142,24 +136,10 @@ function runScript(codexHome: string, script: string): { stdout: string; stderr:
   if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 60_000) {
     throw new Error("invalid restore child delay fault");
   }
-  const delay = delayMs > 0 ? `await Bun.sleep(${delayMs});\n` : "";
-  const evaluatedScript = [
-    'const { flushConfigDirHardeningForTests } = require("./src/config/paths");',
-    'const { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } = require("./src/lib/windows-secret-acl");',
-    'const icaclsOk = { success: true, exitCode: 0, timedOut: false, stdout: "processed file: 1" };',
-    'setIcaclsRunnerForTests(() => icaclsOk);',
-    'setAsyncIcaclsRunnerForTests(async () => icaclsOk);',
-    "try {",
-    delay + script,
-    "} finally {",
-    "  await flushConfigDirHardeningForTests();",
-    "  setAsyncIcaclsRunnerForTests(null);",
-    "  setIcaclsRunnerForTests(null);",
-    "}",
-  ].join("\n");
+  const evaluatedScript = delayMs > 0 ? `await Bun.sleep(${delayMs});\n${script}` : script;
   const result = spawnSync(process.execPath, ["--eval", evaluatedScript], {
     cwd: repoRoot,
-    env: { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: join(codexHome, ".opencodex-test") },
+    env: { ...process.env, CODEX_HOME: codexHome },
     encoding: "utf8",
     timeout: SPAWN_BUDGET_MS,
     killSignal: "SIGKILL",

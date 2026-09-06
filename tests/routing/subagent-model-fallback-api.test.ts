@@ -7,7 +7,6 @@ import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleManagementAPI } from "../../src/server/management-api";
-import { inMemoryManagementPersistence } from "../helpers/management-auth";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
@@ -44,7 +43,7 @@ async function put(config: OcxConfig, body: unknown): Promise<Response> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  const res = await handleManagementAPI(req, new URL(req.url), config, inMemoryManagementPersistence(config));
+  const res = await handleManagementAPI(req, new URL(req.url), config);
   expect(res).not.toBeNull();
   return res!;
 }

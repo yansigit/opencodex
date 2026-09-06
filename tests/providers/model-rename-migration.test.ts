@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,13 +10,10 @@ import {
 import { runModelRenameStartupMigration } from "../../src/providers/model-rename-startup";
 import { PROVIDER_REGISTRY } from "../../src/providers/registry";
 import { getConfigPath, loadConfig, saveConfig, setPersistedConfigMutationBeforeCommitForTests } from "../../src/config";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const INTL_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 const RENAME: ModelRename = {
   provider: "alibaba-token-plan-intl",
@@ -156,22 +153,11 @@ describe("model rename startup persistence", () => {
     return { port: 10100, defaultProvider: "alibaba-token-plan-intl", ...staleConfig() } as OcxConfig;
   }
 
-  beforeEach(() => {
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-  });
-
-  afterEach(async () => {
+  afterEach(() => {
     setPersistedConfigMutationBeforeCommitForTests(null);
-    try {
-      await flushConfigDirHardeningForTests();
-    } finally {
-      setIcaclsRunnerForTests(null);
-      setAsyncIcaclsRunnerForTests(null);
-      if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = originalHome;
-      for (const home of homes.splice(0)) removeTreeWithRetry(home);
-    }
+    if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = originalHome;
+    for (const home of homes.splice(0)) removeTreeWithRetry(home);
   });
 
   test("startup no-op preserves the live config object identity", () => {

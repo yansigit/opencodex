@@ -11,10 +11,8 @@ import {
 import type { OAuthController } from "../../../src/oauth/types";
 
 const realFetch = globalThis.fetch;
-const realSetTimeout = globalThis.setTimeout;
 afterEach(() => {
   globalThis.fetch = realFetch;
-  globalThis.setTimeout = realSetTimeout;
 });
 
 const GH_ACCESS = "gho_fixture_access_DO_NOT_LEAK";
@@ -29,15 +27,6 @@ function routeFetch(handler: (url: string, init?: RequestInit) => Response | Pro
     return handler(url, init);
   }) as typeof fetch;
   return { calls };
-}
-
-function fastTimers(): number[] {
-  const waits: number[] = [];
-  globalThis.setTimeout = ((handler: TimerHandler, timeout?: number, ...args: any[]) => {
-    waits.push(Number(timeout ?? 0));
-    return realSetTimeout(handler, 0, ...args);
-  }) as typeof setTimeout;
-  return waits;
 }
 
 function expectNoSecretLeak(err: Error): void {
@@ -87,7 +76,6 @@ describe("github-copilot URL allowlists", () => {
 describe("github-copilot login + refresh", () => {
   test("device flow exchanges for a Copilot token and stores allowlisted apiBaseUrl", async () => {
     let poll = 0;
-    const waits = fastTimers();
     routeFetch((url) => {
       if (url.includes("/login/device/code")) {
         return new Response(JSON.stringify({
@@ -136,12 +124,10 @@ describe("github-copilot login + refresh", () => {
     expect(cred.apiBaseUrl).toBe("https://api.githubcopilot.com");
     expect(cred.accountId).toBe("1");
     expect(cred.email).toBeUndefined();
-    expect(waits).toEqual([1_000, 1_000]);
   });
 
   test("honors slow_down without failing the device flow", async () => {
     let poll = 0;
-    const waits = fastTimers();
     routeFetch((url) => {
       if (url.includes("/login/device/code")) {
         return new Response(JSON.stringify({
@@ -171,8 +157,7 @@ describe("github-copilot login + refresh", () => {
     const cred = await loginGithubCopilot({});
     expect(poll).toBeGreaterThanOrEqual(2);
     expect(cred.access).toBe(COPILOT_TOKEN);
-    expect(waits).toEqual([1_000, 6_000]);
-  });
+  }, 15000); // RFC 8628 cadence: slow_down adds a real +5s to the poll interval
 
   test("refresh re-exchanges without leaking tokens on failure", async () => {
     routeFetch((url) => {
@@ -197,7 +182,6 @@ describe("github-copilot login + refresh", () => {
 
   test("login cancel aborts the poll loop", async () => {
     const ac = new AbortController();
-    const waits = fastTimers();
     routeFetch((url) => {
       if (url.includes("/login/device/code")) {
         return new Response(JSON.stringify({
@@ -214,8 +198,7 @@ describe("github-copilot login + refresh", () => {
       return new Response("no", { status: 404 });
     });
     await expect(loginGithubCopilot({ signal: ac.signal })).rejects.toThrow("Login cancelled");
-    expect(waits).toEqual([5_000]);
-  });
+  }, 15000); // wait-before-poll cadence: the 5s interval elapses before the aborting poll
 
   test("rejects SSRF endpoints.api and falls back to default host", async () => {
     routeFetch((url) => {
@@ -239,7 +222,6 @@ describe("github-copilot login + refresh", () => {
 
 describe("github-copilot security repairs (absorb hardening)", () => {
   test("access-token-only device flow succeeds and stores the gho_ token as durable grant", async () => {
-    const waits = fastTimers();
     routeFetch((url) => {
       if (url.includes("/login/device/code")) {
         return new Response(JSON.stringify({
@@ -261,7 +243,6 @@ describe("github-copilot security repairs (absorb hardening)", () => {
     expect(cred.access).toBe(COPILOT_TOKEN);
     expect(cred.refresh).toBe(GH_ACCESS); // durable grant = the gho_ access token itself
     expect(cred.accountId).toBe("42");
-    expect(waits).toEqual([1_000]);
   });
 
   test("a gho_ durable grant refreshes by direct re-exchange (no refresh grant call)", async () => {
@@ -300,7 +281,6 @@ describe("github-copilot security repairs (absorb hardening)", () => {
   });
 
   test("persistent identity failure fails the login instead of persisting an anonymous credential", async () => {
-    const waits = fastTimers();
     routeFetch((url) => {
       if (url.includes("/copilot_internal/v2/token")) {
         return new Response(JSON.stringify({ token: COPILOT_TOKEN, refresh_in: 1500 }), { status: 200 });
@@ -310,11 +290,9 @@ describe("github-copilot security repairs (absorb hardening)", () => {
     });
 
     await expect(refreshGithubCopilotToken(GH_ACCESS)).rejects.toThrow(/identity/i);
-    expect(waits).toEqual([500]);
   });
 
   test("a transient identity failure recovers on the single retry", async () => {
-    const waits = fastTimers();
     let userCalls = 0;
     routeFetch((url) => {
       if (url.includes("/copilot_internal/v2/token")) {
@@ -331,7 +309,6 @@ describe("github-copilot security repairs (absorb hardening)", () => {
     const cred = await refreshGithubCopilotToken(GH_ACCESS);
     expect(cred.accountId).toBe("99");
     expect(userCalls).toBe(2);
-    expect(waits).toEqual([500]);
   });
 });
 

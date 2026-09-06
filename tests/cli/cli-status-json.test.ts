@@ -7,7 +7,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeClientStatusView, isConnectionRefused, isUncleanExitEvidence, proxyHealthFailureReason, resolveStatusPid, selectListenTarget, type CliStatusJson } from "../../src/cli/status";
+import { isConnectionRefused, isUncleanExitEvidence, proxyHealthFailureReason, resolveStatusPid, selectListenTarget } from "../../src/cli/status";
 import * as statusFacade from "../../src/cli/status";
 import * as statusProbes from "../../src/cli/status-probes";
 import { findDeadPid } from "../helpers/dead-pid";
@@ -19,8 +19,6 @@ import { writeDesktopDisconnectReceipt } from "../../src/claude/desktop-remote-s
 
 const repoRoot = dirname(fileURLToPath(new URL("../../package.json", import.meta.url)));
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
-type ClaudeClientFieldIsOptional = {} extends Pick<CliStatusJson, "claudeClient"> ? true : false;
-const claudeClientFieldIsOptional: ClaudeClientFieldIsOptional = true;
 
 function runStatusJson(opencodexHome: string) {
   return spawnSync(process.execPath, [cliPath, "status", "--json"], {
@@ -156,19 +154,6 @@ describe("status recovery inspection is read-only unless an orphan needs cleanup
 });
 
 describe("CLI status JSON", () => {
-  test("Claude client field remains additive for TypeScript consumers", () => {
-    expect(claudeClientFieldIsOptional).toBe(true);
-  });
-  test("Claude client status view serializes each advisory state without probe text", () => {
-    for (const [stdout, expected] of [["2.1.201\n", "compatible"], ["2.1.200\n", "outdated"], ["bad", "unparseable"]] as const) {
-      const value = claudeClientStatusView({ versionProbe: () => ({ stdout, status: 0 }) });
-      expect(value.state).toBe(expected);
-      expect(JSON.stringify(value)).not.toContain("bad");
-    }
-    expect(claudeClientStatusView({ versionProbe: () => ({ error: { code: "ENOENT" } }) }).state).toBe("missing");
-    expect(claudeClientStatusView({ versionProbe: () => ({ error: new Error("secret output") }) }).state).toBe("timed-out");
-  });
-
   test("status facade preserves probe identity without exposing its health helper", () => {
     expect(statusFacade.proxyHealthFailureReason).toBe(statusProbes.proxyHealthFailureReason);
     expect(statusFacade.isConnectionRefused).toBe(statusProbes.isConnectionRefused);
@@ -249,7 +234,6 @@ describe("CLI status JSON", () => {
           warning?: unknown;
           action?: unknown;
         };
-        claudeClient?: { state?: unknown; version?: unknown; source?: unknown };
       };
 
       expect(parsed.schemaVersion).toBe(1);
@@ -299,9 +283,6 @@ describe("CLI status JSON", () => {
         state: "disconnected",
         credentialFile: "missing",
       });
-      expect(["compatible", "outdated", "missing", "timed-out", "unparseable"]).toContain(parsed.claudeClient?.state);
-      expect(parsed.claudeClient?.version === null || typeof parsed.claudeClient?.version === "string").toBe(true);
-      expect(["path", "windows-executable", "windows-command-shim"]).toContain(parsed.claudeClient?.source);
 
       const serialized = JSON.stringify(parsed).toLowerCase();
       for (const forbidden of ["apikey", "sk-test-secret", "token", "refreshtoken", "authorization", "email"]) {
@@ -636,14 +617,9 @@ describe("unclean prior exit evidence", () => {
  * drive the real CLI, so the field has to travel from disk to output.
  */
 describe("status reports stale process records end to end", () => {
-  // The Linux hosted runner can legitimately assign low PIDs such as 4242 while this
-  // parallel batch runs. INT_MAX is accepted by process.kill but cannot name a live
-  // process on the supported platforms, so these end-to-end fixtures stay deterministic.
-  const deadPid = 2_147_483_647;
-
   const seed = (home: string, opts: { pid?: number; runtime?: boolean; port: number }): void => {
     writeFileSync(join(home, "config.json"), JSON.stringify({ port: opts.port, codexAutoStart: false }), "utf8");
-    const pid = opts.pid ?? deadPid;
+    const pid = opts.pid ?? findDeadPid();
     if (opts.pid !== 0) writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
     if (opts.runtime) {
       writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: opts.port, hostname: "127.0.0.1" }), "utf8");
@@ -730,18 +706,11 @@ describe("status reports stale process records end to end", () => {
     const occupied = createServer(socket => { socket.destroy(); });
     await new Promise<void>(resolve => { occupied.listen(0, "127.0.0.1", () => resolve()); });
     const occupiedPort = (occupied.address() as AddressInfo).port;
-    // Allocate while the configured port is still held so Windows cannot recycle
-    // that same ephemeral port for the recorded-port probe.
-    const probe = createServer();
-    await new Promise<void>(resolve => { probe.listen(0, "127.0.0.1", () => resolve()); });
-    const recordedPort = (probe.address() as AddressInfo).port;
-    expect(recordedPort).not.toBe(occupiedPort);
-    await new Promise<void>(resolve => { probe.close(() => resolve()); });
     try {
-      const pid = deadPid;
+      const pid = findDeadPid();
       writeFileSync(join(home, "config.json"), JSON.stringify({ port: occupiedPort, codexAutoStart: false }), "utf8");
       writeFileSync(join(home, "ocx.pid"), String(pid), "utf8");
-      writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: recordedPort, hostname: "127.0.0.1" }), "utf8");
+      writeFileSync(join(home, "runtime-port.json"), JSON.stringify({ pid, port: freePort, hostname: "127.0.0.1" }), "utf8");
 
       const parsed = JSON.parse(runStatusJson(home).stdout) as { proxy?: { staleProcessState?: unknown } };
       expect(parsed.proxy?.staleProcessState).toBe(true);
@@ -749,42 +718,5 @@ describe("status reports stale process records end to end", () => {
       await new Promise<void>(resolve => { occupied.close(() => resolve()); });
       removeTreeWithRetry(home);
     }
-  });
-});
-
-describe("TLS-aware status URLs", () => {
-  test("selectListenTarget uses https and canonical public origin when tls is set", () => {
-    const target = selectListenTarget(
-      { port: 10443, hostname: "0.0.0.0", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
-      null,
-      null,
-    );
-    expect(target.healthUrl).toBe("https://127.0.0.1:10443/healthz");
-    expect(target.dashboardUrl).toBe("https://example.com");
-  });
-
-  test("selectListenTarget brackets IPv6 and uses https when tls set", () => {
-    const target = selectListenTarget(
-      { port: 10443, hostname: "::1", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
-      123,
-      { pid: 123, port: 10443, hostname: "::1" },
-    );
-    expect(target.healthUrl).toBe("https://[::1]:10443/healthz");
-    expect(target.dashboardUrl).toBe("https://example.com");
-  });
-
-  test("selectListenTarget maps 0.0.0.0 to 127.0.0.1 with https", () => {
-    const target = selectListenTarget(
-      { port: 10443, hostname: "0.0.0.0", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
-      null,
-      null,
-    );
-    expect(target.healthUrl).toBe("https://127.0.0.1:10443/healthz");
-  });
-
-  test("without tls dashboard stays http localhost", () => {
-    const target = selectListenTarget({ port: 10100, hostname: "0.0.0.0" }, null, null);
-    expect(target.healthUrl).toBe("http://127.0.0.1:10100/healthz");
-    expect(target.dashboardUrl).toBe("http://localhost:10100/");
   });
 });

@@ -26,7 +26,6 @@ function rawCustomWindowRank(rawLabel: string): number {
   if (rawLabel === "5h") return 0;
   if (rawLabel === "First-party models") return 2;
   if (rawLabel === "API usage") return 3;
-  if (rawLabel === "Total subscription credits") return 4.5;
   return 5;
 }
 
@@ -48,17 +47,15 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
   if (!displayQuota) return [];
   // Intrinsic ranks for the standard slots; custom windows rank on their RAW labels.
   const ranked: Array<{ rank: number; row: QuotaBarRow }> = [];
-  const fiveHourPercent = displayQuota.fiveHourPercent ?? displayQuota.shortPercent;
-  const fiveHourResetAt = displayQuota.fiveHourResetAt ?? displayQuota.shortResetAt;
-  if (typeof fiveHourPercent === "number") {
+  if (typeof displayQuota.fiveHourPercent === "number") {
     ranked.push({
       rank: 0,
       row: {
         windowKey: "fiveHour",
         label: t("codexAuth.fiveHour"),
         limitLabel: t("quota.fiveHourLimit"),
-        percent: fiveHourPercent,
-        resetAt: fiveHourResetAt,
+        percent: displayQuota.fiveHourPercent,
+        resetAt: displayQuota.fiveHourResetAt,
       },
     });
   }
@@ -99,35 +96,16 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
       },
     });
   }
-  if (displayQuota.creditsUsd && typeof displayQuota.creditsUsd.percent === "number") {
-    const hasCreditCustom = displayQuota.customWindows?.some(w => /credits?/i.test(w.label));
-    if (!hasCreditCustom) {
-      const localized = localizeCustomQuotaLabel("Total subscription credits", t);
-      ranked.push({
-        rank: rawCustomWindowRank("Total subscription credits"),
-        row: {
-          customLabel: "Total subscription credits",
-          label: localized,
-          limitLabel: localized,
-          percent: displayQuota.creditsUsd.percent,
-          resetAt: displayQuota.creditsUsd.expiresAt,
-        },
-      });
-    }
-  }
   return ranked.sort((a, b) => a.rank - b.rank).map(entry => entry.row);
 }
 
 /** Max utilisation across known windows (for sorting providers by urgency). */
 export function maxQuotaUtilisation(quota: AccountQuota | null): number {
   if (!quota) return -1;
-  const vals = [quota.fiveHourPercent ?? quota.shortPercent, quota.weeklyPercent, quota.monthlyPercent]
+  const vals = [quota.fiveHourPercent, quota.weeklyPercent, quota.monthlyPercent]
     .filter((n): n is number => typeof n === "number");
   for (const w of quota.customWindows ?? []) {
     if (typeof w.percent === "number") vals.push(w.percent);
-  }
-  if (typeof quota.creditsUsd?.percent === "number") {
-    vals.push(quota.creditsUsd.percent);
   }
   return vals.length ? Math.max(...vals) : -1;
 }

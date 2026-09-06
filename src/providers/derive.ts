@@ -1,5 +1,4 @@
 import type { CodexAccountMode, OcxProviderConfig } from "../types";
-import { isAzureIdentityProvider } from "../config/provider-validation";
 import { cloneFastWire } from "./fastwire";
 import {
   PROVIDER_REGISTRY,
@@ -50,7 +49,7 @@ export interface DerivedKeyLoginProvider {
   thinkingBudgetModels?: string[];
   escapeBuiltinToolNames?: boolean;
   openaiChatEofTolerance?: boolean;
-  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web";
+  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
   project?: string;
   location?: string;
 }
@@ -229,7 +228,6 @@ export function providerConfigSeed(entry: ProviderRegistryEntry): OcxProviderCon
     ...(entry.modelSuffixBracketStrip !== undefined ? { modelSuffixBracketStrip: entry.modelSuffixBracketStrip } : {}),
     ...(entry.staticHeaders ? { headers: { ...entry.staticHeaders } } : {}),
     ...(entry.defaultModel ? { defaultModel: entry.defaultModel } : {}),
-    ...(entry.requestPacing ? { requestPacing: structuredClone(entry.requestPacing) } : {}),
     ...(entry.models ? { models: [...entry.models] } : {}),
     ...(liveModels !== undefined ? { liveModels } : {}),
     ...(entry.contextWindow !== undefined ? { contextWindow: entry.contextWindow } : {}),
@@ -451,26 +449,7 @@ export function hasLegacyClinePassReasoningEfforts(name: string, prov: OcxProvid
     && prov.reasoningEfforts[0] === "low";
 }
 
-const LEGACY_GOOGLE_AISTUDIO_MODELS = [
-  "gemini-3.7-flash",
-  "gemini-3.1-pro-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-  "gemini-3.5-flash",
-] as const;
-
-function refreshLegacyGoogleAiStudioModels(name: string, prov: OcxProviderConfig, seed: OcxProviderConfig): void {
-  if (name !== "google-aistudio"
-    || prov.googleMode !== "ai-studio-web"
-    || prov.liveModels !== false
-    || prov.defaultModel !== "gemini-3.7-flash"
-    || JSON.stringify(prov.models) !== JSON.stringify(LEGACY_GOOGLE_AISTUDIO_MODELS)
-    || !seed.models) return;
-  prov.models = [...seed.models];
-}
-
 export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig): void {
-  if (isAzureIdentityProvider(prov)) prov.liveModels = false;
   const entry = PROVIDER_REGISTRY.find(row => row.id === name);
   if (!entry || !providerMatchesRegistryTransportWithStaticGuards(name, prov)) {
     // Name lookup failed, but the row may still point at a vendor route we know. #1100 was
@@ -491,11 +470,9 @@ export function enrichProviderFromRegistry(name: string, prov: OcxProviderConfig
     modelReasoningEffortMap: prov.modelReasoningEffortMap,
   };
   const seed = providerConfigSeed(entry);
-  refreshLegacyGoogleAiStudioModels(name, prov, seed);
   repairStaticModelCatalogProvider(name, prov);
   if (prov.apiKeyTransport === undefined && seed.apiKeyTransport !== undefined) prov.apiKeyTransport = seed.apiKeyTransport;
   if (!prov.defaultModel && seed.defaultModel) prov.defaultModel = seed.defaultModel;
-  if (prov.requestPacing === undefined && seed.requestPacing) prov.requestPacing = structuredClone(seed.requestPacing);
   if (prov.responsesPath === undefined && seed.responsesPath !== undefined) prov.responsesPath = seed.responsesPath;
   // Fill mode only when absent: an explicit persisted `direct` must never be overwritten.
   if (prov.codexAccountMode === undefined && seed.codexAccountMode !== undefined) prov.codexAccountMode = seed.codexAccountMode;

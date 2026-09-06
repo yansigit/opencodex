@@ -2,10 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { createCursorAdapter as createCursorAdapterProduction } from "../../../src/adapters/cursor";
 import {
   CURSOR_ECHO_RETRY_CONTINUATION_TEXT,
-  CursorEnvelopeEchoGuard,
   CursorEnvelopeEchoSniffer,
   CursorMidstreamEchoObserver,
-  CursorReplayEnvelopeDetectedError,
   CursorRoutingCommentarySniffer,
   MAX_MIDSTREAM_SCAN_LENGTH,
 } from "../../../src/adapters/cursor/envelope-echo";
@@ -37,57 +35,6 @@ function toolResultBody(modelId: string): OcxParsedRequest {
   } as OcxParsedRequest;
 }
 
-function completedToolBody(modelId: string, isError = false): OcxParsedRequest {
-  return {
-    modelId,
-    context: {
-      messages: [
-        { role: "user", content: "Run STEP1, then continue.", timestamp: 1 },
-        {
-          role: "assistant",
-          content: [{
-            type: "toolCall",
-            id: "call_step_1",
-            name: "exec_command",
-            arguments: { timeout_ms: 1_000, cmd: "printf STEP1" },
-          }],
-          timestamp: 2,
-        },
-        {
-          role: "toolResult",
-          toolCallId: "call_step_1",
-          toolName: "exec_command",
-          content: "STEP1",
-          isError,
-          timestamp: 3,
-        },
-      ],
-    },
-    stream: false,
-    options: {},
-    _cursorConversationId: "cursor_duplicate_tool_fixture",
-    _cursorIdentityScope: "acct-duplicate-tool",
-  } as OcxParsedRequest;
-}
-
-function parallelCompletedToolBody(modelId: string): OcxParsedRequest {
-  const body = completedToolBody(modelId);
-  body.context.messages = [
-    { role: "user", content: "Run both probes, then continue.", timestamp: 1 },
-    {
-      role: "assistant",
-      content: [
-        { type: "toolCall", id: "call_a", name: "lookup", arguments: { q: "A" } },
-        { type: "toolCall", id: "call_b", name: "lookup", arguments: { q: "B" } },
-      ],
-      timestamp: 2,
-    },
-    { role: "toolResult", toolCallId: "call_a", toolName: "lookup", content: "A", isError: false, timestamp: 3 },
-    { role: "toolResult", toolCallId: "call_b", toolName: "lookup", content: "B", isError: false, timestamp: 4 },
-  ];
-  return body;
-}
-
 /** First run echoes the envelope; the retry answers normally. Records each run request. */
 function echoingThenHealthyTransportFactory() {
   const runRequests: CursorRunRequest[] = [];
@@ -116,50 +63,6 @@ function echoingThenHealthyTransportFactory() {
 }
 
 describe("cursor external output quarantine + corrective retry (devlog 260826 gaps 10-11)", () => {
-  describe("unified streaming envelope guard", () => {
-    const headers = [
-      "[Tool Result]",
-      "[Tool Error]",
-      "[tool_result]",
-      "Tool output for exec (call_id: exec_2-24a1f, is_error: false):",
-      "Tool error for exec (call_id: exec_2-24a1f, is_error: true):",
-    ];
-
-    for (const header of headers) {
-      test(`${header} is detected across every chunk boundary`, () => {
-        for (let split = 0; split <= header.length; split++) {
-          const guard = new CursorEnvelopeEchoGuard();
-          expect(() => {
-            guard.feed(header.slice(0, split));
-            guard.feed(header.slice(split));
-          }).toThrow();
-        }
-      });
-    }
-
-    test("leading CRLF stays quarantined and a malformed or inline neutral phrase stays visible", () => {
-      const echoed = new CursorEnvelopeEchoGuard();
-      expect(() => echoed.feed("\r\nTool output for exec (call_id: call_1, is_error: false):")).toThrow();
-
-      const normal = new CursorEnvelopeEchoGuard();
-      const text = "The phrase Tool output for exec is documentation.\r\n"
-        + "Tool output for exec (call_id missing, is_error: false):";
-      expect(normal.feed(text) + normal.finish()).toBe(text);
-    });
-
-    test("post-output detection reports a UTF-8 byte offset", () => {
-      const guard = new CursorEnvelopeEchoGuard();
-      expect(guard.feed("é\n")).toBe("é\n");
-      try {
-        guard.feed("[Tool Result]");
-        throw new Error("expected replay detection");
-      } catch (error) {
-        expect(error).toBeInstanceOf(CursorReplayEnvelopeDetectedError);
-        expect((error as CursorReplayEnvelopeDetectedError).offset).toBe(3);
-      }
-    });
-  });
-
   describe("mid-stream echo observer (devlog 260828 F1/F2)", () => {
     const RUN03_SPECIMEN =
       "Step 2 produced no stdout, as expected. Next I'll cat the file.\n"
@@ -234,7 +137,17 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
     });
   });
 
-    test("midstream replay is discarded and fails closed after legitimate text", async () => {
+    test("held-then-released deltas are fed exactly once (adapter diagnostic offset proves single feed)", async () => {
+      // The prefix guard holds early deltas then releases them through the same
+      // observed emit path. If a delta were fed twice, the mid-stream echo
+      // offset would shift by the duplicated length; asserting the exact
+      // offset in the diagnostic proves exactly-once feeding.
+      const previousDebug = process.env.OCX_DEBUG;
+      process.env.OCX_DEBUG = "1";
+      const errLines: string[] = [];
+      const originalError = console.error;
+      console.error = (line: unknown) => { errLines.push(String(line)); };
+      try {
         const LEAD = "Progressing through the steps now.\n";
         const factory = () => ({
           async *run() {
@@ -247,11 +160,16 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
         const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
         const events: AdapterEvent[] = [];
         await adapter.runTurn?.(toolResultBody("cursor/kimi-k3"), { headers: new Headers() }, event => events.push(event));
-        expect(events.filter(event => event.type === "text_delta").map(event => event.text).join("")).toBe(LEAD);
-        expect(events.find(event => event.type === "error")).toMatchObject({
-          code: "cursor_replay_envelope_detected",
-          retryable: false,
-        });
+        const diag = errLines.find(line => line.includes("midstream-envelope-echo"));
+        expect(diag).toBeDefined();
+        const payload = JSON.parse(diag!.slice(diag!.indexOf("{"))) as { offset: number; callIdCorrupt: boolean };
+        expect(payload.offset).toBe(LEAD.length);
+        expect(payload.callIdCorrupt).toBe(true);
+      } finally {
+        console.error = originalError;
+        if (previousDebug === undefined) delete process.env.OCX_DEBUG;
+        else process.env.OCX_DEBUG = previousDebug;
+      }
     });
 
   test("sniffer: marker split across deltas is detected; divergent text flushes", () => {
@@ -268,216 +186,6 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
 
     const whitespace = new CursorEnvelopeEchoSniffer();
     expect(whitespace.feed("\n  [tool_result]").kind).toBe("echo");
-
-    const neutral = new CursorEnvelopeEchoSniffer();
-    expect(neutral.feed("Tool output for exec (call_id: exec_2-24a1f, ").kind).toBe("hold");
-    expect(neutral.feed("is_error: false):").kind).toBe("echo");
-  });
-
-  test("neutral K3 replay envelope retries without leaking the screenshot payload", async () => {
-    let attempt = 0;
-    const recoveries: string[] = [];
-    const factory = () => ({
-      async *run() {
-        attempt += 1;
-        if (attempt === 1) {
-          yield { type: "text", text: "Tool output for exec (call_id: exec_2-24a1f, is_error: false):\n" } satisfies CursorServerMessage;
-          yield { type: "text", text: "invoked: exec with {secret payload}" } satisfies CursorServerMessage;
-        } else {
-          yield { type: "text", text: "continued safely" } satisfies CursorServerMessage;
-        }
-        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(
-      toolResultBody("cursor/kimi-k3"),
-      { headers: new Headers(), onAdapterRetry: recovery => recoveries.push(recovery) },
-      event => events.push(event),
-    );
-    expect(attempt).toBe(2);
-    expect(recoveries).toEqual(["cursor-envelope-echo"]);
-    expect(events.filter(event => event.type === "text_delta").map(event => event.text).join("")).toBe("continued safely");
-  });
-
-  test("an exact successful tool invocation is quarantined and retried before it reaches the client", async () => {
-    let attempt = 0;
-    const recoveries: string[] = [];
-    const factory = () => ({
-      async *run() {
-        attempt += 1;
-        if (attempt === 1) {
-          yield { type: "tool_call_start", id: "duplicate", name: "exec_command" } satisfies CursorServerMessage;
-          yield { type: "tool_call_delta", arguments: "{\"cmd\":\"printf STEP1\"," } satisfies CursorServerMessage;
-          yield { type: "tool_call_delta", arguments: "\"timeout_ms\":1000}" } satisfies CursorServerMessage;
-          yield { type: "tool_call_end", id: "duplicate" } satisfies CursorServerMessage;
-          return;
-        }
-        yield { type: "text", text: "ALLDONE" } satisfies CursorServerMessage;
-        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(
-      completedToolBody("cursor/grok-4.6"),
-      { headers: new Headers(), onAdapterRetry: recovery => recoveries.push(recovery) },
-      event => events.push(event),
-    );
-
-    expect(attempt).toBe(2);
-    expect(recoveries).toEqual(["cursor-duplicate-tool-call"]);
-    expect(events.map(event => event.type)).not.toContain("tool_call_start");
-    expect(events.filter(event => event.type === "text_delta").map(event => event.text).join(""))
-      .toBe("ALLDONE");
-  });
-
-  test("an exact parameterless tool invocation is quarantined without an argument delta", async () => {
-    let attempt = 0;
-    const recoveries: string[] = [];
-    const body = completedToolBody("cursor/grok-4.6");
-    const assistant = body.context.messages[1];
-    if (assistant?.role !== "assistant" || !Array.isArray(assistant.content)) {
-      throw new Error("expected assistant tool-call fixture");
-    }
-    const priorCall = assistant.content[0];
-    if (!priorCall || priorCall.type !== "toolCall") throw new Error("expected prior tool call");
-    priorCall.name = "refresh_status";
-    priorCall.arguments = {};
-    const priorResult = body.context.messages[2];
-    if (priorResult?.role !== "toolResult") throw new Error("expected prior tool result");
-    priorResult.toolName = "refresh_status";
-
-    const factory = () => ({
-      async *run() {
-        attempt += 1;
-        if (attempt === 1) {
-          yield { type: "tool_call_start", id: "duplicate-empty", name: "refresh_status" } satisfies CursorServerMessage;
-          yield { type: "tool_call_end", id: "duplicate-empty" } satisfies CursorServerMessage;
-          return;
-        }
-        yield { type: "text", text: "ALLDONE" } satisfies CursorServerMessage;
-        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(
-      body,
-      { headers: new Headers(), onAdapterRetry: recovery => recoveries.push(recovery) },
-      event => events.push(event),
-    );
-
-    expect(attempt).toBe(2);
-    expect(recoveries).toEqual(["cursor-duplicate-tool-call"]);
-    expect(events.map(event => event.type)).not.toContain("tool_call_start");
-    expect(events.filter(event => event.type === "text_delta").map(event => event.text).join(""))
-      .toBe("ALLDONE");
-  });
-
-  test("an exact repeat of either call in the preceding parallel batch is quarantined", async () => {
-    let attempt = 0;
-    const factory = () => ({
-      async *run() {
-        attempt += 1;
-        if (attempt === 1) {
-          yield { type: "tool_call_start", id: "duplicate-a", name: "lookup" } satisfies CursorServerMessage;
-          yield { type: "tool_call_delta", arguments: "{\"q\":\"A\"}" } satisfies CursorServerMessage;
-          yield { type: "tool_call_end", id: "duplicate-a" } satisfies CursorServerMessage;
-          return;
-        }
-        yield { type: "text", text: "ALLDONE" } satisfies CursorServerMessage;
-        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(
-      parallelCompletedToolBody("cursor/grok-4.6"),
-      { headers: new Headers() },
-      event => events.push(event),
-    );
-
-    expect(attempt).toBe(2);
-    expect(events.map(event => event.type)).not.toContain("tool_call_start");
-    expect(events.filter(event => event.type === "text_delta").map(event => event.text).join(""))
-      .toBe("ALLDONE");
-  });
-
-  test("same tool with different arguments remains visible and does not retry", async () => {
-    let attempt = 0;
-    const factory = () => ({
-      async *run() {
-        attempt += 1;
-        yield { type: "tool_call_start", id: "next", name: "exec_command" } satisfies CursorServerMessage;
-        yield { type: "tool_call_delta", arguments: "{\"cmd\":\"printf STEP2\",\"timeout_ms\":1000}" } satisfies CursorServerMessage;
-        yield { type: "tool_call_end", id: "next" } satisfies CursorServerMessage;
-        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(completedToolBody("cursor/grok-4.6"), { headers: new Headers() }, event => events.push(event));
-
-    expect(attempt).toBe(1);
-    expect(events.filter(event => event.type === "tool_call_start")).toHaveLength(1);
-    expect(events.filter(event => event.type === "tool_call_end")).toHaveLength(1);
-  });
-
-  test("a failed prior tool result does not arm duplicate-call recovery", async () => {
-    let attempt = 0;
-    const factory = () => ({
-      async *run() {
-        attempt += 1;
-        yield { type: "tool_call_start", id: "retry-failed", name: "exec_command" } satisfies CursorServerMessage;
-        yield { type: "tool_call_delta", arguments: "{\"cmd\":\"printf STEP1\",\"timeout_ms\":1000}" } satisfies CursorServerMessage;
-        yield { type: "tool_call_end", id: "retry-failed" } satisfies CursorServerMessage;
-        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(completedToolBody("cursor/grok-4.6", true), { headers: new Headers() }, event => events.push(event));
-
-    expect(attempt).toBe(1);
-    expect(events.filter(event => event.type === "tool_call_start")).toHaveLength(1);
-  });
-
-  test("an exact duplicate after a local side effect fails closed without a corrective resend", async () => {
-    let attempt = 0;
-    const recoveries: string[] = [];
-    const factory = () => ({
-      async *run() {
-        attempt += 1;
-        yield { type: "local_side_effect" } satisfies CursorServerMessage;
-        yield { type: "tool_call_start", id: "unsafe-duplicate", name: "exec_command" } satisfies CursorServerMessage;
-        yield { type: "tool_call_delta", arguments: "{\"cmd\":\"printf STEP1\",\"timeout_ms\":1000}" } satisfies CursorServerMessage;
-        yield { type: "tool_call_end", id: "unsafe-duplicate" } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(
-      completedToolBody("cursor/grok-4.6"),
-      { headers: new Headers(), onAdapterRetry: recovery => recoveries.push(recovery) },
-      event => events.push(event),
-    );
-
-    expect(attempt).toBe(1);
-    expect(recoveries).toEqual([]);
-    expect(events.find(event => event.type === "error")).toMatchObject({
-      code: "cursor_duplicate_completed_tool_call",
-      retryable: false,
-    });
-    expect(events.map(event => event.type)).not.toContain("tool_call_start");
   });
 
   test("routing-commentary sniffer catches fragmented invented fallback but not legitimate Shell prose", () => {
@@ -555,22 +263,6 @@ describe("cursor external output quarantine + corrective retry (devlog 260826 ga
     expect(attempt).toBe(1);
     const text = events.filter(e => e.type === "text_delta").map(e => (e as { text: string }).text).join("");
     expect(text).toBe("[note] leading bracket but not an envelope");
-  });
-
-  test("external model terminal tokens are removed at done without touching inline mentions", async () => {
-    const factory = () => ({
-      async *run() {
-        yield { type: "text", text: "Use `<eos>` literally.\nanswer\n<|eot_" } satisfies CursorServerMessage;
-        yield { type: "text", text: "id|>\n" } satisfies CursorServerMessage;
-        yield { type: "done", usage: { inputTokens: 1, outputTokens: 1 } } satisfies CursorServerMessage;
-      },
-      writeClient() {},
-    });
-    const adapter = createCursorAdapter({ ...provider, apiKey: "cursor-token" }, { createTransport: factory as never });
-    const events: AdapterEvent[] = [];
-    await adapter.runTurn?.(toolResultBody("cursor/grok-4.6"), { headers: new Headers() }, event => events.push(event));
-    expect(events.filter(event => event.type === "text_delta").map(event => event.text).join(""))
-      .toBe("Use `<eos>` literally.\nanswer\n");
   });
 
   test("plain user turns (no trailing toolResult) never arm the sniffer", async () => {

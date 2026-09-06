@@ -26,7 +26,6 @@ import {
   terminateAllBackgroundShells,
   terminateBackgroundShellsForSession,
   writeShellStdinExec,
-  type BackgroundShellRuntime,
 } from "../../../src/adapters/cursor/native-exec-shell";
 
 function decodeClient(bytes: Uint8Array): AgentClientMessage {
@@ -48,10 +47,6 @@ class FakeChild extends EventEmitter {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly pid = 1234;
-
-  kill(): boolean {
-    return true;
-  }
 }
 
 class FakeClock {
@@ -95,39 +90,20 @@ function spawnArgs(command = "background") {
   });
 }
 
-interface FakeShellRuntime {
-  clock: FakeClock;
-  children: FakeChild[];
-  signals: Array<NodeJS.Signals | undefined>;
-  spawnCalls(): number;
-  spawnOptions: unknown[];
-}
-
 function installFakeShellRuntime(options: {
   spawnError?: Error;
   onKill?: (child: FakeChild, signal?: NodeJS.Signals) => boolean;
-  runtime?: (fake: FakeShellRuntime) => Partial<BackgroundShellRuntime>;
 } = {}) {
   const clock = new FakeClock();
   const children: FakeChild[] = [];
-  const spawnOptions: unknown[] = [];
   let spawnCalls = 0;
   const signals: Array<NodeJS.Signals | undefined> = [];
-  const fake = { clock, children, signals, spawnCalls: () => spawnCalls, spawnOptions };
   setBackgroundShellRuntimeForTests({
-    // Keep generic lifecycle fixtures independent of the host process table.
-    // FakeChild.pid is intentionally stable, so inheriting the production
-    // process-group helpers can signal an unrelated runner group with that PID.
-    // Process-tree-specific cases below override these deterministic defaults.
-    platform: "linux",
-    killProcessGroup: () => false,
-    isProcessGroupAlive: () => "gone",
     now: () => clock.now,
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
     spawn: ((..._args: unknown[]) => {
       spawnCalls++;
-      spawnOptions.push(_args[1]);
       if (options.spawnError) throw options.spawnError;
       const child = new FakeChild();
       children.push(child);
@@ -137,133 +113,9 @@ function installFakeShellRuntime(options: {
       signals.push(signal);
       return options.onKill?.(rawChild as unknown as FakeChild, signal) ?? true;
     },
-    isProcessGroupAlive: () => "gone",
-    ...options.runtime?.(fake),
   });
-  return fake;
+  return { clock, children, signals, spawnCalls: () => spawnCalls };
 }
-
-describe("process-tree lifecycle regressions", () => {
-test("background shells are detached and terminate their POSIX process group", async () => {
-  const fake = installFakeShellRuntime({ runtime: fake => ({
-    platform: "linux",
-    killProcessGroup: (_pid: number, signal?: NodeJS.Signals) => {
-      fake.signals.push(signal);
-      if (signal === "SIGKILL") queueMicrotask(() => fake.children[0]!.emit("close", null, signal));
-      return true;
-    },
-    isProcessGroupAlive: () => "alive",
-  }) });
-  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
-  const cleanup = terminateBackgroundShellsForSession("session-a");
-  await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
-  await cleanup;
-  expect(fake.spawnOptions).toEqual([{ cwd: process.cwd(), shell: true, detached: true }]);
-  expect(fake.signals).toEqual(["SIGTERM", "SIGKILL"]);
-});
-
-test("Windows termination uses one whole-tree operation instead of the shell wrapper", async () => {
-  let treeKills = 0;
-  const fake = installFakeShellRuntime({ runtime: () => ({
-    platform: "win32",
-    killTree: child => { treeKills += 1; queueMicrotask(() => (child as unknown as FakeChild).emit("close", null, "SIGKILL")); return true; },
-  }) });
-  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
-  await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ attempted: 1, closed: 1 });
-  expect(treeKills).toBe(1);
-  expect(fake.signals).toEqual([]);
-});
-
-test("POSIX group escalation continues after the shell wrapper closes", async () => {
-  const fake = installFakeShellRuntime({ runtime: fake => ({
-    platform: "linux",
-    killProcessGroup: (_pid: number, signal?: NodeJS.Signals) => {
-      fake.signals.push(signal);
-      if (signal === "SIGTERM") queueMicrotask(() => fake.children[0]!.emit("close", 0, signal));
-      return true;
-    },
-    isProcessGroupAlive: () => "alive",
-  }) });
-  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
-  const cleanup = terminateBackgroundShellsForSession("session-a");
-  await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
-  await cleanup;
-  expect(fake.signals).toEqual(["SIGTERM", "SIGKILL"]);
-});
-
-test("failed POSIX group termination counts even when direct-child fallback closes", async () => {
-  const fake = installFakeShellRuntime({
-    runtime: fake => ({
-      platform: "linux",
-      killProcessGroup: () => false,
-      kill: child => {
-        fake.signals.push(undefined);
-        queueMicrotask(() => (child as unknown as FakeChild).emit("close", 0, null));
-        return true;
-      },
-    }),
-  });
-  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
-  await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ killFailures: 2, closed: 1 });
-});
-
-test("failed POSIX TERM still escalates after direct-child fallback closes", async () => {
-  const groupSignals: Array<NodeJS.Signals | undefined> = [];
-  const fake = installFakeShellRuntime({ runtime: fake => ({
-    platform: "linux",
-    killProcessGroup: (_pid: number, signal?: NodeJS.Signals) => {
-      groupSignals.push(signal);
-      return false;
-    },
-    kill: child => {
-      fake.signals.push(undefined);
-      queueMicrotask(() => (child as unknown as FakeChild).emit("close", 0, null));
-      return true;
-    },
-  }) });
-  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
-  await expect(terminateBackgroundShellsForSession("session-a")).resolves.toMatchObject({ closed: 1 });
-  expect(groupSignals).toEqual(["SIGTERM", "SIGKILL"]);
-  expect(fake.signals).toEqual([undefined]);
-});
-
-test("dead POSIX process group skips SIGKILL after graceful TERM", async () => {
-  const groupSignals: Array<NodeJS.Signals | undefined> = [];
-  const fake = installFakeShellRuntime({ runtime: fake => ({
-    platform: "linux",
-    killProcessGroup: (_pid: number, signal?: NodeJS.Signals) => {
-      groupSignals.push(signal);
-      if (signal === "SIGTERM") queueMicrotask(() => fake.children[0]!.emit("close", 0, signal));
-      return true;
-    },
-    isProcessGroupAlive: () => "gone",
-  }) });
-  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
-  const cleanup = terminateBackgroundShellsForSession("session-a");
-  await expect(cleanup).resolves.toMatchObject({ attempted: 1, closed: 1, unresolved: 0 });
-  expect(groupSignals).toEqual(["SIGTERM"]);
-  expect(backgroundShellLifecycleMetrics().killFailures).toBe(0);
-});
-
-test("unknown POSIX process-group liveness conservatively escalates", async () => {
-  const groupSignals: Array<NodeJS.Signals | undefined> = [];
-  const fake = installFakeShellRuntime({ runtime: fake => ({
-    platform: "linux",
-    killProcessGroup: (_pid: number, signal?: NodeJS.Signals) => {
-      groupSignals.push(signal);
-      if (signal === "SIGKILL") queueMicrotask(() => fake.children[0]!.emit("close", null, signal));
-      return true;
-    },
-    isProcessGroupAlive: () => { throw Object.assign(new Error("probe denied"), { code: "EPERM" }); },
-  }) });
-  spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
-  const cleanup = terminateBackgroundShellsForSession("session-a");
-  await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS);
-  await cleanup;
-  expect(groupSignals).toEqual(["SIGTERM", "SIGKILL"]);
-  expect(backgroundShellLifecycleMetrics().killFailures).toBe(0);
-});
-});
 
 function spawnSuccess(bytes: Uint8Array): number {
   const message = decodedExec(bytes);
@@ -283,20 +135,6 @@ function spawnErrorText(bytes: Uint8Array): string {
   return message.value.result.value.error;
 }
 
-function fakeShellSpawn(options: { code?: number; stdout?: string; emitClose?: boolean; emitExit?: boolean } = {}): typeof import("node:child_process").spawn {
-  return (() => {
-    const child = new FakeChild();
-    queueMicrotask(() => {
-      if (options.stdout) child.stdout.write(options.stdout);
-      child.stdout.end();
-      child.stderr.end();
-      if (options.emitExit !== false) child.emit("exit", options.code ?? 0, null);
-      if (options.emitClose !== false) child.emit("close", options.code ?? 0, null);
-    });
-    return child as unknown as ChildProcessWithoutNullStreams;
-  }) as typeof import("node:child_process").spawn;
-}
-
 afterEach(async () => {
   await resetBackgroundShellStateForTests();
 });
@@ -309,11 +147,7 @@ describe("shellStreamExec completion acknowledgement", () => {
       message: { case: "shellStreamArgs", value: create(ShellArgsSchema, { command: "echo OCX_STREAM_OK" }) },
     });
 
-    // This is a protocol-framing assertion. Keep the child event sequence deterministic:
-    // Bun 1.4.0's Darwin --isolate multi-file runner can lose a real subprocess pipe event
-    // under descriptor pressure, which made this otherwise unrelated test wait for 60s.
-    // Exit plus both pipe ends must complete the result even when close is withheld.
-    const replies = (await shellStreamExec(execMsg, fakeShellSpawn({ stdout: "OCX_STREAM_OK\n", emitClose: false }))).map(decodeClient);
+    const replies = (await shellStreamExec(execMsg)).map(decodeClient);
     const execMessages = replies.filter(r => r.message.case === "execClientMessage");
     const cases = execMessages.map(r => (r.message.case === "execClientMessage" ? r.message.value.message.case : undefined));
 
@@ -350,7 +184,7 @@ describe("shellStreamExec completion acknowledgement", () => {
       execId: "3",
       message: { case: "shellStreamArgs", value: create(ShellArgsSchema, { command: "exit 3" }) },
     });
-    const replies = (await shellStreamExec(execMsg, fakeShellSpawn({ code: 3, emitExit: false }))).map(decodeClient);
+    const replies = (await shellStreamExec(execMsg)).map(decodeClient);
     const shellResult = replies.filter(r => r.message.case === "execClientMessage").at(-1);
     if (shellResult?.message.case !== "execClientMessage" || shellResult.message.value.message.case !== "shellResult") {
       throw new Error("missing shellResult");
@@ -473,7 +307,7 @@ describe("Cursor background shell lifecycle", () => {
     spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
     const cleanup = terminateBackgroundShellsForSession("session-a");
     await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS * 2);
-    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 4 });
+    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 2 });
     expect(backgroundShellAdmissionMetrics().active).toBe(1);
     fake.children[0]!.emit("close", 0, null);
   });
@@ -483,7 +317,7 @@ describe("Cursor background shell lifecycle", () => {
     spawnSuccess(backgroundShellSpawnExec(spawnArgs(), "session-a"));
     const cleanup = terminateBackgroundShellsForSession("session-a");
     await fake.clock.advance(CURSOR_BACKGROUND_SHELL_TERM_GRACE_MS * 2);
-    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 2 });
+    await expect(cleanup).resolves.toMatchObject({ unresolved: 1, killFailures: 0 });
     expect(backgroundShellLifecycleMetrics().unresolvedKills).toBe(1);
     expect(backgroundShellAdmissionMetrics().active).toBe(1);
     fake.children[0]!.emit("close", 0, null);

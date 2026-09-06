@@ -11,9 +11,6 @@ services:
     read_only: true
     ports:
       - "${OPENCODEX_BIND_ADDRESS:-127.0.0.1}:${OPENCODEX_PORT:-10100}:10100"
-    environment:
-      OCX_CONTAINER_PUBLIC_PORT: "${OPENCODEX_PORT:-10100}"
-      OCX_CONTAINER_PUBLIC_ORIGIN: "${OPENCODEX_PUBLIC_ORIGIN:-}"
     volumes:
       - ocx-state:/home/bun/.opencodex
     tmpfs:

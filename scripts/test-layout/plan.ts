@@ -13,13 +13,6 @@ export function repoRootFromHere(): string {
   return join(import.meta.dir, "..", "..");
 }
 
-/** JavaScript and TypeScript module extensions Bun accepts for `*.test.*` files. */
-const TEST_FILE_PATTERN = /\.test\.(?:[cm]?[jt]s|[jt]sx)$/;
-
-export function isTestFileName(name: string): boolean {
-  return TEST_FILE_PATTERN.test(name);
-}
-
 export function listTestFiles(root: string): string[] {
   const out: string[] = [];
   const walk = (dir: string) => {
@@ -29,7 +22,7 @@ export function listTestFiles(root: string): string[] {
         if (entry !== "helpers" && entry !== "fixtures" && entry !== "node_modules") walk(full);
         continue;
       }
-      if (isTestFileName(entry)) out.push(relative(root, full).split(sep).join("/"));
+      if (entry.endsWith(".test.ts")) out.push(relative(root, full).split(sep).join("/"));
     }
   };
   walk(join(root, "tests"));

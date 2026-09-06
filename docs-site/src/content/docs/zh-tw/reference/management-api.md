@@ -64,7 +64,7 @@ Session 簽發在需要 data-plane 認證時停用，這包含遠端綁定。遠
 | `GET /api/grok` | 讀取 Grok 受管設定狀態與候選模型 | 400 狀態讀取失敗 |
 | `PUT /api/grok/selection` | 持久化排除的 Grok 模型 | 400 無效或過大選擇 |
 | `POST /api/grok/apply` | 透過受管同步套用持久化的 Grok 設定 | 409 `grok_apply_busy`；400/500 套用失敗 |
-| `GET, PUT /api/claude-desktop` | 讀取或持久化 Claude Desktop 路由／原生設定檔 | 400 設定無效；409 目錄已變更或指派變為不可用 |
+| `GET, PUT /api/claude-desktop` | 讀取或持久化 Claude Desktop 路由／原生設定檔 | 400 無效或不可用指派 |
 | `POST /api/claude-desktop/apply` | 將儲存的設定檔寫入 Claude Desktop 的受管設定 | 400/500 寫入失敗 |
 | `GET /api/claude-desktop/status` | 檢查已儲存 vs 已套用設定檔與 Desktop 健康 | 400 狀態讀取失敗 |
 | `GET, PUT /api/claude-code` | 讀取或更新 Claude Code 閘道、auth-mode、model-map、context、agent 與 sidecar 設定 | 400 無效欄位或結構 |

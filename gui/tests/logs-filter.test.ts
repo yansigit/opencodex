@@ -3,7 +3,7 @@ import {
   DEFAULT_LOG_FILTER_STATE,
   extractLogFilterOptions,
   filterLogs,
-  hasActiveFilters,
+  hasActiveLogFilters,
 } from "../src/pages/logs-filter";
 
 const NOW = 2_000_000_000_000;
@@ -42,7 +42,7 @@ const logs = [
 
 describe("rich Logs filtering", () => {
   test("the default state is inert", () => {
-    expect(hasActiveFilters(DEFAULT_LOG_FILTER_STATE)).toBe(false);
+    expect(hasActiveLogFilters(DEFAULT_LOG_FILTER_STATE)).toBe(false);
     expect(filterLogs(logs, DEFAULT_LOG_FILTER_STATE, NOW)).toEqual(logs);
   });
 
@@ -72,13 +72,13 @@ describe("rich Logs filtering", () => {
     expect(filterLogs(logs, {
       ...DEFAULT_LOG_FILTER_STATE,
       surface: "claude",
-      statusFilter: "success",
+      status: "success",
       conversationId: "conv-123",
     }, NOW).map(row => row.id)).toEqual(["claude"]);
     expect(filterLogs(logs, {
       ...DEFAULT_LOG_FILTER_STATE,
-      statusFilter: "success",
-      interceptedHelpersOnly: true,
+      status: "success",
+      interceptedOnly: true,
     }, NOW).map(row => row.id)).toEqual(["helper"]);
   });
 
@@ -91,9 +91,9 @@ describe("rich Logs filtering", () => {
       { id: "fractional", status: 200.5 },
       { id: "out-of-range", status: 600 },
     ];
-    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, statusFilter: "success" }, NOW).map(row => row.id)).toEqual(["success"]);
-    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, statusFilter: "errors" }, NOW).map(row => row.id)).toEqual(["error"]);
-    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, statusFilter: "all" }, NOW).map(row => row.id)).toContain("redirect");
+    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, status: "success" }, NOW).map(row => row.id)).toEqual(["success"]);
+    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, status: "errors" }, NOW).map(row => row.id)).toEqual(["error"]);
+    expect(filterLogs(rows, { ...DEFAULT_LOG_FILTER_STATE, status: "all" }, NOW).map(row => row.id)).toContain("redirect");
   });
 
   test("uses deterministic time windows and rejects rows without a usable timestamp", () => {
@@ -138,11 +138,10 @@ describe("rich Logs filtering", () => {
   });
 
   test("reports every non-default field as active", () => {
-    expect(hasActiveFilters({ ...DEFAULT_LOG_FILTER_STATE, provider: "openai" })).toBe(true);
-    expect(hasActiveFilters({ ...DEFAULT_LOG_FILTER_STATE, agentKind: "subagent" })).toBe(true);
-    expect(hasActiveFilters({ ...DEFAULT_LOG_FILTER_STATE, statusFilter: "errors" })).toBe(true);
-    expect(hasActiveFilters({ ...DEFAULT_LOG_FILTER_STATE, minTokPerSec: 1 })).toBe(true);
-    expect(hasActiveFilters({ ...DEFAULT_LOG_FILTER_STATE, conversationId: "  conv  " })).toBe(true);
+    expect(hasActiveLogFilters({ ...DEFAULT_LOG_FILTER_STATE, provider: "openai" })).toBe(true);
+    expect(hasActiveLogFilters({ ...DEFAULT_LOG_FILTER_STATE, status: "errors" })).toBe(true);
+    expect(hasActiveLogFilters({ ...DEFAULT_LOG_FILTER_STATE, minTokPerSec: 1 })).toBe(true);
+    expect(hasActiveLogFilters({ ...DEFAULT_LOG_FILTER_STATE, conversationId: "  conv  " })).toBe(true);
   });
 });
 

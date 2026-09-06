@@ -227,13 +227,6 @@ test("provider quota fetch preserves aggregate capacity through shell state and 
   expect(text).not.toMatch(/configured units|weighted units|units remaining|projected/i);
 });
 
-test("provider workspace uses a labelled section instead of nesting a main landmark", async () => {
-  await mountShell();
-
-  expect(host.querySelectorAll("main")).toHaveLength(0);
-  expect(host.querySelector("section.pws-main")?.getAttribute("aria-label")).toBe("Provider details");
-});
-
 test("successful empty quota response removes cached providers and updates session cache", async () => {
   const seeded = (aggregatePayload().reports[0]);
   const { provider: _provider, ...cached } = seeded;
@@ -493,49 +486,4 @@ test("five-hour and custom aggregate windows can be marked independently", async
   const markers = [...host.querySelectorAll<HTMLElement>(".quota-window-partial")];
   expect(markers).toHaveLength(1);
   expect(markers[0]?.getAttribute("aria-label")).toBe("Burst: incomplete account coverage");
-});
-
-test("single-account pool collapses duplicate pool estimate, recovery share, and current-account breakdown", async () => {
-  const now = Date.now();
-  const singleAccountResetAt = Date.UTC(2026, 8, 1, 16, 40);
-  quotaPayload = {
-    reports: [{
-      provider: "openai",
-      label: "OpenAI (Codex login)",
-      source: "chatgpt:wham",
-      updatedAt: now,
-      quota: { weeklyPercent: 21, updatedAt: now },
-      aggregation: {
-        kind: "capacity-weighted-v1",
-        scope: "routable-known",
-        presentation: "aggregate",
-        includedAccounts: 1,
-        excludedAccounts: 0,
-        unknownPlanAccounts: 0,
-        missingQuotaAccounts: 0,
-        pausedAccounts: 0,
-        reauthAccounts: 0,
-        staleQuotaAccounts: 0,
-        incomplete: false,
-        weekly: {
-          usedPercent: 21,
-          includedAccounts: 1,
-          excludedAccounts: 0,
-          incomplete: false,
-          updatedAt: now,
-          nextRecoveryAt: singleAccountResetAt,
-          nextRecoveryPercent: 21,
-        },
-        currentAccount: { isMain: true, plan: "plus", quota: { weeklyPercent: 21, weeklyResetAt: singleAccountResetAt, updatedAt: now } },
-      },
-    }],
-  };
-  await mountShell();
-
-  const text = host.textContent ?? "";
-  expect(text).not.toContain("Configured-weight pool estimate");
-  expect(text).not.toContain("Current effective account");
-  expect(text).not.toContain("Next capacity recovery");
-  expect(text).toContain("21% used");
-  expect(host.querySelectorAll(".quota-stacked-row")).toHaveLength(1);
 });

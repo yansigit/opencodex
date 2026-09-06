@@ -13,7 +13,6 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import type { RequestLogContext } from "../../src/server/request-log";
 import type { OcxConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
-import { inMemoryManagementPersistence } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const originalFetch = globalThis.fetch;
@@ -279,7 +278,6 @@ async function shadowApi(config: OcxConfig, method: string, body?: unknown): Pro
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const res = await handleManagementAPI(req, new URL(req.url), config, {
-    ...inMemoryManagementPersistence(config),
     createManagementConvergeCodex: catalogConvergenceFactory(),
   });
   expect(res).not.toBeNull();

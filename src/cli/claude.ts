@@ -30,11 +30,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { aliasForNative, aliasForRoute } from "../claude/alias";
 import { desktop3pAlias } from "../claude/desktop-3p";
-import {
-  CLAUDE_CODE_COMPATIBILITY_FLOOR,
-  probeClaudeClientVersion,
-  type ClaudeClientProbeDeps,
-} from "../claude/client-version";
 
 export interface ClaudeLaunchEnv {
   [key: string]: string | undefined;
@@ -599,50 +594,6 @@ export function rootSkipPermissionsNotice(env: ClaudeLaunchEnv): string {
   return `⚠ Root --dangerously-skip-permissions requested: preserving user IS_SANDBOX=${env.IS_SANDBOX}; Claude Code's root guard remains in control.`;
 }
 
-type ClaudeChild = {
-  on(event: "error", listener: (error: NodeJS.ErrnoException) => void): void;
-  on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): void;
-};
-
-/** Internal launcher seam: diagnostics are advisory; this child remains authoritative. */
-export type ClaudeLaunchDiagnosticDeps = ClaudeClientProbeDeps & {
-  commandInvocation?: typeof commandInvocation;
-  spawnChild?: (file: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => ClaudeChild;
-  platform?: NodeJS.Platform;
-};
-
-export async function launchClaudeWithDiagnostics(
-  args: string[],
-  env: ClaudeLaunchEnv,
-  deps: ClaudeLaunchDiagnosticDeps = {},
-): Promise<number> {
-  const version = probeClaudeClientVersion(deps);
-  if (version.state === "outdated") {
-    console.error(
-      `⚠ Claude Code ${version.version} is below the recommended compatibility floor ${CLAUDE_CODE_COMPATIBILITY_FLOOR}. Upgrade with: npm install -g @anthropic-ai/claude-code`,
-    );
-  }
-  return await new Promise<number>(resolve => {
-    const invocation = (deps.commandInvocation ?? commandInvocation)("claude", args);
-    const child = (deps.spawnChild
-      ? deps.spawnChild(invocation.file, invocation.args, { stdio: "inherit", env: env as NodeJS.ProcessEnv, ...invocation.options })
-      : spawn(invocation.file, invocation.args, { stdio: "inherit", env: env as NodeJS.ProcessEnv, ...invocation.options })) as ClaudeChild;
-    child.on("error", (err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT") {
-        console.error(CLAUDE_INSTALL_HINT);
-      } else {
-        console.error(`❌ Failed to launch claude: ${err.message}`);
-      }
-      resolve(1);
-    });
-    child.on("exit", (code, signal) => {
-      const hint = claudeNotFoundHint(code, signal, deps.platform);
-      if (hint) console.error(hint);
-      resolve(signal ? 1 : code ?? 0);
-    });
-  });
-}
-
 export async function cmdClaude(args: string[]): Promise<number> {
   const config = loadConfig();
   const clientState = readClientConnectionState();
@@ -701,7 +652,7 @@ export async function cmdClaude(args: string[]): Promise<number> {
       console.error(`⚠ Claude agent definitions could not be synced: ${message}`);
     }
   }
-  return launchClaudeWithDiagnostics(args, env);
+  return spawnClaude(args, env);
 }
 
 async function launchNativeClaude(config: OcxConfig, args: string[], notice: string): Promise<number> {
@@ -717,5 +668,25 @@ async function launchNativeClaude(config: OcxConfig, args: string[], notice: str
   const allowRootSkipPermissions = shouldAllowRootSkipPermissions(args);
   const env = buildNativeClaudeEnv(config, process.env, { allowRootSkipPermissions });
   if (allowRootSkipPermissions) console.error(rootSkipPermissionsNotice(env));
-  return launchClaudeWithDiagnostics([...(override.flag ?? []), ...args], env);
+  return spawnClaude([...(override.flag ?? []), ...args], env);
+}
+
+function spawnClaude(args: string[], env: ClaudeLaunchEnv): Promise<number> {
+  return new Promise<number>(resolve => {
+    const inv = commandInvocation("claude", args);
+    const child = spawn(inv.file, inv.args, { stdio: "inherit", env: env as NodeJS.ProcessEnv, ...inv.options });
+    child.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "ENOENT") {
+        console.error(CLAUDE_INSTALL_HINT);
+      } else {
+        console.error(`❌ Failed to launch claude: ${err.message}`);
+      }
+      resolve(1);
+    });
+    child.on("exit", (code, signal) => {
+      const hint = claudeNotFoundHint(code, signal);
+      if (hint) console.error(hint);
+      resolve(signal ? 1 : code ?? 0);
+    });
+  });
 }

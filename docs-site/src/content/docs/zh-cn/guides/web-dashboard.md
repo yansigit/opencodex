@@ -40,7 +40,7 @@ bun run dev:gui
 | **Providers** | 添加、编辑、设为默认（仅已启用）、启用/禁用、删除 provider，并在支持时管理 OAuth 账号池和 API key 池。删除当前默认时，会切换到剩余的第一个已启用 provider（若存在）；否则拒绝删除并保留当前默认。Claude（Anthropic）OAuth 池中，每个已登录账号显示各自的 5 小时与周限额条（用量按凭证计）；探测失败时保留上次已知数值并标记为暂时不可用。 未选中任何 provider 时显示的 Providers 概览带有**刷新全部额度**按钮，会在服务端一次性重新读取所有已配置的 provider；上游探测失败的 provider 会保留上次已知数值，因此状态文案只表示检查已完成，而不声称每个数值都是最新的，各行自身的检查时间仍是该 provider 的新鲜度信号。 |
 | **Add provider** | 搜索 registry preset，选择账号登录、API key 服务、本地服务器或自定义 endpoint。 |
 | **Codex Auth** | 添加 ChatGPT/Codex 池账号，选择下一 session 的账号，刷新 5h / 每周 / 30d 配额，启用或停用配额自动切换，设置其 1–100% 阈值和临时故障 failover。 |
-| **Subagents** | 在 `spawn_agent` override 列表中置顶最多五个原生或路由模型，编辑最多八个具名角色，并配置自定义父级指导和全局子代理说明。 |
+| **Subagents** | 在 `spawn_agent` override 列表中置顶最多五个原生或路由模型。 |
 | **Models** | 开关原生 GPT 与路由模型，配置 provider allowlist、上下文上限、v1/base/v2 以及 v2 thread 数量。 |
 | **Logs** | 自动刷新近期请求，显示 token、请求强度以及（可用时）实际发送强度、实际模型、provider、状态、request id、耗时和错误详情。适配器发送 reasoning 参数时，详情中还会显示准确的 wire field。可按不透明会话/对话 ID（客户端提供时）筛选，并对当前已加载的 Logs 环形缓冲合计 token 与估算标价成本。 |
 | **Usage / Debug** | 查看 token usage 覆盖率与趋势，或启用可选的 provider transport 和 usage 提取诊断。 |
@@ -57,9 +57,7 @@ Logs 可组合界面、被拦截请求、提供商、完整模型名、状态、
 
 ### 链接到某个部分
 
-布局只有一种且会自适应，无需切换。桌面端使用侧边栏进行主要导航；窄屏时点击 **打开菜单** 可展开相同的页面链接。Dashboard 的各个部分都有自己的地址：`#dashboard` 打开 Overview，`#dashboard/providers` 与 `#dashboard/models` 打开另外两个。刷新、收藏和后退都会保留当前所在的部分。**Logs** 同理，使用 `#logs` 与 `#logs/debug`。旧的 `#providers/workspace` 书签现在会跳转到 `#providers`。
-
-Overview 还提供 **30 天活动** 面板，显示 30 天的请求和 token 趋势。点击任一迷你折线图中的某一天即可查看当天总量，点击 **查看用量** 可打开完整的 Usage 页面。Overview 已加载后如果刷新被中断，页面会保留最近一次成功的数据并显示重新连接提示与 **重试**；首次连接失败时则显示 `ocx start` 指引和相同的重试操作。
+布局只有一种，无需切换。Dashboard 的各个部分都有自己的地址：`#dashboard` 打开 Overview，`#dashboard/providers` 与 `#dashboard/models` 打开另外两个。刷新、收藏和后退都会保留当前所在的部分。**Logs** 同理，使用 `#logs` 与 `#logs/debug`。旧的 `#providers/workspace` 书签现在会跳转到 `#providers`。
 
 **Logs** 和 **Usage** 中的费用是根据已报告 token 计算的 API 标价折算值，不是账单，也不能证明
 实际发生了扣费；实际可能计入订阅用量或消耗服务商额度。
@@ -147,7 +145,7 @@ GUI 是代理 JSON 管理 API 之上的轻量客户端。常用 endpoint 包括�
 
 | Endpoint | 用途 |
 | --- | --- |
-| `GET` / `PUT /api/settings` | 读取或更新 Codex 自动启动、流/内存设置、账号定向 picker 的可见性以及服务器监听器设置。监听器和证书更改需要重启代理。 |
+| `GET` / `PUT /api/settings` | 读取设置，或更新 Codex 自动启动、流/内存设置以及账号定向 picker 的可见性。 |
 | `GET /api/startup-health` | 读取不含秘密信息的路由、服务、shim 和重启安全诊断。 |
 | `GET` / `POST /api/windows-tray` | 读取或更改 Windows 托盘安装和显示状态；POST 支持 `install`、`start`、`stop`、`uninstall`。 |
 | `POST /api/sync` | 重建共享模型目录，并把 Codex 模型缓存标记为过期。 |

@@ -10,7 +10,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import {
   clearAccountQuota,
   updateAccountQuota,
@@ -36,10 +35,6 @@ import { resolveCodexAuthContext, type CodexAuthContext } from "../../src/codex/
 import { handleResponses } from "../../src/server/responses";
 import { resetAgentTaskRecoveryState } from "../../src/server/responses/agent-task-recovery";
 import { isEagerRelaySseResponse } from "../../src/server/relay";
-import {
-  setAsyncIcaclsRunnerForTests,
-  setIcaclsRunnerForTests,
-} from "../../src/lib/windows-secret-acl";
 import type { ActiveTurnLease } from "../../src/server/lifecycle";
 import type { OcxConfig } from "../../src/types";
 import type { RequestLogContext } from "../../src/server/request-log";
@@ -58,14 +53,8 @@ const originalNow = Date.now;
 let testDir: string;
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 beforeEach(() => {
-  // This suite exercises response routing, not Windows ACL behavior. Stub both hardening
-  // runners so credential persistence cannot leave a real icacls child holding the scratch
-  // home open while teardown runs.
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testDir = mkdtempSync(join(tmpdir(), "ocx-subagent-hr-"));
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
@@ -82,7 +71,7 @@ beforeEach(() => {
   resetCodexModelEntitlementCacheForTests();
 });
 
-afterEach(async () => {
+afterEach(() => {
   globalThis.fetch = originalFetch;
   Date.now = originalNow;
   clearThreadAccountMap();
@@ -91,16 +80,11 @@ afterEach(async () => {
   resetAgentTaskRecoveryState();
   resetSubagentModelFallbackStateForTests();
   setMainAccountPlan(null);
-  // Own the asynchronous hardening lifecycle instead of asking filesystem retries to outlast
-  // an icacls child. Flush before restoring the home variables or removing their directory.
-  await flushConfigDirHardeningForTests();
-  setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
+  removeTreeWithRetry(testDir);
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
-  removeTreeWithRetry(testDir);
 });
 
 function fernetFixture(ciphertextBytes = 16): string {
@@ -2168,10 +2152,10 @@ describe("native passthrough terminal finalization", () => {
       expect(result.healthBlocked).toBe(true);
     });
 
-    test(`${streamMode}: client invalid request failure invokes terminal callback without health block`, async () => {
+    test(`${streamMode}: generic 500 failure invokes terminal callback without health block`, async () => {
       const result = await runStreamingSpawn(
         streamMode,
-        failedSse("invalid request: missing field", "invalid_request_error"),
+        failedSse("internal server error", "server_error"),
       );
       expect(result.terminals).toEqual(["failed"]);
       expect(result.healthBlocked).toBe(false);

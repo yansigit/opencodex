@@ -26,19 +26,14 @@ import {
   rotateAnthropicAccountOn429,
 } from "../../src/oauth/anthropic-routing";
 import { getAccountSet, markAccountNeedsReauth, removeAccount, saveCredential } from "../../src/oauth/store";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const originalHome = process.env.OPENCODEX_HOME;
 let home: string;
 let readSpy: ReturnType<typeof spyOn> | undefined;
 let authReadsBefore = 0;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 beforeEach(() => {
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   home = mkdtempSync(join(tmpdir(), "ocx-quorum-cache-"));
   process.env.OPENCODEX_HOME = home;
   // Pass-through spy (no mockImplementation): records calls, the real read still happens.
@@ -47,20 +42,14 @@ beforeEach(() => {
   forgetAnthropicFailoverQuorum();
 });
 
-afterEach(async () => {
-  try {
-    clearAnthropicAccountPoolState();
-    forgetAnthropicFailoverQuorum();
-    await flushConfigDirHardeningForTests();
-  } finally {
-    readSpy?.mockRestore();
-    readSpy = undefined;
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = originalHome;
-    removeTreeWithRetry(home);
-  }
+afterEach(() => {
+  readSpy?.mockRestore();
+  readSpy = undefined;
+  clearAnthropicAccountPoolState();
+  forgetAnthropicFailoverQuorum();
+  if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = originalHome;
+  removeTreeWithRetry(home);
 });
 
 async function seed(count: number, offset = 0): Promise<string[]> {

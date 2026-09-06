@@ -56,18 +56,12 @@ import { classifyCursorError, CursorUnexpectedCancelError, isCursorAbortError, i
 import { mcpArgsFromToolCall } from "./protobuf-events";
 import { OCX_RESPONSES_TOOL_PROVIDER } from "./tool-definitions";
 import {
-  cursorUnsafeNativeLocalExecEnabled,
   handleCursorNativeExec,
   handleCursorNativeKv,
   releaseCursorBlobRequestScope,
   type CursorBlobRequestScopeToken,
   type CursorNativeExecContext,
 } from "./native-exec";
-import {
-  advertisedBareCodexShellBridgeName,
-  nativeExecBridgeToMcpExec,
-  planNativeExecBridge,
-} from "./native-exec-bridge";
 import { effectiveCursorNativeExecAllow } from "./exec-policy";
 import { resolveMcpServers } from "./mcp-config";
 import { CursorMcpManager } from "./mcp-manager";
@@ -76,7 +70,6 @@ import { desktopDepsFromConfig } from "./native-exec-desktop";
 import {
   buildCursorToolDefinitions,
   cursorRequestAdvertisesApplyPatch,
-  cursorRequestUsesCodeMode,
   cursorRequestHasShellAlias,
   cursorToolArgNormalizeSchema,
   cursorToolWireName,
@@ -94,9 +87,9 @@ import type { CursorClientMessage, CursorRunRequest, CursorServerMessage } from 
 import type { CursorTransport, CursorTransportFactoryInput } from "./transport";
 import { CursorHttp1BidiConnection } from "./http1-bidi";
 import { isPinnedHttp1 } from "../../lib/upstream-http-version";
-import { CURSOR_VERIFIED_CLIENT_VERSION } from "./protocol-profile";
 
 const CURSOR_RUN_PATH = "/agent.v1.AgentService/Run";
+const CURSOR_CLIENT_VERSION = "cli-2026.07.08-0c04a8a";
 const HEARTBEAT_MS = 5_000;
 const CURSOR_FIRST_FRAME_TIMEOUT_MS = 30_000;
 /**
@@ -110,7 +103,7 @@ const CURSOR_STREAM_SILENCE_FAIL_MS = 30_000;
  * for this long is equally stuck — the server is alive but the turn is not progressing.
  * Reset on every decoded frame that is not liveness-only.
  */
-const CURSOR_STREAM_HEARTBEAT_ONLY_FAIL_MS = 180_000;
+const CURSOR_STREAM_HEARTBEAT_ONLY_FAIL_MS = 90_000;
 /**
  * After `turnEnded` is decoded, the application turn is complete. A server that keeps
  * HTTP/2 open past this point cannot hold the turn hostage (senpi #1062): we close our side
@@ -122,18 +115,7 @@ const CLIENT_TOOL_FINALIZE_GRACE_MS = 50;
 const GENERIC_TOOL_COUNT_MIN_FINALIZE_GRACE_MS = 750;
 const GENERIC_TOOL_COUNT_MAX_FINALIZE_GRACE_MS = 1_800;
 const GENERIC_TOOL_COUNT_PER_TOOL_GRACE_MS = 125;
-const cursorContextUsageTracker = createCursorContextUsageTracker({
-  onContextDrop(previousTokens, currentTokens) {
-    const droppedTokens = previousTokens - currentTokens;
-    if (droppedTokens >= 1_024 && currentTokens <= previousTokens * 0.9) {
-      debugProviderDiagnostic("cursor", "context-compacted", {
-        previousTokens,
-        currentTokens,
-        droppedTokens,
-      });
-    }
-  },
-});
+const cursorContextUsageTracker = createCursorContextUsageTracker();
 
 /**
  * Single-shot terminal settlement for one Cursor turn: whichever of fail/finish wins first owns
@@ -677,8 +659,6 @@ class LiveCursorTransport implements CursorTransport {
     this.execContext = {
       ...this.execContext,
       clientToolDefs,
-      cursorSystem: activeRequest.system,
-      codeMode: cursorRequestUsesCodeMode(request.tools, request.toolChoice),
       rejectNativeFileMutations: cursorRequestAdvertisesApplyPatch(request.tools, request.toolChoice),
       structuredEditAvailable: syntheticStructuredEditToolNames.size > 0,
     };
@@ -1085,7 +1065,7 @@ class LiveCursorTransport implements CursorTransport {
         te: "trailers",
         authorization: `Bearer ${this.token}`,
         "x-ghost-mode": "true",
-        "x-cursor-client-version": CURSOR_VERIFIED_CLIENT_VERSION,
+        "x-cursor-client-version": CURSOR_CLIENT_VERSION,
         "x-cursor-client-type": "cli",
         "x-request-id": requestId,
         "x-session-id": this.sessionId,
@@ -1220,7 +1200,6 @@ class LiveCursorTransport implements CursorTransport {
           && (
             state.openToolCalls.size > 0
             || this.sawAssistantText
-            || !!state.textToolCallBuffer
             || hasPendingClientToolFinalization
           )
         ) {
@@ -1388,7 +1367,7 @@ class LiveCursorTransport implements CursorTransport {
           settler.settleFinish();
           return;
         }
-        if (this.framesReceived > 0 && (this.sawAssistantText || state.textToolCallBuffer)) {
+        if (this.framesReceived > 0 && this.sawAssistantText) {
           for (const event of finalizeTurnEvents(state)) push(event);
           releaseBacklogLease();
           settler.settleFinish();
@@ -1407,7 +1386,7 @@ class LiveCursorTransport implements CursorTransport {
       this.http1Connection = new CursorHttp1BidiConnection({
         baseUrl,
         token: this.token,
-        clientVersion: CURSOR_VERIFIED_CLIENT_VERSION,
+        clientVersion: CURSOR_CLIENT_VERSION,
         sessionId: this.sessionId,
         requestId,
         translatorBudget: this.translatorBudget,
@@ -1488,21 +1467,6 @@ class LiveCursorTransport implements CursorTransport {
           return;
         }
       }
-      const advertisedShellBridgeName = advertisedBareCodexShellBridgeName(state.clientToolNames ?? []);
-      const nativePlan = planNativeExecBridge(execMsg, {
-        nativeLocalExecEnabled: cursorUnsafeNativeLocalExecEnabled(this.execContext),
-        advertisedShellBridgeName,
-      });
-      if (nativePlan.bridge) {
-        const plan = planMcpArgsHandling(nativeExecBridgeToMcpExec(execMsg, nativePlan), state);
-        if (plan.handledByResponsesBridge) {
-          this.noteClientToolActivity();
-          for (const event of plan.events) push(event);
-          if (plan.cancelCursorRun) this.cancelCursorRun();
-          else if (plan.finalizeWhenDrained) this.scheduleClientToolFinalize(state, push);
-          return;
-        }
-      }
       // Native exec/MCP is handled inside this transport and can mutate files/process state
       // without emitting a Responses tool event. Mark the turn replay-unsafe before executing so
       // an eventual invalid_argument cannot cause the adapter's fresh-conversation fallback to
@@ -1543,7 +1507,7 @@ class LiveCursorTransport implements CursorTransport {
     const awaitedNativeArgsBeforeMapping = update?.case === "toolCallCompleted"
       && state.openToolCalls.get(update.value.callId)?.awaitingNativeArgs === true;
     const mapped = mapCursorProtobufServerMessage(message, state);
-    if (mapped.some(event => event.type === "text" || event.type === "thinking" || event.type === "tool_call_start" || event.type === "tool_call_end")) this.sawAssistantText = true;
+    if (mapped.some(event => event.type === "text")) this.sawAssistantText = true;
     const beganAwaitingNativeClientToolArgs = update?.case === "toolCallCompleted"
       && !awaitedNativeArgsBeforeMapping
       && state.openToolCalls.get(update.value.callId)?.awaitingNativeArgs === true;

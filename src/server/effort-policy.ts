@@ -17,43 +17,6 @@ import { modelInList } from "../types";
 import { codexEffortRank, configuredReasoningEfforts, isCodexReasoningEffort, modelRecordValue } from "../reasoning-effort";
 import { catalogModelEfforts } from "../codex/catalog";
 
-export type AgentKind = "main" | "subagent" | "internal";
-
-type MarkerValue = { value: string; valid: boolean } | undefined;
-
-function turnMetadataMarker(headers: Headers): MarkerValue {
-  const raw = headers.get("x-codex-turn-metadata");
-  if (raw === null) return undefined;
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { value: "", valid: false };
-    const metadata = parsed as Record<string, unknown>;
-    if (!("subagent_kind" in metadata)) return undefined;
-    const value = metadata.subagent_kind;
-    if (typeof value !== "string" || value.trim().length === 0) return { value: "", valid: false };
-    return { value, valid: true };
-  } catch {
-    return { value: "", valid: false };
-  }
-}
-
-/** Classify Responses-origin headers without retaining any marker values. */
-export function classifyAgentKind(headers: Headers, traffic?: "responses"): AgentKind | undefined {
-  const headerRaw = headers.get("x-openai-subagent");
-  const headerMarker: MarkerValue = headerRaw === null
-    ? undefined
-    : { value: headerRaw, valid: headerRaw.length > 0 };
-  const metadataMarker = turnMetadataMarker(headers);
-
-  // A genuine spawn marker is authoritative even when a sibling marker is stale or malformed.
-  if (headerMarker?.value === "collab_spawn" || metadataMarker?.value === "thread_spawn") return "subagent";
-  const present = [headerMarker, metadataMarker].filter((marker): marker is NonNullable<MarkerValue> => marker !== undefined);
-  if (present.some(marker => !marker.valid)) return undefined;
-  if (present.length > 1 && present[0].value !== present[1].value) return undefined;
-  if (present.length > 0) return "internal";
-  return traffic === "responses" ? "main" : undefined;
-}
-
 /**
  * True when the request carries codex-rs's spawned-child markers, matched EXACTLY.
  * Source of truth (openai/codex @ 6138909d): every collab-spawned child turn sends
@@ -67,8 +30,16 @@ export function classifyAgentKind(headers: Headers, traffic?: "responses"): Agen
  * sources — responses_metadata.rs subagent_source). Those are maintenance turns,
  * not spawned children, and must never trip subagentEffortCap.
  */
-export function isThreadSpawnRequest(headers: Headers, agentKind?: AgentKind): boolean {
-  return (agentKind ?? classifyAgentKind(headers)) === "subagent";
+export function isThreadSpawnRequest(headers: Headers): boolean {
+  if (headers.get("x-openai-subagent") === "collab_spawn") return true;
+  const turnMeta = headers.get("x-codex-turn-metadata");
+  if (!turnMeta) return false;
+  try {
+    const parsed = JSON.parse(turnMeta) as { subagent_kind?: unknown };
+    return parsed.subagent_kind === "thread_spawn";
+  } catch {
+    return false;
+  }
 }
 
 /** The effective ceiling for this turn, or undefined when no configured cap applies. */
@@ -102,11 +73,10 @@ export function effortCapAppliesTo(
   headers: Headers,
   config: OcxConfig,
   compaction = false,
-  agentKind?: AgentKind,
 ): boolean {
   if (compaction) return false;
   if (config.multiAgentMode === "v1") return false;
-  return surface === "v2" || isThreadSpawnRequest(headers, agentKind);
+  return surface === "v2" || isThreadSpawnRequest(headers);
 }
 
 /**
@@ -144,22 +114,6 @@ export function stripEmptyLadderEffort(
   const next = { ...(reasoning as Record<string, unknown>) };
   delete next.effort;
   return Object.keys(next).length > 0 ? next : undefined;
-}
-
-/**
- * Strip reasoning effort from parsed options and _rawBody when the routed model
- * has an empty supported ladder (effortless models like Composer 2.5).
- */
-export function sanitizeEffortForModel(
-  parsed: OcxParsedRequest,
-  ladder: readonly string[] | undefined,
-): void {
-  if (ladder === undefined || ladder.length > 0) return;
-  parsed.options.reasoning = undefined;
-  const raw = parsed._rawBody as { reasoning?: unknown } | undefined;
-  if (!raw || typeof raw !== "object" || !("reasoning" in raw)) return;
-  raw.reasoning = stripEmptyLadderEffort(raw.reasoning, ladder);
-  if (raw.reasoning === undefined) delete raw.reasoning;
 }
 
 export function supportedLadderFor(route: { provider: OcxProviderConfig; modelId: string }): string[] | undefined {
@@ -215,9 +169,8 @@ export function applyEffortCap(
   headers: Headers,
   config: OcxConfig,
   supported?: readonly string[] | undefined,
-  agentKind?: AgentKind,
 ): { from: string; to: string; subagent: boolean } | null {
-  const subagent = isThreadSpawnRequest(headers, agentKind);
+  const subagent = isThreadSpawnRequest(headers);
   const cap = effortCapFor(config, subagent);
   if (!cap) return null;
   const resolved = resolveCappedEffort(cap, supported);

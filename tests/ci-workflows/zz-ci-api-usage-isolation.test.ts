@@ -21,16 +21,15 @@ test("Linux shards isolate api-usage into its own gated job", async () => {
   };
 
   const shardRun = workflow.jobs?.test?.steps?.find(
-    step => step.name === "Test in fresh-process timing-aware batches",
+    step => step.name === "Test in fresh-process batches",
   )?.run ?? "";
   expect(shardRun).toContain("scripts/ci/run-bun-test-batches.sh");
 
   const batchHelper = await Bun.file(
     new URL("../../scripts/ci/run-bun-test-batches.sh", import.meta.url),
   ).text();
-  expect(batchHelper).toContain("scripts/ci/test-lanes.ts --lane general");
-  expect(batchHelper).toContain("scripts/test.ts --isolate");
-  expect(batchHelper).not.toContain("is_general_test_file");
+  // Basename-anchored so the exclusion follows the file into tests/usage/.
+  expect(batchHelper).toContain("*/api-usage.test.ts)");
 
   const apiUsageJob = workflow.jobs?.["api-usage"];
   expect(apiUsageJob?.["runs-on"]).toBe("ubuntu-latest");
@@ -39,9 +38,7 @@ test("Linux shards isolate api-usage into its own gated job", async () => {
   const apiUsageRun = apiUsageJob?.steps?.find(
     step => step.name === "Test api usage API",
   )?.run ?? "";
-  expect(apiUsageRun).toContain("scripts/ci/test-lanes.ts --lane dedicated-api");
-  expect(apiUsageRun).toContain("bun scripts/test.ts --isolate");
-  expect(apiUsageRun).not.toContain("--timings");
+  expect(apiUsageRun).toBe("bun test --isolate ./tests/server/api-usage.test.ts");
   expect(apiUsageRun).not.toContain("--shard");
 
   expect(workflow.jobs?.ci?.needs).toContain("api-usage");

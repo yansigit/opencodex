@@ -1,14 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import {
   getConfigPath,
-  initializePersistedConfigIfMissing,
   loadConfig,
   mutatePersistedConfig,
-  setPersistedConfigMutationBeforeCommitForTests,
+  saveConfig,
 } from "../../src/config";
 import {
   clearKeyCooldowns,
@@ -43,7 +42,7 @@ function makeConfig(provider: Partial<OcxProviderConfig>): OcxConfig {
       } as OcxProviderConfig,
     },
   } as OcxConfig;
-  initializePersistedConfigIfMissing(config);
+  saveConfig(config);
   return config;
 }
 
@@ -62,9 +61,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  setPersistedConfigMutationBeforeCommitForTests(null);
-  delete process.env.POOL_KEY_ONE;
-  delete process.env.POOL_KEY_TWO;
   delete process.env.OPENCODEX_HOME;
   removeTreeWithRetry(home);
   clearKeyCooldowns();
@@ -88,12 +84,6 @@ describe("hasKeyPoolFailover", () => {
     expect(hasKeyPoolFailover({ adapter: "openai-chat", baseUrl: "x" } as OcxProviderConfig)).toBe(false);
     expect(hasKeyPoolFailover({ adapter: "anthropic", baseUrl: "x", authMode: "oauth", apiKeyPool: pool3() } as OcxProviderConfig)).toBe(false);
     expect(hasKeyPoolFailover({ adapter: "openai-responses", baseUrl: "x", authMode: "forward", apiKeyPool: pool3() } as OcxProviderConfig)).toBe(false);
-    expect(hasKeyPoolFailover({
-      adapter: "azure-openai",
-      baseUrl: "https://resource.openai.azure.com/openai",
-      azureCredential: { type: "default-azure-credential" },
-      apiKeyPool: pool3(),
-    } as OcxProviderConfig)).toBe(false);
   });
 });
 
@@ -204,13 +194,6 @@ describe("rotateKeyOn429", () => {
     const single = makeConfig({ apiKey: "key-alpha-000111222333", apiKeyPool: [pool3()![0]] });
     expect(rotateKeyOn429(single, "p", null)).toBeNull();
     expect(rotateKeyOn429(makeConfig({}), "missing", null)).toBeNull();
-    const identity = makeConfig({
-      adapter: "azure-openai",
-      baseUrl: "https://resource.openai.azure.com/openai",
-      azureCredential: { type: "default-azure-credential" },
-      apiKeyPool: pool3(),
-    });
-    expect(rotateKeyOn429(identity, "p", null)).toBeNull();
   });
 
   test("unavailable persistence does not publish a tentative cooldown", () => {
@@ -247,28 +230,6 @@ describe("rotateKeyOn429", () => {
     expect(getKeyCooldownUntil("p", "k1", now)).not.toBeNull();
     // A REAL beta failure afterwards still rotates to gamma.
     expect(rotateKeyOn429(config, "p", null, now, "key-beta-444555666777")?.apiKey).toBe("key-gamma-888999000111");
-  });
-
-  test("a lost active-key race adopts the committed provider row without rotating again", () => {
-    const config = makeConfig({
-      apiKey: "key-alpha-000111222333",
-      apiKeyPool: pool3(),
-      note: "stale row",
-    });
-    const winner = structuredClone(config);
-    winner.providers.p.apiKey = "key-gamma-888999000111";
-    winner.providers.p.note = "concurrent winner";
-    winner.providers.p.baseUrl = "https://winner.example.com/v1";
-    setPersistedConfigMutationBeforeCommitForTests(() => {
-      writeFileSync(getConfigPath(), `${JSON.stringify(winner, null, 2)}\n`);
-    });
-
-    const rotated = rotateKeyOn429(config, "p", null, 1_000_000);
-    const disk = (JSON.parse(readFileSync(getConfigPath(), "utf8")) as OcxConfig).providers.p;
-    expect(rotated).toEqual(disk);
-    expect(config.providers.p).toEqual(disk);
-    expect(rotated?.apiKey).toBe("key-gamma-888999000111");
-    expect(rotated?.note).toBe("concurrent winner");
   });
 
   test("two stale handlers adopt one committed rotation without rotating twice", () => {
@@ -376,9 +337,9 @@ describe("rotateProviderTransportOn429", () => {
     expect(retryBody.prompt_cache_key).toBe(promptCacheKey);
   });
 
-  test("inherits routed-only backfills while persisted fields stay authoritative", () => {
-    // Rotation must keep fields absent from the persisted snapshot while honoring fields
-    // that are present there; registered providers are canonicalized by routedProviderConfig.
+  test("drops stale routed configuration while persisted fields stay authoritative", () => {
+    // Request-time configuration cannot revive fields absent from the committed snapshot.
+    // Registry providers still receive their canonical backfills from routedProviderConfig.
     const config = makeConfig({ apiKey: "key-alpha-000111222333", apiKeyPool: pool3() });
     const routedProvider = {
       ...config.providers.p,
@@ -396,10 +357,10 @@ describe("rotateProviderTransportOn429", () => {
 
     expect(rotated?.apiKey).toBe("key-beta-444555666777");
     expect(rotated?.baseUrl).toBe("https://api.example.com/v1");
-    expect(rotated?.promptCacheKey).toBe(true);
-    expect(rotated?.parallelToolCalls).toBe(false);
-    expect(rotated?.modelContextWindows).toEqual({ "some-model": 262_144 });
-    expect(rotated?.noTemperatureModels).toEqual(["some-model"]);
+    expect(rotated?.promptCacheKey).toBeUndefined();
+    expect(rotated?.parallelToolCalls).toBeUndefined();
+    expect(rotated?.modelContextWindows).toBeUndefined();
+    expect(rotated?.noTemperatureModels).toBeUndefined();
     // The pool swap still lands in the persisted config.
     expect(config.providers.p.apiKey).toBe("key-beta-444555666777");
     expect(config.providers.p.promptCacheKey).toBeUndefined();
@@ -486,30 +447,6 @@ describe("rotateKeyOn401", () => {
     const routed = { ...config.providers.p } as Parameters<typeof rotateProviderTransportOn401>[2];
     const rotated = rotateProviderTransportOn401(config, "p", routed, { now });
     expect(rotated?.apiKey).toBe("key-beta-444555666777");
-    expect(getKeyCooldownUntil("p", "k1", now)).toBe(now + 10 * 60_000);
-  });
-
-  test("rotateProviderTransportOn401 identifies and cools an env-backed rejected key", () => {
-    process.env.POOL_KEY_ONE = "key-alpha-000111222333";
-    process.env.POOL_KEY_TWO = "key-beta-444555666777";
-    const config = makeConfig({
-      apiKey: "${POOL_KEY_ONE}",
-      apiKeyPool: [
-        { id: "k1", key: "${POOL_KEY_ONE}", addedAt: 1 },
-        { id: "k2", key: "${POOL_KEY_TWO}", addedAt: 2 },
-      ],
-    });
-    const now = 1_000_000;
-    const routed = routeModel(config, "p/model").provider;
-
-    const rotated = rotateProviderTransportOn401(config, "p", routed, {
-      now,
-      attemptedKey: routed.apiKey,
-    });
-
-    expect(routed.apiKey).toBe("key-alpha-000111222333");
-    expect(rotated?.apiKey).toBe("key-beta-444555666777");
-    expect(config.providers.p.apiKey).toBe("${POOL_KEY_TWO}");
     expect(getKeyCooldownUntil("p", "k1", now)).toBe(now + 10 * 60_000);
   });
 });

@@ -1,18 +1,7 @@
 import type { AdapterFetchContext, AdapterRequest } from "./base";
-import {
-  isAntigravityGeoBlockedBody,
-  isQuotaExhaustedBody,
-  retryableGoogleStatus,
-  safeGoogleHttpErrorMessage,
-} from "./google-errors";
-import { isGoogleMixedBuiltinToolError, repairGoogleInvalidRequestBody, stripGoogleBuiltinToolsFromWireBody } from "./google-wire-compiler";
+import { isQuotaExhaustedBody, retryableGoogleStatus, safeGoogleHttpErrorMessage } from "./google-errors";
+import { repairGoogleInvalidRequestBody } from "./google-wire-compiler";
 import { normalizeUpstreamHttpErrorResponse, readDisplaySafeErrorPayloadText } from "./upstream-http-error";
-import { recordAntigravityCooldown, recordAntigravitySyntheticFailure } from "../oauth/antigravity-routing";
-import {
-  antigravityHostCandidates,
-  canonicalAntigravityHttpsHost,
-  isAntigravityHttpsHost,
-} from "./google-antigravity-hosts";
 import {
   abortError,
   cancelResponseBodyBestEffort,
@@ -24,265 +13,10 @@ import {
 const GOOGLE_RETRY_ATTEMPTS = 3;
 const GOOGLE_RETRY_BASE_MS = 250;
 const GOOGLE_RETRY_MAX_MS = 2_000;
-export const CCA_STREAM_CLASSIFY_MAX_BYTES = 256 * 1024;
-export const CCA_STREAM_PROBE_MAX_BYTES = CCA_STREAM_CLASSIFY_MAX_BYTES;
-
-function isAntigravitySseRequest(request: AdapterRequest): boolean {
-  return request.url.includes("/v1internal:streamGenerateContent?alt=sse");
-}
-
-function requestForHost(request: AdapterRequest, host: string): AdapterRequest {
-  const current = new URL(request.url);
-  const target = new URL(host);
-  target.pathname = current.pathname;
-  target.search = current.search;
-  return { ...request, url: target.toString() };
-}
-
-type CcaSseProbe = "empty" | "candidate" | "unavailable" | "quota_exhausted" | "rate_limit" | "geo_blocked" | "terminal";
-
-function probeCcaSseEvent(bytes: Uint8Array): CcaSseProbe {
-  const text = new TextDecoder().decode(bytes);
-  for (const line of text.split(/\r?\n/)) {
-    if (!line.startsWith("data:")) continue;
-    const payload = line.slice(5).trim();
-    if (!payload) continue;
-    let frame: unknown;
-    try {
-      frame = JSON.parse(payload);
-    } catch {
-      return "terminal";
-    }
-    if (!frame || typeof frame !== "object" || Array.isArray(frame)) return "terminal";
-    const record = frame as Record<string, unknown>;
-    if (record.error) {
-      const error = record.error;
-      const errorRecord = error && typeof error === "object" && !Array.isArray(error)
-        ? error as Record<string, unknown>
-        : {};
-      const status = String(errorRecord.status ?? "").toUpperCase();
-      const code = errorRecord.code;
-      if (status === "UNAVAILABLE" || status === "503" || code === 503 || code === "503") {
-        return "unavailable";
-      }
-      const serialized = JSON.stringify(frame);
-      if (isQuotaExhaustedBody(serialized)) return "quota_exhausted";
-      if (errorRecord.code === 429 || status === "RESOURCE_EXHAUSTED") return "rate_limit";
-      if (/rate[- ]limit|too many requests|per[- ]minute|requests per minute|concurrent request/i.test(serialized)) return "rate_limit";
-      if (isAntigravityGeoBlockedBody(serialized)) return "geo_blocked";
-      return "terminal";
-    }
-    const response = record.response;
-    if (!response || typeof response !== "object" || Array.isArray(response)) return "terminal";
-    const root = response as Record<string, unknown>;
-    if (Array.isArray(root.candidates) && root.candidates.length > 0) return "candidate";
-  }
-  return "empty";
-}
-
-export class CcaProbeBuffer {
-  private storage: Uint8Array;
-  length = 0;
-
-  constructor(private readonly maxBytes = CCA_STREAM_PROBE_MAX_BYTES) {
-    this.storage = new Uint8Array(Math.min(64 * 1024, maxBytes));
-  }
-
-  append(next: Uint8Array): boolean {
-    if (next.byteLength === 0) return true;
-    const required = this.length + next.byteLength;
-    if (required > this.maxBytes) return false;
-    if (required > this.storage.byteLength) {
-      let capacity = Math.max(this.storage.byteLength, 1);
-      while (capacity < required) {
-        const grownCapacity = Math.min(this.maxBytes, capacity * 2);
-        capacity = grownCapacity <= capacity ? this.maxBytes : grownCapacity;
-      }
-      const grown = new Uint8Array(capacity);
-      grown.set(this.storage.subarray(0, this.length));
-      this.storage = grown;
-    }
-    this.storage.set(next, this.length);
-    this.length = required;
-    return true;
-  }
-
-  view(): Uint8Array {
-    return this.storage.subarray(0, this.length);
-  }
-}
-
-function firstSseEventEnd(bytes: Uint8Array, from: number): number | undefined {
-  for (let index = from; index + 1 < bytes.byteLength; index++) {
-    if (bytes[index] === 10 && bytes[index + 1] === 10) return index + 2;
-    if (index + 3 < bytes.byteLength
-      && bytes[index] === 13 && bytes[index + 1] === 10
-      && bytes[index + 2] === 13 && bytes[index + 3] === 10) {
-      return index + 4;
-    }
-  }
-  return undefined;
-}
-
-function responseWithBufferedBody(
-  response: Response,
-  buffered: Uint8Array,
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  pending?: Uint8Array,
-  status = response.status,
-): Response {
-  let bufferedBody = buffered;
-  let pendingBody = pending;
-  let readerReleased = false;
-  const releaseReader = () => {
-    if (readerReleased) return;
-    readerReleased = true;
-    reader.releaseLock();
-  };
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        if (bufferedBody.byteLength > 0 || pendingBody?.byteLength) {
-          if (bufferedBody.byteLength > 0) {
-            controller.enqueue(bufferedBody);
-            bufferedBody = new Uint8Array();
-          }
-          if (pendingBody?.byteLength) {
-            controller.enqueue(pendingBody);
-            pendingBody = undefined;
-          }
-          return;
-        }
-
-        const { done, value } = await reader.read();
-        if (done) {
-          controller.close();
-          releaseReader();
-          return;
-        }
-        if (value?.byteLength) controller.enqueue(value);
-      } catch (error) {
-        controller.error(error);
-        releaseReader();
-      }
-    },
-    cancel(reason) {
-      void reader.cancel(reason).catch(() => {}).finally(releaseReader);
-    },
-  });
-  return new Response(body, {
-    status,
-    statusText: response.statusText,
-    headers: response.headers,
-  });
-}
-
-async function prepareCcaSseResponse(
-  response: Response,
-  fetchPeer: (() => Promise<Response>) | undefined,
-  accountId?: string,
-): Promise<Response> {
-  if (!response.body) return fetchPeer ? fetchPeer() : response;
-  const reader = response.body.getReader();
-  const probeBuffer = new CcaProbeBuffer();
-  let scanned = 0;
-  const passthrough = (pending?: Uint8Array, status = response.status) =>
-    responseWithBufferedBody(response, probeBuffer.view(), reader, pending, status);
-  const failoverOrPassthrough = async (): Promise<Response> => {
-    if (!fetchPeer) return passthrough();
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-    return fetchPeer();
-  };
-  try {
-    while (probeBuffer.length < CCA_STREAM_CLASSIFY_MAX_BYTES) {
-      if (scanned >= CCA_STREAM_CLASSIFY_MAX_BYTES || probeBuffer.length >= CCA_STREAM_CLASSIFY_MAX_BYTES) {
-        return passthrough();
-      }
-      const { done, value } = await reader.read();
-      if (done) {
-        const buffered = probeBuffer.view();
-        const residual = buffered.subarray(scanned);
-        if (residual.byteLength > 0) {
-          const probe = probeCcaSseEvent(residual);
-          if (probe === "candidate" || probe === "terminal") {
-            return passthrough();
-          }
-          if (probe === "unavailable") {
-            return failoverOrPassthrough();
-          }
-          if (probe === "quota_exhausted" || probe === "rate_limit" || probe === "geo_blocked") {
-            if (accountId) {
-              recordAntigravitySyntheticFailure(accountId, {
-                code: probe === "geo_blocked" ? 403 : 429,
-                status: probe === "geo_blocked" ? "PERMISSION_DENIED" : "RESOURCE_EXHAUSTED",
-                message: probe === "quota_exhausted" ? "quota exceeded" : probe === "rate_limit" ? "rate limit exceeded" : "user location is not supported",
-              });
-            }
-            const status = probe === "geo_blocked" ? 403 : 429;
-            return passthrough(undefined, status);
-          }
-        }
-        return failoverOrPassthrough();
-      }
-      if (!value?.byteLength) continue;
-      const classifyRemaining = CCA_STREAM_CLASSIFY_MAX_BYTES - probeBuffer.length;
-      const copyBytes = Math.min(value.byteLength, classifyRemaining);
-      const overflow = value.byteLength > copyBytes ? value.subarray(copyBytes) : undefined;
-      if (copyBytes > 0) {
-        probeBuffer.append(value.subarray(0, copyBytes));
-      }
-      const buffered = probeBuffer.view();
-      while (true) {
-        if (scanned >= CCA_STREAM_CLASSIFY_MAX_BYTES) return passthrough(overflow);
-        const eventEnd = firstSseEventEnd(buffered, scanned);
-        if (eventEnd === undefined) break;
-        const probe = probeCcaSseEvent(buffered.subarray(scanned, eventEnd));
-        scanned = eventEnd;
-        if (probe === "candidate") return passthrough(overflow);
-        if (probe === "unavailable") {
-          if (overflow?.byteLength) {
-            return passthrough(overflow);
-          }
-          return failoverOrPassthrough();
-        }
-        if (probe === "quota_exhausted" || probe === "rate_limit" || probe === "geo_blocked") {
-          if (accountId) {
-            recordAntigravitySyntheticFailure(accountId, {
-              code: probe === "geo_blocked" ? 403 : 429,
-              status: probe === "geo_blocked" ? "PERMISSION_DENIED" : "RESOURCE_EXHAUSTED",
-              message: probe === "quota_exhausted" ? "quota exceeded" : probe === "rate_limit" ? "rate limit exceeded" : "user location is not supported",
-            });
-          }
-          const status = probe === "geo_blocked" ? 403 : 429;
-          return passthrough(overflow, status);
-        }
-        if (probe === "terminal") return passthrough(overflow);
-      }
-      if (overflow?.byteLength) return passthrough(overflow);
-      if (scanned >= CCA_STREAM_CLASSIFY_MAX_BYTES || probeBuffer.length >= CCA_STREAM_CLASSIFY_MAX_BYTES) {
-        return passthrough();
-      }
-    }
-    return passthrough();
-  } catch (error) {
-    try { await reader.cancel(error); } catch { /* cleanup only */ }
-    reader.releaseLock();
-    throw error;
-  }
-}
-
-function isUnavailableResponse(response: Response): boolean {
-  return response.status === 503;
-}
 
 export interface GoogleRetryOptions {
   /** Repair-and-replay structurally invalid 400 bodies (Vertex/Antigravity behavior). */
   repairInvalid400?: boolean;
-  /** Let the Responses layer own Antigravity's single same-account 429 replay. */
-  retry429?: boolean;
-  replayTransientFailures?: boolean;
-  replayBudget?: { remaining: number };
 }
 
 async function normalizeFinalGoogleError(label: string, res: Response, signal?: AbortSignal): Promise<Response> {
@@ -292,40 +26,6 @@ async function normalizeFinalGoogleError(label: string, res: Response, signal?: 
   });
 }
 
-function retryAfterMs(value: string | null, now = Date.now()): number | undefined {
-  const text = value?.trim();
-  if (!text) return undefined;
-  if (/^\d+(?:\.\d+)?$/.test(text)) {
-    const seconds = Number(text);
-    return Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds * 1000) : undefined;
-  }
-  const timestamp = Date.parse(text);
-  return Number.isFinite(timestamp) && timestamp > now ? timestamp - now : undefined;
-}
-
-async function recordAntigravityHttpCooldown(
-  response: Response,
-  accountId: string | undefined,
-): Promise<boolean> {
-  if (!accountId || (response.status !== 429 && response.status !== 403)) return false;
-  const payloadText = await readDisplaySafeErrorPayloadText(response.clone());
-  if (response.status === 429) {
-    recordAntigravityCooldown(
-      accountId,
-      response.headers.get("retry-after"),
-      Date.now(),
-      isQuotaExhaustedBody(payloadText) ? "quota" : "rate-limit",
-      "synthetic",
-    );
-    return true;
-  }
-  if (response.status === 403 || isAntigravityGeoBlockedBody(payloadText)) {
-    recordAntigravityCooldown(accountId, response.headers.get("retry-after"), Date.now(), "geoblock", "synthetic");
-    return true;
-  }
-  return false;
-}
-
 /**
  * Fetch a Google-family upstream with Kiro-style hardening: per-attempt timeout
  * (`AbortSignal.any([parent, timeout])`), bounded retry on transient status / network errors,
@@ -333,40 +33,19 @@ async function recordAntigravityHttpCooldown(
  * classified + redacted final error body. `label` is the provider-facing prefix used in error
  * messages.
  */
-async function fetchGoogleWithRetryInternal(
+export async function fetchGoogleWithRetry(
   label: string,
   request: AdapterRequest,
-  ctx: AdapterFetchContext,
-  allowAntigravityHostFailover: boolean,
+  ctx: AdapterFetchContext = {},
   opts: GoogleRetryOptions = {},
 ): Promise<Response> {
   const repairInvalid400 = opts.repairInvalid400 ?? true;
-  const retry429 = opts.retry429 ?? true;
   const timeoutMs = ctx.timeoutMs ?? 200_000;
   const executor = ctx.executor ?? globalThis.fetch;
-  let activeRequest = request;
-  if (label === "Antigravity" && isAntigravitySseRequest(activeRequest)) {
-    const origin = new URL(activeRequest.url).origin;
-    const canonicalHttps = canonicalAntigravityHttpsHost(origin);
-    if (canonicalHttps) {
-      activeRequest = requestForHost(activeRequest, canonicalHttps);
-    } else if (!isAntigravityHttpsHost(origin)) {
-      throw new Error("Antigravity OAuth bearer requests must use HTTPS");
-    }
-  }
-  const antigravityHosts = allowAntigravityHostFailover && label === "Antigravity" && isAntigravitySseRequest(activeRequest)
-    ? antigravityHostCandidates(new URL(activeRequest.url).origin).filter(isAntigravityHttpsHost)
-    : [];
-  let antigravityHostIndex = 0;
   let lastError: unknown;
+  let activeRequest = request;
   let compatibilityReplayUsed = false;
-  const maxAttempts = opts.replayTransientFailures ? GOOGLE_RETRY_ATTEMPTS : 1;
-  const consumeReplay = (): boolean => {
-    if (!opts.replayTransientFailures || (opts.replayBudget && opts.replayBudget.remaining <= 0)) return false;
-    if (opts.replayBudget) opts.replayBudget.remaining -= 1;
-    return true;
-  };
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+  for (let attempt = 0; attempt < GOOGLE_RETRY_ATTEMPTS; attempt++) {
     if (ctx.abortSignal?.aborted) throw abortError(ctx.abortSignal);
     try {
       const res = await fetchWithAttemptDeadline(activeRequest.url, {
@@ -374,35 +53,6 @@ async function fetchGoogleWithRetryInternal(
         headers: activeRequest.headers,
         body: activeRequest.body,
       }, timeoutMs, ctx.abortSignal, ctx.stream, executor);
-      if (label === "Antigravity") {
-        const cooldownRecorded = await recordAntigravityHttpCooldown(res, ctx.accountId);
-        if (cooldownRecorded) {
-          return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
-        }
-      }
-      if (antigravityHosts.length > 1 && antigravityHostIndex === 0) {
-        const shouldTryPeer = res.status === 404 || isUnavailableResponse(res);
-        if (shouldTryPeer && consumeReplay()) {
-          cancelResponseBodyBestEffort(res);
-          antigravityHostIndex = 1;
-          activeRequest = requestForHost(activeRequest, antigravityHosts[antigravityHostIndex]!);
-          continue;
-        }
-      }
-      if (label === "Antigravity" && isAntigravitySseRequest(activeRequest) && res.ok) {
-        const fetchPeer = antigravityHosts.length > 1 && antigravityHostIndex === 0 && opts.replayTransientFailures
-          ? () => consumeReplay()
-            ? fetchGoogleWithRetryInternal(
-            label,
-            requestForHost(activeRequest, antigravityHosts[1]!),
-            ctx,
-            false,
-            opts,
-            )
-            : Promise.reject(new Error("Antigravity transient replay budget exhausted"))
-          : undefined;
-        return prepareCcaSseResponse(res, fetchPeer, ctx.accountId);
-      }
       if (res.status === 400 && repairInvalid400 && !compatibilityReplayUsed) {
         let payloadText = "";
         try {
@@ -410,17 +60,7 @@ async function fetchGoogleWithRetryInternal(
         } catch (error) {
           if (ctx.abortSignal?.aborted) throw error;
         }
-        // Mixed built-in + function tools must win over schema repair: those 400s often mention
-        // function_declarations, which would otherwise empty parameters and leave google_search attached.
-        let repairedBody: string | undefined;
-        if (isGoogleMixedBuiltinToolError(payloadText)) {
-          repairedBody = stripGoogleBuiltinToolsFromWireBody(activeRequest.body);
-          if (repairedBody === undefined) {
-            repairedBody = repairGoogleInvalidRequestBody(activeRequest.body, payloadText);
-          }
-        } else {
-          repairedBody = repairGoogleInvalidRequestBody(activeRequest.body, payloadText);
-        }
+        const repairedBody = repairGoogleInvalidRequestBody(activeRequest.body, payloadText);
         if (repairedBody !== undefined) {
           compatibilityReplayUsed = true;
           activeRequest = { ...activeRequest, body: repairedBody };
@@ -429,11 +69,7 @@ async function fetchGoogleWithRetryInternal(
           continue;
         }
       }
-      if (res.status === 429 && !retry429) {
-        return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
-      }
-      if (!retryableGoogleStatus(res.status) || attempt === maxAttempts - 1
-        || (opts.replayBudget && opts.replayBudget.remaining <= 0)) {
+      if (!retryableGoogleStatus(res.status) || attempt === GOOGLE_RETRY_ATTEMPTS - 1) {
         return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
       }
       // A 429 may be a transient rate limit (retry) or hard quota exhaustion (do NOT retry —
@@ -454,33 +90,17 @@ async function fetchGoogleWithRetryInternal(
         maxDelayMs: GOOGLE_RETRY_MAX_MS,
         headers: res.headers,
       }), ctx.abortSignal);
-      if (!consumeReplay()) return ctx.returnRawErrors ? res : normalizeFinalGoogleError(label, res, ctx.abortSignal);
     } catch (err) {
       if (ctx.abortSignal?.aborted) throw err;
       lastError = err;
-      if (antigravityHosts.length > 1 && antigravityHostIndex === 0 && consumeReplay()) {
-        antigravityHostIndex = 1;
-        activeRequest = requestForHost(activeRequest, antigravityHosts[antigravityHostIndex]!);
-        continue;
-      }
-      if (attempt === maxAttempts - 1 || (opts.replayBudget && opts.replayBudget.remaining <= 0)) throw err;
+      if (attempt === GOOGLE_RETRY_ATTEMPTS - 1) throw err;
       await sleepWithAbort(retryBackoffDelayMs(attempt, {
         baseDelayMs: GOOGLE_RETRY_BASE_MS,
         maxDelayMs: GOOGLE_RETRY_MAX_MS,
       }), ctx.abortSignal);
-      if (!consumeReplay()) throw err;
     }
   }
   throw lastError ?? new Error(`${label} fetch failed`);
-}
-
-export function fetchGoogleWithRetry(
-  label: string,
-  request: AdapterRequest,
-  ctx: AdapterFetchContext = {},
-  opts: GoogleRetryOptions = {},
-): Promise<Response> {
-  return fetchGoogleWithRetryInternal(label, request, ctx, true, opts);
 }
 
 /**
@@ -493,23 +113,16 @@ export function fetchGoogleWithRetry(
  * demand" spikes, plus plain rate-limit 429s, both of which previously failed immediately
  * because the default server fetch path only retries connection resets.
  */
-export function fetchDirectGeminiWithRetry(
-  request: AdapterRequest,
-  ctx: AdapterFetchContext = {},
-  opts: GoogleRetryOptions = {},
-): Promise<Response> {
-  return fetchGoogleWithRetry("Gemini", request, { ...ctx, returnRawErrors: true }, {
-    ...opts,
-    repairInvalid400: false,
-  });
+export function fetchDirectGeminiWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}): Promise<Response> {
+  return fetchGoogleWithRetry("Gemini", request, { ...ctx, returnRawErrors: true }, { repairInvalid400: false });
 }
 
 /** Vertex AI retry wrapper. */
-export function fetchVertexWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}, opts: GoogleRetryOptions = {}): Promise<Response> {
-  return fetchGoogleWithRetry("Vertex AI", request, ctx, opts);
+export function fetchVertexWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}): Promise<Response> {
+  return fetchGoogleWithRetry("Vertex AI", request, ctx);
 }
 
 /** Antigravity (Cloud Code Assist) retry wrapper. */
-export function fetchAntigravityWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}, opts: GoogleRetryOptions = {}): Promise<Response> {
-  return fetchGoogleWithRetry("Antigravity", request, ctx, { ...opts, retry429: false });
+export function fetchAntigravityWithRetry(request: AdapterRequest, ctx: AdapterFetchContext = {}): Promise<Response> {
+  return fetchGoogleWithRetry("Antigravity", request, ctx);
 }

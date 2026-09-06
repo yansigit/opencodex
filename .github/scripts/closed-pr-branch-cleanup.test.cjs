@@ -16,11 +16,6 @@ const HEAD_OID = "a".repeat(40);
 const OTHER_OID = "b".repeat(40);
 const NBSP = "\u00a0";
 const longAgo = new Date(NOW - 60 * DAY).toISOString();
-const DEFAULT_OID = "1".repeat(40);
-
-function branch(name, oid = DEFAULT_OID) {
-  return { name, oid };
-}
 
 function closedPr(overrides) {
   return {
@@ -29,7 +24,7 @@ function closedPr(overrides) {
     merged: false,
     isCrossRepository: false,
     headRefName: "codex/example",
-    headRefOid: DEFAULT_OID,
+    headRefOid: HEAD_OID,
     baseRefName: "dev",
     closedAt: longAgo,
     ...overrides,
@@ -62,7 +57,7 @@ describe("planClosedPrBranchDeletions", () => {
   it("deletes a branch whose only pull request closed unmerged past the grace period", () => {
     const result = planClosedPrBranchDeletions({
       pullRequests: [closedPr({ number: 42, headRefName: "codex/stale" })],
-      branches: [branch("codex/stale"), branch("dev")],
+      branches: [{ name: "codex/stale", oid: HEAD_OID }, "dev"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), ["codex/stale"]);
@@ -75,7 +70,7 @@ describe("planClosedPrBranchDeletions", () => {
         closedPr({ number: 10, headRefName: "codex/reused" }),
         closedPr({ number: 11, headRefName: "codex/reused", state: "MERGED", merged: true }),
       ],
-      branches: [branch("codex/reused")],
+      branches: ["codex/reused"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), []);
@@ -88,7 +83,7 @@ describe("planClosedPrBranchDeletions", () => {
         closedPr({ number: 20, headRefName: "codex/active" }),
         closedPr({ number: 21, headRefName: "codex/active", state: "OPEN", closedAt: null }),
       ],
-      branches: [branch("codex/active")],
+      branches: ["codex/active"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), []);
@@ -107,7 +102,7 @@ describe("planClosedPrBranchDeletions", () => {
           baseRefName: "codex/stack-1",
         }),
       ],
-      branches: [branch("codex/stack-1"), branch("codex/stack-2")],
+      branches: ["codex/stack-1", "codex/stack-2"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), []);
@@ -119,7 +114,7 @@ describe("planClosedPrBranchDeletions", () => {
       pullRequests: [
         closedPr({ number: 40, headRefName: "patch-1", isCrossRepository: true }),
       ],
-      branches: [branch("patch-1")],
+      branches: ["patch-1"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), []);
@@ -130,7 +125,7 @@ describe("planClosedPrBranchDeletions", () => {
     const recent = new Date(NOW - 3 * DAY).toISOString();
     const result = planClosedPrBranchDeletions({
       pullRequests: [closedPr({ number: 50, headRefName: "codex/recent", closedAt: recent })],
-      branches: [branch("codex/recent")],
+      branches: ["codex/recent"],
       now: NOW,
       graceDays: DEFAULT_GRACE_DAYS,
     });
@@ -141,7 +136,7 @@ describe("planClosedPrBranchDeletions", () => {
   it("keeps a branch when a closed pull request has no closed_at timestamp", () => {
     const result = planClosedPrBranchDeletions({
       pullRequests: [closedPr({ number: 60, headRefName: "codex/unknown", closedAt: null })],
-      branches: [branch("codex/unknown")],
+      branches: ["codex/unknown"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), []);
@@ -151,7 +146,7 @@ describe("planClosedPrBranchDeletions", () => {
   it("refuses to delete a protected branch even if a closed pull request used it", () => {
     const result = planClosedPrBranchDeletions({
       pullRequests: [closedPr({ number: 70, headRefName: "dev" })],
-      branches: [branch("dev"), branch("main"), branch("preview")],
+      branches: ["dev", "main", "preview"],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), []);
@@ -161,7 +156,10 @@ describe("planClosedPrBranchDeletions", () => {
   it("ignores branches that no pull request ever used", () => {
     const result = planClosedPrBranchDeletions({
       pullRequests: [closedPr({ number: 80, headRefName: "codex/known" })],
-      branches: [branch("codex/known"), branch("codex/never-a-pr")],
+      branches: [
+        { name: "codex/known", oid: HEAD_OID },
+        { name: "codex/never-a-pr", oid: HEAD_OID },
+      ],
       now: NOW,
     });
     assert.deepEqual(deletedBranches(result), ["codex/known"]);
@@ -185,7 +183,7 @@ describe("planClosedPrBranchDeletions", () => {
   it("preserves Unicode whitespace so distinct valid refs never collapse", () => {
     const disposable = `codex/live${NBSP}`;
     const result = planClosedPrBranchDeletions({
-      pullRequests: [closedPr({ number: 86, headRefName: disposable, headRefOid: HEAD_OID })],
+      pullRequests: [closedPr({ number: 86, headRefName: disposable })],
       branches: [
         { name: "codex/live", oid: OTHER_OID },
         { name: disposable, oid: HEAD_OID },

@@ -70,7 +70,7 @@ route-specific results rather than repeating this table.
 
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
-| `GET, PUT /api/v2` | Read or change native multi-agent v2 mode, thread settings, V2 native parent override, and routed delegation bridge | 400 invalid settings/target; 502 transition or persistence failure |
+| `GET, PUT /api/v2` | Read or change native multi-agent v2 mode and thread settings | 400 invalid settings; 502 transition or persistence failure |
 | `GET, PUT /api/injection-model` | Read or set the injected sub-agent model, effort, prompt, and guidance settings | 400 invalid model, effort, or body |
 | `GET, PUT /api/effort-caps` | Read or set global and sub-agent reasoning-effort ceilings | 400 invalid ladder value |
 | `GET, PUT /api/subagent-models` | Read or order the models advertised to sub-agents | 400 invalid list or more than five models |
@@ -78,85 +78,13 @@ route-specific results rather than repeating this table.
 | `GET /api/grok` | Read Grok managed-config status and candidate models | 400 status read failure |
 | `PUT /api/grok/selection` | Persist the excluded Grok models | 400 invalid or oversized selection |
 | `POST /api/grok/apply` | Apply persisted Grok configuration through the managed sync | 409 `grok_apply_busy`; 400/500 apply failure |
-| `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile | 400 invalid profile; 409 catalog changed or assignment became unavailable |
+| `GET, PUT /api/claude-desktop` | Read or persist the Claude Desktop routed/native profile | 400 invalid or unavailable assignment |
 | `POST /api/claude-desktop/apply` | Write the saved profile to Claude Desktop's managed config | 400/500 write failure |
 | `GET /api/claude-desktop/status` | Inspect saved-versus-applied profile and Desktop health | 400 status read failure |
 | `GET, PUT /api/claude-code` | Read or update Claude Code gateway, auth-mode, model-map, context, agent, and sidecar settings | 400 invalid field or shape |
 
 For the concepts behind the model roster and encrypted worker-task behavior, see
 [Sub-agent Surface](/guides/sub-agent-surface/).
-
-### V2 native parent override
-
-`GET /api/v2` includes the derived override state:
-
-```json
-{
-  "v2NativeParentOverride": {
-    "enabled": false,
-    "model": null,
-    "active": false
-  }
-}
-```
-
-`active` is read-only. It is true only when the override is enabled with a target, the effective
-surface is explicitly `multiAgentMode: "v2"`, the upstream V2 flag is enabled, and
-`keepNativeChatGptOnV1` is false. `model` is the persisted target, including while the switch is
-disabled.
-
-`PUT /api/v2` accepts a complete override object; the surrounding endpoint remains partial-update
-for its other fields:
-
-```json
-{
-  "v2NativeParentOverride": {
-    "enabled": true,
-    "model": "anthropic/claude-sonnet-5"
-  }
-}
-```
-
-`enabled` must be a boolean and `model` must be a nonblank string or `null`. A non-null model must
-resolve through normal routing to a configured noncanonical provider. Enabling additionally
-requires an explicit V2 mode, the upstream V2 flag, and Keep ChatGPT on v1 turned off. The whole
-object is validated before any write; invalid requests return 400 and leave configuration
-unchanged. Override-only writes persist this subtree without catalog restamping and return the
-fresh nested DTO.
-
-When `active` is true, an eligible canonical ChatGPT V2 root is rerouted per request to the
-configured provider. Missing, disabled, unroutable, or canonical targets fail closed rather than
-falling back to ChatGPT. The request's selected model can remain visible in Codex while the resolved
-routed model is executed; request logs retain requested and resolved identities separately. If mode,
-the upstream V2 flag, or Keep ChatGPT on v1 changes, subsequent requests skip the override while the
-stored target and enabled selection remain available for reactivation. Native children are not
-rewritten, so a native child can still create a routed grandchild with an unreadable encrypted task.
-This API exposes no automatic selection, nested override, protocol decryption, per-thread pin, or
-CLI operation.
-
-### Routed V2 delegation bridge
-
-`GET /api/v2` returns `v2RoutedDelegationBridge` as a boolean, defaulting to `false`. `PUT /api/v2`
-accepts the scalar boolean as a partial update:
-
-```json
-{ "v2RoutedDelegationBridge": true }
-```
-
-It can be armed outside explicit V2 but activates only for eligible native V2 root and thread-spawn child turns. It moves
-`spawn_agent`, `send_message`, and `followup_task` to plaintext mirrors while leaving `wait_agent`,
-`interrupt_agent`, and `list_agents` native. Consequently those three message operations are plaintext
-even for native-to-native delegation while active. The bridge is distinct from parent override and
-encrypted-task recovery. Eligible canonical native spawned-child turns are bridged after fallback
-selection too, so routed grandchildren can receive plaintext assignments. The native Codex UI can show the
-original model while routed prompts, repository context, and tool results follow the selected
-provider's availability, context, behavior, billing, and privacy terms. `false` disables subsequent
-requests immediately.
-
-There is no management field for continuation encryption. Bridge-derived state is automatically encrypted
-with an OS-credential-store key, or retained only in memory when secure storage is unavailable. The bridge
-prevents new encrypted message operations within its eligibility boundary; encrypted-task recovery remains
-the fallback for ciphertext produced elsewhere. A first upgrade retires legacy continuation-cache files.
 
 ### Client integration rollback journal
 

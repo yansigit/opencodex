@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, replacePersistedConfig, saveConfig } from "../../src/config";
+import { getConfigPath, saveConfig } from "../../src/config";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { clearModelCache } from "../../src/codex/model-cache";
 import { initializeProviderModelSelection, reconcileInitialModelSelections } from "../../src/providers/initial-model-selection";
@@ -10,7 +10,7 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
-import { isolatedDiskManagementPersistence, ManagementRequest } from "../helpers/management-auth";
+import { ManagementRequest } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const ids = ["anthropic/claude-opus-5", "openai/gpt-5.6-sol"];
@@ -58,10 +58,7 @@ async function request(config: OcxConfig, path: string, body: string): Promise<R
     method: "PUT", headers: { "Content-Type": "application/json" },
     body,
   });
-  const response = await handleManagementAPI(request, url, config, {
-    ...isolatedDiskManagementPersistence(),
-    createManagementConvergeCodex: catalogConvergenceFactory(),
-  });
+  const response = await handleManagementAPI(request, url, config, { createManagementConvergeCodex: catalogConvergenceFactory() });
   if (!response) throw new Error("missing management route");
   return response;
 }
@@ -81,26 +78,6 @@ test.each([...operations])("pending selection write is rejected without mutation
   expect(readFileSync(getConfigPath(), "utf8")).toBe(disk);
   expect(config.providers.openrouter.disabled).not.toBe(true);
 });
-
-test.each([operations[0], operations[1], operations[3], operations[4]])(
-  "a freshly rebased pending selection still fences the write: %j",
-  async operation => {
-    const liveConfig = fixture("ready");
-    const before = structuredClone(liveConfig);
-    // Ordinary saves intentionally preserve the currently persisted provider registry.
-    // Replace explicitly so disk advances to a pending registration while the handler
-    // still holds the stale ready snapshot.
-    replacePersistedConfig(fixture("pending"));
-    const disk = readFileSync(getConfigPath(), "utf8");
-
-    const response = await put(liveConfig, operation);
-
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ code: "initial_model_selection_pending" });
-    expect(liveConfig).toEqual(before);
-    expect(readFileSync(getConfigPath(), "utf8")).toBe(disk);
-  },
-);
 
 for (const state of ["ready", "legacy"] as const) {
   test.each([...operations])(`${state} selection write retains normal behavior: %j`, async operation => {

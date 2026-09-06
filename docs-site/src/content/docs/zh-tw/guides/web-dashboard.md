@@ -45,7 +45,7 @@ GUI session 簽發到服務的頁面中，並在到期或代理重啟時靜默�
 | **Providers** | 新增、編輯、啟用/停用、刪除 provider，並在支援時管理 OAuth 帳號池和 API key 池。 |
 | **Add provider** | 搜尋 registry preset，選擇帳號登入、API key 服務、本機伺服器或自訂 endpoint。 |
 | **Codex Auth** | 新增 ChatGPT/Codex 池帳號，選擇下一 session 的帳號，重新整理 5h / 每週 / 30d 配額，啟用或停用配額自動切換，設定其 1–100% 閾值和臨時故障 failover。 |
-| **Subagents** | 在 `spawn_agent` override 列表中置頂最多五個原生或路由模型，編輯最多八個具名角色，並設定自訂父級指引與全域子代理說明。 |
+| **Subagents** | 在 `spawn_agent` override 列表中置頂最多五個原生或路由模型。 |
 | **Models** | 開關原生 GPT 與路由模型，設定 provider allowlist、上下文上限、v1/base/v2 以及 v2 thread 數量。 |
 | **Logs** | 自動重新整理近期請求，顯示 token、請求強度、實際模型、provider、狀態、request id、耗時和錯誤詳情。 |
 | **Usage / Debug** | 檢視 token usage 覆蓋率與趨勢，或啟用可選的 provider transport 和 usage 提取診斷。 |
@@ -61,9 +61,7 @@ Logs 可組合介面、被攔截請求、供應商、完整模型名稱、狀態
 
 ### 連結到某個部分
 
-佈局只有一種且會自適應，無需切換。桌面版使用側邊欄進行主要導覽；窄螢幕時點選 **開啟選單** 可展開相同的頁面連結。Dashboard 的各個部分都有自己的地址：`#dashboard` 開啟 Overview，`#dashboard/providers` 與 `#dashboard/models` 開啟另外兩個。重新整理、收藏和後退都會保留目前所在的部分。**Logs** 同理，使用 `#logs` 與 `#logs/debug`。舊的 `#providers/workspace` 書籤現在會跳轉到 `#providers`。
-
-Overview 也提供 **30 天活動** 面板，顯示 30 天的請求和 token 趨勢。在任一迷你折線圖中選取某一天即可查看當日總量，點選 **檢視用量** 可開啟完整的 Usage 頁面。Overview 載入後若重新整理被中斷，頁面會保留最近一次成功的資料並顯示重新連線提示與 **重試**；首次連線失敗時則顯示 `ocx start` 指引和相同的重試操作。
+佈局只有一種，無需切換。Dashboard 的各個部分都有自己的地址：`#dashboard` 開啟 Overview，`#dashboard/providers` 與 `#dashboard/models` 開啟另外兩個。重新整理、收藏和後退都會保留目前所在的部分。**Logs** 同理，使用 `#logs` 與 `#logs/debug`。舊的 `#providers/workspace` 書籤現在會跳轉到 `#providers`。
 
 **Logs** 和 **Usage** 中的費用是根據已報告 token 計算的 API 標價折算值，不是帳單，也不能證明
 實際發生了扣費；實際可能計入訂閱用量或消耗服務商額度。
@@ -144,7 +142,7 @@ GUI 是代理 JSON 管理 API 之上的輕量用戶端。常用 endpoint 包括�
 
 | Endpoint | 用途 |
 | --- | --- |
-| `GET` / `PUT /api/settings` | 讀取或更新 Codex 自動啟動、伺服器監聽器設定與儀表板控制項。監聽器和憑證變更需要重新啟動代理。 |
+| `GET` / `PUT /api/settings` | 讀取設定或切換 Codex 自動啟動。 |
 | `GET /api/startup-health` | 讀取不含秘密資訊的路由、服務、shim 和重啟安全診斷。 |
 | `GET` / `POST /api/windows-tray` | 讀取或更改 Windows 托盤安裝和顯示狀態；POST 支援 `install`、`start`、`stop`、`uninstall`。 |
 | `POST /api/sync` | 重建共享模型目錄，並把 Codex 模型快取標記為過期。 |

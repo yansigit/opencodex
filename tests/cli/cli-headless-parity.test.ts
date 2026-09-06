@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -221,11 +221,10 @@ describe("headless GUI parity CLI", () => {
       }
     }
     const coverage: Array<[string, string]> = [
-     ["/api/claude-code", "ocx claude config"],
-     ["/api/claude-desktop", "ocx claude desktop"],
-     ["/api/claude/", "ocx observe"],
-     ["/api/aistudio", "(none — GUI-only native auth)"],
-     ["/api/codex-auth", "ocx account"],
+      ["/api/claude-code", "ocx claude config"],
+      ["/api/claude-desktop", "ocx claude desktop"],
+      ["/api/claude/", "ocx observe"],
+      ["/api/codex-auth", "ocx account"],
       // GUI-only affordance: starring the repo from the sidebar. There is deliberately
       // no CLI mirror — the headless surface has nothing to gain from a one-click
       // social action, and inventing `ocx github star` would be a command nobody asked
@@ -699,37 +698,6 @@ describe("headless GUI parity CLI", () => {
       if (previous === undefined) delete process.env.OPENCODEX_HOME;
       else process.env.OPENCODEX_HOME = previous;
       removeTreeWithRetry(home);
-    }
-  });
-
-  test("config set/unset cannot replace the provider registry root", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ocx-cli-provider-root-"));
-    const previous = process.env.OPENCODEX_HOME;
-    process.env.OPENCODEX_HOME = home;
-    try {
-      const configPath = join(home, "config.json");
-      const original = JSON.stringify({
-        port: 10100,
-        providers: {
-          openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
-          keeper: { adapter: "openai-chat", baseUrl: "https://keeper.example/v1" },
-        },
-        defaultProvider: "openai",
-      });
-      writeFileSync(configPath, original);
-
-      const replacement = JSON.stringify({
-        openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
-      });
-      expect(await handleConfigCommand(["set", "providers", replacement, "--json"])).not.toBe(0);
-      expect(await handleConfigCommand(["unset", "providers", "--json"])).not.toBe(0);
-      expect(readFileSync(configPath, "utf8")).toBe(original);
-      expect(await handleConfigCommand(["set", "providers.openai.disabled", "true", "--json"])).toBe(0);
-      expect(JSON.parse(readFileSync(configPath, "utf8")).providers.openai.disabled).toBe(true);
-    } finally {
-      if (previous === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = previous;
-      rmSync(home, { recursive: true, force: true });
     }
   });
 

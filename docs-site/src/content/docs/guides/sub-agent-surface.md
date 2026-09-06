@@ -27,60 +27,6 @@ are plaintext. OpenCodex disables the global `multi_agent_v2` override for this 
 Codex applies that override before per-model catalog pins. This is a switch *inside* v2, not a
 fourth catalog mode.
 
-For a different trade-off, the experimental **V2 native parent override** can replace an eligible
-ChatGPT-native v2 root parent with one routed model before the parent runs. It keeps the v2 tool
-surface and makes that root's child tasks plaintext, but it is independent of both
-`keepNativeChatGptOnV1` and `agentTaskRecovery`:
-
-| Setting | What it preserves or changes | Cost/limitation |
-| --- | --- | --- |
-| `keepNativeChatGptOnV1` | Preserves the native ChatGPT parent, but advertises it on v1. | The native v2 task-encryption problem is avoided by leaving v2, and it applies to new sessions. |
-| `agentTaskRecovery` | Preserves the native v2 parent and recovers a routed child task through ChatGPT. | The extra authenticated ChatGPT request consumes quota, adds latency, and returns model-produced plaintext. |
-| `v2NativeParentOverride` | Preserves v2 tools while executing eligible native roots on one configured routed model. | The routed provider receives the root data; availability, context, behavior, latency, cost, and privacy differ by provider. |
-| `v2RoutedDelegationBridge` | Preserves eligible native V2 root and spawned-child turns while exposing plaintext mirror collaboration tools. | Default off; bridged task text follows the selected provider's privacy and billing terms. |
-
-The override is off unless explicitly enabled, requires an explicitly forced v2 surface and the
-upstream V2 flag, and is unavailable while **Keep ChatGPT on v1** is on. There is no automatic
-target selection or fallback. Once a root qualifies, a missing, unavailable, or canonical ChatGPT
-target fails closed instead of sending that request to ChatGPT. The target is looked up for every
-eligible request, so changing it affects later parent turns and compaction; it is not pinned per
-thread. The requested model remains the request identity in logs, while the effective/resolved
-model and provider show what OpenCodex actually executes.
-
-The target and enabled selection may remain persisted while `active` is false. Changing the mode,
-upstream V2 flag, or Keep ChatGPT on v1 makes subsequent parent requests skip the override until
-the prerequisites are restored.
-
-### Routed delegation bridge
-
-`v2RoutedDelegationBridge` is a separate experimental, default-off boolean. When armed, it activates
-for eligible native V2 root and thread-spawn child turns after final routing. It exposes mirror collaboration tools
-so the routed child receives plaintext task, repository-context, and tool-result flow. It exposes
-`spawn_agent`, `send_message`, and `followup_task` only through that plaintext mirror while leaving
-`wait_agent`, `interrupt_agent`, and `list_agents` native. While active, this makes every use of those
-three delegation-message operations plaintext, including native-to-native delegation. Disabling takes
-effect on the next request immediately.
-
-The native Codex UI can still display the original model. Routed prompts, repository context, and tool
-results follow the selected provider's availability, context window, behavior, billing, and privacy
-terms. The bridge differs from ordinary native GPT-to-GPT delegation, the
-parent override (which reroutes the root), and recovery (which makes an additional ChatGPT request for
-an already encrypted child task). Eligible canonical native children are bridged after their final
-fallback route is selected, so they can delegate plaintext assignments to routed grandchildren.
-The current-turn collaboration catalog remains authoritative: a depth-limited child without those tools
-cannot regain delegation authority merely by carrying child headers.
-
-Bridge continuations are selectively encrypted at rest with AES-256-GCM and an installation key held in
-the operating system credential store. If that store is unavailable or times out, delegation continues
-with memory-only replay; sensitive state is never persisted as plaintext and is lost at restart. The first
-run of this version retires legacy v1/v2 continuation snapshots and spills rather than guessing which old
-rows contain bridged plaintext. Ordinary continuation rows remain in their standard format.
-
-The bridge prevents *new* encrypted message operations only inside this eligibility boundary.
-`agentTaskRecovery` remains the fallback for Fernet ciphertext created outside it. Because bridging sends
-the assignment as plaintext, the routed provider receives that text under its own privacy and retention
-terms; enable the experiment only for providers you trust with it.
-
 :::tip[Not sure?]
 Start with **base**. Choose **v1** when cross-provider delegation must work predictably. Force **v2**
 only when you specifically want its newer session model across every catalog entry.
@@ -138,7 +84,7 @@ inherits the parent model and rejects model or effort overrides. Guidance theref
 use `fork_turns: "none"` (or a positive partial turn count such as `"3"`) when passing `model` or
 `reasoning_effort`, and to make the task message self-contained.
 
-Custom `injectionPrompt` text can use these placeholders:
+Custom `injectionPrompt` text can use all four placeholders:
 
 | Placeholder | Replaced with |
 | --- | --- |
@@ -146,8 +92,6 @@ Custom `injectionPrompt` text can use these placeholders:
 | `{{effort}}` | The configured `injectionEffort`, or an empty string |
 | `{{roster}}` | The resolved picker-visible, surface-compatible roster |
 | `{{fallback}}` | The configured global fallback guidance |
-| `{{roles}}` | Compact enabled-role catalog (id, when-to-use, model, optional effort), filtered to the current surface and 700-character budget |
-| `{{nativeDefaultState}}` | `active`, `disabled`, `pending`, or `blocked`; only `active` confirms that the configured native default is authoritative |
 
 The built-in v2 guidance has a 700-character budget. If it would exceed the budget, opencodex drops
 the roster first rather than truncating the core spawn instructions. Built-in guidance fires only
@@ -164,9 +108,6 @@ active Codex routing, sync or restart can write the selected values as marker-ow
 opencodex updates or removes only fields bearing its markers. If either target field is user-owned,
 the pair is left unchanged rather than partially written; ambiguous TOML is rejected without a
 write. External provider managers and user-owned root routing also remain authoritative.
-The dashboard's `nativeDefaultState` diagnostic is fail-closed: only `active` means the synchronized
-native default is live. `pending`, `blocked`, `disabled`, or a missing field never claims that an
-omitted-model subagent will inherit the preferred model.
 
 ## Fallback chains
 
@@ -183,15 +124,6 @@ rejects `model_fallback` as an unknown field, which skips the entire role defini
 (#1190). opencodex can still read a legacy `model_fallback` line from the TOML for
 backwards compatibility, but `ocx doctor` warns about it and Codex itself will ignore
 the affected role.
-
-When `syncCodexAgentRoles` is effective, opencodex also writes marker-owned
-`$CODEX_HOME/agents/ocx-<id>.toml` files for enabled named roles (`subagentRoles`).
-Those files carry only `name`, `description`, `developer_instructions`, `model`, and
-optional `model_reasoning_effort`. Unset means on once any enabled role exists;
-`syncCodexAgentRoles: false` prunes OpenCodex-owned `ocx-*.toml` files and leaves
-user-authored agent files untouched. A user-owned agent file with the same `name`
-(including `reviewer.toml` next to `ocx-reviewer.toml`) wins; OpenCodex skips or
-prunes its owned file and leaves the user file unchanged.
 
 Duplicate model ids are removed while preserving the first occurrence. During selection, opencodex
 skips candidates that are disabled, unroutable, backed by a disabled provider, marked unhealthy,
@@ -257,11 +189,6 @@ modes preserve the error message in a `response.failed` terminal instead of repo
 `adapter_eof`. Other upstream `response.failed` events remain SSE failures. This history
 recovery does not change the encrypted v2 task-delivery restrictions described above.
 
-The parent override avoids this recovery path by routing the eligible root before Codex can create
-encrypted child content. It does not decrypt or rewrite Codex's protocol. Native children remain
-native; if a native child later creates a routed grandchild, that nested native parent can still
-produce an unreadable encrypted task. Nested parent override is not supported.
-
 ## Changing the mode
 
 ### GUI
@@ -269,7 +196,7 @@ produce an unreadable encrypted task. Nested parent override is not supported.
 - **Dashboard** → first stat cell: choose **v1**, **base**, or **v2**.
 - **Models** → top-row segmented control: choose the same global mode.
 - **Dashboard** → **Sub-agent delegation**: set guidance model/effort and the native-default opt-in.
-- **Subagents**: edit named roles, choose and order the roster, and configure custom parent guidance, global child instructions, and the native-default opt-in.
+- **Subagents**: choose and order the roster and configure the global fallback chain.
 
 ### CLI
 
@@ -304,7 +231,7 @@ The management API exposes matching `GET` and `PUT` endpoints:
 
 | Endpoint | Manages |
 | --- | --- |
-| `/api/v2` | Surface mode, native feature flag, thread settings, V2 native parent override, and routed delegation bridge |
+| `/api/v2` | Surface mode, native feature flag, and thread settings |
 | `/api/injection-model` | Preferred model, effort, custom prompt, guidance, and native-default sync |
 | `/api/effort-caps` | Main-agent and sub-agent effort ceilings |
 | `/api/subagent-models` | Ordered roster of up to five models |
@@ -321,23 +248,6 @@ curl -X PUT http://localhost:10100/api/injection-model \
   -H 'Content-Type: application/json' \
   -d '{"model":"anthropic/claude-sonnet-5","effort":"xhigh"}'
 ```
-
-The override is managed through the dashboard or this endpoint; it has no CLI command:
-
-```bash
-curl -X PUT http://localhost:10100/api/v2 \
-  -H 'Content-Type: application/json' \
-  -d '{"v2NativeParentOverride":{"enabled":true,"model":"anthropic/claude-sonnet-5"}}'
-
-curl -X PUT http://localhost:10100/api/v2 \
-  -H 'Content-Type: application/json' \
-  -d '{"v2RoutedDelegationBridge":true}'
-```
-
-See the configuration references for the [native-parent override](/reference/configuration/agents/#v2-native-parent-override)
-and [routed delegation bridge](/reference/configuration/agents/#routed-v2-delegation-bridge), plus
-their [management API contracts](/reference/management-api/#v2-native-parent-override) and
-[bridge validation rules](/reference/management-api/#routed-v2-delegation-bridge).
 
 ## FAQ
 

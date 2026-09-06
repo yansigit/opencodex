@@ -78,7 +78,7 @@ résultats propres à chaque route, sans répéter ce tableau.
 | `GET /api/grok` | Lire l'état de la configuration Grok gérée et les modèles candidats | 400 échec de lecture de l'état |
 | `PUT /api/grok/selection` | Persister les modèles Grok exclus | 400 sélection invalide ou surdimensionnée |
 | `POST /api/grok/apply` | Appliquer la configuration Grok persistante par la synchronisation gérée | 409 `grok_apply_busy` ; 400/500 échec de l'application |
-| `GET, PUT /api/claude-desktop` | Lire ou enregistrer le profil Claude Desktop routé ou natif | 400 profil invalide ; 409 catalogue modifié ou affectation devenue indisponible |
+| `GET, PUT /api/claude-desktop` | Lire ou enregistrer le profil Claude Desktop routé ou natif | 400 affectation invalide ou indisponible |
 | `POST /api/claude-desktop/apply` | Écrire le profil enregistré dans la configuration gérée de Claude Desktop | 400/500 échec d'écriture |
 | `GET /api/claude-desktop/status` | Inspecter le profil enregistré par rapport à celui appliqué et l'état du bureau | 400 échec de lecture de l'état |
 | `GET, PUT /api/claude-code` | Lire ou mettre à jour les paramètres de passerelle, de mode d'authentification, de correspondance des modèles, de contexte, d'agent et de service auxiliaire | 400 champ ou structure invalide |

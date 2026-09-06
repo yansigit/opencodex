@@ -20,12 +20,12 @@ import { assemblePolicyCandidateEvidence } from "../../routing/compatibility/ass
 import { activateLab, labActivationRequired } from "../../lib/lab-activation";
 import { quotaEvidenceForCandidate } from "../../routing/quota";
 import { routedProviderConfig } from "../../router";
-import { deleteConfigTopLevelKey, getConfigDir } from "../../config";
+import { deleteConfigTopLevelKey, saveConfigPreservingClaudeCode, getConfigDir } from "../../config";
 import { reconcileLiveStateStores } from "../../lib/state-store-registrations";
 import { isPlainRecord } from "./shared";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import { jsonResponse } from "../auth-cors";
-import { saveManagementConfig, type ManagementContext } from "./context";
+import type { ManagementContext } from "./context";
 import type { OcxConfig, OcxRoutingProfileConfig } from "../../types";
 import { shadowCallTargetError } from "./shadow-call-validation";
 
@@ -178,19 +178,11 @@ function migrateProfileModelReferences(
   if (config.subagentModels) {
     config.subagentModels = [...new Set(config.subagentModels.map(migrateAgentReference))];
   }
-  if (config.subagentRoles) {
-    for (const role of config.subagentRoles) {
-      role.model = migrateAgentReference(role.model);
-    }
-  }
   if (config.subagentModelFallback) {
     config.subagentModelFallback = [...new Set(config.subagentModelFallback.map(migrateAgentReference))];
   }
   if (config.injectionModel && config.injectionModel === oldPublicModel) {
     config.injectionModel = newPublicModel;
-  }
-  if (config.v2NativeParentOverride?.model && config.v2NativeParentOverride.model === oldPublicModel) {
-    config.v2NativeParentOverride = { ...config.v2NativeParentOverride, model: newPublicModel };
   }
   if (config.shadowCallIntercept?.model && config.shadowCallIntercept.model === oldPublicModel) {
     config.shadowCallIntercept = { ...config.shadowCallIntercept, model: newPublicModel };
@@ -325,7 +317,8 @@ export async function handleRoutingProfileRoutes(ctx: ManagementContext): Promis
       const newPublicModel = policyPublicModelId(id, getRoutingProfile(config, id)!);
       shouldSyncClaudeAgentDefs = migrateProfileModelReferences(config, oldPublicModel, newPublicModel);
     }
-    saveManagementConfig(deps, config);
+    const save = deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode;
+    save(config);
     reconcileLiveStateStores();
     const catalogRefresh = await convergeCodexCatalog();
     if (shouldSyncClaudeAgentDefs) await syncClaudeAgentDefsBestEffort();
@@ -352,7 +345,8 @@ export async function handleRoutingProfileRoutes(ctx: ManagementContext): Promis
     delete nextProfiles[id];
     if (Object.keys(nextProfiles).length > 0) config.routingProfiles = nextProfiles;
     else deleteConfigTopLevelKey(config, "routingProfiles");
-    saveManagementConfig(deps, config);
+    const saveConfigPreservingClaudeCodeSafe = deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode;
+    saveConfigPreservingClaudeCodeSafe(config);
     reconcileLiveStateStores();
     const catalogRefresh = await convergeCodexCatalog();
     return jsonResponse({ success: true, id, catalogRefresh }, 200, req, config);

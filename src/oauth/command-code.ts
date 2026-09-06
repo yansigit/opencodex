@@ -1,8 +1,8 @@
 import type { OAuthController, OAuthCredentials } from "./types";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { isAddrInUse } from "../server/ports";
 import { parseCallbackInput } from "./callback-server";
-import { oauthFetch } from "./transport";
 
 const COMMAND_CODE_STUDIO_URL = "https://commandcode.ai";
 const COMMAND_CODE_CALLBACK_PORT = 5959;
@@ -44,7 +44,7 @@ async function importLocalCommandCodeAuth(signal?: AbortSignal): Promise<OAuthCr
   if (typeof parsed.apiKey !== "string" || parsed.apiKey.length === 0) return undefined;
   let accountId: string | undefined;
   try {
-    const response = await oauthFetch("https://api.commandcode.ai/alpha/whoami", {
+    const response = await fetch("https://api.commandcode.ai/alpha/whoami", {
       headers: { Authorization: `Bearer ${parsed.apiKey}`, Accept: "application/json" },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
     });
@@ -115,11 +115,21 @@ function createCallbackServer(state: string): {
       return Response.json({ success: false, error: message }, { status: 400, headers });
     }
   };
-  const create = (port: number): Array<ReturnType<typeof Bun.serve>> => [
-    // The advertised callback host is explicitly IPv4, so an IPv6 listener is
-    // unnecessary and can conflict with this socket on dual-stack runtimes.
-    Bun.serve({ hostname: "127.0.0.1", port, fetch }),
-  ];
+  const create = (port: number): Array<ReturnType<typeof Bun.serve>> => {
+    // The advertised callback host is `127.0.0.1`; on Windows `localhost` commonly resolves to `::1`
+    // first, so also bind the IPv6 loopback best-effort (mirrors the shared OAuthCallbackFlow).
+    const servers = [Bun.serve({ hostname: "127.0.0.1", port, fetch })];
+    try {
+      servers.push(Bun.serve({ hostname: "::1", port: servers[0].port, fetch }));
+    } catch (error) {
+      if (isAddrInUse(error)) {
+        for (const server of servers) server.stop(true);
+        throw error;
+      }
+      // IPv6 unsupported (EAFNOSUPPORT etc.) degrades to the IPv4-only listener.
+    }
+    return servers;
+  };
   try {
     return { servers: create(COMMAND_CODE_CALLBACK_PORT), callback };
   } catch {
@@ -130,7 +140,7 @@ function createCallbackServer(state: string): {
 /** Validate a raw pasted Command Code API key and return the validated identity. */
 async function validatePastedApiKey(apiKey: string): Promise<{ userId: string; userName: string } | undefined> {
   try {
-    const response = await oauthFetch("https://api.commandcode.ai/alpha/whoami", {
+    const response = await fetch("https://api.commandcode.ai/alpha/whoami", {
       headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });

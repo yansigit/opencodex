@@ -1,6 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   clearThreadAccountMap,
@@ -36,16 +35,12 @@ import {
   updateAccountQuota,
 } from "../../src/codex/auth-api";
 import type { OcxConfig } from "../../src/types";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-let STORE_DIR = "";
-let CODEX_DIR = "";
+const STORE_DIR = join(import.meta.dir, ".tmp-main-rotation-store");
+const CODEX_DIR = join(import.meta.dir, ".tmp-main-rotation-codex");
 let prevOpencodexHome: string | undefined;
 let prevCodexHome: string | undefined;
-
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function writeMainAuth(): void {
   mkdirSync(CODEX_DIR, { recursive: true });
@@ -88,12 +83,7 @@ describe("main account rotation (Option A)", () => {
   beforeEach(() => {
     prevOpencodexHome = process.env.OPENCODEX_HOME;
     prevCodexHome = process.env.CODEX_HOME;
-    // These tests exercise account rotation, not ACL behavior. Stub both runners so config
-    // hardening cannot leave an icacls child holding a temp directory open during teardown.
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    STORE_DIR = mkdtempSync(join(tmpdir(), "ocx-main-rotation-store-"));
-    CODEX_DIR = mkdtempSync(join(tmpdir(), "ocx-main-rotation-codex-"));
+    for (const d of [STORE_DIR, CODEX_DIR]) if (existsSync(d)) removeTreeWithRetry(d);
     mkdirSync(STORE_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = STORE_DIR;
     process.env.CODEX_HOME = CODEX_DIR;
@@ -109,7 +99,7 @@ describe("main account rotation (Option A)", () => {
     writeMainAuth();
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     clearThreadAccountMap();
     clearCodexUpstreamHealth();
     clearAccountQuota();
@@ -117,17 +107,9 @@ describe("main account rotation (Option A)", () => {
     resetMainCodexAccountIdentityTrackingForTests();
     setMainAccountPlan(null);
     for (const id of ["a", "b", MAIN_CODEX_ACCOUNT_ID]) clearAccountNeedsReauth(id);
-    // Drain queued hardening before restoring env and removing the per-test homes. This closes
-    // the Windows race where an async icacls operation still owns a file/dir handle.
-    await flushConfigDirHardeningForTests();
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
+    for (const d of [STORE_DIR, CODEX_DIR]) if (existsSync(d)) removeTreeWithRetry(d);
     if (prevOpencodexHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = prevOpencodexHome;
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prevCodexHome;
-    if (STORE_DIR) removeTreeWithRetry(STORE_DIR);
-    if (CODEX_DIR) removeTreeWithRetry(CODEX_DIR);
-    STORE_DIR = "";
-    CODEX_DIR = "";
   });
 
   test("main account is usable when ~/.codex/auth.json token is present", () => {

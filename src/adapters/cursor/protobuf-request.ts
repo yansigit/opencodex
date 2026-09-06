@@ -44,6 +44,8 @@ import {
   RequestedModelSchema,
   RequestedModel_ModelParameterbytesSchema,
   ResumeActionSchema,
+  RequestContextSchema,
+  RequestContextEnvSchema,
   ThinkingMessageSchema,
   ToolCallSchema,
   UserMessageActionSchema,
@@ -59,7 +61,6 @@ import {
   CURSOR_SHELL_ALIAS_SYSTEM_NOTE,
   OCX_RESPONSES_TOOL_PROVIDER,
 } from "./tool-definitions";
-import { buildCursorRequestContext } from "./request-context";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -87,31 +88,24 @@ export const CURSOR_INVOCATION_ARGUMENTS_BYTE_LIMIT = 2 * 1024;
  * results already stored in history blobs are visible without a ResumeAction.
  */
 export const CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT =
-  "Continue: the requested tool results are provided in the conversation history above. Follow the active system and developer instructions exactly, including any required output format. Answer the user request or proceed with the next step directly without repeating status summaries, greetings, or a tool invocation that already completed successfully.";
+  "Continue: the requested tool results are provided in the conversation history above.";
 
-const CURSOR_EXTERNAL_INSTRUCTION_REMINDER_BYTE_LIMIT = 2 * 1024;
-
-export function externalToolContinuationText(
-  rawMessages?: readonly OcxMessage[],
-  system?: readonly string[],
-): string {
-  const joinedInstructions = system?.join("\n\n").trim() ?? "";
-  const instructionReminder = joinedInstructions
-    && encoder.encode(joinedInstructions).byteLength <= CURSOR_EXTERNAL_INSTRUCTION_REMINDER_BYTE_LIMIT
-      ? `\n\nActive instructions:\n${joinedInstructions}`
-      : "";
-  const last = rawMessages?.at(-1);
-  if (last?.role === "toolResult") {
-    const raw = typeof last.content === "string" ? last.content : JSON.stringify(last.content ?? "");
-    const trimmed = raw.trim();
-    if (
-      (last.toolName?.includes("list_agents") || last.toolName?.includes("search"))
-      && (trimmed === "[]" || trimmed === "" || trimmed === "{}" || trimmed === "null")
-    ) {
-      return `${CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT} If a prior discovery or list tool returned empty results (e.g. no sub-agents currently active), proceed directly with your next concrete action using available tools.${instructionReminder}`;
-    }
+/** Runtime timezone for protobuf RequestContextEnv (dynamic, never hardcoded). */
+function runtimeTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
+  } catch {
+    return "UTC";
   }
-  return CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT + instructionReminder;
+}
+
+/** Builds a RequestContext with env.timeZone populated dynamically. */
+function buildRequestContext() {
+  return create(RequestContextSchema, {
+    env: create(RequestContextEnvSchema, {
+      timeZone: runtimeTimeZone(),
+    }),
+  });
 }
 
 function jsonBlob(value: unknown): { data: Uint8Array; serialized: string } {
@@ -322,7 +316,7 @@ function rootPromptMessages(
     normalized: string,
   ): void => {
     const previous = replayRuns.get(role);
-    if (echoToolResultInRoot && previous?.text === normalized) {
+    if (externalModel && previous?.text === normalized) {
       const runLength = previous.length + 1;
       if (runLength > maxRunLength) maxRunLength = runLength;
       const marked = `${normalized}\n[note: this exact output was produced ${runLength} times in a row]`;
@@ -358,7 +352,6 @@ function rootPromptMessages(
         }, "user", { messageIndex: i }));
       }
     } else if (message.role === "assistant") {
-      if (externalModel && message.phase === "commentary") continue;
       // External Cursor clients do not replay hidden reasoning as assistant-visible prompt text.
       // Native Composer state can preserve it through ThinkingMessage/history structures.
       const text = assistantRootText(message, !externalModel).trim();
@@ -394,13 +387,12 @@ function rootPromptMessages(
       // the same payload as assistant-role "[Tool Result]" / "[tool_result]" text teaches Auto
       // to echo that envelope as chat instead of continuing from the structured result.
       if (!echoToolResultInRoot) continue;
+      // #1920: the prefix must reflect the NORMALIZED error state (an empty
+      // node_repl result is an error even when the runtime said isError=false).
+      const prefix = normalizedToolResult(message, contentToText(message.content)).isError ? "[Tool Error]" : "[Tool Result]";
       // The bound compares in full-history space: this loop's `i` is already full-history on the
       // full-replay path, and `knownCallsOffset` re-bases it when only a suffix is replayed.
-      const text = externalToolResultToText(
-        message,
-        callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i),
-        request.modelId.includes("grok-4.6") || request.modelId.startsWith("composer-2.5"),
-      );
+      const text = `${prefix}\n${toolResultToText(message, callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i))}`;
       pushDeduped(toolResultRootPayload(text), "toolResult", { messageIndex: i, text }, text);
     }
   }
@@ -410,7 +402,7 @@ function rootPromptMessages(
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same tool call repeated ${maxToolCallCount} times in this user turn. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
     }, "user", {}));
-  } else if (echoToolResultInRoot && maxRunLength >= 3) {
+  } else if (externalModel && maxRunLength >= 3) {
     entries.push(rootBlobCandidate({
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same output repeated ${maxRunLength} times in a row. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
@@ -1068,38 +1060,14 @@ function toolResultToText(
   call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
 ): string {
   const normalized = normalizedToolResult(message, contentToText(message.content));
-  const name = namespacedToolName(message.toolNamespace, message.toolName);
-  const label = normalized.isError ? "Tool error" : "Tool output";
   return [
     "[tool_result]",
-    `${label} for ${name}`,
     `call_id: ${decodeCursorCallId(message.toolCallId)}`,
+    `name: ${namespacedToolName(message.toolNamespace, message.toolName)}`,
     ...(call ? [toolInvocationLine(call)] : []),
-    ...(normalized.isError ? ["is_error: true"] : []),
+    `is_error: ${normalized.isError}`,
     "output:",
     normalized.text,
-  ].join("\n");
-}
-
-function externalToolResultToText(
-  message: OcxToolResultMessage,
-  call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
-  protocolEnvelope = false,
-): string {
-  const normalized = normalizedToolResult(message, contentToText(message.content));
-  if (protocolEnvelope) {
-    const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
-    const completion = normalized.isError
-      ? ""
-      : "\n[completed: this tool invocation already ran successfully; do not repeat it]";
-    return `${prefix}\n${toolResultToText(message, call)}${completion}`;
-  }
-  const label = normalized.isError ? "Tool error" : "Tool output";
-  return [
-    `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${decodeCursorCallId(message.toolCallId)}, is_error: ${normalized.isError}):`,
-    ...(call ? [toolInvocationLine(call)] : []),
-    normalized.text,
-    ...(!normalized.isError ? ["[completed: this tool invocation already ran successfully; do not repeat it]"] : []),
   ].join("\n");
 }
 
@@ -1271,7 +1239,6 @@ function conversationTurns(
     const fullIndex = knownCallsOffset + start + w;
     if (message.role === "assistant") {
       if (!current) continue;
-      if (externalModel && message.phase === "commentary") continue;
       for (const part of message.content) {
         if (externalModel) {
           // Working external-model clients replay only assistant text. Native mcpToolCall and
@@ -1302,20 +1269,16 @@ function conversationTurns(
         // #1920/#1866: this external-replay site bypasses toolResultToText, so it
         // must consume the normalizer directly — cursor/grok-4.6 is the exact
         // reported repro path for empty Computer Use results.
+        const normalized = normalizedToolResult(message, contentToText(message.content));
+        const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
         // Name the invocation here as well, for the same reason the root replay does: a result with
         // no visible originating call reads as an interrupted attempt (devlog 260829 000_rca).
         const call = callBefore(turnCalls, decodeCursorCallId(message.toolCallId), fullIndex);
+        const invocation = call ? `${toolInvocationLine(call)}\n` : "";
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, {
-              text: externalToolResultToText(
-                message,
-                call,
-                (request.modelId.includes("grok-4.6") || request.modelId.startsWith("composer-2.5"))
-                  && message.toolName !== "exec",
-              ),
-            }),
+            value: create(AssistantMessageSchema, { text: `${prefix}\n${invocation}${normalized.text}` }),
           },
         })), requestScope));
         continue;
@@ -1405,9 +1368,6 @@ function buildPreparedCursorRunRequest(
   options?: { estimateInputTokens?: boolean },
 ): PreparedCursorRunRequest {
   const rawText = activePromptText(request);
-  const visibleTools = cursorToolsForActivePrompt(request.tools, rawText, request.toolChoice);
-  const mcpToolDefs = buildCursorToolDefinitions(visibleTools, request.toolChoice);
-  const requestContext = buildCursorRequestContext({ system: request.system, tools: mcpToolDefs });
   const lastRole = request.messages.at(-1)?.role;
   const text = lastRole === "user" || lastRole === "developer"
     ? appendCursorGenericToolUseHint(request.tools, rawText)
@@ -1429,7 +1389,7 @@ function buildPreparedCursorRunRequest(
     ? "userMessageAction"
     : "resumeAction";
   let actionText = externalToolContinuation
-    ? (request.echoRetryContinuationText ?? externalToolContinuationText(request.rawMessages, request.system))
+    ? (request.echoRetryContinuationText ?? CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT)
     : request.echoRetryContinuationText
       ? `${text}\n\n[correction] ${request.echoRetryContinuationText}`
       : text;
@@ -1455,13 +1415,13 @@ function buildPreparedCursorRunRequest(
               // OmniRoute / cursor-agent always send mode=1 on UserMessage.
               mode: 1,
             }),
-            requestContext,
+            requestContext: buildRequestContext(),
           }),
         }
       : {
           case: "resumeAction",
           value: create(ResumeActionSchema, {
-            requestContext,
+            requestContext: buildRequestContext(),
           }),
         },
   });
@@ -1630,6 +1590,8 @@ function buildPreparedCursorRunRequest(
   }
   // Hoisted out of the mcp_tools spread below so the estimate can read the same
   // filtered definitions the wire carries. Both helpers are pure.
+  const visibleTools = cursorToolsForActivePrompt(request.tools, rawText, request.toolChoice);
+  const mcpToolDefs = buildCursorToolDefinitions(visibleTools, request.toolChoice);
   // The envelope is measured HERE, on the final root set, and nowhere else.
   //
   // `rootPromptMessages` cannot do it: it sees only a checkpoint suffix, so 192 checkpoint roots

@@ -6,8 +6,7 @@
  *   bun scripts/release.ts <version> [--tag latest|preview] [--publish]
  *   bun scripts/release.ts --bump patch|minor|major [--tag latest|preview] [--publish]
  *       Preflight (clean tree + dependency audit + typecheck + tests + privacy scan) → bump package.json → commit → push →
- *       wait for Cross-platform CI (and, for main/latest, the immutable Build release candidate
- *       plus its artifact) → dispatch the Release workflow → watch it.
+ *       wait for Cross-platform CI → dispatch the Release workflow → watch it.
  *       The version bump commit/push is real; the Release workflow publish step is dry-run by default.
  *       Pass --publish to publish.
  *   bun scripts/release.ts watch
@@ -29,7 +28,6 @@
 import { commandInvocation } from "../src/lib/win-exec";
 import {
   compareVersions as compareReleaseVersions,
-  isPreviewVersion,
   nextPreviewRelease,
   nextStableRelease,
   parseVersion,
@@ -44,9 +42,6 @@ interface GhRun {
   headSha: string;
   status: string;
   url: string;
-  event?: string;
-  headBranch?: string;
-  name?: string;
 }
 
 interface CommandResult {
@@ -59,12 +54,6 @@ const CI_WORKFLOW = "ci.yml";
 const SERVICE_WORKFLOW = "service-lifecycle.yml";
 const CI_WAIT_TIMEOUT_MS = 20 * 60 * 1000;
 const CI_POLL_MS = 10 * 1000;
-const CANDIDATE_WAIT_TIMEOUT_MS = 60 * 60 * 1000;
-
-interface ReleaseCandidateRef {
-  runId: number;
-  artifactId: number;
-}
 
 async function runQuiet(command: string[]): Promise<CommandResult> {
   // Windows exposes npm and gh as `.cmd` shims. A shell-less spawn of a bare
@@ -159,25 +148,8 @@ async function runLoud(command: string[], env?: Record<string, string>): Promise
  * backslash path. Escape the characters that stay special inside double quotes so a path can never
  * introduce a second word or a substitution.
  */
-export function quoteSshArgument(value: string): string {
+function quoteSshArgument(value: string): string {
   return `"${value.replace(/(["\\`$])/g, "\\$1")}"`;
-}
-
-export interface ReleasePolicy {
-  tag?: string;
-  error?: string;
-}
-
-export function releasePolicy(version: string, branch: string, requestedTag?: string): ReleasePolicy {
-  const allowedBranches = ["main", "preview", "dev"];
-  if (!allowedBranches.includes(branch)) return { error: `✗ must be on ${allowedBranches.join(", ")} (currently ${branch}).` };
-  const expectedTag = branch === "preview" ? "preview" : branch === "dev" ? "dev" : "latest";
-  const tag = requestedTag ?? expectedTag;
-  if (tag !== expectedTag) return { error: `Release tag mismatch: ${branch} releases must use npm dist-tag '${expectedTag}' (got '${tag}').` };
-  if (branch === "preview" && !version.includes("-preview.")) return { error: `Preview releases must use a preview prerelease version (got ${version}).` };
-  if (branch === "dev" && !version.includes("-dev.")) return { error: `Dev releases must use a dev prerelease version (got ${version}).` };
-  if (branch === "main" && version.includes("-")) return { error: `Main releases must use a stable semver version (got ${version}).` };
-  return { tag };
 }
 
 /**
@@ -188,7 +160,7 @@ export function releasePolicy(version: string, branch: string, requestedTag?: st
  * fork's release to the upstream repository. `OCX_RELEASE_SSH_REPO` still wins when a maintainer
  * needs an explicit target.
  */
-export function sshTargetFromOrigin(originUrl: string): string | undefined {
+function sshTargetFromOrigin(originUrl: string): string | undefined {
   const trimmed = originUrl.trim();
   if (!trimmed) return undefined;
   // Reject a credential-bearing remote outright rather than transplanting it. A URL like
@@ -197,7 +169,10 @@ export function sshTargetFromOrigin(originUrl: string): string | undefined {
   // log. The host capture below therefore excludes '@' as well as '/'.
   const https = /^https?:\/\/([^/@]+)\/(.+?)(?:\.git)?\/?$/.exec(trimmed);
   if (https) return `${SSH_USER}@${https[1]}:${https[2]}.git`;
-  if (/^https?:\/\//.test(trimmed)) return undefined;
+  if (/^https?:\/\//.test(trimmed)) {
+    console.error("✗ origin carries credentials in its URL; refusing to build a release push target from it.");
+    process.exit(1);
+  }
   // Already an SSH remote (either scp-like or ssh://): reuse it verbatim.
   if (isSshRemote(trimmed)) return trimmed;
   return undefined;
@@ -210,7 +185,7 @@ export function sshTargetFromOrigin(originUrl: string): string | undefined {
  * the failure command. Parse URL userinfo instead of treating any `ssh://` string as safe, and
  * reject the scp-like `user:password@host:path` lookalike before either sink can observe it.
  */
-export function isSshRemote(value: string): boolean {
+function isSshRemote(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return false;
 
@@ -252,40 +227,31 @@ export function isSshRemote(value: string): boolean {
 /** Split out so the scp-like SSH target is assembled rather than written as an address literal. */
 const SSH_USER = "git";
 
-export function sshPushCommand(branch: string, keyPath: string | undefined, configured: string | undefined, origin: string | undefined): { command: string[]; env?: Record<string, string>; error?: string } {
-  const key = keyPath?.trim();
-  if (!key) return { command: ["git", "push", "origin", branch] };
-  const target = configured?.trim();
+async function releasePushCommand(branch: string): Promise<{ command: string[]; env?: Record<string, string> }> {
+  const keyPath = process.env.OCX_RELEASE_SSH_KEY?.trim();
+  if (!keyPath) return { command: ["git", "push", "origin", branch] };
+  const configured = process.env.OCX_RELEASE_SSH_REPO?.trim();
   // An unvalidated override outranking origin means a stale exported value from a fork session can
   // silently retarget a production release. Check the shape, and print the resolved target either
   // way so the destination is visible before the push rather than inferred afterwards.
-  if (target && !isSshRemote(target)) return { command: [], error: "✗ OCX_RELEASE_SSH_REPO is not a credential-free ssh:// or git@host:owner/repo remote; refusing to push." };
-  const slug = target || sshTargetFromOrigin(origin ?? "");
-  if (!slug) return { command: [], error: /^https?:\/\/[^/]*@/.test(origin?.trim() ?? "")
-    ? "✗ origin carries credentials in its URL; refusing to build a release push target from it."
-    : "✗ OCX_RELEASE_SSH_KEY is set but no SSH push target could be derived from origin; set OCX_RELEASE_SSH_REPO." };
+  if (configured && !isSshRemote(configured)) {
+    console.error("✗ OCX_RELEASE_SSH_REPO is not a credential-free ssh:// or git@host:owner/repo remote; refusing to push.");
+    process.exit(1);
+  }
+  const slug = configured || sshTargetFromOrigin(await capture(["git", "remote", "get-url", "origin"]));
+  if (!slug) {
+    console.error("✗ OCX_RELEASE_SSH_KEY is set but no SSH push target could be derived from origin; set OCX_RELEASE_SSH_REPO.");
+    process.exit(1);
+  }
+  console.log(`→ release push target: ${slug}`);
   return {
     // Push to the SSH URL explicitly rather than rewriting the `origin` remote: the remote stays
     // HTTPS for every other command, so nothing outside this call inherits the key.
     command: ["git", "push", slug, `HEAD:${branch}`],
     // IdentitiesOnly stops ssh from offering the agent's other keys first, which would authenticate
     // as the maintainer and get rejected by the ruleset again.
-    env: { GIT_SSH_COMMAND: `ssh -i ${quoteSshArgument(key)} -o IdentitiesOnly=yes` },
+    env: { GIT_SSH_COMMAND: `ssh -i ${quoteSshArgument(keyPath)} -o IdentitiesOnly=yes` },
   };
-}
-
-async function releasePushCommand(branch: string): Promise<{ command: string[]; env?: Record<string, string> }> {
-  const keyPath = process.env.OCX_RELEASE_SSH_KEY;
-  const configured = process.env.OCX_RELEASE_SSH_REPO;
-  const origin = keyPath ? await capture(["git", "remote", "get-url", "origin"]) : undefined;
-  const result = sshPushCommand(branch, keyPath, configured, origin);
-  if (result.error) { console.error(result.error); process.exit(1); }
-  if (result.command[2] && result.command[2] !== "origin") console.log(`→ release push target: ${result.command[2]}`);
-  return result;
-}
-
-export function remoteHeadMatches(localSha: string, remoteSha: string): boolean {
-  return localSha === remoteSha;
 }
 
 async function readPackageName(): Promise<string> {
@@ -467,63 +433,6 @@ async function waitForSuccessfulCi(sha: string, workflow: string = CI_WORKFLOW, 
   process.exit(1);
 }
 
-async function waitForReleaseCandidate(sha: string): Promise<ReleaseCandidateRef> {
-  const repository = process.env.GITHUB_REPOSITORY || await (async () => {
-    const origin = await capture(["git", "remote", "get-url", "origin"]);
-    const match = /(?:https?:\/\/[^/]+\/|git@[^:]+:|ssh:\/\/[^/]+\/)([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(origin.trim());
-    if (!match?.[1]) {
-      console.error("✗ could not derive repository name for candidate artifact lookup");
-      process.exit(1);
-    }
-    return match[1];
-  })();
-  const deadline = Date.now() + CANDIDATE_WAIT_TIMEOUT_MS;
-  let attempt = 1;
-  while (Date.now() < deadline) {
-    const raw = await capture(["gh", "run", "list", "--workflow", "release-candidate.yml", "--commit", sha,
-      "--limit", "20", "--json", "conclusion,databaseId,event,headBranch,headSha,name,status,url"]);
-    const runs = (JSON.parse(raw) as GhRun[]).filter(run =>
-      run.headSha === sha && run.event === "workflow_run" && run.headBranch === "main" &&
-      run.name === "Build release candidate",
-    );
-    const successfulRuns = runs.filter(run => run.status === "completed" && run.conclusion === "success");
-    if (successfulRuns.length > 1) {
-      console.error(`✗ multiple successful Build release candidate runs found for ${sha}; refusing ambiguous provenance`);
-      process.exit(1);
-    }
-    const failed = runs.find(run => run.status === "completed" && run.conclusion && run.conclusion !== "success");
-    if (successfulRuns.length === 0 && failed) {
-      console.error(`✗ Build release candidate failed for ${sha}: ${failed.url}`);
-      process.exit(1);
-    }
-    for (const run of successfulRuns) {
-      const artifactsRaw = await capture(["gh", "api", `/repos/${repository}/actions/runs/${run.databaseId}/artifacts?per_page=100`]);
-      const artifacts = JSON.parse(artifactsRaw) as { total_count?: number; artifacts?: Array<{ id?: number; name?: string; expired?: boolean }> };
-      const matching = (artifacts.artifacts ?? []).filter(artifact =>
-        artifact.name === `release-candidate-${sha}` && artifact.expired === false &&
-        typeof artifact.id === "number" && Number.isInteger(artifact.id) && artifact.id > 0,
-      );
-      if (artifacts.total_count !== undefined && artifacts.total_count !== (artifacts.artifacts ?? []).length) {
-        console.error("✗ candidate artifact listing was truncated; refusing ambiguous provenance");
-        process.exit(1);
-      }
-      if (matching.length === 1) {
-        console.log(`→ Build release candidate passed: ${run.url}`);
-        return { runId: run.databaseId, artifactId: matching[0]!.id! };
-      }
-      if (matching.length > 1) {
-        console.error(`✗ multiple unexpired release candidate artifacts found for ${sha}`);
-        process.exit(1);
-      }
-    }
-    console.log(`→ waiting for immutable Build release candidate (${sha.slice(0, 7)}) attempt ${attempt}`);
-    attempt += 1;
-    await Bun.sleep(CI_POLL_MS);
-  }
-  console.error(`✗ timed out waiting for immutable Build release candidate on ${sha}`);
-  process.exit(1);
-}
-
 async function _remoteMainSha(): Promise<string> {
   const out = await capture(["git", "ls-remote", "origin", "refs/heads/main"]);
   const [sha] = out.split(/\s+/);
@@ -545,13 +454,12 @@ async function remoteBranchHead(branch: string): Promise<string> {
   return sha;
 }
 
-async function main(): Promise<void> {
 if (args[0] === "watch") {
   await watchLatest();
   process.exit(0);
 }
 
-const usage = "Usage: bun scripts/release.ts <version> [--tag latest|preview|dev] [--publish]\n"
+const usage = "Usage: bun scripts/release.ts <version> [--tag latest|preview] [--publish]\n"
   + "       bun scripts/release.ts --bump patch|minor|major [--tag latest|preview] [--publish]\n"
   + "       bun scripts/release.ts watch";
 const explicitVersion = args[0] && !args[0].startsWith("--") ? args[0] : null;
@@ -585,24 +493,16 @@ if (explicitVersion !== null && !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(explicitVersio
 const bumpKind = rawBumpKind as ReleaseBumpKind | null;
 const dryRun = !args.includes("--publish");
 
-// 1. Preflight — must be on main, preview, or dev, and local verification must pass.
+// 1. Preflight — must be on main or preview, and local verification must pass.
 const branch = await capture(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
-const allowedBranches = ["main", "preview", "dev"];
-if (!allowedBranches.includes(branch)) {
-  console.error(`✗ must be on ${allowedBranches.join(", ")} (currently ${branch}).`);
-  process.exit(1);
-}
-const requestedTag = args.includes("--tag") ? (args[args.indexOf("--tag") + 1] ?? undefined) : undefined;
-const expectedTag = branch === "preview" ? "preview" : branch === "dev" ? "dev" : "latest";
-const tag = requestedTag ?? expectedTag;
+const allowedBranches = ["main", "preview"];
+const expectedTag = branch === "preview" ? "preview" : "latest";
+const tag = args.includes("--tag") ? (args[args.indexOf("--tag") + 1] ?? expectedTag) : expectedTag;
 if (tag !== expectedTag) {
   console.error(`Release tag mismatch: ${branch} releases must use npm dist-tag '${expectedTag}' (got '${tag}').`);
   process.exit(1);
 }
-if (branch === "dev" && bumpIndex !== undefined) {
-  console.error(`--bump is supported only on main or preview; supply an explicit dev prerelease version.\n${usage}`);
-  process.exit(1);
-}
+if (!allowedBranches.includes(branch)) { console.error(`✗ must be on ${allowedBranches.join(" or ")} (currently ${branch}).`); process.exit(1); }
 if ((await capture(["git", "status", "--porcelain"])).trim()) { console.error("✗ working tree not clean — commit or stash first."); process.exit(1); }
 const packageName = await readPackageName();
 const distTags = await readNpmDistTags(packageName);
@@ -620,8 +520,7 @@ if (version === null) {
   for (const candidate of tags) {
     const parsed = parseVersion(candidate);
     if (!parsed) continue;
-    if (parsed.prerelease === null) stableTags.push(candidate);
-    else if (isPreviewVersion(candidate)) previewTags.push(candidate);
+    (parsed.prerelease === null ? stableTags : previewTags).push(candidate);
   }
   try {
     version = tag === "preview"
@@ -644,8 +543,14 @@ if (version === null) {
     process.exit(1);
   }
 }
-const policy = releasePolicy(version, branch, requestedTag);
-if (policy.error) { console.error(policy.error); process.exit(1); }
+if (branch === "preview" && !version.includes("-preview.")) {
+  console.error(`Preview releases must use a preview prerelease version (got ${version}).`);
+  process.exit(1);
+}
+if (branch === "main" && version.includes("-")) {
+  console.error(`Main releases must use a stable semver version (got ${version}).`);
+  process.exit(1);
+}
 console.log(`→ release metadata preflight (${packageName}@${version})`);
 await assertUnusedReleaseVersion(packageName, version);
 assertChannelVersionMovesForward(version, tag, distTags);
@@ -657,7 +562,7 @@ console.log("→ test suite");
 // Match CI's isolation policy instead of inventing a second one. `ci.yml` runs
 // the storage-policy and api-usage harnesses in DEDICATED jobs and excludes them
 // from the general shards (`scripts/ci/run-bun-test-batches.sh`
-// through the `scripts/ci/test-lanes.ts` manifest), because those Worker-heavy files corrupt the isolate
+// `is_general_test_file`), because those Worker-heavy files corrupt the isolate
 // state around them.
 //
 // This preflight used to run `bun test --isolate tests` — the whole directory in
@@ -680,13 +585,13 @@ const ISOLATED_TEST_FILES = [
   "./tests/server/api-usage.test.ts",
 ];
 await runLoud([
-  "bun", "scripts/test.ts", "--isolate", "tests",
+  "bun", "test", "--isolate", "tests",
   "--path-ignore-patterns=**/api-storage-policy*.test.ts",
   "--path-ignore-patterns=**/api-storage.test.ts",
   "--path-ignore-patterns=**/api-usage.test.ts",
 ]);
 for (const isolated of ISOLATED_TEST_FILES) {
-  await runLoud(["bun", "scripts/test.ts", "--isolate", isolated]);
+  await runLoud(["bun", "test", "--isolate", isolated]);
 }
 console.log("→ privacy scan");
 await runLoud(["bun", "run", "privacy:scan"]);
@@ -713,21 +618,9 @@ if (currentVersion === version) {
 const pendingBump = (await capture(["git", "status", "--porcelain", "package.json"])).trim() !== "";
 if (pendingBump) {
   await runLoud(["git", "add", "package.json"]);
-  const commitArgs = ["git", "commit", "-m", `release: v${version}`];
-  if (branch === "main" && tag === "latest") commitArgs.push("-m", "Auto-Release: skip");
-  await runLoud(commitArgs);
+  await runLoud(["git", "commit", "-m", `release: v${version}`]);
 }
 const releaseSha = await capture(["git", "rev-parse", "HEAD"]);
-if (branch === "main" && tag === "latest") {
-  const autoReleaseTrailers = await capture(["git", "log", "-1", "--format=%(trailers:key=Auto-Release,valueonly)", "HEAD"]);
-  const suppressesAutomaticDispatch = autoReleaseTrailers
-    .split(/\r?\n/)
-    .some(value => value.trim() === "skip");
-  if (!suppressesAutomaticDispatch) {
-    console.error("✗ stable helper releases require an 'Auto-Release: skip' commit trailer to prevent competing automatic and manual dispatches.");
-    process.exit(1);
-  }
-}
 if (pendingBump) {
   console.log(`→ push origin ${branch}`);
   const push = await releasePushCommand(branch);
@@ -747,34 +640,23 @@ await waitForSuccessfulCi(releaseSha);
 console.log(`→ wait for Service lifecycle (${releaseSha})`);
 await waitForSuccessfulCi(releaseSha, SERVICE_WORKFLOW, "Service lifecycle");
 
-let candidate: ReleaseCandidateRef | undefined;
-if (branch === "main" && tag === "latest") {
-  console.log(`→ wait for immutable Build release candidate (${releaseSha})`);
-  candidate = await waitForReleaseCandidate(releaseSha);
-}
-
 // Live-remote guard: re-read the actual remote head over the network immediately
 // before dispatch. The local remote-tracking ref can be minutes stale, and the
 // workflow_dispatch below resolves a mutable branch — so this is the last chance
 // to refuse publishing an unaudited newer commit.
 const liveOriginSha = await remoteBranchHead(branch);
-if (!remoteHeadMatches(releaseSha, liveOriginSha)) {
+if (liveOriginSha !== releaseSha) {
   console.error(`✗ origin/${branch} moved while waiting for CI (${liveOriginSha} != ${releaseSha}); aborting release dispatch.`);
   process.exit(1);
 }
 
 console.log(`→ dispatch Release (tag=${tag}, dry-run=${dryRun})`);
 const dispatchStartedAt = new Date(Date.now() - 5_000).toISOString();
-const dispatchArgs = ["gh", "workflow", "run", "release.yml", "--ref", branch, "-f", `version=${version}`, "-f", `tag=${tag}`, "-f", `expected-sha=${releaseSha}`, "-f", `dry-run=${String(dryRun)}`];
-if (candidate) dispatchArgs.push("-f", `candidate-run-id=${candidate.runId}`, "-f", `candidate-artifact-id=${candidate.artifactId}`);
-await runLoud(dispatchArgs);
+await runLoud(["gh", "workflow", "run", "release.yml", "--ref", branch, "-f", `version=${version}`, "-f", `tag=${tag}`, "-f", `expected-sha=${releaseSha}`, "-f", `dry-run=${String(dryRun)}`]);
 
 // 5. Watch it.
 const releaseRun = await waitForReleaseWorkflowRun(releaseSha, branch, dispatchStartedAt);
 await watchRun(releaseRun.databaseId);
 console.log(dryRun
   ? "\n✓ Dry run complete. Re-run with --publish to publish for real."
-  : `\n✓ Published. Try:  npm install -g ${packageName}`);
-}
-
-if (import.meta.main) await main();
+  : "\n✓ Published. Try:  npm install -g @bitkyc08/opencodex");

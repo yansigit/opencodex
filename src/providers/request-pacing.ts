@@ -33,8 +33,6 @@ interface Waiter {
   modelId?: string;
   providerIntervalMs: number;
   modelIntervalMs: number;
-  providerJitterMs: number;
-  modelJitterMs: number;
   queuedAt: number;
   signal?: AbortSignal;
   resolve: () => void;
@@ -56,7 +54,6 @@ export interface RequestPacingRuntime {
   setTimer: (callback: () => void, delayMs: number) => unknown;
   clearTimer: (handle: unknown) => void;
   enqueueMicrotask: (callback: () => void) => void;
-  random: () => number;
 }
 
 export interface ProviderRequestPacingStatus {
@@ -74,7 +71,6 @@ const defaultRuntime: RequestPacingRuntime = {
   setTimer: (callback, delayMs) => setTimeout(callback, delayMs),
   clearTimer: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
   enqueueMicrotask: queueMicrotask,
-  random: Math.random,
 };
 let runtime = defaultRuntime;
 let lastReconciledGeneration = 0;
@@ -94,19 +90,6 @@ function normalizedInterval(rule: RequestPacingRule | undefined): number {
   return Math.max(rpmInterval, fixedInterval);
 }
 
-function normalizedJitter(rule: RequestPacingRule | undefined): number {
-  return rule?.jitterMs !== undefined && Number.isInteger(rule.jitterMs)
-    ? Math.min(60_000, Math.max(0, rule.jitterMs))
-    : 0;
-}
-
-function jitterDelay(jitterMs: number): number {
-  if (jitterMs <= 0) return 0;
-  const sample = runtime.random();
-  if (!Number.isFinite(sample)) return 0;
-  return Math.min(jitterMs, Math.floor(Math.max(0, sample) * jitterMs));
-}
-
 export function requestPacingIntervalMs(provider: OcxProviderConfig, modelId?: string): number {
   const policy = provider.requestPacing;
   if (!policy?.enabled) return 0;
@@ -117,17 +100,12 @@ export function requestPacingIntervalMs(provider: OcxProviderConfig, modelId?: s
 function requestPacingIntervals(provider: OcxProviderConfig, modelId?: string): {
   providerIntervalMs: number;
   modelIntervalMs: number;
-  providerJitterMs: number;
-  modelJitterMs: number;
 } {
   const policy = provider.requestPacing;
-  if (!policy?.enabled) return { providerIntervalMs: 0, modelIntervalMs: 0, providerJitterMs: 0, modelJitterMs: 0 };
-  const model = modelId ? policy.models?.[modelId] : undefined;
+  if (!policy?.enabled) return { providerIntervalMs: 0, modelIntervalMs: 0 };
   return {
     providerIntervalMs: normalizedInterval(policy),
-    modelIntervalMs: normalizedInterval(model),
-    providerJitterMs: normalizedJitter(policy),
-    modelJitterMs: normalizedJitter(model),
+    modelIntervalMs: modelId ? normalizedInterval(policy.models?.[modelId]) : 0,
   };
 }
 
@@ -208,9 +186,9 @@ function runQueue(providerName: string, state: ProviderPacer): void {
   const startedAt = runtime.now();
   state.lastStartedAt = startedAt;
   state.lastModelId = waiter.modelId;
-  state.providerNextStartAt = startedAt + waiter.providerIntervalMs + jitterDelay(waiter.providerJitterMs);
-  if (waiter.modelId && (waiter.modelIntervalMs > 0 || waiter.modelJitterMs > 0)) {
-    state.modelNextStartAt.set(waiter.modelId, startedAt + waiter.modelIntervalMs + jitterDelay(waiter.modelJitterMs));
+  state.providerNextStartAt = startedAt + waiter.providerIntervalMs;
+  if (waiter.modelId && waiter.modelIntervalMs > 0) {
+    state.modelNextStartAt.set(waiter.modelId, startedAt + waiter.modelIntervalMs);
   }
   waiter.resolve();
   runtime.enqueueMicrotask(() => runQueue(providerName, state));
@@ -223,12 +201,7 @@ export async function waitForProviderRequestSlot(
   signal?: AbortSignal,
 ): Promise<void> {
   const intervals = requestPacingIntervals(provider, modelId);
-  if (Math.max(
-    intervals.providerIntervalMs,
-    intervals.modelIntervalMs,
-    intervals.providerJitterMs,
-    intervals.modelJitterMs,
-  ) <= 0) return;
+  if (Math.max(intervals.providerIntervalMs, intervals.modelIntervalMs) <= 0) return;
   if (signal?.aborted) throw abortReason(signal);
 
   const state = pacers.get(providerName) ?? {

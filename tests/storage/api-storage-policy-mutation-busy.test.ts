@@ -27,11 +27,7 @@ afterEach(async () => {
 });
 
 test("storage_mutation_busy clears inflight so a later policy run can start", async () => {
-  let acquired!: () => void;
-  let release!: () => void;
-  const acquiredPromise = new Promise<void>(resolve => { acquired = resolve; });
-  const releasePromise = new Promise<void>(resolve => { release = resolve; });
-  setArchivedCleanupJobTestHooks({ blockMs: 10, onAcquired: acquired, waitForRelease: releasePromise });
+  setArchivedCleanupJobTestHooks({ blockMs: 600 });
   seedArchived(harness.isolatedCodexHome.path);
   const server = startServer(0);
   try {
@@ -58,7 +54,7 @@ test("storage_mutation_busy clears inflight so a later policy run can start", as
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ percent: 50, mode: "quarantine", digest: preview.digest }),
     });
-    await acquiredPromise;
+    await Bun.sleep(50);
 
     const blockedRun = await fetch(new URL("/api/storage/cleanup-policy/run", server.url), {
       method: "POST",
@@ -68,7 +64,6 @@ test("storage_mutation_busy clears inflight so a later policy run can start", as
     const blockedDone = await waitForJobIdle(server.url, blockedStart.job.startedAt);
     expect(blockedDone.job.lastOutcome?.ok).toBe(false);
     expect(blockedDone.job.lastOutcome?.error).toBe("storage_mutation_busy");
-    release();
 
     await cleanupPromise;
 

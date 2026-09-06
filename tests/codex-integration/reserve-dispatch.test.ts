@@ -40,7 +40,6 @@ function config(): OcxConfig {
     port: 0, defaultProvider: "custom", codexDesktopAuthless: true, codexMainAccountHardLock: true,
     providers: { custom: {
       adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex",
-      replayTransientFailures: true,
     } },
   };
 }

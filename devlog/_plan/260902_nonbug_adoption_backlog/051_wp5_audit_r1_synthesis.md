@@ -10,3 +10,4 @@ Source verification for the doc sentences (read in this worktree):
 - `src/images/artifacts.ts`: HTTPS-only (`:278`, `:313`), `redirect: "manual"` with 3xx rejected
   (`xai-client.ts:124-128`), `MAX_DOWNLOAD_BYTES` 50 MiB default (`:14`, `:281`, `:327`).
 - Image-bridge precedence sentence already present and correct; mirror it into codex-integration.
+

@@ -66,10 +66,7 @@ async function runScenario(scenario: Scenario): Promise<Record<string, unknown>>
       }
       return { success: true, exitCode: 0, timedOut: false, stdout: "" };
     });
-    setIcaclsRunnerForTests((args, timeoutMs) => {
-      if (!args.some(arg => arg.includes("responses-state-spill"))) {
-        return { success: true, exitCode: 0, timedOut: false, stdout: "" };
-      }
+    setIcaclsRunnerForTests((_args, timeoutMs) => {
       Bun.sleepSync(timeoutMs + 50);
       return { success: true, exitCode: 0, timedOut: false, stdout: "" };
     });

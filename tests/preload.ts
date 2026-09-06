@@ -12,10 +12,6 @@
  * module load, and that must happen BEFORE this file replaces HOME.
  */
 import { isTestHomeGuardArmed, protectedHomeForTests } from "../src/lib/test-home-guard";
-
-// Fork-only test seams are opt-in and must be armed before modules using them load.
-(globalThis as Record<PropertyKey, unknown>)[Symbol.for("opencodex.test.provider-fetch")] = true;
-(globalThis as Record<PropertyKey, unknown>)[Symbol.for("opencodex.test.plaintext-remote")] = true;
 import { createIsolatedTestEnvironment } from "../scripts/test";
 import {
   acquireTestRunLock,

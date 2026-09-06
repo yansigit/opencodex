@@ -60,9 +60,6 @@ export type PullRequestState = {
   draft?: boolean;
   base?: { ref: string };
   user?: { login: string };
-  state?: "open" | "closed";
-  merged?: boolean;
-  merged_at?: string | null;
   /** `pulls.get` changed_files; omit to default to listed file count in harness. */
   changed_files?: number;
 };
@@ -114,16 +111,6 @@ export type RunOptions = {
   statusContext?: string;
   /** Legacy commit-status state. Defaults to `success`. */
   statusState?: string;
-  /** Completed Cross-platform CI workflow_run payload fields. */
-  workflowRun?: {
-    name?: string;
-    event?: string;
-    status?: string;
-    conclusion?: string | null;
-    head_sha?: string;
-    repository?: { full_name?: string };
-    head_repository?: { full_name?: string };
-  };
   /** Shorthand for a single associated-PR response page. */
   associatedPullRequests?: unknown[];
   /** Page-specific PRs returned by repos.listPullRequestsAssociatedWithCommit. */
@@ -191,13 +178,12 @@ export type RunOptions = {
   /** Page-keyed open PR fixtures for `pulls.list` (1-based via array index). */
   openPullPages?: unknown[][];
   /**
-   * Check-runs returned by the exact-head Cursor Bugbot evidence lookup.
-   * Local CI remains an author attestation; only the configured Bugbot check
-   * affects readiness when its policy is required.
+   * Check-runs `checks.listForRef` used to report for readiness claim checks.
+   * Local CI is now an author attestation only, so the gate no longer lists
+   * checks; these fixtures remain so older scenarios that pass `checkRuns`
+   * still construct cleanly without affecting gate behavior.
    */
   checkRuns?: Array<{
-    id?: number;
-    head_sha?: string;
     name: string;
     status: string;
     conclusion: string | null;
@@ -205,14 +191,12 @@ export type RunOptions = {
   }>;
   /** Page-keyed check-run fixtures for `checks.listForRef` pagination. */
   checkRunPages?: Array<Array<{
-    id?: number;
-    head_sha?: string;
     name: string;
     status: string;
     conclusion: string | null;
     app?: { id: number } | null;
   }>>;
-  /** Optional filtered total returned by `checks.listForRef`. */
+  /** Optional filtered total; unused now that the gate skips check listing. */
   checkRunTotalCount?: number;
   /**
    * Review threads `pullRequestReviewThreads` (via GraphQL) reports for the PR.
@@ -282,9 +266,6 @@ export type RunOptions = {
   senderLogin?: string;
   /** Numeric sender id; status events default to CodeRabbit's stable bot id. */
   senderId?: number;
-  /** Bugbot policy and immutable App id injected by workflow variables. */
-  bugbotPolicy?: "shadow" | "required";
-  bugbotAppId?: number;
 };
 
 /**
@@ -701,10 +682,8 @@ export async function runEnforcePrTarget(
     (pr as { changed_files: number }).changed_files = listedFileCount;
   }
   const checkRunPages = (options.checkRunPages ?? [options.checkRuns ?? DEFAULT_GREEN_CHECKS])
-    .map(page => page.map((check, index) => ({
+    .map(page => page.map(check => ({
       ...check,
-      id: check.id ?? index + 1,
-      head_sha: check.head_sha ?? pr.head.sha,
       // Existing fixtures model trusted GitHub Actions checks unless a test
       // explicitly supplies another app or null to exercise provenance.
       app: check.app === undefined ? { id: 15368 } : check.app,
@@ -1054,26 +1033,6 @@ export async function runEnforcePrTarget(
               context: options.statusContext ?? "CodeRabbit",
               state: options.statusState ?? "success",
             }
-          : options.eventName === "workflow_run"
-            ? {
-                workflow_run: {
-                  name: options.workflowRun?.name ?? "Cross-platform CI",
-                  event: options.workflowRun?.event ?? "pull_request",
-                  status: options.workflowRun?.status ?? "completed",
-                  conclusion: options.workflowRun?.conclusion ?? "success",
-                  ...(options.workflowRun && Object.prototype.hasOwnProperty.call(options.workflowRun, "head_sha")
-                    ? { head_sha: options.workflowRun.head_sha }
-                    : options.workflowRun ? {} : { head_sha: pr.head.sha }),
-                  repository: {
-                    full_name: options.workflowRun?.repository?.full_name ?? "lidge-jun/opencodex",
-                  },
-                  head_repository: {
-                    full_name: options.workflowRun?.head_repository?.full_name ?? "lidge-jun/opencodex",
-                  },
-                },
-              }
-          : options.eventName === "workflow_dispatch"
-            ? { inputs: { pull_number: String(options.resolvedPullNumber ?? pr.number) } }
           : { pull_request: eventPr }),
       repository: {
         id: 987654321,
@@ -1100,7 +1059,7 @@ export async function runEnforcePrTarget(
     };
     eventName = options.eventName ?? "pull_request_target";
     sha = "3f1c0de0a6a4d0a3f9a1b2c3d4e5f60718293a4b";
-    ref = (options.eventName === "workflow_dispatch") ? "refs/heads/main" : "refs/pull/42/merge";
+    ref = "refs/pull/42/merge";
     workflow = "Enforce PR target branch";
     action = "__run";
     actor = "contributor";
@@ -1226,8 +1185,6 @@ export async function runEnforcePrTarget(
   runtimeProcess.env.RESOLVED_PULL_NUMBER = String(
     options.resolvedPullNumber ?? eventPr.number ?? "",
   );
-  runtimeProcess.env.CURSOR_BUGBOT_POLICY = options.bugbotPolicy ?? "shadow";
-  runtimeProcess.env.CURSOR_BUGBOT_APP_ID = String(options.bugbotAppId ?? 99);
 
   const returnValue = await compileScript(script)({
     github,

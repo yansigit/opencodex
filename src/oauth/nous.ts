@@ -40,7 +40,6 @@ import type { OAuthController, OAuthCredentials } from "./types";
 import { getAuthStorePath } from "./store";
 import { atomicWriteFile, hardenConfigDir, hardenExistingSecret } from "../config";
 import { BOUNDED_BODY_MAX_BYTES, readBoundedResponseBytes } from "../lib/bounded-body";
-import { oauthFetch } from "./transport";
 
 export const NOUS_PORTAL_BASE_URL = "https://portal.nousresearch.com";
 export const NOUS_INFERENCE_BASE_URL = "https://inference-api.nousresearch.com/v1";
@@ -536,7 +535,7 @@ async function requestDeviceAuthorization(signal?: AbortSignal): Promise<{
   intervalMs: number;
 }> {
   const effectiveSignal = requestSignal(signal);
-  const response = await oauthFetch(`${resolvePortalBaseUrl()}/api/oauth/device/code`, {
+  const response = await fetch(`${resolvePortalBaseUrl()}/api/oauth/device/code`, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -594,7 +593,7 @@ async function pollForToken(
     let response: Response;
     const effectiveSignal = requestSignal(signal);
     try {
-      response = await oauthFetch(`${resolvePortalBaseUrl()}/api/oauth/token`, {
+      response = await fetch(`${resolvePortalBaseUrl()}/api/oauth/token`, {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -647,7 +646,8 @@ async function pollForToken(
     // Unknown OAuth error: report it from the parsed payload, not by
     // re-reading the (already consumed) response body.
     if (error) {
-      throw new NousTokenError(response.status, String(error), `Nous Portal device authorization failed (${response.status})`);
+      const detail = typeof payload.error_description === "string" ? `: ${payload.error_description}` : "";
+      throw new NousTokenError(response.status, String(error), `Nous Portal device authorization failed (${error})${detail}`);
     }
     throw tokenErrorFromPayload(response.status, payload);
   }
@@ -717,7 +717,7 @@ export async function refreshNousToken(refreshToken: string, signal?: AbortSigna
   let response: Response;
   const effectiveSignal = requestSignal(signal);
   try {
-    response = await oauthFetch(`${baseUrl}/api/oauth/token`, {
+    response = await fetch(`${baseUrl}/api/oauth/token`, {
       method: "POST",
       headers: {
         Accept: "application/json",

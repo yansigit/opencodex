@@ -25,8 +25,5 @@ This file applies to `src/` and inherits the repository-wide rules in `/AGENTS.m
 - For focused behavior, run the relevant `bun test tests/<name>.test.ts` and `bun run typecheck`.
 - If the change set is broader than one file, run `bun run test:changed` instead of the full suite.
 - Run `bun run test` only before marking a PR review-ready, or when the user explicitly asks for the full suite.
-- Real inference and provider smoke must run against an isolated instance or
-  container; do not restart, reconfigure, or smoke-test the live `10100` proxy
-  (see **Live inference testing** in `/AGENTS.md`).
 - For logging, requests, credentials, account data, or fixtures, also run `bun run privacy:scan`.
 - Update `docs-site/` when the change affects user-visible behavior or configuration.

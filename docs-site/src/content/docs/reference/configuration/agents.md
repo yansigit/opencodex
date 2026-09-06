@@ -27,20 +27,16 @@ still depends on upstream support for your account.
 | `multiAgentMode?` | `"v1" \| "default" \| "v2"` | `"default"` | `v1` stamps every catalog model as v1; `v2` stamps every model as v2. `default` restores upstream pins (Sol/Terra v2, Luna v1) and otherwise follows the native `multi_agent_v2` flag. Applies to new sessions. |
 | `keepNativeChatGptOnV1?` | `boolean` | `false` | When `multiAgentMode` is `"v2"`, disable the global V2 override, stamp ChatGPT-native rows as v1, and keep routed rows on v2. Codex resolves the global override before catalog pins, so both parts are required for a ChatGPT parent to spawn routed children without backend-encrypted tasks ([#92](https://github.com/lidge-jun/opencodex/issues/92)). Ignored in `v1` and `default`. |
 | `subagentModels?` | `string[]` | `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5` | Up to five bare native, account-qualified `<selector>/<native-openai-model>`, or routed `provider/model` ids featured first in the sub-agent picker. The dashboard offers only bare native and routed ids and omits exact account-qualified choices when it saves; use `ocx agent subagents set` or edit the configuration for exact choices. After the [one-time Astra upgrade](#astra-roster-upgrade), an explicit empty list is preserved. |
-| `injectionModel?` | `string` | — | Preferred native or routed sub-agent model used in proxy-authored v2 delegation guidance. It remains independent of the five featured overrides. |
+| `injectionModel?` | `string` | — | Preferred native or routed sub-agent model used in proxy-authored v2 delegation guidance. |
 | `injectionEffort?` | `string` | — | Preferred effort (`low` through `ultra`), meaningful only with `injectionModel`. |
-| `injectionPrompt?` | `string` | — | Replaces the built-in v2 guidance body. Supports `{{model}}`, `{{effort}}`, `{{roster}}`, `{{fallback}}`, `{{roles}}`, and `{{nativeDefaultState}}`. The native-default placeholder is `active` when the configured native default is authoritative, `disabled` when native-default sync is off or no model is configured, `pending` while the write or app-server freshness is unresolved, and `blocked` when conflicting or unreadable Codex configuration prevents authority. A configured `injectionModel` is sufficient to render the custom prompt. |
+| `injectionPrompt?` | `string` | — | Replaces the built-in v2 guidance body. Supports `{{model}}`, `{{effort}}`, `{{roster}}`, and `{{fallback}}`. A configured `injectionModel` is sufficient to render the custom prompt. |
 | `multiAgentGuidanceEnabled?` | `boolean` | `true` | Controls only opencodex-authored v1/v2 developer guidance; it does not change native agent defaults, tools, routing, rosters, or effort caps. |
-| `subagentRoles?` | `object[]` | — | Named specialists (`id`, `description`, `model`, optional `effort`, `developerInstructions`, optional `enabled`). Max 8 roles and 5 unique enabled models. An explicit empty list is preserved. The Subagents dashboard edits this catalog. |
-| `syncCodexAgentRoles?` | `boolean` | on once any enabled role exists | Project enabled roles into marker-owned `$CODEX_HOME/agents/ocx-<id>.toml`. `false` prunes those owned files and leaves user-authored agent files untouched. Never writes `model_fallback`. |
-| `syncCodexSubagentDefaults?` | `boolean` | `false` | Opt into writing `injectionModel` and optional `injectionEffort` as Codex's native defaults during sync/restart. Requires `injectionModel`; only the API's `nativeDefaultState: "active"` confirms that omitted-model behavior is live. |
+| `syncCodexSubagentDefaults?` | `boolean` | `false` | Opt into writing `injectionModel` and optional `injectionEffort` as Codex's native defaults during sync/restart. Requires `injectionModel`. |
 | `subagentModelFallback?` | `string[]` | `[]` | Priority-ordered global fallback models for spawned child turns. |
 | `subagentModelFallbackByModel?` | `Record<string, string[]>` | `{}` | Per-primary-model fallback chains, keyed by the requested primary model id. This is the supported home for per-role fallback metadata; `model_fallback` inside Codex agent TOML makes Codex 0.146+ skip the role (#1190). |
 | `subagentModelFallbackPollMs?` | `number` | `60000` | Availability-probe cache interval. Values below 1000 ms fall back to the default. |
 | `effortCap?` | `string` | — | Hard ceiling for qualifying v2 main turns and marked spawned-child turns. Accepts `low` through `ultra`. |
 | `subagentEffortCap?` | `string` | — | Additional ceiling for spawned-child turns only. When both caps apply, the lower wins. |
-| `v2NativeParentOverride?` | `{ enabled?: boolean; model?: string }` | off | Experimental V2-only routed replacement for an eligible ChatGPT-native root parent. See [V2 native parent override](#v2-native-parent-override). |
-| `v2RoutedDelegationBridge?` | `boolean` | `false` | Experimental plaintext mirror bridge for eligible native V2 root and spawned-child turns. See [Routed V2 delegation bridge](#routed-v2-delegation-bridge). |
 | `agentTaskRecovery?` | `object` | — | Experimental opt-in recovery for backend-encrypted v2 tasks sent to routed providers. Disabled unless `enabled: true`; see [Encrypted v2 task recovery](#encrypted-v2-task-recovery). |
 
 Manage the surface with the dashboard or
@@ -64,77 +60,8 @@ an explicit v2 surface (`multiAgentMode: "v2"`, equivalent to `ocx v2 mode v2`);
 `ocx v2 on` alone does not satisfy that dashboard gate.
 
 The management API exposes `GET`/`PUT /api/v2`, `/api/injection-model`, `/api/effort-caps`,
-`/api/subagent-models`, `/api/subagent-roles`, and `/api/subagent-model-fallback`. Injection-model updates are partial;
-the custom prompt is the `prompt` field on that API. Role catalog updates are a full replace, or
-`PUT { "remove": "<id>" }` to delete one id against the live catalog.
-
-## V2 native parent override
-
-`v2NativeParentOverride` is an experimental, default-off setting for the V2 collaboration surface.
-It replaces an eligible ChatGPT-native V2 root parent with one configured routed model before that
-parent executes, so its V2 child tasks are plaintext. It does not change child model choices or
-decrypt the Codex protocol.
-
-```json
-{
-  "v2NativeParentOverride": {
-    "enabled": true,
-    "model": "anthropic/claude-sonnet-5"
-  }
-}
-```
-
-`model` is a trimmed, nonblank configured model id. The target must resolve to a noncanonical
-provider; there is no default target. Enabling it requires `multiAgentMode: "v2"`, the upstream
-`multi_agent_v2` flag, a target, and `keepNativeChatGptOnV1` unset or false. A selected target may
-remain stored while the setting is disabled. A malformed hand-edited subtree disables this
-optional feature without invalidating providers or the rest of the configuration.
-
-When `active` is true, OpenCodex checks the resolved source provider and V2 request markers, then
-looks up the configured target through normal routing. Missing, disabled, unroutable, or canonical
-targets fail closed; an eligible request is never silently sent to ChatGPT. The target is read per
-request, so later parent turns and routed root compaction follow a changed target. Changing the
-mode, upstream V2 flag, or Keep ChatGPT on v1 makes subsequent requests skip the override while
-preserving the stored target and enabled selection. Native children are preserved; a native child
-that creates a routed grandchild can still create an unreadable encrypted task. Nested parent
-override, automatic selection, fallback, per-thread pinning, and CLI support are not part of this
-setting.
-
-The Codex UI can continue to display the originally selected native model even when OpenCodex
-executes the root on the routed target. Prompts, repository context, conversation history, and tool
-results are sent to that provider and inherit its availability, context window, instruction/tool
-behavior, latency, cost, and privacy characteristics.
-
-## Routed V2 delegation bridge
-
-`v2RoutedDelegationBridge` is an experimental default-off boolean. It does not reroute a parent like
-`v2NativeParentOverride`; after parent-override routing, it moves `spawn_agent`, `send_message`, and
-`followup_task` from native collaboration to plaintext mirrors for eligible native V2 root and thread-spawn child turns so routed descendants
-can receive task, repository-context, and tool-result flow without `agentTaskRecovery`'s additional
-ChatGPT request. `wait_agent`, `interrupt_agent`, and `list_agents` remain native. While active, every use
-of the three delegation-message operations is plaintext, including native-to-native delegation.
-
-It can be armed while the current surface is not explicit V2, but is inactive until an eligible root
-arrives. A false value disables it immediately for subsequent requests. The original native model can
-remain visible in Codex while the selected provider receives the routed content and its availability,
-context, behavior, billing, and privacy rules apply. Eligible canonical native children with a V2
-collaboration catalog are bridged too, allowing their routed grandchildren to receive plaintext
-assignments. Routed child fallbacks, depth-limited leaves, and non-spawn maintenance turns remain
-outside the bridge.
-
-The bridge prevents newly created encrypted message operations within that boundary; `agentTaskRecovery`
-is still the fallback for ciphertext produced outside it. Bridge-derived continuation rows are sealed with
-AES-256-GCM using an installation key in the operating system credential store. If secure storage is
-unavailable, replay remains memory-only and does not survive restart—there is no plaintext persistence
-fallback. Upgrading retires legacy v1/v2 continuation snapshots and spills once, accepting loss of the
-bounded continuation cache instead of risking historical plaintext. This encryption is automatic and has
-no separate configuration switch. Routed providers necessarily receive bridged assignments in plaintext.
-
-```json
-{
-  "v2RoutedDelegationBridge": true
-}
-```
+`/api/subagent-models`, and `/api/subagent-model-fallback`. Injection-model updates are partial;
+the custom prompt is the `prompt` field on that API.
 
 The Codex Auth page can also toggle Codex's own `default_mode_request_user_input`
 feature flag (`GET`/`PUT /api/codex-auth/features/default-mode-request-user-input`). Enabling it

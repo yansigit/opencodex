@@ -1,5 +1,4 @@
 import { markActivity } from "../lib/sidecar-tracker";
-import { allowPlaintextRemoteForTests } from "../lib/test-server-start";
 import { knownModelIdsForProvider } from "../router";
 import {
   buildWarmupCompletionFrames,
@@ -17,12 +16,9 @@ import {
   armClaudeCodeBaseline,
   loadConfig,
   saveConfig,
-  saveConfigPreservingClaudeCode,
-  mutatePersistedConfig,
   getConfigDir,
   websocketsEnabled,
 } from "../config";
-import { prepareSensitiveResponsePersistence } from "../responses/state";
 import { grokDefaultReasoningEffort } from "../grok/effort";
 import { flushConfigDirHardening } from "../config/paths";
 import { migrateStartupSubagentModels } from "./subagent-models-startup";
@@ -50,11 +46,6 @@ import {
 } from "../lib/state-store-registrations";
 import { startUserCostOverlayReconciler } from "../usage/user-cost-overlay-reconciler";
 import {
-  getStorageCleanupPolicyJobState,
-  getStorageCleanupPolicyTestStreamResponse,
-  requestStorageCleanupPolicyRun,
-} from "../storage/policy-job";
-import {
   configureAppOwnedMemoryBudget,
   enforceAppOwnedMemoryBudget,
   resolveAppOwnedMemoryBudgetBytes,
@@ -71,7 +62,7 @@ import { runAlibabaRegionStartupMigration } from "../providers/alibaba-region-st
 import { runModelRenameStartupMigration } from "../providers/model-rename-startup";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
-import type { OcxConfig, StorageCleanupPolicy } from "../types";
+import type { StorageCleanupPolicy } from "../types";
 import { MAX_DECOMPRESSED_BODY_BYTES } from "./request-decompress";
 import {
   CodexAccountCooldownError,
@@ -130,7 +121,6 @@ import {
   type RequestLogEntry,
 } from "./request-log";
 import { sessionLaneIdFromRequest } from "./request-log-conversation";
-import { classifyAgentKind } from "./effort-policy";
 export {
   addFinalRequestLog,
   filterRequestLogs,
@@ -170,7 +160,6 @@ import {
   jsonResponse,
   admissionFields,
   resolveApiAuth,
-  resolveDataPlaneAdmissionSecret,
   resolveResponsesApiAuth,
   requestPolicyView,
   type DataPlaneAdmission,
@@ -180,7 +169,6 @@ import {
   withCors,
   withManagementCors,
 } from "./auth-cors";
-import { managementBodyTooLargeResponse, readManagementJsonBody } from "./management/body";
 export {
   assertServerAuthConfig,
   corsHeaders,
@@ -248,26 +236,10 @@ import { recordCursorSeen } from "../integrations/cursor-seen";
 import { detectCursorInstalls } from "../integrations/cursor-detect";
 import { loadCursorEffortTable } from "../integrations/cursor-effort-table";
 import { expandCursorEffortRow, knownEffortRowIds } from "./effort-row";
-import { canonicalServerOrigin } from "../lib/server-tls";
-import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
 import { catalogFastRowEligible, expandFastRow } from "./fast-row";
 
-function isAiStudioSessionOrigin(origin: string | null, config: Pick<OcxConfig, "corsAllowOrigins">): boolean {
-  return !!origin && (
-    origin === "https://aistudio.google.com"
-    || (origin.startsWith("chrome-extension://") && config.corsAllowOrigins?.includes(origin) === true)
-  );
-}
-
-function withAiStudioSessionCors(resp: Response, req: Request, config: RequestPolicyView): Response {
-  const origin = req.headers.get("Origin");
-  if (isAiStudioSessionOrigin(origin, config) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
-  return resp;
-}
-
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
-const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 255;
-const WEBSOCKET_BACKPRESSURE_LIMIT = 1024 * 1024;
+const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
 
 // Header-safe by construction: a key id reaches a response header, so anything outside this
 // class could inject a header break or a control character into a response we control.
@@ -599,12 +571,6 @@ function withRequestLogId(response: Response, requestId: string): Response {
   });
 }
 
-export function remoteDashboardStartupHint(hostname: string | undefined): string | null {
-  return isLoopbackHostname(hostname)
-    ? "   Remote dashboard → SSH tunnel guide: https://opencodex.me/reference/configuration/server/#ssh-port-forwarding"
-    : null;
-}
-
 export interface StartServerDeps {
   /** Test-only seam; production always initializes its own management credential state. */
   managementAuthState?: ManagementAuthState;
@@ -624,8 +590,6 @@ export interface StartServerDeps {
   readinessGate?: ReadinessGate;
   /** Test-only package-tree observation; production captures package.json identity at boot. */
   packageTreeIntegrity?: PackageTreeIntegrityGuard;
-  /** Test-only seam for the awaited native AI Studio login process. */
-  runAiStudioNativeLogin?: typeof runAiStudioNativeLogin;
   /** Test-only seam for observing quota-worker registration ownership. */
   registerCodexQuotaAutoRefreshWorker?: typeof registerCodexQuotaAutoRefreshWorker;
 }
@@ -686,16 +650,6 @@ export function warnAgentTaskRecoveryStartup(config: {
 }
 
 export function startServer(port?: number, deps: StartServerDeps = {}): Server<WsData> {
-  const managementApi: ManagementApiDeps = {
-    saveConfigPreservingClaudeCode,
-    mutatePersistedConfig,
-    storageCleanupPolicyJob: {
-      getState: getStorageCleanupPolicyJobState,
-      getTestStream: getStorageCleanupPolicyTestStreamResponse,
-      requestRun: requestStorageCleanupPolicyRun,
-    },
-    ...deps.managementApi,
-  };
   const localAttestationSecret = deps.localAttestationSecret ?? createLocalAttestationSecret();
   // Captured before loadConfig() starts the optional ACL flight so stop() drains the same dir
   // even if OPENCODEX_HOME changes underneath a long-lived process.
@@ -710,7 +664,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
-  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: allowPlaintextRemoteForTests() });
+  assertServerAuthConfig(config);
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   const managementSessionControl = createManagementSessionControl(managementAuth);
   let userCostOverlayReconciler: { stop(): void } | null = null;
@@ -871,17 +825,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       return req.method === "POST";
     }
     if (path === "/v1/models") return req.method === "GET";
-    // Anthropic Messages (Claude Code) inbound. A directly-spawned Claude Code session
-    // posts these against the listener's base_url with no API key available, so admitting
-    // them here is what makes the loopback socket usable for local Claude integration.
-    // The exact-path + POST-only constraints are load-bearing: trailing-slash and
-    // percent-encoded variants never match, and every other method is refused by the
-    // handler's own admission (resolveApiAuth on the loopback policy view admits only the
-    // loopback bind itself). Handlers run the same admission/origin gates the public
-    // listener applies, so this entry widens nothing beyond the unauthenticated socket.
-    if (path === "/v1/messages" || path === "/v1/messages/count_tokens") {
-      return req.method === "POST";
-    }
     // Realtime voice — a directly-spawned `codex app-server` needs these for desktop voice
     // the same way it needs /v1/responses. Two shapes, same trust model as /v1/responses:
     //  - standalone sessions (codex-rs thread/realtime/start, WebSocket transport):
@@ -1097,7 +1040,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     // Started inside the guarded startup transaction so the catch below can
     // release the owner-scoped lease on any listener failure.
     userCostOverlayReconciler = startUserCostOverlayReconciler({ liveConfig: config });
-    const plaintextServeOptions = {
+    const serveOptions = {
       idleTimeout: 255,
       maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
       async fetch(req: Request, requestServer: Server<WsData>): Promise<Response> {
@@ -1172,20 +1115,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (readyzPath !== undefined) {
           return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
         }
-        if (url.pathname === "/api/aistudio/session") {
-          const origin = req.headers.get("Origin");
-          if (isAiStudioSessionOrigin(origin, policy)) {
-            return new Response(null, {
-              status: 204,
-              headers: {
-                "Access-Control-Allow-Origin": origin as string,
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type, X-OpenCodex-API-Key",
-                Vary: "Origin, Access-Control-Request-Headers",
-              },
-            });
-          }
-        }
         const managementPreflight = url.pathname.startsWith("/api/");
         const allowed = managementPreflight
           ? isAllowedManagementOrigin(req, config)
@@ -1236,90 +1165,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
-      }
-
-      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws" || url.pathname === "/v1/ws/aistudio/status") {
-        return withCors(jsonResponse({
-          error: "gone",
-          message: "AI Studio browser relay endpoints are deprecated and return 410 Gone. Use native macOS login (ocx login) or the session exporter extension.",
-        }, 410), req, policy);
-      }
-
-      if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
-        const dedicated = req.headers.get("x-opencodex-api-key")?.trim() ?? "";
-        const admission = dedicated
-          ? resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated")
-          : null;
-        if (!admission) {
-          return withAiStudioSessionCors(withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy), req, policy);
-        }
-        const origin = req.headers.get("Origin");
-        if (!isAiStudioSessionOrigin(origin, policy)) {
-          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req, policy);
-        }
-        try {
-          const bodyJson = await readManagementJsonBody(req) as any;
-          const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
-          if (typeof bodyJson.token === "string" && bodyJson.token) {
-            saveAiStudioSessionFromToken(bodyJson.token);
-          } else if (Array.isArray(bodyJson.cookies)) {
-            saveAiStudioSession({
-              selectedProject: bodyJson.selectedProject || "",
-              windowId: bodyJson.windowId || "",
-              cookies: bodyJson.cookies,
-            });
-          } else {
-            return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req, policy);
-          }
-          return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req, policy);
-        } catch (error) {
-          const tooLarge = managementBodyTooLargeResponse(error, req, config);
-          return withAiStudioSessionCors(
-            withCors(tooLarge ?? jsonResponse({ error: "invalid session payload" }, 400), req, policy),
-            req,
-            policy,
-          );
-        }
-      }
-
-      if (url.pathname === "/aistudio/bridge" && req.method === "GET") {
-        const bridgeHtml = `<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Google AI Studio Relay Deprecated - OpenCodex</title></head>
-<body><h1>HTTP 410 Gone: AI Studio Browser Relay Deprecated</h1>
-<p>The browser relay has been retired. Use native macOS authentication or the session exporter extension.</p>
-<p>Run <code>ocx login</code> to connect.</p></body></html>`;
-        return new Response(bridgeHtml, { status: 410, headers: { "Content-Type": "text/html; charset=utf-8" } });
-      }
-
-      if (url.pathname === "/aistudio/bridge.user.js" && req.method === "GET") {
-        return new Response("// HTTP 410 Gone: OpenCodex AI Studio browser relay and userscripts are deprecated.\\n", {
-          status: 410,
-          headers: { "Content-Type": "application/javascript; charset=utf-8" },
-        });
-      }
-
-      if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
-        const admission = resolveApiAuth(req, policy);
-        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
-        if (!isAllowedRequestOrigin(req, policy)) {
-          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
-        }
-        try {
-          const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
-          if (login.kind === "unsupported") return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
-          if (login.kind === "cancelled") return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
-          if (login.kind === "failed") return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
-          const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
-            method: "POST",
-            headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
-          });
-          const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, managementApi);
-          const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
-          if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
-          return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
-        } catch (error) {
-          return jsonResponse({ ok: false, error: String(error) }, 500, req, policy);
-        }
       }
 
       if (url.pathname === "/healthz" && req.method === "GET") {
@@ -1415,7 +1260,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             }), req, config);
           }
         }
-        const mgmtResponse = await handleManagementAPI(req, url, config, managementApi, principal, managementSessionControl);
+        const mgmtResponse = await handleManagementAPI(req, url, config, deps.managementApi, principal, managementSessionControl);
         if (mgmtResponse) return withManagementCors(mgmtResponse, req, config);
         return withManagementCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, config);
       }
@@ -1823,7 +1668,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           ? detectCursorInstalls().find(install => install.build === "private-inference")
           : undefined;
         const cursorEffortTable = effortRowsEnabled
-          ? (managementApi.loadCursorEffortTable ?? loadCursorEffortTable)(privateInference)
+          ? (deps.managementApi?.loadCursorEffortTable ?? loadCursorEffortTable)(privateInference)
           : null;
         const expandedNativeModelRow = (id: string, metadataId = id) => {
           const reasoningEfforts = nativeReasoningEfforts(metadataId);
@@ -1914,7 +1759,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
-          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
@@ -2028,7 +1872,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
-          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;
@@ -2321,8 +2164,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     websocket: {
       maxPayloadLength: MAX_WS_FRAME_BYTES,
       idleTimeout: WEBSOCKET_IDLE_TIMEOUT_SECONDS,
-      backpressureLimit: WEBSOCKET_BACKPRESSURE_LIMIT,
-      closeOnBackpressureLimit: true,
       // Responses WebSocket data plane (phase 120.2). Re-frames the same SSE pipeline onto the
       // socket: parse response.create → run handleResponses unchanged → pump its SSE body as WS
       // Text frames. response.processed is a no-op ack. close() aborts the upstream (RC2 parity).
@@ -2534,14 +2375,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     },
     } as const;
 
-    // TLS belongs only to the configured public listener. The two auxiliary sockets are
-    // intentionally plaintext loopback origins: local clients dial the unauthenticated data
-    // listener directly over HTTP, while Tailscale Serve or an operator proxy terminates TLS
-    // before forwarding to the hub-management listener.
-    const serveOptions = {
-      ...plaintextServeOptions,
-      ...(config.tls ? { tls: { cert: Bun.file(config.tls.certFile), key: Bun.file(config.tls.keyFile) } } : {}),
-    } as const;
     server = Bun.serve<WsData>({ ...serveOptions, port: listenPort, hostname: bindHost });
 
     // Both binds are one startup transaction (#1102). If the loopback bind fails after the
@@ -2551,7 +2384,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (loopbackListenerPort !== null) {
       try {
         loopbackServer = Bun.serve<WsData>({
-          ...plaintextServeOptions,
+          ...serveOptions,
           port: loopbackListenerPort,
           hostname: "127.0.0.1",
         });
@@ -2571,7 +2404,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (managementIngressPort !== null) {
       try {
         managementIngressServer = Bun.serve<WsData>({
-          ...plaintextServeOptions,
+          ...serveOptions,
           port: managementIngressPort,
           hostname: "127.0.0.1",
         });
@@ -2637,15 +2470,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   setServerRef(server);
   const actualPort = server.port ?? listenPort;
   boundPort = actualPort;
-  managementApi.activeServerOrigin = canonicalServerOrigin(config, actualPort);
-  managementApi.activeServerConfig = {
-    hostname: config.hostname,
-    port: actualPort,
-    tls: config.tls ? { ...config.tls } : undefined,
-  };
   setCorsOrigin(actualPort);
 
-  console.log(`🚀 opencodex proxy running on ${managementApi.activeServerOrigin}`);
+  console.log(`🚀 opencodex proxy running on http://localhost:${actualPort}`);
   console.log(`   POST /v1/responses → provider translation`);
   console.log(`   POST /v1/chat/completions → OpenAI-compatible clients`);
   console.log(`   GET  /healthz      → health check`);
@@ -2704,13 +2531,6 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   const labConfigDir = getConfigDir();
   if (labActivationRequired(config, labConfigDir)) {
     activateLab(config, labConfigDir);
-  }
-
-  // Prime secure continuation storage without delaying listen or suspending the
-  // synchronous startup window above. A failed credential-store lookup degrades
-  // bridge turns to memory-only state at their admission boundary.
-  if (config.v2RoutedDelegationBridge === true) {
-    void prepareSensitiveResponsePersistence();
   }
 
   // Reset-credit auto-redemption (#822) is opt-in; a default install constructs nothing here.

@@ -34,7 +34,6 @@ import upstreamModelsSnapshot from "../data/upstream-models.json";
 
 import { generatedModelMetadata, readCatalog, readCodexCatalogPath } from "./parsing";
 import type { CatalogModel, RawEntry } from "./parsing";
-import { shouldStampContextProvenance } from "./model-metadata";
 import { UPSTREAM_NATIVE_ENTRIES } from "./metadata";
 import { nativeOpenAiCapabilitySourceSlug, SELF_DESCRIBED_NATIVE_OPENAI_MODELS, NATIVE_RESERVE_MODEL } from "./native-models";
 import { isReserveCatalogProjection } from "./reserve";
@@ -191,46 +190,32 @@ export function applyCatalogModelMetadata(entry: RawEntry, model?: CatalogModel)
  * live in that table.
  */
 function stampCapabilityProvenance(entry: RawEntry, model: CatalogModel): void {
-  // Virtual combo rows without derived member evidence are placeholders
-  // (generic 128k / `["text"]`). Stamping those would reintroduce the
-  // false-evidence defect this block exists to prevent. Combos that actually
-  // min() real member windows carry `metadataSource: "derived"`.
-  if (model.provider === COMBO_NAMESPACE && model.metadataSource !== "derived") return;
+  // Virtual combo rows are synthesized from last-resort defaults (a generic 128k
+  // context and a `["text"]` modality), so their values are placeholders rather
+  // than assertions. Stamping them would reintroduce the exact false-evidence
+  // defect this block exists to prevent.
+  if (model.provider === COMBO_NAMESPACE) return;
 
   const meta = generatedModelMetadata(model.provider, model.id);
   const metaContext = typeof meta?.contextWindow === "number" && meta.contextWindow > 0
+    // The generated context is capped before it reaches the entry, so provenance
+    // must apply the same cap or routing would advertise a window the cap refused.
     ? applyProviderContextCap(meta.contextWindow, model.contextCap) ?? meta.contextWindow
     : undefined;
-  const stampModelContext = shouldStampContextProvenance(model);
-  const contextWindow = stampModelContext
+  const contextWindow = typeof model.contextWindow === "number" && model.contextWindow > 0
     ? model.contextWindow
-    : (model.metadataSource === undefined ? metaContext : undefined);
+    : metaContext;
   const inputModalities = Array.isArray(model.inputModalities) && model.inputModalities.length > 0
     ? model.inputModalities
     : (Array.isArray(meta?.input) && meta.input.length > 0 ? meta.input : undefined);
-  const maxInputTokens = typeof model.maxInputTokens === "number" && model.maxInputTokens > 0
-    ? model.maxInputTokens
-    : undefined;
-  const source = model.metadataSource;
-  const stampSource = source === "live" || source === "registry" || source === "snapshot" || source === "derived";
-
-  if (contextWindow === undefined && inputModalities === undefined
-    && !(Array.isArray(model.capabilities) && model.capabilities.length > 0)) {
-    return;
-  }
 
   entry.opencodex_capability_provenance = {
     provider: model.provider,
     model_id: model.id,
     ...(contextWindow !== undefined ? { context_window: contextWindow } : {}),
-    ...(maxInputTokens !== undefined && stampModelContext ? { max_input_tokens: maxInputTokens } : {}),
     ...(inputModalities !== undefined ? { input_modalities: [...inputModalities] } : {}),
     ...(Array.isArray(model.capabilities) && model.capabilities.length > 0
       ? { capabilities: [...model.capabilities] }
-      : {}),
-    ...(stampSource ? { source } : {}),
-    ...(typeof model.metadataObservedAt === "string" && stampSource
-      ? { observed_at: model.metadataObservedAt }
       : {}),
   };
 }

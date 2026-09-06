@@ -2,7 +2,6 @@
 import { OAuthCallbackFlow } from "./callback-server";
 import { generatePKCE } from "./pkce";
 import type { LocalTokenImportMode, OAuthController, OAuthCredentials } from "./types";
-import { oauthFetch } from "./transport";
 
 const CLIENT_ID = atob("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
@@ -15,11 +14,7 @@ const SCOPES = "org:create_api_key user:profile user:inference";
 export const ANTHROPIC_OAUTH_BETA = "claude-code-20250219,oauth-2025-04-20";
 export const CLAUDE_CODE_SYSTEM_INSTRUCTION = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 const CLAUDE_TOOL_PREFIX = "custom_";
-const ANTHROPIC_BUILTIN_TOOLS = new Set([
-  "web_search", "web_fetch", "code_execution", "bash_code_execution",
-  "text_editor", "text_editor_code_execution", "computer",
-  "tool_search_tool_regex", "tool_search_tool_bm25",
-]);
+const ANTHROPIC_BUILTIN_TOOLS = new Set(["web_search", "code_execution", "text_editor", "computer"]);
 
 /** OAuth tokens reject arbitrary tool names; prefix custom tools (Anthropic builtins are exempt). */
 export function applyClaudeToolPrefix(name: string): string {
@@ -51,7 +46,7 @@ export class AnthropicTokenError extends Error {
 }
 
 async function postJson(url: string, body: Record<string, string | number>): Promise<string> {
-  const response = await oauthFetch(url, {
+  const response = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
     body: JSON.stringify(body),
@@ -67,7 +62,7 @@ async function postJson(url: string, body: Record<string, string | number>): Pro
       // Best-effort only: malformed error bodies remain structured by HTTP status.
     }
     throw new AnthropicTokenError(
-      `Anthropic OAuth HTTP ${response.status}`,
+      `Anthropic OAuth HTTP ${response.status}: ${responseBody}`,
       response.status,
       oauthError,
     );
@@ -79,7 +74,7 @@ function parseTokenResponse(responseBody: string): AnthropicTokenResponse {
   try {
     return JSON.parse(responseBody) as AnthropicTokenResponse;
   } catch {
-    throw new Error("Anthropic OAuth returned invalid JSON");
+    throw new Error(`Anthropic OAuth returned invalid JSON: ${responseBody.slice(0, 200)}`);
   }
 }
 

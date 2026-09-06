@@ -8,3 +8,4 @@
 - Audit trail: Erdos failed the PR as-is (nested-name hole); plan revised; Chandrasekhar verified
   the hole and passed the carry plan.
 - Checks: focused set 202 pass / 0 fail (receipt), typecheck, privacy:scan.
+

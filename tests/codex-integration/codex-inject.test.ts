@@ -30,44 +30,6 @@ describe("Codex config injection", () => {
     );
   });
 
-  test("standalone TLS routing uses the externally reachable public origin in every injected output", () => {
-    const target = standaloneCodexRoutingTarget(10443, {
-      hostname: "0.0.0.0",
-      tls: {
-        certFile: "/tmp/cert.pem",
-        keyFile: "/tmp/key.pem",
-        publicOrigin: "https://proxy.example.com",
-      },
-    });
-
-    expect(target).toMatchObject({
-      baseUrl: "https://proxy.example.com/v1",
-      requiresAdmissionToken: true,
-    });
-    expect(buildProviderTableBlock(target)).toContain('base_url = "https://proxy.example.com/v1"');
-    expect(buildProfileFile(target, null)).toContain('base_url = "https://proxy.example.com/v1"');
-  });
-
-  test("the dedicated unauthenticated loopback listener takes precedence over the TLS public origin", () => {
-    const target = standaloneCodexRoutingTarget(10443, {
-      hostname: "0.0.0.0",
-      tls: {
-        certFile: "/tmp/cert.pem",
-        keyFile: "/tmp/key.pem",
-        publicOrigin: "https://proxy.example.com",
-      },
-      unauthenticatedLoopbackListener: { enabled: true, port: 10199 },
-    });
-
-    expect(target).toEqual({
-      baseUrl: "http://127.0.0.1:10199/v1",
-      requiresAdmissionToken: false,
-      tokenEnv: "OPENCODEX_API_AUTH_TOKEN",
-    });
-    expect(buildProfileFile(target, null)).toContain('openai_base_url = "http://127.0.0.1:10199/v1"');
-    expect(buildProfileFile(target, null)).not.toContain("proxy.example.com");
-  });
-
   describe("authless Codex Desktop opt-in (#1107)", () => {
     test("default target on loopback stays Design B and byte-identical", () => {
       const target = standaloneCodexRoutingTarget(10100, {});
@@ -363,16 +325,6 @@ describe("Design B openai_base_url injection", () => {
     expect(buildOpenaiBaseUrlLine(10100)).toBe('openai_base_url = "http://127.0.0.1:10100/v1"');
     expect(buildOpenaiBaseUrlLine(10100, "localhost")).toBe('openai_base_url = "http://127.0.0.1:10100/v1"');
     expect(buildOpenaiBaseUrlLine(10100, "::1")).toBe('openai_base_url = "http://[::1]:10100/v1"');
-  });
-
-  test("uses the configured public origin for every injected Codex endpoint", () => {
-    const publicOrigin = "https://proxy.example.com";
-    expect(buildOpenaiBaseUrlLine(10443, "127.0.0.1", publicOrigin))
-      .toBe('openai_base_url = "https://proxy.example.com/v1"');
-    expect(buildProviderTableBlock(10443, false, false, "127.0.0.1", publicOrigin))
-      .toContain('base_url = "https://proxy.example.com/v1"');
-    expect(buildProfileFile(10443, null, false, true, "127.0.0.1", undefined, publicOrigin))
-      .toContain('base_url = "https://proxy.example.com/v1"');
   });
 
   test("inserts marker + root key before the first table header", () => {

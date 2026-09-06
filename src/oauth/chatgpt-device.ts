@@ -1,6 +1,5 @@
 import type { OAuthController, OAuthCredentials } from "./types";
 import { CHATGPT_CLIENT_ID, CHATGPT_TOKEN_URL, credsFromToken } from "./chatgpt";
-import { oauthFetch } from "./transport";
 
 /**
  * OpenAI deviceauth (device-code) grant for the ChatGPT/Codex provider.
@@ -83,7 +82,7 @@ interface DeviceUserCode {
 }
 
 async function requestUserCode(signal?: AbortSignal): Promise<DeviceUserCode> {
-  const response = await oauthFetch(USERCODE_URL, {
+  const response = await fetch(USERCODE_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ client_id: CHATGPT_CLIENT_ID }),
@@ -120,7 +119,7 @@ async function pollForGrant(
   const deadline = Date.now() + DEVICE_FLOW_TTL_MS;
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("Login cancelled");
-    const response = await oauthFetch(DEVICE_TOKEN_URL, {
+    const response = await fetch(DEVICE_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device_auth_id: device.deviceAuthId, user_code: device.userCode }),
@@ -151,7 +150,7 @@ async function pollForGrant(
 }
 
 async function exchangeGrant(grant: DeviceGrant, signal?: AbortSignal): Promise<OAuthCredentials> {
-  const response = await oauthFetch(CHATGPT_TOKEN_URL, {
+  const response = await fetch(CHATGPT_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({

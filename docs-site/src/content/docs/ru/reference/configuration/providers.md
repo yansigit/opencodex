@@ -6,12 +6,6 @@ description: Записи провайдеров, аутентификация, 
 Провайдер сообщает opencodex, где живёт модель, на каком wire-adapter'е она работает и как
 аутентифицируются запросы.
 
-Azure identity configurations use `azureCredential` and are documented in the
-[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
-including `managedIdentityClientId`, the exact scope, `liveModels: false`,
-mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
-remains supported separately.
-
 ## Выбор моделей при первой регистрации
 
 Новое подключение без OAuth не публикует модели до получения достоверного списка. Если в Models не менее 20 уникальных строк моделей, все переключатели моделей изначально OFF, но сам провайдер остаётся ACTIVE. Подключения, фактически использующие OAuth или вход ChatGPT, сохраняют настройки по умолчанию.
@@ -91,8 +85,7 @@ cross-route credential fallback не существует. Строки API GPT-
 | --- | --- | --- |
 | `adapter` | `string` | Один из `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` (или alias `azure`). |
 | `baseUrl` | `string` | Базовый URL API upstream'а. Большинство built-in fixed-endpoint'ов игнорируют несовпадение; collision-safe key-preset'ы сохраняют старый custom destination с тем же именем. |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | Клиентское выравнивание начала запросов. `jitterMs` добавляет только положительную случайную задержку от 0 до 60 000 мс; правила моделей могут лишь увеличить задержку. |
-| `tlsProfile?` | `"antigravity-browser"` | Экспериментальный неофициальный TLS/HTTP2-профиль только для Google Antigravity Cloud Code Assist и канонических хостов. Он не гарантирует соблюдение условий или отсутствие блокировки, может сделать трафик более отличимым и переходит на Bun при ошибке инициализации. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | Опциональное клиентское выравнивание начала исходящих запросов, отдельное от учёта использования, биллинга и индикаторов rate limit апстрима. Лимит провайдера действует на все модели, а `models` сопоставляется с точными ID моделей апстрима и может только увеличить задержку. Ожидание очереди не расходует таймаут заголовков ответа. Поддерживаются HTTP, Responses WebSocket и явные вызовы адаптеров `fetchResponse`/`runTurn`. |
 | `responsesPath?` | `string` | Relative resource path для key-auth запросов `openai-responses`. Должен начинаться с `/` и не может содержать scheme, query или fragment. |
 | `upstreamWebsocket?` | `boolean` | Необязательный upstream Responses WebSocket для запросов `openai-responses` (по умолчанию `false`). Если upstream поддерживает этот протокол, потоковые POST-запросы используют настроенный путь Responses (по умолчанию `/v1/responses`), подключаются по WSS через HTTPS и перекодируются обратно в SSE для обычного конвейера. Провайдеры в режиме forward используют `{baseUrl}/responses`; провайдеры с ключом используют `responsesPath` или исторический fallback `/v1/responses`. Для HTTP остаётся SSE; пути, не относящиеся к Responses, и запросы `openai-chat` остаются на HTTP. |
 | `supportsServiceTier?` | `boolean` | Три состояния поддержки `service_tier`. `true`: fast mode может подставлять поле, значения вызывающего сохраняются. `false`: поле удаляется и никогда не подставляется (апстрим, для которого задокументировано отсутствие поддержки, не должен его получать). Не задано: провайдер не классифицирован — значения вызывающего сохраняются без изменений, fast mode не подставляет. Registry классифицирует canonical OpenAI (`true`), DeepSeek и Volcengine Ark (`false`); задавайте явно только для custom gateway'ев, реально поддерживающих tier'ы. |
@@ -159,8 +152,6 @@ cross-route credential fallback не существует. Строки API GPT-
 | `desktopExecutor?` | `DesktopExecutorConfig` | Только Cursor: команды внешнего computer-use и record-screen. |
 | `unsafeAllowNativeLocalExec?` | `boolean` | Legacy boolean Cursor, эквивалентен `nativeLocalExec: "on"` только если новое поле не задано. |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Политика local-exec для Cursor. `off` — дефолт; `codex-sandbox` сейчас ведёт себя fail-closed как `off`. |
-| `commandCodeVersion?` | `string` | Только Command Code OAuth (`adapter: "command-code"`). Фиксирует заголовок `x-command-code-version` в запросах `/alpha/generate`. Если не задан, используется дефолт адаптера (`0.52.1`). Не читается пресетом API-ключа `commandcode` (`openai-chat` / `/provider/v1`). |
-| `projectContext?` | `"off" \| "on"` | Только Command Code OAuth (`adapter: "command-code"`). При `"on"` копирует ограниченные файлы проекта из рабочей директории процесса прокси в конверт `/alpha/generate` (`memory`, `taste`, `skills`). Если отсутствует или `"off"`, сохраняется пустой конверт, даже когда файлы есть на диске. Не читается пресетом API-ключа `commandcode`. Задаётся на `providers.command-code`, не на верхнем уровне. В дашборде: **Providers → Command Code → Edit JSON**. Запускайте прокси из доверенной директории проекта Codex, чтобы `process.cwd()` указывал на нужный репозиторий. Fail-soft: отсутствие, нечитаемость, таймаут или выход за пределы пути — часть опускается, ход не падает. Не читает `~/.commandcode/skills` и другие домашние skill-деревья. `x-taste-learning` остаётся `"false"` независимо от флага. |
 
 Провайдеры с API-key могут хранить literal key или environment-reference. OAuth-провайдеры
 используют credential store, заполняемый через `ocx login`; поведение subscription-backed launcher'а
@@ -227,13 +218,13 @@ reauth или порога исчерпания; здоровые привяза
 
 | Ключ | Тип | По умолчанию | Описание |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` | Включить закрепление сессии и выбор новой сессии по использованию. Если ключ отсутствует, наличие двух и более пригодных аккаунтов по умолчанию включает реактивное переключение при 429. Явное значение `false` отключает и пул, и это переключение. |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | Включить закрепление сессии и выбор новой сессии по использованию. **Переключение при 429 здесь не управляется**: оно работает, как только сохранено два и более пригодных аккаунта, как и у любого другого провайдера с несколькими учётными данными, и не отключается. |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | Для новых сессий выбирать аккаунт с наименьшим известным cached usage в настроенном окне, если активный аккаунт достиг порога. `0` отключает выбор по quota. |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | Стратегия для новых сессий; `quota` ранжирует аккаунты по окну, заданному в `quotaWindow` (по умолчанию это 5-hour bar'ы), а `fill-first` в этом же окне оценивает свой порог исчерпания. |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | Кешированная полоса использования, сообщённая провайдером и применяемая при выборе по использованию. `five-hour` сохраняет прежнее поведение. `weekly` использует недельный bar и пропускает аккаунты с исчерпанным 5-hour bar, пока остаётся другой доступный аккаунт, но возвращается к ним, если других нет. `max-utilization` использует наибольшее известное значение, поэтому до появления недельных данных может использовать 5-hour usage; если неизвестны оба значения, аккаунт следует порядку unknown usage. Известное использование ранжируется раньше unknown, но если у всех доступных аккаунтов оно неизвестно, выбирается аккаунт в доступном порядке. После описанного сравнения по меньшему значению 5-hour usage полное равенство также сохраняет этот порядок. Здоровая сессия с affinity не перебалансируется заранее. При назначении новой сессии и восстановлении маршрутизации после допустимой замены при 429 `quota` напрямую ранжирует доступных кандидатов по этому окну, `fill-first` идёт в стабильном порядке с учётом порога и правил исчерпания этого окна, а `round-robin` игнорирует настройку. Cooldown, лимиты failover и допустимость повторной аутентификации остаются отдельным локальным состоянием. Недельные bar'ы аккаунтов известны только после опроса на странице Providers в dashboard. |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | Сколько успешных bind'ов новых сессий удерживать на одном выборе round-robin. Диапазон 1–100. |
 
-Когда реактивное переключение активно, 429 записывает ограниченный cooldown из `Retry-After` или из default
+Если функция включена, 429 записывает ограниченный cooldown из `Retry-After` или из default
 backoff и может переключить аккаунт уже внутри текущего запроса. Affinity локальна для процесса и
 ограничена по размеру. Credential 401/403 помечает аккаунт как нуждающийся в переавторизации.
 Если все eligible-аккаунты в cooldown, клиент получает 429 с `Retry-After`, если он известен,
@@ -329,9 +320,8 @@ Bridge Cursor экспериментальный. После `ocx login cursor` 
 Server-driven local tool'ы Cursor по умолчанию выключены. Codex продолжает использовать собственные
 инструменты, такие как `apply_patch` и `exec_command`, со своей же approval/sandbox policy:
 
-- `"off"` (по умолчанию) запрещает proxy-local выполнение нативных Cursor `read`, `write`, `delete`, `ls`, `grep`,
-  `shell` и `fetch`. Когда в turn объявлен bare Codex `shell_command` или `exec_command`, нативные Shell/Read/Ls/Grep/Fetch
-  маппятся в этот Codex shell bridge вместо выполнения на proxy; write/delete по-прежнему запрещены.
+- `"off"` (по умолчанию) отвергает нативное выполнение `read`, `write`, `delete`, `ls`, `grep`,
+  `shell` и `fetch` со стороны Cursor.
 - `"on"` включает trusted local execution и обходит approval/sandbox semantics Codex.
 - `"codex-sandbox"` сохранён ради совместимости, но закрывается с ошибкой так же, как `"off"`; на
   prose запроса нельзя полагаться как на достоверную sandbox-attestation.
@@ -534,4 +524,3 @@ Pool/Direct рекламирует `922000`; синхронизированны�
   "visionSidecar": { "enabled": true }
 }
 ```
-`replayTransientFailures` (по умолчанию выключен) повторяет временные сбои до начала потока; запрос может быть доставлен повторно.

@@ -1,4 +1,4 @@
-import type { OcxConfig, OcxContentPart, OcxParsedRequest, OcxProviderConfig } from "../types";
+import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../types";
 import { modelInList, toolChoiceToolPredicate } from "../types";
 import { isModelTextOnly } from "../vision";
 import type { SidecarSettings } from "./executor";
@@ -12,7 +12,6 @@ import { validateXaiSearchOptions, type XaiSearchOptions } from "./xai-executor"
 import type { OcxWebSearchSidecarConfig } from "../types";
 import { DEFAULT_STALL_TIMEOUT_SEC } from "../stall-timeout";
 import { buildWebSearchTool, extractHostedWebSearch, WEB_SEARCH_TOOL_NAME } from "./synthetic-tool";
-import { estimateInputTokens } from "../server/responses/input-admission";
 
 export { runWithWebSearch } from "./loop";
 export { buildWebSearchTool, extractHostedWebSearch, WEB_SEARCH_TOOL_NAME };
@@ -48,19 +47,13 @@ const STALL_MARGIN_SEC = 30;
  * deliberately permissive, so malformed values fall back locally without rejecting or rewriting
  * the caller's config object.
  */
-export function resolveRoutedModelStallTimeoutMs(value: unknown, estimatedInputTokens?: number): number {
-  if (typeof value === "number"
+export function resolveRoutedModelStallTimeoutMs(value: unknown): number {
+  return typeof value === "number"
     && Number.isInteger(value)
     && value >= 1
-    && value <= MAX_ROUTED_MODEL_STALL_TIMEOUT_MS) {
-    return value;
-  }
-  const base = DEFAULT_ROUTED_MODEL_STALL_TIMEOUT_MS;
-  if (typeof estimatedInputTokens === "number" && Number.isFinite(estimatedInputTokens) && estimatedInputTokens > 100_000) {
-    const extraBlocks = Math.ceil((estimatedInputTokens - 100_000) / 100_000);
-    return Math.min(MAX_ROUTED_MODEL_STALL_TIMEOUT_MS, base + extraBlocks * 60_000);
-  }
-  return base;
+    && value <= MAX_ROUTED_MODEL_STALL_TIMEOUT_MS
+    ? value
+    : DEFAULT_ROUTED_MODEL_STALL_TIMEOUT_MS;
 }
 
 function finiteCeil(value: number | undefined, fallback: number): number {
@@ -176,86 +169,6 @@ export function resolveSidecarBackend(
   return "openai";
 }
 
-export interface CcaInTurnGrounding {
-  search: boolean;
-  urlContext: boolean;
-}
-
-const HTTP_URL_RE = /https?:\/\/[^\s<>"')\]]+/i;
-const EXPLICIT_SIDECAR_BACKENDS = new Set<WebSearchBackendId>(["openai", "anthropic", "xai", "exa"]);
-
-function isGemini3ModelId(modelId: string): boolean {
-  return /gemini-3/i.test(modelId);
-}
-
-/** Whether a planned media bridge will actually inject tools on this turn. */
-export function mediaBridgeWillRun(
-  hasMediaPlan: boolean,
-  hasWebSearchPlan: boolean,
-  adapterRunsTurn: boolean,
-  isStreaming = true,
-): boolean {
-  return hasMediaPlan && isStreaming && (!hasWebSearchPlan || adapterRunsTurn);
-}
-
-function messageTextContainsHttpUrl(content: string | OcxContentPart[]): boolean {
-  if (typeof content === "string") return HTTP_URL_RE.test(content);
-  for (const part of content) {
-    if (part.type === "image") {
-      const url = part.imageUrl;
-      if (url && !url.startsWith("data:") && /^https?:/i.test(url)) return true;
-      continue;
-    }
-    if (part.type === "text" && HTTP_URL_RE.test(part.text ?? "")) return true;
-  }
-  return false;
-}
-
-/** True when request text carries http(s) URLs that become remote-url placeholders upstream. */
-export function requestNeedsCcaUrlContext(parsed: OcxParsedRequest): boolean {
-  for (const msg of parsed.context.messages) {
-    if (msg.role === "user" || msg.role === "developer") {
-      if (messageTextContainsHttpUrl(msg.content)) return true;
-      continue;
-    }
-    if (msg.role === "toolResult" && typeof msg.content === "string" && HTTP_URL_RE.test(msg.content)) return true;
-    if (msg.role === "assistant") {
-      for (const part of msg.content) {
-        if (part.type === "text" && HTTP_URL_RE.test(part.text ?? "")) return true;
-      }
-    }
-  }
-  return false;
-}
-
-/**
- * Antigravity Gemini in-turn google_search / url_context on the main routed fetch. Returns undefined
- * when the request should use the web-search sidecar (Claude-on-CCA, explicit sidecar backend, or
- * Gemini &lt;3 with Codex function tools, including media bridge tools that will be injected later).
- */
-export function resolveCcaInTurnGrounding(
-  config: OcxConfig,
-  parsed: OcxParsedRequest,
-  isPassthrough: boolean,
-  provider: OcxProviderConfig,
-  modelId: string,
-  hasMediaBridge = false,
-): CcaInTurnGrounding | undefined {
-  if (!parsed._webSearch || isPassthrough) return undefined;
-  if (provider.googleMode !== "cloud-code-assist") return undefined;
-  if (/claude/i.test(modelId)) return undefined;
-  if (!toolChoiceToolPredicate(parsed.options.toolChoice)(buildWebSearchTool())) return undefined;
-  const cfg = config.webSearchSidecar ?? {};
-  if (cfg.enabled === false) return undefined;
-  if (cfg.backend !== undefined && EXPLICIT_SIDECAR_BACKENDS.has(cfg.backend)) return undefined;
-  const hasCodexTools = (parsed.context.tools?.some(tool => !tool.imageGeneration) ?? false) || hasMediaBridge;
-  if (hasCodexTools && !isGemini3ModelId(modelId)) return undefined;
-  return {
-    search: true,
-    urlContext: requestNeedsCcaUrlContext(parsed),
-  };
-}
-
 export interface SidecarPlan {
   /** Which executor runs the search. Anthropic does not require a forward provider. */
   backend: WebSearchBackendId;
@@ -305,30 +218,16 @@ export function planWebSearch(
   provider: OcxProviderConfig,
   modelId: string,
   openAiSidecar?: ResolvedOpenAiForwardSidecar,
-  options: {
-    admission?: Pick<DataPlaneAdmission, "source">;
-    codexAuthPolicy?: CodexAuthPolicyConfig;
-    /** Potential media injection used to resolve CCA grounding precedence before dispatch. */
-    hasMediaBridge?: boolean;
-  } = {},
+  options: { admission?: Pick<DataPlaneAdmission, "source">; codexAuthPolicy?: CodexAuthPolicyConfig } = {},
 ): SidecarPlan | undefined {
-  if (resolveCcaInTurnGrounding(
-    config,
-    parsed,
-    isPassthrough,
-    provider,
-    modelId,
-    options.hasMediaBridge === true,
-  )) return undefined;
   if (!parsed._webSearch || isPassthrough) return undefined;
   if (!toolChoiceToolPredicate(parsed.options.toolChoice)(buildWebSearchTool())) return undefined;
   const cfg = config.webSearchSidecar ?? {};
   if (cfg.enabled === false) return undefined;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const safeModelId = typeof modelId === "string" ? modelId : "";
-  const estimatedInputTokens = estimateInputTokens(parsed, safeModelId);
-  const routedModelStallTimeoutMs = resolveRoutedModelStallTimeoutMs(cfg.routedModelStallTimeoutMs, estimatedInputTokens);
-  const connectTimeoutMs = config.connectTimeoutMs ?? Math.max(200_000, routedModelStallTimeoutMs);
+  const routedModelStallTimeoutMs = resolveRoutedModelStallTimeoutMs(cfg.routedModelStallTimeoutMs);
+  // Same `?? 200_000` default the server applies when threading connectTimeoutMs into the loop.
+  const connectTimeoutMs = config.connectTimeoutMs ?? 200_000;
   // Shared auth state (#2188): presence only — backend PREFERENCE stays with
   // resolveSidecarBackend's explicit-or-openai contract.
   const auth = resolveSidecarAuth(config);

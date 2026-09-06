@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync} from "node:fs";
 import { join } from "node:path";
 import {
   clearCodexCooldownRecoveryProbeState,
@@ -26,14 +25,11 @@ import {
   resolveCodexAccountForThread,
 } from "../../src/codex/routing";
 import type { OcxConfig } from "../../src/types";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-let TEST_DIR = "";
-let TEST_CODEX_HOME = "";
+const TEST_DIR = join(import.meta.dir, ".tmp-codex-cooldown-recovery-test");
+const TEST_CODEX_HOME = join(TEST_DIR, "codex");
 const START = 1_800_000_000_000;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
 let previousFetch: typeof fetch;
@@ -83,50 +79,30 @@ function due(at = START): number {
   return at + CODEX_QUOTA_PROBE_INTERVAL_MS + 1;
 }
 
-function installScratchHome(): void {
-  // These tests exercise cooldown recovery, not Windows ACL behavior. Stub both runners so
-  // optional hardening never spawns a real icacls.exe child that can hold the fixture open.
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-cooldown-recovery-"));
-  TEST_CODEX_HOME = join(TEST_DIR, "codex");
-  mkdirSync(TEST_CODEX_HOME, { recursive: true });
-  process.env.OPENCODEX_HOME = TEST_DIR;
-  process.env.CODEX_HOME = TEST_CODEX_HOME;
-}
-
-async function removeScratchHome(): Promise<void> {
-  // Settle hardening before restoring env/removing the directory: Windows holds the directory
-  // open until the child exits, and a failed teardown otherwise poisons subsequent tests.
-  await flushConfigDirHardeningForTests();
-  setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
-  if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = previousOpencodexHome;
-  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-  else process.env.CODEX_HOME = previousCodexHome;
-  if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
-  TEST_DIR = "";
-  TEST_CODEX_HOME = "";
-}
-
 describe("Codex cooldown recovery worker", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
     previousCodexHome = process.env.CODEX_HOME;
     previousFetch = globalThis.fetch;
-    installScratchHome();
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_CODEX_HOME, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    process.env.CODEX_HOME = TEST_CODEX_HOME;
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearCodexCooldownRecoveryProbeState();
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     globalThis.fetch = previousFetch;
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearCodexCooldownRecoveryProbeState();
-    await removeScratchHome();
+    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousOpencodexHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   });
 
   test("recovers cooled A independently while ordinary routing only selects B", async () => {

@@ -1,11 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import {
   resetHardenedStateForTests,
-  setAsyncIcaclsRunnerForTests,
   setIcaclsRunnerForTests,
 } from "../../src/lib/windows-secret-acl";
 import {
@@ -15,8 +12,7 @@ import {
 } from "../../src/oauth/store";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
-let testDir: string | undefined;
+const TEST_DIR = join(import.meta.dir, ".tmp-oauth-account-id-collision-test");
 let previousOpencodexHome: string | undefined;
 
 const COLLIDING_ACCOUNT_A = "account-collision-16138";
@@ -25,22 +21,24 @@ const COLLIDING_ACCOUNT_B = "account-collision-28806";
 describe("OAuth account id collision hardening", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    testDir = mkdtempSync(join(tmpdir(), "ocx-oauth-account-id-collision-"));
-    process.env.OPENCODEX_HOME = testDir;
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
     resetHardenedStateForTests();
+    setIcaclsRunnerForTests(() => ({
+      success: true,
+      exitCode: 0,
+      timedOut: false,
+      stdout: "",
+    }));
   });
 
-  afterEach(async () => {
-    await flushConfigDirHardeningForTests();
+  afterEach(() => {
     setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
     resetHardenedStateForTests();
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (testDir) removeTreeWithRetry(testDir);
-    testDir = undefined;
+    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
   });
 
   test("distinct identities that collide on the historical 32-bit prefix get distinct slots", async () => {
@@ -70,7 +68,7 @@ describe("OAuth account id collision hardening", () => {
   });
 
   test("existing persisted 32-bit account ids remain valid and are not rewritten", async () => {
-    const authPath = join(testDir!, "auth.json");
+    const authPath = join(TEST_DIR, "auth.json");
     writeFileSync(authPath, JSON.stringify({
       anthropic: {
         activeAccountId: "deadbeef",

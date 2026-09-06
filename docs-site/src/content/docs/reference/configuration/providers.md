@@ -122,10 +122,7 @@ predictions. Explicit provider/model price overrides still take precedence.
 | --- | --- | --- |
 | `adapter` | `string` | One of `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` (or alias `azure`). |
 | `baseUrl` | `string` | Upstream API base URL. Most built-in fixed endpoints ignore a mismatch; collision-safe key presets preserve an older same-named custom destination. |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | Optional client-side outbound request-start pacing, separate from upstream usage, billing, and rate-limit indicators. RPM is converted to an even interval; `minIntervalMs` may impose a longer interval; `jitterMs` adds only a positive random delay (0–60,000 ms). Provider limits apply across all models, while `models` entries use exact upstream model IDs and can only add delay. Queue waits do not consume the upstream response-header timeout. HTTP, Responses WebSocket, and explicit adapter `fetchResponse`/`runTurn` dispatches are covered. |
-| `tlsProfile?` | `"antigravity-browser"` | Explicit, experimental Antigravity-only TLS/HTTP2 compatibility profile. It requires Google OAuth Cloud Code Assist and canonical Antigravity hosts. It is unofficial, does not ensure Terms-of-Service compliance or prevent suspension, may make traffic more distinctive, and falls back to Bun if initialization fails. OAuth/token/onboarding traffic remains on standard Bun TLS. Prefer official Gemini API-key, Vertex, or documented Code Assist routes when policy safety matters. |
-| `wsUpstream?` | `boolean` | Canonical ChatGPT Responses streaming uses HTTP/SSE by default. Set `true` to opt into the upstream WebSocket transport; `false` disables it. An explicitly set provider value takes precedence. When omitted, `OCX_CODEX_WS_UPSTREAM=true` or `1` enables it; `false`/`0`, absent, or invalid values use HTTP/SSE. |
-| `maxWsFrameBytes?` | `number` | Maximum `response.create` request frame size before falling back to HTTP/SSE while the upstream WebSocket transport is enabled. Defaults to 16,711,680 bytes (16 MiB minus 64 KiB); invalid or non-positive values use that default. Ignored when WebSocket transport is disabled. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | Optional client-side outbound request-start pacing, separate from upstream usage, billing, and rate-limit indicators. RPM is converted to an even interval; `minIntervalMs` may impose a longer interval. Provider limits apply across all models, while `models` entries use exact upstream model IDs (for example `nvidia/llama-3.1-nemotron-ultra-253b-v1`) and can only add delay. Queue waits do not consume the upstream response-header timeout. HTTP, Responses WebSocket, and explicit adapter `fetchResponse`/`runTurn` dispatches are covered. |
 | `upstreamHttpVersion?` | `"auto" \| "http1.1" \| "h1" \| "http2" \| "h2"` | Pin the HTTP version used for upstream requests to this provider. Defaults to `auto`, which lets Bun negotiate. An explicit pin requires an HTTPS target and fails locally when it cannot be honored. Set `http1.1` when a provider's HTTP/2 SSE stream stalls instead of delivering events — the symptom is a long-running streaming request that produces nothing and eventually times out. For Cursor, `http1.1`/`h1` selects its `RunSSE` + `BidiAppend` compatibility transport for inference and also pins live model discovery. Management `POST`/`PATCH` accept `null` to clear it back to `auto`. |
 | `responsesPath?` | `string` | Relative resource path for key-auth `openai-responses` requests. It must start with `/` and contain no scheme, query, or fragment. |
 | `allowEncryptedV2AgentTasks?` | `boolean` | Disabled by default. Trust a direct key-auth `openai-responses` provider to consume or relay opaque encrypted V2 sub-agent tasks unchanged. Eligible routes skip `agentTaskRecovery`; all other routes keep the existing recovery or fail-closed behavior. OpenCodex does not decrypt, translate, or recover tasks sent through this opt-in. |
@@ -184,7 +181,7 @@ predictions. Explicit provider/model price overrides still take precedence.
 | `responsesItemIdRepair?` | `{ message?: string[]; reasoning?: string[]; repairMissingTerminalIds?: boolean; repairInvalidIds?: boolean }` | Disabled-by-default downstream SSE repair for exact placeholder ids, missing terminal ids, and (with `repairInvalidIds`) message/reasoning ids missing the canonical `msg_`/`rs_` prefix. Function-call ids are never rewritten. Built-in DeepSeek enables the last two by default. |
 | `responsesSnapshotRepair?` | `boolean` | Disabled-by-default client-facing repair for sparse Responses lifecycle snapshots in SSE and JSON. Fills missing canonical status, output, and tool metadata while raw inspection and persistence remain unchanged. |
 | `retryOn429?` | `{ enabled?: boolean; attempts?: number; intervalMs?: number; maxIntervalMs?: number; respectRetryAfter?: boolean }` | API-key providers only (`authMode: "key"`). Opt-in same-target 429 retry: when `retryOn429` is absent the feature is off; object presence enables it unless `enabled: false`. On 429 the proxy waits (upstream `Retry-After` or the fixed interval) and replays the identical request on the same key before any key failover — across the main text-turn recovery loop, the Responses passthrough wire, the image/video bridge, the web-search sidecar, and terminal continuations. Only pre-stream HTTP 429 responses are eligible for replay; custom `runTurn` transports are outside the HTTP retry loop. `attempts` counts same-key replays after the first 429 (total sends = `attempts` + 1) and is one request-wide budget shared by the main recovery loop, the terminal-guard continuation, and bridge retries. Exhausting `attempts` only stops further same-key replays: normal key failover or final-error handling then applies per the available targets — on the key-auth passthrough wire there is no failover, so the exhausted 429 surfaces as-is. Codex itself never retries 429, so this is the only defense for single-key providers. Defaults: `enabled: true`, `attempts: 3`, `intervalMs: 5000`, `maxIntervalMs: 60000` (any single wait is capped at `maxIntervalMs`, itself capped at 600000), `respectRetryAfter: true`. |
-| `replayTransientFailures?` | `boolean` | `false` | Opt in to replaying pre-stream transient upstream failures (HTTP 500/502/503/504 and connection resets) on the same target. The bounded retry budget is shared by the request's recovery paths; omitted or `false` preserves fail-fast behavior for transient HTTP responses. |
+| `transientRetryOn5xx?` | `{ enabled?: boolean; attempts?: number }` | Key-auth `openai-chat` providers only. Opt-in retry for pre-stream transient upstream statuses (500, 502, 503, 504, 520, 521, 522): absent means off, object presence enables it unless `enabled: false`. Covers the initial Responses request, the terminal-guard continuation, and native `/v1/chat/completions`. `attempts` is the TOTAL number of upstream sends allowed for one request including the first (1..10, default 3) — it is one budget shared with connection-reset recovery, so `3` means at most three real requests reach the provider. Waits use a fixed 400 ms exponential backoff capped at 5 s and honor `Retry-After`. Separate from `retryOn429`, which handles rate limiting; mid-stream failures are never replayed. |
 | `autoToolChoiceOnlyModels?` | `string[]` | Models whose `tool_choice` accepts only `auto` or `none`; forced choices are downgraded. |
 | `preserveReasoningContentModels?` | `string[]` | Models requiring prior assistant `reasoning_content` in chat history. |
 | `reasoningDetailsModels?` | `string[]` | Models whose endpoint returns thinking as a structured `reasoning_details` array (MiniMax M-series with `reasoning_split`); stream deltas are cumulative snapshots that are prefix-diffed, and preserved reasoning replays as a `reasoning_details` array instead of a `reasoning_content` string. |
@@ -351,13 +348,6 @@ API-key providers may hold a literal key or an environment reference. OAuth prov
 credential store populated by `ocx login`; subscription-backed Claude Code launch behavior is
 configured under [`claudeCode.authMode`](/reference/configuration/server/#claude-code).
 
-Google Antigravity consumer OAuth accounts should keep the registry default
-`https://daily-cloudcode-pa.googleapis.com` endpoint. The production
-`https://cloudcode-pa.googleapis.com` endpoint is retained for enterprise/GCP accounts and may
-return `429 RESOURCE_EXHAUSTED` for consumer accounts even when quota remains. `ocx provider test
-google-antigravity` and the dashboard connection test warn about that explicit override without
-rewriting it.
-
 ## Provider diagnostic outbound safety
 
 Dashboard connection tests and live model discovery use a bounded GET-only transport. Without an
@@ -429,13 +419,13 @@ rotation may trigger provider restrictions.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` | Enable sticky session affinity and quota-ranked new-session selection. When this key is omitted, two or more usable accounts enable reactive 429 failover by presence. An explicit `false` disables that failover as well as the pool. |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | Enable sticky session affinity and quota-ranked new-session selection. **429 failover is not gated here**: it activates whenever two or more usable accounts are stored, exactly like every other multi-credential provider, and cannot be switched off. |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | For new sessions, when the active account reaches this threshold, choose the lowest known cached usage in the configured window; the account chosen does not itself have to be at or above the threshold. `0` disables **proactive** usage-based switching only — new-session selection and routing recovery after an eligible 429 still consult `quotaWindow`. |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | New-session strategy; `quota` ranks accounts by the window set by `quotaWindow`, and `fill-first` evaluates its drain threshold in that same window. |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | The cached provider-reported utilization bar used for usage-aware account selection. `five-hour` keeps the original behavior. `weekly` scores the weekly bar and skips accounts whose 5-hour bar is exhausted while another eligible account remains, but falls back to exhausted candidates when none do. `max-utilization` scores the highest known bar, so it can use 5-hour usage before weekly usage is available; if neither is known, the account follows unknown-usage ordering. Known usage ranks before unknown usage under the opt-in `weekly` and `max-utilization` windows only; an omitted or explicit `five-hour` preserves the legacy ordering. If every eligible account is unknown, selection still returns one in eligible order. After the documented lower-5-hour tie-break, exact ties preserve eligible order. A healthy affinity-bound session is not proactively rebalanced. For new-session assignment and routing recovery after an eligible 429 replacement, `quota` ranks eligible candidates directly with this window; `fill-first` advances in stable order using this window's threshold and exhaustion rules; `round-robin` ignores it. Cooldown, failover limits, and reauthentication eligibility remain separate local state. Per-account weekly bars are only known once the dashboard Providers page has polled them. |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | Successful new-session binds retained on one round-robin selection. Range 1–100. |
 
-When reactive failover is active, 429 records bounded cooldown from `Retry-After` or a default backoff and may rotate
+When enabled, 429 records bounded cooldown from `Retry-After` or a default backoff and may rotate
 within the request. Affinity is process-local and size-bounded. Credential 401/403 marks the account
 as needing reauthentication. If all eligible accounts are cooling, clients receive 429 with
 `Retry-After` when known, not an authentication error.
@@ -451,24 +441,25 @@ Rotates to another logged-in account of the same provider when one is rate-limit
 providers that have no pool of their own — xAI, Cursor, Kimi, GitHub Copilot, Google Antigravity,
 and Nous.
 
-When no relevant `enabled` setting is present, logging in a second account turns reactive rotation
-on. Rotation then activates for any of those providers holding 2 or more accounts that are not
-flagged for reauthentication — the same default `apiKeyPool` already applies to a 2+ key pool. An
-explicit provider setting takes precedence over the global setting, and an explicit `false`
-disables reactive rotation. A provider with one stored account behaves exactly as before.
+**Logging in a second account is what turns this on, and nothing turns it off.** Rotation
+activates for any of those providers holding 2 or more accounts that are not flagged for
+reauthentication — the same rule `apiKeyPool` already applies to a 2+ key pool. A provider with
+one stored account behaves exactly as before.
 
-Rotation here runs only *after* upstream has already refused the request. Use an explicit `false`
-when a second stored account must not receive a retry; otherwise account presence supplies the
-backward-compatible default.
+Rotation here runs only *after* upstream has already refused the request, so the only choice a
+disable switch could offer is between retrying on a second account you deliberately logged in and
+returning a 429 while that account sits idle. Refusing rotation is expressed by not storing a
+second account.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
-| `oauthAccountFailover.enabled?` | `boolean` | presence-driven when omitted | Global control for pre-dispatch account preference and reactive 429 rotation. An explicit `false` disables both unless a provider-specific override is present. |
-| `providers.<name>.oauthAccountFailover.enabled?` | `boolean` | inherits | Per-provider override; beats the global setting in either direction. `false` disables preference and reactive 429 rotation for this provider even when the global setting is `true`, and `true` opts this provider in even when the global setting is `false`. When both settings are absent, two eligible stored accounts enable reactive rotation by presence. |
+| `oauthAccountFailover.enabled?` | `boolean` | presence-driven | Global override for the **pre-dispatch account preference** only. `false` stops a healthy request being steered toward the account with more known headroom. It does **not** disable 429 rotation. |
+| `providers.<name>.oauthAccountFailover.enabled?` | `boolean` | inherits | Per-provider override for the same preference; beats the global setting in either direction. `false` declines the preference for this provider even when the global setting is `true`, and `true` opts this provider in even when the global setting is `false`. Reactive 429 rotation is unaffected either way. |
 | `providers.<name>.oauthAccountFailover.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | — | Declared pool strategy for a generic OAuth provider (#695). Persisted through `ocx account strategy <provider> <name>` or `PUT /api/oauth/accounts/pool`; the generic selector does not act on it yet, so omitted and set behave the same today. |
 | `providers.<name>.oauthAccountFailover.autoSwitchThreshold?` | `number` | — | Declared 0–100 usage percent for a proactive switch on a generic OAuth provider (#695). Set with `ocx account auto-switch <provider> threshold <n>`; inert until the selector consumes it. |
 
-To disable both proactive account steering and reactive 429 rotation for one provider:
+To decline proactive account steering for one provider whose terms you would rather not test,
+while still recovering from a rate limit:
 
 ```json
 {
@@ -486,8 +477,8 @@ Generic OAuth providers (Google Antigravity, xAI, Cursor, Kimi, GitHub Copilot, 
 other OAuth provider outside the Codex and Anthropic pools) also accept `strategy` and
 `autoSwitchThreshold` on the same key, through `GET`/`PUT /api/oauth/accounts/pool?provider=<name>`
 and the `ocx account strategy` / `ocx account auto-switch` verbs. The response carries
-`"inert": true` for those two fields only — `enabled` is live and governs both the pre-dispatch
-preference and reactive 429 rotation. `stickyLimit` and
+`"inert": true` for those two fields only — `enabled` is live and governs the pre-dispatch
+preference. `stickyLimit` and
 `quotaWindow` are not part of the generic contract. Codex (`/api/codex-auth`) and Anthropic
 (`anthropicAccountPool`) keep their own contracts unchanged.
 
@@ -507,8 +498,6 @@ process-local, so a restart forgets them.
 Rotation carries the alternate account's **full** credential snapshot, not just its bearer, so a
 provider that pairs routing metadata with its token — Antigravity's Cloud Code Assist project id,
 for example — cannot end up sending one account's token with another account's metadata.
-Antigravity rate limits embedded before output in a Cloud Code Assist SSE response are treated as
-429 for this purpose, and a successful rotation rebinds that conversation to the alternate account.
 
 Current scope is the ordinary Responses request paths. Cursor reports rate limits as adapter
 events rather than an HTTP status, and the standalone Antigravity image endpoint has its own
@@ -585,28 +574,6 @@ so passthrough stays byte-for-byte identical.
 ## Cursor provider (`adapter: "cursor"`)
 
 The Cursor bridge is experimental. After `ocx login cursor`, add or edit `providers.cursor`.
-
-Protocol-corruption guards are always active for Cursor-hosted external models. Billable transport
-replay remains opt-in: set `replayTransientFailures: true` to retry only pre-commit connection resets
-and transient 5xx failures within the shared three-send budget. The global `emptyCompletionRetry`
-setting also remains off by default, and neither mechanism retries after a Cursor local side effect.
-
-For a stable client conversation and Cursor route, OpenCodex also bounds client-originated rate-limit
-storms. After three consecutive logical requests finish as `429` within 45 seconds, later requests
-receive a local `429` with `Retry-After` for a 30-second cooldown instead of reaching Cursor again.
-A non-429 result, a different conversation/model/provider route, or expiry resets the sequence.
-Request logs include protocol-only turn counters (logical-call ordinal, text byte counts, completed
-tool calls, calls since the last completed tool step, and conservative repeat indicators). They do
-not store assistant text, tool arguments, or a digest that can be correlated across installations.
-Cursor models sometimes label a tool preamble as ordinary answer text. First occurrences stream
-normally. For a recent repeat candidate, OpenCodex holds at most 512 bytes and discards it only when
-it is a Unicode/case/punctuation-normalized repeat or has high token similarity to the prior short,
-single-line first-person announcement before the same tool. Different tools, warnings, multi-line
-explanations, dissimilar preambles, text-only answers, and over-limit text pass through unchanged.
-When an external model emits Cursor's textual `<tool_call>` JSON dialect, or a leading bare object
-with exactly `id`, `name`, and `arguments`, OpenCodex converts it only when the name resolves to a
-tool advertised on that request and `arguments` is a JSON object; unknown, ordinary, malformed, and
-oversized objects remain text.
 
 If a proxy cannot carry Cursor's default HTTP/2 stream, set `upstreamHttpVersion` to `"http1.1"`
 or its `"h1"` alias.

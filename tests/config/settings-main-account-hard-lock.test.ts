@@ -2,9 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, loadConfig, saveConfig, saveConfigPreservingClaudeCode } from "../../src/config";
-import { flushConfigDirHardeningForTests } from "../../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
+import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
 import { handleManagementAPI, type ManagementApiDeps } from "../../src/server/management-api";
 import { invalidateStartupHealthCache } from "../../src/server/startup-health-cache";
 import type { OcxConfig } from "../../src/types";
@@ -14,7 +12,6 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 let home: string;
 let previousHome: string | undefined;
 let previousCodexHome: string | undefined;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 const config = (): OcxConfig => ({
   port: 10100,
   defaultProvider: "example",
@@ -29,14 +26,11 @@ function request(cfg: OcxConfig, body?: unknown, overrides: Partial<ManagementAp
   });
   return handleManagementAPI(req, new URL(req.url), cfg, {
     getCachedStartupHealth: async () => startupHealthFixture(),
-    saveConfigPreservingClaudeCode,
     ...overrides,
   });
 }
 
 beforeEach(() => {
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   previousHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
   home = mkdtempSync(join(tmpdir(), "ocx-hard-lock-settings-"));
@@ -45,19 +39,13 @@ beforeEach(() => {
   invalidateStartupHealthCache();
 });
 
-afterEach(async () => {
+afterEach(() => {
   invalidateStartupHealthCache();
-  try {
-    await flushConfigDirHardeningForTests();
-  } finally {
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousHome;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-    removeTreeWithRetry(home);
-  }
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = previousCodexHome;
+  removeTreeWithRetry(home);
 });
 
 describe("main-account 99 percent setting", () => {
@@ -102,11 +90,9 @@ describe("main-account 99 percent setting", () => {
     for (const previous of [undefined, false, true]) {
       const cfg = config();
       if (previous !== undefined) cfg.codexMainAccountHardLock = previous;
-      const response = await request(cfg, { codexMainAccountHardLock: previous !== true }, {
+      await expect(request(cfg, { codexMainAccountHardLock: previous !== true }, {
         saveConfigPreservingClaudeCode: () => { throw new Error("fixture save failure"); },
-      });
-      expect(response?.status).toBe(500);
-      expect(await response?.json()).toEqual({ error: "management persistence unavailable" });
+      })).rejects.toThrow("fixture save failure");
       expect(cfg.codexMainAccountHardLock).toBe(previous);
       expect(Object.hasOwn(cfg, "codexMainAccountHardLock")).toBe(previous !== undefined);
     }
