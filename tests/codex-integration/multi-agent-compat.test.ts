@@ -7,7 +7,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { injectDeveloperMessage, multiAgentGuidanceText, sanitizeEncryptedContentInPlace } from "../../src/server/responses";
+import { injectDeveloperMessage, multiAgentGuidanceText, sanitizeEncryptedContentInPlace, V2_GUIDANCE_CHAR_BUDGET } from "../../src/server/responses";
 import { parseRequest } from "../../src/responses/parser";
 import type { OcxParsedRequest } from "../../src/types";
 import { CODEX_ACCOUNT_BOUND_CATALOG_KIND, effectiveSubagentRoster } from "../../src/codex/catalog";
@@ -844,7 +844,7 @@ describe("multiAgentGuidanceText", () => {
     expect(await multiAgentGuidanceText(parsedFixture({ reasoning: "max", tools: v1Tools }))).not.toBeNull();
   });
 
-  test("v2 body stays within the 700-char budget with a full 5-model roster", async () => {
+  test("v2 body stays within the guidance budget with a full 5-model roster", async () => {
     const dir = codexHomeFixture(V2_ON);
     catalogFixture(dir, [
       { slug: "gpt-5.5", efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] },
@@ -862,7 +862,7 @@ describe("multiAgentGuidanceText", () => {
       },
     );
     const body = text!.replace(/^<multi_agent_mode>/, "").replace(/<\/multi_agent_mode>$/, "");
-    expect(body.length).toBeLessThanOrEqual(700);
+    expect(body.length).toBeLessThanOrEqual(V2_GUIDANCE_CHAR_BUDGET);
     expect(body).toContain("Available models"); // roster fits inside the budget
   });
 
