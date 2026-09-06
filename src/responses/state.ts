@@ -1,27 +1,48 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, readlinkSync, rmSync, statSync, truncateSync, type Stats, unlinkSync, writeFileSync } from "node:fs";
 import { uptime } from "node:os";
-import { dirname, join } from "node:path";
-import { atomicWriteFileAsync, getConfigDir, resolveWriteTarget } from "../config";
+import { basename, dirname, join } from "node:path";
+import { atomicWriteFile, atomicWriteFileAsync, getConfigDir, renameAtomicFile, resolveWriteTarget, withConfigMutationLockSync } from "../config";
 import { enforceAppOwnedMemoryBudget, type RetainedStoreSnapshot } from "../lib/app-owned-memory";
 import { windowsSecretAclApplies } from "../lib/windows-secret-acl";
 import type { OcxProviderContinuationState } from "../types";
 import {
   cleanupSupersededResponseSpillPublication,
+  closeResponseSpillRetirementScan,
+  createResponseSpillRetirementScan,
   createResponseSpillPublicationControl,
   deleteResponseSpill,
+  isOwnedResponseSpillFileName,
   MAX_RESPONSE_SPILL_PAYLOAD_BYTES,
   noteStubSwapForTest,
   readResponseSpill,
   recoverOrphanedResponseSpills,
+  RESPONSE_SPILL_CLEANUP_MAX,
+  RESPONSE_SPILL_SCAN_MAX,
+  retirePreexistingResponseSpills,
   responseSpillDirectory,
   responseSpillPayloadCap,
   markResponseSpillPublicationSuperseded,
   prospectiveResponseSpillBytes,
+  type ResponseSpillStateInput,
   type ResponseSpillPublicationControl,
   type ResponseSpillRef,
+  type ResponseSpillRetirementScan,
   writeResponseSpillDurably,
   writeResponseSpillDurablyAsync,
 } from "./spill-store";
+import {
+  buildResponseContinuationAAD,
+  decryptResponseContinuation,
+  encryptResponseContinuation,
+  getResponseContinuationKey,
+  getResponseContinuationKeySync,
+  hasPlaintextDelegationHistory,
+  releaseResponseContinuationKey,
+  resetResponseContinuationKeyForTests,
+  responseContinuationHomeId,
+  wipeResponseContinuationKeyCopy,
+  type ResponseContinuationEncryptedEnvelope,
+} from "./continuation-crypto";
 
 const MAX_STORED_RESPONSES = 1_000;
 const RESPONSE_TTL_MS = 60 * 60 * 1_000;
@@ -87,6 +108,17 @@ const RESPONSE_SPILL_SHUTDOWN_BUDGET_MS = 5_000;
 const RESPONSE_SPILL_SHUTDOWN_FALLBACK_RESERVE_MS = 4_000;
 const RESPONSE_SPILL_ASYNC_ACL_ATTEMPT_BUDGET_MS = 30_000;
 const RESPONSE_SPILL_SHUTDOWN_TERMINALIZATION_MAX_PASSES = MAX_STORED_RESPONSES + 1;
+const LEGACY_RETIREMENT_RETRY_INITIAL_MS = 1_000;
+const LEGACY_RETIREMENT_RETRY_MAX_MS = 30_000;
+
+export type ResponseStateDurability = "standard" | "encrypted" | "memory-only";
+export type ResponseDurability = ResponseStateDurability;
+
+export interface RememberResponseStateOptions {
+  force?: boolean;
+  clientThreadId?: string;
+  durability?: ResponseStateDurability;
+}
 
 interface ResidentResponseState {
   kind: "resident";
@@ -97,6 +129,18 @@ interface ResidentResponseState {
   providerOutputStart?: number;
   providers?: OcxProviderContinuationState;
   sizeBytes: number;
+  durability?: ResponseStateDurability;
+  envelope?: ResponseContinuationEncryptedEnvelope;
+}
+
+interface EncryptedResidentResponseState {
+  kind: "encrypted-resident";
+  createdAt: number;
+  clientThreadId?: string;
+  providerOutputStart?: number;
+  envelope: ResponseContinuationEncryptedEnvelope;
+  sizeBytes: number;
+  durability: "encrypted";
 }
 
 interface SpilledResponseState {
@@ -108,6 +152,8 @@ interface SpilledResponseState {
   providers?: OcxProviderContinuationState;
   spill: ResponseSpillRef;
   sizeBytes: number;
+  durability?: ResponseStateDurability;
+  envelope?: ResponseContinuationEncryptedEnvelope;
 }
 
 interface SpillFailedResponseState {
@@ -116,7 +162,11 @@ interface SpillFailedResponseState {
   sizeBytes: number;
 }
 
-type StoredResponseState = ResidentResponseState | SpilledResponseState | SpillFailedResponseState;
+type StoredResponseState =
+  | ResidentResponseState
+  | EncryptedResidentResponseState
+  | SpilledResponseState
+  | SpillFailedResponseState;
 type ResidentInput = Omit<ResidentResponseState, "kind" | "sizeBytes">;
 
 export type PreviousResponseReplayFailure = {
@@ -126,6 +176,151 @@ export type PreviousResponseReplayFailure = {
 
 const states = new Map<string, StoredResponseState>();
 const replayScopeMismatches = new WeakSet<object>();
+const responseStateDurabilityByBody = new WeakMap<object, ResponseStateDurability>();
+let legacyRetirementBlocked = false;
+interface LegacySnapshotRetirement {
+  targetPath?: string;
+  targetDev?: number;
+  targetIno?: number;
+  absentPath?: string;
+  linkPath?: string;
+  linkDev?: number;
+  linkIno?: number;
+  linkTarget?: string;
+  /** Non-v3 snapshots are untrusted retirement markers. Retain the bounded
+   * scan cursor until every pre-existing owned spill candidate is retired. */
+  spillScan?: ResponseSpillRetirementScan;
+  spillScanComplete?: boolean;
+  legacyStates?: unknown[];
+  legacyStateIndex?: number;
+}
+let legacySnapshotAwaitingRetirement: LegacySnapshotRetirement | null = null;
+let legacySnapshotInspectionPending: string | null = null;
+let legacyRetirementRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
+const sensitiveStorageWarnings = new Set<string>();
+
+interface ResponseSnapshotInspectionIo {
+  lstat: (path: string) => Stats;
+  stat: (path: string) => Stats;
+}
+
+let responseSnapshotInspectionIoForTest: Partial<ResponseSnapshotInspectionIo> | null = null;
+
+function snapshotLstat(path: string): Stats {
+  return responseSnapshotInspectionIoForTest?.lstat?.(path) ?? lstatSync(path);
+}
+
+function snapshotStat(path: string): Stats {
+  return responseSnapshotInspectionIoForTest?.stat?.(path) ?? statSync(path);
+}
+
+function warnSensitiveStorageMemoryOnly(reason: "credential_store" | "legacy_retirement"): void {
+  const key = `${responseContinuationHomeId()}:${reason}`;
+  if (sensitiveStorageWarnings.has(key)) return;
+  sensitiveStorageWarnings.add(key);
+  console.warn("[responses] secure continuation storage unavailable; sensitive replay is memory-only", { reason });
+}
+
+export function getResponseStateDurability(body: unknown): ResponseStateDurability | undefined {
+  return body && typeof body === "object" ? responseStateDurabilityByBody.get(body as object) : undefined;
+}
+
+export function markBodyResponseStateDurability(body: unknown, durability: ResponseStateDurability): void {
+  if (body && typeof body === "object") {
+    responseStateDurabilityByBody.set(body as object, durability);
+  }
+}
+
+export function isMemoryOnlyBody(body: unknown): boolean {
+  return !!body && typeof body === "object" && responseStateDurabilityByBody.get(body as object) === "memory-only";
+}
+
+export function isEncryptedResponseStateBody(body: unknown): boolean {
+  return !!body && typeof body === "object" && responseStateDurabilityByBody.get(body as object) === "encrypted";
+}
+
+export async function prepareResponseStateReplay(body: unknown): Promise<void> {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return;
+  const request = body as Record<string, unknown>;
+
+  const carriesSensitiveHistory = hasPlaintextDelegationHistory(request.input)
+    || hasPlaintextDelegationHistory(request.tools);
+  const previousId = typeof request.previous_response_id === "string" ? request.previous_response_id : undefined;
+  if (!carriesSensitiveHistory && !previousId) return;
+
+  ensureLoaded();
+  if (carriesSensitiveHistory) {
+    const key = legacyRetirementBlocked ? null : await getResponseContinuationKey();
+    try {
+      responseStateDurabilityByBody.set(request, key ? "encrypted" : "memory-only");
+      if (!key) warnSensitiveStorageMemoryOnly(legacyRetirementBlocked ? "legacy_retirement" : "credential_store");
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
+    }
+  }
+
+  if (!previousId) {
+    return;
+  }
+
+  pruneResponses();
+  const previous = states.get(previousId);
+  if (!previous) return;
+
+  const isEncrypted =
+    previous.kind === "encrypted-resident"
+    || (previous.kind === "resident" && previous.durability === "encrypted")
+    || (previous.kind === "spill" && (previous.spill.version === 2 || previous.durability === "encrypted"));
+
+  if (isEncrypted) {
+    const key = legacyRetirementBlocked ? null : await getResponseContinuationKey();
+    try {
+      if (!responseStateDurabilityByBody.has(request)) {
+        responseStateDurabilityByBody.set(request, key ? "encrypted" : "memory-only");
+      }
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
+    }
+  } else if (previous.kind === "resident" && previous.durability === "memory-only") {
+    if (!responseStateDurabilityByBody.has(request)) {
+      responseStateDurabilityByBody.set(request, "memory-only");
+    }
+  }
+}
+
+export async function prepareSensitiveResponsePersistence(body?: unknown): Promise<"encrypted" | "memory-only"> {
+  ensureLoaded();
+  const current = body && typeof body === "object"
+    ? responseStateDurabilityByBody.get(body as object)
+    : undefined;
+
+  if (current === "encrypted") return "encrypted";
+
+  if (legacyRetirementBlocked) {
+    if (body && typeof body === "object") responseStateDurabilityByBody.set(body as object, "memory-only");
+    warnSensitiveStorageMemoryOnly("legacy_retirement");
+    return "memory-only";
+  }
+
+  const key = await getResponseContinuationKey();
+  try {
+    if (!key) {
+      if (body && typeof body === "object") {
+        responseStateDurabilityByBody.set(body as object, "memory-only");
+      }
+      warnSensitiveStorageMemoryOnly("credential_store");
+      return "memory-only";
+    }
+
+    if (body && typeof body === "object") {
+      responseStateDurabilityByBody.set(body as object, "encrypted");
+    }
+    return "encrypted";
+  } finally {
+    wipeResponseContinuationKeyCopy(key);
+  }
+}
 let storedResponseBytes = 0;
 let residentResponseBytes = 0;
 let oldestResidentId: string | undefined;
@@ -276,7 +471,7 @@ const MAX_PENDING_RESPONSE_SPILL_BYTES = MAX_RESPONSE_SPILL_PAYLOAD_BYTES;
 
 interface PendingResponseSpill {
   id: string;
-  candidate: ResidentResponseState | null;
+  candidate: ResidentResponseState | EncryptedResidentResponseState | null;
   supersededSpill?: ResponseSpillRef;
   directAdmission: boolean;
   running: boolean;
@@ -343,6 +538,20 @@ function reconcileUnreclaimableSpillPaths(): number {
   return total;
 }
 
+/** Retry cleanup-resistant state-owned paths on the next budget pass. */
+function retryUnreclaimableSpillPaths(): void {
+  for (const path of [...unreclaimableSpillPaths.keys()]) {
+    try {
+      unlinkSync(path);
+      unreclaimableSpillPaths.delete(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        unreclaimableSpillPaths.delete(path);
+      }
+    }
+  }
+}
+
 /**
  * Peak on-disk footprint of publishing this candidate: temp plus destination copy.
  *
@@ -352,8 +561,8 @@ function reconcileUnreclaimableSpillPaths(): number {
  * still exceed it. Falls back to the resident figure only when serialization fails, which
  * is the same condition that will fail the publication itself.
  */
-function publicationFootprintBytes(id: string, candidate: ResidentResponseState): number {
-  const exact = prospectiveResponseSpillBytes(id, spillPayloadForResident(candidate));
+function publicationFootprintBytes(id: string, candidate: ResidentResponseState | EncryptedResidentResponseState): number {
+  const exact = prospectiveResponseSpillBytes(id, spillPayloadForResident(id, candidate));
   return (exact ?? candidate.sizeBytes) * 2;
 }
 let responseSpillPublicationTail: Promise<void> = Promise.resolve();
@@ -365,7 +574,7 @@ function deferSupersededSpill(ref: ResponseSpillRef | undefined): void {
   if (!ref) return;
   pendingSpillUnlinks.push(ref);
   while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-    deleteResponseSpill(pendingSpillUnlinks.shift()!);
+    deleteResponseSpill(pendingSpillUnlinks.shift()!, chargeUnreclaimableSpillPath);
   }
 }
 
@@ -402,8 +611,45 @@ function isAclTimeout(error: unknown): boolean {
     && String((error as { code?: unknown }).code) === "ETIMEDOUT";
 }
 
-function spillPayloadForResident(candidate: ResidentResponseState): Parameters<typeof writeResponseSpillDurably>[1] {
+function isRetryableSpillPublicationError(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  const code = String((error as { code?: unknown }).code);
+  return code === "CONFIG_MUTATION_LOCK_UNAVAILABLE" || code === "ECANCELED" || code === "EAGAIN";
+}
+
+function spillPayloadForResident(id: string, candidate: ResidentResponseState | EncryptedResidentResponseState): ResponseSpillStateInput {
+  if (candidate.durability === "encrypted" || candidate.envelope) {
+    let envelope = candidate.envelope;
+    if (!envelope && candidate.kind === "resident") {
+      const key = getResponseContinuationKeySync();
+      try {
+        if (key) {
+          const homeId = responseContinuationHomeId();
+          const aad = buildResponseContinuationAAD(homeId, id, candidate.createdAt, candidate.clientThreadId, candidate.providerOutputStart);
+          envelope = encryptResponseContinuation(
+            { items: candidate.items, ...(candidate.providers ? { providers: candidate.providers } : {}) },
+            aad,
+            key,
+          );
+          candidate.envelope = envelope;
+        }
+      } finally {
+        wipeResponseContinuationKeyCopy(key);
+      }
+    }
+    if (!envelope) {
+      throw new Error("Cannot spill encrypted state without keyring key");
+    }
+    return {
+      version: 2,
+      createdAt: candidate.createdAt,
+      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
+      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
+      envelope,
+    };
+  }
   return {
+    version: 1,
     createdAt: candidate.createdAt,
     ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
     items: candidate.items,
@@ -417,13 +663,31 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
   job.running = true;
   const candidate = job.candidate;
   let ref: ResponseSpillRef | null = null;
+  let committed = false;
+  let rejectedOversized = false;
   let exhaustedAclRetry = false;
   try {
-    const state = spillPayloadForResident(candidate);
+    if (legacyRetirementBlocked) return;
+    const state = spillPayloadForResident(job.id, candidate);
+    const commitUnderLock = (published: ResponseSpillRef): boolean => {
+      if (published.payloadBytes > responseSpillPayloadCap()) {
+        rejectedOversized = true;
+        return false;
+      }
+      if (legacyRetirementBlocked || states.get(job.id) !== candidate || job.cancelled) return false;
+      committed = swapResidentForSpill(job.id, candidate, published);
+      if (committed) {
+        noteSpillWriteSuccess();
+        if (job.directAdmission) admissionCounters.directSpills += 1;
+        deferSupersededSpill(job.supersededSpill);
+      }
+      return committed;
+    };
     try {
       ref = await writeResponseSpillDurablyAsync(job.id, state, {
         aclBudgetMs: responseSpillAsyncAclAttemptBudgetMs(),
         publicationControl: job.publicationControl,
+        commitUnderLock,
       });
     } catch (error) {
       if (!isAclTimeout(error)) throw error;
@@ -434,31 +698,18 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
           aclBudgetMs: responseSpillAsyncAclAttemptBudgetMs(),
           retryTimedOutOnce: true,
           publicationControl: job.publicationControl,
+          commitUnderLock,
         });
       } catch (retryError) {
         exhaustedAclRetry = isAclTimeout(retryError);
         throw retryError;
       }
     }
-    if (ref.payloadBytes > responseSpillPayloadCap()) {
-      deleteResponseSpill(ref);
-      ref = null;
-      if (job.directAdmission) admissionCounters.oversizedDrops += 1;
-      throw Object.assign(new Error("Response spill payload exceeds replay ceiling"), { code: "EFBIG" });
-    }
-    if (states.get(job.id) !== candidate || job.cancelled) {
-      deleteResponseSpill(ref);
-      ref = null;
-      return;
-    }
-    if (swapResidentForSpill(job.id, candidate, ref)) {
-      ref = null;
-      noteSpillWriteSuccess();
-      if (job.directAdmission) admissionCounters.directSpills += 1;
-      deferSupersededSpill(job.supersededSpill);
-    }
+    if (committed) ref = null;
   } catch (error) {
-    if (ref) deleteResponseSpill(ref);
+    if (ref) deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
+    if (rejectedOversized && job.directAdmission) admissionCounters.oversizedDrops += 1;
+    if (isRetryableSpillPublicationError(error) && !rejectedOversized) return;
     if (states.get(job.id) === candidate && !job.cancelled) {
       noteSpillWriteFailure(error, exhaustedAclRetry ? "EACLRETRYEXHAUSTED" : undefined);
       replaceWithSpillFailure(job.id, candidate);
@@ -466,6 +717,9 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
     }
   } finally {
     const cancelled = job.cancelled;
+    const perPath = Math.max(1, Math.floor(job.reservedBytes / 2));
+    chargeUnreclaimableSpillPath(job.publicationControl.tempPath, perPath);
+    chargeUnreclaimableSpillPath(job.publicationControl.destinationPath, perPath);
     releasePendingResponseSpill(job);
     recomputeOldestResident();
     if (!cancelled) {
@@ -478,9 +732,10 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
 
 function queuePendingResponseSpill(
   id: string,
-  candidate: ResidentResponseState,
+  candidate: ResidentResponseState | EncryptedResidentResponseState,
   options: { supersededSpill?: ResponseSpillRef; directAdmission?: boolean } = {},
 ): void {
+  if (legacyRetirementBlocked) return;
   const inheritedSpill = cancelPendingResponseSpill(id) ?? options.supersededSpill;
   if (pendingResponseSpillBytes + candidate.sizeBytes > MAX_PENDING_RESPONSE_SPILL_BYTES) {
     noteSpillWriteFailure(null, "ECAPACITY");
@@ -530,7 +785,7 @@ function queuePendingResponseSpill(
 
 function replaceWithPendingResponseSpill(
   id: string,
-  candidate: ResidentResponseState,
+  candidate: ResidentResponseState | EncryptedResidentResponseState,
   expected: StoredResponseState | undefined,
   options: { directAdmission?: boolean } = {},
 ): boolean {
@@ -614,6 +869,8 @@ function installShutdownFallbackSpill(
   aclBudgetMs: number,
 ): void {
   let ref: ResponseSpillRef | null = null;
+  let installed = false;
+  let rejectedOversized = false;
   // Supersession released this job's reservation, but the synchronous write below is the
   // largest publication of the shutdown path and has its own link-then-copy fallback
   // holding a temp and a destination at once. Re-reserve for its duration so the cap is
@@ -644,26 +901,29 @@ function installShutdownFallbackSpill(
         throw Object.assign(new Error("Response spill shutdown fallback exceeds the durable disk cap"), { code: "ENOSPC" });
       }
     }
-    ref = writeResponseSpillDurably(job.id, spillPayloadForResident(candidate), { aclBudgetMs });
-    if (ref.payloadBytes > responseSpillPayloadCap()) {
-      deleteResponseSpill(ref);
-      ref = null;
-      if (job.directAdmission) admissionCounters.oversizedDrops += 1;
-      throw Object.assign(new Error("Response spill payload exceeds replay ceiling"), { code: "EFBIG" });
-    }
-    if (states.get(job.id) !== candidate) {
-      deleteResponseSpill(ref);
-      ref = null;
-      return;
-    }
-    if (swapResidentForSpill(job.id, candidate, ref)) {
+    ref = writeResponseSpillDurably(job.id, spillPayloadForResident(job.id, candidate), {
+      aclBudgetMs,
+      onCleanupResidual: chargeUnreclaimableSpillPath,
+      commitUnderLock: published => {
+        if (published.payloadBytes > responseSpillPayloadCap()) {
+          rejectedOversized = true;
+          return false;
+        }
+        if (legacyRetirementBlocked || states.get(job.id) !== candidate) return false;
+        installed = swapResidentForSpill(job.id, candidate, published);
+        return installed;
+      },
+    });
+    if (installed) {
       ref = null;
       noteSpillWriteSuccess();
       if (job.directAdmission) admissionCounters.directSpills += 1;
       deferSupersededSpill(job.supersededSpill);
     }
   } catch (error) {
-    if (ref) deleteResponseSpill(ref);
+    if (ref) deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
+    if (rejectedOversized && job.directAdmission) admissionCounters.oversizedDrops += 1;
+    if (isRetryableSpillPublicationError(error) && !rejectedOversized) throw error;
     if (states.get(job.id) === candidate) {
       noteSpillWriteFailure(error);
       replaceWithSpillFailure(job.id, candidate);
@@ -917,14 +1177,7 @@ function serializedBytes(value: unknown): number | null {
 }
 
 function measureResidentEntry(id: string, entry: ResidentInput): ResidentResponseState | null {
-  const sizeBytes = serializedBytes({
-    responseId: id,
-    createdAt: entry.createdAt,
-    ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-    items: entry.items,
-    ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-    ...(entry.providers ? { providers: entry.providers } : {}),
-  });
+  const sizeBytes = serializedBytes({ responseId: id, kind: "resident", ...entry });
   return sizeBytes === null ? null : { kind: "resident", ...entry, sizeBytes };
 }
 
@@ -932,7 +1185,7 @@ function recomputeOldestResident(): void {
   oldestResidentId = undefined;
   oldestResidentAt = null;
   for (const [id, state] of states) {
-    if (state.kind !== "resident") continue;
+    if (state.kind !== "resident" && state.kind !== "encrypted-resident") continue;
     if (pendingResponseSpillById.get(id)?.candidate === state) continue;
     if (oldestResidentAt !== null && state.createdAt >= oldestResidentAt) continue;
     oldestResidentId = id;
@@ -945,10 +1198,10 @@ function replaceMapEntry(id: string, next: StoredResponseState, expected?: Store
   if (expected && existing !== expected) return false;
   storedResponseBytes -= existing?.sizeBytes ?? 0;
   storedResponseBytes += next.sizeBytes;
-  if (existing?.kind === "resident") {
+  if (existing?.kind === "resident" || existing?.kind === "encrypted-resident") {
     residentResponseBytes -= existing.sizeBytes;
   }
-  if (next.kind === "resident") {
+  if (next.kind === "resident" || next.kind === "encrypted-resident") {
     residentResponseBytes += next.sizeBytes;
   }
   if (storedResponseBytes < 0) storedResponseBytes = 0;
@@ -957,7 +1210,7 @@ function replaceMapEntry(id: string, next: StoredResponseState, expected?: Store
   states.set(id, next);
   if (oldestResidentId === id) {
     recomputeOldestResident();
-  } else if (next.kind === "resident" && (oldestResidentAt === null || next.createdAt < oldestResidentAt)) {
+  } else if ((next.kind === "resident" || next.kind === "encrypted-resident") && (oldestResidentAt === null || next.createdAt < oldestResidentAt)) {
     oldestResidentId = id;
     oldestResidentAt = next.createdAt;
   }
@@ -975,7 +1228,7 @@ function tombstone(id: string, createdAt: number): SpillFailedResponseState {
 }
 
 function deleteOwnedSpills(entry: StoredResponseState): void {
-  if (entry.kind === "spill") deleteResponseSpill(entry.spill);
+  if (entry.kind === "spill") deleteResponseSpill(entry.spill, chargeUnreclaimableSpillPath);
 }
 
 /** The ONLY deletion point: TTL, count, byte, and explicit deletes all route here. */
@@ -984,7 +1237,7 @@ function deleteEntry(id: string, options: { deleteSpill?: boolean } = {}): void 
   if (!existing) return;
   const supersededSpill = cancelPendingResponseSpill(id);
   storedResponseBytes -= existing.sizeBytes;
-  if (existing.kind === "resident") {
+  if (existing.kind === "resident" || existing.kind === "encrypted-resident") {
     residentResponseBytes -= existing.sizeBytes;
   }
   if (storedResponseBytes < 0) storedResponseBytes = 0;
@@ -993,7 +1246,9 @@ function deleteEntry(id: string, options: { deleteSpill?: boolean } = {}): void 
   if (oldestResidentId === id) recomputeOldestResident();
   stateRevision += 1;
   if (options.deleteSpill !== false) deleteOwnedSpills(existing);
-  if (options.deleteSpill !== false && supersededSpill) deleteResponseSpill(supersededSpill);
+  if (options.deleteSpill !== false && supersededSpill) {
+    deleteResponseSpill(supersededSpill, chargeUnreclaimableSpillPath);
+  }
 }
 
 function replaceWithSpillFailure(
@@ -1012,7 +1267,7 @@ function replaceWithSpillFailure(
         // itself is durable — queue the unlink for the next stable persist.
         pendingSpillUnlinks.push(existing.spill);
         while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-          deleteResponseSpill(pendingSpillUnlinks.shift()!);
+          deleteResponseSpill(pendingSpillUnlinks.shift()!, chargeUnreclaimableSpillPath);
         }
       } else {
         deleteOwnedSpills(existing);
@@ -1021,17 +1276,21 @@ function replaceWithSpillFailure(
   }
 }
 
-function swapResidentForSpill(id: string, expected: ResidentResponseState, ref: ResponseSpillRef): boolean {
+function swapResidentForSpill(id: string, expected: ResidentResponseState | EncryptedResidentResponseState, ref: ResponseSpillRef): boolean {
   const base: Omit<SpilledResponseState, "sizeBytes"> = {
     kind: "spill",
     createdAt: expected.createdAt,
     ...(expected.clientThreadId ? { clientThreadId: expected.clientThreadId } : {}),
-    ...(expected.providers ? { providers: expected.providers } : {}),
+    ...(expected.kind === "resident" && expected.durability !== "encrypted" && expected.providers
+      ? { providers: expected.providers }
+      : {}),
+    ...(expected.providerOutputStart !== undefined ? { providerOutputStart: expected.providerOutputStart } : {}),
     spill: ref,
+    ...(expected.durability ? { durability: expected.durability } : {}),
   };
   const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
   if (!replaceMapEntry(id, next, expected)) {
-    deleteResponseSpill(ref);
+    deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
     return false;
   }
   noteStubSwapForTest();
@@ -1043,38 +1302,48 @@ function replaceSpillEntryAtomically(
   expected: SpilledResponseState,
   candidate: ResidentResponseState,
 ): void {
+  if (legacyRetirementBlocked) {
+    replaceMapEntry(id, candidate, expected);
+    deferSupersededSpill(expected.spill);
+    return;
+  }
   try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      items: candidate.items,
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
+    const payload = spillPayloadForResident(id, candidate);
+    let installed = false;
+    writeResponseSpillDurably(id, payload, {
+      onCleanupResidual: chargeUnreclaimableSpillPath,
+      commitUnderLock: ref => {
+        if (legacyRetirementBlocked) return false;
+        const base: Omit<SpilledResponseState, "sizeBytes"> = {
+          kind: "spill",
+          createdAt: candidate.createdAt,
+          ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
+          ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
+          ...(candidate.durability !== "encrypted" && candidate.providers ? { providers: candidate.providers } : {}),
+          spill: ref,
+          ...(candidate.durability ? { durability: candidate.durability } : {}),
+        };
+        const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
+        installed = replaceMapEntry(id, next, expected);
+        if (installed) noteStubSwapForTest();
+        return installed;
+      },
     });
-    const base: Omit<SpilledResponseState, "sizeBytes"> = {
-      kind: "spill",
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
-      spill: ref,
-    };
-    const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
-    if (!replaceMapEntry(id, next, expected)) {
-      deleteResponseSpill(ref);
-      return;
-    }
+    if (!installed) return;
     noteSpillWriteSuccess();
-    noteStubSwapForTest();
     // The old generation is NOT unlinked here (review C1-1): the new stub is
     // only durable once the debounced snapshot flushes — a crash before that
     // reloads the OLD stub, which must still find its file. Queue the unlink;
     // persistNow() drains the queue only after the snapshot write succeeds.
     pendingSpillUnlinks.push(expected.spill);
     while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-      deleteResponseSpill(pendingSpillUnlinks.shift()!);
+      deleteResponseSpill(pendingSpillUnlinks.shift()!, chargeUnreclaimableSpillPath);
     }
   } catch (error) {
+    if (isRetryableSpillPublicationError(error)) {
+      if (replaceMapEntry(id, candidate, expected)) deferSupersededSpill(expected.spill);
+      return;
+    }
     noteSpillWriteFailure(error);
     // deferSpillUnlink: the durable snapshot may still reference the old
     // generation; deleting it now would strand the old stub after a crash.
@@ -1094,17 +1363,32 @@ function setResidentEntry(id: string, entry: ResidentInput): void {
     return;
   }
   if (candidate.sizeBytes > byteCap()) {
+    if (candidate.durability === "memory-only") {
+      admissionCounters.oversizedDrops += 1;
+      if (expected) deleteEntry(id);
+      return;
+    }
     admitOversizedCandidate(id, candidate, expected);
     pruneResponses();
     return;
   }
   const pending = pendingResponseSpillById.get(id);
   if (windowsSecretAclApplies() && (expected?.kind === "spill" || pending?.supersededSpill)) {
+    if (candidate.durability === "memory-only") {
+      deleteEntry(id);
+      return;
+    }
     replaceWithPendingResponseSpill(id, candidate, expected);
     pruneResponses();
     return;
   }
   if (expected?.kind === "spill") {
+    if (candidate.durability === "memory-only") {
+      deleteOwnedSpills(expected);
+      if (!replaceMapEntry(id, candidate, expected)) return;
+      pruneResponses();
+      return;
+    }
     replaceSpillEntryAtomically(id, expected, candidate);
     pruneResponses();
     return;
@@ -1127,57 +1411,66 @@ function admitOversizedCandidate(
   candidate: ResidentResponseState,
   expected?: StoredResponseState,
 ): void {
-  if (candidate.sizeBytes > responseSpillPayloadCap()) {
+  if (candidate.durability === "memory-only") {
     admissionCounters.oversizedDrops += 1;
-    replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
+    if (expected) deleteEntry(id);
+    return;
+  }
+  if (legacyRetirementBlocked) {
+    admissionCounters.oversizedDrops += 1;
+    if (expected) deleteEntry(id);
     return;
   }
   if (windowsSecretAclApplies()) {
     replaceWithPendingResponseSpill(id, candidate, expected, { directAdmission: true });
     return;
   }
+  let rejectedOversized = false;
   try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      items: candidate.items,
-      ...(candidate.providerOutputStart !== undefined ? { providerOutputStart: candidate.providerOutputStart } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
+    const payload = spillPayloadForResident(id, candidate);
+    let installed = false;
+    writeResponseSpillDurably(id, payload, {
+      onCleanupResidual: chargeUnreclaimableSpillPath,
+      commitUnderLock: ref => {
+        // Enforce the ceiling against the REAL envelope: the spill payload adds
+        // the {version, responseId, ...} wrapper.
+        if (ref.payloadBytes > responseSpillPayloadCap()) {
+          rejectedOversized = true;
+          return false;
+        }
+        if (legacyRetirementBlocked) return false;
+        const base: Omit<SpilledResponseState, "sizeBytes"> = {
+          kind: "spill",
+          createdAt: candidate.createdAt,
+          ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
+          ...(candidate.durability !== "encrypted" && candidate.providers ? { providers: candidate.providers } : {}),
+          spill: ref,
+          ...(candidate.durability ? { durability: candidate.durability } : {}),
+        };
+        const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
+        installed = replaceMapEntry(id, next, expected);
+        if (installed) noteStubSwapForTest();
+        return installed;
+      },
     });
-    // Enforce the ceiling against the REAL envelope: the spill payload adds
-    // the {version, responseId, ...} wrapper, so a candidate within the
-    // wrapper's size of the cap would otherwise be retained unreadably.
-    if (ref.payloadBytes > responseSpillPayloadCap()) {
-      deleteResponseSpill(ref);
-      admissionCounters.oversizedDrops += 1;
-      replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
-      return;
-    }
-    const base: Omit<SpilledResponseState, "sizeBytes"> = {
-      kind: "spill",
-      createdAt: candidate.createdAt,
-      ...(candidate.clientThreadId ? { clientThreadId: candidate.clientThreadId } : {}),
-      ...(candidate.providers ? { providers: candidate.providers } : {}),
-      spill: ref,
-    };
-    const next: SpilledResponseState = { ...base, sizeBytes: stubSize(id, base) };
-    if (!replaceMapEntry(id, next, expected)) {
-      deleteResponseSpill(ref);
-      return;
-    }
+    if (!installed) return;
     noteSpillWriteSuccess();
     admissionCounters.directSpills += 1;
-    noteStubSwapForTest();
     if (expected?.kind === "spill") {
       // Same deferred-unlink rule as replaceSpillEntryAtomically: the new stub
       // is durable only after the debounced snapshot, so the old generation
       // stays until a stable persist drains the queue.
       pendingSpillUnlinks.push(expected.spill);
       while (pendingSpillUnlinks.length > PENDING_SPILL_UNLINKS_MAX) {
-        deleteResponseSpill(pendingSpillUnlinks.shift()!);
+        deleteResponseSpill(pendingSpillUnlinks.shift()!, chargeUnreclaimableSpillPath);
       }
     }
   } catch (error) {
+    if (isRetryableSpillPublicationError(error) && !rejectedOversized) {
+      replaceMapEntry(id, candidate, expected);
+      return;
+    }
+    if (rejectedOversized) admissionCounters.oversizedDrops += 1;
     noteSpillWriteFailure(error);
     replaceWithSpillFailure(id, expected, { deferSpillUnlink: true });
   }
@@ -1205,20 +1498,12 @@ function snapshotPath(): string {
   return join(getConfigDir(), "responses-state.json");
 }
 
-interface LegacySnapshotState {
-  createdAt?: unknown;
-  clientThreadId?: unknown;
-  items?: unknown;
-  providers?: OcxProviderContinuationState;
-  conversationId?: unknown;
-  cursorCheckpointUsable?: unknown;
-}
-
 function isSpillRef(value: unknown): value is ResponseSpillRef {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const ref = value as ResponseSpillRef;
-  return ref.version === 1
+  return (ref.version === 1 || ref.version === 2)
     && typeof ref.fileName === "string"
+    && isOwnedResponseSpillFileName(ref.fileName)
     && /^[0-9a-f]{64}$/.test(ref.digest)
     && Number.isSafeInteger(ref.payloadBytes)
     && ref.payloadBytes >= 0;
@@ -1226,7 +1511,7 @@ function isSpillRef(value: unknown): value is ResponseSpillRef {
 
 function loadSnapshotEntry(id: string, value: unknown): void {
   if (!value || typeof value !== "object" || Array.isArray(value)) return;
-  const rec = value as LegacySnapshotState & { kind?: unknown; spill?: unknown };
+  const rec = value as Record<string, unknown>;
   if (typeof rec.createdAt !== "number" || !Number.isFinite(rec.createdAt)) return;
   const clientThreadId = typeof rec.clientThreadId === "string" && rec.clientThreadId.trim().length > 0
     ? rec.clientThreadId.trim()
@@ -1234,13 +1519,42 @@ function loadSnapshotEntry(id: string, value: unknown): void {
   // A malformed boundary degrades to "never skip" rather than to a bad index: an untrusted
   // snapshot must not be able to authorize dropping conversation history.
   const anchorFor = (itemCount: number): number | undefined => {
-    const raw = (rec as { providerOutputStart?: unknown }).providerOutputStart;
+    const raw = rec.providerOutputStart;
     return Number.isSafeInteger(raw) && (raw as number) >= 0 && (raw as number) <= itemCount
       ? raw as number
       : undefined;
   };
+  if (rec.kind === "encrypted-resident") {
+    const env = rec.envelope as ResponseContinuationEncryptedEnvelope | undefined;
+    if (
+      !env
+      || env.version !== 1
+      || env.cipher !== "aes-256-gcm"
+      || typeof env.keyId !== "string"
+      || typeof env.nonce !== "string"
+      || typeof env.tag !== "string"
+      || typeof env.ciphertext !== "string"
+    ) {
+      return;
+    }
+    const stubBase = {
+      kind: "encrypted-resident",
+      createdAt: rec.createdAt,
+      ...(clientThreadId ? { clientThreadId } : {}),
+      ...(anchorFor(Number.MAX_SAFE_INTEGER) !== undefined ? { providerOutputStart: anchorFor(Number.MAX_SAFE_INTEGER) } : {}),
+      envelope: env,
+      durability: "encrypted",
+    } as const;
+    const stub: EncryptedResidentResponseState = {
+      ...stubBase,
+      sizeBytes: serializedBytes({ responseId: id, ...stubBase }) ?? 0,
+    };
+    replaceMapEntry(id, stub);
+    return;
+  }
   if (rec.kind === "spill") {
     if (!isSpillRef(rec.spill)) return;
+    const isEncryptedSpill = (rec.spill as ResponseSpillRef).version === 2;
     const base: Omit<SpilledResponseState, "sizeBytes"> = {
       kind: "spill",
       createdAt: rec.createdAt,
@@ -1248,8 +1562,9 @@ function loadSnapshotEntry(id: string, value: unknown): void {
       // Item count is unknown until materialization, so accept any non-negative integer
       // here; the spill payload validator re-checks it against the real array.
       ...(anchorFor(Number.MAX_SAFE_INTEGER) !== undefined ? { providerOutputStart: anchorFor(Number.MAX_SAFE_INTEGER) } : {}),
-      ...(rec.providers ? { providers: rec.providers } : {}),
-      spill: rec.spill,
+      ...(rec.providers ? { providers: rec.providers as OcxProviderContinuationState } : {}),
+      spill: rec.spill as ResponseSpillRef,
+      ...(isEncryptedSpill ? { durability: "encrypted" } : {}),
     };
     replaceMapEntry(id, { ...base, sizeBytes: stubSize(id, base) });
     return;
@@ -1275,7 +1590,7 @@ function loadSnapshotEntry(id: string, value: unknown): void {
     ...(clientThreadId ? { clientThreadId } : {}),
     items: rec.items,
     ...(anchorFor(rec.items.length) !== undefined ? { providerOutputStart: anchorFor(rec.items.length) } : {}),
-    ...(providers ? { providers } : {}),
+    ...(providers ? { providers: providers as OcxProviderContinuationState } : {}),
   });
   if (!resident) {
     replaceMapEntry(id, tombstone(id, rec.createdAt));
@@ -1483,6 +1798,391 @@ function responseStateSweepDirectories(): Set<string> {
   return new Set([dirname(path), resolvedDir]);
 }
 
+function pathEntryExists(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== "ENOENT";
+  }
+}
+
+function liveResponseSpillFileNames(): Set<string> {
+  const protectedNames = new Set<string>();
+  for (const state of states.values()) {
+    if (state.kind === "spill") protectedNames.add(state.spill.fileName);
+  }
+  for (const job of pendingResponseSpills) {
+    const { tempPath, destinationPath } = job.publicationControl;
+    if (tempPath) protectedNames.add(basename(tempPath));
+    if (destinationPath) protectedNames.add(basename(destinationPath));
+  }
+  return protectedNames;
+}
+
+function retryLegacySpillRetirement(): void {
+  const snapshot = legacySnapshotAwaitingRetirement;
+  if (!snapshot) return;
+  let scanned = 0;
+  let removed = 0;
+  const legacyStates = snapshot.legacyStates;
+  if (legacyStates && (snapshot.legacyStateIndex ?? 0) < legacyStates.length) {
+    while (
+      (snapshot.legacyStateIndex ?? 0) < legacyStates.length
+      && scanned < RESPONSE_SPILL_SCAN_MAX
+      && removed < RESPONSE_SPILL_CLEANUP_MAX
+    ) {
+      const index = snapshot.legacyStateIndex ?? 0;
+      const entry = legacyStates[index];
+      scanned += 1;
+      if (Array.isArray(entry) && entry.length === 2 && entry[1] && typeof entry[1] === "object") {
+        const item = entry[1] as { kind?: unknown; spill?: unknown };
+        if (item.kind === "spill" && isSpillRef(item.spill)) {
+          const spillPath = join(responseSpillDirectory(), item.spill.fileName);
+          const existed = pathEntryExists(spillPath);
+          deleteResponseSpill(item.spill, chargeUnreclaimableSpillPath);
+          if (pathEntryExists(spillPath)) return;
+          if (existed) removed += 1;
+        }
+      }
+      snapshot.legacyStateIndex = index + 1;
+    }
+    if ((snapshot.legacyStateIndex ?? 0) < legacyStates.length) return;
+    delete snapshot.legacyStates;
+    delete snapshot.legacyStateIndex;
+  }
+  if (snapshot?.spillScan && !snapshot.spillScanComplete) {
+    const result = retirePreexistingResponseSpills(snapshot.spillScan, liveResponseSpillFileNames(), {
+      maxScanned: RESPONSE_SPILL_SCAN_MAX - scanned,
+      maxRemoved: RESPONSE_SPILL_CLEANUP_MAX - removed,
+    });
+    if (result.complete) snapshot.spillScanComplete = true;
+  }
+}
+
+function unlinkLegacyEntryIfUnchanged(
+  path: string,
+  dev: number,
+  ino: number,
+  expectedLinkTarget?: string,
+): boolean {
+  try {
+    const current = snapshotLstat(path);
+    if (current.dev !== dev || current.ino !== ino) return false;
+    if (expectedLinkTarget !== undefined && readlinkSync(path) !== expectedLinkTarget) return false;
+    unlinkSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") return false;
+  }
+  return !pathEntryExists(path);
+}
+
+function reclassifyLegacySnapshot(pending: LegacySnapshotRetirement): void {
+  if (pending.spillScan) closeResponseSpillRetirementScan(pending.spillScan);
+  legacySnapshotAwaitingRetirement = null;
+  legacySnapshotInspectionPending = pending.linkPath ?? pending.targetPath ?? pending.absentPath ?? snapshotPath();
+}
+
+function retireCapturedTargetBeforeReclassify(pending: LegacySnapshotRetirement): boolean {
+  if (
+    pending.targetPath === undefined
+    || pending.targetDev === undefined
+    || pending.targetIno === undefined
+  ) return true;
+  try {
+    const current = snapshotLstat(pending.targetPath);
+    if (current.dev !== pending.targetDev || current.ino !== pending.targetIno) return true;
+    const capturedTargetIsLink = pending.linkPath === pending.targetPath;
+    if (capturedTargetIsLink) {
+      if (pending.linkTarget === undefined) return false;
+      try {
+        if (readlinkSync(pending.targetPath) !== pending.linkTarget) return true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (code === "ENOENT" || code === "EINVAL") return true;
+        return false;
+      }
+    }
+    return unlinkLegacyEntryIfUnchanged(
+      pending.targetPath,
+      pending.targetDev,
+      pending.targetIno,
+      capturedTargetIsLink ? pending.linkTarget : undefined,
+    );
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT";
+  }
+}
+
+function retirementMarkerStillCurrent(pending: LegacySnapshotRetirement): boolean | null {
+  try {
+    if (pending.absentPath) {
+      snapshotLstat(pending.absentPath);
+      return false;
+    }
+    if (
+      pending.targetPath === undefined
+      || pending.targetDev === undefined
+      || pending.targetIno === undefined
+    ) return false;
+    const target = snapshotLstat(pending.targetPath);
+    if (target.dev !== pending.targetDev || target.ino !== pending.targetIno) return false;
+    if (pending.linkPath && pending.linkDev !== undefined && pending.linkIno !== undefined) {
+      const link = snapshotLstat(pending.linkPath);
+      if (link.dev !== pending.linkDev || link.ino !== pending.linkIno) return false;
+      if (pending.linkTarget === undefined || readlinkSync(pending.linkPath) !== pending.linkTarget) return false;
+      if (
+        pending.linkPath !== pending.targetPath
+        && resolveWriteTarget(pending.linkPath) !== pending.targetPath
+      ) return false;
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return pending.absentPath !== undefined;
+    }
+    return null;
+  }
+}
+
+function publishRetirementCompletionMarker(): boolean {
+  try {
+    // This marker contains no continuation data. Publish it without invoking the
+    // synchronous Windows secret-ACL subprocess: a fresh home reaches this path
+    // during synchronous load, while every later snapshot containing real state
+    // still uses the hardened default/async atomic writer below.
+    atomicWriteFile(snapshotPath(), JSON.stringify({ version: 3, states: [] }), {
+      write: (path, content) => writeFileSync(path, content, { encoding: "utf8", flag: "wx", mode: 0o600 }),
+      harden: () => undefined,
+      rename: renameAtomicFile,
+      truncate: path => truncateSync(path, 0),
+      unlink: unlinkSync,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function retryLegacySnapshotRetirement(): void {
+  const pending = legacySnapshotAwaitingRetirement;
+  if (!pending || (pending.legacyStates && (pending.legacyStateIndex ?? 0) < pending.legacyStates.length)) return;
+  if (pending.spillScan && !pending.spillScanComplete) return;
+  if (pending.absentPath) {
+    try {
+      snapshotLstat(pending.absentPath);
+      closeResponseSpillRetirementScan(pending.spillScan!);
+      legacySnapshotAwaitingRetirement = null;
+      legacySnapshotInspectionPending = pending.absentPath;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        if (publishRetirementCompletionMarker()) legacySnapshotAwaitingRetirement = null;
+        else if (pending.spillScan) pending.spillScanComplete = false;
+      } else if (pending.spillScan) {
+        pending.spillScanComplete = false;
+      }
+    }
+    return;
+  }
+  if (
+    pending.targetPath === undefined
+    || pending.targetDev === undefined
+    || pending.targetIno === undefined
+    || !unlinkLegacyEntryIfUnchanged(pending.targetPath, pending.targetDev, pending.targetIno)
+  ) {
+    reclassifyLegacySnapshot(pending);
+    return;
+  }
+
+  // A snapshot symlink is a second directory entry. Remove it only after its
+  // captured target is gone, and only if it is still the link we inspected.
+  // Leaving a dangling link is harmless to confidentiality; deleting a link
+  // that was concurrently replaced would not be.
+  if (
+    pending.linkPath
+    && pending.linkDev !== undefined
+    && pending.linkIno !== undefined
+  ) {
+    if (!unlinkLegacyEntryIfUnchanged(
+      pending.linkPath,
+      pending.linkDev,
+      pending.linkIno,
+      pending.linkTarget,
+    )) {
+      reclassifyLegacySnapshot(pending);
+      return;
+    }
+  }
+  if (!publishRetirementCompletionMarker()) {
+    if (pending.spillScan) pending.spillScanComplete = false;
+    return;
+  }
+  legacySnapshotAwaitingRetirement = null;
+}
+
+function scheduleLegacyRetirementRetry(): void {
+  if (legacyRetirementRetryTimer || !legacyRetirementBlocked) return;
+  const delay = legacyRetirementRetryDelayMs;
+  legacyRetirementRetryDelayMs = Math.min(delay * 2, LEGACY_RETIREMENT_RETRY_MAX_MS);
+  legacyRetirementRetryTimer = setTimeout(() => {
+    legacyRetirementRetryTimer = null;
+    retryLegacyRetirement();
+  }, delay);
+  (legacyRetirementRetryTimer as { unref?: () => void }).unref?.();
+}
+
+function refreshLegacyRetirementBlock(): void {
+  legacyRetirementBlocked = legacySnapshotAwaitingRetirement !== null
+    || legacySnapshotInspectionPending !== null;
+  if (legacyRetirementBlocked) {
+    warnSensitiveStorageMemoryOnly("legacy_retirement");
+    scheduleLegacyRetirementRetry();
+  } else {
+    if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
+    legacyRetirementRetryTimer = null;
+    legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
+  }
+}
+
+function absentSnapshotRetirementMarker(path: string): LegacySnapshotRetirement {
+  return {
+    absentPath: path,
+    spillScan: createResponseSpillRetirementScan(),
+    spillScanComplete: false,
+  };
+}
+
+type SnapshotTargetInspection =
+  | { kind: "target"; targetPath: string; target: Stats }
+  | { kind: "literal" }
+  | { kind: "retry" };
+
+function inspectSnapshotTarget(path: string, literal: Stats): SnapshotTargetInspection {
+  let targetPath: string;
+  try {
+    targetPath = resolveWriteTarget(path);
+  } catch {
+    if (!literal.isSymbolicLink()) return { kind: "retry" };
+    try {
+      snapshotStat(path);
+      return { kind: "retry" };
+    } catch (error) {
+      return (error as NodeJS.ErrnoException)?.code === "ENOENT"
+        ? { kind: "literal" }
+        : { kind: "retry" };
+    }
+  }
+  try {
+    const target = snapshotStat(targetPath);
+    return target.isFile()
+      ? { kind: "target", targetPath, target }
+      : { kind: "literal" };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT"
+      ? { kind: "literal" }
+      : { kind: "retry" };
+  }
+}
+
+function retryLegacySnapshotInspection(): void {
+  const path = legacySnapshotInspectionPending;
+  if (!path) return;
+  let literal: Stats;
+  try {
+    literal = snapshotLstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      legacySnapshotInspectionPending = null;
+      legacySnapshotAwaitingRetirement = absentSnapshotRetirementMarker(path);
+    }
+    return;
+  }
+  const inspection = inspectSnapshotTarget(path, literal);
+  if (inspection.kind === "retry") return;
+  legacySnapshotInspectionPending = null;
+  if (inspection.kind === "target" && inspection.target.size <= SNAPSHOT_FILE_MAX_BYTES) {
+    try {
+      const raw = JSON.parse(readFileSync(inspection.targetPath, "utf8")) as { version?: unknown; states?: unknown };
+      if (raw?.version === 3 && Array.isArray(raw.states)) return;
+    } catch {
+      // Unreadable/malformed replacements stay on the retirement path.
+    }
+  }
+  legacySnapshotAwaitingRetirement = inspection.kind === "literal"
+    ? snapshotRetirementMarker(path, literal, path, literal)
+    : snapshotRetirementMarker(path, literal, inspection.targetPath, inspection.target);
+}
+
+function retryLegacyRetirement(): void {
+  try {
+    withConfigMutationLockSync(() => {
+      retryLegacySnapshotInspection();
+      const pending = legacySnapshotAwaitingRetirement;
+      if (pending) {
+        const current = retirementMarkerStillCurrent(pending);
+        if (current === null) return;
+        if (!current) {
+          // A replaced link no longer authorizes unlinking that directory
+          // entry, but its separately captured legacy target can still hold
+          // plaintext. Retire only the exact target inode we classified;
+          // failures remain blocked and retry instead of dropping ownership.
+          if (!retireCapturedTargetBeforeReclassify(pending)) return;
+          reclassifyLegacySnapshot(pending);
+          return;
+        }
+      }
+      retryLegacySpillRetirement();
+      retryLegacySnapshotRetirement();
+    });
+  } catch {
+    // Shared-home writer contention and lock failures remain fail-closed; the
+    // bounded retry timer will attempt the whole retirement transaction again.
+  }
+  refreshLegacyRetirementBlock();
+}
+
+function snapshotRetirementMarker(
+  path: string,
+  literal: Stats,
+  targetPath: string,
+  target: Stats,
+): LegacySnapshotRetirement {
+  let linkTarget: string | undefined;
+  if (literal.isSymbolicLink()) {
+    try {
+      linkTarget = readlinkSync(path);
+    } catch {
+      // Missing identity data must never authorize deletion. The retry path
+      // will reclassify the current directory entry before trying again.
+    }
+  }
+  return {
+    targetPath,
+    targetDev: target.dev,
+    targetIno: target.ino,
+    spillScan: createResponseSpillRetirementScan(),
+    spillScanComplete: false,
+    ...(literal.isSymbolicLink()
+      ? { linkPath: path, linkDev: literal.dev, linkIno: literal.ino, linkTarget }
+      : {}),
+  };
+}
+
+function beginUntrustedSnapshotRetirement(
+  path: string,
+  literal: Stats,
+  targetPath: string,
+  target: Stats,
+): void {
+  legacySnapshotAwaitingRetirement = snapshotRetirementMarker(path, literal, targetPath, target);
+  retryLegacyRetirement();
+}
+
+function beginSnapshotInspectionRetry(path: string): void {
+  legacySnapshotInspectionPending = path;
+  refreshLegacyRetirementBlock();
+}
+
 /**
  * Best-effort disk snapshot so previous_response_id chains survive a proxy restart (the
  * dominant expansion-miss cause: an in-memory-only store dies with the process, and the next
@@ -1512,36 +2212,79 @@ function ensureLoaded(): void {
       /* best-effort cleanup only; snapshot loading must remain independent */
     }
   }
+  let literal: Stats | null = null;
   try {
-    if (existsSync(path)) {
-      // Bound the read BEFORE parse: the 24 MiB write cap constrains snapshots
-      // this process wrote, not a pre-existing oversized file. statSync follows
-      // symlinks deliberately — readFileSync below follows them too, so the
-      // size gate must measure the same target the read would.
-      const stat = statSync(path);
-      if (!stat.isFile()) {
-        // Symlink to a FIFO/device (e.g. /dev/zero): reading would block or
-        // return unbounded input. Only regular files are ever parsed.
-      } else if (stat.size > SNAPSHOT_FILE_MAX_BYTES) {
-        admissionCounters.snapshotOversizedRefusals += 1;
-      } else {
-        const raw = JSON.parse(readFileSync(path, "utf-8")) as { version?: unknown; states?: unknown };
-        if ((raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
-          for (const entry of raw.states) {
-            if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
-            loadSnapshotEntry(entry[0], entry[1]);
+    literal = snapshotLstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      legacySnapshotAwaitingRetirement = absentSnapshotRetirementMarker(path);
+      retryLegacyRetirement();
+    } else {
+      beginSnapshotInspectionRetry(path);
+    }
+  }
+  if (literal) {
+    const inspection = inspectSnapshotTarget(path, literal);
+    if (inspection.kind === "retry") {
+      beginSnapshotInspectionRetry(path);
+    } else if (inspection.kind === "literal") {
+      // Dangling/non-regular targets must never be read or unlinked through.
+      // The captured literal inode is the durable marker and unlink target.
+      beginUntrustedSnapshotRetirement(path, literal, path, literal);
+    } else {
+      const { targetPath, target: stat } = inspection;
+      try {
+        // Bound the read BEFORE parse: the 24 MiB write cap constrains snapshots
+        // this process wrote, not a pre-existing oversized file. stat follows
+        // symlinks deliberately — readFileSync below follows them too, so the
+        // size gate must measure the same target the read would.
+        if (stat.size > SNAPSHOT_FILE_MAX_BYTES) {
+          admissionCounters.snapshotOversizedRefusals += 1;
+          // No snapshot this process writes can exceed this bound. Treat an older
+          // or externally planted oversized regular file as untrusted plaintext:
+          // retire the inode without reading it, and block encrypted persistence
+          // until that inode (and a symlink entry, if present) is really gone.
+          beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
+        } else {
+          let parsed: unknown;
+          let parsedOk = false;
+          try {
+            parsed = JSON.parse(readFileSync(targetPath, "utf-8"));
+            parsedOk = true;
+          } catch {
+            beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
+          }
+          const raw = parsedOk && parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? parsed as { version?: unknown; states?: unknown }
+            : undefined;
+          if (raw?.version === 3 && Array.isArray(raw.states)) {
+            for (const entry of raw.states) {
+              if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string") continue;
+              loadSnapshotEntry(entry[0], entry[1]);
+            }
+          } else if (raw && (raw.version === 1 || raw.version === 2) && Array.isArray(raw.states)) {
+            legacySnapshotAwaitingRetirement = snapshotRetirementMarker(path, literal, targetPath, stat);
+            legacySnapshotAwaitingRetirement.legacyStates = raw.states;
+            legacySnapshotAwaitingRetirement.legacyStateIndex = 0;
+            retryLegacyRetirement();
+          } else if (parsedOk) {
+            beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
           }
         }
+      } catch {
+        // Once lstat/stat proved an entry exists, later read/classification
+        // failures must remain fail-closed and retry in-process.
+        beginUntrustedSnapshotRetirement(path, literal, targetPath, stat);
       }
     }
-  } catch {
-    /* missing/corrupt snapshot: start empty */
   }
   const referenced = new Set<string>();
   for (const state of states.values()) {
     if (state.kind === "spill") referenced.add(state.spill.fileName);
   }
-  try { recoverOrphanedResponseSpills(referenced); } catch { /* best effort */ }
+  if (!legacyRetirementBlocked) {
+    try { recoverOrphanedResponseSpills(referenced); } catch { /* best effort */ }
+  }
   pruneResponses();
 }
 
@@ -1554,19 +2297,66 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
   persistGate = new Promise<void>(resolve => { release = resolve; });
   await previous;
   try {
+    if (legacyRetirementBlocked) {
+      // The legacy snapshot is the durable retry marker for every plaintext
+      // spill it references. Never replace that marker with v3 until all of
+      // those spills and the snapshot itself have been retired successfully.
+      retryLegacyRetirement();
+      if (legacyRetirementBlocked) return "failed";
+    }
     for (let attempt = 0; attempt < attemptLimit; attempt += 1) {
       const revision = stateRevision;
       const entries: Array<[string, unknown]> = [];
       let total = 0;
       // Newest-first so the most recent chains survive both legacy snapshot caps.
       for (const [id, state] of [...states].reverse()) {
+        if (state.kind !== "spill-failed" && state.durability === "memory-only") {
+          continue;
+        }
         let persistable: unknown;
-        if (state.kind === "resident") {
-          const { sizeBytes: _sizeBytes, kind: _kind, ...resident } = state;
-          persistable = resident;
-        } else {
-          const { sizeBytes: _sizeBytes, ...smallState } = state;
+        if (state.kind === "spill-failed") {
+          persistable = { kind: "spill-failed", createdAt: state.createdAt };
+        } else if (state.kind === "spill") {
+          const { sizeBytes: _sizeBytes, durability: _d, envelope: _e, ...smallState } = state;
           persistable = smallState;
+        } else if (state.kind === "encrypted-resident") {
+          persistable = {
+            kind: "encrypted-resident",
+            createdAt: state.createdAt,
+            ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
+            ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
+            envelope: state.envelope,
+          };
+        } else if (state.durability === "encrypted") {
+          let env = state.envelope;
+          if (!env) {
+            const key = getResponseContinuationKeySync();
+            try {
+              if (key) {
+                const homeId = responseContinuationHomeId();
+                const aad = buildResponseContinuationAAD(homeId, id, state.createdAt, state.clientThreadId, state.providerOutputStart);
+                env = encryptResponseContinuation(
+                  { items: state.items, ...(state.providers ? { providers: state.providers } : {}) },
+                  aad,
+                  key,
+                );
+                state.envelope = env;
+              }
+            } finally {
+              wipeResponseContinuationKeyCopy(key);
+            }
+          }
+          if (!env) continue;
+          persistable = {
+            kind: "encrypted-resident",
+            createdAt: state.createdAt,
+            ...(state.clientThreadId ? { clientThreadId: state.clientThreadId } : {}),
+            ...(state.providerOutputStart !== undefined ? { providerOutputStart: state.providerOutputStart } : {}),
+            envelope: env,
+          };
+        } else {
+          const { sizeBytes: _sizeBytes, kind: _kind, durability: _d, envelope: _e, ...resident } = state;
+          persistable = resident;
         }
         const persistEntry: [string, unknown] = [id, persistable];
         // UTF-8 bytes, not UTF-16 code units: multibyte items otherwise slip
@@ -1578,7 +2368,7 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
         entries.push(persistEntry);
       }
       entries.reverse();
-      const payload = JSON.stringify({ version: 2, states: entries });
+      const payload = JSON.stringify({ version: 3, states: entries });
       const payloadBytes = Buffer.byteLength(payload, "utf8");
       const payloadDigest = Bun.hash(payload).toString(36);
       // A mutation does not always change what gets persisted: entries past the
@@ -1624,7 +2414,7 @@ async function writeBoundedSnapshot(path: string, attemptLimit: number): Promise
 function drainPendingSpillUnlinks(): void {
   while (pendingSpillUnlinks.length > 0) {
     const ref = pendingSpillUnlinks.shift()!;
-    deleteResponseSpill(ref);
+    deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
   }
 }
 
@@ -1698,6 +2488,11 @@ export async function flushResponseState(): Promise<void> {
   }
   try {
     await flushResponseSnapshot();
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    releaseResponseContinuationKey();
   } catch (error) {
     failures.push(error);
   }
@@ -1829,8 +2624,13 @@ function enforceSpilledResponseBudget(): number {
   // live continuation to make room for a dead file would be the wrong order.
   while (spilledBytes > spillByteCap() && pendingSpillUnlinks.length > 0) {
     const ref = pendingSpillUnlinks.shift()!;
-    spilledBytes -= ref.payloadBytes;
-    deleteResponseSpill(ref);
+    const beforeDelete = spilledBytes;
+    deleteResponseSpill(ref, chargeUnreclaimableSpillPath);
+    spilledBytes = accountedResponseSpillBytes();
+    // A persistent unlink failure is now represented by the residual-path ledger.
+    // Stop this pass rather than evicting live continuations against a stale
+    // optimistic subtraction; the next pass can retry after the path disappears.
+    if (spilledBytes >= beforeDelete) break;
   }
   // Ordered by createdAt, not by map order. `states` is not an age index:
   // demotion and spill replacement delete and reinsert entries, and
@@ -1846,10 +2646,12 @@ function enforceSpilledResponseBudget(): number {
     // order must not depend on the host locale.
     .sort((a, b) => a[1].createdAt - b[1].createdAt
       || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  for (const [id, entry] of spilled) {
+  for (const [id] of spilled) {
     if (spilledBytes <= spillByteCap()) break;
-    spilledBytes -= entry.spill.payloadBytes;
+    const beforeDelete = spilledBytes;
     deleteEntry(id);
+    spilledBytes = accountedResponseSpillBytes();
+    if (spilledBytes >= beforeDelete) break;
   }
   return before - spilledBytes;
 }
@@ -1866,15 +2668,23 @@ function pruneResponses(at = now()): void {
   // Unconditional RAM cap. Resident payloads demote durably; stubs/tombstones are
   // deleted only when even their bounded metadata cannot fit the override.
   while (storedResponseBytes > byteCap() && states.size > 0) {
-    const oldestResident = [...states].find(([id, entry]) => entry.kind === "resident"
+    const oldestResident = [...states].find(([id, entry]) => (entry.kind === "resident" || entry.kind === "encrypted-resident")
       && pendingResponseSpillById.get(id)?.candidate !== entry);
-    const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => entry.kind === "resident"
+    const hasPendingResident = !oldestResident && [...states].some(([id, entry]) => (entry.kind === "resident" || entry.kind === "encrypted-resident")
       && pendingResponseSpillById.get(id)?.candidate === entry);
     if (hasPendingResident) break;
     const oldestId = oldestResident?.[0] ?? states.keys().next().value as string | undefined;
     if (!oldestId) break;
     const entry = states.get(oldestId)!;
-    if (entry.kind !== "resident") {
+    if (legacyRetirementBlocked) {
+      deleteEntry(oldestId);
+      continue;
+    }
+    if (entry.kind !== "resident" && entry.kind !== "encrypted-resident") {
+      deleteEntry(oldestId);
+      continue;
+    }
+    if (entry.durability === "memory-only") {
       deleteEntry(oldestId);
       continue;
     }
@@ -1883,15 +2693,27 @@ function pruneResponses(at = now()): void {
       continue;
     }
     try {
-      const ref = writeResponseSpillDurably(oldestId, {
-        createdAt: entry.createdAt,
-        ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-        items: entry.items,
-        ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-        ...(entry.providers ? { providers: entry.providers } : {}),
+      const payload = entry.kind === "encrypted-resident"
+        ? {
+            version: 2 as const,
+            createdAt: entry.createdAt,
+            ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
+            ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
+            envelope: entry.envelope,
+          }
+        : spillPayloadForResident(oldestId, entry);
+      let installed = false;
+      writeResponseSpillDurably(oldestId, payload, {
+        onCleanupResidual: chargeUnreclaimableSpillPath,
+        commitUnderLock: ref => {
+          if (legacyRetirementBlocked) return false;
+          installed = swapResidentForSpill(oldestId, entry, ref);
+          return installed;
+        },
       });
-      if (swapResidentForSpill(oldestId, entry, ref)) noteSpillWriteSuccess();
+      if (installed) noteSpillWriteSuccess();
     } catch (error) {
+      if (isRetryableSpillPublicationError(error)) break;
       noteSpillWriteFailure(error);
       replaceWithSpillFailure(oldestId, entry);
     }
@@ -1907,6 +2729,7 @@ export function sweepExpiredResponseStates(at = now()): number {
     deleteEntry(id);
     removed += 1;
   }
+  retryUnreclaimableSpillPaths();
   // The disk ceiling needs a caller that does not depend on traffic. The return
   // value stays the TTL count so this function's existing contract is unchanged.
   const reclaimed = enforceSpilledResponseBudget();
@@ -1993,28 +2816,50 @@ export function evictOldestResponseContinuationForBudget(): number {
   if (oldestResidentId === undefined) return 0;
   const id = oldestResidentId;
   const entry = states.get(id);
-  if (!entry || entry.kind !== "resident") return 0;
+  if (!entry || (entry.kind !== "resident" && entry.kind !== "encrypted-resident")) return 0;
+  if (legacyRetirementBlocked) {
+    const freedBytes = entry.sizeBytes;
+    deleteEntry(id);
+    return freedBytes;
+  }
+  if (entry.durability === "memory-only") {
+    const freedBytes = entry.sizeBytes;
+    deleteEntry(id);
+    return freedBytes;
+  }
   if (windowsSecretAclApplies()) {
     queuePendingResponseSpill(id, entry);
     schedulePersist();
     return 0;
   }
   try {
-    const ref = writeResponseSpillDurably(id, {
-      createdAt: entry.createdAt,
-      ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
-      items: entry.items,
-      ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
-      ...(entry.providers ? { providers: entry.providers } : {}),
+    const payload = entry.kind === "encrypted-resident"
+      ? {
+          version: 2 as const,
+          createdAt: entry.createdAt,
+          ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
+            ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
+          envelope: entry.envelope,
+        }
+      : spillPayloadForResident(id, entry);
+    let installed = false;
+    writeResponseSpillDurably(id, payload, {
+      onCleanupResidual: chargeUnreclaimableSpillPath,
+      commitUnderLock: ref => {
+        if (legacyRetirementBlocked) return false;
+        installed = swapResidentForSpill(id, entry, ref);
+        return installed;
+      },
     });
-    if (swapResidentForSpill(id, entry, ref)) noteSpillWriteSuccess();
+    if (installed) noteSpillWriteSuccess();
   } catch (error) {
+    if (isRetryableSpillPublicationError(error)) return 0;
     noteSpillWriteFailure(error);
     replaceWithSpillFailure(id, entry);
   }
   schedulePersist();
   const replacement = states.get(id);
-  return !replacement || replacement.kind === "resident"
+  return !replacement || replacement.kind === "resident" || replacement.kind === "encrypted-resident"
     ? 0
     : Math.max(0, entry.sizeBytes - replacement.sizeBytes);
 }
@@ -2027,8 +2872,53 @@ function materializeEntry(
   if (entry.kind === "spill-failed") {
     return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_failed" } };
   }
+  if (entry.kind === "encrypted-resident") {
+    const key = getResponseContinuationKeySync();
+    if (!key) {
+      spillCounters.readFailures += 1;
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    const homeId = responseContinuationHomeId();
+    const aad = buildResponseContinuationAAD(homeId, id, entry.createdAt, entry.clientThreadId, entry.providerOutputStart);
+    let decrypted: ReturnType<typeof decryptResponseContinuation>;
+    try {
+      decrypted = decryptResponseContinuation(entry.envelope, aad, key);
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
+    }
+    if (!decrypted || (entry.providerOutputStart !== undefined && entry.providerOutputStart > decrypted.items.length)) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    const state = measureResidentEntry(id, {
+      createdAt: entry.createdAt,
+      ...(entry.clientThreadId ? { clientThreadId: entry.clientThreadId } : {}),
+      items: decrypted.items,
+      ...(entry.providerOutputStart !== undefined ? { providerOutputStart: entry.providerOutputStart } : {}),
+      ...(decrypted.providers ? { providers: decrypted.providers as OcxProviderContinuationState } : {}),
+      durability: "encrypted",
+      envelope: entry.envelope,
+    });
+    if (!state) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    return { ok: true, state };
+  }
+  // Load the key before judging an encrypted spill. Credential-store outages
+  // are transient and must leave both its stub and file intact for a later turn.
+  const encryptedSpillKey = entry.spill.version === 2 ? getResponseContinuationKeySync() : null;
+  if (entry.spill.version === 2 && !encryptedSpillKey) {
+    spillCounters.readFailures += 1;
+    return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+  }
   const result = readResponseSpill(id, entry.spill);
   if (!result.ok) {
+    wipeResponseContinuationKeyCopy(encryptedSpillKey);
     spillCounters.readFailures += 1;
     const failure: PreviousResponseReplayFailure = {
       code: "previous_response_not_found",
@@ -2041,6 +2931,50 @@ function materializeEntry(
     replaceWithSpillFailure(id, entry);
     schedulePersist();
     return { ok: false, failure };
+  }
+  if (result.payload.version === 2) {
+    const key = encryptedSpillKey!;
+    const homeId = responseContinuationHomeId();
+    const aad = buildResponseContinuationAAD(
+      homeId,
+      id,
+      result.payload.createdAt,
+      result.payload.clientThreadId,
+      result.payload.providerOutputStart,
+    );
+    let decrypted: ReturnType<typeof decryptResponseContinuation>;
+    try {
+      decrypted = decryptResponseContinuation(result.payload.envelope, aad, key);
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
+    }
+    if (!decrypted || (
+      result.payload.providerOutputStart !== undefined
+      && result.payload.providerOutputStart > decrypted.items.length
+    )) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    const state = measureResidentEntry(id, {
+      createdAt: result.payload.createdAt,
+      ...(result.payload.clientThreadId ? { clientThreadId: result.payload.clientThreadId } : {}),
+      items: decrypted.items,
+      ...(result.payload.providerOutputStart !== undefined
+        ? { providerOutputStart: result.payload.providerOutputStart }
+        : {}),
+      ...(decrypted.providers ? { providers: decrypted.providers as OcxProviderContinuationState } : {}),
+      durability: "encrypted",
+      envelope: result.payload.envelope,
+    });
+    if (!state) {
+      spillCounters.readFailures += 1;
+      replaceWithSpillFailure(id, entry);
+      schedulePersist();
+      return { ok: false, failure: { code: "previous_response_not_found", reason: "spill_corrupt" } };
+    }
+    return { ok: true, state };
   }
   const state = measureResidentEntry(id, {
     createdAt: result.payload.createdAt,
@@ -2123,6 +3057,11 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
       // not re-acknowledge historical compaction markers (parser.ts) and stays visible to
       // guidance de-duplication (collaboration.ts).
       replayedInputPrefixLengths.set(unchanged, carried);
+      if (materialized.state.durability === "memory-only") {
+        responseStateDurabilityByBody.set(unchanged, "memory-only");
+      } else if (materialized.state.durability === "encrypted") {
+        responseStateDurabilityByBody.set(unchanged, "encrypted");
+      }
       return unchanged;
     }
   }
@@ -2131,6 +3070,11 @@ export function expandPreviousResponseInput(body: unknown, clientThreadId?: stri
     input: [...materialized.state.items, ...inputItems(request.input)],
   };
   replayedInputPrefixLengths.set(expanded, materialized.state.items.length);
+  if (materialized.state.durability === "memory-only") {
+    responseStateDurabilityByBody.set(expanded, "memory-only");
+  } else if (materialized.state.durability === "encrypted") {
+    responseStateDurabilityByBody.set(expanded, "encrypted");
+  }
   return expanded;
 }
 
@@ -2150,10 +3094,19 @@ export function copyPreviousResponseReplayProvenance(source: unknown, target: un
   if (!source || typeof source !== "object" || Array.isArray(source)) return;
   if (!target || typeof target !== "object" || Array.isArray(target)) return;
   const prefixLength = replayedInputPrefixLengths.get(source);
-  if (!prefixLength) return;
-  const input = (target as { input?: unknown }).input;
-  if (!Array.isArray(input) || prefixLength > input.length) return;
-  replayedInputPrefixLengths.set(target, prefixLength);
+  if (prefixLength) {
+    const input = (target as { input?: unknown }).input;
+    if (Array.isArray(input) && prefixLength <= input.length) {
+      replayedInputPrefixLengths.set(target, prefixLength);
+    }
+  }
+  const durability = responseStateDurabilityByBody.get(source as object);
+  if (durability) {
+    responseStateDurabilityByBody.set(target as object, durability);
+  }
+  if (nonPersistableBodies.has(source as object)) {
+    nonPersistableBodies.add(target as object);
+  }
 }
 
 /** True when a stale or foreign previous_response_id was removed from this exact request body. */
@@ -2170,7 +3123,12 @@ export function previousResponseProviderState(responseId: string | undefined): O
   ensureLoaded();
   pruneResponses();
   const state = states.get(responseId);
-  const providers = state?.kind === "spill-failed" ? undefined : state?.providers;
+  if (!state || state.kind === "spill-failed") return undefined;
+  if (state.kind === "encrypted-resident" || (state.kind === "spill" && state.spill.version === 2)) {
+    const materialized = materializeEntry(responseId, state);
+    return materialized.ok ? structuredClone(materialized.state.providers) : undefined;
+  }
+  const providers = state.providers;
   return providers ? structuredClone(providers) : undefined;
 }
 
@@ -2215,7 +3173,7 @@ export function responseStateMetrics(): ResponseStateMetrics {
     const bytes = state.sizeBytes;
     if (bytes > largestBytes) largestBytes = bytes;
     if (state.createdAt < oldestCreatedAt) oldestCreatedAt = state.createdAt;
-    if (state.kind === "resident") {
+    if (state.kind === "resident" || state.kind === "encrypted-resident") {
       residentCount += 1;
     } else if (state.kind === "spill") {
       spillStubCount += 1;
@@ -2276,7 +3234,7 @@ export function rememberResponseState(
   requestBody: unknown,
   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
   providerState?: OcxProviderContinuationState | string,
-  opts?: { force?: boolean; clientThreadId?: string },
+  opts?: RememberResponseStateOptions,
 ): void {
   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
   const request = requestBody as Record<string, unknown>;
@@ -2294,6 +3252,21 @@ export function rememberResponseState(
       || (details as { reason?: unknown }).reason !== "max_output_tokens") return;
   } else if (response.status !== undefined && response.status !== "completed") return;
   ensureLoaded();
+
+  let durability: ResponseStateDurability = opts?.durability
+    ?? responseStateDurabilityByBody.get(request)
+    ?? "standard";
+
+  if (durability === "standard") {
+    if (
+      hasPlaintextDelegationHistory(request.input)
+      || hasPlaintextDelegationHistory(request.tools)
+      || hasPlaintextDelegationHistory(response.output)
+    ) {
+      durability = "encrypted";
+    }
+  }
+
   const normalizedProviderState: OcxProviderContinuationState = typeof providerState === "string"
     ? { cursor: { conversationId: providerState } }
     : structuredClone(providerState ?? {});
@@ -2306,23 +3279,60 @@ export function rememberResponseState(
   // Compute the normalized array once and reuse it for both fields, so the recorded
   // boundary can never disagree with the items it indexes.
   const requestItems = inputItems(request.input);
+  const createdAt = now();
+  const providerOutputStart = requestItems.length;
+
+  let envelope: ResponseContinuationEncryptedEnvelope | undefined;
+  if (durability === "encrypted") {
+    const key = legacyRetirementBlocked ? null : getResponseContinuationKeySync();
+    try {
+      if (!key) {
+        durability = "memory-only";
+        warnSensitiveStorageMemoryOnly(legacyRetirementBlocked ? "legacy_retirement" : "credential_store");
+      } else {
+        const homeId = responseContinuationHomeId();
+        const aad = buildResponseContinuationAAD(
+          homeId,
+          response.id,
+          createdAt,
+          clientThreadId,
+          providerOutputStart,
+        );
+        envelope = encryptResponseContinuation(
+          {
+            items: [...requestItems, ...response.output],
+            ...(Object.keys(normalizedProviderState).length > 0 ? { providers: normalizedProviderState } : {}),
+          },
+          aad,
+          key,
+        );
+      }
+    } finally {
+      wipeResponseContinuationKeyCopy(key);
+    }
+  }
+
   setResidentEntry(response.id, {
-    createdAt: now(),
+    createdAt,
     ...(clientThreadId ? { clientThreadId } : {}),
     items: [...requestItems, ...response.output],
     // Where response.output begins. A replay skip requires a matched item at or past this
     // index that also carries a provider-issued id — position alone proves only that an item
     // sits on the provider side, not that the provider authored it.
-    providerOutputStart: requestItems.length,
+    providerOutputStart,
     // Always preserve the Cursor conversation id so the next tool-result turn can continue the SAME
     // Cursor conversation (multi-turn continuation). Separately track whether Cursor's own
     // checkpoint/cache is safe to reuse: a turn that ended with a pending client tool call produced an
     // incomplete agent turn on the Cursor side (we suspended without a real mcpResult), so its
     // checkpoint must not be reused — but the conversation id string itself is still valid.
     ...(Object.keys(normalizedProviderState).length > 0 ? { providers: normalizedProviderState } : {}),
+    ...(durability !== "standard" ? { durability } : {}),
+    ...(envelope ? { envelope } : {}),
   });
   enforceAppOwnedMemoryBudget();
-  schedulePersist();
+  if (durability !== "memory-only") {
+    schedulePersist();
+  }
 }
 
 /** Test-only persistence churn hook; invoked after each atomic snapshot rewrite. */
@@ -2371,13 +3381,26 @@ export function clearResponseStateMemoryForTests(): void {
   lastSnapshotDigest = null;
   lastSnapshotTarget = null;
   loaded = false;
+  legacyRetirementBlocked = false;
+  legacySnapshotInspectionPending = null;
+  if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
+  legacyRetirementRetryTimer = null;
+  legacyRetirementRetryDelayMs = LEGACY_RETIREMENT_RETRY_INITIAL_MS;
+  if (legacySnapshotAwaitingRetirement?.spillScan) {
+    closeResponseSpillRetirementScan(legacySnapshotAwaitingRetirement.spillScan);
+  }
+  legacySnapshotAwaitingRetirement = null;
+  sensitiveStorageWarnings.clear();
+  releaseResponseContinuationKey();
 }
 
 export function clearResponseStateForTests(): void {
   for (const entry of states.values()) deleteOwnedSpills(entry);
   clearResponseStateMemoryForTests();
+  responseSnapshotInspectionIoForTest = null;
   reservedResponseSpillBytes = 0;
   unreclaimableSpillPaths.clear();
+  resetResponseContinuationKeyForTests();
   try {
     unlinkSync(snapshotPath());
   } catch {
@@ -2385,3 +3408,34 @@ export function clearResponseStateForTests(): void {
   }
   try { rmSync(responseSpillDirectory(), { recursive: true, force: true }); } catch { /* no spill directory */ }
 }
+
+/** Test-only: run a scheduled legacy retirement retry without waiting for its backoff. */
+export function runPendingLegacyResponseStateRetirementForTests(): void {
+  if (legacyRetirementRetryTimer) clearTimeout(legacyRetirementRetryTimer);
+  legacyRetirementRetryTimer = null;
+  if (legacyRetirementBlocked) retryLegacyRetirement();
+}
+
+/** Test-only: inject snapshot pre-classification lstat/stat failures. */
+export function setResponseSnapshotInspectionIoForTests(
+  io: Partial<ResponseSnapshotInspectionIo> | null,
+): void {
+  responseSnapshotInspectionIoForTest = io;
+}
+
+export {
+  buildResponseContinuationAAD,
+  canonicalConfigDir,
+  decryptResponseContinuation,
+  encryptResponseContinuation,
+  getResponseContinuationKey,
+  getResponseContinuationKeySync,
+  hasPlaintextDelegationHistory,
+  releaseResponseContinuationKey,
+  resetResponseContinuationKeyForTests,
+  responseContinuationHomeId,
+  responseContinuationKeyringAccount,
+  setResponseContinuationKeyringFactoryForTests,
+  type KeyringTestFactorySeam,
+  type ResponseContinuationEncryptedEnvelope,
+} from "./continuation-crypto";

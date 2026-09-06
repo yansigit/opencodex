@@ -232,7 +232,7 @@ describe("responses-state snapshot write amplification (#2460)", () => {
       version: number;
       states: [string, Record<string, unknown>][];
     };
-    expect(parsed.version).toBe(2);
+    expect(parsed.version).toBe(3);
     expect(parsed.states.map(([id]) => id)).toContain("resp_amp_roundtrip");
   });
 });
