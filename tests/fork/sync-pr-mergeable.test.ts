@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { repoPath } from "../helpers/repo-root";
 
-const workflowPath = resolve(import.meta.dir, "../../.github/workflows/fork-pr-mergeable.yml");
+const workflowPath = repoPath(".github/workflows/fork-pr-mergeable.yml");
 const workflow = () => readFileSync(workflowPath, "utf8");
 
 describe("fork PR mergeable workflow", () => {

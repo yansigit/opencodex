@@ -1,0 +1,103 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import {
+  resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+} from "../../src/lib/windows-secret-acl";
+import {
+  getAccountSet,
+  getCredential,
+  saveCredential,
+} from "../../src/oauth/store";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
+
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+let testDir: string | undefined;
+let previousOpencodexHome: string | undefined;
+
+const COLLIDING_ACCOUNT_A = "account-collision-16138";
+const COLLIDING_ACCOUNT_B = "account-collision-28806";
+
+describe("OAuth account id collision hardening", () => {
+  beforeEach(() => {
+    previousOpencodexHome = process.env.OPENCODEX_HOME;
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    testDir = mkdtempSync(join(tmpdir(), "ocx-oauth-account-id-collision-"));
+    process.env.OPENCODEX_HOME = testDir;
+    resetHardenedStateForTests();
+  });
+
+  afterEach(async () => {
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    resetHardenedStateForTests();
+    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousOpencodexHome;
+    if (testDir) removeTreeWithRetry(testDir);
+    testDir = undefined;
+  });
+
+  test("distinct identities that collide on the historical 32-bit prefix get distinct slots", async () => {
+    // sha256(account-collision-16138) and sha256(account-collision-28806) both
+    // start with da1e26d2. The historical 8-hex id therefore aliased these
+    // two accounts and made active-account lookup return the wrong credential.
+    await saveCredential("anthropic", {
+      access: "access-a",
+      refresh: "refresh-a",
+      expires: Date.now() + 3600_000,
+      accountId: COLLIDING_ACCOUNT_A,
+    });
+    await saveCredential("anthropic", {
+      access: "access-b",
+      refresh: "refresh-b",
+      expires: Date.now() + 3600_000,
+      accountId: COLLIDING_ACCOUNT_B,
+    });
+
+    const set = getAccountSet("anthropic");
+    expect(set).not.toBeNull();
+    expect(set!.accounts).toHaveLength(2);
+    expect(new Set(set!.accounts.map(account => account.id)).size).toBe(2);
+    expect(set!.accounts.every(account => account.id.length === 32)).toBe(true);
+    expect(getCredential("anthropic")?.accountId).toBe(COLLIDING_ACCOUNT_B);
+    expect(getCredential("anthropic")?.access).toBe("access-b");
+  });
+
+  test("existing persisted 32-bit account ids remain valid and are not rewritten", async () => {
+    const authPath = join(testDir!, "auth.json");
+    writeFileSync(authPath, JSON.stringify({
+      anthropic: {
+        activeAccountId: "deadbeef",
+        accounts: [{
+          id: "deadbeef",
+          credential: {
+            access: "old-access",
+            refresh: "old-refresh",
+            expires: Date.now() + 3600_000,
+            accountId: "existing-account",
+          },
+        }],
+      },
+    }));
+
+    expect(getAccountSet("anthropic")?.activeAccountId).toBe("deadbeef");
+
+    await saveCredential("anthropic", {
+      access: "rotated-access",
+      refresh: "rotated-refresh",
+      expires: Date.now() + 7200_000,
+      accountId: "existing-account",
+    });
+
+    const set = getAccountSet("anthropic");
+    expect(set?.activeAccountId).toBe("deadbeef");
+    expect(set?.accounts[0]?.id).toBe("deadbeef");
+    expect(getCredential("anthropic")?.access).toBe("rotated-access");
+  });
+});

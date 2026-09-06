@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { repoPath } from "../helpers/repo-root";
 
-const text = readFileSync(resolve(import.meta.dir, "../../.github/workflows/release.yml"), "utf8");
+const text = readFileSync(repoPath(".github/workflows/release.yml"), "utf8");
 
 describe("release candidate publish bridge", () => {
   test("requires and validates immutable candidate provenance", () => {

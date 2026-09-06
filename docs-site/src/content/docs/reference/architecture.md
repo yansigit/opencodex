@@ -144,13 +144,18 @@ falls back to HTTP for that session. When `"websockets": true` is set, the same 
 upgrade and uses the WebSocket bridge.
 
 Independently of that client-facing setting, canonical ChatGPT forward requests with root-level
-`stream: true` may use Codex's upstream WebSocket transport on stable Bun 1.4.0 or newer when
-`wsUpstream: true` is set, or when `OCX_CODEX_WS_UPSTREAM=true`/`1` is set with no provider
-override. Omitted, invalid, and explicit false values use HTTP/SSE, as do bundled Bun 1.3.14,
-prereleases, and unverifiable runtime identities. Successful upstream WS responses keep the
-downstream SSE contract and bypass `tee()` through a bounded eager single-reader relay (4 MiB per
-raw/enveloped frame and an 8 MiB producer queue). Queue overflow closes the upstream and emits a
-terminal downstream `response.failed` event followed by `[DONE]`.
+`stream: true` may use Codex's upstream WebSocket transport on stable Bun 1.4.0 or newer.
+The canonical ChatGPT path preserves HTTP Responses Lite intent in WS frame metadata
+and derives its routing hint from the actual outgoing model and service tier.
+Initial upstream quota/model metadata becomes bounded HTTP response headers;
+later quota updates are attributed to the serving account, not retroactively
+added to headers already sent. A failure after a WS request was sent does not
+trigger an automatic HTTP resend. These mappings do not enable the client-facing
+WebSocket setting or change other providers' transport selection.
+Bundled Bun 1.3.14, prereleases, and unverifiable runtime identities use HTTP/SSE. Successful
+upstream WS responses keep the downstream SSE contract and bypass `tee()` through a bounded eager
+single-reader relay (4 MiB per raw/enveloped frame and an 8 MiB producer queue). Queue overflow
+closes the upstream and emits a terminal downstream `response.failed` event followed by `[DONE]`.
 
 When a provider rejects a streaming request with HTTP 413 before SSE begins, OpenCodex emits one
 terminal `response.failed` event with `context_length_exceeded` instead of relaying the retryable

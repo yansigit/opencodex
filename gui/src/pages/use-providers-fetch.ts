@@ -1,46 +1,54 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
+import type { TFn } from "../i18n/shared";
 import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
 import { writeSessionListCache } from "../session-list-cache";
 import type { OAuthStatus, ProvidersConfig } from "./providers-shared";
+export type ProvidersConfigRefreshResult = "applied" | "failed" | "superseded";
 
 export function useProvidersFetch({
   apiBase,
+  t,
   setConfig,
   setOauthProviders,
   setOauthStatus,
   invalidateProviderQuotas,
+  notify,
   setConfigLoadFailed,
   configCacheKey,
 }: {
   apiBase: string;
+  t: TFn;
   setConfig: React.Dispatch<React.SetStateAction<ProvidersConfig | null>>;
   setOauthProviders: React.Dispatch<React.SetStateAction<string[]>>;
   setOauthStatus: React.Dispatch<React.SetStateAction<Record<string, OAuthStatus>>>;
   /** Bump the shell's quota revision; `force` adds `?refresh=1` to its next read. */
   invalidateProviderQuotas: (force?: boolean) => void;
-  /** Mirrors config fetch health so the page can offer an inline retry without replacing cached data. */
+  notify: (message: string, ok: boolean) => void;
+  /** Mirrors config fetch health so cached data can retain the page's inline retry affordance. */
   setConfigLoadFailed?: (failed: boolean) => void;
   /** Session seed key for instant Providers shell paint (no secrets — hasApiKey flags only). */
   configCacheKey?: string;
 }) {
-  const configRequestEpochRef = useRef(0);
-  const fetchConfig = useCallback(async () => {
-    const requestEpoch = ++configRequestEpochRef.current;
+  const configRequest = useRef(0);
+  useEffect(() => () => { configRequest.current += 1; }, [apiBase]);
+  const fetchConfig = useCallback(async (): Promise<ProvidersConfigRefreshResult> => {
+    const request = ++configRequest.current;
     try {
       const res = await fetch(`${apiBase}/api/config`);
       const data = await readJsonOrThrow<ProvidersConfig>(res);
-      if (!data || typeof data !== "object" || !data.providers || typeof data.providers !== "object") {
-        throw new Error("empty config response");
-      }
-      if (requestEpoch !== configRequestEpochRef.current) return;
+      if (request !== configRequest.current) return "superseded";
+      if (!data) throw new Error("config response missing");
       setConfig(data ?? null);
       if (configCacheKey && data) writeSessionListCache(configCacheKey, data);
       setConfigLoadFailed?.(false);
+      return "applied";
     } catch {
-      if (requestEpoch !== configRequestEpochRef.current) return;
-      setConfigLoadFailed?.(true);
+      if (request !== configRequest.current) return "superseded";
+      if (setConfigLoadFailed) setConfigLoadFailed(true);
+      else notify(t("prov.loadConfigFail"), false);
+      return "failed";
     }
-  }, [apiBase, configCacheKey, setConfig, setConfigLoadFailed]);
+  }, [apiBase, configCacheKey, notify, setConfig, setConfigLoadFailed, t]);
 
   const fetchOauth = useCallback(async () => {
     try {

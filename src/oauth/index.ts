@@ -1,4 +1,5 @@
 import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./types";
+import { initializeProviderModelSelection } from "../providers/initial-model-selection";
 import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
 import {
@@ -1277,6 +1278,7 @@ interface OAuthReconcileProjection {
   touchedAntigravityVersion: boolean;
 }
 
+/** Pure projection over a clone: apply every reconciliation rule and report what it touched. */
 function projectOAuthProviderReconciliation(config: OcxConfig): OAuthReconcileProjection {
   const projected = structuredClone(config);
   const touchedProviders = new Set<string>();
@@ -1331,6 +1333,12 @@ function projectOAuthProviderReconciliation(config: OcxConfig): OAuthReconcilePr
   };
 }
 
+/**
+ * Copy only the keys the projection actually touched back onto the caller's live object.
+ *
+ * Deliberately key-by-key rather than a wholesale clear-and-reassign: a live reference held
+ * elsewhere to an untouched provider sub-object must survive startup reconciliation.
+ */
 function adoptOAuthReconciliation(config: OcxConfig, projection: OAuthReconcileProjection): void {
   for (const name of projection.touchedProviders) {
     const provider = projection.config.providers[name];
@@ -1342,6 +1350,13 @@ function adoptOAuthReconciliation(config: OcxConfig, projection: OAuthReconcileP
   }
 }
 
+/**
+ * Union the keys the on-disk rebase touched with the keys the live projection touched.
+ *
+ * The rebase runs against the persisted snapshot, which may already carry a reconciliation
+ * another process committed. Adopting only its touched set would leave the live object stale
+ * for a key it decided was already correct on disk.
+ */
 function withOAuthReconciliationTouchedKeys(
   projection: OAuthReconcileProjection,
   required: OAuthReconcileProjection,
@@ -1353,6 +1368,15 @@ function withOAuthReconciliationTouchedKeys(
   };
 }
 
+/**
+ * Refresh OAuth provider presets against the registry, rebasing the write on the persisted config.
+ *
+ * This runs on the boot path (`startServer`), so persistence failure must never be fatal: a
+ * missing, malformed or contended config degrades to a warning plus an in-memory adopt, exactly
+ * as every other `mutatePersistedConfig` consumer does (`src/storage/policy.ts`,
+ * `src/codex/plan-from-token.ts`, `src/server/management/agent-settings-routes.ts`). Throwing
+ * here would take the whole proxy down over a config file the operator can still repair.
+ */
 export function reconcileOAuthProviders(config: OcxConfig, persist = true): boolean {
   const projection = projectOAuthProviderReconciliation(config);
   if (!projection.changed) return false;
@@ -1360,16 +1384,20 @@ export function reconcileOAuthProviders(config: OcxConfig, persist = true): bool
     adoptOAuthReconciliation(config, projection);
     return true;
   }
-  if (persist) {
-    const outcome = mutatePersistedConfig(fresh => {
-      const next = projectOAuthProviderReconciliation(fresh);
-      if (next.changed) adoptOAuthReconciliation(fresh, next);
-      return { changed: next.changed, value: next };
-    });
-    if (outcome.status !== "unavailable") {
-      adoptOAuthReconciliation(config, withOAuthReconciliationTouchedKeys(outcome.value, projection));
-    }
+  const outcome = mutatePersistedConfig(fresh => {
+    const next = projectOAuthProviderReconciliation(fresh);
+    if (next.changed) adoptOAuthReconciliation(fresh, next);
+    return { changed: next.changed, value: next };
+  });
+  if (outcome.status === "unavailable") {
+    console.warn(
+      `[opencodex] OAuth provider reconciliation could not be persisted (${outcome.reason}); `
+      + "applying it in memory for this run only.",
+    );
+    adoptOAuthReconciliation(config, projection);
+    return true;
   }
+  adoptOAuthReconciliation(config, withOAuthReconciliationTouchedKeys(outcome.value, projection));
   return true;
 }
 
@@ -1458,6 +1486,7 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
       if (previousModeAllowsKey) next.authMode = "key";
     }
   }
+  initializeProviderModelSelection(provider, next, existing, config);
   config.providers[provider] = next;
 }
 

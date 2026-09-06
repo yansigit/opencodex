@@ -16,7 +16,7 @@ description: デフォルトのプロバイダーの選択、モデルの解決�
 
 opencodex は、要求されたモデルを次の順序で解決します。
 
-1. 設定済みの `policy/<id>` または routing-profile alias。policy evaluator を実行して選択した候補へ routing します。未解決の `policy/<id>` は後続のルールへフォールスルーします。
+1. 設定済みの `policy/<id>` または routing-profile alias。policy evaluator を実行して選択した候補へ routing します。未解決の `policy/<id>` は後続のルールへフォールスルーせず、ローカルで失敗します。
 2. 設定済みの `<account-selector>/<native-openai-model>` namespace。対応する保存済み Codex アカウントだけに routing され、無効または利用不能な exact target は fail closed します。
 3. 正規の `combo/<id>` または構成されたコンボ エイリアス。正規 ID は、エイリアスが一致する前に優先されます。
 4. 構成されたプロバイダーを示すプレフィックスを持つ明示的な `<provider>/<model>` 名前空間。

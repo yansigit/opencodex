@@ -65,3 +65,25 @@ export function proxyForUrl(url: string | URL, env: ProxyEnvMap = process.env): 
   if (parsed.protocol === "http:") return proxyValue("HTTP_PROXY", env) ?? proxyValue("ALL_PROXY", env);
   return undefined;
 }
+
+/**
+ * The proxy URL that Bun's fetch will actually use for `url`, or null when none applies.
+ *
+ * Bun selects by scheme: `HTTPS_PROXY` for `https:` targets, `HTTP_PROXY` for `http:`.
+ * `ALL_PROXY` is deliberately not consulted here — fetch does not honour it, so a caller
+ * that needs "this request will ride the proxy" as a precondition must not count it.
+ * Presence of *some* proxy variable (`outboundProxyConfigured`) is not that guarantee.
+ */
+export function effectiveProxyFor(
+  url: URL,
+  env: ProxyEnvMap = process.env,
+): string | null {
+  const key: ProxyEnvKey | null = url.protocol === "https:"
+    ? "HTTPS_PROXY"
+    : url.protocol === "http:"
+      ? "HTTP_PROXY"
+      : null;
+  if (!key) return null;
+  const value = env[key]?.trim() || env[key.toLowerCase()]?.trim();
+  return value ? value : null;
+}
