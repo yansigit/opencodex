@@ -460,7 +460,11 @@ export async function resolveNativeDefaultState(
   try {
     catalogState = await (deps.collectCatalogState ?? (async () => {
       const { collectCodexAppServerCatalogStateForRequest } = await import("./app-server-processes");
-      return collectCodexAppServerCatalogStateForRequest(deps.processIo);
+      return collectCodexAppServerCatalogStateForRequest({
+        ...deps.processIo,
+        freshnessPath: configPath,
+        freshnessTarget: "config",
+      });
     }))();
   } catch {
     return "pending";
