@@ -3,7 +3,7 @@ import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OAUTH_PROVIDERS, upsertOAuthProvider } from "../../src/oauth";
-import { loadConfig, saveConfig } from "../../src/config";
+import { loadConfig, mutatePersistedConfig, saveConfig } from "../../src/config";
 import { migrateXaiResponsesDefault } from "../../src/providers/xai-responses-opt-in";
 import { resolveWireProtocolOverride } from "../../src/server/adapter-resolve";
 import {
@@ -370,7 +370,10 @@ describe("upsertOAuthProvider credential preservation", () => {
       expect(provider.authMode).toBe("oauth");
       expect(provider.apiKey).toBeUndefined();
       expect(provider.apiKeyPool).toBeUndefined();
-      saveConfig(config);
+      expect(mutatePersistedConfig(fresh => {
+        upsertOAuthProvider(fresh, "xai");
+        return { changed: true, value: undefined };
+      }).status).toBe("committed");
       expect(loadConfig().providers.xai!.authMode).toBe("oauth");
     } finally {
       if (previousHome === undefined) delete process.env.OPENCODEX_HOME;

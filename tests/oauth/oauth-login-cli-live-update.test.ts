@@ -3,7 +3,7 @@ import { managementFetch as fetch } from "../helpers/management-auth";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig, writePid, writeRuntimePort } from "../../src/config";
+import { loadConfig, mutatePersistedConfig, saveConfig, writePid, writeRuntimePort } from "../../src/config";
 import { OAUTH_PROVIDERS, runLogin, upsertOAuthProvider } from "../../src/oauth";
 import { getAccountSet, saveCredential } from "../../src/oauth/store";
 import { clearGenericFailoverHealth, preferredInitialAccount } from "../../src/oauth/generic-account-failover";
@@ -77,7 +77,14 @@ describe("CLI OAuth live-update credential preservation", () => {
         },
       },
     };
-    saveConfig(cfg);
+    expect(mutatePersistedConfig(fresh => {
+      fresh.port = cfg.port;
+      fresh.hostname = cfg.hostname;
+      fresh.defaultProvider = cfg.defaultProvider;
+      fresh.providers = structuredClone(cfg.providers);
+      fresh.oauthAccountFailover = cfg.oauthAccountFailover;
+      return { changed: true, value: undefined };
+    }).status).toBe("committed");
     await saveCredential(providerName, {
       access: "access-a", refresh: "refresh-a", expires: Date.now() + 3_600_000,
       accountId: "account-a", projectId: "project-a",
