@@ -437,7 +437,7 @@ jobs:
           set -euo pipefail
           package_file=""
           if [ -n "$DISPATCH_CANDIDATE_RUN_ID" ]; then
-            package_file="$CANDIDATE_PACKAGE_PATH"
+            package_file="./${CANDIDATE_PACKAGE_PATH#./}"
             test -f "$package_file" || { echo "::error::verified candidate package path is unavailable"; exit 1; }
           fi
           if [ -z "$DISPATCH_CANDIDATE_RUN_ID" ] && [ "$DRY_RUN" = "true" ]; then
