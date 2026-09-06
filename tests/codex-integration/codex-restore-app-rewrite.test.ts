@@ -136,10 +136,24 @@ function runScript(codexHome: string, script: string): { stdout: string; stderr:
   if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 60_000) {
     throw new Error("invalid restore child delay fault");
   }
-  const evaluatedScript = delayMs > 0 ? `await Bun.sleep(${delayMs});\n${script}` : script;
+  const delay = delayMs > 0 ? `await Bun.sleep(${delayMs});\n` : "";
+  const evaluatedScript = [
+    'const { flushConfigDirHardeningForTests } = require("./src/config/paths");',
+    'const { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } = require("./src/lib/windows-secret-acl");',
+    'const icaclsOk = { success: true, exitCode: 0, timedOut: false, stdout: "processed file: 1" };',
+    'setIcaclsRunnerForTests(() => icaclsOk);',
+    'setAsyncIcaclsRunnerForTests(async () => icaclsOk);',
+    "try {",
+    delay + script,
+    "} finally {",
+    "  await flushConfigDirHardeningForTests();",
+    "  setAsyncIcaclsRunnerForTests(null);",
+    "  setIcaclsRunnerForTests(null);",
+    "}",
+  ].join("\n");
   const result = spawnSync(process.execPath, ["--eval", evaluatedScript], {
     cwd: repoRoot,
-    env: { ...process.env, CODEX_HOME: codexHome },
+    env: { ...process.env, CODEX_HOME: codexHome, OPENCODEX_HOME: join(codexHome, ".opencodex-test") },
     encoding: "utf8",
     timeout: SPAWN_BUDGET_MS,
     killSignal: "SIGKILL",

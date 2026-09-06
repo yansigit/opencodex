@@ -4,12 +4,15 @@
  * instead of the /v1/* JSON-404 guard.
  */
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { existsSync, mkdirSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { clearAccountNeedsReauth, clearAccountQuota } from "../../src/codex/auth-api";
 import { clearCodexUpstreamHealth, clearThreadAccountMap, getCodexUpstreamHealth } from "../../src/codex/routing";
 import { saveConfig } from "../../src/config";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { selectImagesProvider } from "../../src/providers/openai-sidecar";
 import { startServer } from "../../src/server";
 import { handleImages, IMAGES_RESPONSE_MAX_BYTES, readImageResponseBytes, setXaiResultPinnedDownloadForTests } from "../../src/server/images";
@@ -25,14 +28,16 @@ const previousApiToken = process.env.OPENCODEX_API_AUTH_TOKEN;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 const previousImagesApiKey = process.env.OPENCODEX_TEST_IMAGES_API_KEY;
 const originalFetch = globalThis.fetch;
-const TEST_DIR = join(import.meta.dir, ".tmp-server-images-test");
+let testDir = "";
 let isolatedCodexHome: IsolatedCodexHome | null = null;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 const DIRECT_CHATGPT_TOKEN = fakeChatGptJwt({ chatgpt_account_id: "acct-123" });
 
 beforeEach(() => {
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-  mkdirSync(TEST_DIR, { recursive: true });
-  process.env.OPENCODEX_HOME = TEST_DIR;
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  testDir = mkdtempSync(join(tmpdir(), "ocx-server-images-"));
+  process.env.OPENCODEX_HOME = testDir;
   delete process.env.OPENCODEX_API_AUTH_TOKEN;
   process.env.OPENCODEX_TEST_IMAGES_API_KEY = "custom-images-key";
   isolatedCodexHome = installIsolatedCodexHome("ocx-server-images-codex-");
@@ -43,9 +48,12 @@ beforeEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-afterEach(() => {
+afterEach(async () => {
   setXaiResultPinnedDownloadForTests(undefined);
   globalThis.fetch = originalFetch;
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousApiToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -58,7 +66,7 @@ afterEach(() => {
   clearThreadAccountMap();
   clearAccountNeedsReauth("pool-a");
   clearAccountQuota();
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  if (testDir) removeTreeWithRetry(testDir);
 });
 
 interface CapturedRequest {

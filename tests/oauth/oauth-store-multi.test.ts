@@ -6,8 +6,10 @@ import * as atomicWrite from "../../src/config/atomic-write";
 import * as oauthStore from "../../src/oauth/store";
 import {
   resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
   setIcaclsRunnerForTests,
 } from "../../src/lib/windows-secret-acl";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import {
   getAccountCredential,
   getAccountSet,
@@ -67,10 +69,13 @@ describe("multi-account auth store", () => {
       timedOut: false,
       stdout: "",
     }));
+    setAsyncIcaclsRunnerForTests(async () => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await flushConfigDirHardeningForTests();
     setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     resetHardenedStateForTests();
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;

@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
   existsSync,
-  mkdirSync,
+  mkdtempSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as fsModule from "node:fs";
 import * as accountStoreModule from "../../src/codex/account-store";
@@ -30,12 +31,15 @@ import {
 } from "../../src/codex/quota";
 import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
 import * as configModule from "../../src/config";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-codex-account-delete-atomicity");
+let testDir = "";
 const ACCOUNT_ID = "delete-atomicity";
 let previousHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function seededConfig(): OcxConfig {
   const config = loadConfig();
@@ -64,15 +68,20 @@ function seededConfig(): OcxConfig {
 
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-  mkdirSync(TEST_DIR, { recursive: true });
-  process.env.OPENCODEX_HOME = TEST_DIR;
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  testDir = mkdtempSync(join(tmpdir(), "ocx-codex-account-delete-atomicity-"));
+  process.env.OPENCODEX_HOME = testDir;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
-  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+  if (testDir) removeTreeWithRetry(testDir);
+  testDir = "";
 });
 
 describe("Codex account delete persistence ordering", () => {

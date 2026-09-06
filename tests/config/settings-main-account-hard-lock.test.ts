@@ -3,6 +3,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { handleManagementAPI, type ManagementApiDeps } from "../../src/server/management-api";
 import { invalidateStartupHealthCache } from "../../src/server/startup-health-cache";
 import type { OcxConfig } from "../../src/types";
@@ -12,6 +14,7 @@ import { removeTreeWithRetry } from "../helpers/remove-tree";
 let home: string;
 let previousHome: string | undefined;
 let previousCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 const config = (): OcxConfig => ({
   port: 10100,
   defaultProvider: "example",
@@ -31,6 +34,8 @@ function request(cfg: OcxConfig, body?: unknown, overrides: Partial<ManagementAp
 }
 
 beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   previousHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
   home = mkdtempSync(join(tmpdir(), "ocx-hard-lock-settings-"));
@@ -39,13 +44,19 @@ beforeEach(() => {
   invalidateStartupHealthCache();
 });
 
-afterEach(() => {
+afterEach(async () => {
   invalidateStartupHealthCache();
-  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = previousHome;
-  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-  else process.env.CODEX_HOME = previousCodexHome;
-  removeTreeWithRetry(home);
+  try {
+    await flushConfigDirHardeningForTests();
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    removeTreeWithRetry(home);
+  }
 });
 
 describe("main-account 99 percent setting", () => {

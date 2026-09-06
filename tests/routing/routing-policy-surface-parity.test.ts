@@ -1,10 +1,14 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { chatCompletionsToResponsesBody } from "../../src/chat/inbound";
 import { anthropicToResponsesTranslation } from "../../src/claude/inbound";
+import { DIRECTIVE_KEY_FILE } from "../../src/claude/directive-key";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { closeRequestHistoryIndex } from "../../src/routing/history/indexer";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { evidenceFromBody } from "../../src/routing/request-evidence";
 import type { ProviderAdapter } from "../../src/adapters/base";
 import type { AdapterEvent, OcxConfig, OcxProviderConfig } from "../../src/types";
@@ -17,6 +21,7 @@ const EXPECTED_RICH_EVIDENCE = {
   toolsRequired: true,
   imageInputRequired: true,
 };
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 describe("routing policy request evidence parity (translator-level coverage)", () => {
   test("tools and image input produce the same evidence across Responses, Chat Completions, and Claude Messages", () => {
@@ -126,8 +131,33 @@ const { handleResponses, handleResponsesCompact } = await import("../../src/serv
 const { handleChatCompletions } = await import("../../src/server/chat-completions");
 const { handleClaudeMessages } = await import("../../src/server/claude-messages");
 
-afterEach(() => {
+let testHome = "";
+let previousHome: string | undefined;
+
+beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  previousHome = process.env.OPENCODEX_HOME;
+  testHome = mkdtempSync(join(tmpdir(), "ocx-routing-policy-"));
+  process.env.OPENCODEX_HOME = testHome;
+  writeFileSync(join(testHome, DIRECTIVE_KEY_FILE), `${"a".repeat(64)}\n`, { mode: 0o600 });
+  clearRequestLogsForTests();
+});
+
+afterEach(async () => {
   adapterFactory = undefined;
+  clearRequestLogsForTests();
+  closeRequestHistoryIndex();
+  try {
+    await flushConfigDirHardeningForTests();
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (testHome) removeTreeWithRetry(testHome);
+    testHome = "";
+  }
 });
 
 function testConfig(): OcxConfig {

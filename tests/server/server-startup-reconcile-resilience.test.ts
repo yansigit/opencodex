@@ -18,6 +18,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import * as configStore from "../../src/config";
 import * as stateStores from "../../src/lib/state-store-registrations";
 import { OAUTH_PROVIDERS, reconcileOAuthProviders } from "../../src/oauth";
@@ -131,6 +133,7 @@ test.skipIf(!CAN_BIND)("preset reconciliation cannot undo an in-memory Grok migr
 let testDir = "";
 let previousHome: string | undefined;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 /** A saved config that reconciliation genuinely rewrites, so the persistence path is reached. */
 function staleConfig(): OcxConfig {
@@ -154,13 +157,18 @@ function runStartupReconciliation(config: OcxConfig): void {
 }
 
 beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   previousHome = process.env.OPENCODEX_HOME;
   isolatedCodexHome = installIsolatedCodexHome("ocx-startup-reconcile-codex-");
   testDir = mkdtempSync(join(tmpdir(), "ocx-startup-reconcile-"));
   process.env.OPENCODEX_HOME = testDir;
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousHome;
   isolatedCodexHome?.restore();

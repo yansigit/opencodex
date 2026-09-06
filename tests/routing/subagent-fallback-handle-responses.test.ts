@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import {
   clearAccountQuota,
   updateAccountQuota,
@@ -53,8 +55,11 @@ const originalNow = Date.now;
 let testDir: string;
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testDir = mkdtempSync(join(tmpdir(), "ocx-subagent-hr-"));
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
@@ -71,7 +76,7 @@ beforeEach(() => {
   resetCodexModelEntitlementCacheForTests();
 });
 
-afterEach(() => {
+afterEach(async () => {
   globalThis.fetch = originalFetch;
   Date.now = originalNow;
   clearThreadAccountMap();
@@ -80,11 +85,14 @@ afterEach(() => {
   resetAgentTaskRecoveryState();
   resetSubagentModelFallbackStateForTests();
   setMainAccountPlan(null);
-  removeTreeWithRetry(testDir);
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
+  removeTreeWithRetry(testDir);
 });
 
 function fernetFixture(ciphertextBytes = 16): string {

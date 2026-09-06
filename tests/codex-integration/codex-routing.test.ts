@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { STORE_BUDGET_MS } from "../helpers/test-budget";
 import {
@@ -53,10 +54,13 @@ import { routeModel } from "../../src/router";
 import { consumeForInspection } from "../../src/server/relay";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-codex-routing-test");
+let TEST_DIR = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -90,8 +94,9 @@ function pendingInspectionStream(): ReadableStream<Uint8Array> {
 describe("codex routing", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-routing-"));
     process.env.OPENCODEX_HOME = TEST_DIR;
     // Isolate the main-account credential source: TEST_DIR has no auth.json, so the main
     // account is deterministically absent (these cases test the pool-only scenario).
@@ -107,18 +112,22 @@ describe("codex routing", () => {
     saveTestCredential("b");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
     clearAccountNeedsReauth("a");
     clearAccountNeedsReauth("b");
     clearAccountNeedsReauth("c");
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    removeTreeWithRetry(TEST_DIR);
+    TEST_DIR = "";
   });
 
   test("usage score uses the hottest known quota window", () => {
@@ -2176,8 +2185,9 @@ describe("codex routing", () => {
 describe("codex account selection order", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-codex-routing-"));
     process.env.OPENCODEX_HOME = TEST_DIR;
     previousCodexHome = process.env.CODEX_HOME;
     process.env.CODEX_HOME = TEST_DIR;
@@ -2191,18 +2201,22 @@ describe("codex account selection order", () => {
     saveTestCredential("b");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
     clearPoolRotationState();
     clearAccountNeedsReauth("a");
     clearAccountNeedsReauth("b");
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    removeTreeWithRetry(TEST_DIR);
+    TEST_DIR = "";
   });
 
   /** `a` is ordered above `b`; the persisted operator selection is the lower tier. */

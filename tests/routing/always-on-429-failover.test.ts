@@ -24,14 +24,19 @@ import {
 } from "../../src/oauth/anthropic-routing";
 import { clearPoolRotationState } from "../../src/codex/pool-rotation";
 import { getAccountSet, saveCredential, setActiveAccount } from "../../src/oauth/store";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { clearAccountQuotaCache, setCachedProviderAccountQuotaForTests } from "../../src/providers/quota";
 import type { OcxConfig } from "../../src/types";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const originalHome = process.env.OPENCODEX_HOME;
 let home: string;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   home = mkdtempSync(join(tmpdir(), "ocx-always-on-429-"));
   process.env.OPENCODEX_HOME = home;
   clearAnthropicAccountPoolState();
@@ -39,10 +44,13 @@ beforeEach(() => {
   clearAccountQuotaCache("anthropic");
 });
 
-afterEach(() => {
+afterEach(async () => {
   clearAnthropicAccountPoolState();
   clearPoolRotationState();
   clearAccountQuotaCache("anthropic");
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = originalHome;
   removeTreeWithRetry(home);

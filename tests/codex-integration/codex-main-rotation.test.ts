@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   clearThreadAccountMap,
@@ -35,12 +36,15 @@ import {
   updateAccountQuota,
 } from "../../src/codex/auth-api";
 import type { OcxConfig } from "../../src/types";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const STORE_DIR = join(import.meta.dir, ".tmp-main-rotation-store");
-const CODEX_DIR = join(import.meta.dir, ".tmp-main-rotation-codex");
+let STORE_DIR = "";
+let CODEX_DIR = "";
 let prevOpencodexHome: string | undefined;
 let prevCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function writeMainAuth(): void {
   mkdirSync(CODEX_DIR, { recursive: true });
@@ -83,8 +87,10 @@ describe("main account rotation (Option A)", () => {
   beforeEach(() => {
     prevOpencodexHome = process.env.OPENCODEX_HOME;
     prevCodexHome = process.env.CODEX_HOME;
-    for (const d of [STORE_DIR, CODEX_DIR]) if (existsSync(d)) removeTreeWithRetry(d);
-    mkdirSync(STORE_DIR, { recursive: true });
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    STORE_DIR = mkdtempSync(join(tmpdir(), "ocx-main-rotation-store-"));
+    CODEX_DIR = mkdtempSync(join(tmpdir(), "ocx-main-rotation-codex-"));
     process.env.OPENCODEX_HOME = STORE_DIR;
     process.env.CODEX_HOME = CODEX_DIR;
     clearThreadAccountMap();
@@ -99,7 +105,7 @@ describe("main account rotation (Option A)", () => {
     writeMainAuth();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearThreadAccountMap();
     clearCodexUpstreamHealth();
     clearAccountQuota();
@@ -107,9 +113,12 @@ describe("main account rotation (Option A)", () => {
     resetMainCodexAccountIdentityTrackingForTests();
     setMainAccountPlan(null);
     for (const id of ["a", "b", MAIN_CODEX_ACCOUNT_ID]) clearAccountNeedsReauth(id);
-    for (const d of [STORE_DIR, CODEX_DIR]) if (existsSync(d)) removeTreeWithRetry(d);
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     if (prevOpencodexHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = prevOpencodexHome;
     if (prevCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = prevCodexHome;
+    for (const d of [STORE_DIR, CODEX_DIR]) if (d) removeTreeWithRetry(d);
   });
 
   test("main account is usable when ~/.codex/auth.json token is present", () => {

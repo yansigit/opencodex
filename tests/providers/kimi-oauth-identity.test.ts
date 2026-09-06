@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { identityFromKimiTokens, refreshKimiToken } from "../../src/oauth/kimi";
 import { getCredential, listAccounts, saveCredential } from "../../src/oauth/store";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-kimi-oauth-identity-test");
+let testDir = "";
 let previousOpencodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function jwtWithClaims(claims: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -112,15 +116,19 @@ describe("Kimi token-response wiring (production parseTokenPayload path)", () =>
 describe("Kimi multiauth via saveCredential", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    testDir = mkdtempSync(join(tmpdir(), "ocx-kimi-oauth-identity-"));
+    process.env.OPENCODEX_HOME = testDir;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    if (testDir) removeTreeWithRetry(testDir);
   });
 
   test("two distinct user_ids append two kimi accounts", async () => {

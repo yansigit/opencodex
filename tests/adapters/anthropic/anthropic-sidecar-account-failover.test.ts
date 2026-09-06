@@ -12,6 +12,8 @@ import type { ProviderAdapter } from "../../../src/adapters/base";
 import { clearAnthropicAccountPoolState } from "../../../src/oauth/anthropic-routing";
 import { clearGenericFailoverHealth } from "../../../src/oauth/generic-account-failover";
 import { getAccountSet, saveCredential, setActiveAccount } from "../../../src/oauth/store";
+import { flushConfigDirHardeningForTests } from "../../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../../src/lib/windows-secret-acl";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../../src/types";
 import { removeTreeWithRetry } from "../../helpers/remove-tree";
 
@@ -20,6 +22,7 @@ let testHome = "";
 let handleResponses: typeof import("../../../src/server/responses")["handleResponses"];
 let observedKeys: string[] = [];
 let sidecarMode = false;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function fixtureAdapter(provider: OcxProviderConfig): ProviderAdapter {
   return {
@@ -82,6 +85,8 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testHome = mkdtempSync(join(tmpdir(), "ocx-oauth-429-boundaries-"));
   process.env.OPENCODEX_HOME = testHome;
   observedKeys = [];
@@ -90,15 +95,21 @@ beforeEach(() => {
   clearGenericFailoverHealth();
 });
 
-afterEach(() => {
+afterEach(async () => {
   clearAnthropicAccountPoolState();
   clearGenericFailoverHealth();
-  removeTreeWithRetry(testHome);
+  try {
+    await flushConfigDirHardeningForTests();
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    removeTreeWithRetry(testHome);
+  }
 });
 
 afterAll(() => {
-  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = previousHome;
   mock.restore();
 });
 

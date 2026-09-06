@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync} from "node:fs";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   clearCodexCooldownRecoveryProbeState,
@@ -25,14 +26,17 @@ import {
   resolveCodexAccountForThread,
 } from "../../src/codex/routing";
 import type { OcxConfig } from "../../src/types";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-codex-cooldown-recovery-test");
-const TEST_CODEX_HOME = join(TEST_DIR, "codex");
+let testDir = "";
+let testCodexHome = "";
 const START = 1_800_000_000_000;
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
 let previousFetch: typeof fetch;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function makeConfig(ids = ["a", "b"]): OcxConfig {
   return {
@@ -84,25 +88,33 @@ describe("Codex cooldown recovery worker", () => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
     previousCodexHome = process.env.CODEX_HOME;
     previousFetch = globalThis.fetch;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_CODEX_HOME, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    process.env.CODEX_HOME = TEST_CODEX_HOME;
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    testDir = mkdtempSync(join(tmpdir(), "ocx-codex-cooldown-recovery-"));
+    testCodexHome = join(testDir, "codex");
+    mkdirSync(testCodexHome, { recursive: true });
+    process.env.OPENCODEX_HOME = testDir;
+    process.env.CODEX_HOME = testCodexHome;
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearCodexCooldownRecoveryProbeState();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     globalThis.fetch = previousFetch;
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearCodexCooldownRecoveryProbeState();
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    if (testDir) removeTreeWithRetry(testDir);
+    testDir = "";
+    testCodexHome = "";
   });
 
   test("recovers cooled A independently while ordinary routing only selects B", async () => {

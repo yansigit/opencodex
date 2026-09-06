@@ -62,4 +62,14 @@ if (ENABLED) {
   // `mock.module` replaces the module before production imports its named
   // `spawnSync` binding. Preserve every other child_process API verbatim.
   mock.module("node:child_process", () => ({ ...childProcess, spawnSync: fakeSpawnSync }));
+
+  const aclModuleUrl = process.env.OCX_TEST_WINDOWS_ACL_MODULE;
+  if (!aclModuleUrl) throw new Error("owned-service-home preload requires the ACL module URL");
+  const {
+    setAsyncIcaclsRunnerForTests,
+    setIcaclsRunnerForTests,
+  } = await import(aclModuleUrl) as typeof import("../../src/lib/windows-secret-acl");
+  const icaclsOk = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+  setIcaclsRunnerForTests(() => icaclsOk);
+  setAsyncIcaclsRunnerForTests(async () => icaclsOk);
 }

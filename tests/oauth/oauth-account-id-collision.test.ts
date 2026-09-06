@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
   setIcaclsRunnerForTests,
 } from "../../src/lib/windows-secret-acl";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import {
   getAccountSet,
   getCredential,
@@ -12,8 +15,9 @@ import {
 } from "../../src/oauth/store";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-oauth-account-id-collision-test");
+let testDir = "";
 let previousOpencodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 const COLLIDING_ACCOUNT_A = "account-collision-16138";
 const COLLIDING_ACCOUNT_B = "account-collision-28806";
@@ -21,24 +25,21 @@ const COLLIDING_ACCOUNT_B = "account-collision-28806";
 describe("OAuth account id collision hardening", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
+    testDir = mkdtempSync(join(tmpdir(), "ocx-oauth-account-id-collision-"));
+    process.env.OPENCODEX_HOME = testDir;
     resetHardenedStateForTests();
-    setIcaclsRunnerForTests(() => ({
-      success: true,
-      exitCode: 0,
-      timedOut: false,
-      stdout: "",
-    }));
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await flushConfigDirHardeningForTests();
     setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     resetHardenedStateForTests();
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    if (testDir) removeTreeWithRetry(testDir);
   });
 
   test("distinct identities that collide on the historical 32-bit prefix get distinct slots", async () => {
@@ -68,7 +69,7 @@ describe("OAuth account id collision hardening", () => {
   });
 
   test("existing persisted 32-bit account ids remain valid and are not rewritten", async () => {
-    const authPath = join(TEST_DIR, "auth.json");
+    const authPath = join(testDir, "auth.json");
     writeFileSync(authPath, JSON.stringify({
       anthropic: {
         activeAccountId: "deadbeef",

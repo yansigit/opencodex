@@ -13,12 +13,32 @@ import {
   resetLifecycleDrainStateForTests,
 } from "../../src/server/lifecycle";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { flushConfigDirHardening } from "../../src/config/paths";
+import {
+  resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+  setPlatformForTests,
+} from "../../src/lib/windows-secret-acl";
+import {
+  resetWindowsPrincipalForTests,
+  setAsyncWindowsPrincipalRunnerForTests,
+  setWindowsPrincipalRunnerForTests,
+} from "../../src/lib/windows-user-principal";
 
 const origHome = process.env.HOME;
 const origOcxHome = process.env.OPENCODEX_HOME;
 const origCodexHome = process.env.CODEX_HOME;
 const origFetch = globalThis.fetch;
 const WARMUP_INPUT = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+const SYNTHETIC_WINDOWS_PRINCIPAL = {
+  success: true,
+  exitCode: 0,
+  timedOut: false,
+  stdout: "S-1-5-21-1-2-3-1001\nocx-test\n",
+  stderr: "",
+} as const;
 let tmp: string;
 
 // kimi refresh is a single token POST (no OAuth discovery hop), so a blanket 200 mock exercises the
@@ -36,6 +56,12 @@ function writeConfig(partial: Partial<OcxConfig>): void {
 
 beforeEach(() => {
   resetLifecycleDrainStateForTests();
+  resetHardenedStateForTests();
+  setPlatformForTests("win32");
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  setWindowsPrincipalRunnerForTests(() => SYNTHETIC_WINDOWS_PRINCIPAL);
+  setAsyncWindowsPrincipalRunnerForTests(async () => SYNTHETIC_WINDOWS_PRINCIPAL);
   tmp = join(tmpdir(), `token-guardian-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   mkdirSync(tmp, { recursive: true });
   process.env.HOME = tmp;
@@ -46,12 +72,20 @@ beforeEach(() => {
   __resetGuardianState();
 });
 
-afterEach(() => {
+afterEach(async () => {
   resetLifecycleDrainStateForTests();
+  await flushConfigDirHardening(join(tmp, "ocx"));
   if (origHome === undefined) delete process.env.HOME; else process.env.HOME = origHome;
   if (origOcxHome === undefined) delete process.env.OPENCODEX_HOME; else process.env.OPENCODEX_HOME = origOcxHome;
   if (origCodexHome === undefined) delete process.env.CODEX_HOME; else process.env.CODEX_HOME = origCodexHome;
   globalThis.fetch = origFetch;
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  setWindowsPrincipalRunnerForTests(null);
+  setAsyncWindowsPrincipalRunnerForTests(null);
+  setPlatformForTests(null);
+  resetWindowsPrincipalForTests();
+  resetHardenedStateForTests();
   removeTreeWithRetry(tmp);
 });
 

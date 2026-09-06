@@ -32,6 +32,8 @@ import {
   recordCodexUpstreamOutcome,
 } from "../../src/codex/routing";
 import type { OcxConfig } from "../../src/types";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 // beforeEach writes three Codex credentials (NTFS ACL harden on Windows). Under
@@ -42,6 +44,7 @@ setDefaultTimeout(30_000);
 const savedCodexHome = process.env.CODEX_HOME;
 const savedOpencodexHome = process.env.OPENCODEX_HOME;
 let testDir: string;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function installPoolCredential(accountId: string, now = Date.now()): void {
   saveCodexAccountCredential(accountId, {
@@ -93,6 +96,8 @@ function codexHomeFixture(): string {
 // Credential writes can hit Windows ACL harden stalls under full-suite isolate
 // load (GHA windows-latest: beforeEach/afterEach hook timed out ~7.6s).
 beforeEach(() => {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   testDir = mkdtempSync(join(tmpdir(), "ocx-subagent-fb-"));
   process.env.OPENCODEX_HOME = testDir;
   process.env.CODEX_HOME = testDir;
@@ -105,7 +110,10 @@ beforeEach(() => {
   clearAccountNeedsReauth("main");
 }, { timeout: 30_000 });
 
-afterEach(() => {
+afterEach(async () => {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = savedCodexHome;
   if (savedOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;

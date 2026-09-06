@@ -32,14 +32,38 @@ import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/account-id";
 import { clearAccountQuota, updateAccountQuota } from "../../src/codex/auth-api";
 import { getConfigPath } from "../../src/config";
 import type { OcxConfig } from "../../src/types";
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-codex-pool-rotation-test");
+let testDir = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
+function installScratchHome(): void {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  testDir = mkdtempSync(join(tmpdir(), "ocx-codex-pool-rotation-"));
+  process.env.OPENCODEX_HOME = testDir;
+  process.env.CODEX_HOME = testDir;
+}
+
+async function removeScratchHome(): Promise<void> {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousOpencodexHome;
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = previousCodexHome;
+  if (testDir) removeTreeWithRetry(testDir);
+  testDir = "";
+}
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -314,27 +338,20 @@ describe("pickRoundRobinAccount", () => {
 describe("accountPoolStrategy new-session routing", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
     previousCodexHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = TEST_DIR;
+    installScratchHome();
     clearThreadAccountMap();
     clearCodexUpstreamHealth();
     clearAccountQuota();
     clearPoolRotationState();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
     clearPoolRotationState();
-    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    await removeScratchHome();
   });
 
   test("round-robin strategy rotates unbound new sessions", () => {
@@ -724,27 +741,20 @@ describe("accountPoolStrategy new-session routing", () => {
 describe("selection order across rotation strategies", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
     previousCodexHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = TEST_DIR;
+    installScratchHome();
     clearThreadAccountMap();
     clearCodexUpstreamHealth();
     clearAccountQuota();
     clearPoolRotationState();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearAccountQuota();
     clearCodexUpstreamHealth();
     clearThreadAccountMap();
     clearPoolRotationState();
-    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    await removeScratchHome();
   });
 
   function primeAllQuota(usage = 10): void {

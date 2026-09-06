@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   classifyCodexUpstreamOutcome,
   clearCodexUpstreamHealth,
@@ -19,13 +19,17 @@ import { fetchWithResetRetry, fetchWithTransientRetry } from "../../src/lib/upst
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import { getConfigPath } from "../../src/config";
 import type { OcxConfig } from "../../src/types";
-import { existsSync, mkdirSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-issue-914-test");
+let TEST_DIR = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -58,8 +62,9 @@ function makeTwoAccountConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
 beforeEach(() => {
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   previousCodexHome = process.env.CODEX_HOME;
-  removeTreeWithRetry(TEST_DIR);
-  mkdirSync(TEST_DIR, { recursive: true });
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-issue-914-transport-"));
   process.env.OPENCODEX_HOME = TEST_DIR;
   process.env.CODEX_HOME = TEST_DIR;
   clearCodexUpstreamHealth();
@@ -67,13 +72,20 @@ beforeEach(() => {
   clearUpstreamHostHealth();
 });
 
-function restoreEnv(): void {
+afterEach(async () => {
+  clearCodexUpstreamHealth();
+  clearThreadAccountMap();
+  clearUpstreamHostHealth();
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
   else process.env.CODEX_HOME = previousCodexHome;
-  removeTreeWithRetry(TEST_DIR);
-}
+  if (TEST_DIR) removeTreeWithRetry(TEST_DIR);
+  TEST_DIR = "";
+});
 
 function coded(message: string, code: string): Error {
   return Object.assign(new Error(message), { code });
@@ -103,9 +115,7 @@ describe("issue #914 — pre-connection failures never touch account health", ()
       expect(isCodexAccountSoftAvoided("a")).toBe(false);
       expect(getEffectiveActiveCodexAccountId(config)).toBe("a");
       expect(getUpstreamHostHealth(hostKey)).toMatchObject({ consecutiveFailures: 3, lastFailureCode: "ECONNREFUSED" });
-    } finally {
-      restoreEnv();
-    }
+    } finally {}
   });
 
   test("a relayed 3xx is the neutral class: no account and no host evidence", () => {
@@ -118,9 +128,7 @@ describe("issue #914 — pre-connection failures never touch account health", ()
       expect(getCodexUpstreamHealth("a")).toBeNull();
       expect(isCodexAccountSoftAvoided("a")).toBe(false);
       expect(getUpstreamHostHealth(upstreamHostHealthKey("openai", "chatgpt.com"))).toBeNull();
-    } finally {
-      restoreEnv();
-    }
+    } finally {}
   });
 
   test("mixed evidence: 503 then a reachability rejection stays account-attributed", async () => {
@@ -137,9 +145,7 @@ describe("issue #914 — pre-connection failures never touch account health", ()
       expect(outcome).toBe("connect_error");
       recordCodexUpstreamOutcome(config, "a", outcome, { threadId: "t-mixed" });
       expect(getCodexUpstreamHealth("a")).toMatchObject({ consecutiveFailures: 1 });
-    } finally {
-      restoreEnv();
-    }
+    } finally {}
   });
 
   test("mixed evidence: a reset then a reachability rejection stays account-attributed", async () => {

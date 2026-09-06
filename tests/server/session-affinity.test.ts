@@ -1,16 +1,20 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveCodexAccountForThread, clearThreadAccountMap, formatCodexProviderForLog } from "../../src/codex/routing";
 import { CODEX_ACCOUNT_LOG_LABEL_RE, fallbackCodexAccountLogLabel } from "../../src/codex/account-label";
 import { updateAccountQuota, clearAccountQuota } from "../../src/codex/auth-api";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
 import type { OcxConfig } from "../../src/types";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-session-affinity-test");
+let testDir = "";
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function makeConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -42,25 +46,29 @@ function makeActivePoolConfig(active: string, ids: string[] = [active]): OcxConf
 describe("resolveCodexAccountForThread", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    // Isolate the main-account credential source: TEST_DIR has no auth.json, so the
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+    testDir = mkdtempSync(join(tmpdir(), "ocx-session-affinity-"));
+    process.env.OPENCODEX_HOME = testDir;
+    // Isolate the main-account credential source: testDir has no auth.json, so the
     // main account is deterministically absent and cannot become a rotation target.
     previousCodexHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = TEST_DIR;
+    process.env.CODEX_HOME = testDir;
     clearThreadAccountMap();
     clearAccountQuota();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     clearAccountQuota();
     clearThreadAccountMap();
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+    if (testDir) removeTreeWithRetry(testDir);
   });
 
   test("returns null when no active account", () => {
