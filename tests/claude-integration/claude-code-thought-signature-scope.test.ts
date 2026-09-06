@@ -134,7 +134,7 @@ describe("Claude Code Anthropic inbound reasoning-replay scope", () => {
     expect(a).toBeDefined();
     expect(b).toBeDefined();
     expect(a).not.toBe(b);
-    expect(a).not.toContain("session-a");
-    expect(b).not.toContain("session-b");
+    expect(a).toBe("session-a");
+    expect(b).toBe("session-b");
   });
 });

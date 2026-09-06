@@ -20,6 +20,7 @@ import {
   type TranslatorBudget,
 } from "../lib/translator-budget";
 import { sseFieldOffset, sseFieldValue } from "../lib/sse-decoder";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope } from "../responses/reasoning-envelope";
 
 type Rec = Record<string, unknown>;
 
@@ -214,6 +215,8 @@ interface OpenBlock {
   callId?: string;
   /** Last fixed-size reasoning identity (item + summary/content index) seen by this block. */
   reasoningPartKey?: string;
+  thinkingBuf?: string;
+  reasoningSig?: string;
 }
 
 /** Streaming: Responses SSE bytes -> Anthropic Messages SSE bytes. */
@@ -296,10 +299,10 @@ export function responsesSseToAnthropicSse(
           open.webSearchArgsEmitted = true;
         }
         if (open.kind === "thinking") {
-          // Synthetic signature: Claude Code accepts it (003 E6); inbound drops replays anyway.
+          const signature = open.reasoningSig ?? encodeReasoningEnvelope({ txt: open.thinkingBuf ?? "" });
           emit("content_block_delta", {
             type: "content_block_delta", index: open.index,
-            delta: { type: "signature_delta", signature: `ocx${Date.now()}` },
+            delta: { type: "signature_delta", signature },
           });
         }
         emit("content_block_stop", { type: "content_block_stop", index: open.index });
@@ -315,7 +318,7 @@ export function responsesSseToAnthropicSse(
           ? { type: "text", text: "" }
           : { type: "thinking", thinking: "", signature: "" };
         emit("content_block_start", { type: "content_block_start", index, content_block: contentBlock });
-        open = { kind, index };
+        open = { kind, index, thinkingBuf: "" };
       };
       const finish = (stopReason: string, usage: unknown) => {
         if (terminated) return;
@@ -378,6 +381,7 @@ export function responsesSseToAnthropicSse(
               type: "content_block_delta", index: open!.index,
               delta: { type: "text_delta", text: data.delta },
             });
+            open!.thinkingBuf = (open!.thinkingBuf ?? "") + data.delta;
             break;
           }
           case "response.reasoning_summary_text.delta":
@@ -406,6 +410,7 @@ export function responsesSseToAnthropicSse(
               type: "content_block_delta", index: open!.index,
               delta: { type: "thinking_delta", thinking: data.delta },
             });
+            open!.thinkingBuf = (open!.thinkingBuf ?? "") + data.delta;
             break;
           }
           case "response.output_item.added": {
@@ -519,7 +524,18 @@ export function responsesSseToAnthropicSse(
               closeOpenBlock();
             }
             else if (open.kind === "text" && item.type === "message") closeOpenBlock();
-            else if (open.kind === "thinking" && item.type === "reasoning") closeOpenBlock();
+            else if (open.kind === "thinking" && item.type === "reasoning") {
+              const encrypted = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
+              const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
+              if (env?.sig) open.reasoningSig = env.sig;
+              const red = env?.red ?? [];
+              closeOpenBlock();
+              for (const data of red) {
+                const idx = blockIndex++;
+                emit("content_block_start", { type: "content_block_start", index: idx, content_block: { type: "redacted_thinking", data } });
+                emit("content_block_stop", { type: "content_block_stop", index: idx });
+              }
+            }
             break;
           }
           case "response.completed": {
@@ -756,9 +772,12 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
             if (isRec(s) && typeof s.text === "string" && s.text.length > 0) parts.push(s.text);
           }
         }
+        const encrypted = typeof raw.encrypted_content === "string" ? raw.encrypted_content : "";
+        const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
         if (parts.length > 0) {
-          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: `ocx${Date.now()}` });
+          content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: env?.sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") }) });
         }
+        for (const data of env?.red ?? []) content.push({ type: "redacted_thinking", data });
         break;
       }
       case "function_call": {

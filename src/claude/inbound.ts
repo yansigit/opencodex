@@ -17,6 +17,7 @@ export { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, e
 import { AnthropicRequestError, isRec, type Rec } from "./inbound-records";
 import { resolveInboundModel, effortForThinkingBudget, effortFromOutputConfig, formatFromOutputConfig } from "./inbound-model-options";
 import { systemToInstructions, toolsToResponses, toolChoiceToResponses } from "./inbound-content-options";
+import { decodeReasoningEnvelope, encodeReasoningEnvelope, OCX_REASONING_PREFIX } from "../responses/reasoning-envelope";
 
 
 
@@ -163,7 +164,7 @@ function systemMessageText(content: unknown): string {
   return parts.join("\n\n");
 }
 
-function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionContext = NO_ELISION): void {
+function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionContext = NO_ELISION, knownToolIds: ReadonlySet<string> = new Set()): void {
   if (typeof content === "string") {
     if (content.length > 0) pushUserMessage(input, [{ type: "input_text", text: content }]);
     return;
@@ -189,6 +190,7 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
         if (typeof raw.tool_use_id !== "string" || raw.tool_use_id.length === 0) {
           throw new AnthropicRequestError("tool_result requires tool_use_id");
         }
+        if (!knownToolIds.has(raw.tool_use_id)) throw new AnthropicRequestError("tool_result references unknown tool_use");
         input.push({
           type: "function_call_output",
           call_id: raw.tool_use_id,
@@ -209,7 +211,7 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
   pushUserMessage(input, pending);
 }
 
-function assistantMessageToItems(content: unknown, input: Rec[]): void {
+function assistantMessageToItems(content: unknown, input: Rec[], knownToolIds: Set<string>): void {
   if (typeof content === "string") {
     if (content.length > 0) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: content }] });
     return;
@@ -231,12 +233,31 @@ function assistantMessageToItems(content: unknown, input: Rec[]): void {
         if (typeof raw.id !== "string" || raw.id.length === 0 || typeof raw.name !== "string" || raw.name.length === 0) {
           throw new AnthropicRequestError("tool_use requires id and name");
         }
+        knownToolIds.add(raw.id);
+        if (raw.type === "tool_use" && typeof raw.name !== "string") break;
         input.push({ type: "function_call", call_id: raw.id, name: raw.name, arguments: JSON.stringify(raw.input ?? {}) });
         break;
       }
-      case "thinking":
-      case "redacted_thinking":
-        break; // v1 policy: dropped on replay (003 evidence — safe for routed providers)
+      case "thinking": {
+        flush();
+        const thinking = typeof raw.thinking === "string" ? raw.thinking : "";
+        const signature = typeof raw.signature === "string" ? raw.signature : "";
+        if (signature.startsWith(OCX_REASONING_PREFIX)) {
+          const owned = decodeReasoningEnvelope(signature);
+          if (!owned) throw new AnthropicRequestError("malformed ocxr1 reasoning signature");
+          if (owned.sig) throw new AnthropicRequestError("OpenCodex reasoning continuity cannot be replayed as an Anthropic signature");
+        }
+        const encrypted = signature.length === 0 ? undefined : signature.startsWith(OCX_REASONING_PREFIX) ? signature : encodeReasoningEnvelope({ sig: signature });
+        if (thinking.length === 0 && !encrypted) break;
+        input.push({ type: "reasoning", id: `rs_${crypto.randomUUID().replace(/-/g, "")}`, summary: thinking.length > 0 ? [{ type: "summary_text", text: thinking }] : [], ...(encrypted ? { encrypted_content: encrypted } : {}) });
+        break;
+      }
+      case "redacted_thinking": {
+        flush();
+        const data = typeof raw.data === "string" ? raw.data : "";
+        if (data.length > 0) input.push({ type: "reasoning", id: `rs_${crypto.randomUUID().replace(/-/g, "")}`, summary: [], encrypted_content: encodeReasoningEnvelope({ red: [data] }) });
+        break;
+      }
       default:
         break;
     }
@@ -286,6 +307,7 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   }
 
   const input: Rec[] = [];
+  const knownToolIds = new Set<string>();
   const systemParts: string[] = [];
   const topLevelSystem = systemToInstructions(raw.system);
   if (topLevelSystem !== undefined) systemParts.push(topLevelSystem);
@@ -296,8 +318,8 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   };
   for (const msg of raw.messages) {
     if (!isRec(msg)) throw new AnthropicRequestError("each message must be an object");
-    if (msg.role === "user") userMessageToItems(msg.content, input, elide);
-    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input);
+    if (msg.role === "user") userMessageToItems(msg.content, input, elide, knownToolIds);
+    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, knownToolIds);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
       if (text.length > 0) systemParts.push(text);

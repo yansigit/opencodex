@@ -15,7 +15,7 @@ describe("Claude source envelope boundaries", () => {
       { type: "input_text", text: "ok" },
       { type: "input_text", text: "[document: report]" },
     ]);
-    expect(JSON.stringify(body)).not.toContain("q");
+    expect(JSON.stringify(body)).not.toContain("secret-payload");
   });
 
   test("malformed tool results fail closed instead of becoming an unpaired output", () => {
