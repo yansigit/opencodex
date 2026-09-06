@@ -67,8 +67,12 @@ describe("proxy process-state ownership", () => {
     expect(isOcxStartCommandLine("bun run src/cli.ts start")).toBe(true);
     expect(isOcxStartCommandLine('"C:/tools/bun/bin/bun.exe" "run" "src/cli/index.ts" "start"')).toBe(true);
     expect(isOcxStartCommandLine("bun C:/tools/bun/install/global/node_modules/@bitkyc08/opencodex/src/cli.ts start")).toBe(true);
+    expect(isOcxStartCommandLine("bun C:/tools/bun/install/global/node_modules/@yansigit/opencodex/src/cli.ts start")).toBe(true);
     expect(isOcxStartCommandLine(
       "bun C:/nvm/node_modules/@bitkyc08/.opencodex-1JejBqbZ/src/cli/index.ts start --port 10100",
+    )).toBe(true);
+    expect(isOcxStartCommandLine(
+      "bun C:/nvm/node_modules/@yansigit/.opencodex-1JejBqbZ/src/cli/index.ts start --port 10100",
     )).toBe(true);
     expect(isOcxStartCommandLine("opencodex start")).toBe(true);
     expect(isOcxStartCommandLine("bun run src/cli.ts status")).toBe(false);
@@ -170,10 +174,10 @@ describe("proxy process-state ownership", () => {
 
   test("runtime port metadata round-trips and validates the expected pid", () => {
     const attestationSecret = "A".repeat(43);
-    writeRuntimePort({ pid: 1234, port: 58195, hostname: "0.0.0.0", attestationSecret });
+    writeRuntimePort({ pid: 1234, port: 58195, hostname: "0.0.0.0", origin: "https://proxy.example.com", attestationSecret });
 
-    expect(readRuntimePort()).toEqual({ pid: 1234, port: 58195, hostname: "0.0.0.0", attestationSecret });
-    expect(readRuntimePort(1234)).toEqual({ pid: 1234, port: 58195, hostname: "0.0.0.0", attestationSecret });
+    expect(readRuntimePort()).toEqual({ pid: 1234, port: 58195, hostname: "0.0.0.0", origin: "https://proxy.example.com", attestationSecret });
+    expect(readRuntimePort(1234)).toEqual({ pid: 1234, port: 58195, hostname: "0.0.0.0", origin: "https://proxy.example.com", attestationSecret });
     expect(readRuntimePort(9999)).toBeNull();
   });
 
@@ -195,5 +199,23 @@ describe("proxy process-state ownership", () => {
       "utf-8",
     );
     expect(readRuntimePort()).toBeNull();
+  });
+
+  test("rejects runtime origins that could redirect graceful-stop credentials", () => {
+    for (const origin of [
+      ["https://user:pass", "proxy.example.com"].join("@"),
+      "https://proxy.example.com/api/stop",
+      "https://proxy.example.com/?forward=1",
+      "http://proxy.example.com/#fragment",
+      "javascript:alert(1)",
+      "not-an-origin",
+    ]) {
+      writeFileSync(
+        getRuntimePortPath(),
+        JSON.stringify({ pid: 1234, port: 58195, origin, attestationSecret: "A".repeat(43) }),
+        "utf-8",
+      );
+      expect(readRuntimePort()).toBeNull();
+    }
   });
 });

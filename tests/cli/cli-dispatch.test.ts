@@ -34,6 +34,34 @@ describe("CLI dispatch command coverage", () => {
       expect(alias).not.toBe(target);
     }
   });
+
+  test("the local telemetry command reaches its dedicated runner", () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "ocx-cli-telemetry-"));
+    const ocxHome = join(fixtureRoot, "ocx");
+    const codexHome = join(fixtureRoot, "codex");
+    const userHome = join(fixtureRoot, "home");
+    for (const path of [ocxHome, codexHome, userHome]) mkdirSync(path, { recursive: true });
+    try {
+      const result = Bun.spawnSync([process.execPath, repoPath("src", "cli", "index.ts"), "telemetry", "status"], {
+        cwd: fixtureRoot,
+        env: {
+          ...process.env,
+          OPENCODEX_HOME: ocxHome,
+          CODEX_HOME: codexHome,
+          HOME: userHome,
+          USERPROFILE: userHome,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout.toString()).toContain("Telemetry failures: 0");
+      expect(result.stdout.toString()).toContain("Autonomous remediation: disabled");
+      expect(result.stderr.toString()).toBe("");
+    } finally {
+      removeTreeWithRetry(fixtureRoot);
+    }
+  });
 });
 
 describe("CLI dispatch aliases", () => {

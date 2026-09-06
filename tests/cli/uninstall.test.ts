@@ -12,6 +12,7 @@ import { removeOwnedConfigAfterDesktopCleanup, type UninstallClientStateDeps } f
 import { assertClientLifecycleHeld, withClientLifecycle, withClientLifecycleSync, type ClientLifecycleHeld } from "../../src/client/lifecycle-lock";
 import type { UninstallObservation } from "../../src/cli/uninstall-plan";
 import type { DesktopDisconnectReceipt } from "../../src/claude/desktop-remote-store";
+import { PKG } from "../../src/update/index";
 
 const root = pathToFileURL(repoRoot() + "/");
 
@@ -34,6 +35,9 @@ describe("full uninstall command", () => {
     expect(cli).toContain("await removeOwnedConfigAfterDesktopCleanup(observed)");
     expect(cli).not.toContain("removeOwnedConfigState(getConfigDir())");
     expect(cli).not.toContain("rmSync(getConfigDir()");
+    expect(cli).toContain('import { PKG } from "../update/index"');
+    expect(cli).toContain("npm uninstall -g ${PKG}");
+    expect(PKG).toBe("@yansigit/opencodex");
   });
 
   test("CLI exposes explicit legacy history recovery command", async () => {

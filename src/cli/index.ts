@@ -62,7 +62,8 @@ import {
 } from "./tray-proxy";
 import { requestBoundSystemRestart } from "./system-restart-client";
 import { installCrashGuards } from "../lib/crash-guard";
-import { dispatchCommand , decideStartWithLiveOwner } from "./dispatch";
+import { canonicalServerOrigin } from "../lib/server-tls";
+import { dispatchCommand, decideStartWithLiveOwner } from "./dispatch";
 import { findAvailablePort, isAddrInUse, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../server/ports";
 import { findLiveProxy, probeHostname, type LiveProxy } from "../server/proxy-liveness";
 import { createReadinessGate } from "../server/readiness";
@@ -79,6 +80,7 @@ import { startHistoryMigrationGuardian } from "../codex/history-migration-guardi
 import { maybeShowStarPrompt } from "./star-prompt";
 import { scheduleCatalogPrewarm } from "./catalog-prewarm";
 import { maybeShowUpdatePrompt } from "../update/notify";
+import { PKG } from "../update/index";
 import { syncModelsToCodex } from "../codex/sync";
 import {
   shouldSyncGrokOnStart,
@@ -123,6 +125,11 @@ initializeNodeLauncherContext();
 const head = await runCli(process.argv.slice(2));
 const args = head.args;
 const command = head.command;
+
+if (command === "telemetry") {
+  const { runTelemetryCommand } = await import("./telemetry-commands");
+  process.exit(runTelemetryCommand(args.slice(1), loadConfig()));
+}
 
 function parsePortOption(): number | undefined {
   if (args.length === 1) return undefined;
@@ -190,7 +197,7 @@ async function chooseListenPort(
       // Ghost LISTEN rows with a dead PID can outlive the process for a while.
       // SetTcpEntry(DELETE_TCB) needs elevation (often returns 317), so the only
       // reliable non-admin recovery is to wait for the OS to release the TCB.
-      timeoutMs: 60_000,
+      timeoutMs: process.platform === "win32" ? 60_000 : 10_000,
       intervalMs: 100,
       scanIntervalMs: 500,
       killOcxHolders: false,
@@ -364,7 +371,14 @@ async function handleStart(options: { block?: boolean } = {}) {
   writePid(process.pid);
 
   const config = loadConfig();
-  writeRuntimePort({ pid: process.pid, port, hostname: config.hostname, attestationSecret: localAttestationSecret });
+  const boundPort = server.port ?? port;
+  writeRuntimePort({
+    pid: process.pid,
+    port: boundPort,
+    hostname: config.hostname,
+    origin: canonicalServerOrigin(config, boundPort),
+    attestationSecret: localAttestationSecret,
+  });
   // No pre-emptive snapshot here. `injectCodexConfig` journals the exact bytes it
   // is about to transform; snapshotting earlier only captured a baseline that could
   // already be stale by the time injection ran (#477).
@@ -762,8 +776,10 @@ async function handleStop() {
   // The receipt must name the endpoint the owner was stopping — an obligation nobody can
   // locate cannot be proven discharged. Only the runtime record knows it; a proxy started
   // with an explicit --port is not on the configured one.
-  const endpointOf = (runtime: { port: number; hostname?: string } | null): { hostname: string; port: number } | null =>
-    runtime?.port ? { hostname: runtime.hostname ?? "127.0.0.1", port: runtime.port } : null;
+  const endpointOf = (runtime: { port: number; hostname?: string; origin?: string } | null): { hostname: string; port: number; origin?: string } | null =>
+    runtime?.port
+      ? { hostname: runtime.hostname ?? "127.0.0.1", port: runtime.port, origin: runtime.origin }
+      : null;
   // Last-resort endpoint for a receipt: the address this home is configured to serve on,
   // which is what a later recovery probe would ask about anyway.
   const configuredEndpoint = (): { hostname: string; port: number } => {
@@ -1297,7 +1313,7 @@ async function handleUninstall() {
     console.error(`\nUninstall finished with ${failures.length} failed step(s): ${failures.join(", ")}`);
     process.exit(1);
   }
-  console.log("\n✅ opencodex local state removed. Remove the package with: npm uninstall -g @bitkyc08/opencodex");
+  console.log(`\n✅ opencodex local state removed. Remove the package with: npm uninstall -g ${PKG}`);
 }
 
 async function handleStatus() {
