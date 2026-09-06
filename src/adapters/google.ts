@@ -1273,6 +1273,11 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           const { done, value } = await reader.read();
           if (done) break;
           const nextBuffer = buffer + decoder.decode(value, { stream: true });
+          if (isHtmlRedirect(nextBuffer)) {
+            yield { type: "error", message: reauthError };
+            try { await reader.cancel(); } catch { /* ignore */ }
+            return;
+          }
           const nextBufferBytes = budgetEncoder.encode(nextBuffer).byteLength;
           const appendReservation = budget.reserveTransient(nextBufferBytes, { kind: "live_transient" });
           buffer = nextBuffer;
@@ -1326,6 +1331,15 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           if (residual.startsWith(":")) {
             yield { type: "heartbeat" };
           } else if (!residual.startsWith("data:")) {
+            try {
+              const parsedErr = JSON.parse(residual);
+              if (parsedErr.error?.message) {
+                yield { type: "error", message: parsedErr.error.message };
+                return;
+              }
+            } catch (err) {
+              void err;
+            }
             if (provider.googleMode === "ai-studio-web") {
               const parsedMakerSuite = parseMakerSuiteChunk(residual);
               if (parsedMakerSuite.text) {
@@ -1338,7 +1352,7 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
               yield { type: "error", message: reauthError };
               return;
             }
-            yield { type: "error", message: "upstream stream ended with an incomplete SSE frame — possible truncation" };
+            yield { type: "error", message: `upstream non-SSE response: ${residual.slice(0, 300)}` };
             return;
           } else if ((yield* handleDataLine(residual)) === "terminate") return;
         }

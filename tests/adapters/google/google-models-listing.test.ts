@@ -237,7 +237,7 @@ describe("Antigravity live model discovery", () => {
     let markFetchStarted!: () => void;
     const responseGate = new Promise<void>(resolve => { releaseResponse = resolve; });
     const fetchStarted = new Promise<void>(resolve => { markFetchStarted = resolve; });
-    const baseUrl = "https://cca-stale-discovery.example";
+    const baseUrl = "https://daily-cloudcode-pa.googleapis.com";
     const priorGeneration = captureModelCacheGeneration("google-antigravity");
     registerAntigravityDiscoveredWireModels(baseUrl, [{ id: "stale-model", wireModelId: "old-wire-model" }], {
       provider: "google-antigravity",
