@@ -77,7 +77,6 @@ try {
       proxied: {
         adapter: "openai-chat",
         baseUrl: "http://connection-proxy.invalid/v1",
-        apiKey: "sk-x",
       },
     },
   } as OcxConfig, "proxied");
@@ -85,18 +84,22 @@ try {
   const proxyModels = await fetchProviderModels("proxy-discovery-e2e", {
     baseUrl: "http://proxy-models.invalid/v1",
     adapter: "openai-chat",
-    apiKey: "sk-test",
     models: [],
   }, 0);
 
   for (const key of proxyKeys) delete process.env[key];
   process.env.ALL_PROXY = proxyUrl;
-  const allProxyResponse = await providerOutboundGet(
-    "all-proxy",
-    { baseUrl: "http://all-proxy-only.invalid/v1", allowPrivateNetwork: false },
-    "http://all-proxy-only.invalid/v1/models",
-  );
-  const allProxy = { status: allProxyResponse.status, body: await allProxyResponse.text() };
+  let allProxy: { status?: number; body?: string; error?: string };
+  try {
+    const allProxyResponse = await providerOutboundGet(
+      "all-proxy",
+      { baseUrl: "http://all-proxy-only.invalid/v1", allowPrivateNetwork: false },
+      "http://all-proxy-only.invalid/v1/models",
+    );
+    allProxy = { status: allProxyResponse.status, body: await allProxyResponse.text() };
+  } catch (error) {
+    allProxy = { error: error instanceof Error ? error.message : String(error) };
+  }
 
   const localConfig = {
     port: 0,

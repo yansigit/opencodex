@@ -52,6 +52,95 @@ function directDependencies(
 }
 
 describe("provider outbound GET transport", () => {
+  test("an irrelevant HTTP proxy does not disable HTTPS DNS pinning", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    process.env.HTTP_PROXY = "http://127.0.0.1:9";
+    const originalFetch = globalThis.fetch;
+    const fetchMock = mock(async () => new Response("unexpected")) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    try {
+      const { providerOutboundGet } = await import("../../src/lib/provider-outbound");
+      const { dependencies, captured } = directDependencies(new Response("ok"));
+      const response = await providerOutboundGet(
+        "custom",
+        { baseUrl: "https://provider.example" },
+        "https://provider.example/models",
+        {},
+        dependencies,
+      );
+      expect(await response.text()).toBe("ok");
+      expect(captured.address).toBe("93.184.216.34");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("NO_PROXY keeps the direct DNS-pinned path", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    process.env.HTTPS_PROXY = "http://127.0.0.1:9";
+    process.env.NO_PROXY = "provider.example";
+    const originalFetch = globalThis.fetch;
+    const fetchMock = mock(async () => new Response("unexpected")) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    try {
+      const { providerOutboundGet } = await import("../../src/lib/provider-outbound");
+      const { dependencies, captured } = directDependencies(new Response("ok"));
+      await providerOutboundGet(
+        "custom",
+        { baseUrl: "https://provider.example" },
+        "https://provider.example/models",
+        {},
+        dependencies,
+      );
+      expect(captured.address).toBe("93.184.216.34");
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("credential-bearing public GET requires HTTPS", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    const { providerOutboundGet, ProviderOutboundPolicyError } = await import("../../src/lib/provider-outbound");
+    const { dependencies, captured } = directDependencies(new Response("unexpected"));
+    await expect(providerOutboundGet(
+      "custom",
+      { baseUrl: "http://provider.example" },
+      "http://provider.example/models",
+      { headers: { "x-api-key": "must-not-send" } },
+      dependencies,
+    )).rejects.toThrow(ProviderOutboundPolicyError);
+    expect(captured.address).toBeUndefined();
+  });
+
+  test("proxy DNS degradation cannot bypass credentialed GET HTTPS", async () => {
+    for (const key of proxyKeys) delete process.env[key];
+    process.env.HTTP_PROXY = "http://127.0.0.1:9";
+    const originalFetch = globalThis.fetch;
+    const fetchMock = mock(async () => new Response("unexpected")) as typeof fetch;
+    globalThis.fetch = fetchMock;
+    try {
+      const { providerOutboundGet, ProviderOutboundPolicyError } = await import("../../src/lib/provider-outbound");
+      await expect(providerOutboundGet(
+        "custom",
+        { baseUrl: "http://unresolved.example" },
+        "http://unresolved.example/models",
+        { headers: { authorization: "Bearer must-not-send" } },
+        {
+          resolveAddresses: mock(async () => {
+            const error = new Error("DNS failed");
+            error.name = "DestinationDnsResolutionError";
+            throw error;
+          }),
+        },
+      )).rejects.toThrow(ProviderOutboundPolicyError);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("direct HTTPS connects only to the validated address with TLS verification", async () => {
     for (const key of proxyKeys) delete process.env[key];
     const { providerOutboundGet } = await import("../../src/lib/provider-outbound");
@@ -313,7 +402,7 @@ describe("provider outbound GET transport", () => {
       }
       const result = JSON.parse(stdout.trim()) as {
         outbound: { status: number; body: string };
-        allProxy: { status: number; body: string };
+        allProxy: { status?: number; body?: string; error?: string };
         managementProxy: Record<string, unknown>;
         proxyModels: string[];
         managementNoProxy: Record<string, unknown>;
@@ -327,10 +416,7 @@ describe("provider outbound GET transport", () => {
           status: 200,
           body: '{"data":[{"id":"proxied-model"}]}',
       });
-      expect(result.allProxy).toEqual({
-        status: 200,
-        body: '{"data":[{"id":"proxied-model"}]}',
-      });
+      expect(result.allProxy.error).toContain("could not be resolved");
       expect(result.managementProxy.ok).toBe(false);
       expect(String(result.managementProxy.error)).toContain("returned 302 redirect");
       expect(String(result.managementProxy.error)).toContain("http://final.example/v1/models");
@@ -344,7 +430,6 @@ describe("provider outbound GET transport", () => {
         "http://proxy-only.invalid/v1/models",
         "http://connection-proxy.invalid/v1/models",
         "http://proxy-models.invalid/v1/models",
-        "http://all-proxy-only.invalid/v1/models",
       ]);
       expect(result.providerRequests).toEqual(["/v1/models", "/v1/models", "/v1/models"]);
       expect(stderr).toContain("cannot be pinned locally");

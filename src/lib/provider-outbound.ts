@@ -7,7 +7,7 @@ import {
   resolvePublicAddresses,
 } from "./destination-policy";
 import { pinnedHttpGet, pinnedHttpPost } from "./pinned-http";
-import { effectiveProxyFor, noProxyMatches, normalizeProxyHostname, outboundProxyConfigured } from "./proxy-env";
+import { effectiveProxyFor, noProxyMatches, normalizeProxyHostname } from "./proxy-env";
 import { publicProviderBaseUrl } from "./provider-url";
 import { antigravityOAuthDestinationConfigError, isCanonicalAntigravityUrl, providerTlsFetch } from "./provider-tls-profile";
 import { waitForProviderRequestSlot } from "../providers/request-pacing";
@@ -129,6 +129,34 @@ export async function providerRedirectError(response: Response, requestUrl: stri
   return `provider returned ${response.status} redirect to ${target}; configure the final provider URL directly`;
 }
 
+const CREDENTIAL_HEADERS = new Set([
+  "authorization",
+  "proxy-authorization",
+  "cookie",
+  "x-api-key",
+  "x-goog-api-key",
+  "x-amz-security-token",
+  "x-opencodex-api-key",
+]);
+
+function hasCredentialHeader(headers: HeadersInit | undefined): boolean {
+  if (!headers) return false;
+  for (const name of new Headers(headers).keys()) {
+    const normalized = name.toLowerCase();
+    if (CREDENTIAL_HEADERS.has(normalized)
+      || /(?:^|-)(?:api-key|access-token|auth-token|security-token)$/.test(normalized)) return true;
+  }
+  return false;
+}
+
+function urlCarriesCredential(url: URL): boolean {
+  if (url.username || url.password) return true;
+  for (const name of url.searchParams.keys()) {
+    if (/^(?:api[-_]?key|access[-_]?token|auth(?:orization)?|password|secret|token)$/i.test(name)) return true;
+  }
+  return false;
+}
+
 async function providerOutboundRequest(
   name: string,
   provider: ProviderOutboundConfig,
@@ -153,7 +181,14 @@ async function providerOutboundRequest(
     throw new ProviderOutboundPolicyError("provider POST URL must use HTTPS");
   }
   const parsed = postUrl ?? new URL(url);
-  const proxyConfigured = outboundProxyConfigured();
+  if (method === "GET"
+    && parsed.protocol !== "https:"
+    && (hasCredentialHeader(init.headers) || urlCarriesCredential(parsed))) {
+    const destination = assessUrlDestination(url)?.kind;
+    if (destination !== "localhost" && destination !== "loopback") {
+      throw new ProviderOutboundPolicyError("credential-bearing provider GET URL must use HTTPS except for loopback");
+    }
+  }
   const effectiveProxy = effectiveProxyFor(parsed);
   const selectedProxy = noProxyMatches(parsed) ? null : effectiveProxy;
   const profiledFetch = antigravityProfileFetch(name, provider, url);
@@ -213,7 +248,7 @@ async function providerOutboundRequest(
       // proof is on the final request URL — not the provider name — because an
       // OAuth/forward name matches any baseUrl by design while the bearer is
       // pinned to the registry destination independently.
-      allowBenchmarkAddresses: (proxyConfigured && !noProxyMatches(parsed))
+      allowBenchmarkAddresses: selectedProxy !== null
         || transparentFakeIpException(url, parsed, isCanonicalUrl, name),
       // Mihomo IPv6 fake-IP (fdfe:dcba:9876::/48) answers are admitted on a stricter gate
       // than the benchmark range: the proxy must be the one fetch will use for this URL's
@@ -228,19 +263,19 @@ async function providerOutboundRequest(
     if (!dnsResolutionFailed) {
       throw new ProviderOutboundPolicyError(error instanceof Error ? error.message : "provider destination was blocked");
     }
-    if (!proxyConfigured) throw error;
+    if (!selectedProxy) throw error;
     warnProxyBoundaryOnce();
     warnProxyDnsDegradationOnce();
     return globalThis.fetch(url, { ...init, method, redirect: "manual" });
   }
-  if (proxyConfigured && !resolved.privateNetwork) {
+  if (selectedProxy && !resolved.privateNetwork) {
     warnProxyBoundaryOnce();
     // When the Mihomo exception could have admitted an answer, pin the transport to the
     // proxy the admission assumed instead of letting fetch re-infer it from the environment.
-    const proxy = allowMihomoIpv6FakeIp ? effectiveProxy : undefined;
+    const proxy = allowMihomoIpv6FakeIp ? selectedProxy : undefined;
     return globalThis.fetch(url, { ...init, method, redirect: "manual", ...(proxy ? { proxy } : {}) });
   }
-  if (proxyConfigured && resolved.privateNetwork && !noProxyMatches(parsed)) {
+  if (selectedProxy && resolved.privateNetwork) {
     const hostname = normalizeProxyHostname(parsed.hostname);
     throw new Error(
       `provider URL resolves to a private-network destination; add ${hostname} to NO_PROXY before using allowPrivateNetwork with an outbound proxy`,
