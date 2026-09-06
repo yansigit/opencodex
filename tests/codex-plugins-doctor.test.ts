@@ -6,9 +6,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { diagnoseCodexBundledPlugins, locateCurrentBundledMarketplace } from "../src/codex/plugins-doctor";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const repoRoot = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const cliPath = join(repoRoot, "src", "cli", "index.ts");
+const STATUS_CHILD_TIMEOUT_MS = SPAWN_BUDGET_MS - 5_000;
 
 function makeConfig(body: string): { dir: string; configPath: string } {
   const dir = mkdtempSync(join(tmpdir(), "ocx-codex-home-"));
@@ -362,8 +364,17 @@ describe("ocx status --json codexPlugins (spawned, read-only)", () => {
       const before = readdirSync(codexHome).sort();
       const result = spawnSync(process.execPath, [cliPath, "status", "--json"], {
         cwd: repoRoot,
-        env: { ...process.env, OPENCODEX_HOME: opencodexHome, CODEX_HOME: codexHome },
+        env: {
+          ...process.env,
+          OPENCODEX_HOME: opencodexHome,
+          CODEX_HOME: codexHome,
+          // ACL behavior is outside this read-only status assertion. Keep a
+          // real Windows hardening child bounded well inside the spawn budget.
+          OPENCODEX_ACL_TIMEOUT_MS: "1000",
+        },
         encoding: "utf8",
+        timeout: STATUS_CHILD_TIMEOUT_MS,
+        windowsHide: true,
       });
       const after = readdirSync(codexHome).sort();
 
@@ -379,5 +390,5 @@ describe("ocx status --json codexPlugins (spawned, read-only)", () => {
       removeTreeWithRetry(opencodexHome);
       removeTreeWithRetry(codexHome);
     }
-  }, { timeout: 20_000 });
+  }, { timeout: SPAWN_BUDGET_MS });
 });

@@ -16,6 +16,10 @@ export const SERIAL_TEST_FILES = [
   // watchdog even though it is still alive. Keep the end-to-end assertions;
   // isolate their process scheduling from unrelated shard load.
   "tests/codex-composed-acceptance.test.ts",
+  // Proves production write-lock contention through many real Bun children.
+  // Run it after the general pool so unrelated process pressure cannot consume
+  // the bounded child startup budgets or let a holder expire before a contender.
+  "tests/codex-inject-write-lock.test.ts",
   "tests/codex-journal.test.ts",
   "tests/codex-prompt-route.test.ts",
   "tests/codex-shim.test.ts",
