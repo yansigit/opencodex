@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync} from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveConfig } from "../../src/config";
+import { replacePersistedConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import { PROVIDER_INPUT_TOO_LARGE_MESSAGE } from "../../src/server/responses/context-overflow";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
@@ -99,7 +99,7 @@ describe("Responses provider input overflow", () => {
   test("streaming passthrough and translated adapters emit a terminal context failure", async () => {
     for (const adapter of ["openai-responses", "openai-chat"] as const) {
       const upstream = upstream413();
-      saveConfig(config({ target: provider(adapter, upstream) }));
+      replacePersistedConfig(config({ target: provider(adapter, upstream) }));
       const server = startServer(0);
       try {
         const failed = await responseFailed(await request(String(server.url), "target/kimi-k3", true));
@@ -119,7 +119,7 @@ describe("Responses provider input overflow", () => {
 
   test("non-streaming callers retain the upstream 413 status and body", async () => {
     const upstream = upstream413();
-    saveConfig(config({ target: provider("openai-responses", upstream) }));
+    replacePersistedConfig(config({ target: provider("openai-responses", upstream) }));
     const server = startServer(0);
     try {
       const response = await request(String(server.url), "target/kimi-k3", false);
@@ -137,7 +137,7 @@ describe("Responses provider input overflow", () => {
     const upstream = upstream413(() => { hits += 1; });
     const target = provider("openai-chat", upstream);
     target.modelContextWindows = { "kimi-k3": 1 };
-    saveConfig(config({ target }));
+    replacePersistedConfig(config({ target }));
     const server = startServer(0);
     try {
       const failed = await responseFailed(await request(
@@ -156,7 +156,7 @@ describe("Responses provider input overflow", () => {
   test("the bounded Anthropic image retry runs once before the terminal failure", async () => {
     let hits = 0;
     const upstream = upstream413(() => { hits += 1; });
-    saveConfig(config({ target: provider("anthropic", upstream) }));
+    replacePersistedConfig(config({ target: provider("anthropic", upstream) }));
     const server = startServer(0);
     try {
       const failed = await responseFailed(await request(
@@ -185,7 +185,7 @@ describe("Responses provider input overflow", () => {
   test("unrelated passthrough HTTP failures keep their status and body", async () => {
     for (const status of [400, 503]) {
       const upstream = upstreamStatus(status);
-      saveConfig(config({ target: provider("openai-responses", upstream) }));
+      replacePersistedConfig(config({ target: provider("openai-responses", upstream) }));
       const server = startServer(0);
       try {
         const response = await request(String(server.url), "target/kimi-k3", true);
@@ -217,7 +217,7 @@ describe("Responses provider input overflow", () => {
         ],
       },
     };
-    saveConfig(next);
+    replacePersistedConfig(next);
     const server = startServer(0);
     try {
       const failed = await responseFailed(await request(String(server.url), "combo/fallback", true));

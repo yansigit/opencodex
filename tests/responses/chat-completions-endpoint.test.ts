@@ -1,9 +1,8 @@
-import { waitForNativeMainStartupGate } from "../../src/codex/native-profile-startup";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig } from "../../src/config";
+import { loadConfig, replacePersistedConfig, saveConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import { ownedServiceHomeInspection } from "../helpers/owned-service-home-inspection";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
@@ -1969,7 +1968,7 @@ test("chat-native skips optional main enrichment while routed work survives drai
     completeNativeMainRecovery(recoveryHomeId);
     recoveryHomeId = null;
     await server.stop(true);
-    saveConfig({
+    replacePersistedConfig({
       port: 0,
       openaiProviderTierVersion: 2,
       defaultProvider: "openai",
