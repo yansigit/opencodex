@@ -725,8 +725,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     }, outcome.value.status ?? 400);
     adoptCommittedConfig(config, outcome.value.config);
     const disabled = outcome.value.disabled;
-    const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, scope, provider, enabled: body.enabled, disabled, catalogRefresh });
+    return jsonResponse({ ok: true, scope, provider, enabled: body.enabled, disabled, ...await convergeVisibleCatalogs() });
   }
 
   if (url.pathname === "/api/custom-models" && req.method === "GET") {

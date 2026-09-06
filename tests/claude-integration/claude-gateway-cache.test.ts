@@ -137,7 +137,7 @@ describe("Claude Code gateway-model cache pre-write (devlog 260712 030)", () => 
   test("proxy refresh uses the hardened service token file before a configured key", async () => {
     const dir = tempDir();
     const tokenFile = join(tempDir(), "service-api-token");
-    writeFileSync(tokenFile, "  service-file-admission\n", "utf8");
+    writeFileSync(tokenFile, "  service-file-admission\n", { encoding: "utf8", mode: 0o600 });
     const originalFetch = globalThis.fetch;
     let seen: string | null = null;
     try {
