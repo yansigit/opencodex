@@ -50,7 +50,6 @@ export type EffortCapPoll = {
 export type DashboardOverviewPoll = {
   health: HealthData | null;
   providers: ProviderInfo[];
-  error: boolean;
 };
 
 /** Multi-agent extras — slower peers must not gate status/uptime/provider counts. */
@@ -248,20 +247,42 @@ export async function fetchDashboardMaMode(
   }
 }
 
+async function fetchDashboardHealth(primaryUrl: string, apiBase: string, signal: AbortSignal): Promise<HealthData> {
+  try {
+    const primary = await fetch(primaryUrl, { signal });
+    if (primary.ok) {
+      const data = (await primary.json()) as HealthData;
+      if (
+        data
+        && typeof (data as { status?: unknown }).status === "string"
+        && typeof (data as { version?: unknown }).version === "string"
+        && typeof (data as { uptime?: unknown }).uptime === "number"
+      ) return data;
+    }
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+  }
+  const fallback = await fetch(`${apiBase}/healthz`, { signal });
+  return requireJson<HealthData>(fallback);
+}
+
 export async function fetchDashboardOverview(
   apiBase: string,
   signal: AbortSignal,
 ): Promise<DashboardOverviewPoll> {
   try {
-    const [hRes, pRes] = await Promise.all([
-      fetch(`${apiBase}/api/system/health`, { signal }),
-      fetch(`${apiBase}/api/providers`, { signal }),
-    ]);
-    const health = await requireJson<HealthData>(hRes);
-    const providers = await requireJson<ProviderInfo[]>(pRes);
-    return { health, providers, error: false };
-  } catch {
-    return { health: null, providers: [], error: true };
+    // Remote Hub serves authenticated health here; the helper retains the legacy fallback.
+    const healthDataPromise = fetchDashboardHealth(`${apiBase}/api/system/health`, apiBase, signal);
+
+    const providersPromise = fetch(`${apiBase}/api/providers`, { signal }).then((response) =>
+      requireJson<ProviderInfo[]>(response),
+    );
+    const [health, providers] = await Promise.all([healthDataPromise, providersPromise]);
+    if (!Array.isArray(providers)) throw new Error("empty overview response");
+    return { health, providers };
+  } catch (error) {
+    if (isAbortError(error, signal)) throw error;
+    throw error instanceof Error ? error : new Error("overview unavailable");
   }
 }
 

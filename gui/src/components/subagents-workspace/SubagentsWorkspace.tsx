@@ -28,7 +28,9 @@ import { modelLabel } from "../../model-display";
 import { SectionTabs } from "../section-tabs";
 import { sectionAnchorId } from "../../section-anchors";
 import SubagentDelegationSection from "./SubagentDelegationSection";
-import type { DelegationPatch, DelegationModelOption, UltraModePatch, UltraModeState } from "../../pages/use-subagent-delegation";
+import SubagentRolesSection from "./SubagentRolesSection";
+import type { DelegationPatch, DelegationModelOption, UltraModePatch, UltraModeState, V2NativeParentOverrideState, AgentTaskRecoveryState, NativeDefaultState } from "../../pages/use-subagent-delegation";
+import type { V2RoutedDelegationBridgeState } from "../../pages/use-subagent-delegation";
 
 export interface SubagentsWorkspaceProps {
   available: string[];
@@ -44,6 +46,7 @@ export interface SubagentsWorkspaceProps {
     available: DelegationModelOption[];
     guidanceEnabled: boolean;
     syncCodexDefaults: boolean;
+    nativeDefaultState: NativeDefaultState;
     saving: boolean;
     onSave: (patch: DelegationPatch) => void;
     ultraMode: UltraModeState;
@@ -51,6 +54,25 @@ export interface SubagentsWorkspaceProps {
     onUltraModeSave: (patch: UltraModePatch) => void;
     ultraLoadFailed: boolean;
     onUltraModeRetry: () => void;
+    nativeParentOverride: V2NativeParentOverrideState;
+    nativeParentOverrideSaving: boolean;
+    onNativeParentOverrideSave: (state: V2NativeParentOverrideState) => void;
+    agentTaskRecovery: AgentTaskRecoveryState;
+    agentTaskRecoverySaving: boolean;
+    onAgentTaskRecoverySave: (state: AgentTaskRecoveryState) => void;
+    routedDelegationBridge: V2RoutedDelegationBridgeState;
+    routedDelegationBridgeSaving: boolean;
+    onRoutedDelegationBridgeSave: (enabled: boolean) => void;
+    prompt: string;
+    childInstructions: string;
+    childInstructionsSaving: boolean;
+    onChildInstructionsSave: (value: string | null) => void;
+  };
+  roles: {
+    apiBase: string;
+    multiAgentMode: "v1" | "default" | "v2";
+    keepNativeChatGptOnV1: boolean;
+    onStatus: (ok: boolean, message: string) => void;
   };
 }
 
@@ -64,6 +86,7 @@ export default function SubagentsWorkspace({
   onMove,
   onSave,
   delegation,
+  roles,
 }: SubagentsWorkspaceProps) {
   const t = useT();
   const [query, setQuery] = useState("");
@@ -77,6 +100,7 @@ export default function SubagentsWorkspace({
   }, [available, query]);
 
   const tabs = useMemo(() => [
+    { id: "roles", label: t("sub.roles") },
     { id: "featured", label: t("sub.featured"), meta: `${chosen.length}/${FEATURED_MAX}` },
     { id: "models", label: t("sub.models"), meta: String(availableFiltered.length) },
     { id: "settings", label: t("sub.settings") },
@@ -86,6 +110,23 @@ export default function SubagentsWorkspace({
     <div className="subagents-workspace-shell">
       <SectionTabs scope="subagents" items={tabs} ariaLabel={t("sub.sections")} />
       <div className="subagents-workspace-root">
+        <section
+          id={sectionAnchorId("subagents", "roles")}
+          className="subagents-workspace-section"
+          aria-label={t("sub.roles")}
+        >
+          <div className="swi-featured-head">
+            <h2 className="swi-featured-title">{t("sub.roles")}</h2>
+          </div>
+          <SubagentRolesSection
+            apiBase={roles.apiBase}
+            available={delegation.available}
+            efforts={delegation.efforts}
+            multiAgentMode={roles.multiAgentMode}
+            keepNativeChatGptOnV1={roles.keepNativeChatGptOnV1}
+            onStatus={roles.onStatus}
+          />
+        </section>
         <section
           id={sectionAnchorId("subagents", "featured")}
           className="subagents-workspace-section"
@@ -110,7 +151,13 @@ export default function SubagentsWorkspace({
                 <div key={m} className="swi-featured-row">
                   <span className="swi-featured-pos">{i + 1}</span>
                   <span className="swi-featured-name">{modelLabel(m)}</span>
+                  {delegation.model === m && <span className="badge badge-accent">{t("sub.preferred")}</span>}
                   <span className="swi-featured-actions">
+                    {delegation.model !== m && (
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => delegation.onSave({ model: m, effort: delegation.effort || null })} disabled={busy || delegation.saving}>
+                        {t("sub.prefer")}
+                      </button>
+                    )}
                     <button
                       type="button"
                       className="btn btn-ghost btn-icon btn-sm"
@@ -223,6 +270,9 @@ export default function SubagentsWorkspace({
           <div className="swi-featured-head">
             <h2 className="swi-featured-title">{t("sub.settings")}</h2>
           </div>
+          {delegation.model && !chosenSet.has(delegation.model) && (
+            <p className="muted setting-hint"><IconInfo width={15} height={15} aria-hidden="true" />{t("sub.preferredOutsideAdvertised")}</p>
+          )}
           <SubagentDelegationSection
             model={delegation.model}
             effort={delegation.effort}
@@ -230,6 +280,7 @@ export default function SubagentsWorkspace({
             available={delegation.available}
             guidanceEnabled={delegation.guidanceEnabled}
             syncCodexDefaults={delegation.syncCodexDefaults}
+            nativeDefaultState={delegation.nativeDefaultState}
             saving={delegation.saving}
             onSave={delegation.onSave}
             ultraMode={delegation.ultraMode}
@@ -237,6 +288,20 @@ export default function SubagentsWorkspace({
             onUltraModeSave={delegation.onUltraModeSave}
             ultraLoadFailed={delegation.ultraLoadFailed}
             onUltraModeRetry={delegation.onUltraModeRetry}
+            nativeParentOverride={delegation.nativeParentOverride}
+            nativeParentOverrideSaving={delegation.nativeParentOverrideSaving}
+            onNativeParentOverrideSave={delegation.onNativeParentOverrideSave}
+            agentTaskRecovery={delegation.agentTaskRecovery}
+            agentTaskRecoverySaving={delegation.agentTaskRecoverySaving}
+            onAgentTaskRecoverySave={delegation.onAgentTaskRecoverySave}
+            routedDelegationBridge={delegation.routedDelegationBridge}
+            routedDelegationBridgeSaving={delegation.routedDelegationBridgeSaving}
+            onRoutedDelegationBridgeSave={delegation.onRoutedDelegationBridgeSave}
+            keepNativeChatGptOnV1={roles.keepNativeChatGptOnV1}
+            prompt={delegation.prompt}
+            childInstructions={delegation.childInstructions}
+            childInstructionsSaving={delegation.childInstructionsSaving}
+            onChildInstructionsSave={delegation.onChildInstructionsSave}
           />
         </section>
       </div>

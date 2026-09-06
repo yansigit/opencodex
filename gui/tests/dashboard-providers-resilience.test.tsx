@@ -13,12 +13,14 @@ import { useProvidersFetch } from "../src/pages/use-providers-fetch";
 
 const API_BASE = "http://localhost";
 const globals = ["document", "window", "navigator", "sessionStorage", "fetch", "IS_REACT_ACT_ENVIRONMENT"] as const;
-let previous: Record<(typeof globals)[number], unknown>;
+let previous: Record<(typeof globals)[number], PropertyDescriptor | undefined>;
 let win: Window;
 let root: Root | null = null;
 
 beforeEach(() => {
-  previous = Object.fromEntries(globals.map(key => [key, Reflect.get(globalThis, key)])) as typeof previous;
+  previous = Object.fromEntries(
+    globals.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
+  ) as typeof previous;
   clearClientResourceStoresForTests();
   win = new Window({ url: "http://localhost/" });
   Object.defineProperties(globalThis, {
@@ -26,7 +28,7 @@ beforeEach(() => {
     window: { configurable: true, value: win },
     navigator: { configurable: true, value: win.navigator },
     sessionStorage: { configurable: true, value: win.sessionStorage },
-    IS_REACT_ACT_ENVIRONMENT: { configurable: true, value: true },
+    IS_REACT_ACT_ENVIRONMENT: { configurable: true, writable: true, value: true },
   });
 });
 
@@ -35,7 +37,11 @@ afterEach(async () => {
   root = null;
   clearClientResourceStoresForTests();
   win.close();
-  for (const key of globals) Object.defineProperty(globalThis, key, { configurable: true, value: previous[key] });
+  for (const key of globals) {
+    const descriptor = previous[key];
+    if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+    else Reflect.deleteProperty(globalThis, key);
+  }
 });
 
 async function waitFor(predicate: () => boolean): Promise<void> {

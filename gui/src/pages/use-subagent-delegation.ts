@@ -8,15 +8,17 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { requireJson } from "./dashboard-shared";
+import { readJsonOrThrow } from "../fetch-json";
 import { normalizeInjectionSelection } from "./dashboard-core-poll";
 
-export type DelegationModelOption = { provider: string; model: string; namespaced: string };
+export type DelegationModelOption = { provider: string; model: string; namespaced: string; canonical?: boolean };
 
 export type DelegationPatch = {
   multiAgentGuidanceEnabled?: boolean;
   syncCodexSubagentDefaults?: boolean;
   model?: string | null;
   effort?: string | null;
+  prompt?: string | null;
 };
 
 /** Ultra mode (Proactive delegation for every model/effort) via /api/v2. */
@@ -34,13 +36,31 @@ export type UltraModePatch = {
   multiAgentMode?: "v1" | "default" | "v2";
 };
 
+export type V2NativeParentOverrideState = {
+  enabled: boolean;
+  model: string | null;
+  active: boolean;
+};
+
+export type AgentTaskRecoveryState = {
+  enabled: boolean;
+  model: string | null;
+};
+
+export type V2RoutedDelegationBridgeState = {
+  enabled: boolean;
+};
+export type NativeDefaultState = "active" | "disabled" | "pending" | "blocked";
+
 type DelegationResponse = {
   multiAgentGuidanceEnabled?: boolean;
   syncCodexSubagentDefaults?: boolean;
   model?: string | null;
   effort?: string | null;
+  prompt?: string | null;
   efforts?: string[];
   available?: DelegationModelOption[];
+  nativeDefaultState?: NativeDefaultState;
 };
 
 export function useSubagentDelegation(apiBase: string) {
@@ -52,16 +72,29 @@ export function useSubagentDelegation(apiBase: string) {
   const [available, setAvailable] = useState<DelegationModelOption[]>([]);
   const [guidanceEnabled, setGuidanceEnabled] = useState(true);
   const [syncCodexDefaults, setSyncCodexDefaults] = useState(false);
+  const [prompt, setPrompt] = useState("");
+  const [nativeDefaultState, setNativeDefaultState] = useState<NativeDefaultState>("disabled");
 
   const apply = useCallback((data: DelegationResponse) => {
     const normalized = normalizeInjectionSelection(data);
     setGuidanceEnabled(normalized.multiAgentGuidanceEnabled);
     setSyncCodexDefaults(normalized.syncCodexSubagentDefaults);
+    setNativeDefaultState(data.nativeDefaultState === "active" || data.nativeDefaultState === "pending" || data.nativeDefaultState === "blocked"
+      ? data.nativeDefaultState
+      : "disabled");
     setModel(normalized.injectionModel);
     setEffort(normalized.injectionEffort);
+    if ("prompt" in data) setPrompt(typeof data.prompt === "string" ? data.prompt : "");
     if (Array.isArray(data.efforts)) setEfforts(data.efforts);
     if (Array.isArray(data.available)) setAvailable(data.available);
   }, []);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`${apiBase}/api/injection-model`);
+      apply(await requireJson<DelegationResponse>(res));
+    } catch { /* keep defaults; the panel still renders and can be retried by saving */ }
+  }, [apiBase, apply]);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,16 +102,15 @@ export function useSubagentDelegation(apiBase: string) {
       try {
         const res = await fetch(`${apiBase}/api/injection-model`);
         const data = await requireJson<DelegationResponse>(res);
-        if (cancelled) return;
-        apply(data);
+        if (!cancelled) apply(data);
       } catch { /* keep defaults; the panel still renders and can be retried by saving */ }
       finally { if (!cancelled) setLoaded(true); }
     })();
     return () => { cancelled = true; };
   }, [apiBase, apply]);
 
-  const save = useCallback(async (patch: DelegationPatch) => {
-    if (saving) return;
+  const save = useCallback(async (patch: DelegationPatch): Promise<{ ok: true } | { ok: false; error: string }> => {
+    if (saving) return { ok: false, error: "" };
     setSaving(true);
     try {
       const res = await fetch(`${apiBase}/api/injection-model`, {
@@ -86,17 +118,24 @@ export function useSubagentDelegation(apiBase: string) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
       });
-      if (!res.ok) throw new Error("injection save failed");
+      await readJsonOrThrow(res, "injection save failed");
       // Re-read rather than trusting the patch: the server clamps effort to what the chosen
       // model actually supports, so the echo can differ from what was sent.
       const getRes = await fetch(`${apiBase}/api/injection-model`);
       apply(await requireJson<DelegationResponse>(getRes));
-    } catch { /* keep the last committed UI state */ }
-    finally { setSaving(false); }
+      return { ok: true };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error && error.message ? error.message : "injection save failed",
+      };
+    } finally {
+      setSaving(false);
+    }
   }, [apiBase, apply, saving]);
 
   return {
-    loaded, saving, model, effort, efforts, available,
-    guidanceEnabled, syncCodexDefaults, save,
+    loaded, saving, model, effort, efforts, available, prompt,
+    guidanceEnabled, syncCodexDefaults, nativeDefaultState, refresh, save,
   };
 }

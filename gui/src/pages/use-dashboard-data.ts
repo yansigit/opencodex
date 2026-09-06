@@ -159,7 +159,6 @@ export function useDashboardData(apiBase: string) {
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [updateJob, setUpdateJob] = useState<UpdateJob | null>(null);
   const [reconnecting, setReconnecting] = useState(false);
-  const [error, setError] = useState(false);
   const effortCapHelpTriggerRef = useRef<HTMLButtonElement>(null);
   const updateTriggerRef = useRef<HTMLButtonElement>(null);
   const maHelpTriggerRef = useRef<HTMLButtonElement>(null);
@@ -225,6 +224,9 @@ export function useDashboardData(apiBase: string) {
     { pollMs: 5000 },
   );
   const overviewReady = health !== null || overviewPoll.data !== undefined;
+  // A cold failure replaces the page; later failures retain the last good overview.
+  const error = overviewPoll.error !== undefined && health === null && !overviewPoll.hasSucceeded;
+  const overviewReconnecting = overviewPoll.error !== undefined && !error;
 
   // Preferences that are just config — never gate on overview or injection.
   const maModePoll = useKeyedClientResource(
@@ -315,7 +317,6 @@ export function useDashboardData(apiBase: string) {
         providers: data.providers,
       });
     }
-    setError(data.error);
   }, [overviewPoll.data, apiBase]);
 
   useEffect(() => {
@@ -624,10 +625,28 @@ export function useDashboardData(apiBase: string) {
       setSettings(prev => prev ? { ...prev, codexAutoStart: data.codexAutoStart, startupHealth: data.startupHealth ?? prev.startupHealth } : prev);
     } catch {
       setSettings(prev => prev ? { ...prev, codexAutoStart: !next } : prev);
-      setError(true);
     } finally {
       settingsMutationInFlightRef.current = false;
       setSettingsSaving(false);
+    }
+  };
+
+  const saveServerSettings = async (
+    server: NonNullable<SettingsData["server"]>["configured"],
+  ): Promise<NonNullable<SettingsData["server"]>> => {
+    settingsMutationInFlightRef.current = true;
+    try {
+      const res = await fetch(`${apiBase}/api/settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ server }),
+      });
+      const data = await requireJson<{ server: NonNullable<SettingsData["server"]> }>(res, t("dash.serverSaveFailed"));
+      settingsMutationEpochRef.current += 1;
+      setSettings(prev => prev ? { ...prev, server: data.server } : prev);
+      return data.server;
+    } finally {
+      settingsMutationInFlightRef.current = false;
     }
   };
 
@@ -785,11 +804,12 @@ export function useDashboardData(apiBase: string) {
     effortCap, subagentEffortCap, effortCapSaving, setEffortCap, setSubagentEffortCap, setEffortCapSaving,
     syncResult, syncError, projectConfigWarnings,
     updateOpen, updateChannel, setUpdateRestart, updateRestart, updateLoading,
-    updateCheck, updateError, updateJob, reconnecting, error,
+    updateCheck, updateError, updateJob, reconnecting, error, overviewReconnecting,
+    retryOverview: overviewPoll.refresh,
     effortCapHelpTriggerRef, updateTriggerRef, maHelpTriggerRef, shadowCallHelpTriggerRef,
     effortCapHelpDialogRef, updateDialogRef, maHelpDialogRef, shadowCallHelpDialogRef,
     filteredGroups, sidecarModels, visionModels,
-    saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, runSync, clearSyncFeedback,
+    saveSidecar, saveShadowCall, switchMaMode, toggleCodexAutoStart, saveServerSettings, runSync, clearSyncFeedback,
     fetchUpdateCheck, closeUpdateDialog, openUpdateDialog, changeUpdateChannel, runUpdate,
   };
 }

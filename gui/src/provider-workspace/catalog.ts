@@ -53,10 +53,16 @@ export interface WorkspaceProvider {
     minIntervalMs?: number;
     models?: Record<string, { requestsPerMinute?: number; minIntervalMs?: number }>;
   };
+  tlsProfile?: "antigravity-browser";
+  tlsProfileStatus?: "disabled" | "active" | "fallback";
   /** Codex account routing mode for the canonical `openai` forward provider. */
   codexAccountMode?: "direct" | "pool";
   /** Derived state of the two xAI Grok Responses model-adapter entries. */
   xaiResponsesOptInState?: boolean | "mixed";
+  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web" | string;
+  /** Live AI Studio session presence (from safeConfigDTO). */
+  hasAiStudioSession?: boolean;
+  aiStudioAuthState?: "connected" | "checking" | "needs_reauth" | "unsupported";
 }
 
 /** Three-way pricing/ownership tier for a ready provider row. */
@@ -135,6 +141,7 @@ export function hasLoopbackBaseUrl(baseUrl: string): boolean {
 }
 
 function isConfigurationReady(p: WorkspaceProvider): boolean {
+  if (p.googleMode === "ai-studio-web") return p.aiStudioAuthState === "connected" || p.aiStudioAuthState === "checking" || p.hasAiStudioSession === true;
   return p.keyOptional === true ||
     p.authMode === "oauth" ||
     p.authMode === "forward" ||

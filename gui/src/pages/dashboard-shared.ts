@@ -54,6 +54,17 @@ export interface SettingsData {
   hostname: string;
   /** IANA zone of the machine running the proxy, used to render log timestamps (#725). */
   timeZone?: string;
+  server?: {
+    configured: {
+      hostname: string;
+      port: number;
+      tls: { certFile: string; keyFile: string; publicOrigin: string } | null;
+      aiStudioOrigin: string | null;
+    };
+    activeOrigin: string;
+    credentialConfigured: boolean;
+    restartRequired: boolean;
+  };
   startupHealth?: {
     status: "native" | "protected" | "at-risk";
     routingKind: "native" | "opencodex-local" | "custom-local" | "custom-remote" | "unknown";
@@ -120,7 +131,11 @@ export interface SidecarPatch {
   };
 }
 export interface ShadowCallData { enabled: boolean; model: string; sourceModels?: string[] }
-export interface UsageSummary30d { summary: { requests: number; totalTokens: number; coverageRatio: number } }
+export interface UsageSummary30d {
+  summary: { requests: number; totalTokens: number; coverageRatio: number };
+  /** Optional because older proxies return only the summary. */
+  days?: Array<{ date: string; requests: number; totalTokens: number }>;
+}
 export type UpdateChannel = "latest" | "preview";
 export type Installer = "npm" | "bun" | "source";
 export type UpdateJobStatus = "running" | "restarting" | "succeeded" | "failed";
@@ -465,14 +480,12 @@ export function useModalDialog(open: boolean, triggerRef: RefObject<HTMLButtonEl
 
   useEffect(() => {
     const dialog = dialogRef.current;
-    if (!dialog) return;
-
     if (open) {
-      if (!dialog.open) dialog.showModal();
+      if (dialog && !dialog.open) dialog.showModal();
       return;
     }
 
-    if (dialog.open) dialog.close();
+    if (dialog?.open) dialog.close();
     focusTriggerQuietly(triggerRef.current);
   }, [open, triggerRef]);
 

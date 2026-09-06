@@ -13,6 +13,7 @@ export function useProvidersFetch({
   setOauthStatus,
   notify,
   invalidateProviderQuotas,
+  setConfigLoadFailed,
   configCacheKey,
 }: {
   apiBase: string;
@@ -21,6 +22,8 @@ export function useProvidersFetch({
   setOauthProviders: React.Dispatch<React.SetStateAction<string[]>>;
   setOauthStatus: React.Dispatch<React.SetStateAction<Record<string, OAuthStatus>>>;
   notify: (msg: string, ok: boolean) => void;
+  /** Mirrors config fetch health so cached data can retain the page's inline retry affordance. */
+  setConfigLoadFailed?: (failed: boolean) => void;
   /** Bump the shell's quota revision; `force` adds `?refresh=1` to its next read. */
   invalidateProviderQuotas: (force?: boolean) => void;
   /** Session seed key for instant Providers shell paint (no secrets — hasApiKey flags only). */
@@ -37,13 +40,15 @@ export function useProvidersFetch({
       if (!data) throw new Error("config response missing");
       setConfig(data ?? null);
       if (configCacheKey && data) writeSessionListCache(configCacheKey, data);
+      setConfigLoadFailed?.(false);
       return "applied";
     } catch {
       if (request !== configRequest.current) return "superseded";
-      notify(t("prov.loadConfigFail"), false);
+      if (setConfigLoadFailed) setConfigLoadFailed(true);
+      else notify(t("prov.loadConfigFail"), false);
       return "failed";
     }
-  }, [apiBase, configCacheKey, notify, setConfig, t]);
+  }, [apiBase, configCacheKey, notify, setConfig, setConfigLoadFailed, t]);
 
   const fetchOauth = useCallback(async () => {
     try {

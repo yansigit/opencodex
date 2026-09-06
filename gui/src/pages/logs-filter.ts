@@ -4,18 +4,24 @@ import { logMatchesSurface } from "./logs-surface-filter";
 
 export type LogTimeWindow = "all" | "15m" | "1h" | "24h";
 export type LogStatusFilter = "all" | "success" | "errors";
+export type LogAgentKind = "all" | "main" | "subagent" | "internal" | "unknown";
 
 export interface LogFilterState {
   surface: LogSurfaceFilter;
   model: string;
   provider: string;
   status: LogStatusFilter;
+  /** Legacy persisted name retained across the v2.44 dashboard refresh. */
+  statusFilter?: LogStatusFilter;
   timeWindow: LogTimeWindow;
   minTokPerSec?: number;
   maxTokPerSec?: number;
   interceptedOnly: boolean;
+  /** Legacy persisted name retained across the v2.44 dashboard refresh. */
+  interceptedHelpersOnly?: boolean;
   conversationId: string;
   conversationQueryHash?: string;
+  agentKind: LogAgentKind;
 }
 
 export const DEFAULT_LOG_FILTER_STATE: LogFilterState = {
@@ -23,9 +29,12 @@ export const DEFAULT_LOG_FILTER_STATE: LogFilterState = {
   model: "",
   provider: "",
   status: "all",
+  statusFilter: "all",
   timeWindow: "all",
   interceptedOnly: false,
+  interceptedHelpersOnly: false,
   conversationId: "",
+  agentKind: "all",
 };
 
 export interface FilterableLogAttempt {
@@ -43,6 +52,7 @@ export interface FilterableLogEntry {
   conversationId?: string;
   shadowCallRewrittenFrom?: unknown;
   attempts?: unknown;
+  agentKind?: unknown;
   displayMetrics?: {
     tokPerSecond?: { kind: "value"; value: number } | { kind: "unavailable" };
   };
@@ -54,11 +64,18 @@ export function hasActiveLogFilters(filters: LogFilterState): boolean {
     || filters.model.trim() !== ""
     || filters.provider.trim() !== ""
     || filters.status !== "all"
+    || (filters.statusFilter !== undefined && filters.statusFilter !== "all")
     || filters.timeWindow !== "all"
     || filters.minTokPerSec !== undefined
     || filters.maxTokPerSec !== undefined
     || filters.interceptedOnly
-    || filters.conversationId.trim() !== "";
+    || filters.interceptedHelpersOnly === true
+    || filters.conversationId.trim() !== ""
+    || filters.agentKind !== "all";
+}
+
+function normalizedAgentKind(value: unknown): Exclude<LogAgentKind, "all" | "unknown"> | "unknown" {
+  return value === "main" || value === "subagent" || value === "internal" ? value : "unknown";
 }
 
 /** Safely retain only object-shaped failover attempts from untrusted log data. */
@@ -93,23 +110,28 @@ export function filterLogs<T extends FilterableLogEntry>(
   const modelQuery = filters.model.trim().toLowerCase();
   const providerQuery = filters.provider.trim().toLowerCase();
   const conversationQuery = filters.conversationId.trim();
+  const statusFilter = filters.statusFilter && filters.statusFilter !== "all"
+    ? filters.statusFilter
+    : filters.status;
+  const interceptedOnly = filters.interceptedOnly || filters.interceptedHelpersOnly === true;
   const since = timeThreshold(filters.timeWindow, now);
 
   return logs.filter(log => {
     if (!logMatchesSurface(log, filters.surface)) return false;
-    if (filters.interceptedOnly && typeof log.shadowCallRewrittenFrom !== "string") return false;
+    if (filters.agentKind !== "all" && normalizedAgentKind(log.agentKind) !== filters.agentKind) return false;
+    if (interceptedOnly && typeof log.shadowCallRewrittenFrom !== "string") return false;
     if (conversationQuery && !matchesLogConversationId(
       log.conversationId,
       conversationQuery,
       filters.conversationQueryHash,
     )) return false;
 
-    if (filters.status === "success"
+    if (statusFilter === "success"
       && (typeof log.status !== "number"
         || !Number.isInteger(log.status)
         || log.status < 200
         || log.status >= 300)) return false;
-    if (filters.status === "errors"
+    if (statusFilter === "errors"
       && (typeof log.status !== "number"
         || !Number.isInteger(log.status)
         || log.status < 400
@@ -119,11 +141,14 @@ export function filterLogs<T extends FilterableLogEntry>(
     // Model options represent complete identities from the current log snapshot. Match
     // selections exactly (case/whitespace-insensitive), while the standalone
     // logMatchesModelQuery helper retains its free-text substring semantics.
-    if (modelQuery && ![
-      normalized(log.model),
-      normalized(log.resolvedModel),
-      ...logAttempts.map(attempt => normalized(attempt.model)),
-    ].some(value => value === modelQuery)) return false;
+    if (modelQuery) {
+      const primaryMatches = [normalized(log.model), normalized(log.resolvedModel)]
+        .some(value => value === modelQuery);
+      const attemptMatches = logAttempts
+        .map(attempt => normalized(attempt.model))
+        .some(value => value === modelQuery || value?.endsWith(`-${modelQuery}`));
+      if (!primaryMatches && !attemptMatches) return false;
+    }
 
     if (providerQuery && ![
       normalized(log.provider),
