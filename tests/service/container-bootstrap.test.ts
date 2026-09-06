@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { readBoundedToken } from "../../docker/bootstrap-token";
@@ -153,7 +153,13 @@ describe("container deployment contract", () => {
 
 const snapshotDirs: string[] = [];
 const manifestPath = "src/generated/compatibility-version.json";
-const snapshotPaths = [...REQUIRED_COMPATIBILITY_FILES, "src/main.ts"];
+const snapshotPaths = [
+  ...REQUIRED_COMPATIBILITY_FILES,
+  "src/main.ts",
+  "gui/src/main.tsx",
+  "gui/public/logo.png",
+  "gui/vite.config.ts",
+];
 // Independent SHA-256 test vector for the bytes "abc", not computed by the verifier.
 const abcDigest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
@@ -188,9 +194,12 @@ describe("container compatibility snapshot validation", () => {
     expect(() => verifyCompatibilitySnapshot(root)).not.toThrow();
   });
 
-  test("runtime verification omits build-only authority bytes after the context verified them", () => {
+  test("runtime verification omits build-only authority and GUI inputs after the context verified them", () => {
     const { root } = compatibilitySnapshot();
     for (const path of [".dockerignore", "Dockerfile", "compose.yaml"]) unlinkSync(join(root, path));
+    rmSync(join(root, "gui"), { recursive: true });
+    mkdirSync(join(root, "gui/dist"), { recursive: true });
+    writeFileSync(join(root, "gui/dist/index.html"), "derived GUI");
     expect(() => verifyCompatibilitySnapshot(root, { runtime: true })).not.toThrow();
   });
 
@@ -221,6 +230,8 @@ describe("container compatibility snapshot validation", () => {
     ["src/untracked.ts", "Source file absent from compatibility manifest"],
     ["src/generated/untracked.json", "Source file absent from compatibility manifest"],
     ["docker/extra.ts", "Container authority file absent from compatibility manifest"],
+    ["gui/src/untracked.ts", "GUI build input absent from compatibility manifest"],
+    ["gui/public/untracked.svg", "GUI build input absent from compatibility manifest"],
   ] as const) {
     test(`rejects an extra inventoried file: ${path}`, () => {
       const { root } = compatibilitySnapshot();
@@ -291,7 +302,7 @@ describe("container compatibility snapshot validation", () => {
     });
   }
 
-  for (const path of ["src", "src/generated", "docker", "scripts"]) {
+  for (const path of ["src", "src/generated", "docker", "scripts", "gui", "gui/src", "gui/public"]) {
     test(`rejects a linked input directory: ${path}`, () => {
       const { root } = compatibilitySnapshot();
       const target = join(root, "linked-target");

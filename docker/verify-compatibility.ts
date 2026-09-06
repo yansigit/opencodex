@@ -13,11 +13,19 @@ const REQUIRED_COMPATIBILITY_FILES = [
   "docker/config.json",
   "docker/healthcheck.ts",
   "docker/verify-compatibility.ts",
+  "gui/bun.lock",
+  "gui/package.json",
   "package.json",
   "scripts/model-metadata.source.json",
 ];
 const MANIFEST_PATH = "src/generated/compatibility-version.json";
 const BUILD_CONTEXT_ONLY_FILES = new Set([".dockerignore", "Dockerfile", "compose.yaml"]);
+
+function isBuildContextOnly(path: string): boolean {
+  // The build stage verifies every tracked GUI input before Vite derives gui/dist.
+  // The runtime stage intentionally contains only that derived output, not its sources.
+  return BUILD_CONTEXT_ONLY_FILES.has(path) || path.startsWith("gui/");
+}
 
 interface ManifestRow {
   path: string;
@@ -45,6 +53,7 @@ function parseRows(raw: unknown): ManifestRow[] {
     if (!path || /[\\\0]/.test(path) || posix.normalize(path) !== path
       || path.split("/").some(part => !part || part === "." || part === "..")
       || (!path.startsWith("src/") && !path.startsWith("docker/")
+        && !path.startsWith("gui/")
         && !REQUIRED_COMPATIBILITY_FILES.includes(path))
       || path === MANIFEST_PATH) {
       throw new Error(`Invalid compatibility manifest path: ${JSON.stringify(path)}`);
@@ -96,6 +105,9 @@ export function verifyCompatibilitySnapshot(
   if (!rows.some(row => row.path.startsWith("src/"))) {
     throw new Error("Compatibility manifest contains no source files");
   }
+  if (!rows.some(row => row.path.startsWith("gui/"))) {
+    throw new Error("Compatibility manifest contains no GUI build inputs");
+  }
 
   // Inspect the full tree, including symlinks to files/directories not named in the manifest.
   for (const path of treeFiles(root, "src", "source")) {
@@ -108,8 +120,15 @@ export function verifyCompatibilitySnapshot(
       throw new Error(`Container authority file absent from compatibility manifest: ${JSON.stringify(path)}`);
     }
   }
+  if (!options.runtime) {
+    for (const path of treeFiles(root, "gui", "GUI build input")) {
+      if (!expected.has(path)) {
+        throw new Error(`GUI build input absent from compatibility manifest: ${JSON.stringify(path)}`);
+      }
+    }
+  }
   for (const row of rows) {
-    if (options.runtime && BUILD_CONTEXT_ONLY_FILES.has(row.path)) continue;
+    if (options.runtime && isBuildContextOnly(row.path)) continue;
     const bytes = readFileSync(regularFile(root, row.path));
     const actual = createHash("sha256").update(bytes).digest("hex");
     if (actual !== row.sha256) {
