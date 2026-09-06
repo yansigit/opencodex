@@ -20,6 +20,7 @@ import {
   readConfigDiagnostics,
   readPid,
   readRuntimePort,
+  replacePersistedConfig,
   removePid,
   removeRuntimePort,
   runtimeRole,
@@ -261,7 +262,7 @@ describe("one-time Grok Responses upgrade", () => {
     const fresh = loadConfig();
     fresh.port = 23456;
     fresh.providers.xai!.xaiResponsesDefaultVersion = 2;
-    saveConfig(fresh);
+    replacePersistedConfig(fresh);
     const upgraded = migrateStartupXaiResponses(stale);
     expect(upgraded.port).toBe(23456);
     expect(upgraded.providers.xai).toEqual(fresh.providers.xai);

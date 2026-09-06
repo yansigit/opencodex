@@ -17,7 +17,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
+import { getConfigPath, loadConfig, replacePersistedConfig, saveConfig } from "../../src/config";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import * as configStore from "../../src/config";
@@ -84,7 +84,7 @@ test.skipIf(!CAN_BIND)("startServer migrates old Grok Chat choices once and pres
       expect(resolveWireProtocolOverride("xai", model, upgraded.providers.xai!).adapter).toBe("openai-responses");
     }
     upgraded.providers.xai!.modelAdapters = { "grok-4.6": "openai-chat", "grok-4.5": "openai-chat" };
-    saveConfig(upgraded);
+    replacePersistedConfig(upgraded);
   } finally { await server.stop(true); }
   const restarted = startServer(0);
   try {

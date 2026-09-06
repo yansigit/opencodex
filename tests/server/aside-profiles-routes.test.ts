@@ -13,6 +13,7 @@ import type { OcxConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { inMemoryManagementPersistence } from "../helpers/management-auth";
 
 let root: string;
 let home: string;
@@ -63,11 +64,17 @@ async function api(pathname: string, method = "GET", body?: unknown) {
 }
 async function rawApi(pathname: string, method: string, body?: string) {
   const url = new URL(`http://127.0.0.1:10100${pathname}`);
+  const persistence = inMemoryManagementPersistence(config);
   const response = await handleManagementAPI(new Request(url, {
     method, headers: { Host: url.host, "content-type": "application/json" },
     ...(body === undefined ? {} : { body }),
   }), url, config, {
     saveConfigPreservingClaudeCode: value => { saved = structuredClone(value); },
+    mutatePersistedConfig: mutate => {
+      const outcome = persistence.mutatePersistedConfig(mutate);
+      if (outcome.status === "committed") saved = structuredClone(config);
+      return outcome;
+    },
     createManagementConvergeCodex: catalogConvergenceFactory(),
     refreshOwnedCatalogIntegrations: input => refreshOwnedCatalogIntegrations({ ...input, store, env, home }),
   });
