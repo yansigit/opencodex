@@ -3,6 +3,7 @@
 **/node_modules
 **/dist
 **/coverage
+**/.vite
 **/*.log
 **/*.log.*
 **/*.tgz

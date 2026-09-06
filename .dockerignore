@@ -18,8 +18,54 @@ scripts/**
 
 !gui/
 !gui/**
-gui/node_modules/
-gui/dist/
-gui/.vite/
 
+# Keep recursive credential, state, and generated-artifact exclusions after
+# the source allowlist above so nested local files cannot be re-admitted.
+**/node_modules
+**/dist
+**/coverage
+**/.vite
 **/*.log
+**/*.log.*
+**/*.tgz
+**/*.tar
+**/*.tar.gz
+**/*.zip
+
+# Negation patterns above admit the runtime source subtrees, so re-apply the
+# host credential and mutable-state boundary after every source inclusion.
+**/.git
+**/.tmp
+**/.worktrees
+**/.codex
+**/.opencode
+**/.opencodex
+**/.planning
+**/.agents
+**/.claude
+**/.cursor
+**/.windsurf
+**/.ssh
+**/.gnupg
+**/.aws
+**/.docker/config.json
+**/.config/containers/auth.json
+**/.config/gh/hosts.yml
+**/.env
+**/.env.*
+**/.npmrc
+**/.netrc
+**/.pypirc
+**/auth.json
+**/credentials.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/*.sqlite-*
+**/*.sqlite3-*
+**/*.db-*

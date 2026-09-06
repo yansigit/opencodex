@@ -58,6 +58,61 @@ describe("container deployment contract", () => {
       "!scripts/", "scripts/**", "!scripts/model-metadata.source.json",
     ]);
     expect(ignored).not.toContain("!scripts/**");
+    const lastSourceNegation = Math.max(
+      ignored.indexOf("!src/**"),
+      ignored.indexOf("!docker/**"),
+      ignored.indexOf("!gui/**"),
+    );
+    for (const sensitive of [
+      "**/node_modules",
+      "**/dist",
+      "**/coverage",
+      "**/.vite",
+      "**/*.log",
+      "**/*.log.*",
+      "**/*.tgz",
+      "**/*.tar",
+      "**/*.tar.gz",
+      "**/*.zip",
+      "**/.git",
+      "**/.tmp",
+      "**/.worktrees",
+      "**/.codex",
+      "**/.opencode",
+      "**/.opencodex",
+      "**/.planning",
+      "**/.agents",
+      "**/.claude",
+      "**/.cursor",
+      "**/.windsurf",
+      "**/.ssh",
+      "**/.gnupg",
+      "**/.aws",
+      "**/.docker/config.json",
+      "**/.config/containers/auth.json",
+      "**/.config/gh/hosts.yml",
+      "**/.env",
+      "**/.env.*",
+      "**/.npmrc",
+      "**/.netrc",
+      "**/.pypirc",
+      "**/auth.json",
+      "**/credentials.json",
+      "**/*.pem",
+      "**/*.key",
+      "**/*.p12",
+      "**/*.pfx",
+      "**/*.jks",
+      "**/*.sqlite",
+      "**/*.sqlite3",
+      "**/*.db",
+      "**/*.sqlite-*",
+      "**/*.sqlite3-*",
+      "**/*.db-*",
+    ]) {
+      expect(ignored).toContain(sensitive);
+      expect(ignored.indexOf(sensitive)).toBeGreaterThan(lastSourceNegation);
+    }
 
     const dockerfile = readFileSync(repoPath("Dockerfile"), "utf8");
     const runtime = dockerfile.split(" AS runtime")[1];
