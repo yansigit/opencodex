@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, readdirSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scanStorage, type StorageBucket, type StorageReport } from "../../src/storage/scanner";
@@ -46,7 +46,7 @@ function buildFixtureHome(home: string = mkdtempSync(join(tmpdir(), "ocx-storage
   // Checkpoint leaves empty -wal and a -shm behind on some Bun/SQLite combos;
   // remove them so the fixture matches the "clean quit" state the test asserts.
   for (const suf of ["-wal", "-shm"]) {
-    try { unlinkSync(join(home, `state_5.sqlite${suf}`)); } catch {}
+    rmSync(join(home, `state_5.sqlite${suf}`), { force: true });
   }
   // Older versioned DB + stale WAL sibling: must count toward bucket size, but row
   // counts must come from the newest suffix (state_5), never this one.
@@ -60,7 +60,7 @@ function buildFixtureHome(home: string = mkdtempSync(join(tmpdir(), "ocx-storage
  logs.exec("PRAGMA wal_checkpoint(TRUNCATE)");
  logs.close();
   for (const suf of ["-wal", "-shm"]) {
-    try { unlinkSync(join(home, `logs_2.sqlite${suf}`)); } catch {}
+    rmSync(join(home, `logs_2.sqlite${suf}`), { force: true });
   }
 
   mkdirSync(join(home, "attachments"));

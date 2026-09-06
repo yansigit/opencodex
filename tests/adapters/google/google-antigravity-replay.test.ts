@@ -462,8 +462,9 @@ describe("antigravity replay fixed-size key identities", () => {
   });
 
   test("sparse arrays and undefined elements canonicalize differently", () => {
-    // eslint-disable-next-line no-sparse-arrays
-    const sparse = [1, , 3];
+    const sparse = Array<number | undefined>(3);
+    sparse[0] = 1;
+    sparse[2] = 3;
     const explicit = [1, undefined, 3];
     expect(antigravityFunctionCallKeyForTests("f", { a: sparse }))
       .not.toBe(antigravityFunctionCallKeyForTests("f", { a: explicit }));

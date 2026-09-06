@@ -135,7 +135,7 @@ describe("Grok fence lifecycle wiring", () => {
   test("a refused proxy stop reports WHY, not just that it failed", () => {
     const stopFn = sliceFn(CLI_SOURCE, "async function handleStop(", "async function handleUninstall(");
     // stopProxy throws the ownership refusal ("run the stop from that home"). A bare
-    // `catch {}` on these call sites strands the operator on a generic failure line, whose
+    // A bare catch block on these call sites strands the operator on a generic failure line, whose
     // natural next move is a manual kill — the teardown the 409 guard exists to prevent.
     const bareCatchAfterStopProxy = /await stopProxy\([^)]*\);[\s\S]{0,400}?\}\s*catch\s*\{/;
     expect(stopFn).not.toMatch(bareCatchAfterStopProxy);

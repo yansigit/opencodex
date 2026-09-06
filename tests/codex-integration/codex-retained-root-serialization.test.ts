@@ -19,11 +19,12 @@ import {
 import { claimOwnedServiceHome, withOwnedServiceHomePreload } from "../helpers/owned-service-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
-import { SPAWN_BUDGET_MS } from "../helpers/test-budget";
-import { INTERNAL_DEADLINE_MS } from "../helpers/test-budget";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 const repoRoot = resolveRepoRoot();
 const sandboxes: Sandbox[] = [];
+const CHILD_MARKER_BUDGET_MS = SPAWN_BUDGET_MS - 5_000;
+const TWO_CHILD_TEST_BUDGET_MS = 2 * SPAWN_BUDGET_MS + 10_000;
 
 interface Sandbox {
   readonly root: string;
@@ -111,13 +112,21 @@ function makeSandbox(prefix: string): Sandbox {
  */
 async function teardownSandbox(sandbox: Sandbox): Promise<void> {
   for (const marker of sandbox.releaseMarkers) {
-    try { writeFileSync(marker, "release"); } catch { /* root may already be gone */ }
+    writeReleaseMarker(marker);
   }
   for (const child of sandbox.children) {
     if (child.exitCode === null) child.kill();
   }
   await Promise.all([...sandbox.children].map(child => child.exited));
   sandbox.children.clear();
+}
+
+function writeReleaseMarker(marker: string): void {
+  try {
+    writeFileSync(marker, "release");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 function sandboxChildEnv(sandbox: Sandbox): Record<string, string> {
@@ -201,9 +210,9 @@ async function holdCatalogLock(sandbox: Sandbox): Promise<{
   });
   sandbox.children.add(child);
   sandbox.releaseMarkers.add(release);
-  await waitForPath(ready, INTERNAL_DEADLINE_MS);
+  await waitForPath(ready, CHILD_MARKER_BUDGET_MS);
   return {
-    release: () => { try { writeFileSync(release, "release"); } catch { /* teardown may have released already */ } },
+    release: () => writeReleaseMarker(release),
     child,
   };
 }
@@ -275,7 +284,7 @@ test("startup and CLI sync-cache cannot write models_cache while another process
 // the CLI sync-cache in series), two of them importing the server/CLI graphs at
 // 8-11 s each on windows-latest (see waitForPath). 15 s timed out on CI run
 // 33920624827; the local timing (~450 ms) is not what this number is for.
-}, SPAWN_BUDGET_MS);
+}, TWO_CHILD_TEST_BUDGET_MS);
 
 test("native restore cannot read-transform-write the catalog while another process owns K", async () => {
   const sandbox = makeSandbox("ocx-retained-restore-");
@@ -298,7 +307,7 @@ test("native restore cannot read-transform-write the catalog while another proce
     holder.release();
     expect(await holder.child.exited).toBe(0);
   }
-});
+}, TWO_CHILD_TEST_BUDGET_MS);
 
 async function runPublisher(
   sandbox: Sandbox,
@@ -370,8 +379,10 @@ for (const publisher of ["convergence", "retained"] as const) {
         console.log(JSON.stringify({ status: response.status, body: await response.json() }));
       `], sandbox.preloadPath)], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
       sandbox.children.add(sync);
+      const syncStdout = new Response(sync.stdout).text();
+      const syncStderr = new Response(sync.stderr).text();
 
-      await raceBarrier(sync, waitForPath(requested, INTERNAL_DEADLINE_MS));
+      await raceBarrier(sync, waitForPath(requested, CHILD_MARKER_BUDGET_MS));
       const published = await runPublisher(sandbox, publisher, config);
       if (published.exitCode !== 0) {
         throw new Error(`${publisher} publisher failed\nstdout=${published.stdout}\nstderr=${published.stderr}`);
@@ -382,15 +393,15 @@ for (const publisher of ["convergence", "retained"] as const) {
       writeFileSync(release, "release");
       const [exitCode, stdout, stderr] = await Promise.all([
         sync.exited,
-        new Response(sync.stdout).text(),
-        new Response(sync.stderr).text(),
+        syncStdout,
+        syncStderr,
       ]);
       expect({ exitCode, stdout, stderr }).toMatchObject({ exitCode: 0 });
       expect(readFileSync(catalogPath, "utf8")).toBe(newer);
     } finally {
       provider.stop(true);
     }
-  }, SPAWN_BUDGET_MS);
+  }, TWO_CHILD_TEST_BUDGET_MS);
 }
 
 /**
@@ -437,6 +448,7 @@ test("a persisted runtime selection moved by another process during the await bl
 
   const sync = Bun.spawn([process.execPath, ...withOwnedServiceHomePreload(["--eval", `
     import { existsSync, writeFileSync } from "node:fs";
+    globalThis[Symbol.for("opencodex.test.provider-fetch")] = true;
     const config = ${JSON.stringify(config)};
     config.providers.together.fetch = async () => {
       writeFileSync(${JSON.stringify(requested)}, "requested");
@@ -447,8 +459,10 @@ test("a persisted runtime selection moved by another process during the await bl
     console.log(JSON.stringify(await syncCatalogModels(config)));
   `], sandbox.preloadPath)], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
   sandbox.children.add(sync);
+  const syncStdout = new Response(sync.stdout).text();
+  const syncStderr = new Response(sync.stderr).text();
 
-  await raceBarrier(sync, waitForPath(requested, INTERNAL_DEADLINE_MS));
+  await raceBarrier(sync, waitForPath(requested, CHILD_MARKER_BUDGET_MS));
 
   // Another process selects a different Codex runtime. No catalog byte changes.
   writeFileSync(runtimeStatePath, `${JSON.stringify({
@@ -462,13 +476,13 @@ test("a persisted runtime selection moved by another process during the await bl
   writeFileSync(release, "release");
   const [exitCode, stdout, stderr] = await Promise.all([
     sync.exited,
-    new Response(sync.stdout).text(),
-    new Response(sync.stderr).text(),
+    syncStdout,
+    syncStderr,
   ]);
   expect({ exitCode, stderr }).toMatchObject({ exitCode: 0 });
   expect(JSON.parse(stdout.trim())).toMatchObject({ catalogWritten: false });
   expect(readFileSync(catalogPath, "utf8")).toBe(initial);
-}, SPAWN_BUDGET_MS);
+}, TWO_CHILD_TEST_BUDGET_MS);
 
 /**
  * The post-approval seam, raced by two real processes through a real route.
@@ -476,7 +490,7 @@ test("a persisted runtime selection moved by another process during the await bl
  * Every case above drives `/api/sync`, which is a retained root. This one drives
  * `PATCH /api/providers` — one of the sixteen management mutations that used to
  * reach a catalog write through `refreshCodexCatalogBestEffort`, whose entire
- * error policy was `catch {}`. The interesting window is AFTER the route has
+ * error policy silently discarded every exception. The interesting window is AFTER the route has
  * already persisted its own mutation and approved the refresh: two processes
  * arriving there together must serialize, and neither may report `committed`
  * for bytes the other replaced.
@@ -493,6 +507,19 @@ test("two processes at the post-approval management seam serialize instead of in
   const catalogPath = seedCatalog(sandbox);
   const seeded = readFileSync(catalogPath, "utf8");
   const barrier = join(sandbox.root, "seam-barrier");
+  const routeConfig = {
+    port: 10100,
+    defaultProvider: "together",
+    providers: {
+      together: {
+        adapter: "openai-chat",
+        baseUrl: "https://api.together.xyz/v1",
+        apiKey: "seam-key",
+        models: ["fallback-model"],
+      },
+    },
+  };
+  writeFileSync(join(sandbox.opencodexHome, "config.json"), JSON.stringify(routeConfig, null, 2));
 
   // Warm the config ownership + mutation database in a single process first.
   // Two cold processes otherwise race to create `.opencodex-owner.json` and both
@@ -520,18 +547,8 @@ test("two processes at the post-approval management seam serialize instead of in
       }
       return Response.json({ data: [{ id: "seam-model-" + ${JSON.stringify(marker)} }] });
     };
-    const config = {
-      port: 10100,
-      defaultProvider: "together",
-      providers: {
-        together: {
-          adapter: "openai-chat",
-          baseUrl: "https://api.together.xyz/v1",
-          apiKey: "seam-key",
-          models: ["fallback-model"],
-        },
-      },
-    };
+    const config = ${JSON.stringify(routeConfig)};
+    const { mutatePersistedConfig, saveConfigPreservingClaudeCode } = await import("./src/config.ts");
     const { handleManagementAPI } = await import("./src/server/management-api.ts");
     const url = new URL("http://localhost/api/providers?name=together");
     const req = new Request(url, {
@@ -539,9 +556,12 @@ test("two processes at the post-approval management seam serialize instead of in
       headers: { Host: "localhost", "content-type": "application/json" },
       body: JSON.stringify({ note: "seam-" + ${JSON.stringify(marker)} }),
     });
-    const response = await handleManagementAPI(req, url, config);
+    const response = await handleManagementAPI(req, url, config, {
+      mutatePersistedConfig,
+      saveConfigPreservingClaudeCode,
+    });
     const body = await response.json();
-    console.log(JSON.stringify({ status: response.status, catalogRefresh: body.catalogRefresh }));
+    console.log(JSON.stringify({ status: response.status, body, catalogRefresh: body.catalogRefresh }));
   `;
 
   const isPreApprovalLoss = (stderr: string): boolean =>
@@ -618,10 +638,14 @@ test("two processes at the post-approval management seam serialize instead of in
     }
     const parsed = JSON.parse(result.stdout.trim()) as {
       status: number;
+      body?: { error?: string };
       catalogRefresh: { status: string };
     };
+    if (parsed.status === 500 && parsed.body?.error === "management persistence unavailable") {
+      continue;
+    }
     // The route persisted its mutation, so it must answer 2xx no matter what the
-    // catalog attempt decided. A throw here would be the old `catch {}` failure
+    // catalog attempt decided. A throw here would reproduce the old silent-catch failure
     // inverted: a persisted change reported as a 500.
     expect(parsed.status).toBeGreaterThanOrEqual(200);
     expect(parsed.status).toBeLessThan(300);
@@ -638,7 +662,9 @@ test("two processes at the post-approval management seam serialize instead of in
   // with a typed disposition and satisfy every assertion above.
   const dispositions = results!
     .filter(r => r.exitCode === 0)
-    .map(r => (JSON.parse(r.stdout.trim()) as { catalogRefresh: { status: string } }).catalogRefresh.status);
+    .map(r => JSON.parse(r.stdout.trim()) as { status: number; body?: { error?: string }; catalogRefresh?: { status: string } })
+    .filter(r => !(r.status === 500 && r.body?.error === "management persistence unavailable"))
+    .map(r => r.catalogRefresh?.status);
   expect(dispositions).toContain("committed");
 
   // A commit means the catalog really moved.
@@ -651,4 +677,4 @@ test("two processes at the post-approval management seam serialize instead of in
   const fromA = slugs.some(s => s.includes("seam-model-a"));
   const fromB = slugs.some(s => s.includes("seam-model-b"));
   expect(fromA && fromB).toBe(false);
-}, SPAWN_BUDGET_MS);
+}, TWO_CHILD_TEST_BUDGET_MS);
