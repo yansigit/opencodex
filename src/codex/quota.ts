@@ -362,7 +362,7 @@ function mergeAccountQuota(
  * applyAccountQuotaFromUpstreamHeaders runs it once per pooled response. A static import
  * would load the observer, its config resolution, and its sink registry into every install,
  * including installs that never enable the feature — the same failure mode
- * tests/core-lab-boundary.test.ts exists to prevent for src/lab/.
+ * tests/lab/core-lab-boundary.test.ts exists to prevent for src/lab/.
  *
  * The previous snapshot is deliberately NOT passed. The observer keeps its own persisted
  * baseline (see swapLastObservedWindows), so every committed write must reach it — including
@@ -736,7 +736,14 @@ function filterMainPolicyMonthlyQuota(
 export function parseMainPolicyUsageQuota(data: WhamUsageResponse): Omit<StoredAccountQuota, "updatedAt"> | null {
   const windows = [data.rate_limit?.primary_window, data.rate_limit?.secondary_window, data.rate_limit?.tertiary_window];
   if (windows.some(window => isInvalidPolicyUsagePercent(window?.used_percent))) return null;
-  return filterMainPolicyMonthlyQuota(parseUsageQuota(data), isThirtyDayOnlyCodexPlan(data.plan_type));
+  const primary = data.rate_limit?.primary_window;
+  // Go/Free normally use monthly quota, so a tertiary-only payload may be their only
+  // governing reading. Once upstream explicitly declares a monthly primary, however, its
+  // missing/unreadable usage is unknown evidence: the tertiary window is supplementary and
+  // must not stand in for the unreadable primary or release a retained block.
+  const monthlyOnlyFallback = isThirtyDayOnlyCodexPlan(data.plan_type)
+    && !isExplicitMonthlyWindow(primary);
+  return filterMainPolicyMonthlyQuota(parseUsageQuota(data), monthlyOnlyFallback);
 }
 
 export function parseUsageQuota(data: WhamUsageResponse): Omit<StoredAccountQuota, "updatedAt"> | null {
@@ -778,6 +785,8 @@ export function parseUsageQuota(data: WhamUsageResponse): Omit<StoredAccountQuot
   const primaryIsShort = isExplicitShortWindow(primaryWindow);
   const weeklyCandidatePercent = primaryIsShort ? undefined : primaryPercent;
   const weeklyCandidateResetAt = primaryIsShort ? undefined : primaryResetAt;
+  // Keep the burst reading instead of dropping it on the floor: it is a real limit, and
+  // the account is blocked when it fills even though the weekly window is fine (#1791).
   // Retain the declared burst tuple even when its usage is unknown. Its shape selects
   // the short-window policy; a missing reading is not permission to fall back to weekly.
   if (primaryIsShort) {

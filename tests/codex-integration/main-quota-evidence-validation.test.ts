@@ -117,7 +117,9 @@ describe("raw policy evidence validation", () => {
     data.rate_limit!.primary_window = { limit_window_seconds: 2_592_000 };
     expect(parseMainPolicyUsageQuota(data)).toBeNull();
     data.rate_limit!.primary_window = { used_percent: 0, limit_window_seconds: 18_000 };
-    expect(parseMainPolicyUsageQuota(data)).toEqual({ shortPercent: 0, shortWindowSeconds: 18_000 });
+    expect(parseMainPolicyUsageQuota(data)).toEqual({
+      shortPercent: 0, fiveHourPercent: 0, shortWindowSeconds: 18_000,
+    });
   });
 
   test.each(["go", "free", " Go ", "FREE"])("%s monthly-only plan retains monthly evidence without fabricating primary provenance", plan => {
@@ -126,6 +128,19 @@ describe("raw policy evidence validation", () => {
     } });
     expect(quota).toEqual({ monthlyPercent: 99, monthlyResetAt: 2_000_000_000 });
     expect(quota?.monthlyIsPrimaryWindow).toBeUndefined();
+  });
+
+  test.each(["go", "free"])("%s does not promote tertiary usage over an unreadable declared monthly primary", plan => {
+    for (const usedPercent of [undefined, null, "", "unreadable"] as const) {
+      const data = { plan_type: plan, rate_limit: {
+        primary_window: { used_percent: usedPercent, limit_window_seconds: 2_592_000 },
+        tertiary_window: { used_percent: 0, reset_at: 2_000_000_000 },
+      } } as WhamUsageResponse;
+      // The ordinary display cache may retain the tertiary bar, but it is not governing
+      // evidence for the main-account admission policy.
+      expect(parseUsageQuota(data)).toEqual({ monthlyPercent: 0, monthlyResetAt: 2_000_000_000 });
+      expect(parseMainPolicyUsageQuota(data)).toBeNull();
+    }
   });
 
   test("null policy evidence preserves only the matching owner and untagged writes invalidate", () => {

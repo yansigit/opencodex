@@ -224,6 +224,37 @@ describe("declared short-window producer evidence", () => {
     }
   }
 
+  test.each(["go", "free"])("owned WHAM %s requires a fresh declared monthly-primary reading to unlock", async plan => {
+    const aclOk = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+    setIcaclsRunnerForTests(() => aclOk);
+    setAsyncIcaclsRunnerForTests(async () => aclOk);
+    writeFileSync(join(testDir, "auth.json"), JSON.stringify({ tokens: {
+      access_token: "fixture-main-token", account_id: "fixture-main-a",
+    } }));
+    let call = 0;
+    globalThis.fetch = Object.assign(async () => {
+      call += 1;
+      return Response.json({ plan_type: plan, rate_limit: {
+        primary_window: {
+          limit_window_seconds: 2_592_000,
+          ...(call === 1 ? { used_percent: 99 } : call === 3 ? { used_percent: 0 } : {}),
+        },
+        ...(call === 2 ? { tertiary_window: { used_percent: 0 } } : {}),
+      } });
+    }, { preconnect: previousFetch.preconnect });
+
+    const enabled = { codexMainAccountHardLock: true };
+    await fetchMainAccountInfo(true);
+    expect(getMainAccountHardLockStatus(enabled).state).toBe("blocked");
+    const retained = getMainPolicyQuota();
+    await fetchMainAccountInfo(true);
+    expect(getAccountQuota(MAIN)?.monthlyPercent).toBe(0);
+    expect(getMainPolicyQuota()).toEqual(retained);
+    expect(getMainAccountHardLockStatus(enabled).state).toBe("blocked");
+    await fetchMainAccountInfo(true);
+    expect(getMainAccountHardLockStatus(enabled).state).toBe("ready");
+  });
+
   test.each([0, "0", 98.99, "98.99", 99, "99", 100, "100"])("owned WHAM and headers accept valid boundary %s", async value => {
     const aclOk = { success: true, exitCode: 0, timedOut: false, stdout: "" };
     setIcaclsRunnerForTests(() => aclOk);
@@ -309,9 +340,10 @@ describe("declared short-window producer evidence", () => {
         await fetchMainAccountInfo(true);
         expect(calls).toBe(4);
         expect(getAccountQuota(MAIN)).toEqual({ weeklyPercent: 99, shortWindowSeconds: 3_600,
-          shortResetAt: 4_000_000_000, updatedAt: observationTime });
-        expect(getMainPolicyQuota()).toEqual({ weeklyPercent: 99, shortPercent: 99, shortWindowSeconds: 18_000,
-          shortResetAt: 3_000_000_000, shortObservedAt: firstShortObservedAt, updatedAt: observationTime });
+          shortResetAt: 4_000_000_000, fiveHourResetAt: 4_000_000_000, updatedAt: observationTime });
+        expect(getMainPolicyQuota()).toEqual({ weeklyPercent: 99, shortPercent: 99, fiveHourPercent: 99,
+          shortWindowSeconds: 18_000, shortResetAt: 3_000_000_000, fiveHourResetAt: 3_000_000_000,
+          shortObservedAt: firstShortObservedAt, updatedAt: observationTime });
         const enabled = { codexMainAccountHardLock: true };
         expect(getMainAccountHardLockStatus(enabled, 3_000_000_000_000 - 1).state).toBe("blocked");
         expect(getMainAccountHardLockStatus(enabled, 3_000_000_000_000)).toEqual({ enabled: true, state: "blocked" });
@@ -361,8 +393,9 @@ describe("declared short-window producer evidence", () => {
       applyAccountQuotaFromUpstreamHeaders(MAIN, headers, undefined, writer);
       expect(getAccountQuota(MAIN)).toEqual({ weeklyPercent: 99, shortWindowSeconds: 3_600,
         shortResetAt: 4_000_000_000, updatedAt: observationTime });
-      expect(getMainPolicyQuota()).toEqual({ weeklyPercent: 99, shortPercent: 99, shortWindowSeconds: 18_000,
-        shortResetAt: 3_000_000_000, shortObservedAt: firstShortObservedAt, updatedAt: observationTime });
+      expect(getMainPolicyQuota()).toEqual({ weeklyPercent: 99, shortPercent: 99, fiveHourPercent: 99,
+        shortWindowSeconds: 18_000, shortResetAt: 3_000_000_000, fiveHourResetAt: 3_000_000_000,
+        shortObservedAt: firstShortObservedAt, updatedAt: observationTime });
       const enabled = { codexMainAccountHardLock: true };
       expect(getMainAccountHardLockStatus(enabled, 3_000_000_000_000 - 1).state).toBe("blocked");
       expect(getMainAccountHardLockStatus(enabled, 3_000_000_000_000)).toEqual({ enabled: true, state: "blocked" });
