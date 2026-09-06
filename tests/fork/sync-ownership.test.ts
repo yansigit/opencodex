@@ -43,6 +43,7 @@ describe("fork sync ownership", () => {
       name: "@yansigit/opencodex",
       version: "2.31.0",
       scripts: { forkOnly: "keep out", shared: "fork value" },
+      files: ["bin", "src", "scripts/benchmark-claude-tokens.ts"],
       forkOnlyTopLevel: { enabled: true },
       repository: { url: "https://github.com/yansigit/opencodex" },
     });
@@ -52,6 +53,7 @@ describe("fork sync ownership", () => {
       description: "upstream release",
       scripts: { start: "bun src/index.ts", shared: "upstream value" },
       dependencies: { zod: "4.4.3" },
+      files: ["bin", "src"],
     });
 
     expect(JSON.parse(mergePackageJson(ours, theirs))).toEqual({
@@ -60,6 +62,7 @@ describe("fork sync ownership", () => {
       description: "upstream release",
       scripts: { start: "bun src/index.ts", shared: "upstream value" },
       dependencies: { zod: "4.4.3" },
+      files: ["bin", "src", "scripts/benchmark-claude-tokens.ts"],
       forkOnlyTopLevel: { enabled: true },
       repository: { url: "https://github.com/yansigit/opencodex" },
     });

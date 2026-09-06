@@ -161,11 +161,13 @@ the `origin/dev` worktree, merges `vendor/main`, applies only named deterministi
 recipes, pushes a conflict-free sync branch, and opens or
 updates a draft PR.
 
-For a conflict handoff, recreate the sync branch from current `origin/dev`,
-merge `origin/vendor/main`, and read `docs/fork/OWNED.md` before resolving
-conflicts. For a preservation handoff, continue the published clean-merge
-branch and complete its candidate decisions. The Action never pushes a
-conflicted branch. For
+For either a conflict or preservation handoff, fix the underlying content or
+preservation decisions on `dev`, then generate a new successor from that exact
+trusted tip. Never continue, edit, or push to a published candidate branch.
+For a conflict handoff, recreate the successor locally from current
+`origin/dev`, merge `origin/vendor/main`, and read `docs/fork/OWNED.md` before
+resolving conflicts, but publish only after the result and attestation are
+complete. The Action never pushes a conflicted branch. For
 `history-diverged`, use the disconnected `run/dev` rebuild only.
 Replay `fork:` commits on `origin/dev` or feature patches only when they are not already contained,
 using `scripts/fork/sync/contained.ts` or

@@ -13,11 +13,16 @@ const FORK_BUGS = {
 // repository invoke them by name. Dropping one during an upstream sync makes the
 // resulting branch deterministically fail before any substantive CI can run.
 const FORK_SCRIPT_KEYS = [
+  "audit:high",
+  "benchmark:claude-tokens",
+  "certify:claude",
   "test:container",
   "prepush",
   "check:hygiene",
+  "check:workflow-policy",
   "lint:workflows",
 ] as const;
+const FORK_PACKAGE_FILES = ["scripts/benchmark-claude-tokens.ts"] as const;
 
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
@@ -42,6 +47,10 @@ export function mergePackageJson(ours: string, theirs: string): string {
   for (const key of FORK_SCRIPT_KEYS) {
     if (currentScripts[key] !== undefined) scripts[key] = currentScripts[key];
   }
+  const files = [...new Set([
+    ...((upstream.files as string[] | undefined) ?? []),
+    ...FORK_PACKAGE_FILES,
+  ])];
 
   return `${JSON.stringify({
     ...current,
@@ -49,6 +58,7 @@ export function mergePackageJson(ours: string, theirs: string): string {
     name: FORK_PACKAGE_NAME,
     version,
     scripts,
+    files,
     ...(current.devDependencies || upstream.devDependencies ? { devDependencies: {
       ...(current.devDependencies as Record<string, string> | undefined),
       ...(upstream.devDependencies as Record<string, string> | undefined),

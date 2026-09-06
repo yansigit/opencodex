@@ -326,8 +326,10 @@ export async function runCli(
       }
       : event;
     const result = await prepareSync(preparedEvent, { runner });
-    // Attempt overlap analysis for provenance; fail-closed on error or candidates.
-    try {
+    // A conflict handoff has no merge result to attest. Keep its unresolved list
+    // limited to Git's actual conflict paths; overlap candidates belong to the
+    // eventual resolved successor, not to the aborted merge.
+    if (result.status === "merged") try {
       const bases = (await runOk(runner, ["merge-base", "--all", forkSha, event.vendorMainSha]))
         .split(/\r?\n/).filter(Boolean);
       if (bases.length !== 1) throw new Error("sync preservation requires one merge base");
