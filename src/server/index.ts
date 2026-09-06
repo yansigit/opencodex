@@ -597,6 +597,12 @@ function withRequestLogId(response: Response, requestId: string): Response {
   });
 }
 
+export function remoteDashboardStartupHint(hostname: string | undefined): string | null {
+  return isLoopbackHostname(hostname)
+    ? "   Remote dashboard → SSH tunnel guide: https://opencodex.me/reference/configuration/server/#ssh-port-forwarding"
+    : null;
+}
+
 export interface StartServerDeps {
   /** Test-only seam; production always initializes its own management credential state. */
   managementAuthState?: ManagementAuthState;
