@@ -84,12 +84,12 @@ describe("claude inbound translation", () => {
     expect(tools[1]).toEqual({ type: "web_search" });
 
     const input = body.input as Record<string, any>[];
-    // user text, assistant text (thinking dropped), function_call, function_call_output, user tail
-    expect(input.map(i => i.type ?? i.role)).toEqual(["message", "message", "function_call", "function_call_output", "message"]);
-    expect(input[1].content).toEqual([{ type: "output_text", text: "Reading it now." }]);
-    expect(input[2]).toMatchObject({ call_id: "toolu_01", name: "Read", arguments: JSON.stringify({ file_path: "/README.md" }) });
-    expect(input[3]).toMatchObject({ call_id: "toolu_01", output: [{ type: "input_text", text: "# hello" }] });
-    const tail = input[4].content as Record<string, any>[];
+    // user text, reasoning, assistant text, function_call, function_call_output, user tail
+    expect(input.map(i => i.type ?? i.role)).toEqual(["message", "reasoning", "message", "function_call", "function_call_output", "message"]);
+    expect(input[2].content).toEqual([{ type: "output_text", text: "Reading it now." }]);
+    expect(input[3]).toMatchObject({ call_id: "toolu_01", name: "Read", arguments: JSON.stringify({ file_path: "/README.md" }) });
+    expect(input[4]).toMatchObject({ call_id: "toolu_01", output: [{ type: "input_text", text: "# hello" }] });
+    const tail = input[5].content as Record<string, any>[];
     expect(tail[0]).toEqual({ type: "input_text", text: "now summarize" });
     expect(tail[1]).toEqual({ type: "input_image", image_url: "data:image/png;base64,aWc=" });
   });
