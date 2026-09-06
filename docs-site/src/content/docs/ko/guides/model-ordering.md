@@ -109,7 +109,7 @@ account selector가 있으면 bare native 선택이 selector-qualified 그룹으
 선두 모델 순서를 바꾸는 지원 수단은 `subagentModels`를 재정렬하는 것입니다. 대시보드의
 **Sub-agents** 페이지에서는 bare native와 routed id의 순서를 바꿀 수 있습니다. 설정과
 `ocx agent subagents set`은 exact account-qualified `<selector>/<native-openai-model>` id도
-지원하지만, 대시보드는 이러한 id를 제공하지 않으며 목록을 저장할 때도 보존하지 않습니다. 설정 id는
+지원합니다. 대시보드는 이미 저장된 id를 현재 사용할 수 없어도 보존합니다. 설정 id는
 최대 5개만 사용하세요. account selector가 있으면 bare native 하나가 여러 selector-qualified 행으로
 확장될 수 있으므로 설정 항목과 노출 행이 항상 일대일로 대응하지는 않습니다.
 
@@ -153,3 +153,11 @@ V1에는 OpenCodex의 선호 후보 목록을 주입하지 않습니다. V2는 �
 
 `disabledModels`와 각 공급자의 `selectedModels`는 노출 여부를 정하는 필드입니다.
 별도의 `modelOrder`, `providerOrder`, priority map 설정은 없습니다.
+
+## 대시보드 정렬 프리셋
+
+**Models**에서 기본값·모델 이름순·프로바이더별·사용량순 스냅샷을 선택한 뒤 **순서 적용**을 누르세요. 현재 표시 가능한 라우팅 ID와 `modelPickerOrderMode`(`alphabetical`, `provider`, `most-used`)를 저장합니다. 사용량순은 적용 시 보관된 전체 사용량을 한 번 읽습니다. 다시 열거나 모델이 추가·삭제되어도 자동 재계산하지 않습니다. 기존 사용자 지정·네이티브 전체 순서는 명시적으로 적용하기 전까지 유지됩니다. 기본값은 사용 가능한 모델이 없어도 두 피커 필드를 지웁니다.
+
+`GET/PUT /api/subagent-models`의 `chosen`·`available`은 비활성·누락된 저장 roster도 보존하고, `pickerAvailable`은 선택 가능한 라우팅 ID만 제공합니다. Models는 `pickerOrder`·`pickerOrderMode`만 보내며 `models`를 보내지 않습니다. Roster만 저장하면 피커 설정은 유지됩니다. 잘못된 요청이나 저장 실패는 이전 상태를 보존합니다.
+
+라우팅 전용 프리셋은 featured·네이티브 우선순위 구간을 유지하며 Codex 카탈로그와 Claude 검색 목록의 라우팅 그룹에 적용됩니다. Claude 네이티브 선두 그룹과 명시적 Desktop 프로필·alias 소유권은 유지됩니다. OpenCodex 가이드 순위와 fallback 설정은 유지되지만 네이티브 Codex에 표시되는 상위 5개·권장 기본 모델은 달라질 수 있습니다. 저장은 클라이언트를 재시작하지 않으며 카탈로그 갱신이 미완료이면 나중에 다시 열어야 할 수 있습니다.

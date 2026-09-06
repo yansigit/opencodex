@@ -46,6 +46,7 @@ import {
   type TranslatorBudget,
 } from "../lib/translator-budget";
 import { handleNativeChatCompletions, isNativeChatRouteEligible } from "./chat-native";
+import { jsonCompletionSse } from "./chat-native-sse";
 import { parseRequestEffortRowId } from "./effort-row";
 import { parseSyntheticRowId } from "./fast-row";
 import { isCanonicalOpenAiForwardProvider } from "../providers/openai-tiers";
@@ -79,6 +80,14 @@ export async function handleChatCompletions(
     );
   } catch (error) {
     translatorBudget.dispose();
+    if (isTranslatorBudgetExceededError(error)) {
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 502, { closeReason: "non_stream" });
+      return chatCompletionsErrorResponse(502, "upstream translation buffer exceeded the safe limit", "upstream_error", "translation_buffer_limit");
+    }
+    if (isChatCompletionsStreamError(error)) {
+      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, error.status, { closeReason: "non_stream" });
+      return chatCompletionsErrorResponse(error.status, error.message, error.type, error.code);
+    }
     throw error;
   }
 }
@@ -277,7 +286,7 @@ async function handleChatCompletionsWithBudget(
   });
 
   let nativeLogged = false;
-  const finalizeNativeLog = (status: number, meta: { terminalStatus?: RequestLogEntry["terminalStatus"]; closeReason: "terminal" | "client_cancel" }) => {
+  const finalizeNativeLog = (status: number, meta: { terminalStatus?: RequestLogEntry["terminalStatus"]; closeReason: "terminal" | "client_cancel" | "non_stream" }) => {
     if (!logIds || nativeLogged) return;
     nativeLogged = true;
     addFinalRequestLog(logIds.requestId, logIds.start, logCtx, status, meta);
@@ -378,11 +387,14 @@ async function handleChatCompletionsWithBudget(
       : rewritten;
   }
 
-  const response = logIds
+  const contentType = upstream.headers.get("content-type") ?? "";
+  // JSON is not complete for the client until its Chat projection succeeds.
+  // Logging the upstream JSON body here would persist 200 before a later
+  // conversion/serialization error, double-counting both the request and usage.
+  const response = logIds && contentType.includes("text/event-stream")
     ? responseWithDeferredRequestLog(upstream, logIds.requestId, logIds.start, logCtx)
     : upstream;
 
-  const contentType = response.headers.get("content-type") ?? "";
   if (contentType.includes("text/event-stream") && response.body) {
     const chatSse = responsesSseToChatCompletionsSse(response.body, requestedModel, { translatorBudget });
     if (stream) {
@@ -416,11 +428,15 @@ async function handleChatCompletionsWithBudget(
   }
 
   // Defensive: JSON despite stream:true.
+  const finishJson = (result: Response): Response => {
+    finalizeNativeLog(result.status, { closeReason: "non_stream" });
+    return result;
+  };
   let json: unknown;
   try {
     json = await response.json();
   } catch {
-    return chatCompletionsErrorResponse(502, "internal replay returned a non-JSON response", "server_error");
+    return finishJson(chatCompletionsErrorResponse(502, "internal replay returned a non-JSON response", "server_error"));
   }
   const status = (json as Rec)?.status;
   if (status === "failed") {
@@ -438,44 +454,24 @@ async function handleChatCompletionsWithBudget(
       classified.code = "model_not_found";
       classified.type = "invalid_request_error";
     }
-    return chatCompletionsErrorResponse(
+    return finishJson(chatCompletionsErrorResponse(
       classified.code === "translation_buffer_limit"
         ? 502
         : isCyberPolicyCode(classified.code) ? 400 : 502,
       message,
       classified.type,
       classified.code,
-    );
+    ));
   }
-  const completion = responsesJsonToChatCompletion(json, requestedModel);
-  if (!stream) {
-    return new Response(JSON.stringify(completion), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-
-  // Streaming client + JSON upstream: synthesize a minimal Chat Completions stream.
-  const encoder = new TextEncoder();
-  const id = typeof completion.id === "string" ? completion.id : `chatcmpl-${Date.now()}`;
-  const created = typeof completion.created === "number" ? completion.created : Math.floor(Date.now() / 1000);
-  const message = isRec((completion.choices as Rec[] | undefined)?.[0])
-    ? ((completion.choices as Rec[])[0] as Rec).message as Rec | undefined
-    : undefined;
-  const content = message && typeof message.content === "string" ? message.content : "";
-  const frames = [
-    `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: requestedModel, choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] })}\n\n`,
-    ...(content
-      ? [`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: requestedModel, choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`]
-      : []),
-    `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: requestedModel, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: completion.usage })}\n\n`,
-    "data: [DONE]\n\n",
-  ];
-  return new Response(encoder.encode(frames.join("")), {
+  const completion = responsesJsonToChatCompletion(json, requestedModel, translatorBudget);
+  const body = stream
+    ? jsonCompletionSse(completion, requestedModel, translatorBudget)
+    : JSON.stringify(completion);
+  if (!stream) translatorBudget.chargeRetained(Buffer.byteLength(body) * 2, { kind: "live_transient" });
+  return finishJson(new Response(body, {
     status: 200,
-    headers: {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache",
-    },
-  });
+    headers: stream
+      ? { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache", Connection: "keep-alive" }
+      : { "Content-Type": "application/json" },
+  }));
 }

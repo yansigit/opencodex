@@ -174,6 +174,45 @@ Before the first normal start, stream a freshly generated data-plane token into 
 The helper accepts at most one 4096-byte line, never prints the token, refuses to replace an existing
 token, and persists it as the canonical owner-only `service-api-token` in the `ocx-state` volume.
 
+The deployment persists two separate homes: `ocx-state` at `/home/bun/.opencodex` for
+OpenCodex configuration, provider credentials and usage, and `codex-state` at
+`/home/bun/.codex` for Codex state and `opencodex-catalog.json`. The image and Compose
+explicitly set `CODEX_HOME=/home/bun/.codex`, so this catalog path remains writable
+with `read_only: true` and survives container recreation. The image creates both
+directories for the non-root `bun` user with mode `0700`; existing volume
+ownership and permissions are not migrated automatically.
+
+Do not combine `CODEX_HOME` and `OPENCODEX_HOME`: both products use an `auth.json`
+filename with different formats. This packaging change adds persistence, not a
+catalog generator. Materialize or import a valid catalog into
+`/home/bun/.codex/opencodex-catalog.json` before the catalog acceptance check below;
+without one, `catalog_not_found` remains the expected response.
+
+Upgrading preserves the existing `ocx-state` volume and adds `codex-state`; no files
+are migrated automatically. If a previous workaround placed a catalog directly
+under `/home/bun/.opencodex`, back it up and deliberately copy only the catalog to
+the new Codex home, preserving owner-only access. Do not copy either product's
+`auth.json` over the other. Deployments with a custom `CODEX_HOME` should retain
+their explicit environment and writable volume mapping until migration is complete.
+When overriding `CODEX_HOME`, mount that exact directory writable and persist the
+default catalog at `${CODEX_HOME}/opencodex-catalog.json`. If `model_catalog_json`
+explicitly selects another file, that resolved path must also be persisted.
+
+Keep the Compose project name stable during upgrades so the same named volumes are reused.
+Mounts with existing foreign ownership, read-only mounts, and mounts using `volume-nocopy`
+are not repaired by the image's directory setup. Persist separately selected catalog or SQLite
+paths separately; an OS credential store is not backed up by these two volumes.
+
+When running without Compose, explicitly supply both named mounts. Dockerfile `VOLUME`
+declarations alone create anonymous volumes that a later `docker run` does not automatically
+reuse. These mount options use standalone example names; to reuse Compose data, substitute
+its actual project-prefixed volume names:
+
+```sh
+--mount type=volume,src=ocx-state,dst=/home/bun/.opencodex \
+--mount type=volume,src=codex-state,dst=/home/bun/.codex
+```
+
 Install Git and Bun on the host first. Before **every** image build, run the existing canonical
 generator from this Git checkout. It hashes Git-tracked working-tree sources (stage any newly
 added source files first), not an arbitrary directory scan. Do not change source files between
@@ -227,7 +266,7 @@ docker compose restart hub
 ```
 
 Do not put a token in `ARG`, `ENV`, `COPY`, Compose YAML, image history, or command arguments. Do not
-mount the Docker socket, host home, Codex home, SSH agent, or provider-key files. A management
+mount the Docker socket, the host's home or Codex home, SSH agent, or provider-key files. A management
 ingress bound to `127.0.0.1:10101` inside the container is reachable only by a TLS/tailnet frontend
 in the same network namespace; never publish `10101` as a shortcut.
 
@@ -244,9 +283,9 @@ docker compose exec hub bun -e \
 Then send one real authenticated routed response with a configured model. If the secret is absent or
 unreadable, a non-loopback hub must not be accepted as ready. Never treat liveness alone as proof.
 
-`docker compose down` removes the container and network but retains the named volume. Treat
+`docker compose down` removes the container and network but retains both named volumes. Treat
 `docker compose down --volumes` as destructive: it deletes configuration, OAuth credentials, usage
-history, and the data-plane token together.
+history, the data-plane token, and persisted Codex state together.
 
 ## Rollback
 
@@ -260,7 +299,9 @@ ocx config set hub.managementIngress '{"enabled":false}'
 ocx service repair
 ```
 
-For a container rollback, remove or replace the container while retaining the named state volume.
+For a container rollback, retain both named state volumes and their mappings. An older image
+can still use `CODEX_HOME=/home/bun/.codex` when that directory remains mounted; do not revert
+to an older Compose file that drops the Codex mount. Do not merge the homes or rerun token bootstrap.
 For a service rollback, stop the branch service and repair the prior release against the same
 `OPENCODEX_HOME`. Disabling management ingress or Serve does not require changing the data listener.
 

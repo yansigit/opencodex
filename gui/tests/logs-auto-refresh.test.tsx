@@ -6,7 +6,7 @@ import { LanguageProvider } from "../src/i18n/provider";
 import { clearClientResourceStoresForTests } from "../src/client-resource";
 import Logs from "../src/pages/Logs";
 
-const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_ACT_ENVIRONMENT", "ResizeObserver"] as const;
+const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "IS_REACT_ACT_ENVIRONMENT", "ResizeObserver"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
 let testWindow: Window;
 const originalFetch = globalThis.fetch;
@@ -89,6 +89,7 @@ beforeEach(() => {
     window: { configurable: true, value: testWindow },
     navigator: { configurable: true, value: testWindow.navigator },
     localStorage: { configurable: true, value: testWindow.localStorage },
+    sessionStorage: { configurable: true, value: testWindow.sessionStorage },
   });
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   installLayoutStubs(testWindow);
@@ -952,6 +953,156 @@ function proxyLogEnvelope(generatedAt: unknown, logs: unknown[]) {
   return { generatedAt, timeZone: "UTC", total: logs.length, logs };
 }
 
+function cursorLogEnvelope(generatedAt: unknown, logs: unknown[], cursor: string, reset = false) {
+  return { ...proxyLogEnvelope(generatedAt, logs), cursor, reset };
+}
+
+test("Logs: append, empty delta, mutation reset and legacy fallback keep the complete window", async () => {
+  const urls: string[] = [];
+  let step = 0;
+  const responses = [
+    cursorLogEnvelope(PROXY_NOW, [sampleLog], "c0"),
+    cursorLogEnvelope(PROXY_NOW, [], "c0"),
+    cursorLogEnvelope(PROXY_NOW, [updatedLog], "c1"),
+    cursorLogEnvelope(PROXY_NOW, [], "c1"),
+    cursorLogEnvelope(PROXY_NOW, [{ ...sampleLog, model: "gpt-mutated", durationMs: 987 }], "c2", true),
+    [updatedLog],
+    { logs: [sampleLog] },
+  ];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    if (!url.includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(url);
+    return jsonResponse(responses[step]);
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    await flushMicrotasks();
+    expect(urls[0]).toBe("http://localhost/api/logs?limit=2000");
+    step = 1;
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=c0");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    step = 2;
+    await advanceSilentRefresh();
+    expect(visibleRequestIds(container)).toEqual(["req-2", "req-1"]);
+    await changeLogSelect(container, "Model", "gpt-test");
+    step = 3;
+    await advanceSilentRefresh();
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.value).toBe("gpt-test");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    step = 4;
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=c1");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    expectTableLoaded(container, "gpt-mutated");
+    expect(container.textContent).toContain("987");
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.value).toBe("");
+    step = 5;
+    await advanceSilentRefresh();
+    expect(visibleRequestIds(container)).toEqual(["req-2"]);
+    step = 6;
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toBe("http://localhost/api/logs?limit=2000");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: an empty delta advances the proxy clock without discarding retained rows", async () => {
+  let step = 0;
+  const row = { ...sampleLog, timestamp: PROXY_NOW - 5 * 60_000 };
+  globalThis.fetch = (async input => {
+    if (!String(input).includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    return jsonResponse(cursorLogEnvelope(step ? PROXY_NOW + 20 * 60_000 : PROXY_NOW, step ? [] : [row], "same"));
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    await flushMicrotasks();
+    await changeLogSelect(container, "Time", "15m");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    step = 1;
+    await advanceSilentRefresh();
+    expect(visibleRequestIds(container)).toEqual([]);
+    await changeLogSelect(container, "Time", "all");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    expect(JSON.parse(sessionStorage.getItem("ocx.logs.list.v1:http://localhost")!)).toHaveLength(1);
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: malformed polls preserve cursor/cache, back off, and explicit retry reads a full snapshot", async () => {
+  let failing = false;
+  const urls: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    if (!url.includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(url);
+    if (failing) return jsonResponse({ logs: [], cursor: "poison", reset: "false" });
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, url.includes("cursor=") ? [] : [sampleLog], "good"));
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    await flushMicrotasks();
+    failing = true;
+    await advanceSilentRefresh();
+    const count = urls.length;
+    await advanceSilentRefresh();
+    expect(urls).toHaveLength(count);
+    await advanceSilentRefresh(14000);
+    expect(container.textContent).toContain("Could not load request logs.");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    expect(urls.slice(1).every(url => url.includes("cursor=good"))).toBe(true);
+    expect(JSON.parse(sessionStorage.getItem("ocx.logs.list.v1:http://localhost")!)).toHaveLength(1);
+    failing = false;
+    await act(async () => { clickRetry(container); });
+    await flushMicrotasks();
+    expect(urls.at(-1)).toBe("http://localhost/api/logs?limit=2000");
+    expectTableLoaded(container, "gpt-test");
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: A to B to A and remount start without a cached cursor", async () => {
+  const urls: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    if (!url.includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(url);
+    const name = url.startsWith("http://proxy-a/") ? "a" : "b";
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, url.includes("cursor=") ? [] : [
+      { ...sampleLog, requestId: name },
+    ], `cursor-${name}`));
+  }) as typeof fetch;
+  const first = await mountLogs("http://proxy-a");
+  try {
+    await flushMicrotasks();
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=cursor-a");
+    for (const name of ["b", "a"]) {
+      const start = urls.length;
+      await renderLogsAt(first.root, `http://proxy-${name}`);
+      await advanceSilentRefresh();
+      expect(urls[start]).toBe(`http://proxy-${name}/api/logs?limit=2000`);
+      expect(visibleRequestIds(first.container)).toEqual([name]);
+    }
+  } finally {
+    await act(async () => { first.root.unmount(); });
+  }
+  const start = urls.length;
+  const remount = await mountLogs("http://proxy-a");
+  try {
+    await advanceSilentRefresh();
+    expect(urls[start]).toBe("http://proxy-a/api/logs?limit=2000");
+    expect(visibleRequestIds(remount.container)).toEqual(["a"]);
+  } finally {
+    await act(async () => { remount.root.unmount(); });
+  }
+});
+
 async function renderLogsAt(root: Root, apiBase: string): Promise<void> {
   await act(async () => {
     root.render(<LanguageProvider><Logs apiBase={apiBase} /></LanguageProvider>);
@@ -1104,6 +1255,7 @@ function delayedLogBody() {
 
 test("Logs: a late body from an aborted old apiBase cannot poison the new proxy clock", async () => {
   const late = delayedLogBody();
+  const urls: string[] = [];
   let oldSignal: AbortSignal | undefined;
   let oldRequests = 0;
   const wall = jest.spyOn(Date, "now").mockReturnValue(PROXY_NOW + 6 * 60 * 60_000);
@@ -1113,14 +1265,15 @@ test("Logs: a late body from an aborted old apiBase cannot poison the new proxy 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
     if (!url.includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(url);
     if (url.startsWith("http://proxy-a/")) {
       oldRequests++;
       oldSignal = init?.signal ?? undefined;
       return late.response;
     }
-    return jsonResponse(proxyLogEnvelope(PROXY_NOW, [
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, url.includes("cursor=") ? [] : [
       { ...sampleLog, requestId: "proxy-b", timestamp: PROXY_NOW - 60_000 },
-    ]));
+    ], "cursor-b"));
   }) as typeof fetch;
   let mounted: Awaited<ReturnType<typeof mountLogs>> | undefined;
   try {
@@ -1136,9 +1289,13 @@ test("Logs: a late body from an aborted old apiBase cannot poison the new proxy 
     await act(async () => { container.querySelector<HTMLInputElement>(".logs-auto-refresh input")!.click(); });
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["proxy-b"]);
-    await act(async () => { late.resolve(proxyLogEnvelope(PROXY_NOW + 12 * 60 * 60_000, [])); });
+    await act(async () => { late.resolve(cursorLogEnvelope(PROXY_NOW + 12 * 60 * 60_000, [], "poison", true)); });
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["proxy-b"]);
+    expect(JSON.parse(sessionStorage.getItem("ocx.logs.list.v1:http://proxy-b")!)).toHaveLength(1);
+    await act(async () => { container.querySelector<HTMLInputElement>(".logs-auto-refresh input")!.click(); });
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=cursor-b");
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.value).toBe("gpt-test");
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!.value).toBe("openai");
     monotonic += 30_000;
@@ -1158,6 +1315,7 @@ test("Logs: a late body from an aborted old apiBase cannot poison the new proxy 
 
 test("Logs: aborting an in-flight refresh before pausing cannot replace the accepted clock", async () => {
   const late = delayedLogBody();
+  const urls: string[] = [];
   let requests = 0;
   let lateSignal: AbortSignal | undefined;
   const wall = jest.spyOn(Date, "now").mockReturnValue(PROXY_NOW - 6 * 60 * 60_000);
@@ -1166,14 +1324,15 @@ test("Logs: aborting an in-flight refresh before pausing cannot replace the acce
   const clock = trackFilterClock();
   globalThis.fetch = (async (input, init) => {
     if (!String(input).includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(String(input));
     requests++;
     if (requests === 2) {
       lateSignal = init?.signal ?? undefined;
       return late.response;
     }
-    return jsonResponse(proxyLogEnvelope(PROXY_NOW, [
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, String(input).includes("cursor=") ? [] : [
       { ...sampleLog, requestId: "current", timestamp: PROXY_NOW - 60_000 },
-    ]));
+    ], "accepted-cursor"));
   }) as typeof fetch;
   let mounted: Awaited<ReturnType<typeof mountLogs>> | undefined;
   try {
@@ -1187,7 +1346,7 @@ test("Logs: aborting an in-flight refresh before pausing cannot replace the acce
     await flushMicrotasks();
     expect(lateSignal?.aborted).toBe(true);
     const pausedRequests = requests;
-    await act(async () => { late.resolve(proxyLogEnvelope(PROXY_NOW + 12 * 60 * 60_000, [])); });
+    await act(async () => { late.resolve(cursorLogEnvelope(PROXY_NOW + 12 * 60 * 60_000, [], "poison", true)); });
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["current"]);
     monotonic += 30_000;
@@ -1195,6 +1354,9 @@ test("Logs: aborting an in-flight refresh before pausing cannot replace the acce
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["current"]);
     expect(requests).toBe(pausedRequests);
+    await act(async () => { container.querySelector<HTMLInputElement>(".logs-auto-refresh input")!.click(); });
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=accepted-cursor");
   } finally {
     try {
       if (mounted) await act(async () => { mounted!.root.unmount(); });
@@ -1244,7 +1406,7 @@ test("Logs: a pending refresh reconciles the user's latest selection rather than
   globalThis.fetch = (async input => {
     if (!String(input).includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
     requests++;
-    return requests === 1 ? jsonResponse(original) : late.response;
+    return requests === 1 ? jsonResponse(cursorLogEnvelope(PROXY_NOW, original, "initial")) : late.response;
   }) as typeof fetch;
   const { root, container } = await mountLogs();
   try {
@@ -1258,10 +1420,10 @@ test("Logs: a pending refresh reconciles the user's latest selection rather than
     await changeLogSelect(container, "Status", "errors");
     expect(visibleRequestIds(container)).toEqual(["b"]);
     await act(async () => {
-      late.resolve([
+      late.resolve(cursorLogEnvelope(PROXY_NOW, [
         { ...original[0]!, requestId: "other", model: "model-other" },
         { ...original[1]!, requestId: "current", model: "MODEL-B", provider: "XAI" },
-      ]);
+      ], "replaced", true));
     });
     await flushMicrotasks();
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.value).toBe("MODEL-B");

@@ -476,3 +476,27 @@ use the `[ocx:<adapter>:<event>]` prefix, go to the proxy terminal, and are buff
 ## Remote credentials and bounded sessions
 
 Data keys authorize only the data matrix and authenticated catalog. Admin credentials authorize ordinary management and key rotation but cannot mint, exchange, or refresh a `gui-session`. Pairing grants are digest-only, origin-bound, one-use, capped at 128 live grants, burned after five grant failures, and source-limited after ten failures in ten minutes with at most 1,024 source buckets. `POST /api/session/logout` invalidates only the current origin/CSRF-authorized browser session.
+
+
+### Model picker ordering settings
+
+`GET /api/subagent-models` retains `chosen`, `available`, and `catalogState`, and adds routed-only
+`pickerAvailable`, saved `pickerOrder`, and nullable `pickerOrderMode`. `available` still includes
+saved disabled/missing roster choices; it is not the eligible-picker set. Bare aliases are excluded
+from the routed preset surface because a bare id activates complete Codex-picker ordering.
+
+PUT accepts `models` and/or `pickerOrder`; `pickerOrderMode` requires `pickerOrder` and accepts
+`alphabetical`, `provider`, `most-used`, or null. Roster arrays keep their existing exact string
+values and five-slot cap. Picker arrays reject blank, duplicate or ineligible ids. Null/empty
+order clears order and mode; a nonempty order without a mode clears only the mode. Validation
+finishes before a synchronous live mutation/save. An unsupported future deletion-provenance format
+returns 409 for picker writes instead of losing clear intent. Deletion intent is staged separately and
+materialized as existing config rebase provenance, so failed persistence restores the touched
+fields without contaminating the live object's pending-deletion state. Absent fields are not
+copied back from a snapshot taken before discovery, preserving concurrent roster changes.
+
+Only roster writes sync Claude agent definitions/auto-apply Desktop profiles. Picker writes
+converge the Codex catalog once and return its disposition. The Models UI owns a separate bounded
+picker data resource so failure cannot erase the ordinary model inventory; Apply publishes through
+the resource's generation fence, and Most used reads usage only on explicit Apply. Stored mode
+survives availability drift, while complete/native custom orders await explicit replacement.

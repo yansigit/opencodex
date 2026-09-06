@@ -209,10 +209,11 @@ OAuth 및 API 키 제공자에는 제공자의 할당량 보고 엔드포인트�
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-`openai` Codex 계정 풀만 제어합니다. `on`은 80%, `off`는 0%를 설정하고, `status`는 현재 값을 읽으며, `threshold <n>`은 0부터 100까지의 정수를 받습니다. 다른 제공자와 잘못된 값은 종료 코드 1로 끝납니다. `--json`은 다음을 반환합니다:
+`openai` Codex 풀의 임계값을 제어하거나 일반 OAuth 풀의 임계값을 저장합니다. `on`은 80%, `off`는 0%, `threshold <n>`은 0–100을 저장합니다. 일반 풀의 임계값은 현재 동작에 적용되지 않습니다. 저장해도 임계값 기반 전환이나 제공자 활성화 설정이 바뀌지 않고, 429 오류에 따른 회전도 비활성화되지 않습니다. 일반 풀의 조회와 변경 결과는 서버가 확인한 값을 사용합니다. 일반 풀의 `poolEnabled`는 저장된 제공자별 설정이며 `null`은 미지정입니다. 전역 설정을 상속한 실제 상태를 뜻하지 않습니다. `inert: true`이면 임계값이 적용되지 않으며, 기능 지원을 알 수 없을 때도 `enabled: true`로 표시하지 않습니다. API 키 제공자, Anthropic 및 잘못된 값은 거부합니다.
 
 ```text
-{ provider, autoSwitchThreshold: number, enabled: boolean }
+openai: { provider, autoSwitchThreshold: number, enabled: boolean }
+generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: true | null }
 ```
 
 ### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`

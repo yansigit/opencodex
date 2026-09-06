@@ -13,7 +13,11 @@ import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
 import { describeIntegrationRefusalParts } from "./integrations/refusal-copy";
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { setClientResourceData } from "../client-resource";
-import { createBoundedFetch } from "../bounded-fetch";
+import { createBoundedFetch, type BoundedFetch } from "../bounded-fetch";
+import {
+  isModelPickerUsage, isPickerOrderSaved, isPickerOrderSettings, modelPickerOrder, modelPickerOrderMode,
+  type ModelPickerOrderMode, type PickerOrderSettings, type ModelPickerUsage,
+} from "../model-picker-order";
 import { startVisibilityPoll } from "../visibility-poll";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
@@ -142,26 +146,48 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     return () => { appServerMounted.current = false; };
   }, []);
 
-  const reloadAppServerState = useCallback((signal?: AbortSignal) => {
-    void fetchCodexAppServerState(apiBase, { signal }).then(outcome => {
-      if (signal?.aborted || !appServerMounted.current) return;
+  const appServerRead = useRef<BoundedFetch | null>(null);
+  const appServerReadGeneration = useRef(0);
+  const appServerReadBase = useRef(apiBase);
+  const cancelAppServerRead = useCallback(() => {
+    appServerReadGeneration.current++;
+    appServerRead.current?.controller.abort();
+    appServerRead.current?.clear();
+    appServerRead.current = null;
+  }, []);
+  const reloadAppServerState = useCallback(async () => {
+    // An old restart callback must not start an A read after the page moved to B.
+    if (!appServerMounted.current || appServerReadBase.current !== apiBase) return;
+    cancelAppServerRead();
+    const generation = appServerReadGeneration.current;
+    const bounded = createBoundedFetch(15_000);
+    appServerRead.current = bounded;
+    try {
+      const outcome = await fetchCodexAppServerState(apiBase, { signal: bounded.signal });
+      if (bounded.signal.aborted || !appServerMounted.current
+        || appServerReadBase.current !== apiBase || generation !== appServerReadGeneration.current
+        || appServerRead.current !== bounded) return;
       setAppServerState(outcome.state);
-    });
-  }, [apiBase]);
+    } finally {
+      // The observation owns its deadline until settlement, independently of PUT.
+      bounded.clear();
+      if (appServerRead.current === bounded) appServerRead.current = null;
+    }
+  }, [apiBase, cancelAppServerRead]);
 
   // onSettled, not a per-button callback: the sidebar control knows nothing about
   // this page, and a restart succeeding there must still clear the banner here.
   const { restarting: codexRestarting, restart: handleCodexRestart } = useCodexRestart(apiBase, {
-    onSettled: () => reloadAppServerState(),
+    onSettled: () => { void reloadAppServerState(); },
   });
 
   useEffect(() => {
-    // Once on mount, on apiBase change, and when a restart settles anywhere in the
-    // app (restartEpoch) — never a timer.
-    const controller = new AbortController();
-    reloadAppServerState(controller.signal);
-    return () => controller.abort();
-  }, [reloadAppServerState, restartEpoch]);
+    // Once on mount/base change or restart completion, never on a timer.
+    appServerReadBase.current = apiBase;
+    setAppServerState(null);
+    void reloadAppServerState();
+    return cancelAppServerRead;
+  }, [apiBase, cancelAppServerRead, reloadAppServerState, restartEpoch]);
 
 
 
@@ -217,6 +243,40 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [contextCaps, setContextCaps] = useState<Record<string, number>>(() => cached?.contextCaps ?? {});
   const [contextCapValues, setContextCapValues] = useState<Record<string, number>>(() => cached?.contextCapValues ?? {});
   const [contextCapValue, setContextCapValue] = useState(() => cached?.contextCapValue ?? 350_000);
+  const pickerCacheKey = `${cacheKey}:picker-order`;
+  const cachedPicker = useMemo(() => {
+    const value = readSessionListCache<unknown>(pickerCacheKey);
+    return isPickerOrderSettings(value) ? value : undefined;
+  }, [pickerCacheKey]);
+  const [pickerDraft, setPickerDraft] = useState<ModelPickerOrderMode | null>(null);
+  const [pickerBusy, setPickerBusy] = useState(false);
+  const pickerFlight = useRef<BoundedFetch | null>(null);
+  const pickerResource = useDataSurface<PickerOrderSettings>(
+    pickerCacheKey, [apiBase],
+    useCallback(async (signal: AbortSignal) => {
+      const response = await fetch(`${apiBase}/api/subagent-models`, { signal });
+      const data = await readJsonOrThrow<unknown>(response);
+      if (!isPickerOrderSettings(data)) throw new Error("picker settings payload missing");
+      if (signal.aborted) throw new Error("picker settings request aborted");
+      writeSessionListCache(pickerCacheKey, data);
+      return data;
+    }, [apiBase, pickerCacheKey]),
+    { isEmpty: () => false, enabled: catalogActive, deadlineMs: 15_000, initialData: cachedPicker },
+  );
+  const pickerSettings = pickerResource.state.data;
+  const pickerMode = pickerDraft ?? modelPickerOrderMode(
+    pickerSettings?.pickerAvailable ?? [], pickerSettings?.pickerOrder ?? [], pickerSettings?.pickerOrderMode,
+  );
+  useEffect(() => {
+    setPickerDraft(null);
+    setPickerBusy(false);
+    return () => {
+      pickerFlight.current?.controller.abort();
+      pickerFlight.current?.clear();
+      pickerFlight.current = null;
+      cancelAppServerRead();
+    };
+  }, [apiBase, catalogActive, cancelAppServerRead]);
   const [customCap, setCustomCap] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [providerCapCustomOpen, setProviderCapCustomOpen] = useState<Record<string, boolean>>({});
@@ -486,6 +546,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       // Follow-up mutation refreshes retain their existing awaitable contract while publishing
       // the result through the same shared store used by the initial catalog subscription.
       setClientResourceData(cacheKey, next);
+      pickerResource.refresh();
       return true;
     } catch {
       return false;
@@ -494,7 +555,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         loadPendingRef.current = false;
       }
     }
-  }, [applyCatalog, cacheKey, fetchCatalog]);
+  }, [applyCatalog, cacheKey, fetchCatalog, pickerResource.refresh]);
 
   // Shadow/v2 controls must not wait on the models catalog (live discovery can be slow).
   useEffect(() => {
@@ -1593,6 +1654,52 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     ? groups.filter(group => group.provider === selectedProvider)
     : groups;
 
+  const savePickerOrder = async () => {
+    if (pickerFlight.current || !pickerSettings || pickerResource.state.showError || pickerMode === "custom") return;
+    const mode = pickerMode;
+    const available = pickerSettings.pickerAvailable;
+    const bounded = createBoundedFetch(15_000);
+    pickerFlight.current = bounded;
+    setPickerBusy(true);
+    try {
+      let usage: ModelPickerUsage[] = [];
+      if (mode === "most-used") {
+        const response = await fetch(`${apiBase}/api/usage?range=all&surface=all`, { signal: bounded.signal });
+        const payload = await readJsonOrThrow<{ models?: unknown }>(response, t("models.pickerOrder.usageFailed"));
+        if (!isModelPickerUsage(payload?.models)) throw new Error(t("models.pickerOrder.usageFailed"));
+        usage = payload.models;
+      }
+      const order = modelPickerOrder(mode, available, usage, models);
+      const response = await fetch(`${apiBase}/api/subagent-models`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, signal: bounded.signal,
+        body: JSON.stringify({ pickerOrder: order, pickerOrderMode: mode === "default" ? null : mode }),
+      });
+      const data = await readJsonOrThrow<unknown>(response, t("models.saveFailed"));
+      if (!isPickerOrderSaved(data) || !("ok" in data) || data.ok !== true) throw new Error(t("models.saveFailed"));
+      if (bounded.signal.aborted || pickerFlight.current !== bounded) return;
+      const next = { ...pickerSettings, pickerOrder: data.pickerOrder, pickerOrderMode: data.pickerOrderMode };
+      // This aborts an older GET and advances the shared resource generation.
+      setClientResourceData(pickerCacheKey, next);
+      writeSessionListCache(pickerCacheKey, next);
+      setPickerDraft(null);
+
+      const refresh = "catalogRefresh" in data ? data.catalogRefresh : undefined;
+      const converged = refresh !== null && typeof refresh === "object"
+        && "status" in refresh && refresh.status === "committed"
+        && "degraded" in refresh && refresh.degraded === false;
+      publishFeedback(converged, t(converged ? "models.pickerOrder.saved" : "models.pickerOrder.pending"));
+      // Durable save is already accepted. Observational failure must not undo it.
+      void reloadAppServerState();
+    } catch (error) {
+      if (pickerFlight.current === bounded) {
+        publishFeedback(false, error instanceof Error ? error.message : t("models.networkError"));
+      }
+    } finally {
+      bounded.clear();
+      if (pickerFlight.current === bounded) { pickerFlight.current = null; setPickerBusy(false); }
+    }
+  };
+
   const controlsBlock = (
     <>
       <div className="models-control-top-row">
@@ -1750,6 +1857,35 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         )}
         <Switch on={allCapped} onClick={setAll} disabled={busy} label={t("models.setAll")} />
         <span className="muted text-label leading-body">{t("models.setAllHint", { value: fmtK(contextCapValue) })}</span>
+      </div>
+
+      <div className="row models-cap-row" aria-busy={pickerBusy || pickerResource.state.refreshing}>
+        <span className="muted text-control">{t("models.pickerOrder.label")}</span>
+        <Select
+          value={pickerMode}
+          options={[
+            { value: "default", label: t("models.pickerOrder.default") },
+            { value: "alphabetical", label: t("models.pickerOrder.alphabetical") },
+            { value: "provider", label: t("models.pickerOrder.provider") },
+            { value: "most-used", label: t("models.pickerOrder.mostUsed") },
+            ...(pickerMode === "custom" ? [{ value: "custom", label: t("models.pickerOrder.custom") }] : []),
+          ]}
+          onChange={value => setPickerDraft(value as ModelPickerOrderMode)}
+          disabled={pickerBusy || !pickerSettings || pickerResource.state.showError}
+          label={t("models.pickerOrder.label")}
+        />
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void savePickerOrder()}
+          disabled={pickerBusy || !pickerSettings || pickerResource.state.showError || pickerMode === "custom"
+            || (pickerMode !== "default" && pickerSettings.pickerAvailable.length === 0)}>
+          {t(pickerBusy ? "models.pickerOrder.applying" : "models.pickerOrder.apply")}
+        </button>
+        {pickerResource.state.showError && <>
+          <span role="alert">{t("models.pickerOrder.loadFailed")}</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => pickerResource.refresh()}>
+            {t("models.pickerOrder.retry")}
+          </button>
+        </>}
+        <span className="muted text-label leading-body">{t("models.pickerOrder.hint")}</span>
       </div>
 
       {(() => {

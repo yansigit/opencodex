@@ -8,6 +8,7 @@ import {
   isClientClosedMessage,
   isCyberPolicyCode,
   isCyberPolicyMessage,
+  isRateLimitOrQuotaFailureMessage,
   upstreamErrorMessageFromPayload,
 } from "../lib/errors";
 import { CODEX_CONFIG_PATH, readRootTomlString } from "../codex/paths";
@@ -24,6 +25,7 @@ import {
   isKnownUsageSurface,
   isCodexUsageAccountLogLabel,
   isValidReasoningWireValue,
+  normalizeClaudeCompatibilityUsageLog,
   readRecentUsageEntries,
   usageForFinalLog,
   usageStatusForFinalLog,
@@ -31,6 +33,7 @@ import {
   type AttemptRecoveryKind,
   type PersistedUsageAttempt,
   type PersistedUsageEntry,
+  type PersistedClaudeCompatibilityLog,
   type UsageStatus,
 } from "../usage/log";
 import {
@@ -138,6 +141,8 @@ export interface RequestLogContext {
   terminalSource?: "upstream" | "synthetic";
   /** Bounded route-decision trace (RI-01); never contains secrets. */
   routeDecision?: RouteDecisionTraceV1;
+  /** Opt-in shadow evidence, normalized again at the logging boundary. */
+  claudeCompatibility?: PersistedClaudeCompatibilityLog;
 }
 
 export interface RequestLogEntry {
@@ -203,6 +208,8 @@ export interface RequestLogEntry {
   terminalSource?: "upstream" | "synthetic";
   /** Bounded route-decision trace (RI-01); never contains secrets. */
   routeDecision?: RouteDecisionTraceV1;
+  /** Closed Claude protocol codes; no request or header values. */
+  claudeCompatibility?: PersistedClaudeCompatibilityLog;
 }
 
 const requestLog: RequestLogEntry[] = [];
@@ -271,6 +278,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
   const terminalStatus = asTerminalStatus(entry.terminalStatus);
   const closeReason = asCloseReason(entry.closeReason);
   const routeDecision = normalizeRouteDecisionTraceForLog(entry.routeDecision);
+  const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
   return {
     requestId: entry.requestId,
     timestamp: entry.timestamp,
@@ -313,6 +321,7 @@ export function requestLogEntryFromPersistedUsage(entry: PersistedUsageEntry): R
     ...(entry.totalTokens !== undefined ? { totalTokens: entry.totalTokens } : {}),
     ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
     ...(routeDecision ? { routeDecision } : {}),
+    ...(claudeCompatibility ? { claudeCompatibility } : {}),
   };
 }
 
@@ -368,10 +377,13 @@ export function addRequestLog(entry: RequestLogEntry) {
   // line-oriented viewer — while `usage.jsonl` looked clean, which is the worst shape for a
   // sanitization bug because the safe surface is the one you check.
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(entry.shadowCallRewrittenFrom);
-  const retained: RequestLogEntry = shadowCallRewrittenFrom === entry.shadowCallRewrittenFrom
+  const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(entry.claudeCompatibility);
+  const retained: RequestLogEntry = shadowCallRewrittenFrom === entry.shadowCallRewrittenFrom && entry.claudeCompatibility === undefined
     ? entry
     : { ...entry, ...(shadowCallRewrittenFrom ? { shadowCallRewrittenFrom } : {}) };
   if (!shadowCallRewrittenFrom && retained !== entry) delete retained.shadowCallRewrittenFrom;
+  if (claudeCompatibility) retained.claudeCompatibility = claudeCompatibility;
+  else if (retained !== entry) delete retained.claudeCompatibility;
   entry = retained;
   retainRequestLogEntry(entry);
   try {
@@ -431,6 +443,7 @@ export function addRequestLog(entry: RequestLogEntry) {
       ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
       ...failureDiagnostics,
       ...(entry.routeDecision ? { routeDecision: entry.routeDecision } : {}),
+      ...(entry.claudeCompatibility ? { claudeCompatibility: entry.claudeCompatibility } : {}),
     });
   } catch {
     /* request logging must never fail a user request */
@@ -852,7 +865,7 @@ function captureTerminalHttpStatus(
     last_error?: { type?: unknown; code?: unknown; message?: unknown };
     response?: {
       error?: { type?: unknown; code?: unknown; message?: unknown };
-      incomplete_details?: { code?: unknown; message?: unknown };
+      incomplete_details?: { code?: unknown; message?: unknown; reason?: unknown };
     };
   },
 ): void {
@@ -861,7 +874,9 @@ function captureTerminalHttpStatus(
   if (type !== "response.failed" && type !== "response.incomplete" && type !== "error") return;
   const responseError = json.response?.error;
   const responseDetails = json.response?.incomplete_details;
-  const candidates = [json.error, json.last_error, responseError, responseDetails, json];
+  const candidates: Array<{ type?: unknown; code?: unknown; message?: unknown } | undefined> = [
+    json.error, json.last_error, responseError, responseDetails, json,
+  ];
   const policy = candidates.some(candidate => (
     candidate?.code === null || typeof candidate?.code === "string"
   ) && isCyberPolicyCode(candidate.code as string | null | undefined))
@@ -873,6 +888,29 @@ function captureTerminalHttpStatus(
   if (policy) {
     logCtx.terminalErrorCode = CYBER_POLICY_ERROR_CODE;
     logCtx.terminalHttpStatus = 400;
+    return;
+  }
+  // A quota terminal can carry only a structured reason, without an error message.
+  // Keep this separate from normal output limits and from the policy precedence above.
+  const quotaTag = (value: unknown): boolean => value === "usage_limit_reached"
+    || value === "rate_limit_exceeded" || value === "insufficient_quota";
+  const structuredRefusal = candidates.some(candidate => [400, 401, 403, 499].includes(
+    httpStatusFromTerminalError({
+      type: typeof candidate?.type === "string" ? candidate.type : undefined,
+      code: typeof candidate?.code === "string" ? candidate.code : undefined,
+    }),
+  ));
+  const ordinaryIncompleteReason = typeof responseDetails?.reason === "string"
+    && ["max_output_tokens", "content_filter", "steered", "upstream_stall_timeout", "adapter_eof"].includes(responseDetails.reason);
+  if (type === "response.incomplete" && !structuredRefusal && (quotaTag(responseDetails?.reason) || candidates.some(candidate =>
+    quotaTag(candidate?.code)
+    || quotaTag(candidate?.type) || candidate?.type === "rate_limit_error"
+    || (!ordinaryIncompleteReason && typeof candidate?.message === "string" && isRateLimitOrQuotaFailureMessage(candidate.message))
+  ))) {
+    // The shared quota classifier also accepts a numeric HTTP status as its message.
+    // Preserve explicit payment-required evidence rather than relabeling it as 429.
+    logCtx.terminalHttpStatus = candidates.some(candidate => typeof candidate?.message === "string"
+      && Number(candidate.message.trim()) === 402) ? 402 : 429;
     return;
   }
   if (type !== "response.failed" || !responseError || typeof responseError !== "object") return;
@@ -903,6 +941,9 @@ export function httpStatusForRequestLogTerminal(
   status: ResponsesTerminalStatus,
   logCtx?: RequestLogContext,
 ): number {
+  if (status === "incomplete" && (logCtx?.terminalHttpStatus === 429 || logCtx?.terminalHttpStatus === 402)) {
+    return logCtx.terminalHttpStatus;
+  }
   /**
    * [Decision Log]
    * - 목적과 의도: Keep request logs aligned with the successful HTTP/SSE contract.
@@ -985,6 +1026,7 @@ export function addFinalRequestLog(
   // means a future caller cannot reintroduce the hole by forgetting to sanitize first, and
   // the in-memory /api/logs row matches what usage.jsonl already stores.
   const shadowCallRewrittenFrom = sanitizeLogMetadataString(logCtx.shadowCallRewrittenFrom);
+  const claudeCompatibility = normalizeClaudeCompatibilityUsageLog(logCtx.claudeCompatibility);
   addLog({
     requestId,
     timestamp: start,
@@ -1034,6 +1076,7 @@ export function addFinalRequestLog(
     ...(logCtx.transportPhase ? { transportPhase: logCtx.transportPhase } : {}),
     ...(logCtx.terminalSource ? { terminalSource: logCtx.terminalSource } : {}),
     ...(logCtx.routeDecision ? { routeDecision: logCtx.routeDecision } : {}),
+    ...(claudeCompatibility ? { claudeCompatibility } : {}),
   });
   if (isUsageDebugEnabled()) {
     appendUsageDebug({

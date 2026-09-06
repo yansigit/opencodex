@@ -1302,6 +1302,46 @@ messages are redacted before either JSON or SSE reaches the client. The native p
 request-attempt logging, reset retry, same-key 429 replay, key rotation, usage extraction, and
 request-signal cancellation contracts as routed Responses transport.
 
+## Chat streaming client with a JSON upstream result
+
+The translated inbound path in `src/server/chat-completions.ts` may receive a complete JSON
+Responses result even when the Chat client requested SSE. Its synthetic stream reuses
+`responsesJsonToChatCompletion` as the semantic authority: converted text, reasoning, available
+refusal content, tool calls, finish reason, and usage must survive this final delivery conversion.
+Tool calls gain their array-order stream `index`; the stream retains one assistant-role frame,
+one terminal choice, and one `[DONE]`. Both native and translated JSON fallbacks share
+`jsonCompletionSse`; its temporary frame strings and final body ownership are charged to the
+existing translator budget. Known incomplete limits take precedence over tool finish reasons;
+unmapped incomplete boundaries remain errors. The existing response-body lifecycle owns translation-budget
+release on consumption or cancellation. Actual upstream SSE and native Chat bypass this fallback.
+
+[Decision Log]
+- 목적과 의도: Keep tool execution and incomplete-response detection working when a streaming client receives a JSON upstream result.
+- 기존 구현 및 제약 조건: The existing fallback copied only text and forced `stop`, despite the JSON converter already retaining tool calls, reasoning, and incomplete status.
+- 검토한 주요 대안: Duplicate Responses parsing in the emitter; perform another inference request; preserve the already-converted Chat completion.
+- 선택한 방식: Copy supported converted message fields into one delta, assign tool-call stream indexes, and retain the converted finish reason.
+- 다른 대안 대신 이 방식을 선택한 이유: One conversion authority prevents the streaming fallback from drifting from non-streaming semantics without changing routing or retry behavior.
+- 장점, 단점 및 영향: No additional upstream request or dependency; this remains buffered delivery, not token-by-token upstream streaming. Handler regressions cover tools, reasoning, length, ordinary and empty completions, and budget release.
+
+### Chat refusal projection
+
+`src/chat/outbound.ts` keeps Responses refusal parts separate from ordinary content. JSON output
+and the stream collector expose nullable `message.refusal`; `jsonCompletionSse` preserves it as
+`delta.refusal`, while the native SSE relay remains opaque. The translated live stream keys refusal
+state by raw `output_index` / `content_index`, validates present item IDs as correlation constraints,
+and emits buffered parts in that order only at a valid completed/incomplete terminal. Deltas append;
+equal, empty, absent, and shorter-prefix snapshots preserve existing text; extending snapshots add
+only new text. Non-string or contradictory snapshots fail with a content-free typed error.
+
+The existing turn budget accounts for refusal text and map metadata, including empty entries, and
+releases that state on terminal, failure, or cancellation. Pending role/tool/refusal/finish/`[DONE]`
+frames form one terminal batch: all serialized strings and encoded frames must be admitted before
+any batch frame is enqueued. Admission failure releases the batch and refusal state, cancels upstream,
+and emits only the bounded overflow error. Collector processing failures cancel their reader before
+releasing its lock, so upstream translation cannot continue after failed JSON collection. The outer
+response finalizer continues to own retained response bytes. These are projection rules, not new
+refusal policy or changes to ordinary content/tool semantics.
+
 ## Parallel tool calls (default-on for chat providers)
 
 The openai-chat adapter buffers ALL streamed `tool_calls` deltas (keyed by `index`, falling back to
@@ -1645,3 +1685,41 @@ dispatch. Selection revisions fence stale retries and reselection; request ident
 actual committed account/key. Generic proactive selection is opt-in and preserves a healthy active
 account, while reactive429 recovery remains enabled even with the pool off. Post-commit selection
 events immediately invalidate dashboard roster state; see`05_gui-and-management-api.md`.
+
+
+### Incomplete quota terminals
+
+A native forward response that ends with quota or rate-limit evidence in an
+`incomplete` terminal records account quota failure and spawn-fallback health.
+Structured `incomplete_details.reason` and error codes are accepted without a
+message; ordinary output-limit, filtering, steering and stall incompletes do not
+cool an account. Cyber-policy classification retains precedence. The terminal is
+not replayed after output, and fixed-account request selection remains fixed.
+
+Remote compact requests release the server request-idle timeout only after a complete
+JSON object with a valid model has been read. Partial or invalid uploads retain
+the listener guard; admitted compaction then uses the upstream operation's own
+deadlines and client cancellation.
+
+Buffered routed compaction treats nonempty text and reasoning deltas as progress
+without exposing partial summary text. Comments, empty deltas and gateway
+keepalives do not reset the adapter-event stall watchdog. The default stall
+timeout stays 300 seconds; encrypted compaction content is preserved unchanged.
+
+Native compact response buffering also enforces a body-byte inactivity deadline
+using `stallTimeoutSec` (300 seconds by default). Nonempty chunks reset that
+deadline; a stalled body returns HTTP 504, client cancellation retains HTTP 499,
+and cleanup does not wait for a stuck upstream cancellation promise. The 32 MiB
+response ceiling and the original body bytes are preserved.
+
+A canonical upstream WebSocket refused-create error can become an HTTP 4xx only
+before the response is committed and after stream correlation checks. Permitted
+quota headers are bounded and rebuilt without upstream framing headers; the JSON
+response is not cacheable. Post-commit and 5xx errors keep the no-resend path.
+
+When encrypted agent-task recovery refuses a routed task, its existing 400 error
+can include a bounded `recovery_reason`: `unsupported_envelope`,
+`admission_denied`, `recovery_unavailable`, `caller_cancelled`, or `input_changed`.
+The field is omitted when no classified recovery result exists.
+`recovery_unavailable` includes cache/singleflight capacity and does not prove an
+upstream request was attempted. No retry or broader envelope acceptance is enabled.
