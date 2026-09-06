@@ -423,6 +423,76 @@ describe("fork sync CLI", () => {
     ]);
   });
 
+  test("prepare reports only real conflict paths after an aborted merge", async () => {
+    const output: string[] = [];
+    const calls: string[][] = [];
+    const prepareEvent: SyncEvent = {
+      kind: "pin-updated",
+      upstreamRepo: "upstream",
+      latestTag: "v2.29.0",
+      latestTagSha: TAG_SHA,
+      vendorMainSha: MAIN_SHA,
+      vendorDevSha: DEV_SHA,
+      detectedAt: "2026-08-24T12:00:00.000Z",
+      recommendedLane: "daily-merge",
+    };
+    await runCli(["prepare"], {
+      env: {},
+      stdin: JSON.stringify(prepareEvent),
+      runner: async args => {
+        calls.push([...args]);
+        if (args.join(" ") === "rev-parse HEAD") return result(DEV_SHA);
+        if (args[0] === "switch") return result("");
+        if (args[0] === "merge" && args[1] === "--no-ff") return result("", 1, "merge conflict");
+        if (args.join(" ") === "diff --name-only --diff-filter=U") return result("src/conflicted.ts\n");
+        if (args.join(" ") === "merge --abort") return result("");
+        return result("", 1, `unexpected command: ${args.join(" ")}`);
+      },
+      write: value => output.push(value),
+    });
+
+    expect(JSON.parse(output[0]!)).toMatchObject({
+      status: "decision-handoff",
+      handoffReason: "conflict",
+      unresolved: ["src/conflicted.ts"],
+    });
+    expect(calls).toHaveLength(5);
+    expect(calls.some(args => args[0] === "merge-base")).toBe(false);
+  });
+
+  test("prepare does not attest an unmerged history-diverged scaffold", async () => {
+    const output: string[] = [];
+    const calls: string[][] = [];
+    const prepareEvent: SyncEvent = {
+      kind: "history-diverged",
+      upstreamRepo: "upstream",
+      latestTag: "v2.29.0",
+      latestTagSha: TAG_SHA,
+      vendorMainSha: MAIN_SHA,
+      vendorDevSha: DEV_SHA,
+      detectedAt: "2026-08-24T12:00:00.000Z",
+      recommendedLane: "emergency-rebuild",
+    };
+    await runCli(["prepare"], {
+      env: {},
+      stdin: JSON.stringify(prepareEvent),
+      runner: async args => {
+        calls.push([...args]);
+        if (args.join(" ") === "rev-parse HEAD") return result(DEV_SHA);
+        if (args[0] === "switch") return result("");
+        return result("", 1, `unexpected command: ${args.join(" ")}`);
+      },
+      write: value => output.push(value),
+    });
+
+    expect(JSON.parse(output[0]!)).toMatchObject({
+      status: "history-diverged",
+      unresolved: [],
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.some(args => args[0] === "merge-base")).toBe(false);
+  });
+
   test("prepare rejects a candidate whose base is not the checked-out dev commit", async () => {
     const prepareEvent: SyncEvent = {
       kind: "pin-updated",
