@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { readBoundedToken } from "../../docker/bootstrap-token";
 import { verifyCompatibilitySnapshot } from "../../docker/verify-compatibility";
-import type { CompatibilityVersionManifest } from "../../scripts/generate-compatibility-version";
+import {
+  REQUIRED_COMPATIBILITY_FILES,
+  type CompatibilityVersionManifest,
+} from "../../scripts/generate-compatibility-version";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { repoPath } from "../helpers/repo-root";
 
@@ -25,7 +28,7 @@ describe("container token bootstrap", () => {
   });
 
   test("accepts a maximum-size token followed by a shell newline", async () => {
-    const token = "x".repeat(4096);
+    const token = "x".repeat(512);
     await expect(readBoundedToken(input(token, "\n"))).resolves.toBe(token);
   });
 
@@ -34,23 +37,30 @@ describe("container token bootstrap", () => {
     await expect(readBoundedToken(input("first\nsecond\n"))).rejects.toThrow("exactly one line");
     await expect(readBoundedToken(input("first\n\n"))).rejects.toThrow("exactly one line");
     await expect(readBoundedToken(input("\nfirst\n"))).rejects.toThrow("exactly one line");
-    await expect(readBoundedToken(input("x".repeat(4097), "\n"))).rejects.toThrow("exceeds 4096 bytes");
+    await expect(readBoundedToken(input("x".repeat(513), "\n"))).rejects.toThrow("exceeds 512 bytes");
   });
 });
 
 describe("container deployment contract", () => {
   test("publishes only the data port with loopback and explicit bind overrides", () => {
     const compose = Bun.YAML.parse(readFileSync(repoPath("compose.yaml"), "utf8")) as {
-      services: { hub: { ports: string[] } };
+      services: { hub: { ports: string[]; environment: Record<string, string> } };
     };
     expect(compose.services.hub.ports).toEqual([
       "${OPENCODEX_BIND_ADDRESS:-127.0.0.1}:${OPENCODEX_PORT:-10100}:10100",
     ]);
+    expect(compose.services.hub.environment).toEqual({
+      OCX_CONTAINER_PUBLIC_PORT: "${OPENCODEX_PORT:-10100}",
+      OCX_CONTAINER_PUBLIC_ORIGIN: "${OPENCODEX_PUBLIC_ORIGIN:-}",
+    });
   });
 
   test("requires the host-generated manifest in the runtime image", () => {
     const ignored = readFileSync(repoPath(".dockerignore"), "utf8").split(/\r?\n/);
     expect(ignored[0]).toBe("**");
+    expect(ignored).toContain("!.dockerignore");
+    expect(ignored).toContain("!Dockerfile");
+    expect(ignored).toContain("!compose.yaml");
     expect(ignored).toContain("!src/generated/compatibility-version.json");
     expect(ignored).not.toContain("src/generated/compatibility-version.json");
     expect(ignored.some(line => /^!\/?\.git(?:\/|$)/.test(line))).toBe(false);
@@ -58,9 +68,19 @@ describe("container deployment contract", () => {
       "!scripts/", "scripts/**", "!scripts/model-metadata.source.json",
     ]);
     expect(ignored).not.toContain("!scripts/**");
+    expect(ignored.slice(ignored.indexOf("!docker/"), ignored.indexOf("!docker/") + 7)).toEqual([
+      "!docker/",
+      "docker/**",
+      "!docker/bootstrap-tls.ts",
+      "!docker/bootstrap-token.ts",
+      "!docker/config.json",
+      "!docker/healthcheck.ts",
+      "!docker/verify-compatibility.ts",
+    ]);
+    expect(ignored).not.toContain("!docker/**");
     const lastSourceNegation = Math.max(
       ignored.indexOf("!src/**"),
-      ignored.indexOf("!docker/**"),
+      ignored.indexOf("!docker/verify-compatibility.ts"),
       ignored.indexOf("!gui/**"),
     );
     for (const sensitive of [
@@ -119,17 +139,21 @@ describe("container deployment contract", () => {
     expect(dockerfile).toContain("RUN --mount=type=bind,target=/build-context bun /tmp/verify-compatibility.ts /build-context");
     expect(dockerfile.indexOf("RUN --mount=type=bind")).toBeLessThan(dockerfile.indexOf("COPY --chown=bun:bun src ./src"));
     expect(dockerfile).toContain("COPY --chown=bun:bun scripts/model-metadata.source.json ./scripts/model-metadata.source.json");
+    expect(dockerfile).toContain("COPY --chown=bun:bun docker/bootstrap-tls.ts docker/bootstrap-token.ts docker/config.json docker/healthcheck.ts docker/verify-compatibility.ts ./docker/");
     expect(runtime).toContain("COPY --from=build --chown=bun:bun /home/bun/app/scripts/model-metadata.source.json ./scripts/model-metadata.source.json");
     expect(runtime).toContain("COPY --chown=bun:bun src/generated/compatibility-version.json ./src/generated/compatibility-version.json");
-    expect(runtime).toContain('RUN ["bun", "docker/verify-compatibility.ts"]');
+    expect(runtime).toContain('RUN ["bun", "docker/verify-compatibility.ts", "--runtime"]');
     expect(runtime).toContain("readOpenCodexCompatibilityVersion() ?? ''");
     expect(runtime).toContain("throw new Error('Missing or invalid generated compatibility manifest')");
+    expect(runtime).toContain('RUN ["/usr/bin/openssl", "version"]');
+    expect(runtime).toContain("bun run docker/bootstrap-tls.ts && exec bun run src/cli/index.ts start --port 10100");
+    expect(runtime).toContain('CMD ["bun", "docker/healthcheck.ts"]');
   });
 });
 
 const snapshotDirs: string[] = [];
 const manifestPath = "src/generated/compatibility-version.json";
-const snapshotPaths = ["package.json", "bun.lock", "scripts/model-metadata.source.json", "src/main.ts"];
+const snapshotPaths = [...REQUIRED_COMPATIBILITY_FILES, "src/main.ts"];
 // Independent SHA-256 test vector for the bytes "abc", not computed by the verifier.
 const abcDigest = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
@@ -164,6 +188,12 @@ describe("container compatibility snapshot validation", () => {
     expect(() => verifyCompatibilitySnapshot(root)).not.toThrow();
   });
 
+  test("runtime verification omits build-only authority bytes after the context verified them", () => {
+    const { root } = compatibilitySnapshot();
+    for (const path of [".dockerignore", "Dockerfile", "compose.yaml"]) unlinkSync(join(root, path));
+    expect(() => verifyCompatibilitySnapshot(root, { runtime: true })).not.toThrow();
+  });
+
   for (const path of snapshotPaths) {
     test(`rejects stale bytes in ${path}`, () => {
       const { root } = compatibilitySnapshot();
@@ -178,8 +208,8 @@ describe("container compatibility snapshot validation", () => {
     });
   }
 
-  for (const path of snapshotPaths.slice(0, 3)) {
-    test(`requires the root manifest entry: ${path}`, () => {
+  for (const path of REQUIRED_COMPATIBILITY_FILES) {
+    test(`requires the authority manifest entry: ${path}`, () => {
       const { root, manifest, save } = compatibilitySnapshot();
       manifest.files = manifest.files.filter(row => row.path !== path);
       save();
@@ -187,11 +217,15 @@ describe("container compatibility snapshot validation", () => {
     });
   }
 
-  for (const path of ["src/untracked.ts", "src/generated/untracked.json"]) {
-    test(`rejects an extra source file: ${path}`, () => {
+  for (const [path, message] of [
+    ["src/untracked.ts", "Source file absent from compatibility manifest"],
+    ["src/generated/untracked.json", "Source file absent from compatibility manifest"],
+    ["docker/extra.ts", "Container authority file absent from compatibility manifest"],
+  ] as const) {
+    test(`rejects an extra inventoried file: ${path}`, () => {
       const { root } = compatibilitySnapshot();
       writeFileSync(join(root, path), "abc");
-      expect(() => verifyCompatibilitySnapshot(root)).toThrow("Source file absent from compatibility manifest");
+      expect(() => verifyCompatibilitySnapshot(root)).toThrow(message);
     });
   }
 
@@ -218,7 +252,7 @@ describe("container compatibility snapshot validation", () => {
     expect(() => verifyCompatibilitySnapshot(root)).toThrow("Duplicate compatibility manifest entry");
   });
 
-  for (const path of ["../outside", "/src/main.ts", "src/../package.json", "src//main.ts", "src/./main.ts", "src\\main.ts", "src/", "src/zero\0.ts", "docker/bootstrap-token.ts", manifestPath]) {
+  for (const path of ["../outside", "/src/main.ts", "src/../package.json", "src//main.ts", "src/./main.ts", "src\\main.ts", "src/", "src/zero\0.ts", "scripts/unlisted.ts", manifestPath]) {
     test(`rejects an unsafe or out-of-authority path: ${JSON.stringify(path)}`, () => {
       const { root, manifest, save } = compatibilitySnapshot();
       manifest.files.push({ path, sha256: abcDigest });
@@ -257,7 +291,7 @@ describe("container compatibility snapshot validation", () => {
     });
   }
 
-  for (const path of ["src", "src/generated", "scripts"]) {
+  for (const path of ["src", "src/generated", "docker", "scripts"]) {
     test(`rejects a linked input directory: ${path}`, () => {
       const { root } = compatibilitySnapshot();
       const target = join(root, "linked-target");

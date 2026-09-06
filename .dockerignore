@@ -1,5 +1,8 @@
 **
 
+!.dockerignore
+!Dockerfile
+!compose.yaml
 !package.json
 !bun.lock
 !tsconfig.json
@@ -14,7 +17,12 @@ scripts/**
 !scripts/model-metadata.source.json
 
 !docker/
-!docker/**
+docker/**
+!docker/bootstrap-tls.ts
+!docker/bootstrap-token.ts
+!docker/config.json
+!docker/healthcheck.ts
+!docker/verify-compatibility.ts
 
 !gui/
 !gui/**
