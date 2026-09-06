@@ -19,7 +19,7 @@ import {
   isCodexAccountSoftAvoided,
   recordCodexUpstreamOutcome,
 } from "../../src/codex/routing";
-import { loadConfig, saveConfig } from "../../src/config";
+import { loadConfig, replacePersistedConfig, saveConfig } from "../../src/config";
 import { clearUpstreamHostHealth, getUpstreamHostHealth, recordUpstreamHostFailure, upstreamHostHealthKey } from "../../src/codex/upstream-host-health";
 import { deriveProviderPresets } from "../../src/providers/derive";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/main-account";
@@ -1721,7 +1721,7 @@ describe("server local API auth", () => {
       updateAccountQuota("direct-unusable", 99);
       markAccountNeedsReauth("direct-unusable");
       recordCodexUpstreamOutcome(directConfig, "direct-unusable", 429, { retryAfter: "60" });
-      saveConfig(directConfig);
+      replacePersistedConfig(directConfig);
       const direct = startServer(0, { inspectNativeCodexOwnership });
       const directBaseline = {
         config: readFileSync(join(TEST_DIR, "config.json"), "utf8"),
@@ -1776,7 +1776,7 @@ describe("server local API auth", () => {
         clearCodexUpstreamHealth();
         const cfg = mainOnlyConfig();
         writeMainToken(state === "expired" ? `header.${expiredPayload}.signature` : "opaque-live-main-token");
-        saveConfig(cfg);
+        replacePersistedConfig(cfg);
         const before = seen.length;
         const unusableMain = startServer(0, { inspectNativeCodexOwnership });
         try {
@@ -1800,7 +1800,7 @@ describe("server local API auth", () => {
         ...mainOnlyConfig(),
         hostname: "0.0.0.0",
       } as OcxConfig;
-      saveConfig(nativeCallerConfig);
+      replacePersistedConfig(nativeCallerConfig);
       const beforeNativeCaller = seen.length;
       const nativeCaller = startServer(0, { inspectNativeCodexOwnership });
       try {
@@ -1871,7 +1871,7 @@ describe("server local API auth", () => {
         rmSync(join(isolatedCodexHome!.path, "auth.json"), { force: true });
       }
 
-      saveConfig({
+      replacePersistedConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,
@@ -1930,7 +1930,7 @@ describe("server local API auth", () => {
         await multi.stop(true);
       }
 
-      saveConfig({
+      replacePersistedConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,
@@ -1961,7 +1961,7 @@ describe("server local API auth", () => {
         expiresAt: Date.now() + 300_000,
         chatgptAccountId: "acct-pool-b",
       });
-      saveConfig({
+      replacePersistedConfig({
         port: 0,
         hostname: "0.0.0.0",
         websockets: true,
@@ -3784,7 +3784,7 @@ describe("server local API auth", () => {
     }
   });
 
-  test("passthrough pool send relays a 307 with Location and records no health evidence (#914)", async () => {
+  test("passthrough pool send refuses a 307 without exposing Location (#914)", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -3793,8 +3793,8 @@ describe("server local API auth", () => {
     clearAccountNeedsReauth("pool-a");
     clearUpstreamHostHealth();
 
-    // The upstream answers 307 -> dead.invalid. Manual redirects must relay it
-    // (with Location) instead of following into a dead-host rejection.
+    // The upstream answers 307 -> dead.invalid. Manual redirects must reject it
+    // without following or exposing the destination.
     const redirectTarget = "https://dead.invalid/x";
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -3829,8 +3829,7 @@ describe("server local API auth", () => {
     });
     updateAccountQuota("pool-a", 10, 5);
 
-    // Seed a pre-connection streak: the 307 is also a real HTTP response and
-    // must clear it.
+    // Seed a pre-connection streak: redirect refusal must not clear it.
     const hostKey = upstreamHostHealthKey("openai", "https://chatgpt.com");
     recordUpstreamHostFailure(hostKey, { code: "ECONNREFUSED" });
 
@@ -3846,13 +3845,19 @@ describe("server local API auth", () => {
         redirect: "manual",
       });
 
-      expect(response.status).toBe(307);
-      expect(response.headers.get("location")).toBe(redirectTarget);
-      // Neutral class: no account streak, no soft-avoid, no rotation, and the
-      // real response cleared the seeded host streak.
-      expect(getCodexUpstreamHealth("pool-a")).toBeNull();
+      expect(response.status).toBe(502);
+      const body = await response.json() as { error?: { message?: string } };
+      expect(body.error?.message).toContain("upstream returned 307 redirect");
+      expect(response.headers.get("location")).toBeNull();
+      expect(getCodexUpstreamHealth("pool-a")).toMatchObject({
+        consecutiveFailures: 1,
+        lastFailureStatus: 0,
+      });
       expect(isCodexAccountSoftAvoided("pool-a")).toBe(false);
-      expect(getUpstreamHostHealth(hostKey)).toBeNull();
+      expect(getUpstreamHostHealth(hostKey)).toMatchObject({
+        consecutiveFailures: 1,
+        lastFailureCode: "ECONNREFUSED",
+      });
     } finally {
       await server.stop(true);
     }
