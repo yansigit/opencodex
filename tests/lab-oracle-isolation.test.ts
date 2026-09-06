@@ -1,4 +1,5 @@
 import { describe, expect, test, afterEach } from "bun:test";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, statSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +12,28 @@ function tempConfigDir(): string { const d = mkdtempSync(join(tmpdir(), "ocx-tes
 afterEach(()=>{ for(const d of ROOTS.splice(0)) rmSync(d,{recursive:true,force:true}); });
 describe("oracle constants are hard-coded",()=>{test("upstream is api2.cursor.sh and loopback is 127.0.0.1",()=>{expect(CURSOR_ORACLE_UPSTREAM).toBe("https://api2.cursor.sh");expect(CURSOR_ORACLE_LOOPBACK_HOST).toBe("127.0.0.1");expect(CURSOR_ORACLE_SCRATCH_SUBDIR).toBe("oracle-raw");expect(CURSOR_ORACLE_RAW_TTL_MS).toBe(24*60*60*1000);expect(CURSOR_ORACLE_MAX_RAW_BYTES).toBe(2*1024*1024);});});
 describe("createIsolatedOracleEnv",()=>{test("creates config/data/workspace/home under tmp with 0700 and cleans up",()=>{const cfg=tempConfigDir();const env=createIsolatedOracleEnv({configDir:cfg});ROOTS.push(env.root);expect(existsSync(env.root)).toBe(true);expect(existsSync(env.configDir)).toBe(true);expect(existsSync(env.dataDir)).toBe(true);expect(existsSync(env.workspaceDir)).toBe(true);expect(existsSync(env.homeDir)).toBe(true);if(process.platform!=="win32"){for(const d of [env.root,env.configDir,env.dataDir,env.workspaceDir,env.homeDir]) expect((statSync(d).mode & 0o777)).toBe(0o700);} const root=env.root;env.cleanup();expect(existsSync(root)).toBe(false);});});
+test.skipIf(process.platform !== "win32")("isolated cleanup waits for a child working-directory handle to release", async () => {
+  const cfg = tempConfigDir();
+  const env = createIsolatedOracleEnv({ configDir: cfg });
+  ROOTS.push(env.root);
+  const ready = join(env.workspaceDir, "ready");
+  const child = spawn(process.execPath, [
+    "-e",
+    `require("node:fs").writeFileSync(${JSON.stringify(ready)}, "ready"); setTimeout(() => process.exit(0), 1_000);`,
+  ], { cwd: env.workspaceDir, stdio: "ignore" });
+  const closed = new Promise<void>(resolve => child.once("close", () => resolve()));
+
+  try {
+    const deadline = Date.now() + 5_000;
+    while (!existsSync(ready) && child.exitCode === null && Date.now() < deadline) await Bun.sleep(10);
+    expect(existsSync(ready)).toBe(true);
+    expect(() => env.cleanup()).not.toThrow();
+    expect(existsSync(env.root)).toBe(false);
+  } finally {
+    if (child.exitCode === null) child.kill();
+    await closed;
+  }
+});
 describe("ensureOracleRawDir",()=>{test("creates lab scratch oracle-raw 0700 idempotently",()=>{const cfg=tempConfigDir();const dir=ensureOracleRawDir(cfg);expect(dir).toBe(join(labScratchDir(cfg),CURSOR_ORACLE_SCRATCH_SUBDIR));expect(existsSync(dir)).toBe(true);if(process.platform!=="win32") expect((statSync(dir).mode & 0o777)).toBe(0o700);expect(ensureOracleRawDir(cfg)).toBe(dir);});});
 describe("writeRawScratch and purgeExpiredRaw",()=>{test("writes 0600 file with random suffix and correct content",()=>{const cfg=tempConfigDir();const p=writeRawScratch({configDir:cfg,prefix:"oracle-req",bytes:Buffer.from("hello"),suffix:".bin"});expect(existsSync(p)).toBe(true);expect(readFileSync(p).toString()).toBe("hello");if(process.platform!=="win32") expect((statSync(p).mode & 0o777)).toBe(0o600);expect(writeRawScratch({configDir:cfg,prefix:"oracle-req",bytes:Buffer.from("world"),suffix:".bin"})).not.toBe(p);});test("purgeExpiredRaw removes only old regular files",()=>{const cfg=tempConfigDir();const fresh=writeRawScratch({configDir:cfg,prefix:"oracle-req",bytes:Buffer.from("fresh"),suffix:".bin"});const old=writeRawScratch({configDir:cfg,prefix:"oracle-req",bytes:Buffer.from("old"),suffix:".bin"});const past=Date.now()-CURSOR_ORACLE_RAW_TTL_MS-1000;const t=new Date(past);utimesSync(old,t,t);const target=join(cfg,"outside.bin");writeFileSync(target,"outside");const link=join(ensureOracleRawDir(cfg),"linked.bin");if(process.platform!=="win32") symlinkSync(target,link);expect(purgeExpiredRaw(cfg,Date.now())).toBe(1);expect(existsSync(old)).toBe(false);expect(existsSync(fresh)).toBe(true);expect(existsSync(target)).toBe(true);if(process.platform!=="win32") expect(existsSync(link)).toBe(true);});});
 describe("assertUnderRoot",()=>{test("passes inside root and throws on escape",()=>{const cfg=tempConfigDir();const env=createIsolatedOracleEnv({configDir:cfg});ROOTS.push(env.root);expect(()=>assertUnderRoot(env.root,join(env.root,"a/b"))).not.toThrow();expect(()=>assertUnderRoot(env.root,"/tmp")).toThrow();env.cleanup();});});

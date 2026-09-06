@@ -38,7 +38,10 @@ export function createIsolatedOracleEnv(opts: { configDir?: string } = {}): Isol
     if (process.platform !== "win32") chmodSync(d, 0o700);
   }
   const cleanup = () => {
-    rmSync(base, { recursive: true, force: true, maxRetries: 3 });
+    // A terminated Windows agent tree can retain its working-directory handle
+    // briefly after the wrapper emits `close`. Keep cleanup strict, but give
+    // those transient EBUSY/EPERM releases a bounded retry window.
+    rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   };
   return { root: base, configDir, dataDir, workspaceDir, homeDir, cleanup };
 }
