@@ -71,6 +71,13 @@ import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, pu
 import { applySystemEnvToggle } from "../system-env";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchInitializedModels as fetchAllModels, fetchGrokCandidateModels, buildClaudeDesktopState } from "./shared";
+import {
+  agentRolesSyncEffective,
+  parseSubagentRoles,
+  routedOnV2Warnings,
+  unionRoleModelsIntoRoster,
+} from "../../codex/agent-roles";
+import { syncCodexAgentRoles } from "../../codex/agent-roles-sync";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
 import { readManagementJsonBody, readOptionalManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 
@@ -178,7 +185,7 @@ export function setGrokApplyFlightTestHooks(
   grokApplyFlight = null;
   grokApplyHighWaterBytes = 0;
 }
-import type { ManagementContext } from "./context";
+import { saveManagementConfig, type ManagementContext } from "./context";
 
 export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
@@ -482,6 +489,18 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
   // dynamically injected into the v1 proactive prompt, plus an optional reasoning
   // effort the prompt tells the agent to pass to spawn_agent. GET returns the current
   // picks + available models/efforts; PUT sets or clears them.
+  if (url.pathname === "/api/subagent-model-authority" && req.method === "POST") {
+    let body: unknown;
+    try { body = await readManagementJsonBody(req); } catch (error) {
+      rethrowManagementBodyTooLarge(error);
+      return jsonResponse({ error: "invalid JSON body" }, 400);
+    }
+    const { parseSubagentModelAuthorityInput, resolveOpenCodexSubagentModelAuthority } = await import("../../codex/subagent-model-authority");
+    const input = parseSubagentModelAuthorityInput(body);
+    if (!input) return jsonResponse({ error: "invalid subagent model authority input" }, 400);
+    return jsonResponse(await resolveOpenCodexSubagentModelAuthority(input, config));
+  }
+
   if (url.pathname === "/api/injection-model" && req.method === "GET") {
     const models = await fetchAllModels(config);
     const disabled = new Set(config.disabledModels ?? []);
@@ -670,6 +689,92 @@ export async function handleAgentSettingsRoutes(ctx: ManagementContext): Promise
     await syncClaudeAgentDefsBestEffort();
     await autoApplyDesktopBestEffort();
     return jsonResponse({ ok: true, applied: chosen, catalogRefresh });
+  }
+
+  if (url.pathname === "/api/subagent-roles" && req.method === "GET") {
+    const models = await fetchAllModels(config);
+    const disabled = new Set(config.disabledModels ?? []);
+    const { listCatalogNativeSlugs } = await import("../../codex/catalog");
+    const { CODEX_REASONING_LEVELS } = await import("../../reasoning-effort");
+    const nativeModels = listCatalogNativeSlugs()
+      .filter(slug => !disabled.has(slug))
+      .map(slug => ({ provider: "openai", model: slug, namespaced: slug }));
+    const routedModels = uniqueCatalogModelsForPublicList(models)
+      .map(m => ({ provider: m.provider, model: m.id, namespaced: catalogModelSlug(m) }))
+      .filter(m => ![...disabled].some(stored => (
+        stored === m.namespaced || slugEquals(stored, m.provider, m.model)
+      )));
+    return jsonResponse({
+      roles: config.subagentRoles ?? [],
+      ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
+      syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
+      efforts: CODEX_REASONING_LEVELS.map(l => l.effort),
+      available: [...nativeModels, ...routedModels],
+    });
+  }
+  if (url.pathname === "/api/subagent-roles" && req.method === "PUT") {
+    let parsedBody: unknown;
+    try {
+      parsedBody = await readManagementJsonBody(req);
+    } catch (error) {
+      rethrowManagementBodyTooLarge(error);
+      return jsonResponse({ error: "invalid JSON body" }, 400);
+    }
+    if (!parsedBody || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+      return jsonResponse({ error: "body must be a JSON object" }, 400);
+    }
+    const body = parsedBody as { roles?: unknown; remove?: unknown; syncCodexAgentRoles?: unknown };
+    if ("remove" in body) {
+      if ("roles" in body) return jsonResponse({ error: "body.remove cannot be combined with body.roles" }, 400);
+      if (typeof body.remove !== "string" || body.remove.trim().length === 0) {
+        return jsonResponse({ error: "body.remove must be a non-empty role id" }, 400);
+      }
+      const id = body.remove.trim();
+      config.subagentRoles = (config.subagentRoles ?? []).filter(role => role.id !== id);
+      saveManagementConfig(deps, config);
+      const warnings = [...syncCodexAgentRoles(config).warnings];
+      const catalogRefresh = await convergeCodexCatalog();
+      await syncClaudeAgentDefsBestEffort();
+      await autoApplyDesktopBestEffort();
+      return jsonResponse({
+        ok: true,
+        roles: config.subagentRoles,
+        ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
+        syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
+        warnings,
+        catalogRefresh,
+      });
+    }
+    if (!("roles" in body)) return jsonResponse({ error: "body.roles is required" }, 400);
+    const parsed = parseSubagentRoles(body.roles);
+    if (!parsed.ok) return jsonResponse({ error: parsed.error, index: parsed.index }, 400);
+    if ("syncCodexAgentRoles" in body && body.syncCodexAgentRoles !== null && typeof body.syncCodexAgentRoles !== "boolean") {
+      return jsonResponse({ error: "syncCodexAgentRoles must be a boolean" }, 400);
+    }
+    const warnings: string[] = [];
+    const union = unionRoleModelsIntoRoster(config.subagentModels, parsed.roles);
+    if (union.droppedRoleIds.length > 0) {
+      warnings.push(`Featured roster truncated to 5 models; dropped role id(s): ${union.droppedRoleIds.join(", ")}`);
+    }
+    warnings.push(...routedOnV2Warnings(parsed.roles, config));
+    config.subagentRoles = parsed.roles;
+    config.subagentModels = union.models;
+    if ("syncCodexAgentRoles" in body && typeof body.syncCodexAgentRoles === "boolean") {
+      config.syncCodexAgentRoles = body.syncCodexAgentRoles;
+    }
+    saveManagementConfig(deps, config);
+    warnings.push(...syncCodexAgentRoles(config).warnings);
+    const catalogRefresh = await convergeCodexCatalog();
+    await syncClaudeAgentDefsBestEffort();
+    await autoApplyDesktopBestEffort();
+    return jsonResponse({
+      ok: true,
+      roles: config.subagentRoles,
+      ...(config.syncCodexAgentRoles === undefined ? {} : { syncCodexAgentRoles: config.syncCodexAgentRoles }),
+      syncCodexAgentRolesEffective: agentRolesSyncEffective(config),
+      warnings,
+      catalogRefresh,
+    });
   }
 
   // Priority-ordered subagent model fallback chain for quota-aware spawn routing.

@@ -162,12 +162,13 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "provider",
-    usage: "ocx provider <list|add|edit|test|remove|show|set-default|selected|quota|presets|account-mode>",
+    usage: "ocx provider <list|add|install-replit|edit|test|remove|show|set-default|selected|quota|presets|account-mode>",
     summary: "Non-interactive provider management.",
     details: [
-      "Subcommands: list, add/edit/test/remove/show, set-default, selected, quota, presets, account-mode",
+      "Subcommands: list, add, install-replit, edit/test/remove/show, set-default, selected, quota, presets, account-mode",
+      "install-replit reads the gateway key from REPLIT_GATEWAY_KEY, --stdin, or --gateway-key-file (never argv).",
       "Registry providers are auto-configured by name. Custom providers need --adapter and --base-url.",
-      "Run `ocx provider --help` for full usage and examples.",
+      "Run `ocx provider help` for full usage and examples.",
     ],
   },
   {
@@ -243,8 +244,8 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "agent",
-    usage: "ocx agent <status|injection|effort|subagents|fallback|sidecar> ...",
-    summary: "Manage headless multi-agent, roster, effort, injection, and sidecar settings.",
+    usage: "ocx agent <status|injection|effort|subagents|authority|roles|fallback|sidecar> ...",
+    summary: "Manage headless multi-agent, roster, roles, effort, injection, and sidecar settings.",
   },
   {
     name: "observe",
@@ -448,8 +449,8 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
   },
   {
     name: "lab",
-    usage: "ocx lab <status|verdicts|subjects|subject|observations|events|event|artifacts|artifact|catalog> [options] [--json]",
-    summary: "Read-only Compatibility Lab projection inspection (local SQLite; no daemon).",
+    usage: "ocx lab <status|verdicts|subjects|subject|observations|events|event|artifacts|artifact|catalog|run|oracle> [options] [--json]",
+    summary: "Inspect the local Compatibility Lab projection or launch an explicit probe.",
     details: [
       "status                Projection availability, schema versions, and row counts.",
       "verdicts              Paginated derived compatibility verdicts with filters.",
@@ -458,7 +459,9 @@ export const CLI_COMMANDS: CliCommandEntry[] = [
       "events                Event history; event <id> returns one safe typed event.",
       "artifacts             Artifact metadata only (no content download).",
       "catalog               Packaged protocol/live scenario catalog metadata.",
-      "Reads never rebuild the projection, trigger probes, or require the proxy.",
+      "run                   Enqueue manual Lab run; --oracle-run <id> pairs stored Cursor evidence.",
+      "oracle cursor         Loopback probe to https://api2.cursor.sh with isolated working state and sanitized observation V1.",
+      "Reads never rebuild the projection, trigger probes, or require the proxy. Run and oracle are explicit opt-in probes with isolated scratch.",
     ],
   },
   {

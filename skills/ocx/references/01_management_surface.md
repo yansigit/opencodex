@@ -373,6 +373,26 @@ JSON mode: `payload`.
 - Requires transient authority on stdin; the credential is never persisted or echoed.
 - A rotation left pending by a crash is resumed here — startup and status stop rather than guess which key generation is live.
 
+### `ocx provider install-replit`
+
+Install the paired Replit OpenAI and Anthropic providers.
+
+| Method | Route |
+|---|---|
+| POST | `/api/providers/replit-pair` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--origin` | string | Replit gateway origin. |
+| `--stdin` | boolean | Read the gateway key from stdin. |
+| `--gateway-key-file` | string | Read the gateway key from a private file. |
+| `--allow-custom-domain` | boolean | Allow a non-Replit gateway domain. |
+| `--replace` | boolean | Replace an existing provider pair. |
+| `--set-default` | boolean | Select Replit as the default provider. |
+| `--json` | boolean | Emit the installation result as JSON. |
+
+JSON mode: `payload`.
+
 ### `ocx provider keychain`
 
 Move a provider's API key into the OS keychain, restore it, or report where it lives.
@@ -663,8 +683,59 @@ JSON mode: `payload`.
 
 - A status invocation reads and never writes.
 
+### `ocx agent authority`
+
+Resolve subagent model authority for a supplied request.
+
+| Method | Route |
+|---|---|
+| POST | `/api/subagent-model-authority` |
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--file` | string | Read authority JSON from a file instead of stdin. |
+
+JSON mode: `none`.
+
+### `ocx lab run`
+
+Enqueue a manual Lab run and optionally pair a stored Cursor oracle observation.
+
+Drives no management route.
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--layer` | string | protocol_conformance | live_route_compatibility | task_effectiveness |
+| `--scenario` | string | Scenario id |
+| `--provider` | string | Optional provider filter |
+| `--model` | string | Model id |
+| `--oracle-run` | string | Stored oracle run id; scenario and model must match |
+| `--json` | boolean | Emit {run, oracle?, comparison?} envelope as JSON |
+
+JSON mode: `envelope`.
+
+- Reads local projection, validates an immutable sanitized oracle sidecar when supplied, then enqueues the manual run.
+
+### `ocx lab oracle cursor`
+
+Cursor oracle probe: isolated working state and loopback-only sanitized observation V1.
+
+Drives no management route.
+
+| Flag | Value | Meaning |
+|---|---|---|
+| `--scenario` | string | Lab scenario id |
+| `--model` | string | Model id for oracle prompt |
+| `--agent-bin` | string | Path to cursor-agent binary |
+| `--keep-raw` | boolean | Persist raw bytes 0600 under lab scratch 24h TTL; without it only names + byte lengths are kept |
+| `--json` | boolean | Emit sanitized observation V1 as JSON |
+
+JSON mode: `envelope`.
+
+- Config/data/workspace use OS tmp 0700 while the authenticated child retains normal home/keychain access; loopback 127.0.0.1:0 forwards only to https://api2.cursor.sh; auth bodies are opaque; sanitized observations contain protocol cases, counts, byte lengths, hashes, and diagnostics.
+
 ## Counts
 
-- declared capabilities: 36
-- of those, state-changing: 16
+- declared capabilities: 40
+- of those, state-changing: 20
 - head-resolved invocations: 2

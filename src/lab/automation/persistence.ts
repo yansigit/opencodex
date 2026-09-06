@@ -60,6 +60,7 @@ const RUN_KEYS = new Set([
   "terminalCode",
   "providerName",
   "modelId",
+  "oracleRunId",
 ]);
 const RUN_STATES = new Set(["queued", "running", "completed", "blocked", "failed", "cancelled", "abandoned"]);
 const TERMINAL_RUN_STATES = new Set(["completed", "blocked", "failed", "cancelled", "abandoned"]);
@@ -366,6 +367,9 @@ function normalizeRunRecord(raw: unknown, index: number): LabAutomationRunRecord
   const modelId = row.modelId === undefined
     ? undefined
     : assertBoundedString(row.modelId, `modelId at ${index}`, "invalid_state", 512);
+  const oracleRunId = row.oracleRunId === undefined
+    ? undefined
+    : assertBoundedString(row.oracleRunId, `oracleRunId at ${index}`, "invalid_state", 128);
 
   if (state === "queued" && (startedAt !== undefined || completedAt !== undefined || terminalCode !== undefined)) {
     throw new LabAutomationError(`queued run has lifecycle terminal fields at ${index}`, "invalid_state");
@@ -400,6 +404,7 @@ function normalizeRunRecord(raw: unknown, index: number): LabAutomationRunRecord
     ...(terminalCode !== undefined ? { terminalCode } : {}),
     ...(providerName !== undefined ? { providerName } : {}),
     ...(modelId !== undefined ? { modelId } : {}),
+    ...(oracleRunId !== undefined ? { oracleRunId } : {}),
   };
 }
 

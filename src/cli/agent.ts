@@ -27,6 +27,7 @@ const USAGE = `Usage:
       [--prompt <text|->] [--guidance <on|off>] [--json]
   ocx agent effort <status|set> [--main <level|->] [--subagent <level|->] [--json]
   ocx agent subagents <status|set|clear> [model,model...] [--json]
+  ocx agent authority [--file <path>]
   ocx agent roles <status|set|remove> [--file <path>] [--json]
   ocx agent fallback <status|set|clear> [model,model...] [--poll-ms <5000-600000>] [--json]
   ocx agent sidecar <status|web|vision> [--list] [--model <id|->]
@@ -140,9 +141,9 @@ async function readRolesDocument(deps: RuntimeApiDeps, file: string | undefined)
   return parsed;
 }
 
-async function readStdinDocument(deps: RuntimeApiDeps): Promise<string> {
+async function readStdinDocument(deps: RuntimeApiDeps, label = "roles set"): Promise<string> {
   const input = deps.stdinImpl ?? process.stdin;
-  if (input.isTTY) throw new CliUsageError("roles set requires --file <path> or JSON on stdin", USAGE);
+  if (input.isTTY) throw new CliUsageError(`${label} requires --file <path> or JSON on stdin`, USAGE);
   const chunks: Buffer[] = [];
   for await (const chunk of input) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
@@ -150,6 +151,21 @@ async function readStdinDocument(deps: RuntimeApiDeps): Promise<string> {
   const text = Buffer.concat(chunks).toString("utf8").trim();
   if (!text) throw new CliUsageError("roles JSON was empty", USAGE);
   return text;
+}
+
+async function authority(argv: string[], deps: RuntimeApiDeps): Promise<void> {
+  const args = [...argv];
+  const file = takeOption(args, "--file");
+  rejectArgs(args, USAGE);
+  const raw = file ? readFileSync(file, "utf8") : await readStdinDocument(deps, "authority");
+  let body: unknown;
+  try { body = JSON.parse(raw); }
+  catch { throw new CliUsageError("authority JSON is invalid", USAGE); }
+  const resolved = await runtimeRequest("/api/subagent-model-authority", {
+    method: "POST",
+    body: JSON.stringify(body),
+  }, deps);
+  printData(resolved, true, []);
 }
 
 async function roles(argv: string[], deps: RuntimeApiDeps): Promise<void> {
@@ -281,6 +297,7 @@ export async function handleAgentCommand(argv: string[], deps: RuntimeApiDeps = 
     else if (sub === "injection" || sub === "guidance") await injection(rest, deps);
     else if (sub === "effort") await effort(rest, deps);
     else if (sub === "subagents" || sub === "roster") await subagents(rest, deps);
+    else if (sub === "authority") await authority(rest, deps);
     else if (sub === "roles") await roles(rest, deps);
     else if (sub === "fallback") await fallback(rest, deps);
     else if (sub === "sidecar") await sidecar(rest, deps);
