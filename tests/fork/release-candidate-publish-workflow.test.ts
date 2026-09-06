@@ -27,6 +27,7 @@ describe("release candidate publish bridge", () => {
   });
 
   test("automatic candidate publication uses only the downloaded tarball", () => {
+    expect(text).toContain('package_file="./${CANDIDATE_PACKAGE_PATH#./}"');
     expect(text).toContain('npm publish "$package_file" --tag "$NPM_DIST_TAG" --access public --ignore-scripts');
     expect(text).toContain('if [ -z "$DISPATCH_CANDIDATE_RUN_ID" ]');
     expect(text).toContain('elif [ "$DRY_RUN" = "true" ]');
