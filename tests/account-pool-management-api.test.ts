@@ -5,10 +5,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleCodexAuthAPI } from "../src/codex/auth-api";
 import { saveConfig } from "../src/config";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
 import { startServer } from "../src/server";
 import type { OcxConfig } from "../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
+
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
+function stubWindowsAclHardening(): void {
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+}
+
+async function flushWindowsAclHardening(): Promise<void> {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+}
 
 function makeCodexConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -21,18 +36,21 @@ function makeCodexConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
 }
 
 describe("Codex account pool strategy management API", () => {
-  const TEST_DIR = join(import.meta.dir, ".tmp-account-pool-mgmt-codex");
+  let testDir = "";
   let previousOpencodexHome: string | undefined;
 
   beforeEach(() => {
+    stubWindowsAclHardening();
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    process.env.OPENCODEX_HOME = TEST_DIR;
+    testDir = mkdtempSync(join(tmpdir(), "ocx-account-pool-mgmt-codex-"));
+    process.env.OPENCODEX_HOME = testDir;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await flushWindowsAclHardening();
+    if (testDir) removeTreeWithRetry(testDir);
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    removeTreeWithRetry(TEST_DIR);
   });
 
   test("GET /api/codex-auth/active surfaces strategy defaults", async () => {
@@ -156,6 +174,7 @@ describe("Anthropic account pool strategy management API", () => {
   }
 
   beforeEach(() => {
+    stubWindowsAclHardening();
     previousHome = process.env.OPENCODEX_HOME;
     isolatedCodexHome = installIsolatedCodexHome("ocx-pool-mgmt-codex-");
     testDir = mkdtempSync(join(tmpdir(), "ocx-pool-mgmt-"));
@@ -171,12 +190,13 @@ describe("Anthropic account pool strategy management API", () => {
     }), { mode: 0o600 });
   });
 
-  afterEach(() => {
-    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousHome;
+  afterEach(async () => {
+    await flushWindowsAclHardening();
+    if (testDir) removeTreeWithRetry(testDir);
     isolatedCodexHome?.restore();
     isolatedCodexHome = null;
-    if (testDir) removeTreeWithRetry(testDir);
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
   });
 
   test("GET /api/oauth/accounts/pool surfaces strategy defaults", async () => {
@@ -415,6 +435,7 @@ describe("generic OAuth pool-settings contract (#695)", () => {
   let previousHome: string | undefined;
   let testDir = "";
   beforeEach(() => {
+    stubWindowsAclHardening();
     previousHome = process.env.OPENCODEX_HOME;
     testDir = mkdtempSync(join(tmpdir(), "ocx-pool-generic-"));
     process.env.OPENCODEX_HOME = testDir;
@@ -428,10 +449,11 @@ describe("generic OAuth pool-settings contract (#695)", () => {
       },
     } as OcxConfig);
   });
-  afterEach(() => {
+  afterEach(async () => {
+    await flushWindowsAclHardening();
+    if (testDir) removeTreeWithRetry(testDir);
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
-    if (testDir) removeTreeWithRetry(testDir);
   });
 
   test("GET/PUT round-trip for a generic OAuth provider; api-key providers and bad values get 400", async () => {
