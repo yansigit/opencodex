@@ -188,28 +188,25 @@ describe("compactRolesCatalog", () => {
 });
 
 describe("ocx agent roles CLI", () => {
-  const servers: Array<ReturnType<typeof Bun.serve>> = [];
-
   afterEach(() => {
-    for (const server of servers.splice(0)) server.stop(true);
     process.exitCode = 0;
   });
 
   function fakeRuntime(responder?: (req: Request, body: unknown) => unknown) {
     const requests: Array<{ path: string; method: string; body: unknown }> = [];
-    const server = Bun.serve({
-      port: 0,
-      async fetch(req) {
-        const url = new URL(req.url);
-        const body = req.method === "GET" ? null : await req.json().catch(() => null);
-        requests.push({ path: url.pathname, method: req.method, body });
-        const custom = responder?.(req, body);
-        if (custom !== undefined) return Response.json(custom);
-        return Response.json({ ok: true, roles: [] });
-      },
-    });
-    servers.push(server);
-    return { requests, deps: { baseUrl: `http://127.0.0.1:${server.port}` } };
+    // These are CLI request-shape tests, so use runtimeRequest's existing
+    // transport seam instead of binding a loopback server. Under a saturated
+    // full-suite worker pool, Bun could starve the local server past the test's
+    // five-second budget even though no product operation was slow.
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const req = new Request(input, init);
+      const url = new URL(req.url);
+      const body = req.method === "GET" ? null : await req.json().catch(() => null);
+      requests.push({ path: url.pathname, method: req.method, body });
+      const custom = responder?.(req, body);
+      return Response.json(custom !== undefined ? custom : { ok: true, roles: [] });
+    };
+    return { requests, deps: { baseUrl: "http://runtime", fetchImpl } };
   }
 
   test("status JSON round-trips the catalog from GET /api/subagent-roles", async () => {
