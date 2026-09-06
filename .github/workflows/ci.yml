@@ -714,6 +714,17 @@ jobs:
         # on it reports a defect this repository does not have (#2152). An ordinary assertion
         # failure returns its status immediately — only the crash signatures below are retried,
         # and only once, so a genuinely broken build cannot be retried into green.
+        #
+        # Every shard owns one ephemeral GitHub-hosted VM and this step invokes its
+        # test runners sequentially. There is no peer process to queue behind, so
+        # resolving and ACL-hardening the desktop-grade per-user lock adds no safety.
+        # More importantly, that resolution starts PowerShell before any test can
+        # run; under hosted contention the bounded SID lookup has timed out and
+        # discarded an otherwise usable shard. Keep the local/multi-worktree lock
+        # fail-closed, while explicitly using its documented no-queue mode inside
+        # this isolated single-owner CI boundary.
+        env:
+          OCX_TEST_NO_QUEUE: "1"
         shell: bash
         run: |
           set +e
