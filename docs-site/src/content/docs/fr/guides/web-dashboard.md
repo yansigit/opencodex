@@ -67,11 +67,19 @@ Le compteur compare les résultats au total chargé ; la réinitialisation resta
 
 ### Liens directs vers une section
 
-Il n'existe qu'une seule mise en page, donc aucun commutateur de disposition n'est à configurer. Les sections
-du tableau de bord possèdent plutôt leur propre adresse : `#dashboard` ouvre **Vue d'ensemble**, tandis que
+Il n'existe qu'une seule mise en page adaptative, donc aucun commutateur de disposition n'est à configurer.
+Sur ordinateur, la barre latérale assure la navigation principale ; sur petit écran, **Ouvrir le menu** affiche
+les mêmes liens de pages. Les sections du tableau de bord possèdent plutôt leur propre adresse : `#dashboard` ouvre **Vue d'ensemble**, tandis que
 `#dashboard/providers` et `#dashboard/models` ouvrent les deux autres sections. Le rechargement, les favoris
 et le bouton **Précédent** conservent la section affichée. **Journaux** fonctionne de la même manière avec
 `#logs` et `#logs/debug`. Un ancien favori `#providers/workspace` ouvre désormais `#providers`.
+
+La Vue d'ensemble comprend aussi le panneau **Activité sur 30 jours**, avec les tendances des requêtes et des
+jetons sur 30 jours. Sélectionnez un jour sur l'un des sparklines pour lire ses totaux, ou choisissez
+**Voir l’utilisation** pour ouvrir la page Utilisation complète. Si une actualisation est interrompue après le
+chargement de la Vue d'ensemble, les dernières données valides restent visibles et un avis de reconnexion
+propose **Réessayer**. En cas d'échec de la connexion initiale, le tableau de bord affiche les indications
+`ocx start` et la même action de nouvelle tentative.
 
 Les coûts affichés dans **Journaux** et **Utilisation** sont des équivalents au tarif catalogue de l'API,
 calculés à partir des jetons signalés. Ils ne constituent ni des reçus de facturation ni la preuve d'une
@@ -186,7 +194,7 @@ L'interface graphique est un client léger de l'API JSON de gestion du proxy. Pa
 
 | Point de terminaison | Fonction |
 | --- | --- |
-| `GET` / `PUT /api/settings` | Lire les réglages ou modifier le démarrage automatique de Codex, les paramètres de flux et de mémoire, ainsi que la visibilité du sélecteur ciblant les comptes. |
+| `GET` / `PUT /api/settings` | Lire ou modifier le démarrage automatique de Codex, les paramètres de flux et de mémoire, la visibilité du sélecteur ciblant les comptes et les paramètres de l’écouteur du serveur. Les changements d’écouteur et de certificat nécessitent un redémarrage du proxy. |
 | `GET` / `POST /api/github/star` | Lire l'état de mise en vedette dérivé de `gh` ou mettre le dépôt en vedette. Le POST est refusé avec `403` et `agent_consent_required` pour les appels pilotés par un agent sans session de tableau de bord. |
 | `GET /api/startup-health` | Lire, sans secrets, les diagnostics de routage, de service, de lanceur intermédiaire et de sécurité au redémarrage. |
 | `POST /api/startup-action` | Installer le service d'arrière-plan ou le lanceur intermédiaire Codex au moyen d'actions fixes et autorisées. |

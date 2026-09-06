@@ -238,10 +238,10 @@ Without a provider, lists the Codex pool, OAuth accounts, and configured API-key
 providers are skipped unless `--all` is present. With a provider, lists only that credential family.
 Human output uses `PROVIDER TYPE ID PLAN/LABEL PRIORITY STATUS`; a manually chosen Codex row is marked
 `selected`. `PRIORITY` is the signed Codex selection order (`0` when unset) and shows `-` for rows
-where ordering does not apply, such as OAuth accounts and API keys. By default, with two or more eligible stored Kiro accounts, a 429 rotates automatically to
-another account and prefers the one with the most known remaining allowance; rotation is
-presence-driven and cannot be turned off — `oauthAccountFailover.enabled: false` declines the
-pre-dispatch account preference, not 429 recovery; `ocx account login kiro`
+where ordering does not apply, such as OAuth accounts and API keys. By default, with two or more eligible stored Kiro accounts and no explicit failover setting, a 429 rotates automatically to
+another account and prefers the one with the most known remaining allowance. Set
+`oauthAccountFailover.enabled: false` globally, or use the provider override, to disable both
+pre-dispatch account preference and 429 recovery; `ocx account login kiro`
 adds accounts to the pool one at a time. An empty result is still success. `--json`
 returns:
 

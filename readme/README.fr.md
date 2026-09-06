@@ -6,13 +6,13 @@ Deux commandes suffisent pour que chacun d'eux exécute le LLM de votre choix.</
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Suivre @claudeebum sur X"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="version npm"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="licence"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="version de Node">
+  <a href="https://www.npmjs.com/package/@yansigit/opencodex"><img src="https://img.shields.io/npm/v/@yansigit/opencodex?color=cb3837&label=npm&logo=npm" alt="version npm"></a>
+  <a href="https://github.com/yansigit/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@yansigit/opencodex?color=blue" alt="licence"></a>
+  <img src="https://img.shields.io/node/v/@yansigit/opencodex?logo=node.js&label=node" alt="version de Node">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ocx start        # proxy et tableau de bord sur le port par défaut localhost:10100
 ```
 
@@ -56,7 +56,7 @@ tandis que les fils existants restent associés au compte qui les a démarrés.
 ### Pour les humains
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+ ; le runtime Bun est inclus automatiquement
+npm install -g @yansigit/opencodex   # Node 22+ ; le runtime Bun est inclus automatiquement
 ocx start                            # ou `ocx service` pour l’exécuter en arrière-plan
 ```
 
@@ -67,7 +67,7 @@ ocx start                            # ou `ocx service` pour l’exécuter en ar
 
 ```bash
 curl -fsSL https://bun.sh/install | bash && ~/.bun/bin/bun upgrade --canary
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex && ~/.bun/bin/bun install
 ~/.bun/bin/bun run src/cli/index.ts start
 ```
@@ -76,7 +76,7 @@ cd opencodex && ~/.bun/bin/bun install
 
 ```powershell
 irm bun.sh/install.ps1 | iex; bun upgrade --canary
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex; bun install
 bun run src/cli/index.ts start
 ```
@@ -103,7 +103,7 @@ l'un d'eux — généralement votre connexion Codex Desktop — ne doit être ut
 ### Pour les agents
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ocx start     # ou `ocx service`
 ocx init      # configuration interactive : écrit ~/.opencodex/config.json et relie Codex
 ```
@@ -127,7 +127,7 @@ mais les commandes sans interface comme `ocx provider add` et `ocx combo set` co
 | Linux (x64 / arm64) | Entièrement pris en charge | systemd (unité utilisateur) |
 | Windows (x64) | Entièrement pris en charge | Planificateur de tâches (masqué) / service natif en option (`--native`, WinSW) |
 
-Nécessite [Node](https://nodejs.org) 18 ou version ultérieure. L'environnement d'exécution Bun est inclus
+Nécessite [Node](https://nodejs.org) 22 ou version ultérieure. L'environnement d'exécution Bun est inclus
 lors de `npm install` — aucune installation séparée de Bun n'est nécessaire, ni WSL sous Windows. Si npm a
 bloqué les scripts d'installation de l'environnement inclus, consultez la
 [documentation d'installation](https://opencodex.me/fr/getting-started/installation/).
@@ -261,7 +261,7 @@ Supprimez-les avec `ocx service uninstall` / `ocx codex-shim uninstall`.
 
 ```bash
 ocx uninstall                  # arrête, supprime le service ou shim, restaure Codex natif et nettoie l’état
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g @yansigit/opencodex
 ```
 
 ## Accès distant
@@ -281,7 +281,7 @@ intégrations et références de la CLI, de la configuration et de l'API de gest
 Les notes de référence des mainteneurs se trouvent dans [`structure/`](../structure), la configuration pour
 les contributeurs dans [`CONTRIBUTING.md`](../CONTRIBUTING.md) et le signalement de problèmes de sécurité dans
 [`SECURITY.md`](../SECURITY.md). Signalez les vulnérabilités non divulguées en privé grâce au
-[signalement privé de vulnérabilités de GitHub](https://github.com/lidge-jun/opencodex/security/advisories/new),
+[signalement privé de vulnérabilités de GitHub](https://github.com/yansigit/opencodex/security/advisories/new),
 et non dans une issue publique.
 
 ## Développement
@@ -291,7 +291,7 @@ l'environnement d'exécution Bun inclus dans le paquet npm publié, lequel est u
 commandes `ocx` installées.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run typecheck

@@ -11,14 +11,14 @@ opencodex를 설치하면 같은 실행 파일을 가리키는 `ocx`와 `opencod
 
 | 요구 사항 | 이유 |
 | --- | --- |
-| **[Node](https://nodejs.org) ≥ 18** | `ocx`는 Bun 런타임에서 실행되지만, 런타임이 `npm install` 시 자동으로 번들되므로 Bun을 직접 설치할 필요가 **없습니다**. |
+| **[Node](https://nodejs.org) ≥ 22** | `ocx`는 Bun 런타임에서 실행되지만, 런타임이 `npm install` 시 자동으로 번들되므로 Bun을 직접 설치할 필요가 **없습니다**. |
 | **[OpenAI Codex](https://openai.com/codex)**(CLI, App, 또는 SDK) | opencodex가 앞단에 위치하는 클라이언트입니다. opencodex는 `$CODEX_HOME/config.toml`(기본값 `~/.codex/config.toml`)에 기록합니다. |
 | 프로바이더 계정 또는 API 키 | Anthropic, xAI, Kimi, Ollama Cloud, OpenRouter, OpenAI API 키, OpenAI 호환 엔드포인트, 또는 ChatGPT 로그인. |
 
 ## 설치
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ```
 
 :::note[npm이 bun postinstall을 차단했다면?]
@@ -29,10 +29,10 @@ install-scripts ... blocked because they are not covered by allowScripts`).
 디렉터리를 재설치하게 되니, 항상 패키지 이름을 명시해야 합니다:
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @yansigit/opencodex
 
 # 처음에 sudo로 설치했다면 sudo를 유지하세요:
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @yansigit/opencodex
 ```
 :::
 
@@ -50,7 +50,7 @@ GPT-5.6 Sol/Terra/Luna 카탈로그 정보가 이미 들어 있습니다. 다만
 아닙니다. 아직 정식 배포되지 않은 opencodex 빌드를 시험할 때만 preview 채널을 사용하세요:
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
+npm install -g @yansigit/opencodex@preview
 ocx update --tag preview
 ```
 
@@ -59,7 +59,7 @@ ocx update --tag preview
 opencodex 자체를 직접 수정하며 작업하려면:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # 개발 모드로 프록시 API 시작 (src/cli/index.ts start)

@@ -239,7 +239,7 @@ ocx update
 ocx update --tag preview
 ```
 
-新しいバージョンは、[リリースワークフロー](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml) が npm に公開すると利用可能になります。
+新しいバージョンは、[リリースワークフロー](https://github.com/yansigit/opencodex/actions/workflows/release.yml) が npm に公開すると利用可能になります。
 
 ## Remote Hub クライアントのライフサイクル
 

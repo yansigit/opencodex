@@ -283,7 +283,7 @@ ocx update
 ocx update --tag preview
 ```
 
-Les nouvelles versions deviennent disponibles lorsque le [workflow de publication](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml) les publie sur npm.
+Les nouvelles versions deviennent disponibles lorsque le [workflow de publication](https://github.com/yansigit/opencodex/actions/workflows/release.yml) les publie sur npm.
 
 ## Cycle de vie du client Remote Hub
 

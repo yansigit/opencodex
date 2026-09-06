@@ -12,7 +12,8 @@ yardımcı özellikleri nasıl çalıştıracağını kontrol eder.
 | Alan | Tip | Varsayılan | Anlamı |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Proxy dinleme portu. |
-| `hostname?` | `string` | `"127.0.0.1"` | Bağlama adresi. Geri döngü olmayan bağlamalar `OPENCODEX_API_AUTH_TOKEN` gerektirir. |
+| `hostname?` | `string` | `"127.0.0.1"` | Bağlama adresi. Geri döngü olmayan bağlamalar TLS ve veri düzlemi kimlik bilgisi gerektirir. |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | Belirtilen okunabilir sertifika ve özel anahtar dosyalarıyla HTTPS sunar. `publicOrigin`, istemci URL'lerinde kullanılan tam HTTPS origin olmalıdır. |
 | `proxy?` | `string` | — | Giden HTTP(S) proxy URL'si veya `${ENV_VAR}`. Yalnızca bu değişkenler ayarlanmadığında `HTTP_PROXY` / `HTTPS_PROXY`'ye uygulanır; geri döngü `NO_PROXY` içinde kalır. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Metin veya araç çağrısı içermeyen bir Responses tamamlamasını aynı istekle bir kez yeniden denemeyi açıkça etkinleştirir. Yeniden deneme ücretlendirilebilir. `OCX_EMPTY_COMPLETION_RETRY=0`, yapılandırmayı değiştirmeden devre dışı bırakır; combo ve routed-compaction turları hariçtir. |
 | `stallTimeoutSec?` | `number` | `300` | `response.incomplete` öncesinde yukarı akış verisi olmadan geçen saniye. Minimum 1. |
@@ -20,7 +21,7 @@ yardımcı özellikleri nasıl çalıştıracağını kontrol eder.
 | `shutdownTimeoutMs?` | `number` | `5000` | Aktif turlar iptal edilmeden önce zarif boşaltma süresi sınırı. |
 | `websockets?` | `boolean` | `false` | Responses WebSocket yolu için `supports_websockets` bildirin. False, HTTP/SSE'yi tutar. |
 | `corsAllowOrigins?` | `string[]` | `[]` | CORS tarafından izin verilen ek tam kaynaklar. Geri döngü kaynaklarına her zaman izin verilir. `chrome-extension://<extension-id>` gibi yetki tabanlı tarayıcı uzantısı kaynakları desteklenir; `*` bir joker karakter değildir. Firefox ve Safari uzantı UUID'sini yeniden oluşturur (yükleme başına / tarayıcı başlatma başına), bu nedenle kaynak değiştiğinde girdiyi güncelleyin. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Geri döngü olmayan bağlamalarda yönetim ve veri düzlemi kimlik doğrulaması tarafından kabul edilen oluşturulmuş `ocx_…` kimlik bilgileri. Kontrol paneli tarafından yönetilir. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Geri döngü olmayan bağlamalarda veri düzlemi kimlik doğrulaması tarafından kabul edilen oluşturulmuş `ocx_…` kimlik bilgileri. Kontrol paneli tarafından yönetilir; yönetim API'si ayrı bir yönetici belirteci gerektirir. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | devre dışı | İsteğe bağlı arşivlenmiş oturum temizleme politikası. Asla örtük olarak etkinleştirilmez. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Çıkarılabilir uygulamaya ait günlükler, önbellekler, bloblar ve devam yükleri için MiB cinsinden sınır. Aralık 64–4096; bir RSS sınırı değildir. |
 | `codexAutoStart?` | `boolean` | `true` | Codex dolgusunun Codex'i başlatmadan önce `ocx ensure` çalıştırmasına izin verin. False, ensure'ı bir işlem yapmayan (no-op) hale getirir. |
@@ -39,15 +40,15 @@ Komut, geçerli dedicated-provider geçmişi de dahil olmak üzere kullanıcı i
 ## Uzaktan erişim
 
 Varsayılan `127.0.0.1` bağlaması yalnızca geri döngüdür. `0.0.0.0` gibi geri
-döngü olmayan bir adres hem `/api/*` hem de veri düzleminde belirteç kimlik
-doğrulaması gerektirir. Başlamadan önce belirteci dışa aktarın:
+döngü olmayan bir adres TLS ve veri düzlemi kimlik bilgisi gerektirir. Uzak kontrol paneli ayrıca
+ayrı yönetici belirteci (`OPENCODEX_ADMIN_AUTH_TOKEN` veya oluşturulan yönetici belirteci dosyası) gerektirir. Başlamadan önce veri düzlemi belirtecini dışa aktarın:
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-Proxy bu değişken olmadan uzak bir bağlamayı reddeder. Bir arka plan servisi
+TLS veya bu değişken olmadan proxy uzak bir bağlamayı reddeder. Sertifika ve dinleyici değişiklikleri yeniden başlatma sonrası uygulanır. Bir arka plan servisi
 için launchd, systemd veya Görev Zamanlayıcı'nın alması amacıyla `ocx service
 install`'dan önce dışa aktarın. İstemciler şunu göndermelidir:
 
@@ -112,8 +113,10 @@ zaten çalışan app-server'lar önceki `base_url`'i tutardı.
 
 Dinleyici yalnızca `POST /v1/responses`, onun WebSocket yükseltmesi, `POST
 /v1/responses/compact`, `POST /v1/alpha/search` (yerel Codex web arama aktarımı),
-`GET /v1/models` ve bağımsız sesli WebSocket yükseltmelerini sunar. `/api/*` ve
-kontrol paneli dahil diğer her şey `404` döndürür.
+`GET /v1/models`, `POST /v1/messages`, `POST /v1/messages/count_tokens` ve bağımsız
+sesli WebSocket yükseltmelerini sunar. İki Messages rotası, Anthropic protokolünü
+kullanan yerel Claude Code istemcilerini destekler. `/api/*` ve kontrol paneli
+dahil diğer her şey `404` döndürür.
 
 :::danger[Bu kimliği doğrulanmamış bir yüzeydir]
 Makinedeki her süreç bu dinleyiciyi kullanabilir. Hesap kotasını ve ücretli
@@ -134,7 +137,7 @@ Uzaktan kullanım uzak bir bağlama gerektirmez. Geri döngüyü tutun ve
 yönlendirin:
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 you@remote
 ```
 
 Herhangi bir yerel port çalışır. Host'u `localhost`, `127.0.0.1` veya `::1`
@@ -147,7 +150,7 @@ Sağlayıcı OAuth geri aramaları sabit bir uzak portta dinler. Uzak makinede
 oturum açın veya bu portu da yönlendirin:
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@remote
 ```
 
 Kayıtlı bir geri arama portu zaten kullanımdaysa ve oturum açma yüzeyi manuel
@@ -193,6 +196,19 @@ Otomatik kimlik doğrulama saklanan Claude kimlik doğrulaması bulunduğunda
 subscription'ı, hiçbiri bulunmadığında proxy'yi ve algılama yetersiz olduğunda
 bir uyarı ile subscription'ı seçer. Bkz. [Claude Code kimlik doğrulama
 modu](/tr/guides/claude-code/#auth-mode).
+
+Oluşturulan kadro tanımları (`~/.claude/agents/ocx-*.md`), gönderimden önce proxy'nin
+doğruladığı imzalı `<!-- ocx-route -->` / `<!-- ocx-effort -->` yönergelerini taşır:
+geçersiz bir imzalı yönerge `400 invalid_request_error` ile kapalı olarak başarısız olur ve
+imzasız yönergeler yalnızca etkin, OpenCodex'e ait kadro girdileriyle tam olarak eşleştiğinde
+kabul edilir. `ocx doctor`, anahtar materyalini yazdırmadan imzalama anahtarının varlığını ve
+izinlerini bildirir.
+
+`POST /v1/messages` ve `POST /v1/messages/count_tokens`, isteğe bağlı
+`unauthenticatedLoopbackListener` üzerinde kabul edilen tek Claude rotalarıdır (sunucu
+düzeyinde bir anahtar; bağlantı noktası zorunludur ve proxy bağlantı noktasından farklı
+olmalıdır). Genel dinleyicide kimlik doğrulaması değişmez. Bkz.
+[Belirteci alamayan yerel istemciler](#belirteci-alamayan-yerel-istemciler).
 
 ## Gölge çağrılar
 
@@ -282,6 +298,9 @@ sınırı tüketmez. Uzak `https:` görselleri ve başarısız veya boş açıkl
 
 Anthropic OAuth sidecar'ları opencodex'in mevcut Claude Code OAuth parmak izini
 yeniden kullanır. Hedeflenen hesap ve iş yükünü kapsamlı bir şekilde test edin.
+### TLS ve WebSocket
+
+`tls`, `certFile`, `keyFile` ve `publicOrigin` alanlarını kabul eder. WebSocket boşta kalma süresi 255 saniyedir; geri basınç sınırında (1 MiB) bağlantı kapatılır.
 
 ## Remote Hub anahtarları ve varsayılanlar
 

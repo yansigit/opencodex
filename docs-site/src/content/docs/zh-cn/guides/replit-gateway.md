@@ -4,7 +4,7 @@ description: 将 opencodex 与您自建的 Replit 部署配对，该部署通过
 ---
 
 **Replit 网关伴侣**是位于
-[`integrations/replit-gateway`](https://github.com/lidge-jun/opencodex/tree/dev/integrations/replit-gateway)
+[`integrations/replit-gateway`](https://github.com/yansigit/opencodex/tree/dev/integrations/replit-gateway)
 的用户自有 Bun 服务，运行在**您的 Replit 部署内**。它从 Repl 环境读取 Replit 托管的 AI Integrations
 凭据，并向 opencodex 暴露两个原生协议端点：
 
@@ -33,7 +33,7 @@ opencodex 永远不会收到 `AI_INTEGRATIONS_*` 密钥。您需单独提供 **�
 - 运行中的 opencodex 代理（`ocx start`），用于控制台向导或 CLI 安装。
 
 部署与配置请参阅
-[包 README](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md)。
+[包 README](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md)。
 
 ## 部署网关（摘要）
 
@@ -164,14 +164,14 @@ Replit 伴侣**目前不达标**。
 | `AI_INTEGRATIONS_*` 名称 | **未验证观察惯例**；canary 待定 |
 | 条款与法律实体 | 服务条款 — **Replit, Inc.**；Pro/Enterprise：Commercial Agreement |
 | 平台外路由授权 | **未获得** |
-| 具名维护负责人 | **opencodex：** [@lidge-jun](https://github.com/lidge-jun)、[@Ingwannu](https://github.com/Ingwannu)（[`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md)）。**Replit：** 未作为此工作流的合作伙伴参与。 |
+| 具名维护负责人 | **opencodex：** [@lidge-jun](https://github.com/lidge-jun)、[@Ingwannu](https://github.com/Ingwannu)（[`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md)）。**Replit：** 未作为此工作流的合作伙伴参与。 |
 | 可引用核验日期 | **2026-08-22** |
 
 **注册表推广被阻止。** `replit`/`replit-anthropic` 不在 `src/providers/registry.ts` 中。
 
 ## 另见
 
-- [包 README](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md)
-- [设计规格](https://github.com/lidge-jun/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
+- [包 README](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md)
+- [设计规格](https://github.com/yansigit/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
 - [提供商](/guides/providers/)
 - [Web 控制台](/guides/web-dashboard/)

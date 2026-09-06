@@ -4,7 +4,7 @@ description: Сопрягите opencodex с собственным развёр
 ---
 
 **Компаньон шлюза Replit** — это пользовательский Bun-сервис из
-[`integrations/replit-gateway`](https://github.com/lidge-jun/opencodex/tree/dev/integrations/replit-gateway),
+[`integrations/replit-gateway`](https://github.com/yansigit/opencodex/tree/dev/integrations/replit-gateway),
 работающий **внутри вашего развёртывания Replit**. Он читает учётные данные Replit AI Integrations из
 среды Repl и предоставляет opencodex два нативных конечных пункта:
 
@@ -35,7 +35,7 @@ opencodex никогда не получает секреты `AI_INTEGRATIONS_*
 - Запущенный прокси opencodex (`ocx start`) для мастера панели или CLI.
 
 Развёртывание и настройка — в
-[README пакета](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md).
+[README пакета](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md).
 
 ## Развёртывание шлюза (кратко)
 
@@ -171,7 +171,7 @@ opencodex поддерживает пресеты только с первичн
 | Имена `AI_INTEGRATIONS_*` | **Неверифицированная конвенция**; canary в ожидании |
 | Условия и юрлицо | ToS — **Replit, Inc.**; Pro/Enterprise: Commercial Agreement |
 | Внеплатформенная маршрутизация | **Не получено** |
-| Именованный владелец сопровождения | **opencodex:** [@lidge-jun](https://github.com/lidge-jun), [@Ingwannu](https://github.com/Ingwannu) ([`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md)). **Replit:** не партнёр этого сценария. |
+| Именованный владелец сопровождения | **opencodex:** [@lidge-jun](https://github.com/lidge-jun), [@Ingwannu](https://github.com/Ingwannu) ([`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md)). **Replit:** не партнёр этого сценария. |
 | Дата проверки | **2026-08-22** |
 
 **Продвижение в реестр заблокировано.** `replit` / `replit-anthropic` отсутствуют в
@@ -179,7 +179,7 @@ opencodex поддерживает пресеты только с первичн
 
 ## См. также
 
-- [README пакета](https://github.com/lidge-jun/opencodex/blob/dev/integrations/replit-gateway/README.md)
-- [Спецификация](https://github.com/lidge-jun/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
+- [README пакета](https://github.com/yansigit/opencodex/blob/dev/integrations/replit-gateway/README.md)
+- [Спецификация](https://github.com/yansigit/opencodex/blob/dev/docs/superpowers/specs/2026-08-22-replit-gateway-design.md)
 - [Провайдеры](/guides/providers/)
 - [Веб-панель](/guides/web-dashboard/)

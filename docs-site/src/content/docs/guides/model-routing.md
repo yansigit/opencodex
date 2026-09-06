@@ -101,6 +101,9 @@ Routing and catalog visibility are separate controls:
   switching it on restores that selection. A remembered selection never applies a limit while disabled.
   Sending `{ "setAll": true }` without `value` enables all configured providers at the current
   global value and replaces their remembered selections.
+- Live `/models` metadata is authoritative for a model's window until a cap lowers it. Provider
+  `contextWindow` and `modelContextWindows` are safety caps and fallbacks for unknown windows;
+  discovery never auto-fills those fields from live catalog data.
 
 ```json
 {

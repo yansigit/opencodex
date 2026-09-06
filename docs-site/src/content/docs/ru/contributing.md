@@ -6,14 +6,14 @@ description: Разработка opencodex — настройка окруже�
 ## Настройка окружения
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # прокси-API в режиме разработки
 bun run dev:gui      # dev-сервер дашборда (другой терминал)
 bun run typecheck    # bun x tsc --noEmit
 bun run test:changed              # routine import-graph test selection
-bun test tests/routing/router.test.ts     # routine focused test
+bun scripts/test.ts tests/routing/router.test.ts     # routine focused test
 bun run test                      # complete suite (PR-ready / explicit ask)
 ```
 
@@ -28,7 +28,7 @@ bun run test                      # complete suite (PR-ready / explicit ask)
 ```bash
 bun run typecheck                 # строгая проверка TypeScript
 bun run test                      # полный набор tests/
-bun test tests/routing/router.test.ts     # отдельный тестовый файл
+bun scripts/test.ts tests/routing/router.test.ts     # отдельный тестовый файл
 bun run build:gui                 # сборка GUI на Vite + подготовка пакета
 bun run privacy:scan              # проверка учётных данных/приватности, используемая в CI
 bun run prepare:package           # обновление лаунчеров/ресурсов пакета
@@ -174,6 +174,6 @@ startup path не должны импортировать каталог ман�
 ## Проверяйте, прежде чем объявлять работу завершённой
 
 Запускайте самую узкую команду, которая доказывает ваше изменение: `bun run typecheck` для типов,
-сфокусированный `bun test tests/<name>.test.ts` или runtime-проверку для поведения, а затем более
+сфокусированный `bun scripts/test.ts tests/<name>.test.ts` или runtime-проверку для поведения, а затем более
 широкие проверки, соответствующие затронутой области. opencodex предпочитает небольшие проверяемые
 коммиты крупным пачкам изменений.

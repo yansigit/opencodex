@@ -12,14 +12,14 @@ ChatGPT lorsqu’un modèle routé en a besoin.
 
 | Exigence | Pourquoi |
 | --- | --- |
-| **[Node](https://nodejs.org) ≥ 18** | `ocx` s’exécute avec Bun, mais ce runtime est fourni automatiquement lors de `npm install` : vous n’avez **pas** à installer Bun vous-même. |
+| **[Node](https://nodejs.org) ≥ 22** | `ocx` s’exécute avec Bun, mais ce runtime est fourni automatiquement lors de `npm install` : vous n’avez **pas** à installer Bun vous-même. |
 | **[OpenAI Codex](https://openai.com/codex)** (CLI, App ou SDK) | Le client derrière lequel s’intercale opencodex. opencodex écrit dans `$CODEX_HOME/config.toml` (par défaut `~/.codex/config.toml`). |
 | Un compte fournisseur ou une clé API | Anthropic, xAI, Kimi, Ollama Cloud, OpenRouter, un point de terminaison compatible avec OpenAI ou votre connexion ChatGPT. |
 
 ## Installer
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ```
 
 :::note[npm a-t-il bloqué le script postinstall de bun ?]
@@ -30,10 +30,10 @@ bun et indiquez toujours le nom du paquet. La suggestion abrégée de npm l’om
 le répertoire courant :
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @yansigit/opencodex
 
 # si l’installation initiale utilisait sudo, continuez à l’utiliser :
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @yansigit/opencodex
 ```
 :::
 
@@ -52,7 +52,7 @@ les entrées du catalogue n’accordent aucun accès par elles-mêmes. N’utili
 tester des versions opencodex non encore publiées :
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
+npm install -g @yansigit/opencodex@preview
 ocx update --tag preview
 ```
 
@@ -61,7 +61,7 @@ ocx update --tag preview
 Pour développer opencodex lui-même :
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # démarre l’API du proxy en mode développement (src/cli/index.ts start)

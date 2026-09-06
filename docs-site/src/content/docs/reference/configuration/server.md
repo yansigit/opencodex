@@ -11,7 +11,8 @@ runs helper features around provider requests.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | Proxy listen port. |
-| `hostname?` | `string` | `"127.0.0.1"` | Bind address. Non-loopback binds require `OPENCODEX_API_AUTH_TOKEN`. |
+| `hostname?` | `string` | `"127.0.0.1"` | Bind address. Non-loopback binds require TLS and a data-plane credential. |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | Serve HTTPS with the supplied readable certificate and private-key files. `publicOrigin` must be the exact HTTPS origin (for example `https://proxy.example.com`) used for generated callback and client URLs; paths, credentials, queries, and fragments are rejected. |
 | `proxy?` | `string` | — | Outbound HTTP(S) proxy URL, `${ENV_VAR}`, or `"auto"`. Applied to `HTTP_PROXY` / `HTTPS_PROXY` only when those variables are unset; loopback remains in `NO_PROXY`. `"auto"` reads the Windows system proxy (WinINET `ProxyEnable`/`ProxyServer`, `https=` then `http=` entry) once at process start and logs the host it chose. On other platforms, or when the system proxy is off, SOCKS-only, or unreadable, it uses direct egress and says so. PAC/WPAD and live proxy changes are not followed; restart the service after changing the system proxy. |
 | `noProxy?` | `string \| string[]` | — | Hosts that bypass `proxy`, merged with inherited `NO_PROXY` and loopback entries. A string may use comma-separated `NO_PROXY` syntax or `${ENV_VAR}`. |
 | `emptyCompletionRetry?` | `boolean` | `false` | Opt in to one identical Responses retry when a turn has no text or tool call, including a stream that ends before a terminal event. The retry may be billable. `OCX_EMPTY_COMPLETION_RETRY=0` disables it without changing config; combo and routed-compaction turns remain excluded. |
@@ -21,7 +22,7 @@ runs helper features around provider requests.
 | `shutdownTimeoutMs?` | `number` | `5000` | Graceful drain deadline before active turns are aborted. |
 | `websockets?` | `boolean` | `false` | Advertise and admit the client-facing Responses WebSocket path. False keeps clients on HTTP/SSE; it does not disable an eligible canonical ChatGPT upstream WS optimization. Complete-input requests may reuse an upstream connection within the same selected credential, account, thread and turn; changed handshake policy or missing identity keeps requests on separate connections. This does not trim HTTP input or create previous-response IDs. |
 | `corsAllowOrigins?` | `string[]` | `[]` | Additional exact origins allowed by CORS. Loopback origins are always allowed. Authority-based browser extension origins such as `chrome-extension://<extension-id>` are supported; `*` is not a wildcard. Firefox and Safari regenerate the extension UUID (per install / per browser launch), so update the entry when the origin changes. |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` credentials accepted by management and data-plane auth on non-loopback binds. Dashboard-managed. |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | Generated `ocx_…` data-plane credentials accepted on non-loopback binds. Dashboard-managed; management routes require the separate admin token. |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | Opt-in archived-session cleanup policy. Never enabled implicitly. |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | Cap in MiB for evictable app-owned logs, caches, blobs, and continuation payloads. Range 64–4096; not an RSS cap. |
 | `codexAutoStart?` | `boolean` | `true` | Let the Codex shim run `ocx ensure` before launching Codex. False makes ensure a no-op. |
@@ -103,15 +104,31 @@ path failed, and does not establish a general fix.
 ## Remote access
 
 The default `127.0.0.1` bind is loopback-only. A non-loopback address such as `0.0.0.0` requires
-token authentication on both `/api/*` and the data plane. Export the token before starting:
+native TLS and a data-plane credential. A remote dashboard also needs the separate admin token
+(`OPENCODEX_ADMIN_AUTH_TOKEN`, or the generated admin-token file); `apiKeys` do not grant management
+access. Configure the listener and export the data-plane token before starting:
+
+```jsonc
+{
+  "hostname": "0.0.0.0",
+  "tls": {
+    "certFile": "/etc/opencodex/server.crt",
+    "keyFile": "/etc/opencodex/server.key",
+    "publicOrigin": "https://proxy.example.com"
+  }
+}
+```
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-The proxy refuses a remote bind without this variable. For a background service, export it before
-`ocx service install` so launchd, systemd, or Task Scheduler receives it. Clients should send:
+The proxy refuses a remote bind when either requirement is missing. Certificate and listener changes
+take effect after restart; certificate trust and renewal remain the operator's responsibility. For a
+background service, export the token before `ocx service install` so launchd, systemd, or Task
+Scheduler receives it. SSH port forwarding to the loopback listener is the plaintext-free alternative.
+Data-plane clients should send:
 
 ```text
 x-opencodex-api-key: your-secret-token
@@ -165,11 +182,12 @@ The port is required and must differ from the proxy port. It is never OS-assigne
 would change across restarts while already-running app-servers kept the previous `base_url`.
 
 The listener serves only `POST /v1/responses`, its WebSocket upgrade, `POST /v1/responses/compact`,
-`POST /v1/alpha/search` (the native Codex web-search relay), `GET /v1/models`, and the realtime
-voice surface: the standalone WebSocket upgrades, WebRTC call creation (`POST /v1/live`,
-`POST /v1/realtime/calls`), and the keyed sideband join upgrades (`/v1/live/{callId}`,
-`/v1/realtime/calls/{callId}`, `/v1/realtime?call_id=`). Everything else, including `/api/*` and
-the dashboard, returns `404`.
+`POST /v1/alpha/search` (the native Codex web-search relay), `GET /v1/models`, `POST /v1/messages`,
+`POST /v1/messages/count_tokens`, and the realtime voice surface: standalone WebSocket upgrades,
+WebRTC call creation (`POST /v1/live`, `POST /v1/realtime/calls`), and keyed sideband join upgrades
+(`/v1/live/{callId}`, `/v1/realtime/calls/{callId}`, `/v1/realtime?call_id=`). The two Messages routes
+support local Claude Code clients speaking the Anthropic protocol. Everything else, including `/api/*`
+and the dashboard, returns `404`.
 
 :::danger[This is an unauthenticated surface]
 Every process on the machine can use this listener. It spends account quota and paid provider
@@ -181,23 +199,37 @@ a page you visit can make your browser connect to `127.0.0.1`. The listener ther
 same `Host` and `Origin` checks as an ordinary loopback bind. Off by default.
 :::
 
+### Troubleshooting: invalid peer certificate UnknownIssuer
+
+If Codex shows `invalid peer certificate: UnknownIssuer`, the Codex client has not trusted the proxy certificate. A self-signed certificate is not trusted until its CA is installed on the Codex machine.
+
+- For a private network, select **Loopback + SSH** in the dashboard, save, restart the proxy, and use SSH forwarding. This avoids certificate trust setup.
+- For a direct remote bind, select **Remote TLS** and use a certificate whose CA is trusted on the Codex machine. Its SAN must include the hostname or IP used in `tls.publicOrigin`.
+
+The server-mode selector updates the saved listener configuration. Listener changes take effect after restarting the proxy.
+
 ### SSH port forwarding
 
-Remote use does not require a remote bind. Keep loopback and forward it:
+Remote use does not require a remote bind. Keep OpenCodex on loopback, then run this temporary
+tunnel on the computer where you want to open the dashboard:
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 user@10.0.0.51
 ```
 
-Any local port works. Requests whose Host resolves to `localhost`, `127.0.0.1`, or `::1` remain
-loopback regardless of port, so `http://localhost:20100/v1` works. Set that base URL in the client;
-`ocx` writes only the default local `127.0.0.1` address into managed client config.
+Keep that terminal open, then visit `http://127.0.0.1:20100/#dashboard`. Use HTTP at the forwarded
+address: SSH encrypts the connection between the two computers. Replace the SSH user and host, and
+choose another local port if `20100` is occupied.
+
+Requests whose Host resolves to `localhost`, `127.0.0.1`, or `::1` remain loopback regardless of
+port, so `http://127.0.0.1:20100/v1` also works as a client base URL. `ocx` writes only the default
+local `127.0.0.1` address into managed client config.
 
 Provider OAuth callbacks listen on a fixed remote port. Log in on the remote machine or forward that
 port too:
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 user@10.0.0.51
 ```
 
 If a registered callback port is already in use and the login surface offers manual input, OpenCodex
@@ -207,10 +239,83 @@ code into OpenCodex. The pending flow preserves state and PKCE validation. Calle
 input still fail closed.
 
 :::caution[Forwarded loopback is unauthenticated]
-Plain `ssh -L` listens on your local loopback and is safe for the default unauthenticated bind. Do not
-use `ssh -g -L`, broad container publishing, or forwarding modes that expose the client side on
-`0.0.0.0`. Bind explicitly with `ssh -L 127.0.0.1:20100:localhost:10100` when unsure.
+Always bind the forwarded port explicitly to `127.0.0.1`. Do not use `ssh -g`, broad container
+publishing, or forwarding modes that expose the client side on `0.0.0.0`; doing so can make the
+unauthenticated loopback dashboard and provider access reachable by other machines.
 :::
+
+### Persistent macOS SSH tunnel
+
+A per-user LaunchAgent can keep the same tunnel running after login. The dashboard cannot install
+this for you; create it on the Mac where you open the dashboard.
+
+First create a dedicated SSH key, verify the server's host-key fingerprint, and authorize the public
+key on the OpenCodex host. The first two SSH connections may request the remote account password:
+
+```bash
+ssh-keygen -t ed25519 -N "" -f "$HOME/.ssh/opencodex-dashboard" -C "opencodex dashboard tunnel"
+ssh user@10.0.0.51 true
+cat "$HOME/.ssh/opencodex-dashboard.pub" | ssh user@10.0.0.51 'umask 077; mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys'
+ssh -i "$HOME/.ssh/opencodex-dashboard" -o BatchMode=yes user@10.0.0.51 true
+```
+
+Only continue when the final command exits successfully without a password prompt. Create the log
+directory, then save the following as
+`~/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist`. Replace `example`, the SSH user, and host
+value; LaunchAgent paths must be absolute, so do not put `$HOME` or `~` in the plist.
+
+```bash
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/OpenCodex"
+```
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>me.opencodex.dashboard-tunnel</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/ssh</string>
+    <string>-N</string>
+    <string>-T</string>
+    <string>-o</string><string>BatchMode=yes</string>
+    <string>-o</string><string>ExitOnForwardFailure=yes</string>
+    <string>-o</string><string>ServerAliveInterval=30</string>
+    <string>-o</string><string>ServerAliveCountMax=3</string>
+    <string>-i</string><string>/Users/example/.ssh/opencodex-dashboard</string>
+    <string>-L</string><string>127.0.0.1:20100:127.0.0.1:10100</string>
+    <string>user@10.0.0.51</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/example/Library/Logs/OpenCodex/dashboard-tunnel.log</string>
+  <key>StandardErrorPath</key><string>/Users/example/Library/Logs/OpenCodex/dashboard-tunnel.error.log</string>
+</dict>
+</plist>
+```
+
+Validate and load it, then verify both the agent and tunnel:
+
+```bash
+plutil -lint "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
+launchctl print "gui/$(id -u)/me.opencodex.dashboard-tunnel"
+curl -fsS http://127.0.0.1:20100/healthz
+open http://127.0.0.1:20100/#dashboard
+```
+
+Inspect failures in `~/Library/Logs/OpenCodex/dashboard-tunnel.error.log`. After editing the plist,
+unload and reload it; `kickstart -k` restarts the already-loaded agent without rereading the plist:
+
+```bash
+tail -f "$HOME/Library/Logs/OpenCodex/dashboard-tunnel.error.log"
+launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/me.opencodex.dashboard-tunnel.plist"
+launchctl kickstart -k "gui/$(id -u)/me.opencodex.dashboard-tunnel"
+```
 
 ## Storage cleanup
 
@@ -322,10 +427,37 @@ These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx clau
 | `claudeCode.classifierModel?` | `string` | unset | Explicit target for Claude Code Auto Mode classifier turns, as a qualified `provider/model` (for example `RelayA/claude-opus-5`). Auto Mode sends bare safety checks such as `claude-opus-5` with no provider, so without this they fall through to `defaultProvider` — which may not speak Anthropic at all. Nothing is inferred automatically: only a target you declare here is used. |
 | `claudeCode.classifierFallbacks?` | `string[]` | unset | Ordered classifier targets used when `classifierModel` is not set. Same qualified `provider/model` form; the first usable entry wins. An explicit `modelMap` entry for the classifier model still outranks both. |
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | inherit | Effort written to generated `~/.claude/agents/ocx-*.md`; separate from Codex guidance and proxy caps. Restart through `ocx claude` to regenerate. |
+| `claudeCode.compatibility?` | `"shadow" \| "enforce"` | `enforce` | Compatibility gate for routed Claude ingress: `enforce` rejects unsupported requests before upstream activity with `400 invalid_request_error`; `shadow` records ordinary incompatibilities without rejecting, but signed-thinking ownership and other safety invariants still fail closed. |
 
 Auto auth selects subscription when stored Claude auth is found, proxy when none is found, and
 subscription with a warning when detection is inconclusive. See
 [Claude Code auth mode](/guides/claude-code/#auth-mode).
+
+When `unauthenticatedLoopbackListener.enabled` is explicitly `true`, its Claude compatibility
+surface admits exactly `POST /v1/messages` and `POST /v1/messages/count_tokens` (POST only).
+No other Claude path is admitted there; the listener is off by default, its `port` is required,
+and that port must differ from the proxy port. Public-listener authentication is unchanged by
+the secondary listener. See
+[Local clients that cannot receive the token](#local-clients-that-cannot-receive-the-token).
+
+### Claude directive trust and token benchmark
+
+Generated `~/.claude/agents/ocx-*.md` definitions carry signed route and optional effort
+directives. OpenCodex verifies a present signature before provider dispatch; a malformed or
+invalid signature fails closed with `400 invalid_request_error`. A definition with no signature
+may use compatibility fallback only when its directive exactly matches an active OpenCodex-owned
+roster entry; arbitrary unsigned text is ignored. Diagnostics never show key material.
+
+To compare routed token estimates with authoritative Anthropic counts, run
+`bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`
+deliberately. The confirmation flag is explicit consent: confirmed runs send real requests and
+may incur provider charges, so do not automate or run them unattended. The benchmark uses a
+deterministic sanitized fixture set, sends fixtures sequentially without retries or fallback,
+and emits only a non-persistent allowlist of fixture ids/digests, states, metrics, provider kind,
+and model id (never request bodies, credentials, or account identifiers). A fixture passes when
+its absolute error is within `max(32 tokens, 20%)`; the weighted aggregate must remain within
+10%. Routed `/v1/messages/count_tokens` remains a local approximation for routed models; only
+native Anthropic requests with an `sk-ant-` credential pass through to Anthropic.
 
 ## Shadow calls
 

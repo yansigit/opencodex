@@ -18,7 +18,8 @@ Routing turns the model id sent by a client into one concrete provider and upstr
 opencodex resolves the requested model in this order:
 
 1. A configured `policy/<id>` or routing-profile alias, executing the policy evaluator and routing
-   the selected candidate. An unresolved `policy/<id>` falls through to the later rules.
+   the selected candidate. An unresolved `policy/<id>` fails locally instead of falling through
+   to the later rules.
 2. A configured `<account-selector>/<native-openai-model>` namespace, routed through exactly the
    mapped stored Codex account. An invalid or unavailable exact target fails closed.
 3. A canonical `combo/<id>` or configured combo alias. Canonical ids win before alias matching.

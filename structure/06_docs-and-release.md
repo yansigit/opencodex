@@ -188,7 +188,7 @@ Invariants:
   selected executable (normally the bundled binary, stable under the npm global prefix) into
   launchd/systemd/Task Scheduler and the Codex autostart shim. Bun-side code never re-selects a
   durable executable from the post-dotenv environment.
-- Public docs (root READMEs + `docs-site` installation pages, all locales) state Node 18+ as the only
+- Public docs (root READMEs + `docs-site` installation pages, all locales) state Node 22+ as the only
   prerequisite. Do not reintroduce "install Bun first" / "bun must be on PATH" guidance for npm users.
 
 ## Release workflow
@@ -248,7 +248,7 @@ Every npm release version must map cleanly across four surfaces:
 | Surface | Required state |
 | --- | --- |
 | `package.json` | `version` equals the release workflow `version` input. |
-| npm registry | `@bitkyc08/opencodex@<version>` does not exist before publish, then exists after publish with the requested dist-tag. |
+| npm registry | `@yansigit/opencodex@<version>` does not exist before publish, then exists after publish with the requested dist-tag. |
 | Git tag | `v<version>` does not exist before publish, then points at the exact release commit. |
 | GitHub Release | `v<version>` does not exist before publish, then is created from the exact release commit. |
 
@@ -268,7 +268,7 @@ after an explicit human decision that the public history rewrite is acceptable.
 Manual preflight checks when debugging a release:
 
 ```bash
-npm view @bitkyc08/opencodex@<version> version
+npm view @yansigit/opencodex@<version> version
 git ls-remote origin refs/tags/v<version>
 gh release view v<version>
 ```
@@ -304,7 +304,7 @@ and the Node-only global-install smoke path:
 npm install
 npm run build:gui
 npm pack --json > pack.json
-npm install -g ./bitkyc08-opencodex-*.tgz
+npm install -g ./yansigit-opencodex-*.tgz
 ocx help
 ```
 

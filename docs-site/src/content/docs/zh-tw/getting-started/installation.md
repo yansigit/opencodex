@@ -11,14 +11,14 @@ vision 和網路搜尋 sidecar 也可以使用你的 ChatGPT 登入憑證。
 
 | 要求 | 原因 |
 | --- | --- |
-| **[Node](https://nodejs.org) ≥ 18** | `ocx` 執行在 Bun 執行環境上，但執行環境會在 `npm install` 時自動打包，你**無需**自己安裝 Bun。 |
+| **[Node](https://nodejs.org) ≥ 22** | `ocx` 執行在 Bun 執行環境上，但執行環境會在 `npm install` 時自動打包，你**無需**自己安裝 Bun。 |
 | **[OpenAI Codex](https://openai.com/codex)**(CLI、App 或 SDK) | opencodex 所代理的用戶端。opencodex 會寫入 `$CODEX_HOME/config.toml`（預設 `~/.codex/config.toml`）。 |
 | 一個 provider 帳號或 API key | Anthropic、xAI、Kimi、Ollama Cloud、OpenRouter、OpenAI API key、一個 OpenAI 相容端點,或你的 ChatGPT 登入憑證。 |
 
 ## 安裝
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ```
 
 :::note[npm 攔截了 bun postinstall？]
@@ -28,10 +28,10 @@ blocked because they are not covered by allowScripts`），導致捆綁的 Bun
 缺少包名，會把目前目錄重新安裝進去，請始終顯式寫上包名：
 
 ```bash
-npm install -g --allow-scripts=bun @bitkyc08/opencodex
+npm install -g --allow-scripts=bun @yansigit/opencodex
 
 # 如果最初是用 sudo 安裝的，請繼續使用 sudo：
-sudo npm install -g --allow-scripts=bun @bitkyc08/opencodex
+sudo npm install -g --allow-scripts=bun @yansigit/opencodex
 ```
 
 :::
@@ -50,7 +50,7 @@ GPT-5.6 Sol/Terra/Luna 目錄資訊，但這些條目本身不會授予上游模
 opencodex 建置時，才需要使用 preview 渠道：
 
 ```bash
-npm install -g @bitkyc08/opencodex@preview
+npm install -g @yansigit/opencodex@preview
 ocx update --tag preview
 ```
 
@@ -59,7 +59,7 @@ ocx update --tag preview
 若要對 opencodex 本身進行開發:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy   # 以開發模式啟動代理 API (src/cli/index.ts start)

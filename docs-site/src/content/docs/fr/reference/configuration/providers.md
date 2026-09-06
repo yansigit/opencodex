@@ -6,6 +6,12 @@ description: Entrées du fournisseur, authentification, points de terminaison, c
 Un fournisseur indique à opencodex où se trouve un modèle, quel adaptateur de protocole il utilise et comment les requêtes sont
 authentifiées.
 
+Azure identity configurations use `azureCredential` and are documented in the
+[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
+including `managedIdentityClientId`, the exact scope, `liveModels: false`,
+mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
+remains supported separately.
+
 ## Sélection des modèles à l’inscription
 
 Une nouvelle connexion sans OAuth attend une liste de modèles fiable avant de les exposer. Si l’onglet Models contient au moins 20 lignes distinctes, tous les interrupteurs de modèles sont initialement OFF ; le fournisseur reste ACTIVE. Les connexions utilisant effectivement OAuth ou la connexion ChatGPT conservent leurs valeurs par défaut.
@@ -82,7 +88,8 @@ sauvegarde dont le contenu diffère, puis réécrit en identifiants sans préfix
 | --- | --- | --- |
 | `adapter` | `string` | L'un des `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` (ou alias `azure`). |
 | `baseUrl` | `string` | URL de base de l'API en amont. La plupart des points de terminaison fixes intégrés ignorent une valeur incompatible ; les préréglages de clés protégés contre les collisions préservent une ancienne destination personnalisée portant le même nom. |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | Cadencement facultatif du démarrage des requêtes sortantes côté client, distinct de l’utilisation, de la facturation et des indicateurs de limitation en amont. Le nombre de requêtes par minute est converti en intervalle régulier ; `minIntervalMs` peut imposer un intervalle plus long. Les limites du fournisseur s’appliquent à tous ses modèles, tandis que les entrées `models` ciblent les identifiants exacts des modèles en amont, par exemple `nvidia/llama-3.1-nemotron-ultra-253b-v1`, et ne peuvent qu’ajouter du délai. L’attente dans la file ne consomme pas le délai d’expiration des en-têtes de réponse en amont. Les requêtes HTTP, Responses WebSocket et les distributions explicites `fetchResponse`/`runTurn` des adaptateurs sont couvertes. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | Cadencement facultatif du démarrage des requêtes sortantes côté client ; `jitterMs` ajoute uniquement un délai aléatoire positif (0 à 60 000 ms). Les règles de modèle ne peuvent qu’augmenter le délai. |
+| `tlsProfile?` | `"antigravity-browser"` | Profil TLS/HTTP2 expérimental et non officiel, limité à Google Antigravity Cloud Code Assist et à ses hôtes canoniques. Il ne garantit ni la conformité aux conditions d’utilisation ni l’absence de suspension, peut rendre le trafic plus distinctif et revient à Bun si l’initialisation échoue. |
 | `responsesPath?` | `string` | Chemin de ressource relatif pour les requêtes d'authentification par clé `openai-responses`. Il doit commencer par `/` et ne contenir aucun schéma, requête ou fragment. |
 | `upstreamWebsocket?` | `boolean` | Active le transport Responses WebSocket en amont pour les requêtes `openai-responses` (désactivé par défaut). Lorsque le service en amont prend en charge ce protocole, les requêtes POST en streaming utilisent le chemin Responses configuré (par défaut `/v1/responses`) via WSS avec une base HTTPS, puis sont reconverties en SSE. Les fournisseurs en mode forward utilisent `{baseUrl}/responses` ; les fournisseurs avec clé utilisent `responsesPath`, ou le repli historique `/v1/responses`. Une base HTTP reste en SSE ; les chemins qui ne sont pas Responses et les requêtes `openai-chat` restent en HTTP. |
 | `supportsServiceTier?` | `boolean` | Repli à trois états pour la capacité `service_tier`. `true` : le mode rapide peut injecter le champ et les valeurs de l’appelant sont conservées. `false` : le champ est retiré et jamais injecté, et aucune déclaration précise de modèle ne peut le réactiver. Absent : le fournisseur n’est pas classé ; les valeurs de l’appelant sont conservées intactes et le mode rapide n’injecte rien, sauf pour un modèle exact activé. Le registre classe OpenAI canonique comme `true`, et DeepSeek ainsi que Volcengine Ark comme `false`. Ne le définissez explicitement que pour les passerelles personnalisées qui prennent réellement en charge les niveaux. Les routes Chat exigent en plus une autorisation globale ou propre au modèle. |
@@ -151,6 +158,8 @@ sauvegarde dont le contenu diffère, puis réécrit en identifiants sans préfix
 | `desktopExecutor?` | `DesktopExecutorConfig` | Cursor uniquement : commandes externes d'utilisation d'un ordinateur et d'enregistrement de l'écran. |
 | `unsafeAllowNativeLocalExec?` | `boolean` | Ancien booléen de Cursor, équivalent à `nativeLocalExec: "on"` uniquement lorsque le champ plus récent n'est pas défini. |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Politique d'exécution locale de Cursor. `off` est la valeur par défaut ; actuellement, `codex-sandbox` échoue de manière sûre comme `off`. |
+| `commandCodeVersion?` | `string` | Command Code OAuth (`adapter: "command-code"`) uniquement. Épingle l'en-tête `x-command-code-version` sur les requêtes `/alpha/generate`. Si absent, utilise la valeur par défaut de l'adaptateur (`0.52.1`). Non lu par le préréglage à clé API `commandcode` (`openai-chat` / `/provider/v1`). |
+| `projectContext?` | `"off" \| "on"` | Command Code OAuth (`adapter: "command-code"`) uniquement. Lorsque `"on"`, copie des fichiers de projet bornés depuis le répertoire de travail du processus proxy vers l'enveloppe `/alpha/generate` `memory`, `taste` et `skills`. Absent ou `"off"` conserve l'enveloppe vide actuelle, même si ces fichiers existent sur le disque. Non lu par le préréglage à clé API `commandcode`. À définir sur `providers.command-code`, pas au niveau supérieur. Dans le tableau de bord, utilisez **Providers → Command Code → Edit JSON**. Démarrez le proxy depuis le répertoire de projet Codex de confiance afin que `process.cwd()` soit le dépôt visé. Fail-soft : fichier manquant, illisible, expiré ou hors du périmètre → cette partie est omise plutôt que de faire échouer le tour. Ne lit pas `~/.commandcode/skills` ni d'autres arborescences du répertoire personnel. `x-taste-learning` reste `"false"` quel que soit ce réglage. |
 
 Les fournisseurs à clé API peuvent détenir une clé littérale ou une référence à une variable d'environnement. Les fournisseurs OAuth utilisent le
 magasin d'identifiants alimenté par `ocx login` ; le comportement de lancement de Claude Code avec abonnement est
@@ -216,13 +225,13 @@ rotation automatique peut déclencher des restrictions du fournisseur.
 
 | Clé | Type | Par défaut | Description |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` | Active l'affinité de session persistante et la sélection des nouvelles sessions basée sur l'usage. **Le basculement sur 429 n'est pas contrôlé ici** : il s'active dès que deux comptes utilisables sont enregistrés, comme pour tout autre fournisseur multi-identifiants, et ne peut pas être désactivé. |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | Active l'affinité de session persistante et la sélection des nouvelles sessions basée sur l'usage. Lorsque cette clé est absente, deux comptes utilisables ou plus activent par leur présence le basculement réactif sur 429. Une valeur `false` explicite désactive ce basculement ainsi que le groupe. |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | Pour les nouvelles sessions, lorsque le compte actif atteint ce seuil, choisir la plus faible utilisation connue et mise en cache dans la fenêtre configurée. `0` désactive la sélection selon le quota. |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | Stratégie des nouvelles sessions ; `quota` classe les comptes selon la fenêtre définie par `quotaWindow`, par défaut les barres sur 5 heures, et `fill-first` évalue son seuil d'évacuation dans cette même fenêtre. |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | Barre d'utilisation signalée par le fournisseur, mise en cache et utilisée pour la sélection selon l'utilisation. `five-hour` conserve le comportement actuel. `weekly` utilise la barre hebdomadaire et ignore les comptes dont la barre sur 5 heures est épuisée tant qu'un autre compte admissible reste disponible, mais y revient si aucun autre ne reste. `max-utilization` utilise la valeur connue la plus élevée et peut donc employer la barre sur 5 heures avant que la barre hebdomadaire soit disponible ; si aucune n'est connue, le compte suit l'ordre des utilisations inconnues. Les utilisations connues précèdent les inconnues, mais si tous les comptes admissibles sont inconnus, la sélection en renvoie tout de même un dans leur ordre admissible. Après le départage documenté par la plus faible utilisation sur 5 heures, une égalité exacte conserve cet ordre. Une session saine avec affinité n'est pas rééquilibrée de manière proactive. Pour l'affectation des nouvelles sessions et la reprise du routage après un remplacement admissible à la suite d'un 429, `quota` classe directement les candidats admissibles avec cette fenêtre ; `fill-first` avance dans un ordre stable selon le seuil et les règles d'épuisement de cette fenêtre ; `round-robin` l'ignore. Le délai de récupération, les limites de basculement et l'éligibilité de réauthentification restent des états locaux distincts. Les barres hebdomadaires ne sont connues qu'après leur interrogation dans la page Fournisseurs du tableau de bord. |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | Liaisons de nouvelle session réussies conservées sur une sélection à tour de rôle. Portée 1–100. |
 
-Lorsque cette option est activée, un 429 enregistre une temporisation bornée à partir de `Retry-After` ou d'un délai de repli, puis peut
+Lorsque le basculement réactif est actif, un 429 enregistre une temporisation bornée à partir de `Retry-After` ou d'un délai de repli, puis peut
 faire basculer la requête vers un autre compte. L'affinité est locale au processus et de taille bornée. Un 401/403 lié aux identifiants marque le compte
 comme devant être réauthentifié. Si tous les comptes admissibles sont en temporisation, les clients reçoivent un 429 accompagné de
 `Retry-After` lorsqu'il est connu, et non une erreur d'authentification.
@@ -322,8 +331,8 @@ sur la liste curatée `noVisionModels` et passent par le sidecar de description 
 Les outils locaux pilotés par le serveur Cursor sont désactivés par défaut. Codex continue d'utiliser ses propres outils tels que
 `apply_patch` et `exec_command` avec sa propre politique d'approbation et de bac à sable :
 
-- `"off"` (par défaut) rejette l'exécution des outils Cursor natifs `read`, `write`, `delete`, `ls`, `grep`, `shell` et
-  `fetch`.
+- `"off"` (par défaut) refuse l'exécution proxy-locale des outils Cursor natifs `read`, `write`, `delete`, `ls`, `grep`, `shell` et
+  `fetch`. Lorsque le tour annonce un outil Codex nu `shell_command` ou `exec_command`, Shell/Read/Ls/Grep/Fetch natifs sont mappés vers ce pont Codex au lieu de s'exécuter sur l'hôte proxy ; write/delete restent refusés.
 - `"on"` active une exécution locale de confiance et contourne les règles d'approbation et de bac à sable de Codex.
 - `"codex-sandbox"` est conservé pour compatibilité, mais échoue de manière sûre comme `"off"` ; le texte de la requête
   ne constitue pas une attestation fiable d'exécution en bac à sable.
@@ -509,3 +518,4 @@ avec un contexte de `922000` et une entrée maximale de `922000` ; OpenRouter i
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures` (désactivé par défaut) réessaie les erreurs transitoires avant le flux ; une requête peut être livrée plusieurs fois.

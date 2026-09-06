@@ -58,7 +58,9 @@ Logsではサーフェス、インターセプトされたリクエスト、プ�
 
 ### セクションへのリンク
 
-レイアウトは 1 つだけなので、切り替える設定はありません。代わりに Dashboard の各セクションに URL があります。`#dashboard` は Overview、`#dashboard/providers` と `#dashboard/models` は残りの 2 つです。再読み込み・ブックマーク・戻る操作のいずれでも、表示していたセクションが保たれます。**Logs** も `#logs` と `#logs/debug` で同じように動作します。以前の `#providers/workspace` のブックマークは `#providers` に移動します。
+レスポンシブなレイアウトは 1 つだけなので、切り替える設定はありません。デスクトップではサイドバーが主なナビゲーションになり、狭い画面では **メニューを開く** で同じページリンクを表示します。Dashboard の各セクションには URL もあります。`#dashboard` は Overview、`#dashboard/providers` と `#dashboard/models` は残りの 2 つです。再読み込み・ブックマーク・戻る操作のいずれでも、表示していたセクションが保たれます。**Logs** も `#logs` と `#logs/debug` で同じように動作します。以前の `#providers/workspace` のブックマークは `#providers` に移動します。
+
+Overview にはリクエスト数とトークン数の **30日間のアクティビティ** 推移が表示されます。どちらかのスパークラインで日を選ぶとその日の合計を確認でき、**使用状況を表示** で Usage ページ全体を開けます。Overview の読み込み後に更新が中断された場合も最後に取得できたデータは表示され続け、再接続中の通知から **再試行** を実行できます。初回接続に失敗した場合は `ocx start` の案内と同じ再試行操作が表示されます。
 
 **ログ**と**使用量**のコスト値は報告されたトークンで計算した API 定価換算値です。請求明細や
 実際の請求証拠ではなく、サブスクリプション使用量またはプロバイダークレジットが代わりに適用される場合があります。
@@ -158,7 +160,7 @@ GUI はプロキシの JSON 管理 API を使うシンクライアントです�
 
 | エンドポイント | 用途 |
  --- | --- |
-| `GET` / `PUT /api/settings` | 設定を読み、Codex 自動起動、stream/memory、account-targeting picker の表示を更新します。 |
+| `GET` / `PUT /api/settings` | 設定を読み、Codex 自動起動、stream/memory、account-targeting picker の表示、サーバーリスナー設定を更新します。リスナーと証明書の変更にはプロキシの再起動が必要です。 |
 | `GET /api/startup-health` | 秘密情報を含まないルーティング、サービス、shim、再起動安全性診断を読み取ります。 |
 | `GET` / `POST /api/windows-tray` | Windows トレイの導入・表示状態を読み取り、`install`、`start`、`stop`、`uninstall` を実行します。 |
 | `POST /api/sync` | 共有モデルカタログを再構築し Codex モデルキャッシュを古い状態としてマークします。 |

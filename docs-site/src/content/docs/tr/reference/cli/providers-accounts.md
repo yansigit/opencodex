@@ -164,7 +164,7 @@ bir Codex satırı `selected` olarak işaretlenir. `PRIORITY`, imzalı Codex se�
 sırasıdır (ayarlanmadığında `0`) ve OAuth hesapları ve API anahtarları gibi
 sıralamanın geçerli olmadığı satırlar için `-` gösterir. İki veya daha fazla uygun Kiro hesabı
 saklandığında, varsayılan olarak 429 yanıtı otomatik olarak başka bir hesaba geçer ve bilinen kalan
-kotası en yüksek hesabı tercih eder; rotasyon hesapların varlığıyla etkinleşir ve kapatılamaz — `oauthAccountFailover.enabled: false` gönderim öncesi hesap tercihini reddeder, 429 kurtarmasını değil; `ocx account login kiro` hesapları havuza teker teker ekler. Boş bir sonuç
+kotası en yüksek hesabı tercih eder. Açık bir yük devretme ayarı yoksa rotasyon hesapların varlığıyla etkinleşir; genel veya sağlayıcıya özel `oauthAccountFailover.enabled: false`, hem gönderim öncesi hesap tercihini hem de 429 kurtarmasını kapatır. `ocx account login kiro` hesapları havuza teker teker ekler. Boş bir sonuç
 yine de başarıdır. `--json` şunu döndürür:
 
 ```text
@@ -449,4 +449,3 @@ kapalı bir enum olarak ayrıştırır ve başka herhangi bir değer içeren tü
 kataloğu reddeder, bu nedenle `add`, `edit` ve yönetim API'si katalog
 yazıcısının daha sonra çıkarması gereken bir şeyi saklamak yerine hatalı değeri
 reddeder (#759).
-

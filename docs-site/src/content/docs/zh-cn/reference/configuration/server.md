@@ -11,15 +11,16 @@ description: 监听、远程访问、准入密钥、超时、存储、侧车、�
 | 字段 | 类型 | 默认值 | 含义 |
 | --- | --- | --- | --- |
 | `port` | `number` | `10100` | 代理监听端口。 |
-| `hostname?` | `string` | `"127.0.0.1"` | 绑定地址。非回环绑定需要 `OPENCODEX_API_AUTH_TOKEN`。 |
+| `hostname?` | `string` | `"127.0.0.1"` | 绑定地址。非回环绑定需要 TLS 和数据平面凭据。 |
+| `tls?` | `{ certFile: string; keyFile: string; publicOrigin: string }` | — | 使用指定的可读证书和私钥文件提供 HTTPS。`publicOrigin` 必须是客户端 URL 使用的精确 HTTPS origin。 |
 | `proxy?` | `string` | — | 出站 HTTP(S) 代理 URL，或 `${ENV_VAR}`。仅当 `HTTP_PROXY` / `HTTPS_PROXY` 未设置时才会应用；回环地址始终保留在 `NO_PROXY` 中。 |
 | `emptyCompletionRetry?` | `boolean` | `false` | 显式启用：当 Responses turn 既无文本也无工具调用时，使用相同请求重试一次，包括流在终止事件之前结束的情况。重试可能产生费用。`OCX_EMPTY_COMPLETION_RETRY=0` 可在不修改配置的情况下禁用；combo 与 routed-compaction turn 不参与。 |
 | `stallTimeoutSec?` | `number` | `300` | 在上游没有数据之前可等待的秒数，超过后返回 `response.incomplete`。最小值为 1。 |
 | `connectTimeoutMs?` | `number` | `200000` | 每次尝试的 DNS/TCP/TLS/最终响应头截止时间；它在正文生成之前结束。 |
 | `shutdownTimeoutMs?` | `number` | `5000` | 优雅停机截止时间，超过后会中止仍在进行中的请求。 |
-| `websockets?` | `boolean` | `false` | 声明并允许面向客户端的 Responses WebSocket 路径。设为 false 时客户端使用 HTTP/SSE；它不会禁用符合条件的 canonical ChatGPT 上游 WS 优化。 |
+| `websockets?` | `boolean` | `false` | 声明并允许面向客户端的 Responses WebSocket 路径。设为 false 时客户端使用 HTTP/SSE。canonical ChatGPT 上游 WS 需要单独启用：设置提供商 `wsUpstream` 时以其为准（`true` 启用，`false` 禁用）；省略时由 `OCX_CODEX_WS_UPSTREAM=true` 或 `1` 启用，而 `false`/`0`、缺失或无效值保持使用 HTTP/SSE。 |
 | `corsAllowOrigins?` | `string[]` | `[]` | CORS 额外允许的精确 origin。loopback origin 始终允许；支持 `chrome-extension://<扩展 ID>` 等基于 authority 的浏览器扩展 origin，`*` 不是通配符。Firefox 和 Safari 会（每次安装/启动浏览器时）重新生成扩展 UUID，origin 变化后请更新该条目。 |
-| `apiKeys?` | `OcxApiKey[]` | `[]` | 管理平面和非回环绑定上的数据平面身份验证可接受的已生成 `ocx_…` 凭据。由仪表板管理。 |
+| `apiKeys?` | `OcxApiKey[]` | `[]` | 非回环绑定上的数据平面身份验证可接受的已生成 `ocx_…` 凭据。由仪表板管理；管理 API 需要单独的管理员令牌。 |
 | `storageCleanupPolicy?` | `StorageCleanupPolicy` | disabled | 可选启用的归档会话清理策略。不会被隐式启用。 |
 | `appOwnedMemoryBudgetMb?` | `number` | `256` | 可逐出应用自有日志、缓存、blob 和续传载荷的内存上限，单位 MiB。范围 64–4096；不是 RSS 上限。 |
 | `codexAutoStart?` | `boolean` | `true` | 允许 Codex shim 在启动 Codex 之前运行 `ocx ensure`。设为 false 会让 ensure 变成无操作。 |
@@ -37,14 +38,14 @@ description: 监听、远程访问、准入密钥、超时、存储、侧车、�
 ## 远程访问
 
 默认的 `127.0.0.1` 绑定仅限回环地址。像 `0.0.0.0` 这样的非回环地址需要
-在 `/api/*` 和数据平面上都启用令牌认证。启动前先导出令牌：
+TLS 和数据平面凭据。远程仪表板还需要单独的管理员令牌（`OPENCODEX_ADMIN_AUTH_TOKEN` 或生成的管理员令牌文件）。启动前先导出数据平面令牌：
 
 ```bash
 export OPENCODEX_API_AUTH_TOKEN="your-secret-token"
 ocx start
 ```
 
-如果没有这个变量，代理会拒绝远程绑定。对于后台服务，请在运行
+如果没有 TLS 或这个变量，代理会拒绝远程绑定。证书和监听器更改会在重启后生效。对于后台服务，请在运行
 `ocx service install` 之前导出它，这样 launchd、systemd 或 Task Scheduler 都能接收到。客户端应发送：
 
 ```text
@@ -76,7 +77,7 @@ Messages 和 `count_tokens` 为兼容路由客户端仍接受三种准入形式�
 远程使用并不要求远程绑定。保持回环绑定并将其转发即可：
 
 ```bash
-ssh -L 20100:localhost:10100 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 you@remote
 ```
 
 任意本地端口都可以。Host 解析为 `localhost`、`127.0.0.1` 或 `::1` 的请求无论端口是多少都仍然算回环，因此 `http://localhost:20100/v1` 可以正常工作。在客户端中把这个 base URL 设为目标地址；
@@ -85,7 +86,7 @@ ssh -L 20100:localhost:10100 you@remote
 提供方 OAuth 回调监听在固定的远程端口上。请在远程机器上登录，或者也把那个端口转发出来：
 
 ```bash
-ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
+ssh -N -L 127.0.0.1:20100:127.0.0.1:10100 -L 127.0.0.1:1455:127.0.0.1:1455 you@remote
 ```
 
 :::caution[转发的回环地址未认证]
@@ -115,6 +116,9 @@ ssh -L 20100:localhost:10100 -L 1455:localhost:1455 you@remote
 自动认证会在找到已保存的 Claude 认证时选择 subscription，在未找到时选择 proxy；如果检测结果不明确，则会选择 subscription 并给出警告。参见
 [Claude Code 认证模式](/guides/claude-code/#auth-mode)。
 
+生成的名册定义（`~/.claude/agents/ocx-*.md`）带有签名的 `<!-- ocx-route -->` / `<!-- ocx-effort -->` 指令，代理会在派发前验证这些指令：无效的签名指令会安全拒绝并返回 `400 invalid_request_error`（关闭失败）；无签名指令仅在与活动的 OpenCodex 所有名册条目完全匹配时才会被采纳。`ocx doctor` 会在 OpenCodex 配置目录下报告 Claude 指令签名密钥的存在性和权限，但不会打印密钥材料。
+
+`POST /v1/messages` 和 `POST /v1/messages/count_tokens` 也是在选择启用的 `unauthenticatedLoopbackListener` 上允许的唯二 Claude 路由（服务器级密钥；必须指定端口，且必须不同于代理端口）。公共监听器的认证不受该监听器影响。参见[远程访问](#远程访问)。
 ## 影子调用
 
 Codex 会为标题、提交信息等任务使用较小的辅助模型。启用
@@ -175,6 +179,9 @@ routed 重放会把主 ChatGPT 认证注入内部请求。Anthropic 后端使用
 支持的等级受上游提供方能力与所选模型公布的推理阶梯限制。Vision 只会对发送给其提供方 `noVisionModels` 中模型的图像生效。OpenAI 具有与 search 相同的登录/forward 要求；显式选择的 Anthropic 在没有可用凭据时会失败并关闭。成功的 `data:` 描述会使用一个受限缓存，其键由后端、模型、detail、图像字节以及规范化消息上下文组成；OpenAI 的键还会额外包含推理强度（Anthropic 键不含）。命中和同轮重复不会消耗限额。远程 `https:` 图像以及失败或空的描述不会被缓存。
 
 Anthropic OAuth 侧车会复用 opencodex 现有的 Claude Code OAuth 指纹。请对目标账户和负载进行 soak 测试。
+### TLS 与 WebSocket
+
+`tls` 支持 `certFile`、`keyFile` 和 `publicOrigin`。WebSocket 空闲超时为 255 秒，达到背压上限（1 MiB）时关闭连接。
 
 ## Remote Hub 密钥与默认值
 

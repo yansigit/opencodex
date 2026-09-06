@@ -60,14 +60,16 @@ OAuth は `POST /api/oauth/login` で開始し、コールバックできない�
 
 ## Docker とトラブルシューティング
 
-公式 Docker イメージはありませんが、リポジトリには digest 固定の Bun イメージをローカルビルドするための、管理された `Dockerfile` と `compose.yaml` があります。初回起動前にデータキーを stdin から一度だけ初期化します。キーは表示されず、`ocx-state` ボリューム内に所有者限定の権限で保存されます。
+公式 Docker イメージはありませんが、リポジトリには digest 固定の Bun イメージをローカルビルドするための、管理された `Dockerfile` と `compose.yaml` があります。初回の通常起動時に、自己署名 TLS 証明書と秘密鍵を `ocx-state` ボリュームの `/home/bun/.opencodex/container-tls/cert.pem` と `/home/bun/.opencodex/container-tls/key.pem` に生成します。秘密鍵は所有者だけが読み取れ、以降の起動では同じ証明書と鍵を検証して再利用します。データエンドポイントは HTTPS です。
 
-ホストに Git と Bun が必要です。イメージをビルドするたびに、Git 管理下のソースから正規のマニフェストを生成し、生成後はビルドまでソースを変更しないでください。生成 JSON は Git に追加せず、`.git` は Docker コンテキストから除外します。ホスト側は既定で `127.0.0.1` にバインドします。リモート公開は `OPENCODEX_BIND_ADDRESS=<LANまたはTailscaleのIP> docker compose up -d` で明示的に指定し、`0.0.0.0` は全インターフェースを公開します。ファイアウォールと認証付き TLS/tailnet フロントエンドで保護してください。
+初回の通常起動前に、データキーを stdin から一度だけ初期化します。bootstrap helper が受け付けるのは最大 512 バイトの 1 行だけです。キーは表示されず、既存のキーは上書きせず、`ocx-state` ボリューム内の所有者限定 `service-api-token` に保存されます。
 
-ビルドは古いマニフェストを拒否し、すべての SHA-256 をコンテキストとコピー後のファイルに照合します。欠落・不一致のファイル、余分なソース、シンボリックリンクは拒否されます。`package.json`、`bun.lock`、および `scripts/` から唯一取り込む `scripts/model-metadata.source.json` が必須です。
+ホストに Git と Bun が必要です。イメージをビルドするたびに、Git 管理下のソースから正規のマニフェストを生成し、生成後はビルドまでソースを変更しないでください。生成 JSON は Git に追加せず、`.git` は Docker コンテキストから除外します。ホスト側は既定で `127.0.0.1:10100` にバインドします。`OPENCODEX_PORT` はホスト側ポートと管理対象 TLS の `publicOrigin` の両方を変更しますが、コンテナ内のリスナーは `10100` のままです。
+
+ビルドは古いマニフェストを拒否し、すべての SHA-256 をコンテキストとコピー後のファイルに照合します。マニフェストは `Dockerfile`、`compose.yaml`、`.dockerignore`、Git 管理下のすべての Docker authority ファイル、`src/`、`package.json`、`bun.lock`、`scripts/model-metadata.source.json` を認証します。欠落・不一致のファイル、マニフェストにない余分なソースまたは Docker authority ファイル、シンボリックリンクは拒否されます。
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build
@@ -75,7 +77,33 @@ openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-t
 docker compose up -d
 ```
 
-コンテナは非 root の `bun` ユーザー、読み取り専用のルートファイルシステムで実行され、公開するのは `10100` だけです。`10101` は公開せず、秘密値を `ARG`、`ENV`、`COPY`、Compose、イメージ履歴、argv に入れないでください。healthcheck 後にも readiness、認証済みカタログ、実リクエストを別途確認します。`docker compose down` はボリュームを保持し、`docker compose down --volumes` は設定、認証情報、キーも削除します。
+ホストから確認するには、公開証明書だけをコピーしてローカル CA として使います。秘密鍵はコピーしないでください。
+
+```bash
+mkdir -p .tmp
+docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
+```
+
+別のホスト側ポートを使う場合は、以降の Compose 実行でも同じ値を指定します。
+
+```bash
+OPENCODEX_PORT=10190 docker compose up -d
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10190/healthz
+```
+
+リモート公開は `OPENCODEX_BIND_ADDRESS=<LANまたはTailscaleのIP>` で明示的に選択し、`0.0.0.0` は全インターフェースを公開します。生成される証明書が対象とするのは `localhost` と `127.0.0.1` だけです。直接リモート公開する場合は、生成済みの証明書と鍵を正確なリモート名に対応する証明書と鍵に置き換え、`OPENCODEX_PUBLIC_ORIGIN=https://hub.example.com:10100` のように、パス、認証情報、クエリ、フラグメントを含まない正確な HTTPS origin を指定してください。ファイアウォールと認証付き TLS/tailnet フロントエンドで保護します。
+
+保持されている TLS 導入前のボリュームは、次の起動時にボリューム固有の TLS identity と公開ホストポートを使う HTTPS origin へ自動移行されます。独自の証明書パスは保持されます。古い HTTP 専用イメージへ戻す場合は、現行イメージが利用できるうちに hub を停止して TLS 設定だけを削除してから、古いイメージを起動してください。証明書ファイルはボリュームに残してかまいません。
+
+```bash
+docker compose down
+docker compose run --rm hub bun run src/cli/index.ts config unset tls
+# 古いイメージを選択またはビルドしてから hub を再作成する
+docker compose up -d
+```
+
+コンテナは非 root の `bun` ユーザー、読み取り専用のルートファイルシステムで実行され、公開するのはデータポートだけです。`10101` は公開せず、秘密値を `ARG`、`ENV`、`COPY`、Compose、イメージ履歴、argv に入れないでください。コンテナ内の health/readiness probe が証明書検証を省略できるのは、固定されたコンテナループバックへの接続だけです。外部の受入確認では、コピーした公開証明書またはシステムの信頼ストアを使い、実際に接続する正確なホスト名を必ず検証してください。healthcheck 後にも認証済みカタログと実リクエストを別途確認します。`docker compose down` はボリュームを保持し、`docker compose down --volumes` は設定、認証情報、キーも削除します。
 
 - hub 停止時はオフライン切断できますが、キー失効は未完了のままです。
 - 一時障害時だけ検証済み LKG を維持し、認証・スキーマ・サイズ・プロトコル障害でローカルへフォールバックしません。

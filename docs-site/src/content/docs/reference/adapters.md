@@ -221,7 +221,19 @@ header and does not guarantee a provider cache hit.
 
 **Targets:** Google **Gemini**, **Vertex AI**, and Antigravity **Cloud Code Assist**. AI Studio uses
 `/v1beta/models/{model}:streamGenerateContent`; the other modes use their native Google endpoints.
-**Auth:** API key, Vertex ADC, or Google Antigravity OAuth, selected by `googleMode`.
+**Auth:** API key, Vertex ADC, Google Antigravity OAuth, or the local `ai-studio-web` direct session,
+selected by `googleMode`.
+
+API-key Gemini routes discover their callable catalog from Google's official `/v1beta/models`
+endpoint, including published input/output token limits, and keep only models that support
+`generateContent`. Cached or configured models remain the fallback when discovery fails.
+
+`googleMode: "ai-studio-web"` routes directly through Google's internal MakerSuite endpoints using authenticated session tokens and SHA-1 `SAPISIDHASH` credentials. On macOS, sessions are established interactively via native WebKit login (`ocx login` or Connect in the dashboard). Sessions can also be exported via the OpenCodex AI Studio Session Exporter extension for Brave and Chrome; configure the extension's exact `chrome-extension://<id>` origin in `corsAllowOrigins` and provide a data-plane API key before auto-sync. Inference uses direct authenticated HTTP transport rather than browser tabs or WebSocket relays.
+
+Saved AI Studio sessions are live-probed on every platform. A Google sign-in redirect is rejected
+without forwarding session credentials and is reported as requiring reauthentication. The static
+fallback catalog includes `gemini-3.8-flash`; an untouched older AI Studio seed is refreshed
+automatically, while operator-customized model lists are preserved.
 
 - **Location denials are permission errors, not invalid requests.** Google rejects unsupported
   geographic or datacenter locations with HTTP 400 `FAILED_PRECONDITION: User location is not
@@ -236,6 +248,13 @@ header and does not guarantee a provider cache hit.
   opaque `thoughtSignature` values so tool-result continuations retain Gemini reasoning continuity.
   The signature cache is snapshotted to the config directory, so continuations also survive proxy
   restarts.
+- **Structured output:** Responses `text.format` and Chat Completions `response_format`
+  with `json_object` or `json_schema` become Gemini `generationConfig.responseMimeType:
+  "application/json"`. A `json_schema` with a schema is sanitized to Gemini
+  `responseSchema` using the same allowlist as function declarations. JSON mode is
+  omitted when the turn has function tools, when the routed model is
+  Claude-on-Antigravity, or when the model is image-capable (`responseModalities`
+  TEXT+IMAGE). Schema-less `json_schema` and `json_object` send mime type only.
 - **Malformed response shapes fail closed.** A claimed candidate, its `content`, or its
   `content.parts` that is not the documented container terminates the turn with a
   `google response contained invalid …` error naming the structural reason and the offending
@@ -369,12 +388,27 @@ compatibility pair: `agent.v1.AgentService/RunSSE` for server output and
 `aiserver.v1.BidiService/BidiAppend` for client messages.
 **Auth:** Cursor OAuth/access token from `provider.apiKey` or the forwarded authorization header.
 
+- Structured output is rejected before transport: Cursor has no protobuf output-schema field, so `text.format` / `response_format` JSON object or schema (and the internal structured-output flag) return `400 invalid_request_error`. Tools do not bypass this. `requested_model.parameters` and MCP `input_schema` are not output-format channels.
 - Uses `runTurn` rather than the ordinary fetch/parse path. Requests, server events, tool arguments,
   usage checkpoints, and client replies are encoded with `@bufbuild/protobuf` schemas in
   `cursor/gen/agent_pb.ts` and framed as Connect messages.
 - Replays conversation state through content-addressed blobs, maps server tool calls back to Codex,
-  discovers live Cursor models through the protobuf `GetUsableModels` RPC, and retries only before a
-  run request is committed to the wire.
+  and discovers live Cursor models through the protobuf `GetUsableModels` RPC. Pre-commit connection
+  reset and transient-5xx replay is disabled by default and follows `replayTransientFailures` when
+  explicitly enabled.
+- External-model output is guarded against marked and neutral tool-result replay envelopes at every
+  line boundary. A turn-start echo gets one safe fresh-conversation correction; a mid-stream echo is
+  withheld and fails explicitly rather than leaking the replayed tool payload. Terminal-only special
+  tokens such as `<eos>` and `<|eot_id|>` are removed without changing tool arguments.
+- On an external-model tool continuation, an exact repeat of any successful invocation in the
+  immediately completed tool batch is quarantined before its call events reach Codex and receives
+  one corrective continuation. The recovery is recorded as `cursor-duplicate-tool-call`; a second
+  repeat fails explicitly instead of executing the tool twice.
+- Once Cursor reports a local side effect, the turn cannot be transparently retried by transport,
+  account failover, or the optional empty-completion guard.
+- Composer 2.5 empty successful turns fail explicitly as `empty_completion` even when the optional
+  replay is disabled. Repeated identical tool-bearing turns are interrupted after three repeats so
+  an upstream loop cannot continue indefinitely; tool calls with different arguments remain valid.
 - After a successful no-tool turn, the adapter keeps Cursor's returned ConversationStateStructure
   in a process-local store and reuses that checkpoint on the next validated linear continuation
   instead of rebuilding the full root history. Tool-result turns reuse the last completed-turn
@@ -403,6 +437,23 @@ compatibility pair: `agent.v1.AgentService/RunSSE` for server output and
   and `desktopExecutor` integrations have separate opt-ins; `nativeLocalExec: "on"` enables the
   broader built-in executor and bypasses Codex approval/sandbox semantics, and legacy
   `unsafeAllowNativeLocalExec: true` remains equivalent only when `nativeLocalExec` is unset.
+  With default-off policy, native Shell/Read/Ls/Grep/Fetch map to Codex `shell_command`/`exec_command`
+  when that bridge tool is in the catalog; write/delete remain refused.
+
+## `command-code`
+
+**Targets:** Command Code **OAuth** subscription agent API (`POST {baseUrl}/alpha/generate`).
+**Auth:** OAuth Bearer from `ocx login command-code`.
+
+- Distinct from the API-key `commandcode` preset (`openai-chat` → `POST {baseUrl}/provider/v1/chat/completions`). The API-key route never reads `projectContext` or fills the generate envelope from disk.
+- Optional `projectContext: "on"` on `providers.command-code` copies bounded files from `process.cwd()` at request time into `memory`, `taste`, and `skills`. Absent or `"off"` sends `memory: ""`, `taste: null`, `skills: null` even when those files exist in the repo — opt-in only, never auto-load.
+- Start the proxy from the trusted Codex project directory so the working directory matches the repository Codex is editing.
+- **Memory:** UTF-8 of `AGENTS.md` at cwd only (not `CLAUDE.md`, `CODEX.md`, or home paths). Cap 32,768 bytes; oversize prefixes truncate with `<!-- truncated -->`.
+- **Taste:** UTF-8 of `.commandcode/taste/taste.md`, or `null` when missing. Cap 8,192 bytes with the same truncation marker. A present-but-empty file sends `""`. `x-taste-learning` remains `"false"`; loading taste is not Command Code taste learning.
+- **Skills:** XML bundle from project skill roots in order: `.commandcode/skills`, `.agents/skills`, `.pi/skills`. Each subdirectory with `SKILL.md` becomes one `<skill name="…">…</skill>` entry (name from YAML frontmatter `name:` or the directory name). Skips dotted names and non-directories; first-wins by resolved name; max 16 skills; total XML cap 32,768 bytes. Never reads `~/.commandcode/skills` or other home skill trees.
+- Path confinement uses realpath checks under cwd; symlink escapes are omitted. Each file operation has a 2-second timeout. Results are cached per cwd for 30 seconds (max 128 entries). Any failure omits that piece fail-softly.
+- `commandCodeVersion` pins `x-command-code-version` (default `0.52.1`). `permissionMode` stays `"standard"` and `mode` stays `"agent"`.
+- Command Code quota reports separate rolling 5-hour/weekly limits from subscription credits; the dashboard shows credit exhaustion independently, and upstream insufficient-credit messages are preserved as quota errors.
 
 Codex-compatible shell schemas retain sandbox permissions, justification, reusable
 prefix rules and login mode. Freeform tools expose one required string `input`
@@ -414,11 +465,24 @@ declarations do not grant approval or change execution policy.
 ## `azure-openai` (alias: `azure`)
 
 **Targets:** **Azure OpenAI**. Wraps `openai-responses` (so also `passthrough: true`).
-**Auth:** `key` via the `api-key` header (not Bearer).
+**Auth:** API key via the `api-key` header, or Azure identity via
+`DefaultAzureCredential` (Bearer; not `api-key`). These modes are mutually exclusive.
 
 - Delegates request building to the Responses passthrough, validates that `baseUrl` contains no
-  unresolved template placeholder, and replaces `Authorization` with `api-key`. The configured URL
-  targets Azure's v1 Responses API directly, so the adapter does not append `api-version`.
+  unresolved template placeholder. In key mode it replaces `Authorization` with `api-key`; in
+  identity mode it obtains a token for the exact scope
+  `https://cognitiveservices.azure.com/.default` and sends only `Authorization: Bearer`. The
+  configured URL targets Azure's v1 Responses API directly, so the adapter does not append
+  `api-version`.
+- Configure identity mode with `azureCredential: { type: "default-azure-credential", managedIdentityClientId?: string }`.
+  `DefaultAzureCredential` tries `EnvironmentCredential`, `WorkloadIdentityCredential`,
+  `ManagedIdentityCredential`, `AzureCliCredential`, `AzurePowerShellCredential`, and
+  `AzureDeveloperCliCredential` in the SDK's documented order. `managedIdentityClientId` is
+  optional and is passed only to the managed-identity leg; tokens and client IDs are never
+  returned in management DTOs or error messages.
+- Identity providers use their configured `models` statically (`liveModels: false`) and do not
+  perform generic `/models` discovery. Credential failures are reported with stable, redacted
+  errors.
 
 ## Image utilities (`image.ts`)
 

@@ -163,32 +163,35 @@ input checks.
 ## Docker Compose
 
 opencodex does not publish an official container image. The repository does maintain a source-build
-[`Dockerfile`](https://github.com/lidge-jun/opencodex/blob/main/Dockerfile),
-[`compose.yaml`](https://github.com/lidge-jun/opencodex/blob/main/compose.yaml), and a narrow
+[`Dockerfile`](https://github.com/yansigit/opencodex/blob/main/Dockerfile),
+[`compose.yaml`](https://github.com/yansigit/opencodex/blob/main/compose.yaml), and a narrow
 `.dockerignore`. The build pins the multi-platform Bun 1.4.0 image index by digest, runs the proxy as
 the non-root `bun` user, keeps the root filesystem read-only, drops Linux capabilities, and publishes
-only the data listener on the host's `127.0.0.1:10100` by default.
+only the data listener on the host's `127.0.0.1:10100` by default. On first normal startup it
+creates a self-signed TLS certificate and owner-only private key in the state volume; later starts
+validate and reuse that identity.
 
-The image seeds a first-run `hub` configuration that binds the container listener to `0.0.0.0`.
+The image seeds a first-run `hub` configuration that binds the TLS container listener to `0.0.0.0`.
 Before the first normal start, stream a freshly generated data-plane token into the bootstrap helper.
-The helper accepts at most one 4096-byte line, never prints the token, refuses to replace an existing
+The helper accepts at most one 512-byte line, never prints the token, refuses to replace an existing
 token, and persists it as the canonical owner-only `service-api-token` in the `ocx-state` volume.
 
 Install Git and Bun on the host first. Before **every** image build, run the existing canonical
-generator from this Git checkout. It hashes Git-tracked working-tree sources (stage any newly
-added source files first), not an arbitrary directory scan. Do not change source files between
+generator from this Git checkout. It hashes Git-tracked working-tree sources and container authority
+(stage any newly added files first), not an arbitrary directory scan. Do not change those files between
 generation and build. Only its untracked `src/generated/compatibility-version.json` artifact
 enters the image; `.git` remains outside the Docker context. Do not commit or hand-edit the
 manifest. The build rejects stale manifests: it verifies every recorded SHA-256 against the
-read-only build context and again against the copied runtime files. It requires `package.json`,
-`bun.lock`, and `scripts/model-metadata.source.json`; only that exact scripts artifact is
-included, not the rest of `scripts/`. Missing or mismatched files, extra source files absent
-from the manifest, and symlinks (including parent directories) fail the build. The only source
-file exempt from the inventory is the generated manifest itself. If validation fails, reconcile
-the tracked sources, remove unintended source files, and rerun the canonical generator.
+read-only build context and again against the copied runtime files. It requires the Dockerfile,
+Compose, `.dockerignore`, every tracked Docker bootstrap/config/probe file, `package.json`,
+`bun.lock`, and `scripts/model-metadata.source.json`; only that exact scripts artifact is included,
+not the rest of `scripts/`. Missing or mismatched files, extra source or Docker-authority files
+absent from the manifest, and symlinks (including parent directories) fail the build. The only
+source file exempt from the inventory is the generated manifest itself. If validation fails,
+reconcile the tracked files, remove unintended files, and rerun the canonical generator.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build
@@ -196,10 +199,20 @@ openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-t
 docker compose up -d
 ```
 
+To verify the default loopback publication from the host, copy out the public certificate (never
+the private key) and use it as the local CA:
+
+```bash
+mkdir -p .tmp
+docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
+```
+
 Set an alternate host port without changing the container's fixed `10100` listener:
 
 ```bash
 OPENCODEX_PORT=10190 docker compose up -d
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10190/healthz
 ```
 
 Remote access is an explicit opt-in. Set `OPENCODEX_BIND_ADDRESS` to the host's LAN or Tailscale
@@ -209,11 +222,33 @@ IP, or use `0.0.0.0` to publish on **all** host interfaces:
 OPENCODEX_BIND_ADDRESS=0.0.0.0 docker compose up -d
 ```
 
-Use a firewall and an authenticated TLS/tailnet frontend before exposing the port. The bind
-override changes only the host publication; the container listener remains `0.0.0.0:10100`.
+The generated certificate covers only `localhost` and `127.0.0.1`. Prefer keeping the default
+loopback publication and putting an authenticated TLS/tailnet frontend on the same host; configure
+that frontend to validate the copied public certificate as its upstream CA. Direct publication
+requires replacing the per-volume certificate and key with an identity for the exact remote name
+and updating `tls.publicOrigin` before exposure. Use a firewall in either case. The bind override
+changes only the host publication; the container listener remains `0.0.0.0:10100`.
 Keep the same bind override on subsequent Compose invocations that recreate the hub. To update
 an existing deployment, regenerate the manifest, run `docker compose build`, and recreate the
-hub with `docker compose up -d`; do not repeat the one-time token initialization.
+hub with `docker compose up -d`; do not repeat the one-time token initialization. Startup migrates
+a retained pre-TLS volume by installing the per-volume identity and an HTTPS origin using the
+published host port. It preserves operator-managed certificate paths. To roll back to an older
+HTTP-only image, stop the hub, remove only the TLS setting while the current image is still
+available, and then start the older image; the identity files may remain in the volume:
+
+```bash
+docker compose down
+docker compose run --rm hub bun run src/cli/index.ts config unset tls
+# select/build the older image, then recreate the hub
+docker compose up -d
+```
+
+Startup fails closed when the managed certificate is expired, malformed, mismatched with its key,
+or has unsafe ownership/permissions. Rotate a generated identity while the hub is stopped: move
+`/home/bun/.opencodex/container-tls` to an owner-only backup name in the same volume, start the hub
+to publish a complete replacement identity, copy out the new public certificate, and update every
+pinned client before removing the backup. If acceptance fails, stop the hub and move the backup
+back into place. Operator-managed certificate paths are never rotated by the bootstrap.
 
 Configure providers with the dashboard through an operator-owned management frontend, or with
 one-shot CLI commands that share the state volume. The commands below show the existing Remote Hub
@@ -235,11 +270,16 @@ After the container is healthy, run a separate readiness promotion check:
 
 ```bash
 docker compose exec hub bun -e \
-  "const r=await fetch('http://127.0.0.1:10100/readyz');console.log(r.status,await r.text());if(!r.ok)process.exit(1)"
+  "const r=await fetch('https://127.0.0.1:10100/readyz',{tls:{rejectUnauthorized:false}});console.log(r.status,await r.text());if(!r.ok)process.exit(1)"
 
 docker compose exec hub bun -e \
-  "const t=(await Bun.file('/home/bun/.opencodex/service-api-token').text()).trim();const r=await fetch('http://127.0.0.1:10100/v1/catalog',{headers:{'x-opencodex-api-key':t}});console.log(r.status);if(!r.ok)process.exit(1)"
+  "const t=(await Bun.file('/home/bun/.opencodex/service-api-token').text()).trim();const r=await fetch('https://127.0.0.1:10100/v1/catalog',{headers:{'x-opencodex-api-key':t},tls:{rejectUnauthorized:false}});console.log(r.status);if(!r.ok)process.exit(1)"
 ```
+
+These two fixed-loopback probes deliberately skip certificate identity verification and prove only
+the local listener/readiness and authenticated route. They work with operator-managed certificate
+paths and names, but do not replace the externally verified `curl --cacert` check above (or normal
+system trust plus the exact configured hostname for a CA-signed certificate).
 
 Then send one real authenticated routed response with a configured model. If the secret is absent or
 unreadable, a non-loopback hub must not be accepted as ready. Never treat liveness alone as proof.

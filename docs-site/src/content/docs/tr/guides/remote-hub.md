@@ -60,14 +60,14 @@ Döndürme sırasında eski ve yeni anahtar aynı `apiKeyId` altında en fazla o
 
 ## Docker ve sorun giderme
 
-Resmî Docker imajı yoktur; ancak depo, digest ile sabitlenmiş Bun imajını yerelde oluşturmak için bakımı yapılan bir `Dockerfile` ve `compose.yaml` sağlar. İlk başlatmadan önce veri anahtarını stdin üzerinden bir kez başlatın; anahtar yazdırılmaz ve `ocx-state` volume içinde yalnızca sahibinin okuyabileceği izinlerle saklanır.
+Resmî Docker imajı yoktur; ancak depo, digest ile sabitlenmiş Bun imajını yerelde oluşturmak için bakımı yapılan bir `Dockerfile` ve `compose.yaml` sağlar. İlk normal başlatma, volume başına kendinden imzalı bir TLS kimliği oluşturur; herkese açık sertifika `/home/bun/.opencodex/container-tls/cert.pem`, özel anahtar ise aynı dizindedir ve yalnızca sahibi tarafından okunabilir. Veri anahtarını ilk başlatmadan önce stdin üzerinden bir kez başlatın. Yardımcı en fazla 512 baytlık tek satır kabul eder, anahtarı yazdırmaz ve `ocx-state` volume içindeki owner-only `service-api-token` dosyasını değiştirmeyi reddeder.
 
-Host üzerinde Git ve Bun gereklidir. Her imaj derlemesinden önce Git tarafından izlenen kaynaklardan kanonik manifesti üretin ve derleme bitene kadar kaynakları değiştirmeyin. Üretilen JSON dosyasını Git'e eklemeyin; `.git` Docker bağlamının dışında kalır. Host portu varsayılan olarak `127.0.0.1` adresine bağlanır. Uzak erişim için açıkça `OPENCODEX_BIND_ADDRESS=<LAN-veya-Tailscale-IP> docker compose up -d` kullanın; `0.0.0.0` tüm arayüzleri açar. Erişimi güvenlik duvarı ve kimlik doğrulamalı TLS/tailnet ön ucu ile koruyun.
+Host üzerinde Git ve Bun gereklidir. Her imaj derlemesinden önce Git tarafından izlenen kaynaklardan kanonik manifesti üretin ve derleme bitene kadar kaynakları değiştirmeyin. Üretilen JSON dosyasını Git'e eklemeyin; `.git` Docker bağlamının dışında kalır. HTTPS host portu varsayılan olarak `127.0.0.1:10100` adresine bağlanır. `OPENCODEX_PORT=10190` hem yayınlanan host portunu hem de yönetilen `tls.publicOrigin` değerini `https://localhost:10190` yapar; konteyner içindeki port yine `10100` kalır.
 
-Derleme, her SHA-256 değerini önce bağlamdaki, ardından kopyalanan dosyalardaki baytlarla karşılaştırarak eski manifestleri reddeder. Eksik veya uyuşmayan dosyalar, fazladan kaynak dosyaları ve sembolik bağlantılar reddedilir. `package.json`, `bun.lock` ve `scripts/` içinden yalnızca dahil edilen `scripts/model-metadata.source.json` zorunludur.
+Manifest; `Dockerfile`, `compose.yaml`, `.dockerignore`, Git tarafından izlenen tüm `docker/` yetki dosyaları, `src/`, `package.json`, `bun.lock` ve `scripts/model-metadata.source.json` dosyalarını doğrular. Derleme her SHA-256 değerini önce bağlamdaki, ardından kopyalanan dosyalardaki baytlarla karşılaştırır; eksik veya uyuşmayan dosyaları, sembolik bağlantıları ve manifestte bulunmayan ek `src/` ya da `docker/` yetki dosyalarını reddeder.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build
@@ -75,7 +75,28 @@ openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-t
 docker compose up -d
 ```
 
-Konteyner root olmayan `bun` kullanıcısıyla, salt okunur kök dosya sistemiyle çalışır ve yalnızca `10100` portunu yayımlar. `10101` portunu yayımlamayın ve sırları `ARG`, `ENV`, `COPY`, Compose, imaj geçmişi veya argv içine koymayın. Healthcheck sonrasında readiness, kimlik doğrulamalı katalog ve gerçek yanıtı ayrıca doğrulayın. `docker compose down` volume'u korur; `docker compose down --volumes` yapılandırmayı, kimlik bilgilerini ve anahtarı da siler.
+Varsayılan HTTPS uç noktasını doğrulamak için yalnızca açık sertifikayı dışarı kopyalayın ve CA olarak kullanın:
+
+```bash
+mkdir -p .tmp
+docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
+```
+
+Konteyner içi liveness/readiness kontrolleri sertifika doğrulamasını yalnızca sabit konteyner loopback hedefinde devre dışı bırakabilir. Harici kabul testleri ise tam host adını kopyalanmış açık sertifika veya sistem güven deposuyla doğrulamalıdır.
+
+Uzak erişim açıkça etkinleştirilmelidir: `OPENCODEX_BIND_ADDRESS=<LAN-veya-Tailscale-IP> docker compose up -d`; `0.0.0.0` tüm arayüzleri açar. Üretilen sertifika yalnızca `localhost` ve `127.0.0.1` için geçerlidir. Yerel yayını koruyup kimlik doğrulamalı bir TLS/tailnet ön ucu kullanın veya uzak ad için özel sertifika/anahtar yollarını ve tam HTTPS `tls.publicOrigin` değerini yayına açmadan önce ayarlayın. Her iki durumda da güvenlik duvarı kullanın.
+
+Saklanan TLS öncesi bir volume, sonraki `docker compose up -d` sırasında volume kimliği ve `OPENCODEX_PORT` tabanlı HTTPS origin eklenerek otomatik taşınır; operatörün özel sertifika yolları korunur. Eski, yalnızca HTTP imajına geri dönmeden önce mevcut imajla yalnızca TLS ayarını kaldırın; kimlik dosyaları volume içinde kalabilir:
+
+```bash
+docker compose down
+docker compose run --rm hub bun run src/cli/index.ts config unset tls
+# eski imajı seçin/derleyin, sonra hub'ı yeniden oluşturun
+docker compose up -d
+```
+
+Konteyner root olmayan `bun` kullanıcısıyla, salt okunur kök dosya sistemiyle çalışır ve yalnızca `10100` portunu yayımlar. `10101` portunu yayımlamayın ve sırları `ARG`, `ENV`, `COPY`, Compose, imaj geçmişi veya argv içine koymayın. Healthcheck sonrasında HTTPS `/readyz`, kimlik doğrulamalı katalog ve gerçek yanıtı ayrıca doğrulayın. `docker compose down` volume'u korur; `docker compose down --volumes` yapılandırmayı, TLS kimliğini, kimlik bilgilerini ve veri anahtarını da siler.
 
 - Hub kapalıysa yerel geri dönüş yapılabilir; uzaktaki anahtarın iptali bekler.
 - Geçici arızada doğrulanmış LKG korunur; auth, şema, boyut veya protokol hatasında yerel fallback yoktur.

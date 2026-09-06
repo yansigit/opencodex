@@ -6,14 +6,14 @@ description: opencodex 的開發環境、結構、約定，以及新增 provider
 ## 環境搭建
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # 開發模式代理 API
 bun run dev:gui      # 儀表板 dev 伺服器（另一個終端）
 bun run typecheck    # bun x tsc --noEmit
 bun run test:changed              # routine import-graph test selection
-bun test tests/routing/router.test.ts     # routine focused test
+bun scripts/test.ts tests/routing/router.test.ts     # routine focused test
 bun run test                      # complete suite (PR-ready / explicit ask)
 ```
 
@@ -28,7 +28,7 @@ bun run test                      # complete suite (PR-ready / explicit ask)
 ```bash
 bun run typecheck                 # 嚴格 TypeScript 檢查
 bun run test                      # 完整 tests/ suite
-bun test tests/routing/router.test.ts     # 聚焦單個測試檔案
+bun scripts/test.ts tests/routing/router.test.ts     # 聚焦單個測試檔案
 bun run build:gui                 # Vite GUI 建置 + package 準備
 bun run privacy:scan              # CI 使用的 credential/privacy 掃描
 bun run prepare:package           # 重新整理 package launcher/asset
@@ -115,7 +115,7 @@ bun run release:watch               # 觀察最新的 Release workflow run
 ## 專案維護者
 
 目前維護者、其職責，以及 review 與 merge 政策記錄在
-[`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md)。repository 與
+[`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md)。repository 與
 安全敏感路徑的 GitHub review 所有權宣告在 `.github/CODEOWNERS`。
 
 ## 約定
@@ -190,5 +190,5 @@ package API，還要從 `src/index.ts` export。
 ## 在聲稱完成前先驗證
 
 先執行能證明改動的最小命令：型別檢查用 `bun run typecheck`，行為檢查用聚焦的
-`bun test tests/<name>.test.ts` 或 runtime probe，然後再執行適合影響範圍的更寬 gate。
+`bun scripts/test.ts tests/<name>.test.ts` 或 runtime probe，然後再執行適合影響範圍的更寬 gate。
 opencodex 傾向於小而可驗證的 commit，而不是大批次改動。

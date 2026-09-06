@@ -240,7 +240,7 @@ ocx update
 ocx update --tag preview
 ```
 
-當 [Release workflow](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml) 將新版本發布到 npm 時，新版本即可使用。
+當 [Release workflow](https://github.com/yansigit/opencodex/actions/workflows/release.yml) 將新版本發布到 npm 時，新版本即可使用。
 
 ## Remote Hub 用戶端生命週期
 

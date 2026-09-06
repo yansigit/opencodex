@@ -6,6 +6,12 @@ description: Sağlayıcı girdileri, kimlik doğrulama, uç noktalar, model kata
 Bir sağlayıcı, opencodex'e bir modelin nerede yaşadığını, hangi hat adaptörünü
 konuştuğunu ve isteklerin nasıl doğrulandığını söyler.
 
+Azure identity configurations use `azureCredential` and are documented in the
+[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
+including `managedIdentityClientId`, the exact scope, `liveModels: false`,
+mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
+remains supported separately.
+
 ## İlk kayıtta model seçimi
 
 Yeni OAuth dışı bağlantılar, modelleri göstermeden önce güvenilir bir model listesini bekler. Models sekmesinde en az 20 benzersiz model satırı varsa tüm model anahtarları başlangıçta OFF olur; sağlayıcının kendisi ACTIVE kalır. Gerçekte OAuth veya ChatGPT girişi kullanan bağlantılar varsayılanlarını korur.
@@ -92,6 +98,8 @@ alanlı seçilmiş kimlikleri yalın kimliklere yeniden yazar.
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` (veya takma ad `azure`) seçeneklerinden biri. |
 | `baseUrl` | `string` | Yukarı akış API temel URL'si. Çoğu yerleşik sabit uç nokta uyumsuzluğu yok sayar; çakışma güvenli anahtar önayarları aynı adlı daha eski özel bir hedefi korur. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | İstemci tarafı istek başlangıç aralığı. `jitterMs` yalnızca 0–60.000 ms pozitif rastgele gecikme ekler; model kuralları yalnızca gecikmeyi artırabilir. |
+| `tlsProfile?` | `"antigravity-browser"` | Yalnızca Google Antigravity Cloud Code Assist kanonik ana bilgisayarları için deneysel, resmi olmayan TLS/HTTP2 uyumluluk profili. Kullanım şartlarına uyumu veya askıya alınmayı önlemeyi garanti etmez, trafiği daha ayırt edilebilir kılabilir ve başlatma başarısız olursa Bun'a döner. |
 | `responsesPath?` | `string` | Anahtar kimlik doğrulamalı `openai-responses` istekleri için göreli kaynak yolu. `/` ile başlamalı ve şema, sorgu veya parça içermemelidir. |
 | `upstreamWebsocket?` | `boolean` | `openai-responses` istekleri için isteğe bağlı upstream Responses WebSocket aktarımıdır (varsayılan `false`). Upstream bu protokolü desteklediğinde, akışlı POST istekleri yapılandırılmış Responses yolunu (varsayılan `/v1/responses`) HTTPS tabanında WSS ile kullanır ve normal işlem hattı için SSE'ye yeniden kodlanır. Forward sağlayıcılar `{baseUrl}/responses`, anahtar kimlik doğrulamalı sağlayıcılar `responsesPath` veya eski `/v1/responses` geri dönüşünü kullanır. Düz HTTP SSE olarak kalır; Responses dışı yollar ve `openai-chat` istekleri HTTP'de kalır. |
 | `supportsServiceTier?` | `boolean` | Üç durumlu `service_tier` yeteneği. `true`: hızlı mod enjekte edebilir ve arayan değerleri korunur. `false`: alan kaldırılır ve asla enjekte edilmez (desteklemediği belgelenen yukarı akış bunu almamalıdır). Yok: sağlayıcı sınıflandırılmamıştır — arayan tarafından sağlanan değerler dokunulmadan korunur ve hızlı mod asla enjekte etmez. Kayıt defteri kurallı OpenAI'yi (`true`), DeepSeek'i ve Volcengine Ark'ı (`false`) sınıflandırır; bunu yalnızca katmanları gerçekten destekleyen özel ağ geçitleri için açıkça ayarlayın. |
@@ -157,6 +165,8 @@ alanlı seçilmiş kimlikleri yalın kimliklere yeniden yazar.
 | `desktopExecutor?` | `DesktopExecutorConfig` | Yalnızca Cursor: harici bilgisayar kullanımı ve ekran kaydetme komutları. |
 | `unsafeAllowNativeLocalExec?` | `boolean` | Cursor eski boolean değeri, yalnızca daha yeni alan ayarlanmadığında `nativeLocalExec: "on"` değerine eşdeğerdir. |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Cursor yerel yürütme politikası. `off` varsayılandır; `codex-sandbox` şu anda `off` gibi kapalı olarak başarısız olur. |
+| `commandCodeVersion?` | `string` | Yalnızca Command Code OAuth (`adapter: "command-code"`). `/alpha/generate` isteklerinde `x-command-code-version` başlığını sabitler. Belirtilmezse adaptör varsayılanı (`0.52.1`) kullanılır. API anahtarı `commandcode` önayarı (`openai-chat` / `/provider/v1`) tarafından okunmaz. |
+| `projectContext?` | `"off" \| "on"` | Yalnızca Command Code OAuth (`adapter: "command-code"`). `"on"` iken, proxy işlem çalışma dizinindeki sınırlı proje dosyalarını `/alpha/generate` `memory` / `taste` / `skills` zarfına kopyalar. Eksik veya `"off"` iken dosyalar diskte olsa bile boş zarf korunur. API anahtarı `commandcode` önayarı tarafından okunmaz. Üst düzeyde değil, `providers.command-code` üzerinde ayarlayın. Panoda **Providers → Command Code → Edit JSON** kullanın. `process.cwd()` hedeflediğiniz depo olsun diye proxy'yi güvenilir Codex proje dizininden başlatın. Fail-soft: eksik, okunamayan, zaman aşımı veya yol kaçışı o parçayı düşürür; tur başarısız olmaz. `~/.commandcode/skills` veya diğer ev skill ağaçlarını okumaz. `x-taste-learning` bu bayraktan bağımsız olarak `"false"` kalır. |
 
 API anahtarı sağlayıcıları değişmez bir anahtar veya bir ortam referansı
 tutabilir. OAuth sağlayıcıları `ocx login` tarafından doldurulan kimlik bilgisi
@@ -242,13 +252,13 @@ ve otomatik rotasyon sağlayıcı kısıtlamalarını tetikleyebilir.
 
 | Anahtar | Tip | Varsayılan | Açıklama |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` | Yapışkan oturum bağlılığını ve kullanıma dayalı yeni oturum seçimini etkinleştirir. **429 yük devretmesi buradan kontrol edilmez**: iki veya daha fazla kullanılabilir hesap saklandığında, diğer çok kimlikli sağlayıcılarda olduğu gibi devreye girer ve kapatılamaz. |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | Yapışkan oturum bağlılığını ve kullanıma dayalı yeni oturum seçimini etkinleştirir. Bu anahtar atlandığında iki veya daha fazla kullanılabilir hesabın varlığı reaktif 429 yük devretmesini etkinleştirir. Açık bir `false` değeri hem havuzu hem de bu yük devretmeyi kapatır. |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | Yeni oturumlarda etkin hesap bu eşiğe ulaştığında, yapılandırılan penceredeki bilinen en düşük önbelleğe alınmış kullanımı seçin. `0` kota seçimini devre dışı bırakır. |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | Yeni oturum stratejisi; `quota`, `quotaWindow` ile belirlenen pencereye (varsayılan 5 saatlik çubuklar) göre hesapları sıralar ve `fill-first` de tükenme eşiğini aynı pencerede değerlendirir. |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | Kullanıma dayalı hesap seçiminde kullanılan, sağlayıcının bildirdiği önbelleğe alınmış kullanım çubuğu. `five-hour` mevcut davranışı korur. `weekly` haftalık çubuğu kullanır ve başka uygun hesap kaldığı sürece 5 saatlik çubuğu tükenmiş hesapları atlar; hiçbiri kalmazsa bu hesaplara geri döner. `max-utilization` bilinen en yüksek değeri kullanır; haftalık değer henüz yokken 5 saatlik değeri kullanabilir, ikisi de bilinmiyorsa hesap unknown kullanım sırasını izler. Bilinen kullanım unknown değerlerden önce gelir; tüm uygun hesaplar unknown olsa bile uygun sıradaki bir hesap seçilir. Belgelenen daha düşük 5 saatlik kullanım eşitlik bozmasından sonra tam eşitlikte de uygun sıra korunur. Sağlıklı affinity oturumları önceden yeniden dengelenmez. Yeni oturum ataması ve uygun bir 429 yedeğine geçildikten sonraki yönlendirme kurtarmasında `quota`, uygun adayları doğrudan bu pencereye göre sıralar; `fill-first`, bu pencerenin eşik ve tükenme kurallarıyla kararlı sırada ilerler; `round-robin` ayarı yok sayar. Cooldown, yük devretme sınırları ve yeniden kimlik doğrulama uygunluğu ayrı yerel durum olarak kalır. Hesap başına haftalık çubuklar ancak dashboard Sağlayıcılar sayfasında sorgulandıktan sonra bilinir. |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | Bir round-robin seçiminde tutulan başarılı yeni oturum bağlamaları. Aralık 1–100. |
 
-Etkinleştirildiğinde 429, `Retry-After`'dan veya varsayılan bir geri çekilmeden
+Reaktif yük devretme etkinken 429, `Retry-After`'dan veya varsayılan bir geri çekilmeden
 sınırlı soğuma kaydeder ve istek içinde dönebilir. Bağlılık işleme özeldir ve
 boyut sınırlıdır. Kimlik bilgisi 401/403, hesabı yeniden kimlik doğrulama
 gerektiriyor olarak işaretler. Uygun tüm hesaplar soğuyorsa istemciler bir
@@ -353,8 +363,10 @@ Cursor sunucu güdümlü yerel araçlar varsayılan olarak devre dışıdır. Co
 onayı ve sanal alan politikasıyla `apply_patch` ve `exec_command` gibi kendi
 araçlarını kullanmaya devam eder:
 
-- `"off"` (varsayılan), Cursor yerel `read`, `write`, `delete`, `ls`, `grep`,
-  `shell` ve `fetch` yürütmesini reddeder.
+- `"off"` (varsayılan), proxy üzerinde Cursor yerel `read`, `write`, `delete`, `ls`, `grep`,
+  `shell` ve `fetch` yürütmesini reddeder. Tur bare Codex `shell_command` veya `exec_command`
+  duyurduğunda yerel Shell/Read/Ls/Grep/Fetch proxy yerine bu Codex köprüsüne eşlenir; write/delete
+  reddedilmeye devam eder.
 - `"on"`, güvenilen yerel yürütmeyi seçer ve Codex onay/sanal alan anlambilimini
   atlar.
 - `"codex-sandbox"` uyumluluk için tutulur ancak `"off"` gibi kapalı olarak
@@ -554,3 +566,4 @@ bildirir; senkronize edilen katalog `xhigh`'ı ayrı tutarken `max` bildirir.
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures` (varsayılan kapalı), akış öncesi geçici hataları yeniden dener; istek birden fazla iletilebilir.

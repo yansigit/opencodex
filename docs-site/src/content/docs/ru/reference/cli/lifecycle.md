@@ -343,7 +343,7 @@ ocx update --tag preview
 ```
 
 Новые версии становятся доступны, когда
-[Release workflow](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml)
+[Release workflow](https://github.com/yansigit/opencodex/actions/workflows/release.yml)
 публикует их в npm.
 
 ## Жизненный цикл клиента Remote Hub

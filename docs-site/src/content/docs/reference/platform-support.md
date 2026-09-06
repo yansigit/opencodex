@@ -78,4 +78,3 @@ OpenCodex states the actual reason rather than disabling a control silently. If
 a capability is unavailable on your platform, the error or the dashboard says
 which mechanism is missing and what the supported alternative is. If you hit one
 that does not, that is a bug worth reporting.
-

@@ -9,14 +9,14 @@ Le développement depuis les sources exige la CLI `bun` dans votre `PATH`. Le pa
 runtime Bun aux utilisateurs, mais les scripts de ce dépôt utilisent votre installation locale de Bun.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # proxy API in dev mode
 bun run dev:gui      # dashboard dev server (another terminal)
 bun run typecheck    # bun x tsc --noEmit
 bun run test:changed              # routine import-graph test selection
-bun test tests/routing/router.test.ts     # routine focused test
+bun scripts/test.ts tests/routing/router.test.ts     # routine focused test
 bun run test                      # complete suite (PR-ready / explicit ask)
 ```
 
@@ -32,7 +32,7 @@ distincte. Utilisez les scripts enregistrés afin que les commandes locales corr
 bun run typecheck                 # strict TypeScript check
 bun run test:changed              # import-graph tests against the resolved dev merge base
 bun run test                      # complete tests/ suite (PR-ready / explicit ask)
-bun test tests/routing/router.test.ts     # focused test file
+bun scripts/test.ts tests/routing/router.test.ts     # focused test file
 bun run build:gui                 # Vite GUI build + package preparation
 bun run privacy:scan              # credential/privacy scan used by CI
 bun run prepare:package           # refresh package launchers/assets
@@ -144,7 +144,7 @@ une contribution normale ; indiquez les commits sources dans la description.
 ## Responsables du projet
 
 Les responsables actuels, leurs attributions et les règles de revue et de fusion sont décrits dans
-[`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md). La propriété GitHub
+[`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md). La propriété GitHub
 du dépôt et des chemins sensibles du point de vue de la sécurité est déclarée dans `.github/CODEOWNERS`.
 
 ## Conventions
@@ -225,5 +225,5 @@ la fabrique depuis `src/index.ts` lorsqu’elle appartient à l’API publique d
 ## Vérifiez avant de déclarer que c'est fait
 
 Exécutez la commande la plus étroite qui prouve votre changement — `bun run typecheck` pour les types, un
-`bun test tests/<name>.test.ts` ou une sonde d'exécution pour le comportement, puis les portes plus larges appropriées à
+`bun scripts/test.ts tests/<name>.test.ts` ou une sonde d'exécution pour le comportement, puis les portes plus larges appropriées à
 la surface affectée. opencodex privilégie les petits commits vérifiables plutôt que les gros lots.

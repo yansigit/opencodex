@@ -11,14 +11,14 @@ aracının bulunması gerekir. Yayınlanan npm paketi kullanıcılar için kendi
 üzerinden çalışır.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run dev:proxy    # geliştirme modunda proxy API
 bun run dev:gui      # kontrol paneli geliştirme sunucusu (başka bir terminalde)
 bun run typecheck    # bun x tsc --noEmit
 bun run test:changed              # routine import-graph test selection
-bun test tests/routing/router.test.ts     # routine focused test
+bun scripts/test.ts tests/routing/router.test.ts     # routine focused test
 bun run test                      # complete suite (PR-ready / explicit ask)
 ```
 
@@ -35,7 +35,7 @@ Yerel komutların CI ile eşleşmesi için depodaki betikleri kullanın:
 ```bash
 bun run typecheck                 # katı TypeScript denetimi
 bun run test                      # tests/ paketinin tamamı
-bun test tests/routing/router.test.ts     # odaklanmış test dosyası
+bun scripts/test.ts tests/routing/router.test.ts     # odaklanmış test dosyası
 bun run build:gui                 # Vite GUI derlemesi + paket hazırlığı
 bun run privacy:scan              # CI tarafından kullanılan kimlik/gizlilik taraması
 bun run prepare:package           # paket başlatıcılarını ve varlıklarını yenileme
@@ -164,7 +164,7 @@ commit'leri belirtin.
 ## Proje bakımcıları
 
 Mevcut bakımcılar, sorumlulukları ve inceleme ile birleştirme politikası
-[`MAINTAINERS.md`](https://github.com/lidge-jun/opencodex/blob/main/MAINTAINERS.md)
+[`MAINTAINERS.md`](https://github.com/yansigit/opencodex/blob/main/MAINTAINERS.md)
 dosyasında belgelenmiştir. Depo ve güvenliğe duyarlı yollar için GitHub inceleme
 sahipliği `.github/CODEOWNERS` dosyasında bildirilmiştir.
 
@@ -264,6 +264,6 @@ fabrikayı `src/index.ts` dosyasından dışa aktarın.
 ## Bittiğini iddia etmeden önce doğrulayın
 
 Değişikliğinizi kanıtlayan en dar komutu çalıştırın — tipler için `bun run
-typecheck`, davranış için odaklanmış bir `bun test tests/<ad>.test.ts` veya
+typecheck`, davranış için odaklanmış bir `bun scripts/test.ts tests/<ad>.test.ts` veya
 çalışma zamanı probu, ardından etkilenen yüzeye uygun daha geniş kapılar.
 opencodex büyük partiler yerine küçük, doğrulanabilir commit'leri tercih eder.

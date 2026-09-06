@@ -5,6 +5,12 @@ description: 공급자 항목, 인증, 엔드포인트, 모델 카탈로그, 할
 
 공급자는 opencodex에 모델의 위치, 사용하는 와이어 어댑터, 요청 인증 방식을 알려줍니다.
 
+Azure identity configurations use `azureCredential` and are documented in the
+[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
+including `managedIdentityClientId`, the exact scope, `liveModels: false`,
+mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
+remains supported separately.
+
 ## 처음 등록할 때의 모델 선택
 
 신규 비-OAuth 연결은 신뢰할 수 있는 모델 목록을 확보할 때까지 모델 노출을 보류합니다. Models 탭의 중복 없는 모델 행이 20개 이상이면 모델 스위치를 모두 OFF로 설정합니다. 프로바이더는 활성 상태를 유지합니다. 실제 인증 방식이 OAuth나 ChatGPT 로그인인 연결은 기존 기본값을 유지합니다.
@@ -72,7 +78,8 @@ managed map을 활성화하면 privacy-safe selector를 만들고, 이후 계정
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`, `openai-responses`, `anthropic`, `google`, `kiro`, `cursor`, `ollama-native`, `azure-openai` 중 하나이며, `azure`는 별칭입니다. |
 | `baseUrl` | `string` | 상위 API 기본 URL입니다. 대부분의 내장 고정 엔드포인트는 불일치를 무시합니다. 충돌 안전 키 프리셋은 같은 이름의 이전 사용자 지정 목적지를 보존합니다. |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | 업스트림 사용량, 과금, rate-limit 지표와 별개인 선택적 클라이언트 측 아웃바운드 요청 시작 속도 조절입니다. Provider 제한은 모든 모델에 적용되고 `models` 항목은 정확한 업스트림 모델 ID와 일치하며 지연을 더 늘릴 때만 적용됩니다. 큐 대기는 응답 헤더 타임아웃을 소모하지 않습니다. HTTP, Responses WebSocket, 명시적 어댑터 `fetchResponse`/`runTurn` 전송을 포함합니다. |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | 업스트림 지표와 별개인 요청 시작 조절입니다. `jitterMs`는 0~60,000ms의 양의 무작위 지연만 추가하며 모델 규칙은 지연을 늘릴 때만 적용됩니다. |
+| `tlsProfile?` | `"antigravity-browser"` | Google Antigravity Cloud Code Assist 정규 호스트에만 적용되는 실험적·비공식 TLS/HTTP2 호환 프로필입니다. 약관 준수나 정지 방지를 보장하지 않고 트래픽을 더 식별하기 쉽게 만들 수 있으며 초기화 실패 시 Bun으로 대체됩니다. |
 | `responsesPath?` | `string` | 키 인증 `openai-responses` 요청의 상대 리소스 경로입니다. 반드시 `/`로 시작해야 하며 스킴, query, fragment를 포함하면 안 됩니다. |
 | `upstreamWebsocket?` | `boolean` | `openai-responses` 요청에 대한 업스트림 Responses WebSocket 전송을 선택적으로 활성화합니다(기본값 `false`). 업스트림이 이 프로토콜을 지원하면 스트리밍 POST가 설정된 Responses 경로(기본값 `/v1/responses`)로 HTTPS 기반 WSS를 사용하고, 일반 파이프라인을 위해 SSE로 다시 인코딩됩니다. forward 공급자는 `{baseUrl}/responses`를 사용하고, key-auth 공급자는 `responsesPath`를 사용하며 미설정 시 기존 `/v1/responses`로 대체됩니다. HTTP 기본 URL은 SSE를 유지하고, Responses가 아닌 경로와 `openai-chat` 요청은 HTTP를 사용합니다. |
 | `supportsServiceTier?` | `boolean` | `service_tier` 케이퍼빌리티 3상태입니다. `true`: fast 모드가 주입할 수 있고 호출자 값도 보존합니다. `false`: 필드를 제거하고 절대 주입하지 않습니다(미지원으로 문서화된 업스트림에는 볼 수 없습니다). 미설정: 미분류 — 호출자가 준 값은 그대로 보존하고 fast 모드는 주입하지 않습니다. 레지스트리는 정식 OpenAI(`true`), DeepSeek, Volcengine Ark(`false`)를 분류하며, 실제로 티어를 지원하는 커스텀 게이트웨이에만 명시적으로 설정하세요. |
@@ -139,6 +146,8 @@ managed map을 활성화하면 privacy-safe selector를 만들고, 이후 계정
 | `desktopExecutor?` | `DesktopExecutorConfig` | Cursor 전용입니다. 외부 computer-use 및 record-screen 명령입니다. |
 | `unsafeAllowNativeLocalExec?` | `boolean` | Cursor 레거시 불리언입니다. 더 새로운 필드가 설정되지 않았을 때만 `nativeLocalExec: "on"`과 같습니다. |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Cursor 로컬 실행 정책입니다. 기본값은 `off`입니다. `codex-sandbox`는 현재 `off`처럼 실패를 닫습니다. |
+| `commandCodeVersion?` | `string` | Command Code OAuth (`adapter: "command-code"`) 전용입니다. `/alpha/generate` 요청의 `x-command-code-version` 헤더를 고정합니다. 생략 시 어댑터 기본값(`0.52.1`)을 사용합니다. API 키 `commandcode` 프리셋(`openai-chat` / `/provider/v1`)에서는 읽지 않습니다. |
+| `projectContext?` | `"off" \| "on"` | Command Code OAuth (`adapter: "command-code"`) 전용입니다. `"on"`이면 프록시 프로세스 작업 디렉터리의 제한된 프로젝트 파일을 `/alpha/generate`의 `memory` / `taste` / `skills` 엔벨로프에 복사합니다. 생략하거나 `"off"`이면 디스크에 파일이 있어도 빈 엔벨로프를 유지합니다. API 키 `commandcode` 프리셋에서는 읽지 않습니다. 최상위가 아니라 `providers.command-code`에 설정합니다. 대시보드에서는 **Providers → Command Code → Edit JSON**을 사용합니다. `process.cwd()`가 의도한 저장소가 되도록 신뢰할 수 있는 Codex 프로젝트 디렉터리에서 프록시를 시작하세요. fail-soft: 누락·읽기 불가·타임아웃·경로 이탈은 해당 조각을 생략하며 턴 전체는 실패하지 않습니다. `~/.commandcode/skills` 등 홈 skill 트리는 읽지 않습니다. 이 플래그와 관계없이 `x-taste-learning`은 `"false"`로 유지됩니다. |
 
 API 키 공급자는 리터럴 키나 환경 참조를 둘 수 있습니다. OAuth 공급자는 `ocx login`으로 채워지는 자격 증명 저장소를 사용합니다. 구독 기반 Claude Code 실행 동작은 [`claudeCode.authMode`](/reference/configuration/server/#claude-code)에서 설정합니다.
 
@@ -187,13 +196,13 @@ affinity 초기화 뒤의 기존 작업도 포함될 수 있습니다. 출력 �
 
 | 키 | 타입 | 기본값 | 설명 |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` | sticky 세션 결속과 사용량 기반 새 세션 선택을 켭니다. **429 failover는 여기서 제어되지 않습니다**: 쓸 수 있는 계정이 둘 이상이면 다른 다중 자격 증명 제공자와 똑같이 자동으로 켜지며, 끌 수 없습니다. |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | sticky 세션 결속과 사용량 기반 새 세션 선택을 켭니다. 이 키를 생략하면 사용 가능한 계정이 둘 이상 존재할 때 반응형 429 장애 조치가 활성화됩니다. 명시적인 `false`는 풀과 해당 장애 조치를 모두 끕니다. |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | 새 세션에서는 활성 계정이 이 임계값에 도달하면 설정된 창의 알려진 캐시 사용량이 가장 낮은 계정을 고릅니다. `0`이면 quota 선택을 끕니다. |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | 새 세션 전략입니다. `quota`는 `quotaWindow`로 지정한 창(기본값은 5시간 막대)으로 계정 순위를 매기고, `fill-first`도 같은 창에서 소진 임계값을 판정합니다. |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | 사용량 기반 계정 선택에 사용하는, 공급자가 보고한 캐시 사용률 막대입니다. `five-hour`는 기존 동작을 유지합니다. `weekly`는 주간 막대를 사용하며 다른 사용 가능한 계정이 남아 있을 때만 5시간 막대가 소진된 계정을 건너뛰고, 아무 계정도 남지 않으면 해당 계정으로 폴백합니다. `max-utilization`은 알려진 값 중 가장 높은 값을 사용하므로 주간 사용량을 알기 전에도 5시간 사용량을 쓸 수 있고, 둘 다 모르면 unknown 순서를 따릅니다. 알려진 사용량은 unknown보다 앞서지만, 사용 가능한 계정이 모두 unknown이어도 사용 가능한 순서의 계정을 선택합니다. 앞서 설명한 5시간 사용량 동점 판정 뒤에도 완전히 같으면 사용 가능한 순서를 유지합니다. 정상 affinity 세션을 선제적으로 재배치하지 않습니다. 새 세션 배정과 가능한 429 대체 이후 라우팅 복구에서 `quota`는 이 창으로 사용 가능한 후보의 순위를 직접 매기고, `fill-first`는 이 창의 임계값과 소진 규칙에 따라 안정 순서로 이동하며, `round-robin`은 이 설정을 무시합니다. 쿨다운, failover 한도, 재인증 가능 여부는 별도의 로컬 상태로 유지됩니다. 계정별 주간 막대는 대시보드의 프로바이더 페이지에서 조회한 뒤에만 알 수 있습니다. |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | 성공한 새 세션 결속이 한 번의 라운드로빈 선택에 유지되는 횟수입니다. 범위는 1–100입니다. |
 
-활성화되면 429 레코드가 `Retry-After` 또는 기본 backoff에서 제한된 쿨다운을 기록하고, 요청 안에서 회전할 수 있습니다. 결속은 프로세스 로컬이며 크기가 제한됩니다. 자격 증명 401/403은 해당 계정이 재인증이 필요함을 표시합니다. 적격한 계정이 모두 쿨다운 중이면, 클라이언트는 인증 오류가 아니라 알려진 경우 `Retry-After`가 포함된 429를 받습니다.
+반응형 장애 조치가 활성화되면 429 레코드가 `Retry-After` 또는 기본 backoff에서 제한된 쿨다운을 기록하고, 요청 안에서 회전할 수 있습니다. 결속은 프로세스 로컬이며 크기가 제한됩니다. 자격 증명 401/403은 해당 계정이 재인증이 필요함을 표시합니다. 적격한 계정이 모두 쿨다운 중이면, 클라이언트는 인증 오류가 아니라 알려진 경우 `Retry-After`가 포함된 429를 받습니다.
 
 :::caution[실험적 기능]
 Anthropic 계정 정책 위험을 이해하지 못한다면 이 기능은 꺼두십시오. 확신이 없으면 수동 `ocx account use anthropic <id>` 전환을 우선하십시오.
@@ -267,7 +276,7 @@ Cursor 브리지는 실험적입니다. `ocx login cursor`를 실행한 뒤 `pro
 
 Cursor 서버 주도 로컬 도구는 기본값으로 비활성화됩니다. Codex는 계속해서 `apply_patch`, `exec_command` 같은 자체 도구를 자체 승인 및 샌드박스 정책과 함께 사용합니다.
 
-- `"off"`(기본값)는 Cursor 네이티브 `read`, `write`, `delete`, `ls`, `grep`, `shell`, `fetch` 실행을 거부합니다.
+- `"off"`(기본값)는 프록시에서 Cursor 네이티브 `read`, `write`, `delete`, `ls`, `grep`, `shell`, `fetch` 실행을 거부합니다. 턴에 bare Codex `shell_command` 또는 `exec_command`가 광고되어 있으면 네이티브 Shell/Read/Ls/Grep/Fetch는 프록시가 아니라 해당 Codex 셸 브리지로 매핑되며 write/delete는 계속 거부됩니다.
 - `"on"`은 신뢰된 로컬 실행을 허용하고, Codex 승인/샌드박스 의미를 우회합니다.
 - `"codex-sandbox"`는 호환성을 위해 남아 있지만 `"off"`처럼 실패를 닫습니다. 요청 문구는 신뢰할 수 있는 샌드박스 증명이 아닙니다.
 
@@ -429,3 +438,4 @@ Vercel AI Gateway는 하나의 모델을 여러 기반 추론 공급자에 걸�
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures`(기본값 false)은 스트리밍 전 일시적 실패를 재시도하며 요청이 여러 번 전달될 수 있습니다.

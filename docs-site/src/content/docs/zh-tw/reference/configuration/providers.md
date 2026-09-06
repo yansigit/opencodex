@@ -5,6 +5,12 @@ description: 供應商項目、認證、端點、模型目錄、配額、context
 
 供應商告訴 opencodex 模型在哪裡、它使用哪種 wire adapter，以及請求如何被認證。
 
+Azure identity configurations use `azureCredential` and are documented in the
+[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
+including `managedIdentityClientId`, the exact scope, `liveModels: false`,
+mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
+remains supported separately.
+
 ## 首次註冊時的模型選擇
 
 新的非 OAuth 連線會先等待可靠的模型清單，再公開模型。如果 Models 分頁中去重後的模型列達到20個，所有模型開關初始為 OFF，但供應商本身保持 ACTIVE。實際驗證方式為 OAuth 或 ChatGPT 登入的連線保留預設值。
@@ -56,7 +62,8 @@ ocx models provider openrouter on
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`、`openai-responses`、`anthropic`、`google`、`kiro`、`cursor`、`ollama-native`、`azure-openai`（或別名 `azure`）之一。 |
 | `baseUrl` | `string` | 上游 API base URL。多數內建固定端點忽略不符；碰撞安全的金鑰預設保留較舊的同名自訂目的地。 |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | 選用的用戶端出站請求啟動節流，與上游用量、計費及限流指標彼此獨立。供應商限制適用於所有模型，`models` 依上游模型精確 ID 比對且只能增加延遲。排隊等待不計入回應標頭逾時。涵蓋 HTTP、Responses WebSocket 及明確的適配器 `fetchResponse`/`runTurn` 呼叫。 |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | 可選的用戶端請求啟動節流。`jitterMs` 只會增加 0 至 60,000 毫秒的正隨機延遲；模型規則只能進一步增加延遲。 |
+| `tlsProfile?` | `"antigravity-browser"` | 僅適用於 Google Antigravity Cloud Code Assist 正規主機的實驗性、非官方 TLS/HTTP2 相容設定。不保證符合服務條款或避免停權，可能讓流量更具辨識度，初始化失敗時回退到 Bun。 |
 | `responsesPath?` | `string` | Key-auth `openai-responses` 請求的相對資源路徑。必須以 `/` 開頭且不含 scheme、query 或 fragment。 |
 | `upstreamWebsocket?` | `boolean` | 為 `openai-responses` 請求選用上游 Responses WebSocket 傳輸（預設 `false`）。當上游支援此協定時，串流 POST 請求會使用設定的 Responses 路徑（預設 `/v1/responses`），透過 HTTPS 基礎 URL 以 WSS 連線，再重新編碼為一般流程使用的 SSE。forward 供應商使用 `{baseUrl}/responses`；key-auth 供應商使用 `responsesPath`，未設定時回退到傳統的 `/v1/responses`。一般 HTTP 仍使用 SSE；非 Responses 路徑與 `openai-chat` 請求仍使用 HTTP。 |
 | `disabled?` | `boolean` | 將供應商保留在磁碟上但排除於路由與模型／目錄清單。 |
@@ -113,6 +120,8 @@ ocx models provider openrouter on
 | `desktopExecutor?` | `DesktopExecutorConfig` | 僅 Cursor：外部 computer-use 與 record-screen 指令。 |
 | `unsafeAllowNativeLocalExec?` | `boolean` | Cursor 舊版布林值，僅在較新欄位未設定時等同於 `nativeLocalExec: "on"`。 |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Cursor 本機執行政策。`off` 為預設；`codex-sandbox` 目前像 `off` 般 fail closed。 |
+| `commandCodeVersion?` | `string` | 僅 Command Code OAuth（`adapter: "command-code"`）。固定 `/alpha/generate` 請求的 `x-command-code-version` 標頭。未設定時使用適配器預設值（`0.52.1`）。API 金鑰 `commandcode` 預設（`openai-chat` / `/provider/v1`）不會讀取。 |
+| `projectContext?` | `"off" \| "on"` | 僅 Command Code OAuth（`adapter: "command-code"`）。為 `"on"` 時，從代理程序工作目錄複製有界專案檔案到 `/alpha/generate` 的 `memory` / `taste` / `skills` 信封。未設定或 `"off"` 時保持空信封，即使磁碟上已有這些檔案。API 金鑰 `commandcode` 預設不會讀取。請設在 `providers.command-code` 上，而非頂層。在儀表板使用 **Providers → Command Code → Edit JSON**。請從受信任的 Codex 專案目錄啟動代理，使 `process.cwd()` 指向目標儲存庫。fail-soft：缺失、不可讀、逾時或路徑逸出會省略該部分，而不會讓整個回合失敗。不會讀取 `~/.commandcode/skills` 或其他主目錄 skill 樹。無論此旗標如何，`x-taste-learning` 保持 `"false"`。 |
 
 API-key 供應商可持有字面值金鑰或環境參考。OAuth 供應商使用由 `ocx login` 填入的憑證存放；訂閱支援的 Claude Code 啟動行為在 [`claudeCode.authMode`](/zh-tw/reference/configuration/server/#claude-code) 下設定。
 
@@ -149,13 +158,13 @@ API-key 供應商可持有字面值金鑰或環境參考。OAuth 供應商使用
 
 | Key | 型別 | 預設值 | 說明 |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` | 啟用 sticky 工作階段親和性與依用量的新工作階段選擇。**429 容錯移轉不由此開關控制**：只要儲存了兩個以上可用帳號就會生效，與其他多憑證供應商一致，且無法關閉。 |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | 啟用 sticky 工作階段親和性與依用量的新工作階段選擇。省略此鍵時，存在兩個以上可用帳號會預設啟用反應式 429 容錯移轉；明確設為 `false` 會同時關閉帳號池和該容錯移轉。 |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | 對於新 session，當目前帳號達到此閾值時，選擇設定視窗中最低的已知快取用量。`0` 停用配額挑選。 |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | 新 session 策略；`quota` 依 `quotaWindow` 指定的視窗（預設為 5 小時列）為帳號排序，`fill-first` 也在同一視窗中判定其排空閾值。 |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | 使用量型帳號選擇所採用、由供應商回報並快取的用量列。`five-hour` 保留原有行為。`weekly` 使用每週用量列，並在仍有其他可用帳號時略過 5 小時用量已用盡的帳號；若沒有其他帳號，則退回使用這些帳號。`max-utilization` 使用已知值中的最高值，因此每週用量尚未取得時仍可使用 5 小時用量；兩者都未知時，帳號遵循 unknown 用量排序。已知用量排在 unknown 之前，但若所有可用帳號都是 unknown，仍會依可用順序選出一個。完成前述較低 5 小時用量的同分判定後，完全相同時也保留可用順序。不會主動重新平衡健康且已有 affinity 的 session。在分配新 session 與符合條件的 429 替代後進行路由復原時，`quota` 直接依此視窗排序可用候選帳號；`fill-first` 依此視窗的門檻與用盡規則按穩定順序前進；`round-robin` 忽略此設定。冷卻狀態、容錯移轉上限與重新驗證資格仍是獨立的本機狀態。每個帳號的每週用量只有在 dashboard 的供應商頁面完成查詢後才可得知。 |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | 在一次 round-robin 選擇上保留的成功新 session 綁定。範圍 1–100。 |
 
-啟用時，429 記錄來自 `Retry-After` 或預設 backoff 的有界冷卻，並可能在請求內輪換。親和性為行程本地且有界。憑證 401/403 將帳號標記為需要重新認證。若所有合格帳號都在冷卻，客戶端收到附帶已知 `Retry-After` 的 429，而非認證錯誤。
+反應式容錯移轉啟用時，429 記錄來自 `Retry-After` 或預設 backoff 的有界冷卻，並可能在請求內輪換。親和性為行程本地且有界。憑證 401/403 將帳號標記為需要重新認證。若所有合格帳號都在冷卻，客戶端收到附帶已知 `Retry-After` 的 429，而非認證錯誤。
 
 :::caution[實驗性]
 除非你了解 Anthropic 帳號政策風險，否則保持停用。不確定時偏好手動 `ocx account use anthropic <id>` 切換。
@@ -234,8 +243,8 @@ Cursor Router 的最佳化階梯以獨立的 Codex id 暴露，因為 picker 無
 
 Cursor 伺服器驅動的本機工具預設停用。Codex 繼續使用其自身工具如 `apply_patch` 與 `exec_command` 及其自身的核准與沙箱政策：
 
-- `"off"`（預設）拒絕 Cursor 原生的 `read`、`write`、`delete`、`ls`、`grep`、`shell` 與
-  `fetch` 執行。
+- `"off"`（預設）拒絕在 proxy 上執行 Cursor 原生的 `read`、`write`、`delete`、`ls`、`grep`、`shell` 與
+  `fetch`。當 turn 公布了 bare Codex `shell_command` 或 `exec_command` 時，原生 Shell/Read/Ls/Grep/Fetch 會映射到該 Codex shell 橋接工具，而不是在 proxy 上執行；write/delete 仍被拒絕。
 - `"on"` 選擇加入受信任的本機執行並繞過 Codex 核准／沙箱語意。
 - `"codex-sandbox"` 為相容性而保留，但像 `"off"` 般 fail closed；請求文字不是可信的沙箱證明。
 
@@ -388,3 +397,4 @@ Vercel AI Gateway 可在多個底層推論供應商之間路由一個模型。`v
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures`（預設關閉）會在串流開始前重試暫時性失敗；請求可能傳送多次。

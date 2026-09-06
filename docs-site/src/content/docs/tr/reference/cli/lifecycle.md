@@ -450,7 +450,7 @@ ocx update --tag preview
 ```
 
 Yeni sürümler, [Sürüm iş
-akışı](https://github.com/lidge-jun/opencodex/actions/workflows/release.yml)
+akışı](https://github.com/yansigit/opencodex/actions/workflows/release.yml)
 bunları npm'de yayınladığında kullanılabilir hale gelir.
 
 ## Remote Hub istemci yaşam döngüsü

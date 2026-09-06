@@ -5,6 +5,12 @@ description: 提供者条目、身份验证、端点、模型目录、配额、�
 
 提供者用于告诉 opencodex 模型位于哪里、使用哪种线协议适配器，以及请求如何进行身份验证。
 
+Azure identity configurations use `azureCredential` and are documented in the
+[canonical English Azure OpenAI authentication reference](/reference/configuration/providers/#azure-openai-authentication),
+including `managedIdentityClientId`, the exact scope, `liveModels: false`,
+mutual exclusion with `apiKey`/`apiKeyPool`, and stable errors. API-key mode
+remains supported separately.
+
 ## 首次注册时的模型选择
 
 新的非 OAuth 连接会等待可靠的模型列表，再公开模型。如果 Models 标签页中去重后的模型行达到20个，所有模型开关初始为 OFF，但提供者本身保持 ACTIVE。实际认证方式为 OAuth 或 ChatGPT 登录的连接保留默认设置。
@@ -72,7 +78,8 @@ selector，而不是分配一个新名称。
 | --- | --- | --- |
 | `adapter` | `string` | `openai-chat`、`openai-responses`、`anthropic`、`google`、`kiro`、`cursor`、`ollama-native`、`azure-openai`（或别名 `azure`）之一。 |
 | `baseUrl` | `string` | 上游 API 基础 URL。大多数内置固定端点会忽略不匹配的值；具备冲突安全键的预设会保留一个更早、同名的自定义目标。 |
-| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, models? }` | 可选的客户端出站请求启动节流，与上游用量、计费和限流指标相互独立。提供商限制适用于所有模型，`models` 按上游模型精确 ID 匹配且只能增加延迟。排队等待不计入响应头超时。覆盖 HTTP、Responses WebSocket 以及显式适配器 `fetchResponse`/`runTurn` 调用。 |
+| `requestPacing?` | `{ enabled, requestsPerMinute?, minIntervalMs?, jitterMs?, models? }` | 可选的客户端请求启动节流。`jitterMs` 只会增加 0 到 60,000 毫秒的正随机延迟；模型规则只能进一步增加延迟。 |
+| `tlsProfile?` | `"antigravity-browser"` | 仅用于 Google Antigravity Cloud Code Assist 正规主机的实验性、非官方 TLS/HTTP2 兼容配置。不保证遵守服务条款或避免停用，可能使流量更具特征，初始化失败时回退到 Bun。 |
 | `responsesPath?` | `string` | 用于 key-auth `openai-responses` 请求的相对资源路径。必须以 `/` 开头，且不能包含 scheme、query 或 fragment。 |
 | `upstreamWebsocket?` | `boolean` | 为 `openai-responses` 请求选择性启用上游 Responses WebSocket 传输（默认 `false`）。当上游支持该协议时，流式 POST 请求会使用配置的 Responses 路径（默认 `/v1/responses`），通过 HTTPS 基础 URL 以 WSS 连接，并重新编码为常规流程使用的 SSE。forward 提供者使用 `{baseUrl}/responses`；key-auth 提供者使用 `responsesPath`，未设置时回退到传统的 `/v1/responses`。普通 HTTP 仍使用 SSE；非 Responses 路径和 `openai-chat` 请求仍使用 HTTP。 |
 | `supportsServiceTier?` | `boolean` | `service_tier` 能力的三态。`true`：fast 模式可以注入，调用方提供的值也会被保留。`false`：剥离该字段且绝不注入（已明确不支持的上游不会收到它）。未设置：未分类——调用方提供的值原样保留，fast 模式绝不注入。注册表已对官方 OpenAI（`true`）、DeepSeek 和 Volcengine Ark（`false`）分类；仅对真正支持分层的自定义网关显式设置。 |
@@ -139,6 +146,8 @@ selector，而不是分配一个新名称。
 | `desktopExecutor?` | `DesktopExecutorConfig` | 仅 Cursor：外部 computer-use 和录屏命令。 |
 | `unsafeAllowNativeLocalExec?` | `boolean` | Cursor 旧布尔值；仅当更新字段未设置时，等同于 `nativeLocalExec: "on"`。 |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Cursor 本地执行策略。`off` 是默认值；`codex-sandbox` 目前会像 `off` 一样失败关闭。 |
+| `commandCodeVersion?` | `string` | 仅 Command Code OAuth（`adapter: "command-code"`）。固定 `/alpha/generate` 请求的 `x-command-code-version` 头。未设置时使用适配器默认值（`0.52.1`）。API 密钥 `commandcode` 预设（`openai-chat` / `/provider/v1`）不会读取。 |
+| `projectContext?` | `"off" \| "on"` | 仅 Command Code OAuth（`adapter: "command-code"`）。为 `"on"` 时，从代理进程工作目录复制有界项目文件到 `/alpha/generate` 的 `memory` / `taste` / `skills` 信封。未设置或 `"off"` 时保持空信封，即使磁盘上已有这些文件。API 密钥 `commandcode` 预设不会读取。请设置在 `providers.command-code` 上，而非顶层。在仪表板使用 **Providers → Command Code → Edit JSON**。请从受信任的 Codex 项目目录启动代理，使 `process.cwd()` 指向目标仓库。fail-soft：缺失、不可读、超时或路径逃逸会省略该部分，而不会让整个回合失败。不会读取 `~/.commandcode/skills` 或其他主目录 skill 树。无论此标志如何，`x-taste-learning` 保持 `"false"`。 |
 
 API key 提供者可以持有字面量 key，或环境引用。OAuth 提供者使用由 `ocx login` 填充的凭据存储；基于订阅的 Claude Code 启动行为在 [`claudeCode.authMode`](/reference/configuration/server/#claude-code) 下配置。
 
@@ -181,13 +190,13 @@ affinity。这些策略不能规避 provider enforcement。
 
 | 键 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `anthropicAccountPool.enabled?` | `boolean` | `false` | 启用粘性会话亲和性与基于用量的新会话选择。**429 故障转移不由此开关控制**：只要存有两个及以上可用账号就会生效，与其他多凭据提供方一致，且无法关闭。 |
+| `anthropicAccountPool.enabled?` | `boolean` | `false` | 启用粘性会话亲和性与基于用量的新会话选择。省略此键时，存在两个及以上可用账号会默认启用响应式 429 故障转移；显式设为 `false` 会同时关闭账号池和该故障转移。 |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | 对于新会话，当活动账户达到此阈值时，选择配置窗口中已知缓存使用率最低的账户。`0` 会禁用配额选择。 |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | 新会话策略；`quota` 按 `quotaWindow` 指定的窗口（默认是 5 小时条形数据）对账户排序，`fill-first` 也在同一窗口中判定其耗尽阈值。 |
 | `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | 基于用量选择账户时使用的、由提供商报告并缓存的用量条。`five-hour` 保持原有行为。`weekly` 使用每周用量条，并在仍有其他可用账户时跳过 5 小时用量已耗尽的账户；若没有其他账户，则回退使用这些账户。`max-utilization` 使用已知值中的最高值，因此每周用量尚不可用时仍可使用 5 小时用量；两者都未知时，账户遵循 unknown 用量排序。已知用量排在 unknown 之前，但如果所有可用账户都未知，仍会按可用顺序选择一个账户。在前述较低 5 小时用量的同分判定之后，完全相同时也保留可用顺序。不会主动重新平衡健康且已建立亲和性的会话。在新会话分配和符合条件的 429 替代后的路由恢复中，`quota` 直接按此窗口对可用候选账户排序；`fill-first` 按此窗口的阈值和耗尽规则以稳定顺序前进；`round-robin` 忽略此设置。冷却状态、故障转移上限和重新认证资格仍是独立的本地状态。各账户的每周用量只有在控制面板的提供商页面完成查询后才可用。 |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | 在一次轮询选择中保留的成功新会话绑定次数。范围 1–100。 |
 
-启用后，429 会根据 `Retry-After` 记录有界冷却，或者使用默认退避，并且可能在同一请求内轮换。亲和性是进程本地的，并且有大小上限。凭据 401/403 会将账户标记为需要重新认证。如果所有合格账户都在冷却，客户端会在已知时收到带 `Retry-After` 的 429，而不是身份验证错误。
+响应式故障转移处于活动状态时，429 会根据 `Retry-After` 记录有界冷却，或者使用默认退避，并且可能在同一请求内轮换。亲和性是进程本地的，并且有大小上限。凭据 401/403 会将账户标记为需要重新认证。如果所有合格账户都在冷却，客户端会在已知时收到带 `Retry-After` 的 429，而不是身份验证错误。
 
 :::caution[Experimental]
 除非你理解 Anthropic 账户策略风险，否则请保持关闭。若不确定，优先手动使用 `ocx account use anthropic <id>` 切换。
@@ -269,7 +278,8 @@ Cursor Router 的优化层级会作为独立的 Codex id 暴露，因为选择�
 
 Cursor 由服务端驱动的本地工具默认是禁用的。Codex 继续使用自己的工具，例如 `apply_patch` 和 `exec_command`，并沿用自己的审批与沙箱策略：
 
-- `"off"`（默认）会拒绝执行 Cursor 原生的 `read`、`write`、`delete`、`ls`、`grep`、`shell` 和 `fetch`。
+- `"off"`（默认）拒绝在 proxy 上执行 Cursor 原生的 `read`、`write`、`delete`、`ls`、`grep`、`shell` 和
+  `fetch`。当 turn 公布了 bare Codex `shell_command` 或 `exec_command` 时，原生 Shell/Read/Ls/Grep/Fetch 会映射到该 Codex shell 桥接工具，而不是在 proxy 上运行；write/delete 仍被拒绝。
 - `"on"` 会启用受信任的本地执行，并绕过 Codex 的审批/沙箱语义。
 - `"codex-sandbox"` 为兼容性保留，但会像 `"off"` 一样失败关闭；请求文案并不是可信的沙箱证明。
 
@@ -423,3 +433,4 @@ Vercel AI Gateway 可以在多个底层推理提供者之间路由一个模型�
   "visionSidecar": { "enabled": true }
 }
 ```
+`replayTransientFailures`（默认关闭）会在流开始前重试暂时性失败；请求可能被传递多次。

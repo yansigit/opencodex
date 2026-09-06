@@ -6,13 +6,13 @@
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="X üzerinde @claudeebum takip edin"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm sürümü"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="lisans"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node sürümü">
+  <a href="https://www.npmjs.com/package/@yansigit/opencodex"><img src="https://img.shields.io/npm/v/@yansigit/opencodex?color=cb3837&label=npm&logo=npm" alt="npm sürümü"></a>
+  <a href="https://github.com/yansigit/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@yansigit/opencodex?color=blue" alt="lisans"></a>
+  <img src="https://img.shields.io/node/v/@yansigit/opencodex?logo=node.js&label=node" alt="node sürümü">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ocx start        # localhost:10100 üzerinde proxy + panel
 ```
 
@@ -50,7 +50,7 @@ opencodex, Codex'in Responses API'sini sağlayıcınızın desteklediği formata
 ### İnsanlar için
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+; Bun çalışma zamanı otomatik olarak paketlenmiştir
+npm install -g @yansigit/opencodex   # Node 22+; Bun çalışma zamanı otomatik olarak paketlenmiştir
 ocx start                            # veya arka planda çalıştırmak için `ocx service`
 ```
 
@@ -59,7 +59,7 @@ ocx start                            # veya arka planda çalıştırmak için `o
 ### Ajanlar için
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ocx start     # veya `ocx service`
 ocx init      # etkileşimli kurulum: ~/.opencodex/config.json yazar ve Codex'i bağlar
 ```
@@ -76,7 +76,7 @@ ocx init      # etkileşimli kurulum: ~/.opencodex/config.json yazar ve Codex'i 
 | Linux (x64 / arm64) | Tam destekleniyor | systemd (user unit) |
 | Windows (x64) | Tam destekleniyor | Görev Zamanlayıcı (gizli) / isteğe bağlı yerel servis (`--native`, WinSW) |
 
-[Node](https://nodejs.org) 18+ gerektirir. Bun çalışma zamanı `npm install` sırasında paketlenmiş olarak gelir — ayrı bir Bun kurulumu veya Windows'ta WSL gerekmez. npm paketlenmiş çalışma zamanının yükleme betiklerini engellediyse [kurulum dokümantasyonuna](https://opencodex.me/getting-started/installation/) bakın.
+[Node](https://nodejs.org) 22+ gerektirir. Bun çalışma zamanı `npm install` sırasında paketlenmiş olarak gelir — ayrı bir Bun kurulumu veya Windows'ta WSL gerekmez. npm paketlenmiş çalışma zamanının yükleme betiklerini engellediyse [kurulum dokümantasyonuna](https://opencodex.me/getting-started/installation/) bakın.
 
 ## Öne Çıkan Özellikler
 
@@ -132,7 +132,7 @@ Bağlantı noktası açıkça belirtilmeden başlatılırsa, tercih edilen bağl
 
 ```bash
 ocx uninstall                  # durdurur, servis/shim kaldırır, yerel Codex'i geri yükler, durumu temizler
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g @yansigit/opencodex
 ```
 
 ## Uzaktan erişim
@@ -143,14 +143,14 @@ Varsayılan olarak opencodex `127.0.0.1` adresine bağlanır ve ekstra kimlik do
 
 Halka açık dokümanlar — kurulum, sağlayıcılar, yönlendirme, kombolar, alt ajanlar, sidecar'lar, entegrasyonlar ve CLI/yapılandırma/yönetim API referansları — [`docs-site/`](../docs-site) klasöründen oluşturulur ve **[opencodex.me](https://opencodex.me/)** üzerinde yayınlanır.
 
-Maintainer temel doğruluk notları [`structure/`](../structure) altında, katkıda bulunan kurulum rehberi [`CONTRIBUTING.md`](../CONTRIBUTING.md) dosyasında ve güvenlik raporlama [`SECURITY.md`](../SECURITY.md) dosyasındadır. Açıklanmamış güvenlik açıklarını herkese açık bir issue yerine [GitHub özel güvenlik açığı raporlaması](https://github.com/lidge-jun/opencodex/security/advisories/new) aracılığıyla gizlice bildirin.
+Maintainer temel doğruluk notları [`structure/`](../structure) altında, katkıda bulunan kurulum rehberi [`CONTRIBUTING.md`](../CONTRIBUTING.md) dosyasında ve güvenlik raporlama [`SECURITY.md`](../SECURITY.md) dosyasındadır. Açıklanmamış güvenlik açıklarını herkese açık bir issue yerine [GitHub özel güvenlik açığı raporlaması](https://github.com/yansigit/opencodex/security/advisories/new) aracılığıyla gizlice bildirin.
 
 ## Geliştirme
 
 Kaynak kod geliştirmesi `PATH` dizininizde `bun` CLI'ını gerektirir. Bu, yalnızca yüklü `ocx` komutları tarafından kullanılan yayınlanmış npm paketinin paketlenmiş Bun çalışma zamanından ayrıdır.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run typecheck

@@ -4,13 +4,13 @@ Two commands, and every one of them runs any LLM you point it at.</p>
 
 <p align="center">
   <a href="https://x.com/claudeebum"><img src="https://img.shields.io/badge/%40claudeebum-000000?logo=x&logoColor=white" alt="Follow @claudeebum on X"></a>
-  <a href="https://www.npmjs.com/package/@bitkyc08/opencodex"><img src="https://img.shields.io/npm/v/@bitkyc08/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
-  <a href="https://github.com/lidge-jun/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@bitkyc08/opencodex?color=blue" alt="license"></a>
-  <img src="https://img.shields.io/node/v/@bitkyc08/opencodex?logo=node.js&label=node" alt="node version">
+  <a href="https://www.npmjs.com/package/@yansigit/opencodex"><img src="https://img.shields.io/npm/v/@yansigit/opencodex?color=cb3837&label=npm&logo=npm" alt="npm version"></a>
+  <a href="https://github.com/yansigit/opencodex/blob/main/LICENSE"><img src="https://img.shields.io/npm/l/@yansigit/opencodex?color=blue" alt="license"></a>
+  <img src="https://img.shields.io/node/v/@yansigit/opencodex?logo=node.js&label=node" alt="node version">
 </p>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ocx start
 ```
 
@@ -81,7 +81,7 @@ account while existing threads stay pinned to the account that started them.
 ### Personal install
 
 ```bash
-npm install -g @bitkyc08/opencodex   # Node 18+; the Bun runtime is bundled automatically
+npm install -g @yansigit/opencodex   # Node 22+; the Bun runtime is bundled automatically
 ocx start                         # proxy + dashboard on localhost:10100
 ```
 
@@ -107,27 +107,35 @@ host, generate the canonical compatibility manifest before every image build, th
 the data-plane token once through stdin and start the hub:
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build
 openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
 docker compose up -d
-curl --fail --silent http://127.0.0.1:10100/healthz
-curl --fail --silent http://127.0.0.1:10100/readyz
+mkdir -p .tmp
+docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/readyz
 ```
 
 The default host binding is `127.0.0.1:10100`. Remote exposure requires explicit
 `OPENCODEX_BIND_ADDRESS=<LAN-or-Tailscale-IP> docker compose up -d`; `0.0.0.0` opts into
-all host interfaces. Restrict access with a firewall and an authenticated TLS/tailnet frontend.
+all host interfaces. `OPENCODEX_PORT` also updates the generated localhost `tls.publicOrigin`;
+set `OPENCODEX_PUBLIC_ORIGIN` only when installing a matching operator-managed identity. The
+generated certificate covers only `localhost` and `127.0.0.1`; keep the default loopback
+publication behind an authenticated TLS/tailnet frontend, or install a certificate and
+`tls.publicOrigin` for the exact remote name before publishing directly. Restrict either setup
+with a firewall.
 The generated JSON stays untracked; it is copied into the image without including `.git`.
 Regenerate it after source changes, and do not change the source between generation and build.
-The build rejects stale manifests, missing or mismatched files, extra source files, and symlinks.
-It checks every recorded SHA-256 against the build context and copied runtime files, including
-`package.json`, `bun.lock`, and the specifically included `scripts/model-metadata.source.json`.
+The build rejects stale manifests, missing or mismatched files, extra source or Docker-authority
+files, and symlinks. It checks every recorded SHA-256 against the build context and copied runtime
+files, including the Dockerfile, Compose/config/bootstrap/probe files, `package.json`, `bun.lock`,
+and the specifically included `scripts/model-metadata.source.json`.
 
-The token and mutable state stay in the `ocx-state` named volume; no credential is placed in the
-image, Compose file, environment, or shell arguments. See the
+The token, TLS private key, and mutable state stay in the `ocx-state` named volume; no credential
+is placed in the image, Compose file, environment, or shell arguments. See the
 [Remote Hub deployment guide](https://opencodex.me/guides/remote-hub/#docker-compose) for provider
 setup, authenticated acceptance checks, remote management, and rollback.
 
@@ -140,7 +148,7 @@ setup, authenticated acceptance checks, remote management, and rollback.
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex && ~/.bun/bin/bun install
 ~/.bun/bin/bun run src/cli/index.ts start
 ```
@@ -149,7 +157,7 @@ cd opencodex && ~/.bun/bin/bun install
 
 ```powershell
 irm bun.sh/install.ps1 | iex
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex; bun install
 bun run src/cli/index.ts start
 ```
@@ -164,7 +172,7 @@ they reach the npm package.
 <summary>For agents</summary>
 
 ```bash
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 ocx start     # or `ocx service`
 ocx init      # interactive setup: writes ~/.opencodex/config.json and wires Codex
 ```
@@ -172,6 +180,13 @@ ocx init      # interactive setup: writes ~/.opencodex/config.json and wires Cod
 `ocx init` never starts the proxy; start it first (or after — either order works, but headless
 commands like `ocx provider add` and `ocx combo set` talk to the **live** proxy and exit nonzero
 when it is unreachable). `ocx status` / `ocx doctor` / `ocx health` report the running state.
+
+### Fork release automation
+
+The fork publishes from `main` after a human merge and green Cross-platform CI. npm Trusted
+Publishing must be bound to GitHub Actions repository `yansigit/opencodex`, workflow `release.yml`,
+for tokenless OIDC publishing. The automation never bumps `package.json`; a merged tree must
+already contain an unused version.
 
 > **Agents installing or running opencodex:** read
 > [`AGENTS_INSTALL.md`](./AGENTS_INSTALL.md). An interactive `ocx start` may ask once whether to
@@ -188,7 +203,7 @@ when it is unreachable). `ocx status` / `ocx doctor` / `ocx health` report the r
 | Linux (x64 / arm64) | Fully supported | systemd (user unit) |
 | Windows (x64) | Fully supported | Task Scheduler (hidden) / opt-in native service (`--native`, WinSW) |
 
-Requires [Node](https://nodejs.org) 18+. The Bun runtime is bundled on `npm install` — no separate
+Requires [Node](https://nodejs.org) 22+. The Bun runtime is bundled on `npm install` — no separate
 Bun install needed, no WSL needed on Windows. If npm blocked the bundled runtime's install scripts,
 see the [installation docs](https://opencodex.me/getting-started/installation/).
 
@@ -322,15 +337,19 @@ daemon. Remove them with `ocx service uninstall` / `ocx codex-shim uninstall`.
 
 ```bash
 ocx uninstall                  # stop, remove service/shim, restore native Codex, clean up state
-npm uninstall -g @bitkyc08/opencodex
+npm uninstall -g @yansigit/opencodex
 ```
 
 ## Remote access
 
-By default opencodex binds to `127.0.0.1` and needs no extra authentication. Binding beyond
-loopback (`"hostname": "0.0.0.0"`) **requires** a bearer token — the proxy refuses to start
-without `OPENCODEX_API_AUTH_TOKEN`, and every client request must carry it as
-`x-opencodex-api-key`. Details: [configuration reference](https://opencodex.me/reference/configuration/).
+By default opencodex binds to `127.0.0.1` over HTTP. Binding beyond loopback requires both a
+data-plane credential and native TLS; the proxy refuses remote plaintext. Configure certificate
+and key file paths plus the client-visible HTTPS `publicOrigin`, then restart the listener. Data-plane
+clients must trust the operator-managed certificate and send the credential as `x-opencodex-api-key`.
+Remote dashboard access additionally requires the separate admin token
+(`OPENCODEX_ADMIN_AUTH_TOKEN` or the generated admin-token file); a data-plane API key does not grant
+management access. SSH port forwarding remains the simpler loopback-only alternative. Details:
+[configuration reference](https://opencodex.me/reference/configuration/).
 
 ## Documentation
 
@@ -341,7 +360,7 @@ published to **[opencodex.me](https://opencodex.me/)**.
 Maintainer source-of-truth notes live under [`structure/`](./structure), contributor setup in
 [`CONTRIBUTING.md`](./CONTRIBUTING.md), and security reporting in [`SECURITY.md`](./SECURITY.md).
 Report undisclosed vulnerabilities privately through
-[GitHub private vulnerability reporting](https://github.com/lidge-jun/opencodex/security/advisories/new),
+[GitHub private vulnerability reporting](https://github.com/yansigit/opencodex/security/advisories/new),
 not a public issue.
 
 ## Development
@@ -350,7 +369,7 @@ Source development requires the `bun` CLI on your `PATH`. This is separate from 
 package's bundled Bun runtime, which is used only by installed `ocx` commands.
 
 ```bash
-git clone https://github.com/lidge-jun/opencodex.git
+git clone https://github.com/yansigit/opencodex.git
 cd opencodex
 bun install
 bun run typecheck
