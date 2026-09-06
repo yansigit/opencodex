@@ -518,6 +518,29 @@ function usageFromGemini(usage: Record<string, number> | undefined): OcxUsage | 
  */
 const MAX_RESPONSE_BYTES = 100 * 1024 * 1024;
 const MAX_SSE_FRAME_BYTES = MAX_RESPONSE_BYTES;
+let sseFrameMaxBytes = MAX_SSE_FRAME_BYTES;
+
+/** Test-only: lower the SSE frame byte cap without allocating a 100 MiB fixture. */
+export function setGoogleSseFrameMaxBytesForTests(bytes?: number): void {
+  sseFrameMaxBytes = bytes ?? MAX_SSE_FRAME_BYTES;
+}
+
+function scanSseLineBytes(incompleteLineBytes: number, incoming: Uint8Array): {
+  maximum: number;
+  residual: number;
+} {
+  let lineBytes = incompleteLineBytes;
+  let maximum = lineBytes;
+  for (let index = 0; index < incoming.length; index++) {
+    if (incoming[index] === 0x0a) {
+      lineBytes = 0;
+      continue;
+    }
+    lineBytes += 1;
+    maximum = Math.max(maximum, lineBytes);
+  }
+  return { maximum, residual: lineBytes };
+}
 
 // Note: imagen-* models use a different API surface (prediction/image-generation
 // schema) and must NOT be treated as responseModalities-capable Gemini models.
@@ -1091,6 +1114,10 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       }
       let buffer = "";
       let bufferBytes = 0;
+      // Raw unterminated-line bytes, independent of TextDecoder's pending UTF-8
+      // state. `bufferBytes` is the decoded residual and can undercount by 1–3
+      // bytes when a chunk ends mid-character.
+      let incompleteLineBytes = 0;
       let pendingUsage: OcxUsage | undefined;
       let toolCallsStarted = 0;
       let lastFinishReason: string | undefined;
@@ -1109,8 +1136,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
       const handleDataLine = async function* (line: string): AsyncGenerator<AdapterEvent, "continue" | "content" | "terminate"> {
         const payload = line.slice(5).trim();
         if (!payload) return "continue";
-        if (payload.length > MAX_SSE_FRAME_BYTES) {
-          yield { type: "error", message: `upstream SSE data frame exceeds ${MAX_SSE_FRAME_BYTES} bytes` };
+        if (budgetEncoder.encode(payload).byteLength > sseFrameMaxBytes) {
+          yield { type: "error", message: `upstream SSE data frame exceeds ${sseFrameMaxBytes} bytes` };
           return "terminate";
         }
         let emittedContentEvent = false;
@@ -1308,6 +1335,20 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+          const incoming = value ?? new Uint8Array();
+          // Cap each incomplete line on raw bytes before decode and before waiting
+          // for a newline — otherwise a single unterminated data: payload can grow
+          // without bound, buffer.length is UTF-16 units, and a mid-character
+          // decode residual undercounts the true line. Reset at each newline so
+          // several sub-cap frames in one network chunk are not rejected as one
+          // oversized frame.
+          const lineScan = scanSseLineBytes(incompleteLineBytes, incoming);
+          if (lineScan.maximum > sseFrameMaxBytes) {
+            yield { type: "error", message: `upstream SSE data frame exceeds ${sseFrameMaxBytes} bytes` };
+            try { await reader.cancel(); } catch { /* ignore */ }
+            return;
+          }
+          incompleteLineBytes = lineScan.residual;
           const nextBuffer = buffer + decoder.decode(value, { stream: true });
           if (isHtmlRedirect(nextBuffer)) {
             yield { type: "error", message: reauthError };
@@ -1320,14 +1361,6 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
           appendReservation.commitRetained();
           budget.releaseRetained(bufferBytes, { kind: "live_transient" });
           bufferBytes = nextBufferBytes;
-          // Cap incomplete frames before waiting for a newline — otherwise a single
-          // unterminated data: payload can grow without bound.
-          if (buffer.length > MAX_SSE_FRAME_BYTES) {
-            yield { type: "error", message: `upstream SSE data frame exceeds ${MAX_SSE_FRAME_BYTES} bytes` };
-            try { await reader.cancel(); } catch { /* ignore */ }
-            return;
-          }
-
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
           const residualBytes = budgetEncoder.encode(buffer).byteLength;
