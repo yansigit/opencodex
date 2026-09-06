@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { recordOwnedConfigPath } from "../lib/config-ownership";
 import { getConfigDir } from "../config";
 import type { OAuthController, OAuthCredentials } from "./types";
+import { oauthFetch } from "./transport";
 
 const CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098";
 const DEFAULT_OAUTH_HOST = "https://auth.kimi.com";
@@ -129,13 +130,13 @@ function getKimiCommonHeaders(): Record<string, string> {
 async function requestDeviceAuthorization(): Promise<{
   userCode: string; deviceCode: string; verificationUriComplete: string; expiresInMs: number; intervalMs: number;
 }> {
-  const response = await fetch(`${resolveOAuthHost()}/api/oauth/device_authorization`, {
+  const response = await oauthFetch(`${resolveOAuthHost()}/api/oauth/device_authorization`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", ...getKimiCommonHeaders() },
     body: new URLSearchParams({ client_id: CLIENT_ID }),
   });
   if (!response.ok) {
-    throw new Error(`Kimi device authorization failed: ${response.status} ${await response.text()}`);
+    throw new Error(`Kimi device authorization failed: ${response.status}`);
   }
   const payload = (await response.json()) as DeviceAuthorizationResponse;
   if (!payload.user_code || !payload.device_code || !payload.verification_uri) {
@@ -184,7 +185,7 @@ async function pollForToken(deviceCode: string, intervalMs: number, expiresInMs:
   let waitMs = Math.max(1000, intervalMs);
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("Login cancelled");
-    const response = await fetch(`${resolveOAuthHost()}/api/oauth/token`, {
+    const response = await oauthFetch(`${resolveOAuthHost()}/api/oauth/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded", ...getKimiCommonHeaders() },
       body: new URLSearchParams({ client_id: CLIENT_ID, device_code: deviceCode, grant_type: "urn:ietf:params:oauth:grant-type:device_code" }),
@@ -202,7 +203,7 @@ async function pollForToken(deviceCode: string, intervalMs: number, expiresInMs:
     }
     if (error === "expired_token") throw new Error("Kimi device authorization expired");
     if (error === "access_denied") throw new Error("Kimi device authorization denied");
-    throw new Error(`Kimi device flow failed: ${error ?? response.status}${payload.error_description ? `: ${payload.error_description}` : ""}`);
+    throw new Error(`Kimi device flow failed (${response.status})`);
   }
   throw new Error("Kimi device flow timed out");
 }
@@ -222,14 +223,14 @@ export async function loginKimi(ctrl: OAuthController): Promise<OAuthCredentials
 }
 
 export async function refreshKimiToken(refreshToken: string): Promise<OAuthCredentials> {
-  const response = await fetch(`${resolveOAuthHost()}/api/oauth/token`, {
+  const response = await oauthFetch(`${resolveOAuthHost()}/api/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded", ...getKimiCommonHeaders() },
     body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: CLIENT_ID }),
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => undefined)) as TokenResponse | undefined;
-    throw new Error(`Kimi token refresh failed: ${response.status}${payload?.error_description ? `: ${payload.error_description}` : ""}`);
+    throw new Error(`Kimi token refresh failed: ${response.status}`);
   }
   return parseTokenPayload((await response.json()) as TokenResponse, refreshToken);
 }

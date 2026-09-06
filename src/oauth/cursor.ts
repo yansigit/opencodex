@@ -9,6 +9,7 @@
  */
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
+import { oauthFetch } from "./transport";
 
 const CURSOR_LOGIN_URL = "https://cursor.com/loginDeepControl";
 const CURSOR_POLL_URL = "https://api2.cursor.sh/auth/poll";
@@ -132,7 +133,7 @@ export async function pollCursorAuth(
 
     try {
       const url = `${CURSOR_POLL_URL}?uuid=${encodeURIComponent(uuid)}&verifier=${encodeURIComponent(verifier)}`;
-      const response = await fetch(url, { signal });
+      const response = await oauthFetch(url, { signal });
 
       if (response.status === 404) {
         consecutiveErrors = 0;
@@ -215,7 +216,7 @@ export async function refreshCursorToken(refresh: string, signal?: AbortSignal):
     if (signal?.aborted) throw signal.reason ?? new Error("Cursor token refresh aborted");
     let response: Response;
     try {
-      response = await fetch(CURSOR_REFRESH_URL, {
+      response = await oauthFetch(CURSOR_REFRESH_URL, {
         method: "POST",
         headers: { Authorization: `Bearer ${refresh}`, "Content-Type": "application/json" },
         body: "{}",

@@ -29,6 +29,7 @@ import {
 import { homedir } from "node:os";
 import { getAccountSet, saveAccountCredential } from "./store";
 import { KIRO_BUILDER_ID_SERVICE_PROFILE_ARN } from "../adapters/kiro-constants";
+import { oauthFetch } from "./transport";
 
 const DEFAULT_REGION = "us-east-1";
 const REFRESH_URL = "https://prod.{region}.auth.desktop.kiro.dev/refreshToken";
@@ -548,7 +549,7 @@ function kiroRefreshSignal(signal?: AbortSignal): AbortSignal {
 
 async function refreshKiroDesktopToken(refresh: string, signal?: AbortSignal, metadata?: KiroOAuthMetadata): Promise<OAuthCredentials> {
   const region = resolveKiroRegion(metadata);
-  const res = await fetch(REFRESH_URL.replace("{region}", region), {
+  const res = await oauthFetch(REFRESH_URL.replace("{region}", region), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refreshToken: refresh }),
@@ -584,7 +585,7 @@ async function refreshAwsSsoOidcToken(
   const clientSecret = metadata?.clientSecret;
   if (!clientId || !clientSecret) return refreshKiroDesktopToken(refresh, signal, metadata);
   const region = resolveKiroRegion(metadata);
-  const run = async (refreshToken: string): Promise<Response> => fetch(OIDC_URL.replace("{region}", region), {
+  const run = async (refreshToken: string): Promise<Response> => oauthFetch(OIDC_URL.replace("{region}", region), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

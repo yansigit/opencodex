@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { isAddrInUse } from "../server/ports";
 import { parseCallbackInput } from "./callback-server";
+import { oauthFetch } from "./transport";
 
 const COMMAND_CODE_STUDIO_URL = "https://commandcode.ai";
 const COMMAND_CODE_CALLBACK_PORT = 5959;
@@ -44,7 +45,7 @@ async function importLocalCommandCodeAuth(signal?: AbortSignal): Promise<OAuthCr
   if (typeof parsed.apiKey !== "string" || parsed.apiKey.length === 0) return undefined;
   let accountId: string | undefined;
   try {
-    const response = await fetch("https://api.commandcode.ai/alpha/whoami", {
+    const response = await oauthFetch("https://api.commandcode.ai/alpha/whoami", {
       headers: { Authorization: `Bearer ${parsed.apiKey}`, Accept: "application/json" },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000),
     });
@@ -140,7 +141,7 @@ function createCallbackServer(state: string): {
 /** Validate a raw pasted Command Code API key and return the validated identity. */
 async function validatePastedApiKey(apiKey: string): Promise<{ userId: string; userName: string } | undefined> {
   try {
-    const response = await fetch("https://api.commandcode.ai/alpha/whoami", {
+    const response = await oauthFetch("https://api.commandcode.ai/alpha/whoami", {
       headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
       signal: AbortSignal.timeout(10_000),
     });

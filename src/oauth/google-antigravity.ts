@@ -13,6 +13,7 @@ import { OAuthCallbackFlow, type OAuthCallbackFlowOptions } from "./callback-ser
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
 import { antigravityUserAgent, ANTIGRAVITY_IDE_VERSION } from "../adapters/client-fingerprint";
+import { oauthFetch } from "./transport";
 
 const CLIENT_ID = process.env.GOOGLE_ANTIGRAVITY_CLIENT_ID
   || "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
@@ -37,7 +38,13 @@ const CALLBACK_PATH = "/callback";
 const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const ONBOARD_ATTEMPTS = 5;
-const ONBOARD_POLL_MS = 2_000;
+const ANTIGRAVITY_ONBOARD_POLL_MS = 2_000;
+const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+let sleepForTests: ((ms: number) => Promise<void>) | undefined;
+
+export function setAntigravityOnboardSleepForTests(sleep: ((ms: number) => Promise<void>) | undefined): void {
+  sleepForTests = sleep;
+}
 
 function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -49,6 +56,28 @@ interface GoogleTokenPayload {
   refresh_token?: unknown;
   expires_in?: unknown;
   id_token?: unknown;
+}
+
+const TERMINAL_OAUTH_ERRORS = new Set([
+  "access_denied",
+  "expired_token",
+  "invalid_grant",
+  "refresh_token_reused",
+  "refresh_token_revoked",
+  "revoked",
+  "revoked_token",
+]);
+
+export class AntigravityTokenRequestError extends Error {
+  readonly httpStatus: number;
+  readonly oauthError?: string;
+
+  constructor(httpStatus: number, oauthError?: string) {
+    super(`Antigravity token request failed: ${httpStatus}`);
+    this.name = "AntigravityTokenRequestError";
+    this.httpStatus = httpStatus;
+    if (oauthError) this.oauthError = oauthError;
+  }
 }
 
 function decodeJwtPayload(token: string): Record<string, unknown> | undefined {
@@ -68,15 +97,24 @@ function emailFromToken(accessToken: string, idToken: string | undefined): strin
 }
 
 async function postToken(body: Record<string, string>, signal?: AbortSignal): Promise<GoogleTokenPayload> {
-  const response = await fetch(TOKEN_ENDPOINT, {
+  const response = await oauthFetch(TOKEN_ENDPOINT, {
     method: "POST",
     headers: { Accept: "application/json", "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams(body).toString(),
     signal: requestSignal(signal),
   });
   if (!response.ok) {
-    // Status only — the body can carry grant/account details.
-    throw new Error(`Antigravity token request failed: ${response.status}`);
+    let oauthError: string | undefined;
+    if (response.status === 400 || response.status === 401) {
+      try {
+        const body = await response.json() as { error?: unknown };
+        const candidate = typeof body.error === "string" ? body.error.trim().toLowerCase() : "";
+        if (TERMINAL_OAUTH_ERRORS.has(candidate)) oauthError = candidate;
+      } catch {
+        /* Keep status-only errors for malformed or non-JSON responses. */
+      }
+    }
+    throw new AntigravityTokenRequestError(response.status, oauthError);
   }
   return (await response.json()) as GoogleTokenPayload;
 }
@@ -95,7 +133,7 @@ function extractProjectId(data: Record<string, unknown> | undefined): string | u
 }
 
 async function loadCodeAssistProject(accessToken: string, signal?: AbortSignal): Promise<string | undefined> {
-  const response = await fetch(`${PROD_API}/${API_VERSION}:loadCodeAssist`, {
+  const response = await oauthFetch(`${PROD_API}/${API_VERSION}:loadCodeAssist`, {
     method: "POST",
     headers: { Authorization: `Bearer ${accessToken}`, Accept: "*/*", "Content-Type": "application/json", "User-Agent": antigravityUserAgent() },
     body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY" } }),
@@ -105,10 +143,14 @@ async function loadCodeAssistProject(accessToken: string, signal?: AbortSignal):
   return extractProjectId((await response.json().catch(() => undefined)) as Record<string, unknown> | undefined);
 }
 
-async function onboardProject(accessToken: string, signal?: AbortSignal): Promise<string | undefined> {
+async function onboardProject(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const sleep = sleepForTests ?? defaultSleep;
   for (let attempt = 0; attempt < ONBOARD_ATTEMPTS; attempt++) {
     if (signal?.aborted) throw signal.reason ?? new Error("Antigravity onboarding aborted");
-    const response = await fetch(`${DAILY_API}/${API_VERSION}:onboardUser`, {
+    const response = await oauthFetch(`${DAILY_API}/${API_VERSION}:onboardUser`, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, Accept: "*/*", "Content-Type": "application/json", "User-Agent": antigravityUserAgent() },
       // `ide_version` is a version, not a User-Agent. `antigravityUserAgent()` returns the whole
@@ -122,7 +164,7 @@ async function onboardProject(accessToken: string, signal?: AbortSignal): Promis
     if (!response.ok) {
       // Transient (429/5xx): keep polling within the attempt budget. Hard 4xx: give up now.
       if (response.status === 429 || response.status >= 500) {
-        await new Promise(resolve => setTimeout(resolve, ONBOARD_POLL_MS));
+        await sleep(ANTIGRAVITY_ONBOARD_POLL_MS);
         continue;
       }
       return undefined;
@@ -131,13 +173,16 @@ async function onboardProject(accessToken: string, signal?: AbortSignal): Promis
     if (data.done === true) {
       return extractProjectId(data.response as Record<string, unknown> | undefined);
     }
-    await new Promise(resolve => setTimeout(resolve, ONBOARD_POLL_MS));
+    await sleep(ANTIGRAVITY_ONBOARD_POLL_MS);
   }
   return undefined;
 }
 
 /** Discover the CCA project for an access token (loadCodeAssist → onboardUser fallback). */
-export async function discoverAntigravityProject(accessToken: string, signal?: AbortSignal): Promise<string | undefined> {
+export async function discoverAntigravityProject(
+  accessToken: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   return (await loadCodeAssistProject(accessToken, signal)) ?? (await onboardProject(accessToken, signal));
 }
 
@@ -221,7 +266,11 @@ export async function loginAntigravity(ctrl: OAuthController, opts?: { forceAcco
   return new AntigravityOAuthFlow(ctrl, opts).login();
 }
 
-export async function refreshAntigravityToken(refreshToken: string, signal?: AbortSignal): Promise<OAuthCredentials> {
+export async function refreshAntigravityToken(
+  refreshToken: string,
+  signal?: AbortSignal,
+  previousCredential?: OAuthCredentials,
+): Promise<OAuthCredentials> {
   if (!refreshToken) throw new Error("Antigravity credentials are expired and do not include a refresh token");
   const payload = await postToken({
     grant_type: "refresh_token",
@@ -230,8 +279,10 @@ export async function refreshAntigravityToken(refreshToken: string, signal?: Abo
     refresh_token: refreshToken,
   }, signal);
   const creds = credentialsFromPayload(payload, refreshToken);
-  // Re-discover the project on refresh so a newly-onboarded account fills in projectId.
-  const projectId = await discoverAntigravityProject(creds.access, signal).catch(() => undefined);
+  // Project discovery is onboarding work, not ordinary token renewal. Preserve the existing
+  // account-scoped project id and avoid an extra authenticated CCA call when it is present.
+  const projectId = previousCredential?.projectId
+    ?? await discoverAntigravityProject(creds.access, signal).catch(() => undefined);
   return projectId ? { ...creds, projectId } : creds;
 }
 
@@ -245,7 +296,7 @@ export async function validateAntigravityImportCredential(
   signal?: AbortSignal,
 ): Promise<OAuthCredentials> {
   const credential = await refreshAntigravityToken(refreshToken, signal);
-  const response = await fetch(USERINFO_ENDPOINT, {
+  const response = await oauthFetch(USERINFO_ENDPOINT, {
     method: "GET",
     headers: { Accept: "application/json", Authorization: `Bearer ${credential.access}` },
     signal: requestSignal(signal),
