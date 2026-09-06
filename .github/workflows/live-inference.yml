@@ -171,8 +171,14 @@ jobs:
         run: |
           log_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.log"
           pid_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid"
+          pid_start_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid-start"
           bun run src/cli/index.ts start >"$log_file" 2>&1 &
-          echo $! > "$pid_file"
+          proxy_pid=$!
+          echo "$proxy_pid" > "$pid_file"
+          if ! awk '{ print $22 }' "/proc/$proxy_pid/stat" > "$pid_start_file"; then
+            echo "::error::Could not record isolated proxy process identity."
+            exit 1
+          fi
           for _ in $(seq 1 60); do
             if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:10100/healthz >/dev/null; then
               exit 0
@@ -221,11 +227,92 @@ jobs:
           OPENCODEX_HOME: ${{ steps.prepare.outputs.home }}
         run: |
           pid_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid"
+          pid_start_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid-start"
+          cleanup_failed=false
+
           if [ -s "$pid_file" ]; then
-            kill "$(cat "$pid_file")" 2>/dev/null || true
+            proxy_pid="$(cat "$pid_file")"
+            if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then
+              if kill -0 "$proxy_pid" 2>/dev/null; then
+                expected_start_time="$(cat "$pid_start_file" 2>/dev/null || true)"
+                actual_start_time="$(awk '{ print $22 }' "/proc/$proxy_pid/stat" 2>/dev/null || true)"
+                if [ -z "$expected_start_time" ] || [ "$actual_start_time" != "$expected_start_time" ]; then
+                  echo "::error::Isolated proxy process identity changed; refusing to signal it."
+                  cleanup_failed=true
+                else
+                  kill -TERM "$proxy_pid" 2>/dev/null || true
+                  for _ in $(seq 1 15); do
+                    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+                      break
+                    fi
+                    sleep 1
+                  done
+                fi
+              fi
+
+              if [ "$cleanup_failed" = false ] && kill -0 "$proxy_pid" 2>/dev/null; then
+                actual_start_time="$(awk '{ print $22 }' "/proc/$proxy_pid/stat" 2>/dev/null || true)"
+                if [ -z "$actual_start_time" ] && ! kill -0 "$proxy_pid" 2>/dev/null; then
+                  true
+                elif [ "$actual_start_time" != "$expected_start_time" ]; then
+                  echo "::error::Isolated proxy process identity changed during shutdown; refusing to signal it."
+                  cleanup_failed=true
+                else
+                  echo "Proxy did not exit after TERM; escalating to KILL."
+                  kill -KILL "$proxy_pid" 2>/dev/null || true
+                  for _ in $(seq 1 5); do
+                    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+                      break
+                    fi
+                    sleep 1
+                  done
+                fi
+              fi
+
+              # This is a no-op when the proxy was reparented between Actions
+              # steps, but reaps it when the shell still owns the child.
+              wait "$proxy_pid" 2>/dev/null || true
+              if kill -0 "$proxy_pid" 2>/dev/null; then
+                echo "::error::Isolated proxy process did not exit."
+                cleanup_failed=true
+              fi
+            else
+              echo "::error::Invalid isolated proxy PID."
+              cleanup_failed=true
+            fi
           fi
+
           if [ -n "${OPENCODEX_HOME:-}" ]; then
-            rm -rf -- "$OPENCODEX_HOME"
+            if [ -e "$OPENCODEX_HOME" ]; then
+              canonical_home="$(cd -P -- "$OPENCODEX_HOME" 2>/dev/null && pwd -P || true)"
+              canonical_runner_temp="$(cd -P -- "$RUNNER_TEMP" 2>/dev/null && pwd -P || true)"
+              case "$canonical_home" in
+                "$canonical_runner_temp"/ocx-live-home.*) ;;
+                *)
+                  echo "::error::Refusing to remove a non-ephemeral OPENCODEX_HOME."
+                  exit 1
+                  ;;
+              esac
+            fi
+
+            for attempt in 1 2 3; do
+              rm -rf -- "$OPENCODEX_HOME" 2>/dev/null || true
+              if [ ! -e "$OPENCODEX_HOME" ]; then
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                sleep 1
+              fi
+            done
+            if [ -e "$OPENCODEX_HOME" ]; then
+              echo "::error::Ephemeral provider credentials were not removed."
+              cleanup_failed=true
+            fi
+          fi
+
+          rm -f -- "$pid_file" "$pid_start_file"
+          if [ "$cleanup_failed" = true ]; then
+            exit 1
           fi
 
       - name: Reconcile Jules live-inference supervision
