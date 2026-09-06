@@ -218,7 +218,7 @@ describe("#2568 adapter-event OAuth failover", () => {
         emit({ type: "done" });
       }
     };
-    const response = await handleResponses(request(false), config(false), { model: "", provider: "" });
+    const response = await handleResponses(request(false), config(), { model: "", provider: "" });
     expect(await response.text()).toContain("manual choice answered");
     expect(attemptKeys).toEqual(["cursor-access-2", "cursor-access-1"]);
     expect(getCredential("cursor")?.access).toBe("cursor-access-1");
@@ -234,11 +234,7 @@ describe("#2568 adapter-event OAuth failover", () => {
     expect(body).toContain("rate_limit_exceeded");
   });
 
-  test("an explicit opt-out no longer strands a 429 when a second account is stored", async () => {
-    // Reversed deliberately. `enabled: false` used to keep pre-#2568d single-account behaviour
-    // on a 429; it now governs only the proactive pre-dispatch preference. Stranding a rate
-    // limit while a second logged-in account sits idle is a defect rather than a preference,
-    // and the operator who wants one account expresses that by storing one account.
+  test("an explicit opt-out refuses adapter-event replay under the second account", async () => {
     await seedAccounts(2);
     attempts = [
       [{ type: "error", message: "Cursor rate limit exceeded: resource_exhausted" }],
@@ -249,9 +245,9 @@ describe("#2568 adapter-event OAuth failover", () => {
     const body = await response.text();
 
     expect(response.status).toBe(200);
-    expect(attemptKeys).toEqual(["cursor-access-1", "cursor-access-0"]);
-    expect(body).toContain("ok");
-    expect(body).not.toContain("rate_limit_exceeded");
+    expect(attemptKeys).toEqual(["cursor-access-1"]);
+    expect(body).not.toContain("ok");
+    expect(body).toContain("rate_limit_exceeded");
   });
 
   test("the first delta reaches the client before the turn completes", async () => {

@@ -115,19 +115,13 @@ export function hasFailoverAccountQuorum(providerName: string, now = Date.now())
 /**
  * Whether REACTIVE 429 rotation is active for this provider.
  *
- * Presence is the only rule: two or more eligible stored accounts. The
- * `oauthAccountFailover.enabled` booleans no longer suppress it.
+ * An explicit provider setting wins over the global setting, and an explicit global setting
+ * wins when the provider has no override. Only when both are absent does the presence of two
+ * eligible stored accounts enable rotation by default.
  *
- * That is a deliberate narrowing of #2568d. Rotation here runs only after upstream has already
- * refused the request, so the choice the old knob offered was between "retry on the second
- * account you deliberately logged in" and "return a 429 while that account sits idle". The
- * second is a defect, not a preference — and an operator who does not want rotation expresses
- * that by not storing a second account, exactly as they do for `apiKeyPool`.
- *
- * The knob is not gone. It still governs {@link isProactivePreferenceEnabled}, which decides
- * whether a HEALTHY request may be steered to a different account before dispatch — a real
- * behavioural choice that remains refusable — and it still carries `strategy` and
- * `autoSwitchThreshold`.
+ * This keeps a stored secondary credential from overriding an operator's explicit refusal:
+ * accounts may belong to different billing, retention, or policy domains, so retrying a request
+ * under another identity remains an authority decision even after upstream returns 429.
  */
 export function isGenericOAuthFailoverEnabled(
   config: OcxConfig,
@@ -136,6 +130,10 @@ export function isGenericOAuthFailoverEnabled(
 ): boolean {
   const provider = config.providers?.[providerName];
   if (!provider || !isGenericFailoverProvider(providerName, provider)) return false;
+  const perProvider = provider.oauthAccountFailover?.enabled;
+  if (typeof perProvider === "boolean") return perProvider;
+  const global = config.oauthAccountFailover?.enabled;
+  if (typeof global === "boolean") return global;
   return hasFailoverAccountQuorum(providerName, now);
 }
 

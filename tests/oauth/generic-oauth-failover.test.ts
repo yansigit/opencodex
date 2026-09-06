@@ -112,7 +112,8 @@ describe("#2568 generic OAuth account failover", () => {
 
   test("two logged-in accounts rotate with NO configuration at all (#2568d)", async () => {
     // The reported workflow: three xAI accounts are logged in, the active one hits its limit, and
-    // the operator never went looking for a toggle. Presence is the consent signal.
+    // the operator never went looking for a toggle. Presence supplies the default only while
+    // neither the global nor provider-specific setting records an explicit choice.
     const [first, second] = await seed(2);
     const next = rotateGenericOAuthAccountOn429(config(), "xai", first!, null);
     expect(next).toBe(second);
@@ -120,15 +121,11 @@ describe("#2568 generic OAuth account failover", () => {
     expect(eligibleFailoverAccounts("xai")).toEqual([second!]);
   });
 
-  test("an explicit knob no longer disables REACTIVE rotation", async () => {
-    // This assertion is deliberately the reverse of what it was under #2568d. The knob used to
-    // suppress rotation entirely; it now governs only the proactive pre-dispatch preference.
-    // The choice it offered here was between retrying on the second account the operator
-    // deliberately logged in and returning a 429 while that account sat idle -- and the second
-    // is a defect, not a preference. Refusing rotation is expressed by not storing a second
-    // account, exactly as it is for an apiKeyPool.
+  test("an explicit global knob controls REACTIVE rotation", async () => {
+    // A second credential may belong to another billing or policy domain. Presence supplies a
+    // useful default, but it must not override an operator's explicit refusal to replay there.
     const ids = await seed(2);
-    expect(rotateGenericOAuthAccountOn429(config(false), "xai", ids[0]!, null)).toBe(ids[1]);
+    expect(rotateGenericOAuthAccountOn429(config(false), "xai", ids[0]!, null)).toBeNull();
     clearGenericFailoverHealth();
     expect(rotateGenericOAuthAccountOn429(config(true), "xai", ids[0]!, null)).toBe(ids[1]);
   });
@@ -153,15 +150,14 @@ describe("#2568 generic OAuth account failover", () => {
     expect(rotateGenericOAuthAccountOn429(config(), "xai", "not-a-real-account", null)).toBe(ids[0]);
   });
 
-  test("neither switch can turn REACTIVE rotation off, in either direction", async () => {
-    // Also reversed from #2568d. Reactive rotation is presence-only now, so a per-provider
-    // false, a global false, and any combination of the two all still rotate. What the override
-    // still buys is the PROACTIVE preference, covered by its own test below.
+  test("the provider switch overrides the global reactive default in either direction", async () => {
+    // Provider terms differ, so the narrower setting remains authoritative over the global one.
     const ids = await seed(2);
-    expect(isGenericOAuthFailoverEnabled(config(true, false), "xai")).toBe(true);
+    expect(isGenericOAuthFailoverEnabled(config(true, false), "xai")).toBe(false);
     expect(isGenericOAuthFailoverEnabled(config(false, true), "xai")).toBe(true);
-    expect(isGenericOAuthFailoverEnabled(config(false, false), "xai")).toBe(true);
-    expect(rotateGenericOAuthAccountOn429(config(true, false), "xai", ids[0]!, null)).toBe(ids[1]);
+    expect(isGenericOAuthFailoverEnabled(config(false, false), "xai")).toBe(false);
+    expect(rotateGenericOAuthAccountOn429(config(true, false), "xai", ids[0]!, null)).toBeNull();
+    expect(rotateGenericOAuthAccountOn429(config(false, true), "xai", ids[0]!, null)).toBe(ids[1]);
   });
 
   test("the knob still refuses the PROACTIVE pre-dispatch preference", async () => {
