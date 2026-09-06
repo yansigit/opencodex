@@ -740,6 +740,15 @@ let managementUsageReadInflight: {
   abort: AbortController;
 } | null = null;
 
+/** Test seam for the same-ledger shrink branch without mutating an open Windows file. */
+export function setManagementUsageReadOpenedSizeForTests(openedSize: number): void {
+  if (!Number.isSafeInteger(openedSize) || openedSize < 0) {
+    throw new RangeError("management usage opened size must be a non-negative safe integer");
+  }
+  if (!managementUsageReadInflight) throw new Error("no management usage read is in flight");
+  managementUsageReadInflight.openedSize = openedSize;
+}
+
 /**
  * Append-tolerant snapshot of the last management read.
  *

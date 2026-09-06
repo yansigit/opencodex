@@ -12,6 +12,7 @@ import {
   readUsageEntriesForManagement,
   readUsageSnapshotForManagement,
   resetUsageReadCacheForTests,
+  setManagementUsageReadOpenedSizeForTests,
   usageForFinalLog,
   usageLogPath,
   usageStatusForFinalLog,
@@ -360,28 +361,24 @@ describe("usage log", () => {
     }
   });
 
-  test("a replacement does not join an in-flight read for the previous file revision", async () => {
-    // Keep the writer open before the cooperative reader starts. Opening the file
-    // again with writeFileSync while Windows still has the reader open across its
-    // timer yield can block inside Bun instead of exercising the revision logic.
-    const writer = openSync(usageLogPath(), "w");
-    try {
-      const oldContents = Buffer.from(
-        `${Array.from({ length: 2_100 }, (_, index) => persistedLine(`old-${index}`)).join("\n")}\n`,
-      );
-      writeSync(writer, oldContents, 0, oldContents.byteLength, 0);
-      const oldRead = readUsageSnapshotForManagement();
-      await new Promise<void>(resolve => setTimeout(resolve, 0));
-      const replacement = Buffer.from(`${persistedLine("replacement")}\n`);
-      truncateSync(writer, 0);
-      writeSync(writer, replacement, 0, replacement.byteLength, 0);
-      const newRead = readUsageSnapshotForManagement();
-      await expect(oldRead).rejects.toThrow("management usage read superseded");
-      const newSnapshot = await newRead;
-      expect(newSnapshot.entries.map(entry => entry.requestId)).toEqual(["replacement"]);
-    } finally {
-      closeSync(writer);
-    }
+  test("a shrunk ledger does not join its previous in-flight read", async () => {
+    // Exercise the production same-identity shrink branch without truncating while
+    // the cooperative reader owns a Windows handle. Bun can deadlock that artificial
+    // same-file mutation before the cache-replacement behavior is ever reached.
+    writeFileSync(
+      usageLogPath(),
+      `${Array.from({ length: 2_100 }, (_, index) => persistedLine(`old-${index}`)).join("\n")}\n`,
+    );
+    const oldRead = readUsageSnapshotForManagement();
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    const unchangedSize = statSync(usageLogPath()).size;
+    setManagementUsageReadOpenedSizeForTests(unchangedSize + 1);
+    const newRead = readUsageSnapshotForManagement();
+
+    await expect(oldRead).rejects.toThrow("management usage read superseded");
+    const newSnapshot = await newRead;
+    expect(newSnapshot.entries).toHaveLength(2_100);
+    expect(newSnapshot.entries.at(-1)?.requestId).toBe("old-2099");
   });
 
   test("persists conversationId for Logs session correlation", () => {
