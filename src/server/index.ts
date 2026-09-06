@@ -1,4 +1,5 @@
 import { markActivity } from "../lib/sidecar-tracker";
+import { allowPlaintextRemoteForTests } from "../lib/test-server-start";
 import { knownModelIdsForProvider } from "../router";
 import {
   buildWarmupCompletionFrames,
@@ -708,7 +709,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   warnAgentTaskRecoveryStartup(config);
   setLiveStateStoreConfig(config);
   applyProxyEnv(config);
-  assertServerAuthConfig(config);
+  assertServerAuthConfig(config, { allowPlaintextRemoteForTests: allowPlaintextRemoteForTests() });
   const managementAuth = deps.managementAuthState ?? initializeManagementAuthState(config);
   const managementSessionControl = createManagementSessionControl(managementAuth);
   let userCostOverlayReconciler: { stop(): void } | null = null;
@@ -2622,9 +2623,15 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   setServerRef(server);
   const actualPort = server.port ?? listenPort;
   boundPort = actualPort;
+  managementApi.activeServerOrigin = canonicalServerOrigin(config, actualPort);
+  managementApi.activeServerConfig = {
+    hostname: config.hostname,
+    port: actualPort,
+    tls: config.tls ? { ...config.tls } : undefined,
+  };
   setCorsOrigin(actualPort);
 
-  console.log(`🚀 opencodex proxy running on ${canonicalServerOrigin(config, actualPort)}`);
+  console.log(`🚀 opencodex proxy running on ${managementApi.activeServerOrigin}`);
   console.log(`   POST /v1/responses → provider translation`);
   console.log(`   POST /v1/chat/completions → OpenAI-compatible clients`);
   console.log(`   GET  /healthz      → health check`);

@@ -1,4 +1,5 @@
 import net, { type Socket } from "node:net";
+import tls from "node:tls";
 
 const DIRECT_LOCAL_HTTP_MAX_BYTES = 8 * 1024 * 1024;
 const DIRECT_LOCAL_HTTP_TIMEOUT_MS = 10_000;
@@ -237,7 +238,8 @@ export async function directLocalHttpFetch(
   const signal = init.signal ?? (input instanceof Request ? input.signal : undefined);
   const body = init.body ?? (input instanceof Request ? input.body : null);
 
-  if (url.protocol !== "http:") throw new Error("direct local request must use HTTP");
+  const isHttps = url.protocol === "https:";
+  if (!isHttps && url.protocol !== "http:") throw new Error("direct local request must use HTTP or HTTPS");
   if (url.username || url.password) throw new Error("direct local request URL must not contain credentials");
   if ((method !== "GET" && method !== "POST") || body !== null) {
     throw new Error("direct local request must be a bodyless GET or POST");
@@ -297,11 +299,23 @@ export async function directLocalHttpFetch(
       finish(error);
     };
 
-    socket = (io.connect ?? ((host, selectedPort) => net.createConnection({
-      host,
-      port: selectedPort,
-      autoSelectFamily: true,
-    })))(hostname, port);
+    const defaultConnect = (host: string, selectedPort: number): Socket => {
+      if (isHttps) {
+        // Local self-signed listener only — direct loopback probe, not outbound provider TLS.
+        return tls.connect({
+          host,
+          port: selectedPort,
+          servername: net.isIP(host) !== 0 ? undefined : host,
+          rejectUnauthorized: false,
+        });
+      }
+      return net.createConnection({
+        host,
+        port: selectedPort,
+        autoSelectFamily: true,
+      });
+    };
+    socket = (io.connect ?? defaultConnect)(hostname, port);
     socket.setTimeout(timeoutMs, () => {
       const error = new Error("direct local HTTP request timed out");
       error.name = "TimeoutError";
@@ -312,7 +326,7 @@ export async function directLocalHttpFetch(
       onAbort();
       return;
     }
-    socket.on("connect", () => {
+    socket.on(isHttps ? "secureConnect" : "connect", () => {
       try { socket?.write(requestBytes); } catch (error) {
         finish(error instanceof Error ? error : new Error(String(error)));
       }

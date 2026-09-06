@@ -29,6 +29,7 @@ import {
   wsUpstreamConfigError,
 } from "../config/provider-validation";
 import { providerDestinationConfigError } from "../lib/destination-policy";
+import { assertServerTlsFiles, serverTlsConfigError } from "../lib/server-tls";
 import { redactSecretString } from "../lib/redact";
 import { effectiveGoogleMode, getProviderRegistryEntry, providerCodexAccountMode, providerMatchesRegistryTransport, registryEntryForProviderDestination } from "../providers/registry";
 import { providerConfigSeed } from "../providers/derive";
@@ -322,7 +323,10 @@ export function requestPolicyView(config: OcxConfig, bindHostname: string): Requ
   };
 }
 
-export function assertServerAuthConfig(config: OcxConfig): void {
+export function assertServerAuthConfig(
+  config: OcxConfig,
+  options: { allowPlaintextRemoteForTests?: boolean } = {},
+): void {
   const hasConfiguredDataCredential = !!configuredApiAuthToken(config)
     || (config.apiKeys ?? []).some(entry => !!entry.key.trim());
   if (isApiAuthRequired(config) && !hasConfiguredDataCredential) {
@@ -330,6 +334,12 @@ export function assertServerAuthConfig(config: OcxConfig): void {
       "A data-plane credential (OPENCODEX_API_AUTH_TOKEN or config.apiKeys) is required when binding opencodex to a non-loopback hostname",
     );
   }
+  const tlsError = serverTlsConfigError(config.tls);
+  if (tlsError) throw new Error(`Invalid server TLS configuration: ${tlsError}`);
+  if (isApiAuthRequired(config) && !config.tls && !options.allowPlaintextRemoteForTests) {
+    throw new Error("Native TLS is required when binding opencodex to a non-loopback hostname; configure tls.certFile, tls.keyFile, and tls.publicOrigin or bind to loopback behind a TLS tunnel");
+  }
+  if (config.tls) assertServerTlsFiles(config.tls);
 }
 
 function secretEquals(actual: string, expected: string | undefined): boolean {

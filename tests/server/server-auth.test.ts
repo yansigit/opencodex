@@ -738,13 +738,37 @@ describe("server local API auth", () => {
     expect(isApiAuthRequired(config("127.0.0.1"))).toBe(false);
   });
 
-  test("non-loopback binding requires env token before startup", () => {
+  test("non-loopback binding requires both an env token and native TLS before startup", () => {
     delete process.env.OPENCODEX_API_AUTH_TOKEN;
     expect(isApiAuthRequired(config("0.0.0.0"))).toBe(true);
     expect(() => assertServerAuthConfig(config("0.0.0.0"))).toThrow("OPENCODEX_API_AUTH_TOKEN");
 
     process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
-    expect(() => assertServerAuthConfig(config("0.0.0.0"))).not.toThrow();
+    expect(() => assertServerAuthConfig(config("0.0.0.0"))).toThrow("Native TLS is required");
+  });
+
+  test("the test home guard cannot bypass native TLS for a remote start", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    process.env.OPENCODEX_API_AUTH_TOKEN = "local-secret";
+    saveConfig({ ...config("0.0.0.0"), port: 0 });
+
+    const seam = Symbol.for("opencodex.test.plaintext-remote");
+    const globalTestState = globalThis as Record<PropertyKey, unknown>;
+    const hadSeam = Object.prototype.hasOwnProperty.call(globalTestState, seam);
+    const previousSeam = globalTestState[seam];
+    delete globalTestState[seam];
+    let server: ReturnType<typeof startServer> | undefined;
+    try {
+      expect(() => {
+        server = startServer(0);
+      }).toThrow("Native TLS is required");
+    } finally {
+      if (server) await server.stop(true);
+      if (hadSeam) globalTestState[seam] = previousSeam;
+      else delete globalTestState[seam];
+    }
   });
 
   test("auth header must match env token when non-loopback auth is required", () => {
