@@ -132,6 +132,7 @@ type SharedPromptProbeOutcome =
 let activePromptProbe: PromptProbeFlight | null = null;
 let probeCommandForTests: { binary: string; args: string[] } | null = null;
 let probeSpawnAttemptsForTests = 0;
+let probeCloseEventsForTests = 0;
 let probeCloseBarrierForTests: Promise<void> | null = null;
 
 function commandKey(command: ProbeCommand): string {
@@ -241,6 +242,7 @@ function runProbe(
       else terminate();
     });
     child.on("close", code => {
+      if (probeCommandForTests) probeCloseEventsForTests += 1;
       // Decode once, at the end: `String(chunk)` per chunk corrupts any UTF-8
       // character that straddles a chunk boundary.
       const recordClose = () => {
@@ -466,6 +468,11 @@ export function promptTextProbeSpawnAttemptsForTests(): number {
   return probeSpawnAttemptsForTests;
 }
 
+/** Test-only close-event counter for observing the pre-result barrier directly. */
+export function promptTextProbeCloseEventsForTests(): number {
+  return probeCloseEventsForTests;
+}
+
 /** Test-only close barrier for proving admission is not released at process exit. */
 export function setPromptTextProbeCloseBarrierForTests(barrier: Promise<void> | null): void {
   probeCloseBarrierForTests = barrier;
@@ -485,5 +492,6 @@ export async function resetPromptTextProbeForTests(): Promise<void> {
   if (activePromptProbe === active) activePromptProbe = null;
   probeCommandForTests = null;
   probeSpawnAttemptsForTests = 0;
+  probeCloseEventsForTests = 0;
   probeCloseBarrierForTests = null;
 }
