@@ -306,8 +306,9 @@ import {
   applySubagentModelFallback,
   maybePrimeSubagentQuota,
   recordSubagentQuotaFailureForThreadSpawn,
-  resolveSubagentFallbackChain,
+  resolveSubagentSelectionContext,
   subagentFallbackNeedsModelEntitlements,
+  subagentSelectionNeedsPoolQuotaPrime,
   type SubagentModelEligibleAccountIds,
   type SubagentPoolAccountPreview,
 } from "../../codex/subagent-model-fallback";
@@ -3487,17 +3488,18 @@ async function handleResponsesInner(
 
   const hasUnexpandedPreviousResponse = !!parsed.previousResponseId
     && parsed._previousResponseInputExpanded !== true;
-  // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
-  // also fail closed without polling quota upstream. Cached fallback state can still select a
-  // provider with native continuation support below.
+  // Exact account selectors are isolated from Pool-wide quota work unless the effective spawn
+  // policy can overwrite them with an unqualified native Pool route. A canonical replay miss
+  // must also fail closed without polling quota upstream. Cached fallback state can still select
+  // a provider with native continuation support below.
   const agentKind = logCtx.agentKind ?? classifyAgentKind(req.headers, "responses");
   const threadSpawn = isThreadSpawnRequest(req.headers, agentKind);
-  const initialSubagentFallbackChain = threadSpawn && !options.comboAttempt
-    ? resolveSubagentFallbackChain(parsed, config)
+  const initialSubagentSelectionContext = threadSpawn && !options.comboAttempt
+    ? resolveSubagentSelectionContext(parsed, req.headers, config)
     : null;
   const previewSelectionAdmission = threadSpawn
     && !options.comboAttempt
-    && (route.codexAccountId === undefined || initialSubagentFallbackChain !== null)
+    && (route.codexAccountId === undefined || initialSubagentSelectionContext !== null)
     ? codexAccountSelectionForTurn(options.turnAdmissionLease)?.()
     : undefined;
   const nativeMainRecoveryBlocked = isNativeMainTrafficBlocked();
@@ -3518,7 +3520,10 @@ async function handleResponsesInner(
   try {
     if (
       threadSpawn
-      && route.codexAccountId === undefined
+      && (
+        route.codexAccountId === undefined
+        || subagentSelectionNeedsPoolQuotaPrime(initialSubagentSelectionContext, config)
+      )
       && !(hasUnexpandedPreviousResponse && isCanonicalOpenAiForwardProvider(route.provider))
     ) {
       await maybePrimeSubagentQuota(config, Date.now(), { nativeMainReadsForbidden });
@@ -3531,16 +3536,16 @@ async function handleResponsesInner(
   if (
     threadSpawn
     && !options.comboAttempt
-    && (route.codexAccountId === undefined || initialSubagentFallbackChain !== null)
+    && (route.codexAccountId === undefined || initialSubagentSelectionContext !== null)
   ) {
     // The final resolveCodexAuthContext binds under codexQuotaScopeForModel(route.modelId),
     // so the preview must read the same scope slot — an undefined scope would map to the
     // "legacy" affinity bucket and never find a binding made under "shared" or a native
     // model scope, making the preview diverge from the account that actually authenticates.
-    const fallbackChain = initialSubagentFallbackChain;
+    const selectionContext = initialSubagentSelectionContext;
     subagentFallbackModelEligibleAccountIdsForModel = await resolveSubagentFallbackModelEligibility({
       config,
-      fallbackChain,
+      fallbackChain: selectionContext?.chain ?? null,
       nativeMainReadsForbidden,
       resolver: options.resolveCodexModelEntitlements ?? resolveCodexModelEntitlements,
     });
@@ -3569,8 +3574,9 @@ async function handleResponsesInner(
       previewSelectionOptions,
       subagentFallbackAccountPreview,
       subagentFallbackModelEligibleAccountIdsForModel,
-      fallbackChain,
+      undefined,
       candidateRoute => canPassThroughEncryptedV2AgentTask(candidateRoute, inboundWire),
+      selectionContext,
     );
     if (fallback) {
       (logCtx as unknown as Record<string, unknown>).subagentModelFallbackFrom = fallback.from;

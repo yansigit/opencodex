@@ -6,6 +6,7 @@ import {
   getValidAccessTokenForAccount,
   OAuthLoginRequiredError,
   OAUTH_PROVIDERS,
+  publicOAuthAuthenticationErrorMessage,
 } from "../../src/oauth";
 import { AntigravityTokenRequestError } from "../../src/oauth/google-antigravity";
 import type { OAuthCredentials } from "../../src/oauth/types";
@@ -61,7 +62,7 @@ function stubKimiRefresh(
 }
 
 describe("generic OAuth refresh lock + CAS", () => {
-  test("typed Antigravity invalid_grant marks the rejected account for reauthentication", async () => {
+  test("typed Antigravity invalid_grant keeps login-required identity and projects a generic public error", async () => {
     await saveCredential("google-antigravity", {
       access: "antigravity-old",
       refresh: "antigravity-refresh",
@@ -74,8 +75,18 @@ describe("generic OAuth refresh lock + CAS", () => {
       throw new AntigravityTokenRequestError(400, "invalid_grant");
     };
 
-    await expect(getValidAccessTokenForAccount("google-antigravity", accountId))
-      .rejects.toBeInstanceOf(OAuthLoginRequiredError);
+    let rejection: unknown;
+    try {
+      await getValidAccessTokenForAccount("google-antigravity", accountId);
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(OAuthLoginRequiredError);
+    expect((rejection as Error).name).toBe("OAuthLoginRequiredError");
+    expect(publicOAuthAuthenticationErrorMessage(rejection)).toBe(
+      "OAuth authentication failed. Check the OpenCodex account status and retry.",
+    );
     expect(getAccountSet("google-antigravity")!.accounts.find(account => account.id === accountId)?.needsReauth).toBe(true);
   });
 

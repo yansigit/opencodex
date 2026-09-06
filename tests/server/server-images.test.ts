@@ -1858,6 +1858,42 @@ test("CCA OAuth no credential saved returns 401 (login required), not a misleadi
   }
 });
 
+test("CCA terminal OAuth refresh rejection returns 401 without exposing the provider failure", async () => {
+  const providerFailureCanary = "EACCES C:\\Users\\Alice\\.opencodex\\auth.json.ocx-tmp";
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (requestUrl === "https://oauth2.googleapis.com/token") {
+      return Response.json({
+        error: "invalid_grant",
+        error_description: providerFailureCanary,
+      }, { status: 400 });
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  saveConfig(ccaConfig());
+  await saveCredential("google-antigravity", {
+    ...CCA_CREDENTIAL,
+    expires: Date.now() - 60_000,
+  });
+
+  const server = startServer(0);
+  try {
+    const response = await fetch(new URL("/v1/images/generations", server.url), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ prompt: "a cat", model: "gpt-image-2" }),
+    });
+    expect(response.status).toBe(401);
+    const json = await response.json() as { error: { message: string } };
+    expect(json.error.message).toContain("login required");
+    expect(json.error.message).not.toContain(providerFailureCanary);
+    expect(json.error.message).not.toContain("auth.json");
+  } finally {
+    await server.stop(true);
+  }
+});
+
 test("CCA fetch network failure returns 502 without leaking the timeout timer", async () => {
   // Mock: CCA fetch always fails with a network error. The bug was that the
   // fetch catch returned 502 without calling linkedSignal.cleanup(), leaving

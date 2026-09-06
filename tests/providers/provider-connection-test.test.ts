@@ -129,7 +129,7 @@ describe("POST /api/providers/test (WP040 connectivity probe)", () => {
     const config = baseConfig({
       metadata: {
         adapter: "openai-chat",
-        baseUrl: "http://169.254.169.254/latest/meta-data",
+        baseUrl: "https://169.254.169.254/latest/meta-data",
         apiKey: "sk-x",
         allowPrivateNetwork: true,
       },

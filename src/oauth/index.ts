@@ -361,6 +361,19 @@ export class OAuthLoginRequiredError extends Error {
   }
 }
 
+/**
+ * A terminal provider refresh rejection that also made the stored account unusable.
+ *
+ * Keep the login-required subtype for internal recovery/account-health semantics, but retain
+ * enough provenance for the public projection boundary to avoid presenting a provider failure
+ * as a locally missing credential. The provider response itself is deliberately not retained.
+ */
+class OAuthRefreshRejectedError extends OAuthLoginRequiredError {
+  constructor(provider: string) {
+    super(provider);
+  }
+}
+
 export class OAuthProviderPublicationError extends Error {
   constructor() {
     super("OAuth credential was saved, but the provider entry was not written. Resolve the account namespace collision, then retry login.");
@@ -391,6 +404,9 @@ class OAuthLoginSupersededError extends Error {
 
 /** Project arbitrary OAuth failures onto the small, stable public error vocabulary. */
 export function publicOAuthAuthenticationErrorMessage(error: unknown): string {
+  if (error instanceof OAuthRefreshRejectedError) {
+    return "OAuth authentication failed. Check the OpenCodex account status and retry.";
+  }
   if (error instanceof OAuthMutationBusyError) {
     return error.message === "OAuth mutation queue wait timed out"
       ? "OAuth mutation queue wait timed out"
@@ -1045,7 +1061,7 @@ export async function refreshGenericAccountWithLock(
         }
       }
       await markAccountNeedsReauthIfGeneration(provider, accountId, generation, writerGeneration);
-      throw new OAuthLoginRequiredError(provider);
+      throw new OAuthRefreshRejectedError(provider);
     }
   } finally {
     guard.release();

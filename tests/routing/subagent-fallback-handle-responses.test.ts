@@ -309,6 +309,240 @@ function entitlementSnapshot(grants: Readonly<Record<string, readonly string[]>>
   };
 }
 
+describe("subagent candidate orchestration", () => {
+  test("an exact account selector still activates role-specific candidate overwrite", async () => {
+    const now = 1_800_000_000_000;
+    Date.now = () => now;
+    installPoolCredential("pool-a", "pool_acc", now);
+    const cfg = poolNativePlusRoutedConfig({
+      codexAccountNamespaces: { side: "pool-a" },
+      subagentCandidates: {
+        coder: ["xai/grok-4.5"],
+        default: ["gpt-5.6-sol"],
+      },
+    });
+    let quotaPrimes = 0;
+    setSubagentQuotaPrimeForTests(async () => { quotaPrimes += 1; });
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    let selectionBegins = 0;
+    let selectionReleases = 0;
+    const turnAdmissionLease = {
+      release() {},
+      beginCodexAccountSelection() {
+        selectionBegins += 1;
+        return {
+          mainProfileDraining: false,
+          claimMainProfile: () => true,
+          release: () => { selectionReleases += 1; },
+        };
+      },
+    } satisfies Pick<ActiveTurnLease, "release" | "beginCodexAccountSelection">;
+    const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
+    mockUpstream(capture);
+
+    const response = await postSpawn(
+      cfg,
+      { model: "side/gpt-5.6-sol", input: readableAgentInput(), stream: false },
+      { turnAdmissionLease },
+      logCtx,
+      { "x-codex-agent-role": "coder" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(quotaPrimes).toBe(0);
+    expect(selectionBegins).toBe(1);
+    expect(selectionReleases).toBe(1);
+    expect((logCtx as unknown as Record<string, unknown>).subagentModelFallbackTo)
+      .toBe("xai/grok-4.5");
+    expect(capture.urls).toHaveLength(1);
+    expect(capture.urls[0]).toContain("api.x.ai");
+    expect(capture.bodies[0]).toContain('"model":"grok-4.5"');
+  });
+
+  test("an exact selector primes quota before overwriting to an unqualified Pool candidate", async () => {
+    const now = 1_800_000_000_000;
+    Date.now = () => now;
+    installPoolCredential("pool-a", "pool_acc", now);
+    const cfg = poolNativePlusRoutedConfig({
+      codexAccountNamespaces: { side: "pool-a" },
+      subagentCandidates: ["gpt-5.5"],
+    });
+    let quotaPrimes = 0;
+    setSubagentQuotaPrimeForTests(async () => { quotaPrimes += 1; });
+    const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
+    mockUpstream(capture);
+
+    const response = await postSpawn(cfg, {
+      model: "side/gpt-5.6-sol",
+      input: readableAgentInput(),
+      stream: false,
+    });
+
+    expect(response.status).toBe(200);
+    expect(quotaPrimes).toBe(1);
+    expect(capture.urls.some(url => url.includes("chatgpt.com/backend-api/codex/responses")))
+      .toBe(true);
+    expect(capture.bodies.some(body => body.includes('"model":"gpt-5.5"'))).toBe(true);
+  });
+
+  test("an exact selector does not prime Pool for a bare native legacy fallback", async () => {
+    const now = 1_800_000_000_000;
+    Date.now = () => now;
+    installPoolCredential("pool-a", "pool_acc", now);
+    const cfg = poolNativePlusRoutedConfig({
+      codexAccountNamespaces: { side: "pool-a" },
+      subagentModelFallback: ["gpt-5.5"],
+    });
+    let quotaPrimes = 0;
+    setSubagentQuotaPrimeForTests(async () => { quotaPrimes += 1; });
+    const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
+    mockUpstream(capture);
+
+    const response = await postSpawn(cfg, {
+      model: "side/gpt-5.6-sol",
+      input: readableAgentInput(),
+      stream: false,
+    });
+
+    expect(response.status).toBe(200);
+    expect(quotaPrimes).toBe(0);
+    expect(capture.urls).toHaveLength(1);
+    expect(capture.auths[0]).toContain("pool-a_token");
+    expect(capture.bodies[0]).toContain('"model":"gpt-5.6-sol"');
+  });
+
+  test("an unentitled account-gated candidate advances to the next candidate", async () => {
+    const now = 1_800_000_000_000;
+    Date.now = () => now;
+    installPoolCredential("pool-a", "pool_acc", now);
+    const cfg = poolNativePlusRoutedConfig({
+      subagentCandidates: ["gpt-daybreak-blue-latest", "xai/grok-4.5"],
+    });
+    let entitlementCalls = 0;
+    const logCtx: RequestLogContext = { model: "", provider: "" };
+    const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
+    mockUpstream(capture);
+
+    const response = await postSpawn(
+      cfg,
+      { model: "xai/grok-3", input: readableAgentInput(), stream: false },
+      {
+        resolveCodexModelEntitlements: async () => {
+          entitlementCalls += 1;
+          return entitlementSnapshot({ "pool-a": ["gpt-5.6-sol"] });
+        },
+      },
+      logCtx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(entitlementCalls).toBe(1);
+    expect((logCtx as unknown as Record<string, unknown>).subagentModelFallbackTo)
+      .toBe("xai/grok-4.5");
+    expect(capture.urls).toHaveLength(1);
+    expect(capture.urls[0]).toContain("api.x.ai");
+  });
+
+  test("an encrypted spawn may select an explicitly trusted direct Responses candidate", async () => {
+    const cfg = poolNativePlusRoutedConfig({
+      defaultProvider: "xai",
+      subagentCandidates: ["relay/gpt-5.5"],
+    });
+    cfg.providers.relay = {
+      adapter: "openai-responses",
+      baseUrl: "https://relay.example.test/v1",
+      authMode: "key",
+      apiKey: "relay-test",
+      allowEncryptedV2AgentTasks: true,
+    };
+    const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
+    mockUpstream(capture);
+
+    const response = await postSpawn(cfg, {
+      model: "xai/grok-4.5",
+      input: encryptedAgentInput(),
+      stream: false,
+    });
+
+    expect(response.status).toBe(200);
+    expect(capture.urls).toEqual(["https://relay.example.test/v1/responses"]);
+    expect(capture.bodies[0]).toContain(FERNET_TASK);
+  });
+
+  test("an encrypted spawn rejects a candidate without trusted direct Responses admission", async () => {
+    const cfg = poolNativePlusRoutedConfig({
+      defaultProvider: "xai",
+      subagentCandidates: ["relay/gpt-5.5"],
+    });
+    cfg.providers.relay = {
+      adapter: "openai-responses",
+      baseUrl: "https://relay.example.test/v1",
+      authMode: "key",
+      apiKey: "relay-test",
+    };
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      throw new Error("untrusted encrypted candidate must not dispatch");
+    }) as typeof fetch;
+
+    const response = await postSpawn(cfg, {
+      model: "xai/grok-4.5",
+      input: encryptedAgentInput(),
+      stream: false,
+    });
+    const json = await response.json() as { error?: { code?: string } };
+
+    expect(response.status).toBe(400);
+    expect(json.error?.code).toBe("unreadable_encrypted_agent_task");
+    expect(fetchCalls).toBe(0);
+  });
+
+  test("candidate entitlement discovery excludes native main during profile drain", async () => {
+    const now = 1_800_000_000_000;
+    Date.now = () => now;
+    installPoolCredential("pool-a", "pool_acc", now);
+    const cfg = poolNativePlusRoutedConfig({
+      codexAccountNamespaces: { side: "pool-a" },
+      subagentCandidates: ["gpt-daybreak-blue-latest", "xai/grok-4.5"],
+    });
+    const mainExclusions: boolean[] = [];
+    let selectionReleases = 0;
+    let claimCalls = 0;
+    const turnAdmissionLease = {
+      release() {},
+      beginCodexAccountSelection() {
+        return {
+          mainProfileDraining: true,
+          claimMainProfile: () => { claimCalls += 1; return false; },
+          release: () => { selectionReleases += 1; },
+        };
+      },
+    } satisfies Pick<ActiveTurnLease, "release" | "beginCodexAccountSelection">;
+    const capture = { urls: [] as string[], bodies: [] as string[], auths: [] as Array<string | null> };
+    mockUpstream(capture);
+
+    const response = await postSpawn(
+      cfg,
+      { model: "side/gpt-5.6-sol", input: readableAgentInput(), stream: false },
+      {
+        turnAdmissionLease,
+        resolveCodexModelEntitlements: async (_config, resolveOptions) => {
+          mainExclusions.push(resolveOptions?.excludeAccountIds?.has("__main__") === true);
+          return entitlementSnapshot({ __main__: ["gpt-daybreak-blue-latest"] });
+        },
+      },
+    );
+
+    expect(response.status).toBe(503);
+    expect(await response.text()).toContain("OpenCodex local native-main profile maintenance is active");
+    expect(mainExclusions).toEqual([true, true]);
+    expect(selectionReleases).toBe(2);
+    expect(claimCalls).toBe(1);
+    expect(capture.urls).toHaveLength(0);
+  });
+});
+
 describe("subagent fallback without primary auth cooldown failure", () => {
   test("exact account child bypasses quota priming and fallback on an empty 503", async () => {
     const now = 1_800_000_000_000;
@@ -784,6 +1018,9 @@ describe("native fallback account preview", () => {
   test("fallback preview and final auth use their own entitlement snapshots", async () => {
     const now = 1_800_000_000_000;
     Date.now = () => now;
+    // This case isolates entitlement snapshots; the exact-selector-to-Pool path now
+    // primes quota separately before candidate selection.
+    setSubagentQuotaPrimeForTests(async () => {});
     installPoolCredential("pool-a", "pool_acc_a", now);
     installPoolCredential("pool-b", "pool_acc_b", now);
     const cfg = poolNativePlusRoutedConfig({

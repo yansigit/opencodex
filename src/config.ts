@@ -93,6 +93,7 @@ import {
   registryModelServiceTierCapabilityApplies,
 } from "./providers/registry";
 import { resolveOpenAiVirtualModel } from "./providers/openai-virtual-models";
+import { slugEquivalenceKey, slugsEquivalent } from "./providers/slug-codec";
 import { parseDesktopProfile } from "./claude/desktop-profile";
 import { isCodexReasoningEffort } from "./reasoning-effort";
 import {
@@ -1205,6 +1206,12 @@ const configSchema = z.object({
     z.string(),
     z.array(z.string().trim().min(1)).min(1),
   ).optional().catch(undefined),
+  // Candidate overwrite is an optional spawn policy. Invalid hand edits disable
+  // only that policy instead of rejecting the operator's otherwise valid config.
+  subagentCandidates: z.union([
+    z.array(z.string().trim().min(1)).min(1),
+    z.record(z.string().trim().min(1), z.array(z.string().trim().min(1)).min(1)),
+  ]).optional().catch(undefined),
   codexShimAutoRestore: z.boolean().optional(),
   codexDesktopAuthless: z.boolean().optional().catch(undefined),
   pausedCodexAccountIds: z.array(z.string().regex(/^[a-zA-Z0-9._-]{1,64}$/)).optional(),
@@ -2510,6 +2517,52 @@ export function subagentDefaultSyncEffective(
   config: Pick<OcxConfig, "syncCodexSubagentDefaults" | "injectionModel">,
 ): boolean {
   return config.syncCodexSubagentDefaults === true && Boolean(config.injectionModel?.trim());
+}
+
+/**
+ * Resolve and normalize configured candidates for one spawned sub-agent.
+ * Supports a global ordered list or a record keyed by role/model, with
+ * `default` and `*` fallbacks for unmatched requests.
+ */
+export function resolveSubagentCandidates(
+  config: Pick<OcxConfig, "subagentCandidates"> | OcxConfig,
+  roleOrModel?: string,
+): string[] {
+  const candidates = config?.subagentCandidates;
+  if (!candidates) return [];
+
+  const normalizeList = (raw: unknown): string[] => {
+    if (!Array.isArray(raw)) return [];
+    const result: string[] = [];
+    const seen = new Set<string>();
+    for (const item of raw) {
+      if (typeof item !== "string") continue;
+      const trimmed = item.trim();
+      if (!trimmed) continue;
+      const key = slugEquivalenceKey(trimmed);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push(trimmed);
+    }
+    return result;
+  };
+
+  if (Array.isArray(candidates)) return normalizeList(candidates);
+  if (typeof candidates !== "object") return [];
+
+  const record = candidates as Record<string, unknown>;
+  const trimmed = roleOrModel?.trim();
+  let selected: unknown;
+  if (trimmed) {
+    if (Object.hasOwn(record, trimmed)) {
+      selected = record[trimmed];
+    } else {
+      const matchingKey = Object.keys(record).find(key => slugsEquivalent(key, trimmed));
+      if (matchingKey) selected = record[matchingKey];
+    }
+  }
+  if (!selected) selected = record.default ?? record["*"];
+  return normalizeList(selected);
 }
 
 function mergeConfigDefaults(parsed: unknown): unknown {

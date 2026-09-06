@@ -36,6 +36,10 @@ export const SERIAL_TEST_FILES = [
   "tests/codex-integration/native-main-owner-lifetime.test.ts",
   "tests/adapters/openai/openai-provider-option-e2e.test.ts",
   "tests/cli/ocx-launcher-runtime.test.ts",
+  // Starts nested Bun and git processes from three disposable repositories. On a
+  // loaded macOS full-suite pool the first child remained blocked until the
+  // 15-minute suite watchdog, while this file completes in under a second alone.
+  "tests/ci-workflows/privacy-scan.test.ts",
   "tests/ci-workflows/release-helper.test.ts",
   // Uses real worker inactivity periods to classify periodic activity. On the
   // loaded promotion pool, scheduler stalls crossed its bounded observation
