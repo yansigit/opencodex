@@ -53,11 +53,15 @@ import {
 } from "../src/server/lifecycle";
 import { startServer } from "../src/server";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const roots: string[] = [];
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 const previousCodexHome = process.env.CODEX_HOME;
 const OWNERSHIP_REPROBE_TEST_HOME = "ownership-reprobe-test-home";
+const CHILD_CASE_BUDGET_MS = 2 * SPAWN_BUDGET_MS;
+type StartupChild = ReturnType<typeof Bun.spawn>;
+const childOutputs = new WeakMap<StartupChild, { stdout: Promise<string>; stderr: Promise<string>; startedAt: number; ready: boolean }>();
 
 function restoreEnv(name: "OPENCODEX_HOME" | "CODEX_HOME", value: string | undefined): void {
   if (value === undefined) delete process.env[name];
@@ -225,7 +229,8 @@ async function fixture(
   return { root, codexHome, configDir, key, manager, target, sourceProfileId: sourceRecord.id, targetProfileId: targetRecord.id };
 }
 
-async function waitForPath(path: string, timeoutMs = 10_000): Promise<void> {
+// Gates on a spawned child reaching its marker: 8-19 s on windows-latest (run 33930757649).
+async function waitForPath(path: string, timeoutMs = INTERNAL_DEADLINE_MS): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!existsSync(path) && Date.now() < deadline) await Bun.sleep(10);
   if (!existsSync(path)) throw new Error(`Timed out waiting for ${path}`);
@@ -238,15 +243,17 @@ async function waitForPath(path: string, timeoutMs = 10_000): Promise<void> {
  * Wait for a port that is actually a port.
  */
 // A spawned proxy child needs 10-18 s to reach its port file on a loaded windows-latest shard
-// (runs 33601508392 and 33610501053); every caller here has a 20 s+ budget.
-async function waitForPort(path: string, timeoutMs = 18_000): Promise<number> {
+// (runs 33601508392 and 33610501053), and run 33930757649 showed 19 s boots elsewhere in the
+// suite. INTERNAL_DEADLINE_MS is the named in-test bound; callers carry a larger case budget.
+async function waitForPort(path: string, child: StartupChild, timeoutMs = SPAWN_BUDGET_MS): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    if (child.exitCode !== null) throw new Error(`startup child exited ${child.exitCode} before publishing ${path}\n${await childDiagnostic(child)}`);
     if (existsSync(path)) {
       const port = Number(readFileSync(path, "utf8").trim());
-      if (Number.isInteger(port) && port > 0) return port;
+      if (Number.isInteger(port) && port > 0 && port <= 65_535) { childOutputs.get(child)!.ready = true; return port; }
     }
-    if (Date.now() >= deadline) throw new Error(`Timed out waiting for a real port in ${path}`);
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for a real port in ${path}; childExit=${child.exitCode}; elapsedMs=${Date.now() - childOutputs.get(child)!.startedAt}`);
     await Bun.sleep(10);
   }
 }
@@ -261,8 +268,9 @@ function childPaths(f: Fixture) {
   };
 }
 
-function spawnChild(f: Fixture, paths: ReturnType<typeof childPaths>): ReturnType<typeof Bun.spawn> {
-  return Bun.spawn([process.execPath, join(import.meta.dir, "helpers", "native-profile-startup-child.ts")], {
+function spawnChild(f: Fixture, paths: ReturnType<typeof childPaths>): StartupChild {
+  const startedAt = Date.now();
+  const child = Bun.spawn([process.execPath, join(import.meta.dir, "helpers", "native-profile-startup-child.ts")], {
     cwd: join(import.meta.dir, ".."),
     env: {
       ...process.env,
@@ -277,23 +285,45 @@ function spawnChild(f: Fixture, paths: ReturnType<typeof childPaths>): ReturnTyp
       NATIVE_STARTUP_SETTLED: paths.settled,
       NATIVE_STARTUP_UPSTREAM: paths.upstream,
       NATIVE_STARTUP_STOP: paths.stop,
+      NATIVE_STARTUP_LAUNCHED_AT: String(startedAt),
     },
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
   });
+  childOutputs.set(child, { stdout: new Response(child.stdout).text(), stderr: new Response(child.stderr).text(), startedAt, ready: false });
+  return child;
 }
 
-async function stopChild(child: ReturnType<typeof Bun.spawn>, paths: ReturnType<typeof childPaths>): Promise<void> {
+async function childDiagnostic(child: StartupChild): Promise<string> {
+  const output = childOutputs.get(child)!;
+  const [stdout, stderr] = await Promise.all([output.stdout, output.stderr]);
+  return `stdout=${stdout.slice(-8192)}\nstderr=${stderr.slice(-8192)}`;
+}
+
+async function stopChild(child: StartupChild, paths: ReturnType<typeof childPaths>): Promise<void> {
   writeFileSync(paths.release, "release");
   writeFileSync(paths.stop, "stop");
-  const exit = await Promise.race([child.exited, Bun.sleep(10_000).then(() => null)]);
-  if (exit === null) {
-    child.kill();
-    await child.exited;
-    throw new Error("startup child did not stop");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const exit = await Promise.race([child.exited, new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 10_000); })]);
+    if (exit === null) {
+      child.kill();
+      await child.exited;
+      throw new Error(`startup child did not stop; killed and joined\n${await childDiagnostic(child)}`);
+    }
+    if (exit !== 0) throw new Error(`startup child exited ${exit}\n${await childDiagnostic(child)}`);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
-  if (exit !== 0) throw new Error(await new Response(child.stderr).text());
+}
+
+async function withStartupChild(f: Fixture, verify: (port: number, paths: ReturnType<typeof childPaths>) => Promise<void>): Promise<void> {
+  const paths = childPaths(f); const child = spawnChild(f, paths); const errors: unknown[] = [];
+  try { await verify(await waitForPort(paths.port, child), paths); } catch (error) { errors.push(error); }
+  try { await stopChild(child, paths); } catch (error) { errors.push(error); }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors);
 }
 
 async function mainRequest(port: number): Promise<Response> {
@@ -576,13 +606,9 @@ describe("native-main startup journal gate", () => {
     expect(isNativeMainTrafficBlocked()).toBe(false);
   });
 
-  test("fresh processes gate first admission and converge every recoverable phase/observation", async () => {
-    for (const scenario of recoverable) {
+  test.each(recoverable)("fresh processes gate first admission and converge $phase/$observation", async (scenario) => {
       const f = await fixture(scenario.phase, scenario.observation);
-      const paths = childPaths(f);
-      const child = spawnChild(f, paths);
-      try {
-        const port = await waitForPort(paths.port);
+      await withStartupChild(f, async (port, paths) => {
         const blocked = await mainRequest(port);
         expect(blocked.status).toBeGreaterThanOrEqual(400);
         expect(existsSync(paths.upstream)).toBe(false);
@@ -597,19 +623,12 @@ describe("native-main startup journal gate", () => {
         expect(existsSync(paths.upstream)).toBe(true);
         const active = (await f.manager.list()).activeProfileId;
         expect(active).toBe(scenario.active === "target" ? f.targetProfileId : f.sourceProfileId);
-      } finally {
-        await stopChild(child, paths);
-      }
-    }
-  }, 120_000);
+      });
+  }, CHILD_CASE_BUDGET_MS);
 
-  test("manual observations keep main closed while health and explicit recovery remain available", async () => {
-    for (const observation of ["unreadable", "third"] as const) {
+  test.each(["unreadable", "third"] as const)("manual observation %s keeps main closed while health and explicit recovery remain available", async (observation) => {
       const f = await fixture("prepared", observation);
-      const paths = childPaths(f);
-      const child = spawnChild(f, paths);
-      try {
-        const port = await waitForPort(paths.port);
+      await withStartupChild(f, async (port, paths) => {
         expect((await mainRequest(port)).status).toBeGreaterThanOrEqual(400);
         expect(existsSync(paths.upstream)).toBe(false);
         expect((await fetch(`http://127.0.0.1:${port}/healthz`)).status).toBe(200);
@@ -629,26 +648,18 @@ describe("native-main startup journal gate", () => {
         expect(recovered.status).toBe(200);
         expect((await mainRequest(port)).status).toBe(200);
         expect(existsSync(paths.upstream)).toBe(true);
-      } finally {
-        await stopChild(child, paths);
-      }
-    }
-  }, 45_000);
+      });
+  }, CHILD_CASE_BUDGET_MS);
 
   test("a pending native-main journal does not block an ordinary Pool account", async () => {
     const f = await fixture("prepared", "unreadable", true);
-    const paths = childPaths(f);
-    const child = spawnChild(f, paths);
-    try {
-      const port = await waitForPort(paths.port);
+    await withStartupChild(f, async (port, paths) => {
       expect((await mainRequest(port)).status).toBe(200);
       await waitForPath(paths.upstream);
       const receipt = JSON.parse(readFileSync(paths.upstream, "utf8").trim());
       expect(receipt.authorization).toBe("Bearer pool-access");
-    } finally {
-      await stopChild(child, paths);
-    }
-  }, 20_000);
+    });
+  }, CHILD_CASE_BUDGET_MS);
 });
 
 /*

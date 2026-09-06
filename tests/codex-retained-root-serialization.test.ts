@@ -18,7 +18,7 @@ import {
 } from "../src/codex/user-identity";
 import { claimOwnedServiceHome, withOwnedServiceHomePreload } from "./helpers/owned-service-home";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
-import { SPAWN_BUDGET_MS } from "./helpers/test-budget";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "./helpers/test-budget";
 
 const repoRoot = resolve(import.meta.dir, "..");
 const sandboxes: Sandbox[] = [];
@@ -32,6 +32,8 @@ interface Sandbox {
   readonly env: Record<string, string>;
   readonly serviceManagerEnv: Record<string, string>;
   readonly preloadPath?: string;
+  readonly children: Set<ReturnType<typeof Bun.spawn>>;
+  readonly releaseMarkers: Set<string>;
 }
 
 function nativeEntry(slug: string, visibility = "list"): Record<string, unknown> {
@@ -90,9 +92,22 @@ function makeSandbox(prefix: string): Sandbox {
     },
     serviceManagerEnv: serviceHome.env,
     preloadPath: serviceHome.preloadPath,
+    children: new Set(),
+    releaseMarkers: new Set(),
   };
   sandboxes.push(sandbox);
   return sandbox;
+}
+
+async function teardownSandbox(sandbox: Sandbox): Promise<void> {
+  for (const marker of sandbox.releaseMarkers) {
+    try { writeFileSync(marker, "release"); } catch { /* root may already be gone */ }
+  }
+  for (const child of sandbox.children) {
+    if (child.exitCode === null) child.kill();
+  }
+  await Promise.all([...sandbox.children].map(child => child.exited));
+  sandbox.children.clear();
 }
 
 function sandboxChildEnv(sandbox: Sandbox): Record<string, string> {
@@ -111,6 +126,16 @@ async function waitForPath(path: string, timeoutMs: number): Promise<void> {
   }
 }
 
+async function raceBarrier(child: ReturnType<typeof Bun.spawn>, barrier: Promise<void>): Promise<void> {
+  const exitedEarly = child.exited.then(async exitCode => {
+    const stdout = await new Response(child.stdout).text();
+    const stderr = await new Response(child.stderr).text();
+    throw new Error(`sync exited before provider barrier (${exitCode})\nstdout=${stdout}\nstderr=${stderr}`);
+  });
+  exitedEarly.catch(() => undefined);
+  await Promise.race([barrier, exitedEarly]);
+}
+
 async function runChild(
   sandbox: Sandbox,
   script: string,
@@ -121,6 +146,7 @@ async function runChild(
     stdout: "pipe",
     stderr: "pipe",
   });
+  sandbox.children.add(child);
   const [exitCode, stdout, stderr] = await Promise.all([
     child.exited,
     new Response(child.stdout).text(),
@@ -152,8 +178,10 @@ async function holdCatalogLock(sandbox: Sandbox): Promise<{
     stdout: "pipe",
     stderr: "pipe",
   });
+  sandbox.children.add(child);
+  sandbox.releaseMarkers.add(release);
   await waitForPath(ready, CHILD_MARKER_BUDGET_MS);
-  return { release: () => writeFileSync(release, "release"), child };
+  return { release: () => { try { writeFileSync(release, "release"); } catch { /* teardown may have released already */ } }, child };
 }
 
 function seedCatalog(sandbox: Sandbox, bytes = catalogBytes()): string {
@@ -163,9 +191,10 @@ function seedCatalog(sandbox: Sandbox, bytes = catalogBytes()): string {
   return path;
 }
 
-afterEach(() => {
+afterEach(async () => {
   const identity = resolveEffectiveUserIdentity();
   for (const sandbox of sandboxes.splice(0)) {
+    await teardownSandbox(sandbox);
     const database = resolveCodexCatalogSerializationDatabasePath(identity, sandbox.codexHome);
     for (const suffix of ["", "-journal", "-wal", "-shm"]) rmSync(`${database}${suffix}`, { force: true });
     removeTreeWithRetry(sandbox.root);
@@ -312,16 +341,11 @@ for (const publisher of ["convergence", "retained"] as const) {
         const response = await handleManagementAPI(req, new URL(req.url), config);
         console.log(JSON.stringify({ status: response.status, body: await response.json() }));
       `], sandbox.preloadPath)], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
+      sandbox.children.add(sync);
       const syncStdout = new Response(sync.stdout).text();
       const syncStderr = new Response(sync.stderr).text();
 
-      await Promise.race([
-        waitForPath(requested, CHILD_MARKER_BUDGET_MS),
-        sync.exited.then(async exitCode => {
-          const [stdout, stderr] = await Promise.all([syncStdout, syncStderr]);
-          throw new Error(`sync exited before provider barrier (${exitCode})\nstdout=${stdout}\nstderr=${stderr}`);
-        }),
-      ]);
+      await raceBarrier(sync, waitForPath(requested, CHILD_MARKER_BUDGET_MS));
       const published = await runPublisher(sandbox, publisher, config);
       if (published.exitCode !== 0) {
         throw new Error(`${publisher} publisher failed\nstdout=${published.stdout}\nstderr=${published.stderr}`);
@@ -397,16 +421,11 @@ test("a persisted runtime selection moved by another process during the await bl
     const { syncCatalogModels } = await import("./src/codex/catalog/sync.ts");
     console.log(JSON.stringify(await syncCatalogModels(config)));
   `], sandbox.preloadPath)], { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" });
+  sandbox.children.add(sync);
   const syncStdout = new Response(sync.stdout).text();
   const syncStderr = new Response(sync.stderr).text();
 
-  await Promise.race([
-    waitForPath(requested, CHILD_MARKER_BUDGET_MS),
-    sync.exited.then(async exitCode => {
-      const [stdout, stderr] = await Promise.all([syncStdout, syncStderr]);
-      throw new Error(`sync exited before provider barrier (${exitCode})\nstdout=${stdout}\nstderr=${stderr}`);
-    }),
-  ]);
+  await raceBarrier(sync, waitForPath(requested, CHILD_MARKER_BUDGET_MS));
 
   // Another process selects a different Codex runtime. No catalog byte changes.
   writeFileSync(runtimeStatePath, `${JSON.stringify({
@@ -472,6 +491,7 @@ test("two processes at the post-approval management seam serialize instead of in
     const { withConfigMutationLockSync } = await import("./src/config.ts");
     withConfigMutationLockSync(() => undefined);
   `], { cwd: repoRoot, env: sandbox.env, stdout: "pipe", stderr: "pipe" });
+  sandbox.children.add(warm);
   expect(await warm.exited).toBe(0);
 
   const routeScript = (marker: string) => `
@@ -482,7 +502,8 @@ test("two processes at the post-approval management seam serialize instead of in
     // looked exactly like a production defect until the encoder said so.
     globalThis.fetch = async () => {
       writeFileSync(${JSON.stringify(barrier)} + "-" + ${JSON.stringify(marker)}, "here");
-      const deadline = Date.now() + 8000;
+      // Two children rendezvous on markers; either may take 8-19 s to boot on windows-latest.
+      const deadline = Date.now() + INTERNAL_DEADLINE_MS;
       while (Date.now() < deadline) {
         if (existsSync(${JSON.stringify(barrier)} + "-a") && existsSync(${JSON.stringify(barrier)} + "-b")) break;
         await Bun.sleep(5);
@@ -515,7 +536,8 @@ test("two processes at the post-approval management seam serialize instead of in
   // On macOS CI both children can still lose the config lock before approval even
   // after the warm-up — that proves nothing about catalog serialization. Retry
   // vacuous runs until at least one process reaches the post-approval seam.
-  const attemptDeadline = Date.now() + 20_000;
+  // Each attempt boots two real children; bound the retry loop by the spawn budget, not a literal.
+  const attemptDeadline = Date.now() + SPAWN_BUDGET_MS;
   let results: Array<{ exitCode: number; stdout: string; stderr: string }> | undefined;
   while (Date.now() < attemptDeadline) {
     for (const marker of ["a", "b"] as const) {
@@ -527,6 +549,7 @@ test("two processes at the post-approval management seam serialize instead of in
       [process.execPath, ...withOwnedServiceHomePreload(["--eval", routeScript(marker)], sandbox.preloadPath)],
       { cwd: repoRoot, env: sandboxChildEnv(sandbox), stdout: "pipe", stderr: "pipe" },
     ));
+    for (const child of children) sandbox.children.add(child);
 
     results = await Promise.all(children.map(async child => {
       const [exitCode, stdout, stderr] = await Promise.all([

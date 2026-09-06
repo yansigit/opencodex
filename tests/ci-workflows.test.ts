@@ -108,15 +108,23 @@ describe("GitHub Actions hardening", () => {
     const workflow = await readText(".github/workflows/ci.yml");
     const ci = Bun.YAML.parse(workflow) as {
       permissions?: Record<string, string>;
+      concurrency?: { group?: string; "cancel-in-progress"?: string };
       jobs?: Record<string, { "timeout-minutes"?: number } | undefined>;
     };
+
+    expect(ci.concurrency?.group).toBe(
+      "cross-platform-ci-${{ github.event_name }}-${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.event_name == 'workflow_dispatch' && github.run_id || github.run_id }}",
+    );
+    expect(ci.concurrency?.["cancel-in-progress"]).toBe(
+      "${{ github.event_name == 'pull_request' || github.event_name == 'push' }}",
+    );
 
     // Job-scoped: a global count still passes if values are swapped between jobs.
     // Pin ownership explicitly. The Windows leg is sharded like the Linux ones
     // since 8034cd7c0 — a single leg reached 30m on a green suite and was killed
     // in cleanup, so each shard now holds the same 15m a Linux shard holds. A
     // shard that needs longer is wedged, not slow.
-    expect(ci.jobs?.["select-windows-runner"]?.["timeout-minutes"]).toBe(2);
+    expect(ci.jobs?.["select-windows-runner"]).toBeUndefined();
     expect(ci.jobs?.test?.["timeout-minutes"]).toBe(15);
     expect(ci.jobs?.gates?.["timeout-minutes"]).toBe(15);
     expect(ci.jobs?.["platform-macos"]?.["timeout-minutes"]).toBe(30);
@@ -176,7 +184,7 @@ describe("GitHub Actions hardening", () => {
     const linuxShards = (ci.jobs?.test as { strategy?: { matrix?: { shard?: number[] } } })
       ?.strategy?.matrix?.shard ?? [];
     expect(linuxShards).toEqual([1, 2, 3, 4]);
-    expect(workflow).toContain(`--shard \${{ matrix.shard }}/${linuxShards.length}`);
+    expect(workflow).toContain(`TEST_SHARD: \${{ matrix.shard }}/${linuxShards.length}`);
 
     // Every job that runs tests/ must fetch tags, because one of those tests reads
     // them. tests/release-version-line.test.ts compares package.json against the
@@ -192,13 +200,23 @@ describe("GitHub Actions hardening", () => {
       expect(`${jobName}:${String(checkout?.with?.["fetch-tags"])}`).toBe(`${jobName}:true`);
     }
 
-    // Windows uses the same shard matrix after the single-leg isolate budget was
-    // replaced. Keep the two matrices equal so a future edit cannot reintroduce
-    // a partial Windows suite while Linux stays fully tiled.
+    // Windows uses more, smaller shards because its process-heavy suite and NTFS
+    // filesystem work repeatedly exhausted four hosted runners under load. Keep
+    // its matrix contiguous and bind the lane selector divisor to that matrix so
+    // load reduction cannot silently drop part of the suite.
     const windowsShards = (ci.jobs?.["platform-windows"] as {
       strategy?: { matrix?: { shard?: number[] } };
     })?.strategy?.matrix?.shard ?? [];
-    expect(windowsShards).toEqual(linuxShards);
+    expect(windowsShards).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(windowsShards).toEqual(windowsShards.map((_, index) => index + 1));
+    const windowsSteps = (ci.jobs?.["platform-windows"] as {
+      steps?: Array<{ run?: string }>;
+    })?.steps ?? [];
+    expect(windowsSteps.some(step =>
+      step.run?.includes(`--shard \${{ matrix.shard }}/${windowsShards.length}`),
+    )).toBe(true);
+    expect(ci.jobs?.["platform-windows"]?.name)
+      .toBe(`windows \${{ matrix.shard }}/${windowsShards.length}`);
 
     // The aggregate gate is the check a human trusts. Three ways to break it
     // silently: drop `if: always()` so it skips (and a skipped job reports
@@ -210,7 +228,7 @@ describe("GitHub Actions hardening", () => {
     const ungated = new Set(["ci"]);
     expect([...(gate?.needs ?? [])].sort())
       .toEqual(Object.keys(ci.jobs ?? {}).filter(name => !ungated.has(name)).sort());
-    expect(workflow).toContain("WINDOWS_REQUIRED: ${{ github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true' }}");
+    expect(workflow).toContain("WINDOWS_REQUIRED: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.ci == 'true' }}");
     expect(workflow).toContain("WINDOWS_RESULT: ${{ needs.platform-windows.result }}");
     expect(workflow).toContain('if [ "$WINDOWS_REQUIRED" = "true" ] && [ "$WINDOWS_RESULT" != "success" ]; then');
 
@@ -248,7 +266,8 @@ describe("GitHub Actions hardening", () => {
     expect(focusedMacos?.run).toContain("tests/codex-prompt-text-probe.test.ts");
     const fullMacos = macosSteps.find(step => step.name === "Full macOS suite");
     expect(fullMacos?.if).toContain("github.event_name == 'pull_request' && github.base_ref == 'main'");
-    expect(workflow).toMatch(/macos:\s+[\s\S]*?- 'tests\/codex-prompt-text-probe\.test\.ts'/);
+    const pathPolicy = await readText(".github/policies/ci-paths.yml");
+    expect(pathPolicy).toMatch(/macos:\s+[\s\S]*?- 'tests\/codex-prompt-text-probe\.test\.ts'/);
 
     // The macOS leg retries ONLY a Bun runtime crash, and only once. Bun 1.3.14
     // segfaults reclaiming a Worker at an `--isolate` file boundary with
@@ -266,21 +285,23 @@ describe("GitHub Actions hardening", () => {
     expect(crashRetry).not.toContain("while true");
     expect((ci.jobs?.["platform-macos"] as { needs?: string; if?: string })?.needs).toBe("changes");
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
-      .toBe("github.event_name != 'pull_request' || github.base_ref == 'main' || needs.changes.outputs.macos == 'true'");
+      .toBe("(github.event_name != 'pull_request' && github.event_name != 'merge_group') || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') || needs.changes.outputs.macos == 'true'");
 
     // Windows is required for every integration push and CI-relevant PR. The
     // changes dependency keeps documentation-only PRs cheap without letting a
     // code change or shipping-boundary push silently lose Windows coverage.
-    const windowsJob = ci.jobs?.["platform-windows"] as { if?: string; needs?: string[] } | undefined;
-    expect(windowsJob?.needs).toEqual(["changes", "select-windows-runner"]);
+    const windowsJob = ci.jobs?.["platform-windows"] as { if?: string; needs?: string[]; "runs-on"?: string } | undefined;
+    expect(windowsJob?.needs).toEqual(["changes"]);
+    expect(windowsJob?.["runs-on"]).toBe("windows-latest");
     expect(windowsJob?.if)
-      .toBe("github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'");
+      .toBe("(github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.ci == 'true'");
 
-    // Windows runs the same suite, sharded like the Linux legs, and keeps the
-    // self-hosted workspace wipe. Without the wipe a deleted file survives on
-    // the runner's disk and the suite passes against a tree that no longer
-    // exists in git.
-    const winSteps = (ci.jobs?.["platform-windows"] as { steps?: { if?: string; run?: string }[] })?.steps ?? [];
+    // Windows runs the same suite, sharded like the Linux legs, on an ephemeral
+    // GitHub-hosted runner. Public pull-request code must never reach a
+    // persistent self-hosted host.
+    const winSteps = (ci.jobs?.["platform-windows"] as {
+      steps?: { if?: string; run?: string; env?: Record<string, unknown> }[];
+    })?.steps ?? [];
     // --timeout is part of the contract, not incidental: this leg ran on Bun's 5s default
     // while Linux and macOS both pass 60000, and it is the slowest hardware on the board.
     // Three composed-acceptance failures were that default firing on tests still working
@@ -294,6 +315,12 @@ describe("GitHub Actions hardening", () => {
     const windowsTestSteps = winSteps.filter(step => hasShellCommandHead(step.run, windowsTestCommand));
     expect(windowsTestSteps.length).toBeGreaterThan(0);
     expect(windowsTestSteps.every(step => step.if === undefined)).toBe(true);
+    // The hosted Windows shard owns an ephemeral VM and invokes every wrapper
+    // sequentially in this one shell step. Requiring the local multi-worktree
+    // queue there adds a pre-test PowerShell SID/known-folder dependency without
+    // preventing any possible overlap; run 34000228308 lost the entire shard when
+    // that bounded identity lookup timed out before Bun started a test.
+    expect(windowsTestSteps.every(step => step.env?.OCX_TEST_NO_QUEUE === "1")).toBe(true);
     const windowsTestRun = windowsTestSteps[0]?.run ?? "";
     expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane general');
     expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane serial');
@@ -306,8 +333,7 @@ describe("GitHub Actions hardening", () => {
     expect(windowsTestRun).toContain('--parallel=1 --timeout "$serial_timeout" "$serial_file"');
     expect(windowsTestRun).not.toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
     expect(windowsTestRun).not.toContain(`tests --shard=\${{ matrix.shard }}/${windowsShards.length}`);
-    expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"
-      && step.run?.includes("git clean -xffd"))).toBe(true);
+    expect(workflow).not.toContain("ocx-home");
 
     // The three crash-signature lists must stay identical, and they must not key on
     // `panic(thread`.
@@ -358,9 +384,7 @@ describe("GitHub Actions hardening", () => {
       expect(`${jobName}:${build?.if ?? "unconditional"}`).toBe(`${jobName}:unconditional`);
     }
 
-    // No job in this workflow pushes, and the self-hosted runner keeps its
-    // checkout between jobs, so a persisted token is avoidable residue. The
-    // other workflows in this repository already set this; ci.yml was the gap.
+    // No job in this workflow pushes, so a persisted token is avoidable residue.
     const checkouts = Object.values(ci.jobs ?? {})
       .flatMap(job => (job as { steps?: { uses?: string; with?: Record<string, unknown> }[] })?.steps ?? [])
       .filter(step => step.uses?.startsWith("actions/checkout@"));
@@ -369,13 +393,6 @@ describe("GitHub Actions hardening", () => {
       expect(`checkout[${index}]:${step.with?.["persist-credentials"]}`).toBe(`checkout[${index}]:false`);
     }
 
-    // The self-hosted workspace wipe must not swallow its own failure. A clean
-    // that fails on permissions leaves deleted files on disk, and the checkout
-    // after it then validates a tree that no longer exists in git.
-    const wipe = ((ci.jobs?.["platform-windows"] as { steps?: { if?: string; run?: string }[] })?.steps ?? [])
-      .find(step => step.run?.includes("git clean -xffd"));
-    expect(wipe?.run).not.toContain("|| true");
-    expect(wipe?.run).toContain("git rev-parse --is-inside-work-tree");
   });
 
   test("PR checks reach every branch the target gate accepts", async () => {
@@ -436,6 +453,7 @@ describe("GitHub Actions hardening", () => {
       on?: {
         push?: { branches?: string[]; paths?: string[] };
         pull_request?: { branches?: string[]; paths?: string[] };
+        merge_group?: { types?: string[]; branches?: string[]; paths?: string[] };
       };
       jobs?: Record<string, Record<string, unknown> | undefined>;
     };
@@ -459,12 +477,15 @@ describe("GitHub Actions hardening", () => {
     // filter: every head needs an aggregate `ci` check.
     expect(ci.on?.pull_request?.branches).toBeUndefined();
     expect(ci.on?.pull_request?.paths).toBeUndefined();
+    expect(ci.on?.merge_group).toEqual({ types: ["checks_requested"] });
 
     // The `changes` job owns the one expensive-CI allowlist for both events.
     // Every head gets the workflow and aggregate check; this list decides
     // whether the costly jobs run.
     const ciPaths = [
       ".gitattributes",
+      ".github/actions/**",
+      ".github/policies/**",
       ".github/workflows/**",
       ".npmignore",
       "LICENSE",
@@ -483,7 +504,8 @@ describe("GitHub Actions hardening", () => {
     const filterStep = (ci.jobs?.changes as {
       steps?: { with?: Record<string, string> }[];
     })?.steps?.find(step => step.with?.filters);
-    const areaFilters = Bun.YAML.parse(String(filterStep?.with?.filters ?? "")) as {
+    expect(filterStep?.with?.filters).toBe(".github/policies/ci-paths.yml");
+    const areaFilters = Bun.YAML.parse(await readText(".github/policies/ci-paths.yml")) as {
       ci?: string[];
       dependencies?: string[];
     };
@@ -516,13 +538,22 @@ describe("GitHub Actions hardening", () => {
     );
     expect(scopeStep?.id).toBe("scope");
     expect(scopeStep?.shell).toBe("bash");
-    expect(scopeStep?.env?.CI_SCOPE).toBe("${{ steps.filter.outputs.ci }}");
-    expect(scopeStep?.env?.DEPENDENCIES_SCOPE).toBe(
+    expect(scopeStep?.env?.EVENT_NAME).toBe("${{ github.event_name }}");
+    expect(scopeStep?.env?.NORMAL_CI_SCOPE).toBe("${{ steps.filter.outputs.ci }}");
+    expect(scopeStep?.env?.NORMAL_DEPENDENCIES_SCOPE).toBe(
       "${{ steps.filter.outputs.dependencies }}",
+    );
+    expect(scopeStep?.env?.MERGE_GROUP_CI_SCOPE).toBe(
+      "${{ steps.merge-group-filter.outputs.ci }}",
+    );
+    expect(scopeStep?.env?.MERGE_GROUP_DEPENDENCIES_SCOPE).toBe(
+      "${{ steps.merge-group-filter.outputs.dependencies }}",
     );
     expect(scopeStep?.run).not.toContain("${{");
     expect(scopeStep?.run).toContain('case "$value" in');
     expect(scopeStep?.run).toContain("true|false)");
+    expect(scopeStep?.run).toContain('[ "$EVENT_NAME" = merge_group ] && prefix=MERGE_GROUP');
+    expect(scopeStep?.run).toContain('value="${!name-}"');
     expect(scopeStep?.run).toContain('printf \'%s=%s\\n\' "$scope" "$value" >> "$GITHUB_OUTPUT"');
     expect(scopeStep?.run).toContain("exit 1");
     const filterIndex = changesJob?.steps?.findIndex(step => step.id === "filter") ?? -1;
@@ -580,7 +611,7 @@ describe("GitHub Actions hardening", () => {
     expect(publishProofStep?.with?.name).toBe("${{ steps.dependency-audit-proof.outputs.name }}");
     expect(publishProofStep?.with?.["if-no-files-found"]).toBe("error");
 
-    const scopedCondition = "github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'";
+    const scopedCondition = "(github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.ci == 'true'";
     for (const jobName of ["test", "storage-policy", "gates", "keyring-smoke"]) {
       const job = ci.jobs?.[jobName] as { needs?: string; if?: string } | undefined;
       expect(`${jobName}:${job?.needs}`).toBe(`${jobName}:changes`);
@@ -588,7 +619,7 @@ describe("GitHub Actions hardening", () => {
     }
     const macosJob = ci.jobs?.["platform-macos"] as { needs?: string; if?: string } | undefined;
     expect(`platform-macos:${macosJob?.needs}`).toBe("platform-macos:changes");
-    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:github.event_name != 'pull_request' || github.base_ref == 'main' || needs.changes.outputs.macos == 'true'");
+    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:(github.event_name != 'pull_request' && github.event_name != 'merge_group') || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') || needs.changes.outputs.macos == 'true'");
   });
 
   test("cross-platform CI keeps the GUI lint and build gates", async () => {
@@ -626,6 +657,14 @@ describe("GitHub Actions hardening", () => {
     // promotion still reads as changed and the scoped jobs run anyway — the
     // filter would look correct, stay green, and save nothing.
     expect(filterStep?.with?.base).toBe("${{ github.ref }}");
+    expect(filterStep?.with?.ref).toBeUndefined();
+    const mergeFilterStep = (ci.jobs?.changes as {
+      steps?: { id?: string; if?: string; with?: Record<string, string> }[];
+    })?.steps?.find(step => step.id === "merge-group-filter");
+    expect(mergeFilterStep?.if).toBe("github.event_name == 'merge_group'");
+    expect(mergeFilterStep?.with?.base).toBe("${{ github.event.merge_group.base_sha }}");
+    expect(mergeFilterStep?.with?.ref).toBe("${{ github.event.merge_group.head_sha }}");
+    expect(mergeFilterStep?.with?.filters).toBe(".github/policies/ci-paths.yml");
 
     // paths-filter cannot read a PR's file list without this, and a filter that
     // errors produces empty outputs — which every `== 'true'` condition reads as
@@ -638,9 +677,9 @@ describe("GitHub Actions hardening", () => {
     // that surface. `src/**` is the load-bearing one: it keeps a source-only PR
     // running the Windows smoke jobs (keyring, npm-global) now that the full
     // Windows suite runs only on manual dispatch.
-    const filters = String(filterStep?.with?.filters ?? "");
-    const packagingBlock = (filters.split(/\n\s*packaging:\s*\n/)[1] ?? "").split(/\n\s*(?:macos|swift):\s*\n/)[0] ?? "";
-    const packaging = [...packagingBlock.matchAll(/-\s*'([^']+)'/g)].map(match => match[1]).sort();
+    const filters = await readText(".github/policies/ci-paths.yml");
+    const parsedFilters = Bun.YAML.parse(filters) as Record<string, string[]>;
+    const packaging = [...(parsedFilters.packaging ?? [])].sort();
     expect(packaging).toEqual([
       ".npmignore",
       ".gitattributes",
@@ -658,11 +697,21 @@ describe("GitHub Actions hardening", () => {
     // Every packaging pattern that names a real path must also appear in the
     // shared expensive-CI filter. Otherwise the workflow records a cheap green
     // aggregate while silently skipping the packaging verification.
-    const ciPatterns = (Bun.YAML.parse(filters) as { ci?: string[] }).ci ?? [];
+    const ciPatterns = parsedFilters.ci ?? [];
     for (const pattern of packaging) {
       if (pattern === "scripts/prepare-package.ts") continue; // covered by scripts/**
       expect(`${pattern}:${ciPatterns.includes(pattern)}`).toBe(`${pattern}:true`);
     }
+  });
+
+  test("cross-platform CI enforces the checked-in workflow policy", async () => {
+    const workflow = Bun.YAML.parse(await readText(".github/workflows/ci.yml")) as {
+      jobs?: Record<string, { steps?: Array<{ name?: string; run?: string }> }>;
+    };
+    const policyStep = workflow.jobs?.gates?.steps?.find(
+      step => step.name === "Validate repository workflow policy",
+    );
+    expect(policyStep?.run).toBe("bun scripts/ci/check-workflow-policy.ts");
   });
 
   test("stale needs-info workflow is schedule-only and least-privilege", async () => {
@@ -920,9 +969,10 @@ describe("GitHub Actions hardening", () => {
     expect(createStep).toContain('notes_file="$GITHUB_WORKSPACE/.release-notes.md"');
     expect(createStep).toContain('test -s "$notes_file"');
     expect(createStep).not.toContain("generate-notes");
-    expect(createStep).not.toContain("gh api");
+    expect(createStep).toContain('gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs"');
+    expect(createStep).not.toContain('git push origin "refs/tags/${release_tag}"');
     expect(createStep.indexOf('test -s "$notes_file"')).toBeLessThan(
-      createStep.indexOf('git tag "$release_tag"'),
+      createStep.indexOf('gh api --method POST'),
     );
 
     // The merged-only restriction remains on the service gate, whose

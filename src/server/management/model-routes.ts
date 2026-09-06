@@ -244,7 +244,7 @@ function applyModelVisibility(
     }
   }
   const matchesTarget = (stored: string, target: { id: string; native: boolean }) => target.native
-    ? stored === target.id
+    ? stored === target.id || slugEquals(stored, "openai", target.id)
     : isVirtualComboNamespace
       ? targetComboSelectors.get(target.id)!.has(stored)
       : slugEquals(stored, provider, target.id);

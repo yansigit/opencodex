@@ -10,7 +10,9 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { sseFieldValue } from "../lib/sse-decoder";
 import { enforceAnthropicImageLimits, sniffImageDimensions } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
-import { AnthropicRequestError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { AnthropicRequestError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, verifyAndExtractDirectives, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { getOrCreateDirectiveSigningKey } from "../claude/directive-key";
+import { isAllowedLegacyDirective } from "../claude/agents-inject";
 import { resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
@@ -33,7 +35,7 @@ import {
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { estimateTokens } from "../lib/token-estimate";
 import { modelInList } from "../types/tools";
-import type { ClaudeSourceEnvelope, OcxConfig } from "../types";
+import type { ClaudeSourceEnvelope, OcxConfig, OcxUsage } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, recordFirstOutput, type RequestLogContext, type RequestLogEntry } from "./request-log";
 import { conversationIdFromClaudeMetadata } from "./request-log-conversation";
@@ -78,6 +80,25 @@ export function buildClaudeReplayConfig(config: OcxConfig): OcxConfig {
       ...config.claudeCode?.visionSidecar,
     },
   };
+}
+
+/**
+ * Phase 4 plan 04-02: benchmark-only raw-usage observation.
+ *
+ * The optional benchmark observer receives a sanitized structural record only —
+ * final adapter kind, resolved model id, and the raw OcxUsage reported before
+ * Anthropic wire normalization. It never receives request bodies, headers,
+ * provider names/aliases, endpoint, account identity, raw provider response, or
+ * error text. Standard Messages behavior is unchanged when omitted.
+ */
+export interface ClaudeBenchmarkRawUsage {
+  adapterKind: string;
+  modelId: string;
+  usage: OcxUsage | undefined;
+}
+
+export interface ClaudeBenchmarkObserverOptions {
+  onRawUsage?: (observation: ClaudeBenchmarkRawUsage) => void;
 }
 
 function claudeInboundDisabled(config: OcxConfig): Response | null {
@@ -714,11 +735,12 @@ export async function handleClaudeMessages(
   logCtx: RequestLogContext,
   logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease },
   requestPolicy: RequestPolicyView = config,
+  benchmark?: ClaudeBenchmarkObserverOptions,
 ): Promise<Response> {
   const translatorBudget = createTranslatorBudget();
   try {
     return finalizeTranslatorBudgetResponse(
-      await handleClaudeMessagesWithBudget(req, config, logCtx, translatorBudget, logIds, requestPolicy),
+      await handleClaudeMessagesWithBudget(req, config, logCtx, translatorBudget, logIds, requestPolicy, benchmark),
       translatorBudget,
     );
   } catch (error) {
@@ -734,6 +756,7 @@ async function handleClaudeMessagesWithBudget(
   translatorBudget: TranslatorBudget,
   logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease },
   requestPolicy: RequestPolicyView = config,
+  benchmark?: ClaudeBenchmarkObserverOptions,
 ): Promise<Response> {
   logCtx.surface = "claude";
   const disabled = claudeInboundDisabled(config);
@@ -761,15 +784,21 @@ async function handleClaudeMessagesWithBudget(
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
       anthropicBody.model = stripOneMillionMarker(anthropicBody.model);
     }
-    // ocx-route override (devlog 072): injected agent bodies pin their model via a
+    // ocx-route override (devlog 072 + TRUST-01..05): injected agent bodies pin their model via a
     // system-prompt directive because 2.1.207 ignores custom ids in agent
     // frontmatter. Must run BEFORE the native-passthrough branch — the CLI sends
     // these subagent turns under a fallback claude model id.
     if (isRec(anthropicBody)) {
-      const routeOverride = extractOcxRouteDirective(anthropicBody);
-      if (routeOverride && typeof anthropicBody.model === "string") {
-        anthropicBody.model = stripOneMillionMarker(routeOverride);
-        effortOverride = extractOcxEffortDirective(anthropicBody);
+      const directives = verifyAndExtractDirectives(
+        anthropicBody,
+        getOrCreateDirectiveSigningKey(),
+        (route, effort) => isAllowedLegacyDirective(route, effort, config),
+      );
+      if (directives.route && typeof anthropicBody.model === "string") {
+        anthropicBody.model = stripOneMillionMarker(directives.route);
+        if (directives.effort) {
+          effortOverride = directives.effort;
+        }
       }
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
@@ -951,6 +980,7 @@ async function handleClaudeMessagesWithBudget(
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
     onNativePassthroughCancel: () => finalizeNativeLog(499, { closeReason: "client_cancel" }),
+    ...(benchmark?.onRawUsage ? { claudeBenchmarkObserver: benchmark.onRawUsage } : {}),
   });
   const response = logIds ? responseWithDeferredRequestLog(upstream, logIds.requestId, logIds.start, logCtx) : upstream;
 
@@ -1184,10 +1214,22 @@ export async function handleClaudeCountTokens(
     model = stripped;
     raw.model = model;
   }
-  // ocx-route override (devlog 072): keep count_tokens consistent with messages.
-  const countRoute = extractOcxRouteDirective(raw);
-  if (countRoute) {
-    model = stripOneMillionMarker(countRoute);
+  // ocx-route override (devlog 072 + TRUST-01..05): keep count_tokens consistent with messages.
+  let directives;
+  try {
+    directives = verifyAndExtractDirectives(
+      raw,
+      getOrCreateDirectiveSigningKey(),
+      (route, effort) => isAllowedLegacyDirective(route, effort, config),
+    );
+  } catch (err) {
+    if (err instanceof AnthropicRequestError) {
+      return anthropicErrorResponse(400, err.message, "invalid_request_error");
+    }
+    throw err;
+  }
+  if (directives.route) {
+    model = stripOneMillionMarker(directives.route);
     raw.model = model;
   }
   const ctHeaderSessionId = claudeSessionIdFromRequest(req, raw);

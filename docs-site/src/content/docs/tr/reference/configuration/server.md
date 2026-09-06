@@ -113,8 +113,10 @@ zaten çalışan app-server'lar önceki `base_url`'i tutardı.
 
 Dinleyici yalnızca `POST /v1/responses`, onun WebSocket yükseltmesi, `POST
 /v1/responses/compact`, `POST /v1/alpha/search` (yerel Codex web arama aktarımı),
-`GET /v1/models` ve bağımsız sesli WebSocket yükseltmelerini sunar. `/api/*` ve
-kontrol paneli dahil diğer her şey `404` döndürür.
+`GET /v1/models`, `POST /v1/messages`, `POST /v1/messages/count_tokens` ve bağımsız
+sesli WebSocket yükseltmelerini sunar. İki Messages rotası, Anthropic protokolünü
+kullanan yerel Claude Code istemcilerini destekler. `/api/*` ve kontrol paneli
+dahil diğer her şey `404` döndürür.
 
 :::danger[Bu kimliği doğrulanmamış bir yüzeydir]
 Makinedeki her süreç bu dinleyiciyi kullanabilir. Hesap kotasını ve ücretli
@@ -194,6 +196,19 @@ Otomatik kimlik doğrulama saklanan Claude kimlik doğrulaması bulunduğunda
 subscription'ı, hiçbiri bulunmadığında proxy'yi ve algılama yetersiz olduğunda
 bir uyarı ile subscription'ı seçer. Bkz. [Claude Code kimlik doğrulama
 modu](/tr/guides/claude-code/#auth-mode).
+
+Oluşturulan kadro tanımları (`~/.claude/agents/ocx-*.md`), gönderimden önce proxy'nin
+doğruladığı imzalı `<!-- ocx-route -->` / `<!-- ocx-effort -->` yönergelerini taşır:
+geçersiz bir imzalı yönerge `400 invalid_request_error` ile kapalı olarak başarısız olur ve
+imzasız yönergeler yalnızca etkin, OpenCodex'e ait kadro girdileriyle tam olarak eşleştiğinde
+kabul edilir. `ocx doctor`, anahtar materyalini yazdırmadan imzalama anahtarının varlığını ve
+izinlerini bildirir.
+
+`POST /v1/messages` ve `POST /v1/messages/count_tokens`, isteğe bağlı
+`unauthenticatedLoopbackListener` üzerinde kabul edilen tek Claude rotalarıdır (sunucu
+düzeyinde bir anahtar; bağlantı noktası zorunludur ve proxy bağlantı noktasından farklı
+olmalıdır). Genel dinleyicide kimlik doğrulaması değişmez. Bkz.
+[Belirteci alamayan yerel istemciler](#belirteci-alamayan-yerel-istemciler).
 
 ## Gölge çağrılar
 

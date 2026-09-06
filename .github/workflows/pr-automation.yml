@@ -75,6 +75,7 @@ jobs:
               buildAutomationComment,
               classifyPullRequest,
               exactHeadGate,
+              isMissingPullRequestError,
               summarizeAgedHolds,
               workflowRunRetryDisposition,
             } = require(path.join(process.cwd(), ".github", "scripts", "pr-automation.cjs"));
@@ -144,7 +145,14 @@ jobs:
                 })).filter(pr => !pr.merged && pr.head?.sha === run.head_sha);
               }
               if (candidates.length !== 1) return;
-              const pr = await getPr(Number(candidates[0].number));
+              let pr;
+              try {
+                pr = await getPr(Number(candidates[0].number));
+              } catch (error) {
+                if (!isMissingPullRequestError(error)) throw error;
+                core.info(`CI rerun skipped: linked pull request #${candidates[0].number} no longer exists.`);
+                return;
+              }
               const disposition = workflowRunRetryDisposition({
                 run, pr, repository: `${owner}/${repo}`,
               });
@@ -789,7 +797,8 @@ jobs:
                   evidence = await rawEvidence(pr);
                   result = controllerEvidence(pr, evidence, await loadMaintenanceMap());
                 }
-                if ((mode === "update" || mode === "merge") && result.classification.eligibleForUpdate && needsUpdate) {
+                const immutableSyncCandidate = SYNC_BRANCH_RE.test(String(pr.head?.ref || ""));
+                if ((mode === "update" || mode === "merge") && result.classification.eligibleForUpdate && needsUpdate && !immutableSyncCandidate) {
                   const updated = await updateBranch(pr, maintenanceMap);
                   pr = updated.pr;
                   if (updated.action === "updated") {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import manifest from "./fixtures/claude-code-compatibility-manifest.json";
 import { analyzeClaudeCompatibility } from "../src/claude/compatibility";
 import { anthropicToResponsesTranslation } from "../src/claude/inbound";
+import { CLAUDE_CODE_COMPATIBILITY_FLOOR } from "../src/claude/client-version";
 
 describe("frozen Claude Code compatibility matrix", () => {
   test("pins two adjacent stable releases, the audit baseline, and reference SHAs", () => {
@@ -17,6 +18,10 @@ describe("frozen Claude Code compatibility matrix", () => {
       "Portkey-AI/gateway",
     ]);
     for (const reference of manifest.references) expect(reference.sha).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  test("keeps the runtime version diagnostic floor aligned with the frozen matrix", () => {
+    expect(CLAUDE_CODE_COMPATIBILITY_FLOOR).toBe(manifest.claudeCode.compatibilityFloor);
   });
 
   test("current and previous stable sanitized captures remain routable", () => {

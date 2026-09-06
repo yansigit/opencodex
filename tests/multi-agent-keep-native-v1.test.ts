@@ -90,6 +90,46 @@ function isolateHomes(): void {
   process.env.CODEX_HOME = mkdtempSync(join(tmpdir(), "codex-keep-native-"));
 }
 
+/**
+ * Read the semantic `features <action> <feature>` triple from either argv
+ * shape emitted by commandInvocation. Windows .cmd shims are wrapped through
+ * cmd.exe, so the action is not a fixed positional argument there.
+ */
+function featureActionOf(args: readonly string[]): string {
+  const ACTION = /^(?:enable|disable)$/;
+  const FEATURE = /^[a-z0-9_]+$/;
+
+  if (args.length === 3 && args[0] === "features") {
+    const [, action, feature] = args;
+    if (!ACTION.test(action!) || !FEATURE.test(feature!)) {
+      throw new Error(`malformed features argv: ${JSON.stringify(args)}`);
+    }
+    return `features ${action} ${feature}`;
+  }
+
+  if (args.length === 4 && args[0] === "/d" && args[1] === "/s" && args[2] === "/c") {
+    const line = args[3]!;
+    if (!line.startsWith('"') || !line.endsWith('"')) {
+      throw new Error(`unquoted cmd line: ${line}`);
+    }
+    const inner = line.slice(1, -1);
+    const tokens = inner.split(/(?<!\^) /).map(t => t.replace(/\^+"/g, "").replace(/\^ /g, " "));
+    const [target, keyword, action, feature, ...rest] = tokens;
+    if (
+      rest.length > 0
+      || !/\.(cmd|bat)$/i.test(target ?? "")
+      || keyword !== "features"
+      || !ACTION.test(action ?? "")
+      || !FEATURE.test(feature ?? "")
+    ) {
+      throw new Error(`unrecognized cmd invocation: ${inner}`);
+    }
+    return `features ${action} ${feature}`;
+  }
+
+  throw new Error(`unrecognized features invocation: ${JSON.stringify(args)}`);
+}
+
 function captureLog(): { logs: string[]; errors: string[]; log: { log: (m?: unknown) => void; error: (m?: unknown) => void } } {
   const logs: string[] = [];
   const errors: string[] = [];
@@ -165,6 +205,27 @@ describe("keep-native-v1 restamp path", () => {
 });
 
 describe("ocx v2 keep-native-v1", () => {
+  test("featureActionOf parses both launcher shapes and rejects malformed invocations", () => {
+    expect(featureActionOf(["features", "disable", "multi_agent_v2"]))
+      .toBe("features disable multi_agent_v2");
+    expect(featureActionOf(["/d", "/s", "/c",
+      String.raw`"C:\npm\codex.cmd ^"features^" ^"disable^" ^"multi_agent_v2^""`]))
+      .toBe("features disable multi_agent_v2");
+    expect(featureActionOf(["/d", "/s", "/c",
+      String.raw`"C:\Program^ Files\npm\codex.cmd ^"features^" ^"disable^" ^"multi_agent_v2^""`]))
+      .toBe("features disable multi_agent_v2");
+    expect(featureActionOf(["/d", "/s", "/c",
+      String.raw`"C:\p\node_modules\.bin\codex.cmd ^^^"features^^^" ^^^"enable^^^" ^^^"multi_agent_v2^^^""`]))
+      .toBe("features enable multi_agent_v2");
+
+    expect(() => featureActionOf(["/d", "/s", "/c",
+      String.raw`"echo ^"features^" ^"disable^" ^"multi_agent_v2^""`])).toThrow();
+    expect(() => featureActionOf(["features", "disable"])).toThrow();
+    expect(() => featureActionOf(["features", "restart", "multi_agent_v2"])).toThrow();
+    expect(() => featureActionOf(["/d", "/s", "/c", "features disable multi_agent_v2"])).toThrow();
+    expect(() => featureActionOf(["-c", "features disable multi_agent_v2"])).toThrow();
+  });
+
   test("enabling the native-v1 pin disables the global V2 override before catalog sync", async () => {
     isolateHomes();
     saveConfig({ ...loadConfig(), multiAgentMode: "v2" });
@@ -174,7 +235,7 @@ describe("ocx v2 keep-native-v1", () => {
 
     const code = await cmdV2(["keep-native-v1", "on"], {
       execFile: (_file, args) => {
-        events.push(args.join(" "));
+        events.push(featureActionOf(args));
         writeFileSync(codexConfig, readFileSync(codexConfig, "utf8").replace("enabled = true", "enabled = false"));
       },
       sync: async () => { events.push("sync"); },
@@ -213,7 +274,7 @@ describe("ocx v2 keep-native-v1", () => {
 
     expect(await cmdV2(["mode", "v2"], {
       execFile: (_file, args) => {
-        actions.push(args[1]!);
+        actions.push(featureActionOf(args).split(" ")[1]!);
         writeFileSync(codexConfig, readFileSync(codexConfig, "utf8").replace("enabled = true", "enabled = false"));
       },
       sync: async () => {},

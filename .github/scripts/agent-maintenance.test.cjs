@@ -443,26 +443,16 @@ describe("Jules API boundary", () => {
     );
   });
 
-  it("passes a validated upstream sync branch to Jules", () => {
-    assert.deepEqual(
-      buildJulesSessionRequest({
-        title: "opencodex-agent:sync-hotspot",
-        prompt: "Resolve the hotspot.",
-        source: "sources/github/yansigit/opencodex",
-        startingBranch: "sync/upstream-v1.2.3-abcdef1234567",
-        requirePlanApproval: false,
-      }).sourceContext.githubRepoContext,
-      { startingBranch: "sync/upstream-v1.2.3-abcdef1234567" },
-    );
+  it("rejects immutable upstream sync branches as Jules starting points", () => {
     assert.throws(
       () => buildJulesSessionRequest({
         title: "x",
         prompt: "x",
         source: "sources/repo",
-        startingBranch: "feature/untrusted",
+        startingBranch: "sync/upstream-v1.2.3-abcdef123456-0123456789ab",
         requirePlanApproval: false,
       }),
-      /starting branch/,
+      /mutable trunk dev/,
     );
   });
 

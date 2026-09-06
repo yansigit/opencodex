@@ -12,11 +12,16 @@ const event: SyncEvent = {
   vendorDevSha: "3333333333333333333333333333333333333333",
   detectedAt: "2026-08-24T12:00:00.000Z",
   recommendedLane: "daily-merge",
+  upstreamTag: "v2.32.0",
+  upstreamSha: "1".repeat(40),
+  baseRef: "refs/heads/dev",
+  baseSha: "0".repeat(40),
+  candidate: { upstreamRepo: "lidge-jun/opencodex", upstreamTag: "v2.32.0", upstreamSha: "1".repeat(40), baseRef: "refs/heads/dev", baseSha: "0".repeat(40) },
 };
 
 const result: PrepareResult = {
   status: "merged",
-  branch: "sync/upstream-v2.32.0-1111111",
+  branch: `sync/upstream-v2.32.0-${"1".repeat(12)}-${"0".repeat(12)}`,
   resolutions: [{
     path: "package.json",
     classification: "recipe",
@@ -77,13 +82,13 @@ describe("fork sync draft pull requests", () => {
 
     expect(number).toBe(17);
     expect(requests.map(request => [request.input, request.init?.method ?? "GET"])).toEqual([
-      ["https://api.github.com/repos/yansigit/opencodex/pulls?head=yansigit:sync/upstream-v2.32.0-1111111&state=open&base=dev", "GET"],
+      ["https://api.github.com/repos/yansigit/opencodex/pulls?head=yansigit:sync/upstream-v2.32.0-111111111111-000000000000&state=open&base=dev", "GET"],
       ["https://api.github.com/repos/yansigit/opencodex/pulls", "POST"],
     ]);
     const body = JSON.parse(String(requests[1]?.init?.body));
     expect(body).toMatchObject({
       title: "sync: upstream v2.32.0",
-      head: "sync/upstream-v2.32.0-1111111",
+      head: "sync/upstream-v2.32.0-111111111111-000000000000",
       base: "dev",
       draft: true,
     });
@@ -157,7 +162,37 @@ describe("fork sync draft pull requests", () => {
     expect(requestCount).toBe(0);
   });
 
-  test("labels only an exact, autonomous published head", async () => {
+  test("rejects a branch that is not derived from the immutable candidate", async () => {
+    let requestCount = 0;
+    const fetchImpl: FetchImplementation = async () => {
+      requestCount++;
+      return response([]);
+    };
+    await expect(createDraftPullRequestClient({
+      repository: "yansigit/opencodex",
+      token: "secret-token",
+      fetchImpl,
+    }).upsert({
+      event,
+      result: { ...result, branch: "sync/upstream-v2.32.0-attacker" },
+    })).rejects.toThrow("does not match immutable candidate identity");
+    expect(requestCount).toBe(0);
+  });
+
+  test("rejects a candidate base outside refs/heads", async () => {
+    const invalidEvent: SyncEvent = {
+      ...event,
+      baseRef: "refs/tags/dev",
+      candidate: { ...event.candidate!, baseRef: "refs/tags/dev" },
+    };
+    await expect(createDraftPullRequestClient({
+      repository: "yansigit/opencodex",
+      token: "secret-token",
+      fetchImpl: async () => response([]),
+    }).upsert({ event: invalidEvent, result })).rejects.toThrow("base ref is invalid");
+  });
+
+  test("does not mutate labels for an autonomous published head", async () => {
     const requests: Array<{ input: string; init?: RequestInit }> = [];
     const fetchImpl: FetchImplementation = async (input, init) => {
       requests.push({ input: String(input), init });
@@ -178,7 +213,8 @@ describe("fork sync draft pull requests", () => {
       fetchImpl,
     }).upsert({ event, result, publishResult: published });
 
-    expect(requests.some(request => request.input.includes("/issues/31/labels"))).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(requests.some(request => request.input.includes("/labels"))).toBe(false);
     expect(requests.some(request => request.input.includes("/actions/workflows/pr-automation.yml/dispatches"))).toBe(false);
   });
 
@@ -200,23 +236,32 @@ describe("fork sync draft pull requests", () => {
     expect(requests).toHaveLength(2);
   });
 
-  test("reconciles an existing PR instead of returning blindly", async () => {
+  test("returns an existing PR without reconciling its body or labels", async () => {
     const requests: Array<{ input: string; init?: RequestInit }> = [];
     const fetchImpl: FetchImplementation = async (input, init) => {
       requests.push({ input: String(input), init });
-      if (requests.length === 1) return response([{ number: 44, state: "open", draft: true, body: "<!-- opencodex-fork-sync -->", head: { ref: result.branch, sha: published.remoteSha }, base: { ref: "dev" } }]);
-      const url = String(input);
-      if (url.endsWith("/pulls/44")) return response({ number: 44, state: "open", changed_files: 1, head: { ref: result.branch, sha: published.remoteSha }, base: { ref: "dev" }, body: "<!-- opencodex-fork-sync -->" });
-      if (url.endsWith("/opencodex")) return response({ default_branch: "dev" });
-      if (url.includes("/files?")) return response([{ filename: "src/feature.ts" }]);
-      if (url.includes("/issues/44/labels")) return response([]);
-      if (requests.length === 2 || requests.length === 3) return response([]);
+      if (requests.length === 1) return response([{ number: 44, state: "open", draft: true, body: "Human-owned notes", head: { ref: result.branch, sha: published.remoteSha }, base: { ref: "dev" } }]);
       return response({});
     };
-    await createDraftPullRequestClient({ repository: "yansigit/opencodex", token: "secret", fetchImpl }).upsert({ event, result, publishResult: published });
-    expect(requests.some(request => request.input.includes("/issues/44/labels"))).toBe(true);
-    expect(requests.some(request => request.init?.method === "POST" && request.input.includes("/labels"))).toBe(true);
+    const number = await createDraftPullRequestClient({ repository: "yansigit/opencodex", token: "secret", fetchImpl }).upsert({ event, result, publishResult: published });
+    expect(number).toBe(44);
+    expect(requests).toHaveLength(1);
+    expect(requests.some(request => request.init?.method === "PATCH" || request.input.includes("/labels"))).toBe(false);
     expect(requests.some(request => request.input.includes("/actions/workflows/pr-automation.yml/dispatches"))).toBe(false);
+  });
+
+  test("fails closed when an existing PR branch points at a different published head", async () => {
+    const fetchImpl: FetchImplementation = async () => response([{
+      number: 45,
+      state: "open",
+      head: { ref: result.branch, sha: "5".repeat(40) },
+      base: { ref: "dev" },
+    }]);
+    await expect(createDraftPullRequestClient({
+      repository: "yansigit/opencodex",
+      token: "secret",
+      fetchImpl,
+    }).upsert({ event, result, publishResult: published })).rejects.toThrow("head does not match");
   });
 
   test.each([

@@ -46,7 +46,7 @@ async function fixture() {
   await git(work, "add", "vendor");
   await git(work, "commit", "-m", "vendor");
   const vendorMainSha = await git(work, "rev-parse", "HEAD");
-  const branch = "sync/upstream-v1.2.3-abcdef0";
+  const branch = `sync/upstream-v1.2.3-${vendorMainSha.slice(0, 12)}-${devSha.slice(0, 12)}`;
   await git(work, "switch", "-c", branch, devSha);
   await git(work, "merge", "--no-ff", vendorMainSha, "-m", "sync");
   const localSha = await git(work, "rev-parse", "HEAD");
@@ -66,6 +66,15 @@ async function fixture() {
     latestTagSha: vendorMainSha,
     vendorMainSha,
     vendorDevSha: "unused",
+    baseRef: "refs/heads/dev",
+    baseSha: devSha,
+    candidate: {
+      upstreamRepo: "upstream",
+      upstreamTag: "v1.2.3",
+      upstreamSha: vendorMainSha,
+      baseRef: "refs/heads/dev",
+      baseSha: devSha,
+    },
     detectedAt: "2026-08-29T00:00:00.000Z",
   };
   const result: PrepareResult = {
@@ -78,9 +87,17 @@ async function fixture() {
 }
 
 describe("fail-closed sync branch publisher", () => {
-  test("creates a missing branch without force", async () => {
+  test("creates a missing branch with an empty lease", async () => {
     const f = await fixture();
-    const published = await publishSyncBranch({ ...f, result: { ...f.result, status: "decision-handoff" } });
+    const calls: string[][] = [];
+    const published = await publishSyncBranch({
+      ...f,
+      runner: async args => {
+        calls.push([...args]);
+        return f.runner(args);
+      },
+      result: { ...f.result, status: "decision-handoff" },
+    });
 
     expect(published).toMatchObject({
       action: "created",
@@ -89,8 +106,9 @@ describe("fail-closed sync branch publisher", () => {
       containsDev: true,
       containsVendorMain: true,
       handoffRequired: true,
-      escalationRequired: false,
+      escalationRequired: true,
     });
+    expect(calls.find(args => args[0] === "push")).toContain(`--force-with-lease=refs/heads/${f.branch}:`);
     expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(f.localSha);
   });
 
@@ -105,15 +123,12 @@ describe("fail-closed sync branch publisher", () => {
     expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(f.localSha);
   });
 
-  test("fast-forwards an existing ancestor", async () => {
+  test("rejects an existing ancestor collision without mutation", async () => {
     const f = await fixture();
     await git(f.work, "push", "origin", `${f.devSha}:refs/heads/${f.branch}`);
 
-    expect(await publishSyncBranch({ ...f })).toMatchObject({
-      action: "fast-forwarded",
-      remoteSha: f.localSha,
-    });
-    expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(f.localSha);
+    await expect(publishSyncBranch({ ...f })).rejects.toThrow("immutable sync branch collision");
+    expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(f.devSha);
   });
 
   test("leaves an equal branch unchanged", async () => {
@@ -127,7 +142,7 @@ describe("fail-closed sync branch publisher", () => {
     expect(published.handoffRequired).toBe(false);
   });
 
-  test("preserves a resolved remote branch byte-for-byte", async () => {
+  test("rejects a resolved remote branch collision", async () => {
     const f = await fixture();
     writeFileSync(join(f.work, "resolution"), "agent work\n");
     await git(f.work, "add", "resolution");
@@ -136,20 +151,10 @@ describe("fail-closed sync branch publisher", () => {
     await git(f.work, "push", "origin", `${resolvedSha}:refs/heads/${f.branch}`);
     await git(f.work, "reset", "--hard", f.localSha);
 
-    const published = await publishSyncBranch({
+    await expect(publishSyncBranch({
       ...f,
       result: { ...f.result, status: "decision-handoff" },
-    });
-
-    expect(published).toMatchObject({
-      action: "preserved-advanced",
-      branch: f.branch,
-      remoteSha: resolvedSha,
-      containsDev: true,
-      containsVendorMain: true,
-      handoffRequired: true,
-      escalationRequired: true,
-    });
+    })).rejects.toThrow("immutable sync branch collision");
     expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(resolvedSha);
   });
 
@@ -173,7 +178,7 @@ describe("fail-closed sync branch publisher", () => {
     });
   });
 
-  test("escalates preserved partial hotspot work", async () => {
+  test("rejects a partial hotspot collision", async () => {
     const f = await fixture();
     await git(f.work, "switch", "dev");
     writeFileSync(join(f.work, "partial"), "partial\n");
@@ -182,21 +187,13 @@ describe("fail-closed sync branch publisher", () => {
     const partialSha = await git(f.work, "rev-parse", "HEAD");
     await git(f.work, "push", "origin", `${partialSha}:refs/heads/${f.branch}`);
 
-    const published = await publishSyncBranch({
+    await expect(publishSyncBranch({
       ...f,
       result: { ...f.result, status: "decision-handoff" },
-    });
-
-    expect(published).toMatchObject({
-      action: "preserved-diverged",
-      remoteSha: partialSha,
-      containsVendorMain: false,
-      handoffRequired: true,
-      escalationRequired: true,
-    });
+    })).rejects.toThrow("immutable sync branch collision");
   });
 
-  test("preserves a resolved branch when dev advances", async () => {
+  test("rejects a resolved branch collision when dev advances", async () => {
     const f = await fixture();
     writeFileSync(join(f.work, "resolution"), "resolved\n");
     await git(f.work, "add", "resolution");
@@ -210,25 +207,15 @@ describe("fail-closed sync branch publisher", () => {
     await git(f.work, "commit", "-m", "advance dev");
     const newDevSha = await git(f.work, "rev-parse", "HEAD");
 
-    const published = await publishSyncBranch({
+    await expect(publishSyncBranch({
       ...f,
       devSha: newDevSha,
       result: { ...f.result, status: "decision-handoff" },
-    });
-
-    expect(published).toMatchObject({
-      action: "preserved-advanced",
-      branch: f.branch,
-      remoteSha: resolvedSha,
-      containsDev: false,
-      containsVendorMain: true,
-      handoffRequired: true,
-      escalationRequired: true,
-    });
+    })).rejects.toThrow("immutable sync branch collision");
     expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(resolvedSha);
   });
 
-  test("preserves and escalates a divergent remote branch", async () => {
+  test("rejects a divergent remote branch collision", async () => {
     const f = await fixture();
     await git(f.work, "switch", "-C", "remote-diverged", f.devSha);
     writeFileSync(join(f.work, "remote-only"), "remote\n");
@@ -237,26 +224,17 @@ describe("fail-closed sync branch publisher", () => {
     const remoteSha = await git(f.work, "rev-parse", "HEAD");
     await git(f.work, "push", "origin", `${remoteSha}:refs/heads/${f.branch}`);
 
-    const published = await publishSyncBranch({ ...f });
-
-    expect(published.action).toBe("preserved-diverged");
-    expect(published.remoteSha).toBe(remoteSha);
-    expect(published.escalationRequired).toBe(true);
+    await expect(publishSyncBranch({ ...f })).rejects.toThrow("immutable sync branch collision");
   });
 
-  test("preserves every existing history-diverged branch", async () => {
+  test("rejects every existing history-diverged branch collision", async () => {
     const f = await fixture();
     await git(f.work, "push", "origin", `${f.devSha}:refs/heads/${f.branch}`);
 
-    const published = await publishSyncBranch({
+    await expect(publishSyncBranch({
       ...f,
       result: { ...f.result, status: "history-diverged" },
-    });
-
-    expect(published.action).toBe("preserved-diverged");
-    expect(published.remoteSha).toBe(f.devSha);
-    expect(published.handoffRequired).toBe(true);
-    expect(published.escalationRequired).toBe(true);
+    })).rejects.toThrow("immutable sync branch collision");
   });
 
   test("fails closed when the remote advances during publication", async () => {
@@ -284,7 +262,7 @@ describe("fail-closed sync branch publisher", () => {
       return f.runner(args);
     };
 
-    await expect(publishSyncBranch({ ...f, runner: racingRunner })).rejects.toThrow("rejected");
+    await expect(publishSyncBranch({ ...f, runner: racingRunner })).rejects.toThrow("immutable sync branch collision");
     expect(await git(f.work, "ls-remote", "origin", `refs/heads/${f.branch}`)).toContain(racedSha);
   });
 

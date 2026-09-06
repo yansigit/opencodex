@@ -135,7 +135,7 @@ function classifyPullRequest(input = {}) {
   }
 
   const updateable = pr?.state === "open" && !pr.draft && sameRepository &&
-    ["same-repo-human", "deterministic-sync"].includes(className) &&
+    className === "same-repo-human" &&
     !labels.has("automation:hold");
   return {
     class: className,
@@ -176,6 +176,10 @@ function workflowRunRetryDisposition({ run, pr, repository } = {}) {
   }
   if (pr.base?.ref !== "dev" && !promotion) return { action: "ignore", reason: "unsupported-target" };
   return { action: "rerun", reason: `first-${run.conclusion}`, runId: Number(run.id), pullNumber: Number(pr.number) };
+}
+
+function isMissingPullRequestError(error) {
+  return Number(error?.status) === 404;
 }
 
 function filePathEntries(files = []) {
@@ -441,6 +445,7 @@ module.exports = {
   buildAutomationComment,
   classifyPullRequest,
   exactHeadGate,
+  isMissingPullRequestError,
   summarizeAgedHolds,
   workflowRunRetryDisposition,
 };

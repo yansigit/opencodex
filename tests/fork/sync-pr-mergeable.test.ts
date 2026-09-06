@@ -36,6 +36,13 @@ describe("fork PR mergeable workflow", () => {
     expect(source).toContain("GitHub has not computed mergeability");
   });
 
+  test("preserves GitHub null while mergeability is still being computed", () => {
+    const source = workflow();
+
+    expect(source).toContain('if .mergeable == null then "null" else (.mergeable | tostring) end');
+    expect(source).not.toContain("--jq '.mergeable'");
+  });
+
   test("rejects branches that are not descendants of the base with promotion-specific recovery", () => {
     const source = workflow();
 
@@ -55,7 +62,7 @@ describe("fork PR mergeable workflow", () => {
     expect(source).not.toMatch(/pull-requests:\s*write/);
   });
 
-  test("uses the trusted base verifier for sync PRs after the transition-validation bootstrap", () => {
+  test("uses only the trusted base verifier for sync PRs", () => {
     const source = workflow();
     expect(source).toContain("if: startsWith(github.head_ref, 'sync/')");
     expect(source).toContain("uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2");
@@ -63,14 +70,23 @@ describe("fork PR mergeable workflow", () => {
       .toBeLessThan(source.indexOf("Preservation overlap check for sync PR"));
     expect(source).toContain('git worktree add --detach "$trusted" "$BASE_SHA"');
     expect(source).toContain('verifier="$trusted/scripts/fork/sync/cli.ts"');
-    expect(source).toContain("if ! grep -q 'validateRegistryTransition' \"$trusted/scripts/fork/sync/preservation.ts\"; then");
-    expect(source).toContain('verifier="$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts"');
+    expect(source).not.toContain('verifier="$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts"');
     expect(source).toContain('bun "$verifier" verify');
     expect(source).toContain('FORK_SYNC_WORKTREE="$GITHUB_WORKSPACE"');
     expect(source).toContain('FORK_SYNC_TRUSTED_REGISTRY="$trusted/docs/fork/PRESERVATION.json"');
     expect(source).toContain('"$trusted/docs/fork/PRESERVATION.json"');
     expect(source).not.toMatch(/jq[^\n]+\sdocs\/fork\/PRESERVATION\.json/);
     expect(source).not.toContain("bun scripts/fork/sync/cli.ts overlap");
+  });
+
+  test("reads live exact-head provenance instead of the synchronize event body snapshot", () => {
+    const source = workflow();
+    expect(source).not.toContain("PR_BODY: ${{ github.event.pull_request.body }}");
+    expect(source).toContain('pr_json="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"');
+    expect(source).toContain("pull-requests: read");
+    expect(source).toContain('if [[ ! "$live_head" =~ ^[0-9a-fA-F]{40}$ ]]; then');
+    expect(source).toContain('if [ "$live_head" != "$HEAD_SHA" ]; then');
+    expect(source).toContain('PR_BODY="$(printf \'%s\' "$pr_json" | jq -r \'.body // ""\')"');
   });
 
   test("binds exact head, registry, decisions, and report through PR provenance", () => {
@@ -85,8 +101,7 @@ describe("fork PR mergeable workflow", () => {
     expect(source).toContain('tag="$(jq -r --arg sha "$upstream" \'.releases | to_entries[] | select(.value.tagSha == $sha) | .value.tag\' "$trusted/docs/fork/PRESERVATION.json" | head -n 1)"');
     expect(source).toContain('tag="$(git show "$upstream:package.json" 2>/dev/null | jq -r \'select(.version != null) | "v" + .version\' || true)"');
     expect(source).toContain('if [ -z "$tag" ]; then');
-    expect(source.indexOf('verifier="$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts"'))
-      .toBeGreaterThan(source.indexOf('if [ -z "$tag" ]; then'));
+    expect(source).not.toContain("validateRegistryTransition' \"$trusted/scripts/fork/sync/preservation.ts\"");
     expect(source).toContain('echo "::error::Preservation provenance does not identify a registered upstream release"');
     expect(source).not.toMatch(/jq[^\n]+\sdocs\/fork\/PRESERVATION\.json/);
   });

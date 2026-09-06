@@ -14,6 +14,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   mergeable:
@@ -46,7 +47,8 @@ jobs:
           while [ "$mergeable" = "null" ] && [ "$attempts" -lt 3 ]; do
             attempts=$((attempts + 1))
             sleep 10
-            mergeable="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" --jq '.mergeable')"
+            mergeable="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER" \
+              --jq 'if .mergeable == null then "null" else (.mergeable | tostring) end')"
           done
 
           if [ "$mergeable" = "null" ]; then
@@ -88,13 +90,29 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BODY: ${{ github.event.pull_request.body }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
           if [[ ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ ]] || [[ ! "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo "::error::Pull request SHAs are malformed"
             exit 1
           fi
+          # A synchronize event snapshots the old body before the sync publisher can
+          # attach exact-head evidence. Read the live PR so the gate sees an attestation
+          # added moments later, while still binding it to this workflow's immutable head.
+          pr_json="$(gh api "repos/$REPOSITORY/pulls/$PR_NUMBER")"
+          live_head="$(printf '%s' "$pr_json" | jq -r '.head.sha // empty')"
+          if [[ ! "$live_head" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Live pull request head SHA is malformed"
+            exit 1
+          fi
+          if [ "$live_head" != "$HEAD_SHA" ]; then
+            echo "Pull request advanced to $live_head; this $HEAD_SHA run is superseded."
+            exit 0
+          fi
+          PR_BODY="$(printf '%s' "$pr_json" | jq -r '.body // ""')"
           provenance="$(printf '%s\n' "$PR_BODY" | sed -n 's/^<!-- opencodex-fork-sync-provenance:\(.*\) -->$/\1/p' | tail -n 1)"
           if ! printf '%s' "$provenance" | jq -e . >/dev/null 2>&1; then
             echo "::error::Missing or malformed exact-head preservation provenance"
@@ -115,12 +133,6 @@ jobs:
           tag="$(jq -r --arg sha "$upstream" '.releases | to_entries[] | select(.value.tagSha == $sha) | .value.tag' "$trusted/docs/fork/PRESERVATION.json" | head -n 1)"
           if [ -z "$tag" ]; then
             tag="$(git show "$upstream:package.json" 2>/dev/null | jq -r 'select(.version != null) | "v" + .version' || true)"
-            # One-time bootstrap for a base whose verifier predates candidate-registry
-            # transition validation. Once this change lands, later syncs stay on the
-            # trusted-base verifier even when introducing their next release entry.
-            if ! grep -q 'validateRegistryTransition' "$trusted/scripts/fork/sync/preservation.ts"; then
-              verifier="$GITHUB_WORKSPACE/scripts/fork/sync/cli.ts"
-            fi
           fi
           if [ -z "$tag" ]; then
             echo "::error::Preservation provenance does not identify a registered upstream release"

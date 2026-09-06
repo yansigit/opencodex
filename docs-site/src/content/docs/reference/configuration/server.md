@@ -132,8 +132,12 @@ The port is required and must differ from the proxy port. It is never OS-assigne
 would change across restarts while already-running app-servers kept the previous `base_url`.
 
 The listener serves only `POST /v1/responses`, its WebSocket upgrade, `POST /v1/responses/compact`,
-`POST /v1/alpha/search` (the native Codex web-search relay), `GET /v1/models`, and the standalone
-realtime voice WebSocket upgrades. Everything else, including `/api/*` and the dashboard, returns `404`.
+`POST /v1/alpha/search` (the native Codex web-search relay), `GET /v1/models`, `POST /v1/messages`,
+`POST /v1/messages/count_tokens`, and the realtime voice surface: standalone WebSocket upgrades,
+WebRTC call creation (`POST /v1/live`, `POST /v1/realtime/calls`), and keyed sideband join upgrades
+(`/v1/live/{callId}`, `/v1/realtime/calls/{callId}`, `/v1/realtime?call_id=`). The two Messages routes
+support local Claude Code clients speaking the Anthropic protocol. Everything else, including `/api/*`
+and the dashboard, returns `404`.
 
 :::danger[This is an unauthenticated surface]
 Every process on the machine can use this listener. It spends account quota and paid provider
@@ -287,10 +291,36 @@ These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx clau
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | inherit | Effort written to generated `~/.claude/agents/ocx-*.md`; separate from Codex guidance and proxy caps. Restart through `ocx claude` to regenerate. |
 | `claudeCode.compatibility?` | `"shadow" \| "enforce"` | `enforce` | Compatibility gate for routed Claude ingress: `enforce` rejects unsupported requests before upstream activity with `400 invalid_request_error`; `shadow` records ordinary incompatibilities without rejecting, but signed-thinking ownership and other safety invariants still fail closed. |
 
+
 Auto auth selects subscription when stored Claude auth is found, proxy when none is found, and
 subscription with a warning when detection is inconclusive. See
 [Claude Code auth mode](/guides/claude-code/#auth-mode).
 
+When `unauthenticatedLoopbackListener.enabled` is explicitly `true`, its Claude compatibility
+surface admits exactly `POST /v1/messages` and `POST /v1/messages/count_tokens` (POST only).
+No other Claude path is admitted there; the listener is off by default, its `port` is required,
+and that port must differ from the proxy port. Public-listener authentication is unchanged by
+the secondary listener. See
+[Local clients that cannot receive the token](#local-clients-that-cannot-receive-the-token).
+
+### Claude directive trust and token benchmark
+
+Generated `~/.claude/agents/ocx-*.md` definitions carry signed route and optional effort
+directives. OpenCodex verifies a present signature before provider dispatch; a malformed or
+invalid signature fails closed with `400 invalid_request_error`. A definition with no signature
+may use compatibility fallback only when its directive exactly matches an active OpenCodex-owned
+roster entry; arbitrary unsigned text is ignored. Diagnostics never show key material.
+
+To compare routed token estimates with authoritative Anthropic counts, run
+`bun run benchmark:claude-tokens -- --provider <provider> --model <model> --confirm-live-provider-charges [--json]`
+deliberately. The confirmation flag is explicit consent: confirmed runs send real requests and
+may incur provider charges, so do not automate or run them unattended. The benchmark uses a
+deterministic sanitized fixture set, sends fixtures sequentially without retries or fallback,
+and emits only a non-persistent allowlist of fixture ids/digests, states, metrics, provider kind,
+and model id (never request bodies, credentials, or account identifiers). A fixture passes when
+its absolute error is within `max(32 tokens, 20%)`; the weighted aggregate must remain within
+10%. Routed `/v1/messages/count_tokens` remains a local approximation for routed models; only
+native Anthropic requests with an `sk-ant-` credential pass through to Anthropic.
 ## Shadow calls
 
 Codex uses small helper models for tasks such as titles and commit messages. Enable

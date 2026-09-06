@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replacePersistedConfig, saveConfig } from "../src/config";
 import { createAnthropicAdapter } from "../src/adapters/anthropic";
+import { getOrCreateDirectiveSigningKey } from "../src/claude/directive-key";
+import { signDirective } from "../src/claude/directive-sign";
 import { clearableDeadline } from "../src/lib/abort";
 import {
   clearRequestLogsForTests,
@@ -17,6 +19,7 @@ import { ownedServiceHomeInspection } from "./helpers/owned-service-home-inspect
 import {
   estimateClaudeRequestTokens,
   fetchWithHeaderDeadline,
+  handleClaudeCountTokens,
   handleClaudeMessages,
   readBoundedPassthroughBody,
   resolvePassthroughBodyGuard,
@@ -101,6 +104,7 @@ function mockConfig(baseUrl: string, claudeCode?: OcxConfig["claudeCode"]): OcxC
     providers: {
       mock: { adapter: "openai-chat", baseUrl, apiKey: "k", allowPrivateNetwork: true },
     },
+    subagentModels: ["mock/test-model"],
     ...(claudeCode ? { claudeCode } : {}),
   } as OcxConfig;
 }
@@ -196,6 +200,56 @@ test("non-streaming /v1/messages returns an Anthropic message JSON", async () =>
     expect(typeof json.usage.input_tokens).toBe("number");
   } finally {
     await server.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("benchmark usage observer is one-shot, isolated from mutation, and non-disruptive", async () => {
+  const upstream = mockChatUpstream();
+  const config = mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`);
+  const observations: Array<{ adapterKind: string; modelId: string; inputTokens?: number }> = [];
+  const request = () => new Request("http://localhost/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "mock/test-model",
+      max_tokens: 8,
+      stream: false,
+      messages: [{ role: "user", content: "observer isolation" }],
+    }),
+  });
+  try {
+    const mutated = await handleClaudeMessages(
+      request(),
+      config,
+      { model: "test-model", provider: "mock", surface: "claude" },
+      undefined,
+      config,
+      { onRawUsage: observation => {
+        observations.push({
+          adapterKind: observation.adapterKind,
+          modelId: observation.modelId,
+          inputTokens: observation.usage?.inputTokens,
+        });
+        if (observation.usage) observation.usage.inputTokens = 999_999;
+      } },
+    );
+    expect(mutated.status).toBe(200);
+    const body = await mutated.json() as { usage: { input_tokens: number } };
+    expect(body.usage.input_tokens).toBe(12);
+    expect(observations).toEqual([{ adapterKind: "openai-chat", modelId: "test-model", inputTokens: 12 }]);
+
+    const throwing = await handleClaudeMessages(
+      request(),
+      config,
+      { model: "test-model", provider: "mock", surface: "claude" },
+      undefined,
+      config,
+      { onRawUsage: () => { throw new Error("observer failure"); } },
+    );
+    expect(throwing.status).toBe(200);
+    expect((await throwing.json() as { usage: { input_tokens: number } }).usage.input_tokens).toBe(12);
+  } finally {
     upstream.stop(true);
   }
 });
@@ -1200,6 +1254,38 @@ test("count_tokens returns a positive estimate in the exact contract shape", asy
   }
 });
 
+test("routed count_tokens stays local and does not invoke provider transport or benchmark observation", async () => {
+  const raw = {
+    model: "mock/test-model",
+    system: "be brief",
+    messages: [{ role: "user", content: "count this routed request" }],
+    tools: [{ name: "Read", input_schema: { type: "object" } }],
+  };
+  const expected = estimateClaudeRequestTokens(raw, raw.model);
+  // The count_tokens handler has no benchmark observer parameter; keep this
+  // sentinel to make the no-observation invariant explicit in the regression.
+  const observerCalls: unknown[] = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (() => {
+    throw new Error("provider transport must not be reached by routed count_tokens");
+  }) as typeof fetch;
+  try {
+    const response = await handleClaudeCountTokens(
+      new Request("http://localhost/v1/messages/count_tokens", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(raw),
+      }),
+      mockConfig("http://127.0.0.1:1/v1"),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ input_tokens: expected });
+    expect(observerCalls).toHaveLength(0);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 /** Minimal PNG header (signature + IHDR) so the attachment sniffer can read real dimensions. */
 function countTokensPngBase64(width: number, height: number): string {
   const u32be = (n: number): number[] => [(n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff];
@@ -1419,6 +1505,8 @@ test("generated agent effort directive restores exact xhigh and max after Claude
   const { server: upstream, captured } = mockChatUpstreamCapturing();
   saveConfig(mockConfig(`${upstream.url.toString().replace(/\/$/, "")}/v1`));
   const server = startServer(0);
+  const route = "claude-ocx-mock--test-model";
+  const key = getOrCreateDirectiveSigningKey();
   try {
     for (const effort of ["xhigh", "max"]) {
       const response = await postMessages(server.url.toString(), {
@@ -1426,8 +1514,9 @@ test("generated agent effort directive restores exact xhigh and max after Claude
         max_tokens: 32000,
         stream: true,
         system: [
-          { type: "text", text: "<!-- ocx-route: claude-ocx-mock--test-model -->" },
+          { type: "text", text: `<!-- ocx-route: ${route} -->` },
           { type: "text", text: `<!-- ocx-effort: ${effort} -->` },
+          { type: "text", text: `<!-- ocx-sig: v1:${signDirective(route, effort, key)} -->` },
         ],
         thinking: { type: "enabled", budget_tokens: 31999 },
         messages: [{ role: "user", content: "hi" }],
@@ -1464,6 +1553,7 @@ test("generated agent effort directive preserves routed Anthropic structured out
   saveConfig({
     port: 0,
     defaultProvider: "mock-anthropic",
+    subagentModels: ["mock-anthropic/claude-sonnet-5"],
     providers: {
       "mock-anthropic": {
         adapter: "anthropic",
@@ -1474,6 +1564,9 @@ test("generated agent effort directive preserves routed Anthropic structured out
     },
   } as OcxConfig);
   const server = startServer(0);
+  const route = "claude-ocx-mock-anthropic--claude-sonnet-5";
+  const effort = "max";
+  const key = getOrCreateDirectiveSigningKey();
   const schema = {
     type: "object",
     properties: { answer: { type: "string" } },
@@ -1486,8 +1579,9 @@ test("generated agent effort directive preserves routed Anthropic structured out
       max_tokens: 32000,
       stream: true,
       system: [
-        { type: "text", text: "<!-- ocx-route: claude-ocx-mock-anthropic--claude-sonnet-5 -->" },
-        { type: "text", text: "<!-- ocx-effort: max -->" },
+        { type: "text", text: `<!-- ocx-route: ${route} -->` },
+        { type: "text", text: `<!-- ocx-effort: ${effort} -->` },
+        { type: "text", text: `<!-- ocx-sig: v1:${signDirective(route, effort, key)} -->` },
       ],
       thinking: { type: "enabled", budget_tokens: 31999 },
       output_config: {

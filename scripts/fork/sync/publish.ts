@@ -1,7 +1,8 @@
 import { isAncestor } from "./contained";
 import { preservationReportHash } from "./overlap";
 import { decisionHash, loadRegistry, registryHash } from "./preservation";
-import type { CommandRunner, PrepareResult, PublishAction, PublishResult, SyncEvent } from "./types";
+import { branchFor } from "./prepare";
+import type { CandidateIdentity, CommandRunner, PrepareResult, PublishAction, PublishResult, SyncEvent } from "./types";
 
 interface PublishOptions {
   event: SyncEvent;
@@ -18,6 +19,30 @@ async function required(runner: CommandRunner, args: readonly string[]): Promise
   return result.stdout.trim();
 }
 
+function candidateIdentity(event: SyncEvent, result: PrepareResult): CandidateIdentity {
+  const candidate = result.candidate ?? event.candidate;
+  if (!candidate) throw new Error("publish requires immutable candidate identity");
+  if (!candidate.upstreamRepo || !candidate.upstreamTag || !candidate.baseRef) {
+    throw new Error("publish candidate identity is incomplete");
+  }
+  if (!candidate.baseRef.startsWith("refs/heads/") || candidate.baseRef.includes("..")) {
+    throw new Error("publish candidate identity contains an invalid base ref");
+  }
+  if (!/^[0-9a-f]{40}$/i.test(candidate.upstreamSha) || !/^[0-9a-f]{40}$/i.test(candidate.baseSha)) {
+    throw new Error("publish candidate identity contains a malformed SHA");
+  }
+  if (
+    candidate.upstreamRepo !== event.upstreamRepo
+    || (event.upstreamTag && candidate.upstreamTag !== event.upstreamTag)
+    || (event.upstreamSha && candidate.upstreamSha !== event.upstreamSha)
+    || (event.baseRef !== undefined && candidate.baseRef !== event.baseRef)
+    || (event.baseSha !== undefined && candidate.baseSha !== event.baseSha)
+  ) {
+    throw new Error("publish candidate identity does not match the sync event");
+  }
+  return candidate;
+}
+
 function buildResult(
   action: PublishAction,
   branch: string,
@@ -27,9 +52,6 @@ function buildResult(
   provenance: PublishResult["provenance"],
   remoteSha?: string,
 ): PublishResult {
-  const preservedRemote = action === "unchanged"
-    || action === "preserved-advanced"
-    || action === "preserved-diverged";
   return {
     action,
     branch,
@@ -37,9 +59,7 @@ function buildResult(
     containsDev,
     containsVendorMain,
     handoffRequired: prepare.status === "decision-handoff" || prepare.status === "history-diverged",
-    escalationRequired: preservedRemote && (
-      prepare.status !== "merged" || !containsDev || !containsVendorMain
-    ),
+    escalationRequired: prepare.status !== "merged" || !containsDev || !containsVendorMain,
     ...(prepare.preservationReport ? { preservationReport: prepare.preservationReport } : {}),
     registryHash: provenance.registryHash,
     provenance,
@@ -50,6 +70,10 @@ export async function publishSyncBranch(options: PublishOptions): Promise<Publis
   const { event, result, devSha, runner } = options;
   const branch = result.branch;
   if (!branch) throw new Error("publish requires a prepare result branch");
+  const candidate = candidateIdentity(event, result);
+  if (branch !== branchFor({ ...event, candidate })) {
+    throw new Error("publish branch does not match immutable candidate identity");
+  }
 
   await required(runner, ["check-ref-format", "--branch", branch]);
   const localSha = await required(runner, ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
@@ -58,8 +82,8 @@ export async function publishSyncBranch(options: PublishOptions): Promise<Publis
   const report = result.preservationReport;
   const provenanceFor = (headSha: string): NonNullable<PublishResult["provenance"]> => ({
     headSha,
-    tagSha: event.latestTagSha,
-    baseSha: report?.shas.base ?? devSha,
+    tagSha: candidate.upstreamSha,
+    baseSha: report?.shas.base ?? candidate.baseSha,
     registryHash: registryHash(),
     decisionHash: report?.decisionHash ?? decisionHash(loadRegistry(), event.latestTag),
     reportHash: report ? preservationReportHash(report) : "",
@@ -67,7 +91,10 @@ export async function publishSyncBranch(options: PublishOptions): Promise<Publis
   const remote = await runner(["ls-remote", "--exit-code", "origin", `refs/heads/${branch}`]);
 
   if (remote.exitCode === 2) {
-    await required(runner, ["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`]);
+    // Empty expected value makes creation a write-once operation.  If another
+    // writer creates the ref after ls-remote, git rejects this push instead of
+    // replacing that writer's history.
+    await required(runner, ["push", `--force-with-lease=refs/heads/${branch}:`, "origin", `refs/heads/${branch}:refs/heads/${branch}`]);
     return buildResult("created", branch, containsDev, containsVendorMain, result, provenanceFor(localSha), localSha);
   }
   if (remote.exitCode !== 0) {
@@ -78,22 +105,10 @@ export async function publishSyncBranch(options: PublishOptions): Promise<Publis
   if (!remoteSha || !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(remoteSha)) {
     throw new Error("origin returned an invalid sync branch SHA");
   }
-  await required(runner, ["fetch", "--no-tags", "origin", remoteSha]);
-  const remoteContainsDev = await isAncestor(runner, devSha, remoteSha);
-  const remoteContainsVendorMain = await isAncestor(runner, event.vendorMainSha, remoteSha);
-
   if (remoteSha === localSha) {
-    return buildResult("unchanged", branch, remoteContainsDev, remoteContainsVendorMain, result, provenanceFor(remoteSha), remoteSha);
+    return buildResult("unchanged", branch, containsDev, containsVendorMain, result, provenanceFor(remoteSha), remoteSha);
   }
-  if (result.status === "history-diverged") {
-    return buildResult("preserved-diverged", branch, remoteContainsDev, remoteContainsVendorMain, result, provenanceFor(remoteSha), remoteSha);
-  }
-  if (await isAncestor(runner, remoteSha, localSha)) {
-    await required(runner, ["push", "origin", `refs/heads/${branch}:refs/heads/${branch}`]);
-    return buildResult("fast-forwarded", branch, containsDev, containsVendorMain, result, provenanceFor(localSha), localSha);
-  }
-  if (await isAncestor(runner, localSha, remoteSha)) {
-    return buildResult("preserved-advanced", branch, remoteContainsDev, remoteContainsVendorMain, result, provenanceFor(remoteSha), remoteSha);
-  }
-  return buildResult("preserved-diverged", branch, remoteContainsDev, remoteContainsVendorMain, result, provenanceFor(remoteSha), remoteSha);
+  throw new Error(
+    `immutable sync branch collision: origin/${branch} is ${remoteSha}, local candidate is ${localSha}; refusing to mutate remote ref`,
+  );
 }
