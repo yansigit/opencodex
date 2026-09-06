@@ -314,6 +314,10 @@ describe("OpenAI provider-option integration spine", () => {
       );
       const openai = seed("openai");
       delete openai.codexAccountMode;
+      // Exercise the outbound Codex WebSocket path explicitly. `websockets`
+      // below controls the inbound client transport; the upstream fast lane is
+      // an independent, provider-scoped opt-in.
+      openai.wsUpstream = true;
       const api = seed("openai-apikey");
       api.liveModels = false;
       api.apiKey = "fixture-api-key";
