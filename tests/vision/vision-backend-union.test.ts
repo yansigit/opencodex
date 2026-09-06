@@ -21,7 +21,7 @@ mock.module("../../src/server/management/model-rows", () => ({
 }));
 
 import { handleManagementAPI } from "../../src/server/management-api";
-import { ManagementRequest as Request } from "../helpers/management-auth";
+import { ManagementRequest as Request, inMemoryManagementPersistence } from "../helpers/management-auth";
 import {
   enabledVisionBackends,
   visionCandidateRows,
@@ -108,7 +108,7 @@ describe("management routes: routed union + coherence", () => {
     const url = new URL("http://localhost/api/sidecar-settings");
     const response = await handleManagementAPI(
       new Request(url, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ vision }) }),
-      url, cfg,
+      url, cfg, inMemoryManagementPersistence(cfg),
     );
     if (!response) throw new Error("route did not handle PUT");
     return response;
@@ -160,7 +160,7 @@ describe("management routes: routed union + coherence", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ visionSidecar: body }),
         }),
-        url, cfg,
+        url, cfg, inMemoryManagementPersistence(cfg),
       );
       if (!response) throw new Error("route did not handle PUT");
       return response;
@@ -171,4 +171,3 @@ describe("management routes: routed union + coherence", () => {
     expect((await putOverride({ backend: "openai", model: "volcengine/doubao-1.8-vision" })).status).toBe(400);
   });
 });
-

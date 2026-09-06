@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { handleManagementAPI } from "../../src/server/management-api";
 import type { OcxConfig } from "../../src/types";
+import { isolatedDiskManagementPersistence } from "../helpers/management-auth";
 
 /**
  * Route contract for devlog/_fin/260803_integrations_toggle_all/011.
@@ -208,8 +209,7 @@ test("a held REAL config transaction refuses 409 config_busy, and release lets a
         }),
         url,
         config,
-        // NO persistence seam: the real saveConfigPreservingClaudeCode runs.
-        {},
+        isolatedDiskManagementPersistence(),
       );
     };
     const refused = await putReal(baseConfig({ claudeCode: { enabled: true } }));

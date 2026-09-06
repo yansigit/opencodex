@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
+import { getConfigPath, loadConfig, saveConfig, saveConfigPreservingClaudeCode } from "../../src/config";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { handleManagementAPI, type ManagementApiDeps } from "../../src/server/management-api";
@@ -29,6 +29,7 @@ function request(cfg: OcxConfig, body?: unknown, overrides: Partial<ManagementAp
   });
   return handleManagementAPI(req, new URL(req.url), cfg, {
     getCachedStartupHealth: async () => startupHealthFixture(),
+    saveConfigPreservingClaudeCode,
     ...overrides,
   });
 }
@@ -101,9 +102,11 @@ describe("main-account 99 percent setting", () => {
     for (const previous of [undefined, false, true]) {
       const cfg = config();
       if (previous !== undefined) cfg.codexMainAccountHardLock = previous;
-      await expect(request(cfg, { codexMainAccountHardLock: previous !== true }, {
+      const response = await request(cfg, { codexMainAccountHardLock: previous !== true }, {
         saveConfigPreservingClaudeCode: () => { throw new Error("fixture save failure"); },
-      })).rejects.toThrow("fixture save failure");
+      });
+      expect(response?.status).toBe(500);
+      expect(await response?.json()).toEqual({ error: "management persistence unavailable" });
       expect(cfg.codexMainAccountHardLock).toBe(previous);
       expect(Object.hasOwn(cfg, "codexMainAccountHardLock")).toBe(previous !== undefined);
     }

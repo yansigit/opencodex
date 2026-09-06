@@ -26,6 +26,7 @@ import {
 } from "../../src/clients/config-export";
 import type { OcxConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
+import { inMemoryManagementPersistence } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 /**
@@ -683,13 +684,20 @@ describe("visibility changes refresh connected client catalogs", () => {
     ["/api/model-presets", { provider: "a", mode: "all" }, ["a/m1", "a/m2"]],
   ] as const)("%s refreshes from the persisted selection and reports refused clients", async (path, body, expected) => {
     const config = baseConfig({ fastRows: false });
+    const persistence = inMemoryManagementPersistence(config);
     let saved = false;
     let refreshCalls = 0;
     const url = new URL(`http://127.0.0.1:10100${path}`);
     const response = await handleManagementAPI(new Request(url, {
       method: "PUT", headers: { Host: url.host, "content-type": "application/json" }, body: JSON.stringify(body),
     }), url, config, {
+      ...persistence,
       saveConfigPreservingClaudeCode: () => { saved = true; },
+      mutatePersistedConfig: mutate => {
+        const result = persistence.mutatePersistedConfig!(mutate);
+        if (result.status === "committed") saved = true;
+        return result;
+      },
       createManagementConvergeCodex: catalogConvergenceFactory(),
       refreshOwnedCatalogIntegrations: async input => {
         expect(saved).toBe(true);

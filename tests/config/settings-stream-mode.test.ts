@@ -32,6 +32,7 @@ import {
 import { resetUsageAggregateCacheForTests } from "../../src/server/management/usage-aggregate-cache";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { startupHealthFixture } from "../helpers/startup-health";
+import { isolatedDiskManagementPersistence } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let TEST_DIR = "";
@@ -66,6 +67,7 @@ function putSettings(
     body: JSON.stringify(body),
   });
   return handleManagementAPI(req, new URL(req.url), config, {
+    ...isolatedDiskManagementPersistence(),
     getCachedStartupHealth: readTestStartupHealth,
     ...deps,
   });
@@ -497,17 +499,19 @@ describe("PUT /api/settings", () => {
     const config = baseConfig();
     const before = structuredClone(config);
     let refreshed = false;
-    const request = putSettings(config, {
+    const response = await putSettings(config, {
       codexAutoStart: false,
       streamMode: "legacy-tee",
       appOwnedMemoryBudgetMb: 128,
       codexAccountPickerEnabled: true,
     }, {
       saveConfigPreservingClaudeCode: () => { throw new Error("save failed"); },
+      mutatePersistedConfig: () => { throw new Error("save failed"); },
       createManagementConvergeCodex: catalogConvergenceFactory(() => { refreshed = true; }),
     });
 
-    await expect(request).rejects.toThrow("save failed");
+    expect(response?.status).toBe(500);
+    expect(await response?.json()).toEqual({ error: "management persistence unavailable" });
     expect(config).toEqual(before);
     expect(refreshed).toBe(false);
   });

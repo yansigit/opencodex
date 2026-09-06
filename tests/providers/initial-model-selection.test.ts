@@ -15,7 +15,7 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import { upsertOAuthProvider } from "../../src/oauth";
 import { commitKeyLoginProvider } from "../../src/oauth/login-cli";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
-import { ManagementRequest } from "../helpers/management-auth";
+import { isolatedDiskManagementPersistence, ManagementRequest } from "../helpers/management-auth";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
@@ -54,7 +54,10 @@ async function api(config: OcxConfig, path: string, body?: unknown, method = "PU
   const url = new URL(`http://localhost${path}`);
   const response = await handleManagementAPI(new ManagementRequest(url, body === undefined ? {} : {
     method, headers: { "content-type": "application/json" }, body: JSON.stringify(body),
-  }), url, config, { createManagementConvergeCodex: catalogConvergenceFactory() });
+  }), url, config, {
+    ...isolatedDiskManagementPersistence(),
+    createManagementConvergeCodex: catalogConvergenceFactory(),
+  });
   if (!response) throw new Error("route missing");
   return response;
 }
@@ -197,7 +200,7 @@ describe("initial provider model switches", () => {
     expect(registrationId).not.toBe(provider.initialModelSelection.registrationId);
     created.selectedModels = ["model-2"];
     created.modelPreset = { mode: "custom" };
-    configStore.saveConfig(config);
+    configStore.replacePersistedConfig(config);
     expect((await api(config, "/api/providers", { name: "vendor", provider }, "POST")).status).toBe(200);
     const saved = configStore.loadConfig().providers.vendor;
     expect(saved.selectedModels).toEqual(["model-2"]);
@@ -245,7 +248,7 @@ describe("initial provider model switches", () => {
     const first = configStore.loadConfig().providers.vendor;
     expect(first.initialModelSelection?.status).toBe("pending");
     config.providers.vendor.selectedModels = ["chosen"];
-    configStore.saveConfig(config);
+    configStore.replacePersistedConfig(config);
     await commitKeyLoginProvider(config, "vendor", { ...provider, apiKey: "fixture-second" });
     const saved = configStore.loadConfig().providers.vendor;
     expect(saved.apiKey).toBe("fixture-second");
@@ -305,7 +308,7 @@ describe("initial provider model switches", () => {
     const baseline = captureInitialSelectionBaseline(config);
     const edited = configStore.loadConfig();
     edited.providers.vendor.selectedModels = ["model-2"];
-    configStore.saveConfig(edited);
+    configStore.replacePersistedConfig(edited);
     finalizeInitialModelSelection(config, baseline, rows(20), ["vendor"]);
     expect(configStore.loadConfig().providers.vendor.selectedModels).toEqual(["model-2"]);
     expect(configStore.loadConfig().disabledModels).toBeUndefined();
@@ -340,7 +343,7 @@ describe("initial provider model switches", () => {
     const replacement = fixture();
     expect(replacement.providers.vendor.initialModelSelection?.registrationId)
       .not.toBe(old.providers.vendor.initialModelSelection?.registrationId);
-    configStore.saveConfig(replacement);
+    configStore.replacePersistedConfig(replacement);
     finalizeInitialModelSelection(old, baseline, rows(20), ["vendor"]);
     const saved = configStore.loadConfig();
     expect(saved.providers.vendor.initialModelSelection?.status).toBe("pending");
