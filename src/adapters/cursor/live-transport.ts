@@ -1200,6 +1200,7 @@ class LiveCursorTransport implements CursorTransport {
           && (
             state.openToolCalls.size > 0
             || this.sawAssistantText
+            || !!state.textToolCallBuffer
             || hasPendingClientToolFinalization
           )
         ) {
@@ -1367,7 +1368,7 @@ class LiveCursorTransport implements CursorTransport {
           settler.settleFinish();
           return;
         }
-        if (this.framesReceived > 0 && this.sawAssistantText) {
+        if (this.framesReceived > 0 && (this.sawAssistantText || state.textToolCallBuffer)) {
           for (const event of finalizeTurnEvents(state)) push(event);
           releaseBacklogLease();
           settler.settleFinish();
