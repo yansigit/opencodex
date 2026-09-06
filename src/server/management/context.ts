@@ -1,5 +1,4 @@
 import type { OcxConfig } from "../../types";
-import type { PersistedConfigMutation, PersistedConfigMutationOutcome } from "../../config";
 import type { NativeProfileApiDeps } from "../../codex/native-profile-api";
 import type { CodexLogGuardProtectionDeps } from "../../codex/log-guard/protection";
 import type { CodexLogGuardMaintenanceDeps } from "../../codex/log-guard/maintenance";
@@ -7,6 +6,7 @@ import type { StartupHealth } from "../../codex/autostart-health";
 import type { StartupInstallAction } from "../startup-action-control";
 import type { ManagementPrincipal, ManagementSessionControl } from "../management-auth";
 import type { CatalogModel } from "../../codex/catalog";
+import type { refreshOwnedCatalogIntegrations } from "../../integrations/catalog-refresh";
 import type { Paths as CodexPromptPaths } from "../../codex/prompt-layers";
 import type { injectGrokConfig } from "../../grok/inject";
 import type { removeDesktop3pStandardPivot, writeDesktop3pConfig } from "../../claude/desktop-3p";
@@ -21,20 +21,11 @@ import type {
 } from "../../codex/app-server-restart-service";
 
 export interface ManagementApiDeps {
-  /** Canonical origin captured from the running listener; management writes must not change it. */
-  activeServerOrigin?: string;
-  /** Listener settings captured at bind time so same-origin certificate/path edits still require restart. */
-  activeServerConfig?: Pick<OcxConfig, "hostname" | "port" | "tls">;
+  /** Isolates automatic owned-client writes in route tests. */
+  refreshOwnedCatalogIntegrations?: typeof refreshOwnedCatalogIntegrations;
   /** Platform seam for capability projections; does not alter host-level startup behavior. */
   platform?: NodeJS.Platform;
   toggleCodexMultiAgentV2?: (enabled: boolean) => void;
-  /** Test seam for ordered V2 scalar side effects. */
-  v2ScalarWriters?: Partial<{
-    setAgentsEnabled: (value: boolean | null) => { ok: true; changed: boolean } | { ok: false; error: string };
-    setAgentsMaxDepth: (value: number | null) => { ok: true; changed: boolean } | { ok: false; error: string };
-    setSubagentDeveloperInstructions: (value: string | null) => { ok: true; changed: boolean } | { ok: false; error: string };
-    setMultiAgentModeHintText: (value: string | null) => { ok: true; changed: boolean } | { ok: false; error: string };
-  }>;
   toggleDefaultModeRequestUserInput?: (enabled: boolean) => void;
   createManagementConvergeCodex?: (config: Readonly<OcxConfig>) => ConvergeCodex;
   /** Test-only destination for best-effort Claude agent-definition sync. */
@@ -48,16 +39,6 @@ export interface ManagementApiDeps {
    * OPENCODEX_HOME (incident: devlog 260730.../070).
    */
   saveConfigPreservingClaudeCode?: (config: OcxConfig) => void;
-  /** Config-mutation seam for routes that commit through `mutatePersistedConfig`. */
-  mutatePersistedConfig?: typeof import("../../config").mutatePersistedConfig;
-  /** Storage-policy job seam keeps management routes off persistence-bearing worker modules. */
-  storageCleanupPolicyJob?: {
-    getState: typeof import("../../storage/policy-job").getStorageCleanupPolicyJobState;
-    getTestStream: typeof import("../../storage/policy-job").getStorageCleanupPolicyTestStreamResponse;
-    requestRun: typeof import("../../storage/policy-job").requestStorageCleanupPolicyRun;
-  };
-  /** Test-only fetch injection for Replit gateway install probes. */
-  probeFetch?: typeof globalThis.fetch;
   /**
    * Catalog seam for the Grok toggle (WP2, devlog 260803_integrations_toggle_all
    * Rev 3 N2). Production leaves this unset and the route dynamic-imports the
@@ -126,50 +107,6 @@ export interface ManagementApiDeps {
    * `saveConfigPreservingClaudeCode` above exists to prevent.
    */
   codexPromptPaths?: CodexPromptPaths;
-}
-
-/** A direct route dispatch has no authority to write the operator's config. */
-export class MissingManagementPersistenceError extends Error {
-  constructor() {
-    super("Management config persistence is unavailable.");
-    this.name = "MissingManagementPersistenceError";
-  }
-}
-
-/** Marks a failed management persistence dependency so dispatch can restore its live snapshot. */
-export class ManagementPersistenceError extends Error {
-  readonly code: unknown;
-  response?: Response;
-
-  constructor(cause: unknown) {
-    const message = cause instanceof Error && cause.message ? `Management config persistence failed: ${cause.message}` : "Management config persistence failed.";
-    super(message, { cause });
-    this.name = "ManagementPersistenceError";
-    this.code = cause && typeof cause === "object" ? (cause as { code?: unknown }).code : undefined;
-  }
-}
-
-/** The only whole-live-config persistence boundary available to management routes. */
-export function saveManagementConfig(deps: ManagementApiDeps, config: OcxConfig): void {
-  if (!deps.saveConfigPreservingClaudeCode) throw new MissingManagementPersistenceError();
-  try {
-    deps.saveConfigPreservingClaudeCode(config);
-  } catch (error) {
-    throw new ManagementPersistenceError(error);
-  }
-}
-
-/** The only locked, field-scoped on-disk mutation boundary available to management routes. */
-export function mutateManagementConfig<T>(
-  deps: ManagementApiDeps,
-  mutate: (config: OcxConfig) => PersistedConfigMutation<T>,
-): PersistedConfigMutationOutcome<T> {
-  if (!deps.mutatePersistedConfig) throw new MissingManagementPersistenceError();
-  try {
-    return deps.mutatePersistedConfig(mutate);
-  } catch (error) {
-    throw new ManagementPersistenceError(error);
-  }
 }
 
 

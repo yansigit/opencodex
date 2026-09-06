@@ -2,13 +2,8 @@ import type { KiroOAuthMetadata, OAuthController, OAuthCredentials } from "./typ
 import { initializeProviderModelSelection } from "../providers/initial-model-selection";
 import { parseCallbackInput } from "./callback-server";
 import type { OcxConfig, OcxProviderConfig, RefreshPolicy } from "../types";
-import {
-  ConfigMutationLockError,
-  initializePersistedConfigIfMissing,
-  loadConfig,
-  mutatePersistedConfig,
-  resolveEnvValue,
-} from "../config";
+import { ConfigMutationLockError, loadConfig, mutatePersistedConfig, saveConfig } from "../config";
+import { resolveProviderApiKey } from "../providers/key-store";
 import { maskEmail } from "../lib/privacy";
 import { KiroTokenRefreshError, environmentKiroRoutingMetadata, loginKiro, refreshKiroToken, settleKiroLoginTransaction } from "./kiro";
 import {
@@ -41,7 +36,7 @@ import { ANTHROPIC_OAUTH_BETA, AnthropicTokenError, loginAnthropic, refreshAnthr
 import { loginKimi, refreshKimiToken } from "./kimi";
 import { loginNous, NousTokenError, refreshNousToken, clearNousRefreshIntent, RefreshIntentIOError } from "./nous";
 import { loginChatGPT, refreshChatGPTToken, type ChatGPTLoginFlow } from "./chatgpt";
-import { AntigravityTokenRequestError, loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
+import { loginAntigravity, refreshAntigravityToken } from "./google-antigravity";
 import { loginCursor, refreshCursorToken } from "./cursor";
 import { loginGithubCopilot, refreshGithubCopilotToken, validateCopilotApiBaseUrl } from "./github-copilot";
 import { loginCommandCode, refreshCommandCodeToken } from "./command-code";
@@ -282,7 +277,6 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     refresh: refreshAntigravityToken,
     providerConfig: oauthConfig("google-antigravity"),
     defaultModel: oauthDefaultModel("google-antigravity"),
-    defaultRefreshPolicy: "lazy-only",
   },
   cursor: {
     login: (ctrl, opts) => loginCursor(ctrl, undefined, { forceLogin: opts?.forceLogin }),
@@ -554,13 +548,7 @@ export async function getValidAccessTokenSnapshot(provider: string): Promise<OAu
 }
 
 /** Providers whose upstream-401 replay path may force a snapshot refresh. */
-const FORCE_REFRESH_PROVIDERS = new Set([
-  "xai",
-  "github-copilot",
-  "kiro",
-  "google-antigravity",
-  "cursor",
-]);
+const FORCE_REFRESH_PROVIDERS = new Set(["xai", "github-copilot", "kiro", "google-antigravity"]);
 
 export async function forceRefreshOAuthAccessSnapshot(
   rejected: OAuthAccessSnapshot,
@@ -600,14 +588,6 @@ export async function getValidAccessSnapshotForAccount(
   return resolveAccessSnapshotForAccount(provider, accountId, undefined, opts.requireUsableAccount === true);
 }
 
-/** Backward-compatible account snapshot name retained for fork call sites. */
-export async function getValidAccessTokenSnapshotForAccount(
-  provider: string,
-  accountId: string,
-): Promise<OAuthAccessSnapshot> {
-  return getValidAccessSnapshotForAccount(provider, accountId);
-}
-
 /** Terminal refresh failures (revoked/rotated-away grants) — retrying cannot succeed. */
 function isTerminalRefreshError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase();
@@ -619,9 +599,6 @@ function isTerminalRefreshError(err: unknown): boolean {
     || msg.includes("expired_token");
 }
 function terminal(error:unknown):boolean{
-  if (error instanceof AntigravityTokenRequestError) {
-    return (error.httpStatus === 400 || error.httpStatus === 401) && error.oauthError !== undefined;
-  }
   if(error instanceof XaiTokenRequestError)return ["invalid_grant","refresh_token_reused","revoked_token"].includes(error.oauthError??"");
   if(error instanceof AnthropicTokenError)return (error.httpStatus===400||error.httpStatus===401)&&["invalid_grant","refresh_token_reused","revoked","revoked_token","refresh_token_revoked"].includes(error.oauthError??"");
   if(error instanceof KiroTokenRefreshError)return (error.httpStatus===400||error.httpStatus===401)&&error.oauthError!==undefined;
@@ -1089,7 +1066,7 @@ export async function resolveModelsAuthToken(name: string, prov: OcxProviderConf
       return undefined;
     }
   }
-  return resolveEnvValue(prov.apiKey);
+  return resolveProviderApiKey(prov.apiKey);
 }
 
 function modelDiscoveryTransportSeed(providerName: string, prov: OcxProviderConfig): OcxProviderConfig {
@@ -1262,6 +1239,37 @@ function isLegacyAntigravityStaticCatalog(provider: OcxProviderConfig): boolean 
     ]);
 }
 
+/** Refresh registry-owned catalog fields while preserving valid operator selections. */
+function applyOAuthPresetCatalog(
+  provider: OcxProviderConfig,
+  preset: OcxProviderConfig,
+): void {
+  for (const field of OAUTH_RECONCILE_FIELDS) {
+    if (JSON.stringify(provider[field]) === JSON.stringify(preset[field])) continue;
+    if (preset[field] !== undefined) {
+      provider[field] = cloneProviderField(preset[field]) as never;
+    } else {
+      delete provider[field];
+    }
+  }
+  if (provider.liveModels === undefined && preset.liveModels !== undefined) {
+    provider.liveModels = preset.liveModels;
+  }
+  // Heal only a selection that the refreshed static catalog no longer contains. Providers
+  // with live discovery do not expose an enumerable account catalog here, so their saved
+  // default remains operator-owned.
+  if (
+    provider.liveModels !== true &&
+    provider.defaultModel
+    && preset.defaultModel
+    && preset.models
+    && preset.models.length > 0
+    && !(provider.models ?? []).includes(provider.defaultModel)
+  ) {
+    provider.defaultModel = preset.defaultModel;
+  }
+}
+
 /** Promote only the versioned canonical static seed; unmarked `liveModels: false` remains user intent. */
 function migrateLegacyAntigravityStaticCatalog(config: OcxConfig): boolean {
   if (config.googleAntigravityStaticCatalogVersion !== 1) return false;
@@ -1300,24 +1308,7 @@ function projectOAuthProviderReconciliation(config: OcxConfig): OAuthReconcilePr
     }
     if (def && prov.authMode === "oauth") {
       const preset = def.providerConfig;
-      for (const field of OAUTH_RECONCILE_FIELDS) {
-        if (JSON.stringify(prov[field]) === JSON.stringify(preset[field])) continue;
-        if (preset[field] !== undefined) {
-          prov[field] = cloneProviderField(preset[field]) as never;
-        } else {
-          delete prov[field];
-        }
-      }
-      if (prov.liveModels === undefined && preset.liveModels !== undefined) {
-        prov.liveModels = preset.liveModels;
-      }
-      // Heal a defaultModel that no longer exists in the refreshed list (e.g. a deprecated snapshot).
-      // Skip providers without a static preset `models` list: for live-discovery providers
-      // (e.g. command-code OAuth) the account-scoped catalog is not enumerable here, so any
-      // persisted defaultModel is a user selection and must not be overwritten by the seed.
-      if (prov.defaultModel && preset.defaultModel && preset.models && preset.models.length > 0 && !(prov.models ?? []).includes(prov.defaultModel)) {
-        prov.defaultModel = preset.defaultModel;
-      }
+      applyOAuthPresetCatalog(prov, preset);
     }
     if (JSON.stringify(prov) !== beforeProvider) {
       changed = true;
@@ -1438,7 +1429,6 @@ const OAUTH_LOGIN_OWNED_PROVIDER_FIELDS = [
   "headers",
   "apiKeyTransport",
   "responsesPath",
-  "tlsProfile",
   "googleMode",
   "keyOptional",
 ] as const satisfies readonly (keyof OcxProviderConfig)[];
@@ -1452,17 +1442,31 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, provider);
   if (namespaceCollision) throw new Error(namespaceCollision);
   const existing = config.providers[provider];
+  // Clone operator state, including xAI wire choices and their migration version.
   const next: OcxProviderConfig = structuredClone(existing ?? def.providerConfig);
   for (const field of OAUTH_LOGIN_OWNED_PROVIDER_FIELDS) {
     const value = def.providerConfig[field];
     if (value === undefined) delete next[field];
     else next[field] = structuredClone(value) as never;
   }
+  // A login may activate a different account. CCA dispatch must take that account's
+  // project from its credential snapshot, never retain the previous account's project.
+  if (next.googleMode === "cloud-code-assist") delete next.project;
+  // Login used to rebuild the whole row from the preset, so catalog data refreshed
+  // immediately. Keep that timing without overwriting unrelated operator-owned fields.
+  applyOAuthPresetCatalog(next, def.providerConfig);
+  // The original Command Code seed was an implementation-owned static catalog, not an
+  // operator opt-out. Promote that exact legacy shape when OAuth login refreshes the row.
+  if (provider === "command-code" && existing && isLegacyCommandCodeStaticCatalog(existing)) {
+    next.liveModels = def.providerConfig.liveModels;
+  }
   // OAuth-only providers must never retain credentials for a different auth mechanism.
   delete next.apiKey;
   delete next.apiKeyPool;
-  delete next.azureCredential;
+  delete (next as unknown as Record<string, unknown>).azureCredential;
   if (existing && getProviderRegistryEntry(provider)?.allowKeyAuthOverride === true) {
+    // Retain stored key billing intent without resolving env references in the login process.
+    // An explicit OAuth choice stays OAuth even when usable key material is retained.
     // Shared sanitizeApiKeyValue trim / no-CRLF checks from api-key pool writes.
     let storedApiKey = sanitizeApiKeyValue(existing.apiKey);
     const storedApiKeyPool = preservableApiKeyPool(existing.apiKeyPool);
@@ -1476,9 +1480,7 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
       // Keep routing and listProviderApiKeys in sync: never leave a hidden active key that
       // is absent from the pool (listing would fall back to pool[0] as "active").
       if (!pool.some(entry => entry.key === storedApiKey)) {
-        const id = apiKeyPoolEntryId(storedApiKey);
-        if (pool.some(entry => entry.id === id)) throw new Error("API-key pool ID collision");
-        pool.push({ id, key: storedApiKey });
+        pool.push({ id: apiKeyPoolEntryId(storedApiKey), key: storedApiKey });
       }
       next.apiKey = storedApiKey;
       next.apiKeyPool = pool;
@@ -1494,8 +1496,7 @@ interface RunLoginDeps {
   saveCredential?: typeof saveCredential;
   saveAccountCredential?: typeof saveAccountCredential;
   loadConfig?: typeof loadConfig;
-  mutatePersistedConfig?: typeof mutatePersistedConfig;
-  initializePersistedConfigIfMissing?: typeof initializePersistedConfigIfMissing;
+  saveConfig?: typeof saveConfig;
   settleKiroLoginTransaction?: typeof settleKiroLoginTransaction;
   removeAccount?: typeof removeAccount;
   setActiveAccount?: typeof setActiveAccount;
@@ -1530,8 +1531,7 @@ export async function runLogin(
   const def = OAUTH_PROVIDERS[provider];
   if (!def) throw new UnsupportedOAuthProviderError(provider);
   const loadLatestConfig = deps.loadConfig ?? loadConfig;
-  const mutateLatestConfig = deps.mutatePersistedConfig ?? mutatePersistedConfig;
-  const initializeLatestConfig = deps.initializePersistedConfigIfMissing ?? initializePersistedConfigIfMissing;
+  const saveLatestConfig = deps.saveConfig ?? saveConfig;
   if (provider !== "chatgpt") {
     const preflightConfig = loadLatestConfig();
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
@@ -1561,18 +1561,15 @@ export async function runLogin(
       const existing = getAccountCredential(provider, opts.reauthAccountId);
       if (!existing) throw new Error(`Unknown account for reauth: ${opts.reauthAccountId}`);
       if (!existing.accountId && !existing.email) {
-        if (provider !== GOOGLE_ANTIGRAVITY_PROVIDER || (!cred.accountId && !cred.email)) {
-          throw new OAuthReauthIdentityUnverifiedError();
-        }
-      } else {
-        const identityMatches = existing.accountId && cred.accountId
-          ? existing.accountId === cred.accountId
-          : existing.email && cred.email
-            ? existing.email.toLowerCase() === cred.email.toLowerCase()
-            : false;
-        if (!identityMatches) {
-          throw new OAuthReauthIdentityMismatchError();
-        }
+        throw new OAuthReauthIdentityUnverifiedError();
+      }
+      const identityMatches = existing.accountId && cred.accountId
+        ? existing.accountId === cred.accountId
+        : existing.email && cred.email
+          ? existing.email.toLowerCase() === cred.email.toLowerCase()
+          : false;
+      if (!identityMatches) {
+        throw new OAuthReauthIdentityMismatchError();
       }
       await (deps.saveAccountCredential ?? saveAccountCredential)(provider, opts.reauthAccountId, cred, {
         assertBeforePersist: deps.assertCurrentOwner,
@@ -1586,32 +1583,16 @@ export async function runLogin(
     if (provider !== "chatgpt") {
       // Re-run against post-credential state so same-provider API-key additions, removals,
       // and active-key switches survive. A late namespace claim wins over provider creation.
-      const publish = () => mutateLatestConfig<{ error: string } | { config: OcxConfig }>(fresh => {
-        const lateCollision = codexAccountNamespaceProviderCollisionError(
-          fresh.codexAccountNamespaces,
-          provider,
-        );
-        if (lateCollision) return { changed: false, value: { error: lateCollision } };
-        upsertOAuthProvider(fresh, provider);
-        return { changed: true, value: { config: structuredClone(fresh) } };
-      });
-      let outcome = publish();
-      let published = false;
-      if (outcome.status === "unavailable" && outcome.reason === "missing") {
-        const initial = loadLatestConfig();
-        const lateCollision = codexAccountNamespaceProviderCollisionError(
-          initial.codexAccountNamespaces,
-          provider,
-        );
-        if (lateCollision) throw new OAuthProviderPublicationError();
-        upsertOAuthProvider(initial, provider);
-        const initialized = initializeLatestConfig(initial);
-        published = initialized === "created";
-        if (initialized === "exists") outcome = publish();
-      }
-      if (!published && (outcome.status === "unavailable" || "error" in outcome.value)) {
+      const latestConfig = loadLatestConfig();
+      const lateCollision = codexAccountNamespaceProviderCollisionError(
+        latestConfig.codexAccountNamespaces,
+        provider,
+      );
+      if (lateCollision) {
         throw new OAuthProviderPublicationError();
       }
+      upsertOAuthProvider(latestConfig, provider);
+      saveLatestConfig(latestConfig);
     }
   } catch (error) {
     const errors: unknown[] = [error];

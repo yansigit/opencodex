@@ -6,9 +6,13 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { directLocalHttpFetch } from "../../src/server/direct-local-http";
 import { repoPath, repoRoot } from "../helpers/repo-root";
+import { watchdogMs } from "../helpers/ci-watchdog";
 
 const PID = 4242;
 const SECRET = "A".repeat(43);
+const CONTROL_TIMEOUT_MS = 2_000;
+// Startup/imports + control + two liveness probes + capability read + process exit.
+const DIRECT_CHILD_BUDGET_MS = watchdogMs(3_000 + CONTROL_TIMEOUT_MS + 750 + 750 + 2_000 + 1_000);
 
 async function listen(server: Server, hostname = "127.0.0.1"): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
@@ -299,14 +303,22 @@ describe("local management direct transport", () => {
       const localClientUrl = pathToFileURL(repoPath("src", "server", "local-management-read-client.ts")).href;
       const capabilityUrl = pathToFileURL(repoPath("src", "lib", "local-management-capability.ts")).href;
       const childSource = `
+        const phase = name => console.error("DIRECT_PHASE:" + name);
+        phase("imports");
         const liveness = await import(${JSON.stringify(proxyLivenessUrl)});
         const client = await import(${JSON.stringify(localClientUrl)});
         const capability = await import(${JSON.stringify(capabilityUrl)});
         const port = ${targetPort};
         const pid = ${PID};
-        const control = await fetch(\`http://127.0.0.1:\${port}/__proxy-control\`).then(response => response.json());
+        phase("control");
+        const control = await fetch(\`http://127.0.0.1:\${port}/__proxy-control\`, {
+          signal: AbortSignal.timeout(${CONTROL_TIMEOUT_MS}),
+        }).then(response => response.json());
+        phase("identity");
         const identity = await liveness.proxyIdentityAt(port, { hostname: "127.0.0.1", expectedPid: pid });
+        phase("readiness");
         const readiness = await liveness.probeReadiness(port, { hostname: "127.0.0.1", expectedPid: pid });
+        phase("memory");
         const read = await client.fetchBoundLocalManagementRead(
           { hostname: "127.0.0.1", port, pid, source: "runtime" },
           capability.LOCAL_MANAGEMENT_READ_PATHS.systemMemory,
@@ -319,6 +331,7 @@ describe("local management direct transport", () => {
         const memory = read.kind === "response" ? await read.response.json() : null;
         const result = { control, identity, readiness, readKind: read.kind, memory };
         console.log(JSON.stringify(result));
+        phase("complete");
         if (control?.via !== "proxy" || identity?.pid !== pid || readiness?.ready !== true || read.kind !== "response" || memory?.pid !== pid) {
           process.exitCode = 2;
         }
@@ -338,20 +351,17 @@ describe("local management direct transport", () => {
         stderr: "pipe",
       });
       let childTimedOut = false;
-      // A fresh Bun process took longer than 3s to boot on a loaded hosted
-      // Windows shard (promotion run 33743291747). Keep the child deadline
-      // inside the enclosing test budget while leaving each transport probe's
-      // own 2s semantic timeout unchanged.
       const childWatchdog = setTimeout(() => {
         childTimedOut = true;
         child.kill();
-      }, 20_000);
+      }, DIRECT_CHILD_BUDGET_MS);
       const [exitCode, stdout, stderr] = await Promise.all([
         child.exited,
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),
       ]).finally(() => clearTimeout(childWatchdog));
-      if (childTimedOut) throw new Error("direct-transport child timed out");
+      const phase = [...stderr.matchAll(/DIRECT_PHASE:(imports|control|identity|readiness|memory|complete)/g)].at(-1)?.[1] ?? "startup";
+      if (childTimedOut) throw new Error(`direct-transport child timed out (phase=${phase}; targetRequests=${targetPaths.length}; proxyRequests=${proxyPaths.length})`);
       if (exitCode !== 0) {
         throw new Error(`direct-transport child failed (${exitCode}): ${stderr.trim()}\n${stdout.trim()}`);
       }
@@ -379,32 +389,5 @@ describe("local management direct transport", () => {
       if (proxyPort !== 0) await close(proxy);
       if (targetPort !== 0) await close(target);
     }
-  }, 30_000);
-});
-
-describe("direct local HTTPS transport", () => {
-  test("https request rejects non-HTTP(S) protocols with widened message", async () => {
-    await expect(directLocalHttpFetch("ftp://127.0.0.1/healthz", {}))
-      .rejects.toThrow("direct local request must use HTTP or HTTPS");
-  });
-
-  test("succeeds against a real local HTTPS server", async () => {
-    const certFile = new URL("../fixtures/network-tls-test-cert.pem", import.meta.url);
-    const keyFile = new URL("../fixtures/network-tls-test-key.pem", import.meta.url);
-    const server = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      tls: { cert: Bun.file(certFile), key: Bun.file(keyFile) },
-      fetch() {
-        return Response.json({ ok: true });
-      },
-    });
-    try {
-      const response = await directLocalHttpFetch(`https://127.0.0.1:${server.port}/healthz`);
-      expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ ok: true });
-    } finally {
-      server.stop(true);
-    }
-  });
+  }, DIRECT_CHILD_BUDGET_MS + 1_000);
 });

@@ -8,7 +8,12 @@ import type { UpstreamHttpVersion, ReasoningSummaryDelivery, CodexAccountMode } 
  */
 export type RefreshPolicy = "proactive" | "lazy-only" | "disabled";
 
-export type ProviderTlsProfile = "antigravity-browser";
+/** Request-owned identity of the configured key, before env/keychain resolution. */
+export interface ProviderApiKeySelection {
+  entryId?: string;
+  reference?: string;
+  revision?: string;
+}
 
 export interface OpenRouterProviderRouting {
   /** OpenRouter provider slugs to try first, in priority order. */
@@ -98,8 +103,6 @@ export interface RequestPacingRule {
   requestsPerMinute?: number;
   /** Minimum delay between request starts. The slower configured value wins. */
   minIntervalMs?: number;
-  /** Positive-only random delay added to each request-start slot. */
-  jitterMs?: number;
 }
 
 export interface ProviderRequestPacingConfig extends RequestPacingRule {
@@ -191,8 +194,6 @@ export interface OcxProviderConfig {
   codexToolMode?: "code_mode_only" | "shell";
   /** Optional outbound request-start pacing shared by this provider and its model overrides. */
   requestPacing?: ProviderRequestPacingConfig;
-  /** Explicitly acknowledged experimental browser-compatible transport profile. */
-  tlsProfile?: ProviderTlsProfile;
   /** Cursor MCP compatibility bounds; positive integers when configured. */
   mcpMaxTools?: number;
   mcpMaxSchemaBytes?: number;
@@ -226,13 +227,6 @@ export interface OcxProviderConfig {
    * version here instead of waiting for a code change. Absent uses the adapter's current default.
    */
   commandCodeVersion?: string;
-  /**
-   * Command Code OAuth `/alpha/generate` project-context envelope. When `"on"`, the adapter
-   * fills `memory`, `taste`, and `skills` from bounded files under `process.cwd()`. Absent or
-   * `"off"` keeps the empty envelope (`memory: ""`, `taste: null`, `skills: null`). Does not
-   * enable taste learning (`x-taste-learning` stays `"false"`).
-   */
-  projectContext?: "off" | "on";
   /**
    * Responses upstream that stores nothing server-side (DeepSeek documents "the API
    * is stateless"). Stateful request parameters are dropped, `store` is pinned false,
@@ -295,19 +289,6 @@ export interface OcxProviderConfig {
    */
   allowPrivateNetwork?: boolean;
   /**
-   * ChatGPT Codex backend WebSocket upstream transport.
-   * Defaults to false (routes streaming turns over standard HTTP/SSE).
-   * Set `true` to opt into the faster responses_websockets transport.
-   * `OCX_CODEX_WS_UPSTREAM=true` or `1` also enables it when this is omitted;
-   * `false` and `0` disable it. Invalid or absent values default to HTTP/SSE.
-   */
-  wsUpstream?: boolean;
-  /**
-   * Maximum WebSocket request frame size in bytes before routing over standard HTTP/SSE.
-   * Defaults to CODEX_WS_CREATE_FRAME_LIMIT_BYTES (~16 MiB minus margin).
-   */
-  maxWsFrameBytes?: number;
-  /**
    * Pin the HTTP version used for upstream provider requests. Bun's fetch negotiates
    * HTTP/2 via TLS ALPN by default; some Cloudflare-fronted SSE endpoints hang on
    * HTTP/2 streaming responses (issue #1668). "http1.1" / "h1" forces HTTP/1.1,
@@ -343,11 +324,6 @@ export interface OcxProviderConfig {
    */
   codexAccountMode?: CodexAccountMode;
   apiKey?: string;
-  /** Azure OpenAI identity authentication; mutually exclusive with API-key fields. */
-  azureCredential?: {
-    type: "default-azure-credential";
-    managedIdentityClientId?: string;
-  };
   /**
    * Key-auth header style for Anthropic-compatible providers.
    * Defaults to the native Anthropic `x-api-key`; gateways may require
@@ -360,6 +336,10 @@ export interface OcxProviderConfig {
    * `apiKey` seeds a one-entry pool on first management touch.
    */
   apiKeyPool?: Array<{ id: string; key: string; label?: string; addedAt?: number }>;
+  /** Changes on manual selection (including re-selection) and committed automatic allocation. */
+  apiKeySelectionRevision?: string;
+  /** Runtime only. Never expose in management responses or persist a routed provider. */
+  _apiKeyAttempt?: ProviderApiKeySelection;
   defaultModel?: string;
   models?: string[];
   /**
@@ -468,12 +448,13 @@ export interface OcxProviderConfig {
    */
   authMode?: "key" | "forward" | "oauth" | "local";
   /**
-   * Per-provider override for generic OAuth account selection and recovery (#2568, #695).
+   * Per-provider override for the generic OAuth PROACTIVE account preference (#2568, #695).
    *
-   * When absent, two or more eligible accounts enable reactive 429 rotation by default. An
-   * explicit `false` refuses both that replay and the pre-dispatch preference that steers a
-   * healthy request toward the account with more known headroom. This narrower setting beats
-   * the global `oauthAccountFailover` in either direction.
+   * Reactive 429 rotation is presence-driven and cannot be refused here — 2+ logged-in accounts
+   * activate it, and a 429 with an idle second account is a defect rather than a preference.
+   * Proactive exhaustion avoidance requires explicit `true`; a healthy selected account
+   * retains priority. This overrides global `oauthAccountFailover` in either direction.
+   * Reactive 429 rotation remains available even when proactive routing is disabled.
    */
   oauthAccountFailover?: {
     enabled?: boolean;
@@ -689,8 +670,6 @@ export interface OcxProviderConfig {
    * before any response bytes are relayed, so the replay is lossless.
    */
   retryOn429?: RateLimitRetryPolicy;
-  /** Opt in to replaying transient upstream 5xx responses (at most three total sends). */
-  replayTransientFailures?: boolean;
   /**
    * Opt-in retry for pre-stream transient upstream statuses
    * (`providers.<name>.transientRetryOn5xx`). Disabled unless present; a bare `{}` opts in
@@ -740,9 +719,8 @@ export interface OcxProviderConfig {
    * Google adapter mode. "ai-studio" (default) = Generative Language API + x-goog-api-key.
    * "vertex" = Vertex AI project/location endpoints with GCP ADC (or x-goog-api-key).
    * "cloud-code-assist" = Google Antigravity (Cloud Code Assist) OAuth + CCA envelope.
-   * "ai-studio-web" = browser-relayed AI Studio Playground/Build session.
    */
-  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist" | "ai-studio-web";
+  googleMode?: "ai-studio" | "vertex" | "cloud-code-assist";
   /** Vertex AI GCP project id (or GOOGLE_CLOUD_PROJECT / GCLOUD_PROJECT env). */
   project?: string;
   /** Vertex AI location, e.g. "us-central1" or "global" (or GOOGLE_CLOUD_LOCATION env). */

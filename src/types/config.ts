@@ -140,8 +140,6 @@ export interface OcxClaudeCodeConfig {
    * Routing-sidecar alias decoding is unchanged — only the Desktop model list writer.
    */
   desktopNativeModels?: boolean;
-  /** Claude ingress compatibility gate. Defaults to enforce. */
-  compatibility?: "shadow" | "enforce";
 }
 
 export type OcxClaudeDesktopFamily = "opus" | "fable" | "sonnet" | "haiku";
@@ -249,32 +247,9 @@ export interface OcxClientIntegrationsConfig {
   "claude-desktop"?: boolean;
 }
 
-/** User-authored specialist the Codex parent may spawn by name. */
-export interface OcxSubagentRole {
-  /** `[a-z][a-z0-9-]{0,31}`, unique within the catalog. */
-  id: string;
-  /** 1..240 chars; parent "when to use" this specialist. */
-  description: string;
-  /** Bare native or `provider/model`, at most 128 characters. */
-  model: string;
-  /** Codex reasoning ladder; optional. */
-  effort?: string;
-  /** 1..8000 chars; child's developer prompt. */
-  developerInstructions: string;
-  /** Default true. Disabled roles stay in config but are omitted from guidance. */
-  enabled?: boolean;
-}
-
 export interface OcxConfigRebaseProvenance {
   version: 1;
   deletedTopLevelKeys: string[];
-}
-
-export interface OcxServerTlsConfig {
-  certFile: string;
-  keyFile: string;
-  /** Exact externally reachable HTTPS origin; paths, query strings, fragments, and credentials are rejected. */
-  publicOrigin: string;
 }
 
 export type OcxRuntimeRole = "standalone" | "hub" | "client";
@@ -350,12 +325,6 @@ export interface OcxClientConnectionConfig {
 
 export interface OcxConfig {
   port: number;
-  autonomousRemediation?: {
-    enabled?: boolean;
-    instanceId?: string;
-    threshold?: number;
-    rollingWindowMs?: number;
-  };
   /** Runtime topology role. Absence preserves the historical standalone behavior. */
   runtimeRole?: OcxRuntimeRole;
   /** Hub-only public management metadata. Presence is inert outside the hub role. */
@@ -440,6 +409,13 @@ export interface OcxConfig {
    * one key at a time rather than widening a shared union.
    */
   clientIntegrations?: OcxClientIntegrationsConfig;
+  /** Aside account-backed profile synchronization; individual overrides survive bulk refresh. */
+  asideProfileSync?: {
+    allProfiles?: boolean;
+    profiles?: Record<string, boolean>;
+    /** Stable provenance for the one legacy root ownership record, or no root owner. */
+    legacyProfileId?: number | null;
+  };
   /**
    * Up to 5 Codex-facing catalog ids to feature first. Values may be bare catalog ids,
    * exact account-qualified "<selector>/<native-openai-model>" ids, or routed
@@ -447,28 +423,18 @@ export interface OcxConfig {
    * into a selector-qualified group; Codex still advertises only the first 5 visible rows.
    */
   subagentModels?: string[];
-  /** Named specialist roles the parent may spawn by id. */
-  subagentRoles?: OcxSubagentRole[];
-  /**
-   * Project enabled roles into marker-owned `$CODEX_HOME/agents/ocx-<id>.toml`.
-   * Unset means on once any enabled role exists. `false` leaves user files
-   * untouched and prunes our owned `ocx-*.toml` files.
-   */
-  syncCodexAgentRoles?: boolean;
   /** One-time featured-roster upgrade marker; later user ordering is preserved. */
   subagentModelsVersion?: number;
   /**
-   * Optional full picker ordering for the Codex model catalog, independent of the
-   * 5-slot `subagentModels` spawn_agent cap. DISPLAY-ONLY: it controls the visual order of
-   * the Codex model picker for large routed catalogs (10-20+ models) that would otherwise sort
-   * arbitrarily and reshuffle on every rebuild. Values are routed `<provider>/<model>` catalog
-   * slugs (matched by exact slug or `provider/id`); native OpenAI passthrough rows and
-   * account-qualified native rows are not reordered (order native rows via `subagentModels`).
-   * Listed routed rows appear in array order; rows not listed keep their normal display order.
-   * `subagentModels`-featured rows keep their top position. When unset or empty, catalog
-   * priority is unchanged. This changes ONLY what the user sees in the picker: the spawn_agent
-   * candidate set is derived from each row's natural priority and is provably unaffected, even
-   * when every routed row is listed (see opencodex_spawn_priority / effectiveSubagentRoster).
+   * Display-only order for the Codex picker, independent of subagentModels.
+   * Routed-only lists order non-featured routed rows; featured and native rows keep
+   * their normal positions. Including a bare native id opts into ordering the complete
+   * picker: listed ids appear first in array order, followed by unlisted rows in their
+   * natural priority order. Exact catalog ids take precedence over equivalent raw/encoded
+   * routed ids; empty entries are ignored. The separate natural priority used by
+   * OpenCodex guidance is preserved. Native Codex's advertised five follow display
+   * priority and may change; exact-name override eligibility is not restricted by that list.
+   * Unset or empty leaves catalog priorities unchanged.
    */
   modelPickerOrder?: string[];
   /**
@@ -488,10 +454,6 @@ export interface OcxConfig {
    * reject the whole role file as an unknown field (#1190).
    */
   subagentModelFallbackByModel?: Record<string, string[]>;
-  /**
-   * Ordered candidates for spawned sub-agents, globally or keyed by role/model.
-   */
-  subagentCandidates?: string[] | Record<string, string[]>;
   /**
    * TTL (ms) for cached sub-agent model availability probes. Default 60_000.
    */
@@ -629,10 +591,6 @@ export interface OcxConfig {
    * Routed parents get v2 tools; Sol/Terra can still spawn Grok/Claude (issue #92).
    */
   keepNativeChatGptOnV1?: boolean;
-  /** Experimental plaintext delegation bridge for eligible native V2 root and thread-spawn child turns. */
-  v2RoutedDelegationBridge?: boolean;
-  /** Optional v2-native parent override for spawn_agent routing. */
-  v2NativeParentOverride?: { enabled?: boolean; model?: string };
   /** Experimental, default-off ChatGPT recovery for encrypted V2 routed tasks. */
   agentTaskRecovery?: {
     enabled?: boolean;
@@ -650,14 +608,14 @@ export interface OcxConfig {
    * so absence is the only default state this feature has.
    */
   quotaResetNotify?: OcxQuotaResetNotifyConfig;
-  /** Provider-level Codex-visible context caps. Values only lower known model context windows. */
+  /** Active provider context limits; native long windows remain within their supported ceilings. */
   providerContextCaps?: Record<string, number>;
+  /** Last selected provider caps; retained while a cap is switched off. Not an active limit. */
+  providerContextCapValues?: Record<string, number>;
   /** Global Codex-visible context cap value (tokens). Falls back to DEFAULT_PROVIDER_CONTEXT_CAP. */
   contextCapValue?: number;
   /** Bind hostname. Default "127.0.0.1" (loopback only). Set "0.0.0.0" to expose on all interfaces. */
   hostname?: string;
-  /** Native Bun TLS for the public listener. Required for non-loopback binds. */
-  tls?: OcxServerTlsConfig;
   /**
    * Optional second listener bound to 127.0.0.1 that admits data-plane requests without a
    * credential (issue #1102).
@@ -833,9 +791,10 @@ export interface OcxConfig {
    * Sticky session affinity; new sessions may pick lowest known 5h usage.
    * Experimental — see docs and GUI warning before enabling.
    *
-   * When `enabled` is absent, two usable accounts enable reactive 429 failover by presence.
-   * An explicit false disables both proactive routing and reactive replay under another
-   * identity; accounts may belong to different billing, retention, or policy domains.
+   * Reactive 429 failover is NOT gated here. It activates on account presence, like every
+   * other multi-credential provider, and cannot be switched off: rotating away from an account
+   * upstream has just rate-limited only ever runs after a refusal, so stranding it while a
+   * second logged-in account sits idle is a defect rather than a configuration choice.
    */
   anthropicAccountPool?: {
     enabled?: boolean;
@@ -856,16 +815,12 @@ export interface OcxConfig {
    * provider has 2 or more eligible stored accounts, the same consent rule an `apiKeyPool` of
    * two keys already applies, and a single account remains a strict no-op.
    *
-   * When `enabled` is absent, two or more eligible accounts enable reactive 429 rotation by
-   * default. An explicit `false` refuses both cross-account replay and the PRE-DISPATCH account
-   * preference. `providers.<name>.oauthAccountFailover` overrides this per provider in either
-   * direction.
+   * Proactive avoidance of an exhausted selected account requires `enabled: true`.
+   * A healthy selected account retains priority; an unknown quota is not exhaustion.
+   * `providers.<name>.oauthAccountFailover` overrides this per provider in either direction.
+   * Reactive 429 rotation remains presence-driven even when proactive routing is disabled.
    */
   oauthAccountFailover?: {
-    enabled?: boolean;
-  };
-  /** Cursor OAuth account pool rotation for api2.cursor.sh. */
-  cursorAccountPool?: {
     enabled?: boolean;
   };
   /** Virtual `combo/<id>` models spanning concrete provider/model targets (issue #133). */

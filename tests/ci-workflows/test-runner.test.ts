@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, posix, win32 } from "node:path";
 import {
@@ -7,22 +8,19 @@ import {
   createIsolatedTestEnvironment,
   ensureGuiDependencies,
   inspectChangedRun,
-  runTestLaneForTests,
   resolveBunTestArgs,
   resolveBunTestPlan,
   selectChangedComparisonRef,
   SERIAL_FULL_SUITE_FILES,
-  terminateTestProcessForTests,
-  waitWithMonotonicTimeout,
 } from "../../scripts/test";
-import { SERIAL_TEST_FILES } from "../../scripts/ci/test-lanes";
-import { fixturePath, repoPath, repoRoot } from "../helpers/repo-root";
+import { repoPath, repoRoot } from "../helpers/repo-root";
 import {
   acquireTestRunLock,
   resolveBareTestRunIdentity,
   resolveDefaultTestRunLockPath,
   resolveInheritedTestRunLock,
   resolveWrappedTestRunLockPath,
+  TEST_RUN_ID_ENV,
   TEST_RUN_LOCK_PATH_ENV,
   TEST_RUN_LOCK_TOKEN_ENV,
   TEST_RUN_NO_QUEUE_ENV,
@@ -34,6 +32,7 @@ import {
   windowsIdentityPowerShellSpawnOptionsForTests,
 } from "../../src/codex/user-identity";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS } from "../helpers/test-budget";
 
 
 function runGit(cwd: string, ...args: string[]): string {
@@ -49,40 +48,6 @@ function runGit(cwd: string, ...args: string[]): string {
 // allow-listed, so writing it whole fails the repository's own privacy gate. The bytes
 // handed to git are identical either way.
 const FIXTURE_COMMIT_EMAIL = ["test", "opencodex.invalid"].join("@");
-
-async function waitForFile(path: string, timeoutMs = 2_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
-    await Bun.sleep(10);
-  }
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function exitWithin(child: Bun.Subprocess, timeoutMs = 5_000): Promise<number> {
-  return await Promise.race([
-    child.exited,
-    Bun.sleep(timeoutMs).then(() => { throw new Error(`pid ${child.pid} did not exit within ${timeoutMs}ms`); }),
-  ]);
-}
-
-async function expectProcessTreeDead(markerPath: string): Promise<void> {
-  const pids = JSON.parse(await Bun.file(markerPath).text()) as { child: number; grandchild: number };
-  const deadline = Date.now() + 2_000;
-  while ((processIsAlive(pids.child) || processIsAlive(pids.grandchild)) && Date.now() < deadline) {
-    await Bun.sleep(10);
-  }
-  expect(processIsAlive(pids.child)).toBe(false);
-  expect(processIsAlive(pids.grandchild)).toBe(false);
-}
 
 function pathIsContainedBy(parent: string, candidate: string, platform: "posix" | "win32"): boolean {
   const path = platform === "win32" ? win32 : posix;
@@ -208,8 +173,6 @@ describe("bun test argv", () => {
 
   test("the default full suite quarantines load-sensitive files into one-worker lanes", () => {
     const plan = resolveBunTestPlan([]);
-    expect(SERIAL_FULL_SUITE_FILES)
-      .toEqual(SERIAL_TEST_FILES.map(file => file.slice("tests/".length)));
     expect(plan).toHaveLength(SERIAL_FULL_SUITE_FILES.length + 1);
     expect(plan[0]?.label).toBe("parallel suite");
     expect(plan[0]?.args).toContain("--parallel=4");
@@ -225,16 +188,7 @@ describe("bun test argv", () => {
       ]);
     }
     expect(plan.find(lane => lane.label === "release-helper.test.ts")?.timeoutMs).toBe(5 * 60 * 1000);
-    expect(plan.find(lane => lane.label === "ocx-launcher-runtime.test.ts")?.timeoutMs).toBe(5 * 60 * 1000);
     expect(plan.find(lane => lane.label === "codex-shim.test.ts")?.timeoutMs).toBe(3 * 60 * 1000);
-  });
-
-  test("a timed full suite keeps load-sensitive files in serial lanes", () => {
-    const plan = resolveBunTestPlan(["--timings", ".bun-timings.json"]);
-    expect(plan).toHaveLength(SERIAL_TEST_FILES.length + 1);
-    expect(plan[0]?.label).toBe("parallel suite");
-    expect(plan.slice(1).map(lane => lane.label))
-      .toEqual(SERIAL_FULL_SUITE_FILES.map(file => basename(file)));
   });
 
   test("serial lanes override caller parallelism without changing the main lane", () => {
@@ -444,102 +398,6 @@ describe("bun test argv", () => {
     } finally {
       removeTreeWithRetry(fixtureRoot);
     }
-  });
-});
-
-describe("test-runner process-tree termination", () => {
-  test("a premature timer wakeup rearms against the monotonic deadline", async () => {
-    let now = 0;
-    let nextHandle = 0;
-    const scheduled = new Map<number, { callback: () => void; delayMs: number }>();
-    const pending = waitWithMonotonicTimeout(new Promise<never>(() => {}), 100, {
-      now: () => now,
-      schedule: (callback, delayMs) => {
-        const handle = ++nextHandle;
-        scheduled.set(handle, { callback, delayMs });
-        return handle;
-      },
-      clear: handle => { scheduled.delete(handle as number); },
-    });
-
-    expect([...scheduled.values()].map(entry => entry.delayMs)).toEqual([100]);
-    now = 10;
-    const early = scheduled.get(1);
-    scheduled.delete(1);
-    early?.callback();
-    expect([...scheduled.values()].map(entry => entry.delayMs)).toEqual([90]);
-    now = 100;
-    const deadline = scheduled.get(2);
-    scheduled.delete(2);
-    deadline?.callback();
-    expect(await pending).toBeNull();
-    expect(scheduled.size).toBe(0);
-  });
-
-  test("rejects invalid process IDs before signaling", async () => {
-    let signals = 0;
-    await expect(terminateTestProcessForTests({
-      pid: 0,
-      platform: "linux",
-      exited: Promise.resolve(0),
-      signalGroup: () => { signals += 1; },
-    })).rejects.toThrow("positive safe integer");
-    expect(signals).toBe(0);
-  });
-
-  test.if(process.platform !== "win32")(
-    "timeout and forwarded signals reap the complete child process group",
-    async () => {
-      const root = mkdtempSync(join(tmpdir(), "opencodex-test-tree-"));
-      const controllerPath = fixturePath("test-runner-tree-controller.ts");
-      const controllers: Bun.Subprocess[] = [];
-      try {
-        for (const [mode, expected] of [["timeout", 124], ["SIGTERM", 143]] as const) {
-          const markerPath = join(root, `${mode}.json`);
-          const controller = Bun.spawn([process.execPath, controllerPath, mode, markerPath], {
-            cwd: repoRoot(),
-            stdout: "pipe",
-            stderr: "pipe",
-          });
-          controllers.push(controller);
-          await waitForFile(markerPath);
-          if (mode === "SIGTERM") controller.kill(mode);
-          expect(await exitWithin(controller)).toBe(expected);
-          await expectProcessTreeDead(markerPath);
-        }
-      } finally {
-        for (const controller of controllers) {
-          if (!processIsAlive(controller.pid)) continue;
-          controller.kill("SIGKILL");
-          await exitWithin(controller).catch(() => {});
-        }
-        for (const mode of ["timeout", "SIGTERM"] as const) {
-          const markerPath = join(root, `${mode}.json`);
-          if (!existsSync(markerPath)) continue;
-          const { child } = JSON.parse(await Bun.file(markerPath).text()) as { child: number };
-          try { process.kill(-child, "SIGKILL"); } catch { /* already dead */ }
-        }
-        rmSync(root, { recursive: true, force: true });
-      }
-    },
-  );
-
-  test("the injectable lane runner still terminates before returning", async () => {
-    let terminations = 0;
-    const exitCode = await runTestLaneForTests(
-      { label: "timeout fixture", args: [], timeoutMs: 5 },
-      "timeout-fixture",
-      {
-        command: [process.execPath, "-e", "await new Promise(() => {})"],
-        terminateProcess: async child => {
-          terminations += 1;
-          child.kill("SIGKILL");
-          await child.exited;
-        },
-      },
-    );
-    expect(exitCode).toBe(124);
-    expect(terminations).toBe(1);
   });
 });
 
@@ -801,6 +659,60 @@ describe("bun test user lock", () => {
     expect(resolveCalls).toBe(0);
   });
 
+  test.if(process.platform === "win32" && process.env[TEST_RUN_NO_QUEUE_ENV] !== "1")(
+    "nested Windows Bun tests inherit the acquired live lock and refuse an incomplete capability",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "opencodex-nested-test-"));
+      try {
+        const lockPath = process.env[TEST_RUN_LOCK_PATH_ENV];
+        expect(Boolean(lockPath && process.env[TEST_RUN_LOCK_TOKEN_ENV] && process.env[TEST_RUN_ID_ENV])).toBe(true);
+        const ownerBefore = readFileSync(join(lockPath!, "owner.json"), "utf8");
+        const fixture = join(root, "nested.test.ts");
+        writeFileSync(fixture, `
+          import { test } from "bun:test";
+          import { readFileSync, existsSync } from "node:fs";
+          import { join } from "node:path";
+          test("nested lock receipt", () => {
+            const path = process.env.OCX_TEST_RUN_LOCK_PATH;
+            const owner = JSON.parse(readFileSync(join(path, "owner.json"), "utf8"));
+            console.log(JSON.stringify({ nestedLockReceipt: {
+              samePath: path === ${JSON.stringify(lockPath)},
+              sameRun: owner.runId === ${JSON.stringify(process.env[TEST_RUN_ID_ENV])},
+              sameToken: owner.token === process.env.OCX_TEST_RUN_LOCK_TOKEN,
+              member: existsSync(join(path, "members", process.pid + "-" + owner.token)),
+              preloadRan: process.env.OCX_TEST_PRELOAD_PID === String(process.pid),
+              guardArmed: process.env.OCX_TEST_HOME_GUARD === "1",
+            } }));
+          });
+        `);
+        const args = ["test", "--preload", repoPath("tests/preload.ts"), fixture];
+        const child = spawnSync(process.execPath, args, {
+          cwd: root, env: { ...process.env }, encoding: "utf8", timeout: INTERNAL_DEADLINE_MS,
+        });
+        // Keep process diagnostics bounded and never render the owner token or child output.
+        expect(child.status).toBe(0);
+        const marker = child.stdout.split("\n").find(line => line.startsWith('{"nestedLockReceipt":'));
+        expect(marker ? JSON.parse(marker).nestedLockReceipt : null).toEqual({
+          samePath: true, sameRun: true, sameToken: true, member: true, preloadRan: true, guardArmed: true,
+        });
+        expect(readFileSync(join(lockPath!, "owner.json"), "utf8") === ownerBefore).toBe(true);
+
+        const incomplete = { ...process.env };
+        delete incomplete[TEST_RUN_LOCK_TOKEN_ENV];
+        const refused = spawnSync(process.execPath, args, {
+          cwd: root, env: incomplete, encoding: "utf8", timeout: INTERNAL_DEADLINE_MS,
+        });
+        expect(refused.status).toBe(1);
+        expect(refused.stderr.includes("capability is incomplete")).toBe(true);
+        expect(refused.stdout.includes('{"nestedLockReceipt":')).toBe(false);
+        expect(readFileSync(join(lockPath!, "owner.json"), "utf8") === ownerBefore).toBe(true);
+      } finally {
+        removeTreeWithRetry(root);
+      }
+    },
+    { timeout: SPAWN_BUDGET_MS },
+  );
+
   test("falls back from an unsafe XDG root to a validated mode-0700 UID directory", () => {
     if (process.platform === "win32" || typeof process.getuid !== "function") return;
     const root = mkdtempSync(join(tmpdir(), "opencodex-runtime-fallback-"));
@@ -879,13 +791,9 @@ describe("bun test user lock", () => {
   test("one run owns the lock while sibling workers with its run ID join", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
-    // Lock semantics must not depend on the environment of the runner that is
-    // executing this test file. Hosted CI deliberately disables its redundant
-    // outer queue, while these unit cases still need to exercise the queue.
-    const env: NodeJS.ProcessEnv = {};
     try {
-      const owner = await acquireTestRunLock({ runId: "suite-a", lockPath, pollMs: 5, maxWaitMs: 50, env });
-      const sibling = await acquireTestRunLock({ runId: "suite-a", lockPath, pollMs: 5, maxWaitMs: 50, env });
+      const owner = await acquireTestRunLock({ runId: "suite-a", lockPath, pollMs: 5, maxWaitMs: 50 });
+      const sibling = await acquireTestRunLock({ runId: "suite-a", lockPath, pollMs: 5, maxWaitMs: 50 });
       expect(owner.acquired).toBe(true);
       expect(sibling.acquired).toBe(false);
       sibling.release();
@@ -900,15 +808,13 @@ describe("bun test user lock", () => {
   test("an inherited worker can only join the exact live wrapper owner", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
-    const env: NodeJS.ProcessEnv = {};
     try {
-      const owner = await acquireTestRunLock({ runId: "wrapped", lockPath, pollMs: 5, maxWaitMs: 50, env });
+      const owner = await acquireTestRunLock({ runId: "wrapped", lockPath, pollMs: 5, maxWaitMs: 50 });
       expect(owner.owner).not.toBeNull();
       const sibling = await acquireTestRunLock({
         runId: "wrapped",
         lockPath,
         joinExistingOwnerToken: owner.owner!.token,
-        env,
       });
       expect(sibling.acquired).toBe(false);
       const wrongToken = owner.owner!.token === "57f44b0e-b750-4bd2-b23d-4a035e75da18"
@@ -919,7 +825,6 @@ describe("bun test user lock", () => {
         runId: "wrapped",
         lockPath,
         joinExistingOwnerToken: wrongToken,
-        env,
       })).rejects.toThrow("refusing to create or reclaim");
 
       owner.release();
@@ -928,7 +833,6 @@ describe("bun test user lock", () => {
         runId: "wrapped",
         lockPath,
         joinExistingOwnerToken: owner.owner!.token,
-        env,
       })).rejects.toThrow("refusing to create or reclaim");
       expect(existsSync(lockPath)).toBe(false);
     } finally {
@@ -939,7 +843,6 @@ describe("bun test user lock", () => {
   test("a dead owner is reclaimed even when the next bare invocation derives the same run ID", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
-    const env: NodeJS.ProcessEnv = {};
     try {
       const stale = await acquireTestRunLock({
         runId: "stale",
@@ -947,9 +850,8 @@ describe("bun test user lock", () => {
         lockPath,
         pollMs: 5,
         maxWaitMs: 50,
-        env,
       });
-      const replacement = await acquireTestRunLock({ runId: "stale", lockPath, pollMs: 5, maxWaitMs: 50, env });
+      const replacement = await acquireTestRunLock({ runId: "stale", lockPath, pollMs: 5, maxWaitMs: 50 });
       expect(replacement.acquired).toBe(true);
       stale.release();
       expect(existsSync(lockPath)).toBe(true);
@@ -963,16 +865,14 @@ describe("bun test user lock", () => {
   test("a live competing run fails closed after the bounded wait", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
-    const env: NodeJS.ProcessEnv = {};
     try {
-      const owner = await acquireTestRunLock({ runId: "live", lockPath, pollMs: 5, maxWaitMs: 50, env });
+      const owner = await acquireTestRunLock({ runId: "live", lockPath, pollMs: 5, maxWaitMs: 50 });
       let waits = 0;
       await expect(acquireTestRunLock({
         runId: "blocked",
         lockPath,
         pollMs: 5,
         maxWaitMs: 20,
-        env,
         onWait: () => { waits += 1; },
       })).rejects.toThrow("timed out");
       expect(waits).toBe(1);

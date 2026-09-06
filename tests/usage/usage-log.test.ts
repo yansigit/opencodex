@@ -39,51 +39,26 @@ afterEach(() => {
 });
 
 describe("usage log", () => {
-  test("normalizes Routed V2 bridge diagnostics as closed enums", () => {
-    const base = {
-      requestId: "ocx-v2-bridge",
-      timestamp: 1,
-      provider: "openai",
-      model: "gpt-test",
-      status: 200,
-      durationMs: 1,
-      usageStatus: "unreported" as const,
+  test("round trips only recognized per-attempt xAI credential sources", () => {
+    const attempt = {
+      ordinal: 1, provider: "xai", model: "grok-test", adapter: "openai-chat", status: 200,
+      durationMs: 1, sendCount: 1, recoveryKinds: [], usageStatus: "reported" as const,
+      usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 }, totalTokens: 5,
     };
-    expect(normalizeUsageEntryForTest({
-      ...base,
-      v2BridgeScope: "root",
-      v2BridgeDecision: "no_collaboration_catalog",
-      v2BridgeStateDurability: "memory-only",
-    })).toMatchObject({
-      v2BridgeScope: "root",
-      v2BridgeDecision: "no_collaboration_catalog",
-      v2BridgeStateDurability: "memory-only",
+    appendUsageEntry({
+      requestId: "credential-source", timestamp: Date.now(), provider: "combo", model: "combo/test",
+      status: 200, durationMs: 1, usageStatus: "reported", attempts: [
+        { ...attempt, credentialSource: "grok-oauth" },
+        { ...attempt, ordinal: 2, credentialSource: "xai-api-key" },
+        { ...attempt, ordinal: 3, credentialSource: "secret-canary" as never },
+        { ...attempt, ordinal: 4, provider: "custom", credentialSource: "grok-oauth" },
+        { ...attempt, ordinal: 5 },
+      ],
     });
-    const invalid = normalizeUsageEntryForTest({
-      ...base,
-      v2BridgeScope: "secret",
-      v2BridgeDecision: "secret",
-      v2BridgeStateDurability: "secret",
-    } as unknown as PersistedUsageEntry);
-    expect(invalid).not.toHaveProperty("v2BridgeScope");
-    expect(invalid).not.toHaveProperty("v2BridgeDecision");
-    expect(invalid).not.toHaveProperty("v2BridgeStateDurability");
-  });
-
-  test("round-trips agentKind and drops invalid historical values", () => {
-    const base = {
-      requestId: "ocx-agent-kind",
-      timestamp: 1,
-      provider: "openai",
-      model: "gpt-test",
-      status: 200,
-      durationMs: 1,
-      usageStatus: "reported" as const,
-    };
-    expect(normalizeUsageEntryForTest({ ...base, agentKind: "subagent" })).toMatchObject({ agentKind: "subagent" });
-    expect(normalizeUsageEntryForTest({ ...base, agentKind: "corrupt" } as unknown as PersistedUsageEntry)).not.toHaveProperty("agentKind");
-    appendUsageEntry({ ...base, agentKind: "internal" });
-    expect(readUsageEntries()[0]).toMatchObject({ agentKind: "internal" });
+    resetUsageReadCacheForTests();
+    const sources = readUsageEntries()[0]?.attempts?.map(row => row.credentialSource);
+    expect(sources).toEqual(["grok-oauth", "xai-api-key", undefined, undefined, undefined]);
+    expect(readFileSync(usageLogPath(), "utf8")).not.toContain("secret-canary");
   });
 
   test("preserves explicitly empty attempts through normalization", () => {
@@ -159,32 +134,6 @@ describe("usage log", () => {
     };
     appendUsageEntry(entry);
     expect(readUsageEntries()[0]?.attempts?.[0]?.recoveryKinds).toEqual(["rate-limit-429"]);
-  });
-
-  test("persists the Cursor duplicate-tool recovery kind on attempts", () => {
-    const entry: PersistedUsageEntry = {
-      requestId: "ocx-cursor-duplicate-tool-kind",
-      timestamp: 1,
-      provider: "cursor",
-      model: "cursor/grok-4.6",
-      status: 200,
-      durationMs: 4,
-      usageStatus: "reported",
-      attempts: [{
-        ordinal: 1,
-        provider: "cursor",
-        model: "cursor/grok-4.6",
-        adapter: "cursor",
-        status: 200,
-        durationMs: 4,
-        sendCount: 2,
-        recoveryKinds: ["cursor-duplicate-tool-call"],
-        usageStatus: "reported",
-      }],
-    };
-    appendUsageEntry(entry);
-    expect(readUsageEntries()[0]?.attempts?.[0]?.recoveryKinds)
-      .toEqual(["cursor-duplicate-tool-call"]);
   });
 
   test("persists the key-401 recovery kind on attempts", () => {
@@ -361,27 +310,17 @@ describe("usage log", () => {
   });
 
   test("a replacement does not join an in-flight read for the previous file revision", async () => {
-    // Keep the writer open before the cooperative reader starts. Opening the file
-    // again with writeFileSync while Windows still has the reader open across its
-    // timer yield can block inside Bun instead of exercising the revision logic.
-    const writer = openSync(usageLogPath(), "w");
-    try {
-      const oldContents = Buffer.from(
-        `${Array.from({ length: 2_100 }, (_, index) => persistedLine(`old-${index}`)).join("\n")}\n`,
-      );
-      writeSync(writer, oldContents, 0, oldContents.byteLength, 0);
-      const oldRead = readUsageSnapshotForManagement();
-      await new Promise<void>(resolve => setTimeout(resolve, 0));
-      const replacement = Buffer.from(`${persistedLine("replacement")}\n`);
-      truncateSync(writer, 0);
-      writeSync(writer, replacement, 0, replacement.byteLength, 0);
-      const newRead = readUsageSnapshotForManagement();
-      await expect(oldRead).rejects.toThrow("management usage read superseded");
-      const newSnapshot = await newRead;
-      expect(newSnapshot.entries.map(entry => entry.requestId)).toEqual(["replacement"]);
-    } finally {
-      closeSync(writer);
-    }
+    writeFileSync(
+      usageLogPath(),
+      `${Array.from({ length: 2_100 }, (_, index) => persistedLine(`old-${index}`)).join("\n")}\n`,
+    );
+    const oldRead = readUsageSnapshotForManagement();
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    writeFileSync(usageLogPath(), `${persistedLine("replacement")}\n`);
+    const newRead = readUsageSnapshotForManagement();
+    await expect(oldRead).rejects.toThrow("management usage read superseded");
+    const newSnapshot = await newRead;
+    expect(newSnapshot.entries.map(entry => entry.requestId)).toEqual(["replacement"]);
   });
 
   test("persists conversationId for Logs session correlation", () => {

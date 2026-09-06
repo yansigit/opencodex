@@ -1,25 +1,20 @@
 # Maintainers
 
-This document lists the people responsible for maintaining the `yansigit/opencodex` fork and
-defines its review and merge policy.
+This document lists the people responsible for maintaining opencodex and defines the project's
+review and merge policy.
 
 ## Current maintainers
 
 | GitHub account | Project role | Responsibilities |
 | --- | --- | --- |
-| [@yansigit](https://github.com/yansigit) | Fork owner | Fork direction, `dev` integration, releases, repository administration, security review, and final governance decisions |
+| [@lidge-jun](https://github.com/lidge-jun) | Project owner | Project direction, releases, repository administration, and final governance decisions |
+| [@Ingwannu](https://github.com/Ingwannu) | Maintainer | Issue and pull-request triage, `dev` integration, security review, and repository maintenance |
 
 The table describes project responsibilities. Actual repository permissions remain controlled
 through GitHub repository settings.
 
 `dev` is the only integration line. The former `dev2-go` carry duty is retired;
 see [The retired `dev2-go` line](#the-retired-dev2-go-line).
-
-## Upstream contacts
-
-[@lidge-jun](https://github.com/lidge-jun) and
-[@Ingwannu](https://github.com/Ingwannu) maintain the upstream project. Their approval is not
-required for changes made only in this fork.
 
 ## Former maintainers
 
@@ -56,12 +51,20 @@ when a maintainer steps down.
   start repository CI; a maintainer has to — so the gate never disproves it;
   a new push still resets every box. A disproved claim unticks the matching
   box and keeps the PR a draft.
-  Authors with repository push permission skip the contributor-readiness
-  checklist. Branch and quality failures still apply.
-- Contributor pull requests require successful required CI checks and exact controller authorization;
-  generic maintainer approval is not a merge prerequisite.
-- The fork owner may merge their own pull requests or push directly. An explicit owner request is
-  sufficient authorization; no upstream or second-maintainer approval is required.
+  Authors with repository push permission skip the ancestry heuristic only. As
+  with the approval requirement above, this part is enforced by convention;
+  the ruleset does not check ancestry (see the note under the change log).
+- Pull requests require successful required CI checks before merge. Contributor pull requests
+  normally require approval from at least one maintainer other than the author.
+- A current maintainer with GitHub `maintain` or `admin` access may explicitly integrate a pull
+  request into `dev` without another maintainer's approval, including their own pull request.
+  Record that choice and the exact-head verification in the pull-request description or comment.
+  This is maintainer integration, not a self-approval or an independent review. Outstanding
+  maintainer change requests must still be resolved or explicitly withdrawn. Technical review,
+  attribution, documentation and security-review duties remain in force.
+- The maintainer-integration exception applies only to `dev`. It does not change review rules
+  for `main` or `preview`, grant contributor authors approval authority, or permit direct pushes,
+  force-pushes or branch deletion. Authors do not submit approving reviews of their own work.
 - Authentication, credential handling, GitHub Actions, release automation, dependency installation,
   and other security-boundary changes require explicit security review.
 - A new or promoted provider preset is a credential-destination change. Before merge it needs the
@@ -73,19 +76,34 @@ when a maintainer steps down.
   with the service is disclosed, not disqualifying, and it does not lower the evidence bar. When the
   evidence is incomplete, prefer an inert `src/providers/free-directory.ts` reference row over a
   canonical registry entry.
-- Security-sensitive and release-related changes should receive additional review when practical;
-  upstream approval is not required for fork-only work.
-- Required CI and documentation checks apply to owner merges and direct pushes.
-- Required merge checks are `ci`, `hygiene`, `enforce-target`, and `mergeable`, bound to the trusted check App where supported. Autonomous sync requires exact published-head provenance and no handoff, protected path, ownership conflict, or agent resolution. Jules controller advances require recorded parents `[previous Jules head, current dev]`; active editing blocks them. Holds older than 24 hours are summarized and never removed automatically.
-- Promotion from `dev` to `main` and npm releases is controlled by the fork owner.
-- Post-release version advancement has one writer: `promote-dev.yml` verifies the
-  published tag and exact release SHA, then advances `dev` through the repository
-  App. `dev-version-bump.yml` remains a dormant fallback and must not become a
-  second live authority.
-- Opening a preview for the next core ends the current patch line. After
+- Security-sensitive and release-related changes should be reviewed by both maintainers when
+  practical.
+- Integration uses pull requests, including urgent maintainer repairs. The PR-only ruleset
+  bypass does not authorize direct pushes; incident changes to branch protection require a
+  separate owner decision.
+- Promotion from `dev` to `main` and npm releases is maintainer-controlled.
+- **Opening a release starts by moving `dev`'s version line forward.** Before cutting
+  a release, `dev` must already outrank the version being released; `release.yml`
+  asserts this and refuses to publish otherwise. Dispatch
+  `.github/workflows/dev-version-bump.yml` with the intended version, merge the pull
+  request it opens, then promote and release. When `dev` already outranks the target
+  — a preview cut, or a stable hotfix below `dev`'s line — no move is needed and the
+  workflow reports `changed=false`.
+
+  Opening a preview for the next core ends the current patch line. After
   `vX.Y.0-preview.*` is tagged, a fix ships as part of `X.Y.0`, not as
-  `X.(Y-1).(Z+1)`. The release helper refuses that lower stable patch instead
-  of publishing a version already outranked by the repository's release line.
+  `X.(Y-1).(Z+1)`. The release helper refuses such a bump rather than producing a
+  version the repository would reject. This is a deliberate policy restriction, not
+  a claim that lower stable patches were historically unused.
+
+  Done after the publish, as this repository did for ten releases (`32529c2b2`,
+  `e4a85d134`, `076ad3036`, `befcac3e1`, then #3045, #3076, #3127, #3265, #3354,
+  #3434), it leaves `dev` and every open pull request carrying a failure contributors
+  cannot fix from their own diff. The pull request itself does not go away — `Protect
+  dev` requires a reviewed merge. If the pre-move is missed and publication somehow
+  succeeds, dispatch `dev-version-bump.yml` from the default branch with the released
+  version and `mode=repair`, then merge the repair pull request. Design:
+  `devlog/_plan/260904_release_version_line/`.
 
 ## The retired `dev2-go` line
 
@@ -114,15 +132,24 @@ defects. Bun-native TypeScript on `dev` is the single runtime line again.
 
 Adding or removing a maintainer requires:
 
-1. agreement from the fork owner,
+1. agreement from the project owner,
 2. review by another current maintainer when available, and
 3. updates to this file and [`.github/CODEOWNERS`](./.github/CODEOWNERS).
 
 ### Change log
 
-- 2026-08-28 — [@yansigit](https://github.com/yansigit) recorded as owner and sole current
-  maintainer of this fork. Upstream maintainers remain credited as upstream contacts but are not
-  required approvers for fork-only work.
+- 2026-09-06 — The owner authorized explicit maintainer integration into `dev` without a second
+  maintainer approval. Both current maintainers have `admin` access. The dev-only PR bypass
+  includes GitHub's `admin` and `maintain` roles; `write` access alone is insufficient. Contributor
+  review remains the default and the `main`/`preview` rules are unchanged. The optional
+  `scripts/ci/assert-mergeable-review.sh --maintainer-integration <pr-number> [repo]` path checks
+  the authenticated actor against the trusted `dev` roster and live repository permissions,
+  preserves outstanding maintainer objections, and binds its result to the current head and base.
+  The helper emits a validation snapshot, not a ready-to-run privileged merge command: head
+  matching does not pin a PR's base, which may change after inspection. Revalidate the current
+  actor and `dev` base before a separately authorized merge. The helper is not proof of CI or
+  security review and not a barrier against an administrator bypassing it. Repository settings
+  remain authoritative for actual permissions.
 
 - 2026-08-19 — [@Wibias](https://github.com/Wibias) stepped down as a maintainer
   and is now a contributor. This follows his own decision to stop developing
@@ -171,12 +198,11 @@ Adding or removing a maintainer requires:
   changes, and it blocks deletion and non-fast-forward pushes. Allowed merge
   methods are merge and squash; rebase merges are off.
 
-  The one carve-out is that the `maintain`/`admin` repository role holds a
-  `pull_request` bypass, so an owner can merge without the approval the rules
-  otherwise require. That is a bypass, not an exemption: "Authors do not approve
-  their own pull requests" above still governs, and an owner who uses the bypass
-  should record it on the pull request rather than leave it to be inferred from
-  a merge timestamp. Widening the security boundary is a separate decision.
+  At that time, the actual PR bypass covered `admin`; the earlier wording that
+  included `maintain` was inaccurate. The 2026-09-06 policy above adds the explicit
+  maintainer-integration exception for `dev` and the corresponding `maintain` role.
+  Both roles bypass through pull requests only. Force-push and deletion protections
+  remain in place, and the integrating maintainer records the decision and evidence.
 
 ## Security reports
 

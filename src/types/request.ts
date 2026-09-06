@@ -2,12 +2,6 @@ import type { KiroOAuthMetadata } from "../oauth/types";
 import type { OcxTool, OcxToolChoice } from "./tools";
 import type { TierDecision, TierObservationContext } from "./provider";
 
-/** Request-local source envelope for fidelity-preserving Anthropic transport. Never persisted. */
-export type ClaudeSourceEnvelope = {
-  readonly body: Readonly<Record<string, unknown>>;
-  readonly headers: Readonly<Record<string, string>>;
-};
-
 /** Exact provider/credential namespace for process-local reasoning replay. */
 export interface OcxReasoningReplayIdentity {
   providerName: string;
@@ -74,10 +68,8 @@ export interface OcxParsedRequest {
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */
   _clientThreadId?: string;
-  /** True when promptCacheKey is a shared cache cohort rather than a conversation identity. */
+  /** True when promptCacheKey identifies a shared cache cohort rather than one conversation. */
   _promptCacheKeyIsSharedCohort?: boolean;
-  /** Provider-private Command Code session affinity id, stable across in-process request mutation. */
-  _commandCodeSessionId?: string;
   /** Cursor-only thread owner; may be an opaque process-local Desktop session/thread identity. */
   _cursorClientThreadId?: string;
   /** Conversation/provider/account/model-bound namespace for reasoning replay state. */
@@ -111,12 +103,6 @@ export interface OcxParsedRequest {
    * executes searches via the gpt-5.4-mini sidecar (see src/web-search). Absent when not requested.
    */
   _webSearch?: Record<string, unknown>;
-  /**
-   * Antigravity Gemini in-turn CCA grounding: google_search and optional url_context ride the main
-   * routed fetch instead of the web-search sidecar loop. Set by core.ts when resolveCcaInTurnGrounding
-   * matches; consumed by the Google adapter at buildRequest/parseStream time.
-   */
-  _ccaInTurnGrounding?: { search: boolean; urlContext: boolean };
   /** Hosted image_generation tool config stashed for the image bridge sidecar (see src/images). */
   _imageGeneration?: { toolNames: Set<string>; originalTool?: Record<string, unknown> };
   /**
@@ -133,13 +119,11 @@ export interface OcxParsedRequest {
    */
   _compactionRequest?: boolean;
   /**
-  * True when the current request newly introduced a stored compaction summary/marker. Historical
-  * markers restored by previous_response_id expansion were already acknowledged and do not reset
-  * provider-private continuation caches again on every later turn.
-  */
+   * True when the current request newly introduced a stored compaction summary/marker. Historical
+   * markers restored by previous_response_id expansion were already acknowledged and do not reset
+   * provider-private continuation caches again on every later turn.
+   */
   _contextCompactionBoundary?: boolean;
-  /** Request-local Anthropic source envelope; never serialized into response state or logs. */
-  _claudeSourceEnvelope?: ClaudeSourceEnvelope;
 }
 
 export interface OcxContext {
@@ -287,34 +271,6 @@ export interface OcxRequestOptions {
     schema?: Record<string, unknown>;
     strict?: boolean;
   };
-  providerOptions?: { google?: GoogleProviderOptions };
-}
-
-export type GoogleSafetyCategory =
-  | "HARM_CATEGORY_HATE_SPEECH"
-  | "HARM_CATEGORY_SEXUALLY_EXPLICIT"
-  | "HARM_CATEGORY_DANGEROUS_CONTENT"
-  | "HARM_CATEGORY_HARASSMENT"
-  | "HARM_CATEGORY_CIVIC_INTEGRITY"
-  | "HARM_CATEGORY_JAILBREAK";
-export type GoogleSafetyThreshold =
-  | "HARM_BLOCK_THRESHOLD_UNSPECIFIED"
-  | "BLOCK_LOW_AND_ABOVE"
-  | "BLOCK_MEDIUM_AND_ABOVE"
-  | "BLOCK_ONLY_HIGH"
-  | "BLOCK_NONE"
-  | "OFF";
-
-export interface GoogleSafetySetting {
-  category: GoogleSafetyCategory;
-  threshold: GoogleSafetyThreshold;
-}
-
-export interface GoogleProviderOptions {
-  thinkingBudget?: number;
-  includeThoughts?: boolean;
-  safetySettings?: GoogleSafetySetting[];
-  cachedContent?: string;
 }
 
 export type OcxMessagePhase = "commentary" | "final_answer";
@@ -352,7 +308,7 @@ export interface OcxProviderContinuationState {
 }
 
 export type AdapterEvent =
-  | { type: "heartbeat"; replayUnsafe?: true }
+  | { type: "heartbeat" }
   | { type: "text_delta"; text: string; phase?: OcxMessagePhase }
   | { type: "thinking_delta"; thinking: string }
   // Anthropic extended-thinking round-trip: signature_delta for the current thinking block, and

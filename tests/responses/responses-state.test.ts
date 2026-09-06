@@ -1,9 +1,8 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { BULK_DURABLE_IO_BUDGET_MS, STORE_BUDGET_MS } from "../helpers/test-budget";
+import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:test";
+import { BULK_DURABLE_IO_BUDGET_MS } from "../helpers/test-budget";
 import { findDeadPid } from "../helpers/dead-pid";
 import {
   closeSync,
-  copyFileSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -19,7 +18,6 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { buildResponseJSON } from "../../src/bridge";
 import { createCursorRequest } from "../../src/adapters/cursor/request-builder";
 import { createCursorContextUsageTracker } from "../../src/adapters/cursor/protobuf-events";
@@ -29,10 +27,10 @@ import { createSseInspector } from "../../src/server/relay";
 import {
   clearResponseStateForTests,
   clearResponseStateMemoryForTests,
-  awaitResponseSpillPublicationTailForTests,
   evictOldestResponseContinuationForBudget,
   expandPreviousResponseInput,
   flushResponseState,
+  awaitResponseSpillPublicationTailForTests,
   markBodyNonPersistable,
   previousResponseConversationId,
   previousResponseProviderState,
@@ -61,17 +59,14 @@ import {
 } from "../../src/responses/state";
 import {
   RESPONSE_SPILL_DIR_NAME,
-  createResponseSpillPublicationControl,
   readResponseSpill,
   deleteResponseSpill,
   recoverOrphanedResponseSpills,
   responseSpillDirectory,
-  setAfterSpillOwnershipTransferForTests,
   setResponseSpillNowForTests,
   setResponseSpillPayloadCapForTests,
   setSpillIoForTest,
   writeResponseSpillDurably,
-  writeResponseSpillDurablyAsync,
 } from "../../src/responses/spill-store";
 import { adapterNeedsForcedContinuation, injectDeveloperMessage } from "../../src/server/responses";
 import { watchdogMs } from "../helpers/ci-watchdog";
@@ -133,8 +128,6 @@ function forceWindowsAclLane(): void {
   setPlatformForTests("win32");
   setWindowsPrincipalRunnerForTests(() => SYNTHETIC_SID);
   setAsyncWindowsPrincipalRunnerForTests(async () => SYNTHETIC_SID);
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
 }
 
 function feedInspector(
@@ -198,7 +191,6 @@ interface NeverSettlingAclChildResult {
   settled: boolean;
   pending: { count: number; bytes: number };
   metrics: { tombstoneCount: number };
-  seamCalls: { principal: number; icacls: number };
 }
 
 async function runShutdownBudgetChild(
@@ -327,36 +319,27 @@ describe("Responses previous_response_id state", () => {
     expect(previousResponseConversationId("resp_progress_31")).toBe("cursor_progress_chain");
   });
 
-  afterEach(async () => {
-    let tailError: unknown;
-    try {
-      await awaitResponseSpillPublicationTailForTests();
-    } catch (error) {
-      tailError = error;
-    } finally {
-      setAfterSpillOwnershipTransferForTests(null);
-      setSpillIoForTest(null);
-      setResponseSpillNowForTests(null);
-      setAsyncIcaclsRunnerForTests(null);
-      setIcaclsRunnerForTests(null);
-      setNowForTests(null);
-      setPlatformForTests(null);
-      setWindowsPrincipalRunnerForTests(null);
-      setAsyncWindowsPrincipalRunnerForTests(null);
-      resetWindowsPrincipalForTests();
-      setStatForTests(null);
-      resetHardenedStateForTests();
-      delete process.env.OPENCODEX_ACL_TIMEOUT_MS;
-      setResponseSpillShutdownBudgetForTests(null);
-      setResponseSpillAsyncAclAttemptBudgetForTests(null);
-      setResponseStateByteCapForTests(null);
-      setSpilledResponseByteCapForTests(null);
-      clearResponseStateForTests();
-      removeTreeWithRetry(home);
-      if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
-      else process.env["OPENCODEX_HOME"] = priorHome;
-    }
-    if (tailError) throw tailError;
+  afterEach(() => {
+    setSpillIoForTest(null);
+    setResponseSpillNowForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    setIcaclsRunnerForTests(null);
+    setNowForTests(null);
+    setPlatformForTests(null);
+    setWindowsPrincipalRunnerForTests(null);
+    setAsyncWindowsPrincipalRunnerForTests(null);
+    resetWindowsPrincipalForTests();
+    setStatForTests(null);
+    resetHardenedStateForTests();
+    delete process.env.OPENCODEX_ACL_TIMEOUT_MS;
+    setResponseSpillShutdownBudgetForTests(null);
+    setResponseSpillAsyncAclAttemptBudgetForTests(null);
+    setResponseStateByteCapForTests(null);
+    setSpilledResponseByteCapForTests(null);
+    clearResponseStateForTests();
+    removeTreeWithRetry(home);
+    if (priorHome === undefined) delete process.env["OPENCODEX_HOME"];
+    else process.env["OPENCODEX_HOME"] = priorHome;
   });
 
   test("expands later input with stored prior input and output", () => {
@@ -946,135 +929,34 @@ describe("Responses previous_response_id state", () => {
     expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 1, spillWrites: 1, spillWriteFailures: 0 });
   });
 
-  test("lock contention never cleans a colliding destination this attempt did not publish", async () => {
-    const payload = { createdAt: Date.now(), items: [{ role: "user", content: "collision" }] };
-    const first = writeResponseSpillDurably("resp_lock_collision", payload);
-    const match = /\.(\d+)\.(\d+)\.spill\.json$/.exec(first.fileName)!;
-    const collisionName = first.fileName.replace(
-      /\.(\d+)\.(\d+)\.spill\.json$/,
-      `.${Number(match[1]) + 1}.${match[2]}.spill.json`,
-    );
-    const dir = responseSpillDirectory(home);
-    const collisionPath = join(dir, collisionName);
-    copyFileSync(join(dir, first.fileName), collisionPath);
-
-    const readyPath = join(home, "spill-lock-ready");
-    const releasePath = join(home, "spill-lock-release");
-    const configUrl = pathToFileURL(join(repoRoot(), "src/config.ts")).href;
-    const child = Bun.spawn([process.execPath, "-e", `
-      import { existsSync, writeFileSync } from "node:fs";
-      import { withConfigMutationLockSync } from ${JSON.stringify(configUrl)};
-      withConfigMutationLockSync(() => {
-        writeFileSync(${JSON.stringify(readyPath)}, "ready");
-        while (!existsSync(${JSON.stringify(releasePath)})) Bun.sleepSync(10);
-      });
-    `], {
-      cwd: repoRoot(),
-      env: { ...process.env, OPENCODEX_HOME: home },
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-
-    try {
-      const deadline = Date.now() + watchdogMs(3_000);
-      while (!existsSync(readyPath) && Date.now() < deadline) await Bun.sleep(10);
-      expect(existsSync(readyPath)).toBe(true);
-      const control = createResponseSpillPublicationControl();
-      await expect(writeResponseSpillDurablyAsync("resp_lock_collision", payload, {
-        aclBudgetMs: 1_000,
-        publicationControl: control,
-      })).rejects.toThrow();
-      expect(existsSync(collisionPath)).toBe(true);
-      expect(readFileSync(collisionPath)).toEqual(readFileSync(join(dir, first.fileName)));
-    } finally {
-      writeFileSync(releasePath, "release");
-      expect(await child.exited).toBe(0);
-    }
-  });
-
-  test("copy fallback retries cleanup for a destination created before post-copy failure", async () => {
+  test("holds the disk cap while a copy-fallback publication has temp and destination on disk", async () => {
+    // The cap is a promise about the volume, and a file being created by
+    // writeResponseSpillDurablyAsync is on the volume. Accounting that walks only
+    // installed spills reports a satisfied budget while the directory grows — the
+    // incident behind this cap put 6.8 GiB on disk in 44 minutes.
+    //
+    // The peak is TWO envelopes, not one: when hard-linking fails, publication copies
+    // with COPYFILE_EXCL and then hardens the destination, so the temp and the copy exist
+    // together. This drives that exact path and measures real bytes on disk.
     forceWindowsAclLane();
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    let destinationUnlinks = 0;
-    let fileFsyncs = 0;
-    setSpillIoForTest({
-      link: () => { throw Object.assign(new Error("cross-device"), { code: "EXDEV" }); },
-      fsync: () => {
-        fileFsyncs += 1;
-        if (fileFsyncs === 2) throw Object.assign(new Error("fsync failed"), { code: "EIO" });
-      },
-      unlink(path) {
-        if (path.endsWith(".spill.json") && ++destinationUnlinks === 1) {
-          throw Object.assign(new Error("temporarily locked"), { code: "EACCES" });
+    setResponseStateByteCapForTests(1_024);
+
+    let gateDestinationHarden = false;
+    let release!: () => void;
+    let entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    let announced = false;
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (gateDestinationHarden && args.some(arg => arg.endsWith(".spill.json"))) {
+        if (!announced) {
+          announced = true;
+          entered();
         }
-        unlinkSync(path);
-      },
+        await gate;
+      }
+      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
     });
-    const control = createResponseSpillPublicationControl();
-
-    await expect(writeResponseSpillDurablyAsync("resp_copy_cleanup", {
-      createdAt: Date.now(),
-      items: [{ role: "user", content: "cleanup" }],
-    }, {
-      aclBudgetMs: 1_000,
-      publicationControl: control,
-    })).rejects.toThrow();
-
-    expect(destinationUnlinks).toBe(2);
-    expect(spillFileNames(home)).toEqual([]);
-    expect(spillTempNames(home)).toEqual([]);
-    expect(control).toMatchObject({ destinationPath: null, destinationOwned: false, tempPath: null });
-  });
-
-  test("a committed async spill survives redundant temp cleanup failure", async () => {
-    forceWindowsAclLane();
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    setSpillIoForTest({
-      unlink(path) {
-        if (path.endsWith(".tmp")) throw Object.assign(new Error("locked temp"), { code: "EACCES" });
-        unlinkSync(path);
-      },
-    });
-    setResponseStateByteCapForTests(1_024);
-
-    rememberLarge("resp_temp_cleanup", "t".repeat(8_000));
-    await flushPendingResponseSpillsForTests();
-
-    expect(responseStateMetrics()).toMatchObject({ spillStubCount: 1, tombstoneCount: 0, spillWriteFailures: 0 });
-    expect(spillFileNames(home)).toHaveLength(1);
-    expect(spillTempNames(home)).toHaveLength(1);
-    expect(getAccountedResponseSpillBytesForTests()).toBeGreaterThan(getSpilledResponseBytesForTests());
-    expect(JSON.stringify(expandPreviousResponseInput({ previous_response_id: "resp_temp_cleanup", input: "next" })))
-      .toContain("tttttttt");
-  });
-
-  test("a committed async spill survives shared-lock commit failure", async () => {
-    forceWindowsAclLane();
-    setIcaclsRunnerForTests(() => ICACLS_OK);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    setAfterSpillOwnershipTransferForTests(() => {
-      throw new Error("injected lock commit failure");
-    });
-    setResponseStateByteCapForTests(1_024);
-
-    rememberLarge("resp_lock_commit", "c".repeat(8_000));
-    await flushPendingResponseSpillsForTests();
-
-    expect(responseStateMetrics()).toMatchObject({ spillStubCount: 1, tombstoneCount: 0, spillWriteFailures: 0 });
-    expect(spillFileNames(home)).toHaveLength(1);
-    expect(spillTempNames(home)).toHaveLength(0);
-    expect(getAccountedResponseSpillBytesForTests()).toBe(getSpilledResponseBytesForTests());
-    expect(JSON.stringify(expandPreviousResponseInput({ previous_response_id: "resp_lock_commit", input: "next" })))
-      .toContain("cccccccc");
-  });
-
-  test("copy-fallback publication commits the destination and stub before releasing its lock", async () => {
-    forceWindowsAclLane();
-    setResponseStateByteCapForTests(1_024);
-    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-    setIcaclsRunnerForTests(() => ICACLS_OK);
 
     // One resident spill already on disk, so the cap has real prior occupancy.
     rememberLarge("resp_cap_existing", "e".repeat(8_000));
@@ -1083,21 +965,52 @@ describe("Responses previous_response_id state", () => {
     expect(existingBytes).toBeGreaterThan(0);
     expect(spillFileNames(home)).toHaveLength(1);
 
+    // Room for the two-envelope publication and nothing more. The seeded spill does not
+    // fit alongside it, so correct admission must reclaim it before publishing; without
+    // the check, seeded + temp + destination sit on disk together and blow the cap.
+    // Generous enough that this publication is admitted: the point of THIS test is that
+    // the accounting sees the in-flight bytes. The cap-refusal behaviour is proven
+    // separately below, where admission is the only thing standing between the request
+    // and an over-budget directory.
     const spillCap = existingBytes * 4;
     setSpilledResponseByteCapForTests(spillCap);
-    const events: string[] = [];
+
+    // Force the exclusive-copy fallback, then gate the destination hardening that follows
+    // it, so the observation below happens with BOTH files present.
     setSpillIoForTest({
       link: () => { throw Object.assign(new Error("EXDEV"), { code: "EXDEV" }); },
-      record: event => events.push(event),
     });
+    gateDestinationHarden = true;
 
     rememberLarge("resp_cap_inflight", "x".repeat(8_000));
+    await started;
+    try {
+      // Real disk: the temp and the copied destination coexist during hardening.
+      const onDisk = spillFileNames(home).length + spillTempNames(home).length;
+      expect(onDisk).toBeGreaterThanOrEqual(3);
+      // The walk over installed spills still reports only the settled file, so accounting
+      // built on it alone would price a three-envelope directory as one.
+      expect(getSpilledResponseBytesForTests()).toBe(existingBytes);
+      // Reservation prices the in-flight publication at its peak, so the accounted total
+      // covers what is actually on the volume.
+      expect(getAccountedResponseSpillBytesForTests())
+        .toBeGreaterThanOrEqual(existingBytes * 3);
+      // And the bytes ACTUALLY on disk stay inside the configured cap. This is the
+      // assertion the admission check has to earn: without it, the seeded spill plus the
+      // temp plus the destination copy exceed a cap sized for two envelopes.
+      expect(bytesOnDisk(home)).toBeLessThanOrEqual(spillCap);
+    } finally {
+      release();
+      setSpillIoForTest(null);
+    }
     await flushPendingResponseSpillsForTests();
-    setSpillIoForTest(null);
-    expect(events.indexOf("publish")).toBeLessThan(events.indexOf("stub-swap"));
+    // Settled: the reservation is released exactly once and accounting collapses to the
+    // real files. A leaked reservation would be monotonic — it would ratchet the usable
+    // cap toward zero until nothing could spill at all.
     expect(getAccountedResponseSpillBytesForTests()).toBe(getSpilledResponseBytesForTests());
     expect(spillTempNames(home)).toHaveLength(0);
-    expect(bytesOnDisk(home)).toBeLessThanOrEqual(spillCap);
+    // And the newest continuation is still replayable: the cap must not have turned the
+    // fail-closed path into the ordinary one.
     expect(JSON.stringify(expandPreviousResponseInput({ previous_response_id: "resp_cap_inflight", input: "next" })))
       .toContain("xxxxxxxx");
   });
@@ -1221,7 +1134,6 @@ describe("Responses previous_response_id state", () => {
 
   test("Windows async spill attempts share one bounded ACL budget across every harden", async () => {
     forceWindowsAclLane();
-    setIcaclsRunnerForTests(() => ICACLS_OK);
     let clock = 0;
     let firstGrant = true;
     const deadlines: number[] = [];
@@ -1250,11 +1162,12 @@ describe("Responses previous_response_id state", () => {
     rememberLarge("resp_async_acl_attempt_budget", "q".repeat(8_000));
     await flushPendingResponseSpillsForTests();
 
-    expect(deadlines.length).toBeGreaterThanOrEqual(7);
+    expect(deadlines.length).toBeGreaterThanOrEqual(10);
     expect(Math.max(...deadlines)).toBeLessThanOrEqual(15_000);
-    const retryAttemptGrantDeadlines = grantDeadlines.slice(-2);
-    expect(retryAttemptGrantDeadlines).toHaveLength(2);
+    const retryAttemptGrantDeadlines = grantDeadlines.slice(-3);
+    expect(retryAttemptGrantDeadlines).toHaveLength(3);
     expect(retryAttemptGrantDeadlines[1]!).toBeLessThan(retryAttemptGrantDeadlines[0]!);
+    expect(retryAttemptGrantDeadlines[2]!).toBeLessThan(retryAttemptGrantDeadlines[1]!);
     expect(responseStateMetrics()).toMatchObject({
       residentCount: 0,
       spillStubCount: 1,
@@ -1272,9 +1185,6 @@ describe("Responses previous_response_id state", () => {
         pending: { count: 0, bytes: 0 },
         metrics: { tombstoneCount: 2 },
       });
-      expect(result.seamCalls.principal).toBeGreaterThan(0);
-      if (mode === "principal") expect(result.seamCalls.icacls).toBe(0);
-      else expect(result.seamCalls.icacls).toBeGreaterThan(0);
     }
   }, { timeout: (2 * watchdogMs(1_500)) + 2_000 });
 
@@ -1387,6 +1297,8 @@ describe("Responses previous_response_id state", () => {
   test("shutdown drain reaches a stable tail after a publication is appended mid-drain", async () => {
     forceWindowsAclLane();
     setResponseSpillShutdownBudgetForTests({ totalMs: 1_000, fallbackReserveMs: 500 });
+    const nativeSetImmediate = setImmediate;
+    const epoch = Date.now();
     let releaseFirst!: () => void;
     let releaseSecond!: () => void;
     let firstEntered!: () => void;
@@ -1395,47 +1307,110 @@ describe("Responses previous_response_id state", () => {
     const secondGate = new Promise<void>(resolve => { releaseSecond = resolve; });
     const firstStarted = new Promise<void>(resolve => { firstEntered = resolve; });
     const secondStarted = new Promise<void>(resolve => { secondEntered = resolve; });
-    let aclCalls = 0;
+    const gatedTemps = new Set<string>();
     setAsyncIcaclsRunnerForTests(async args => {
-      if (!isSpillAclTarget(args)) return ICACLS_OK;
-      aclCalls += 1;
-      if (aclCalls === 1) {
-        firstEntered();
-        await firstGate;
-      } else if (aclCalls === 7) {
-        secondEntered();
-        await secondGate;
+      const target = args[0] ?? "";
+      if (!isSpillAclTarget(args) || !target.endsWith(".tmp") || args[1] !== "/grant:r") {
+        return ICACLS_OK;
       }
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      if (!gatedTemps.has(target)) {
+        gatedTemps.add(target);
+        if (gatedTemps.size === 1) {
+          firstEntered();
+          await firstGate;
+        } else if (gatedTemps.size === 2) {
+          secondEntered();
+          await secondGate;
+        }
+      }
+      return ICACLS_OK;
+    });
+    let syncSpillCalls = 0;
+    setIcaclsRunnerForTests(args => {
+      if (isSpillAclTarget(args)) syncSpillCalls += 1;
+      return ICACLS_OK;
+    });
+    let stubSwaps = 0;
+    setSpillIoForTest({
+      record: event => { if (event === "stub-swap") stubSwaps += 1; },
     });
     setResponseStateByteCapForTests(1_024);
-    rememberLarge("resp_fixed_point_first", "a".repeat(8_000));
-    await firstStarted;
-
     let flushed = false;
-    const flushing = flushResponseState().then(() => { flushed = true; });
-    rememberLarge("resp_fixed_point_second", "b".repeat(8_000));
-    releaseFirst();
-    await secondStarted;
+    let drained = false;
+    let draining: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
+    let flushing: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined;
+    let restoreClock: (() => void) | undefined;
     try {
-      await new Promise(resolve => setTimeout(resolve, 25));
+      // This case proves publication ordering; real disk latency must not fire the drain timer.
+      jest.useFakeTimers();
+      const nowSpy = spyOn(Date, "now").mockReturnValue(epoch);
+      restoreClock = () => { nowSpy.mockRestore(); };
+      setNowForTests(() => epoch);
+      setResponseSpillNowForTests(() => epoch);
+      rememberLarge("resp_fixed_point_first", "a".repeat(8_000));
+      await firstStarted;
+
+      // Handle rejection immediately, including when a gate/assertion fails before this await.
+      draining = flushPendingResponseSpillsForTests().then(
+        () => { drained = true; return { ok: true } as const; },
+        (error: unknown) => { drained = true; return { ok: false, error } as const; },
+      );
+      flushing = flushResponseState().then(
+        () => { flushed = true; return { ok: true } as const; },
+        (error: unknown) => { flushed = true; return { ok: false, error } as const; },
+      );
+      rememberLarge("resp_fixed_point_second", "b".repeat(8_000));
+      releaseFirst();
+      await secondStarted;
+      await new Promise<void>(resolve => nativeSetImmediate(resolve));
+      jest.advanceTimersByTime(25);
+      await new Promise<void>(resolve => nativeSetImmediate(resolve));
+      // Snapshot I/O after draining must not mask a premature drain return.
+      expect(drained).toBe(false);
       expect(flushed).toBe(false);
-    } finally {
+      expect(gatedTemps.size).toBe(2);
+      expect(stubSwaps).toBe(1);
+      expect(syncSpillCalls).toBe(0);
+
       releaseSecond();
+      const drainOutcome = await draining;
+      if (!drainOutcome.ok) throw drainOutcome.error;
+      const outcome = await flushing;
+      if (!outcome.ok) throw outcome.error;
+      expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 2 });
+      expect(pendingResponseSpillMetricsForTests()).toEqual({ count: 0, bytes: 0 });
+      expect(stubSwaps).toBe(2);
+      expect(syncSpillCalls).toBe(0);
+      for (const [id, payload] of [["resp_fixed_point_first", "a"], ["resp_fixed_point_second", "b"]] as const) {
+        expect(JSON.stringify(expandPreviousResponseInput({
+          previous_response_id: id,
+          input: "next",
+        }))).toContain(payload.repeat(8_000));
+      }
+    } finally {
+      releaseFirst();
+      releaseSecond();
+      try {
+        await draining;
+        await flushing;
+        await awaitResponseSpillPublicationTailForTests();
+        await flushPendingResponseSpillsForTests();
+      } finally {
+        restoreClock?.();
+        jest.useRealTimers();
+      }
     }
-    await flushing;
-    await awaitResponseSpillPublicationTailForTests();
-    expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 2 });
   });
 
   test("shutdown drain cap expiry enters the synchronous spill fallback", async () => {
     forceWindowsAclLane();
-    // Freeze the ACL/spill clocks, then give the real wall-clock fallback enough time for
-    // the 2 MiB durable write. The gate, not fallback-budget exhaustion, proves drain expiry.
+    // Freeze the ACL/spill clocks: the sync fallback harden now really runs on every host
+    // (harden() follows the platform seam), and its budget must not race a loaded CI
+    // shard's wall clock inside the 80 ms reserve — run 33603770447 shard 3 lost that race.
     let aclClock = 0;
     setNowForTests(() => aclClock);
     setResponseSpillNowForTests(() => aclClock);
-    setResponseSpillShutdownBudgetForTests({ totalMs: STORE_BUDGET_MS + 1, fallbackReserveMs: STORE_BUDGET_MS });
+    setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -1452,18 +1427,28 @@ describe("Responses previous_response_id state", () => {
       return { success: true, exitCode: 0, timedOut: false, stdout: "" };
     });
     setResponseStateByteCapForTests(1_024);
-    rememberLarge("resp_shutdown_fallback", "f".repeat(2 * 1024 * 1024 + 4_096));
-    await started;
-
+    let restoreClock: (() => void) | undefined;
     try {
+      rememberLarge("resp_shutdown_fallback", "f".repeat(2 * 1024 * 1024 + 4_096));
+      await started;
+      // ACL/spill clocks alone do not control the shutdown reserve: state.ts
+      // uses Date.now(). Keep its 80 ms budget independent of real disk latency.
+      // The real 40 ms drain timer still fires while publication stays gated.
+      const shutdownNow = Date.now();
+      const nowSpy = spyOn(Date, "now").mockReturnValue(shutdownNow);
+      restoreClock = () => { nowSpy.mockRestore(); };
       await flushResponseState();
       expect(synchronousCalls).toBeGreaterThan(0);
       expect(pendingResponseSpillMetricsForTests()).toEqual({ count: 0, bytes: 0 });
       expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 1 });
     } finally {
       release();
+      try {
+        await awaitResponseSpillPublicationTailForTests();
+      } finally {
+        restoreClock?.();
+      }
     }
-    await awaitResponseSpillPublicationTailForTests();
   });
 
   test("shutdown fallback prices the job-owned superseded generation before publishing", async () => {
@@ -1473,12 +1458,13 @@ describe("Responses previous_response_id state", () => {
     // (debt + footprint) and (old + debt + footprint) admits a publication that puts the
     // directory over budget.
     forceWindowsAclLane();
-    // Freeze the ACL/spill clocks, but keep the real wall-clock fallback reserve independent
-    // of runner load. The gate is the semantic reason the async drain cannot complete.
+    // Freeze the ACL/spill clocks: the sync fallback harden now really runs on every host
+    // (harden() follows the platform seam), and its budget must not race a loaded CI
+    // shard's wall clock inside the 80 ms reserve — run 33603770447 shard 3 lost that race.
     let aclClock = 0;
     setNowForTests(() => aclClock);
     setResponseSpillNowForTests(() => aclClock);
-    setResponseSpillShutdownBudgetForTests({ totalMs: STORE_BUDGET_MS + 1, fallbackReserveMs: STORE_BUDGET_MS });
+    setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
     let release!: () => void;
     let entered!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
@@ -1524,17 +1510,12 @@ describe("Responses previous_response_id state", () => {
     } finally {
       release();
     }
-    await awaitResponseSpillPublicationTailForTests();
   });
 
   test("shutdown fallback spends only its reserved ACL budget", async () => {
     forceWindowsAclLane();
-    // The 2 MiB fallback write performs real fsync work even though the ACL clock below
-    // is synthetic. Keep the real wall-clock reserve out of the assertion's critical
-    // path: run 33998058832 exhausted the old 300 ms reserve under Linux shard load.
-    const drainMs = 200;
-    const fallbackReserveMs = STORE_BUDGET_MS;
-    const totalMs = fallbackReserveMs + drainMs;
+    const totalMs = 500;
+    const fallbackReserveMs = 300;
     setResponseSpillShutdownBudgetForTests({ totalMs, fallbackReserveMs });
     let release!: () => void;
     let entered!: () => void;
@@ -1542,47 +1523,71 @@ describe("Responses previous_response_id state", () => {
     const started = new Promise<void>(resolve => { entered = resolve; });
     let aclClock = 0;
     setNowForTests(() => aclClock);
+    setResponseSpillNowForTests(() => aclClock);
     setAsyncIcaclsRunnerForTests(async args => {
       if (!isSpillAclTarget(args)) return ICACLS_OK;
       entered();
       await gate;
       return ICACLS_OK;
     });
-    const deadlines: number[] = [];
+    let released = false;
+    const deadlines: Array<{ target: string; timeoutMs: number; spentBefore: number; gateReleased: boolean }> = [];
     setIcaclsRunnerForTests((args, timeoutMs) => {
       if (!isSpillAclTarget(args)) return ICACLS_OK;
-      deadlines.push(timeoutMs);
-      // Spend a meaningful share of the logical reserve per call so the total-budget
-      // assertion stays sharp without coupling it to hosted-runner filesystem latency.
-      aclClock += Math.floor(fallbackReserveMs / 8);
-      return { success: true, exitCode: 0, timedOut: false, stdout: "" };
+      deadlines.push({ target: args[0]!, timeoutMs, spentBefore: aclClock, gateReleased: released });
+      aclClock += 20;
+      return ICACLS_OK;
     });
     setResponseStateByteCapForTests(1_024);
-    rememberLarge("resp_shutdown_budget", "b".repeat(2 * 1024 * 1024 + 4_096));
-    await started;
-
+    let restoreClock: (() => void) | undefined;
     try {
+      rememberLarge("resp_shutdown_budget", "b".repeat(2 * 1024 * 1024 + 4_096));
+      await started;
+      // Keep the native 200 ms drain timer, but charge only logical ACL work to the reserve.
+      const epoch = Date.now();
+      const nowSpy = spyOn(Date, "now").mockImplementation(() => epoch + aclClock);
+      restoreClock = () => { nowSpy.mockRestore(); };
       await flushResponseState();
+      const logicalElapsedMs = totalMs - fallbackReserveMs + aclClock;
+      expect(deadlines.length).toBeGreaterThanOrEqual(6);
+      expect(Math.max(...deadlines.map(call => call.timeoutMs))).toBeLessThanOrEqual(Math.floor(fallbackReserveMs / 2));
+      expect(logicalElapsedMs).toBeLessThanOrEqual(totalMs);
+      const previousDeadlineByTarget = new Map<string, number>();
+      for (const { target, timeoutMs, spentBefore, gateReleased } of deadlines) {
+        expect(gateReleased).toBe(false);
+        expect(timeoutMs).toBeGreaterThan(0);
+        expect(timeoutMs).toBeLessThanOrEqual(300 - spentBefore);
+        const previous = previousDeadlineByTarget.get(target);
+        if (previous !== undefined) expect(timeoutMs).toBe(previous - 20);
+        previousDeadlineByTarget.set(target, timeoutMs);
+      }
+      expect(pendingResponseSpillMetricsForTests()).toEqual({ count: 0, bytes: 0 });
+      expect(responseStateMetrics()).toMatchObject({ residentCount: 0, spillStubCount: 1 });
+      expect(JSON.stringify(expandPreviousResponseInput({
+        previous_response_id: "resp_shutdown_budget",
+        input: "next",
+      }))).toContain("b".repeat(2 * 1024 * 1024 + 4_096));
     } finally {
+      released = true;
       release();
+      try {
+        // Shutdown can clear pending ownership before the superseded async runner settles.
+        await awaitResponseSpillPublicationTailForTests();
+        await flushPendingResponseSpillsForTests();
+      } finally {
+        restoreClock?.();
+      }
     }
-    await awaitResponseSpillPublicationTailForTests();
-    const logicalElapsedMs = drainMs + aclClock;
-    expect(deadlines.length).toBeGreaterThanOrEqual(6);
-    expect(Math.max(...deadlines)).toBeLessThanOrEqual(Math.floor(fallbackReserveMs / 2));
-    expect(logicalElapsedMs).toBeLessThanOrEqual(totalMs);
   });
 
   test("late async spill completion cannot overwrite the shutdown fallback", async () => {
     forceWindowsAclLane();
     setStatForTests(() => ({ dev: 1n, ino: 10n, ctimeNs: 100n }));
-    // Frozen ACL/spill clocks do not freeze state.ts's wall-clock shutdown deadline.
+    // Frozen clocks for the same reason as the drain-cap case above.
     let aclClock = 0;
     setNowForTests(() => aclClock);
     setResponseSpillNowForTests(() => aclClock);
-    // Preserve the 120 ms async drain window while giving the required synchronous
-    // 2 MiB fallback write the shared filesystem budget under hosted-runner load.
-    setResponseSpillShutdownBudgetForTests({ totalMs: STORE_BUDGET_MS + 120, fallbackReserveMs: STORE_BUDGET_MS });
+    setResponseSpillShutdownBudgetForTests({ totalMs: 120, fallbackReserveMs: 80 });
     let release!: () => void;
     let entered!: () => void;
     let tempHardenFinished!: () => void;
@@ -1942,72 +1947,6 @@ describe("Responses previous_response_id state", () => {
     expect(metrics.totalBytes).toBeLessThanOrEqual(1_024);
   });
 
-  test("repeated synchronous temp cleanup failure remains charged against the disk cap", () => {
-    let tempUnlinks = 0;
-    setSpillIoForTest({
-      unlink(path) {
-        if (path.endsWith(".tmp")) {
-          tempUnlinks += 1;
-          throw Object.assign(new Error("locked temp"), { code: "EACCES" });
-        }
-        unlinkSync(path);
-      },
-    });
-    setResponseStateByteCapForTests(1_024);
-
-    rememberLarge("resp_sync_temp_debt", "t".repeat(8_000));
-
-    expect(tempUnlinks).toBe(2);
-    expect(spillTempNames(home)).toHaveLength(1);
-    expect(spillFileNames(home)).toHaveLength(0);
-    expect(responseStateMetrics()).toMatchObject({ tombstoneCount: 1, spillWriteFailures: 1 });
-    expect(getSpilledResponseBytesForTests()).toBe(0);
-    const cleanupDebt = getAccountedResponseSpillBytesForTests();
-    expect(cleanupDebt).toBeGreaterThan(0);
-
-    setSpillIoForTest(null);
-    setSpilledResponseByteCapForTests(cleanupDebt);
-    rememberLarge("resp_sync_temp_cap", "c".repeat(8_000));
-    expect(spillFileNames(home)).toHaveLength(0);
-    expect(getAccountedResponseSpillBytesForTests()).toBe(cleanupDebt);
-  });
-
-  test("repeated synchronous copy-destination cleanup failure remains charged against the disk cap", () => {
-    let fileFsyncs = 0;
-    let destinationUnlinks = 0;
-    setSpillIoForTest({
-      link: () => { throw Object.assign(new Error("cross-device"), { code: "EXDEV" }); },
-      fsync: () => {
-        fileFsyncs += 1;
-        if (fileFsyncs === 2) throw Object.assign(new Error("fsync failed"), { code: "EIO" });
-      },
-      unlink(path) {
-        if (path.endsWith(".spill.json")) {
-          destinationUnlinks += 1;
-          throw Object.assign(new Error("locked destination"), { code: "EACCES" });
-        }
-        unlinkSync(path);
-      },
-    });
-    setResponseStateByteCapForTests(1_024);
-
-    rememberLarge("resp_sync_destination_debt", "d".repeat(8_000));
-
-    expect(destinationUnlinks).toBe(2);
-    expect(spillTempNames(home)).toHaveLength(0);
-    expect(spillFileNames(home)).toHaveLength(1);
-    expect(responseStateMetrics()).toMatchObject({ tombstoneCount: 1, spillWriteFailures: 1 });
-    expect(getSpilledResponseBytesForTests()).toBe(0);
-    const cleanupDebt = getAccountedResponseSpillBytesForTests();
-    expect(cleanupDebt).toBeGreaterThan(0);
-
-    setSpillIoForTest(null);
-    setSpilledResponseByteCapForTests(cleanupDebt);
-    rememberLarge("resp_sync_destination_cap", "c".repeat(8_000));
-    expect(spillFileNames(home)).toHaveLength(1);
-    expect(getAccountedResponseSpillBytesForTests()).toBe(cleanupDebt);
-  });
-
   test("disk permission failure increments spillWriteFailures without retaining payload", () => {
     const denied = Object.assign(new Error("denied"), { code: "EACCES" });
     setSpillIoForTest({ write: () => { throw denied; } });
@@ -2194,32 +2133,6 @@ describe("Responses previous_response_id state", () => {
     }
   });
 
-  test("spill eviction keeps failed unlink bytes charged until the file disappears", () => {
-    setResponseStateByteCapForTests(1_024);
-    rememberLarge("resp_eviction_unlink_debt", "e".repeat(8_000));
-    const spillPath = join(responseSpillDirectory(home), spillFileNames(home)[0]!);
-    const payloadBytes = getSpilledResponseBytesForTests();
-    expect(payloadBytes).toBeGreaterThan(0);
-
-    setSpillIoForTest({
-      unlink(path) {
-        if (path === spillPath) throw Object.assign(new Error("locked spill"), { code: "EACCES" });
-        unlinkSync(path);
-      },
-    });
-    setSpilledResponseByteCapForTests(0);
-    sweepExpiredResponseStates();
-
-    expect(existsSync(spillPath)).toBe(true);
-    expect(getSpilledResponseBytesForTests()).toBe(0);
-    expect(getAccountedResponseSpillBytesForTests()).toBe(payloadBytes);
-
-    setSpillIoForTest(null);
-    sweepExpiredResponseStates();
-    expect(existsSync(spillPath)).toBe(false);
-    expect(getAccountedResponseSpillBytesForTests()).toBe(0);
-  });
-
   test("startup orphan cleanup removes only old unreferenced regular spill files", async () => {
     setResponseStateByteCapForTests(1_024);
     rememberLarge("resp_live_orphan_gc", "l".repeat(8_000));
@@ -2268,7 +2181,7 @@ describe("Responses previous_response_id state", () => {
     rememberLarge("resp_legacy_small", "small");
     await flushResponseState();
     const snapshot = JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")) as { version: number; states: [string, Record<string, unknown>][] };
-    expect(snapshot.version).toBe(3);
+    expect(snapshot.version).toBe(2);
     const row = snapshot.states.find(([id]) => id === "resp_legacy_small")?.[1];
     expect(row).toMatchObject({ items: expect.any(Array) });
     expect(row?.kind).toBeUndefined();
@@ -2399,7 +2312,7 @@ describe("Responses previous_response_id state", () => {
       );
       const items = [{ role: "user", content: "한글🙂" }, ...output];
       const expected = Buffer.byteLength(JSON.stringify({
-        responseId: "resp_다국어", kind: "resident", createdAt: at, items, providerOutputStart: 1, providers,
+        responseId: "resp_다국어", createdAt: at, items, providerOutputStart: 1, providers,
       }), "utf8");
       expect(getStoredResponseBytesForTests()).toBe(expected);
     } finally {
@@ -3181,7 +3094,7 @@ describe("Responses previous_response_id state", () => {
     expect(closed).toBe(true);
   });
 
-  test("v1 Cursor snapshot is retired by the version 3 confidentiality migration", () => {
+  test("v1 Cursor snapshot migrates to versioned provider state", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "responses-state.json"), JSON.stringify({
       version: 1,
@@ -3193,9 +3106,10 @@ describe("Responses previous_response_id state", () => {
       }]],
     }));
 
-    expect(previousResponseProviderState("resp_v1")).toBeUndefined();
-    expect(previousResponseConversationId("resp_v1")).toBeUndefined();
-    expect(JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8"))).toEqual({ version: 3, states: [] });
+    expect(previousResponseProviderState("resp_v1")).toEqual({
+      cursor: { conversationId: "cursor_v1", checkpointUsable: false },
+    });
+    expect(previousResponseConversationId("resp_v1")).toBe("cursor_v1");
   });
 
   test("persists provider-keyed Cursor and Kiro continuation state across restart", async () => {
@@ -3235,7 +3149,7 @@ describe("Responses previous_response_id state", () => {
       kiro: { conversationId: "kiro_conv_2" },
     });
     const snapshot = JSON.parse(readFileSync(join(home, "responses-state.json"), "utf8")) as { version: number };
-    expect(snapshot.version).toBe(3);
+    expect(snapshot.version).toBe(2);
   });
 
   test("stale snapshot entries are pruned on load", async () => {
@@ -3689,14 +3603,12 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     expect(previousResponseReplayFailure(body)?.reason).toBe("spill_failed");
   });
 
-  test("externally oversized legacy snapshot is retired without parsing", () => {
+  test("externally oversized snapshot file is refused before parse", () => {
     const refusalsBefore = responseAdmissionCountersForTests().snapshotOversizedRefusals;
-    const path = join(home, "responses-state.json");
-    writeFileSync(path, `{"version":2,"states":[${" ".repeat(33 * 1024 * 1024)}]}`);
+    writeFileSync(join(home, "responses-state.json"), `{"version":2,"states":[${" ".repeat(33 * 1024 * 1024)}]}`);
     // First store access triggers the lazy load.
     rememberResponseState({ model: "m", input: "x" }, completedResponse("resp_after", "ok"));
     expect(responseAdmissionCountersForTests().snapshotOversizedRefusals).toBe(refusalsBefore + 1);
-    expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ version: 3, states: [] });
     // The store still works: the new entry is present and replays.
     expect((expandChained("resp_after") as { input: unknown[] }).input.length).toBeGreaterThan(1);
   });
@@ -3812,6 +3724,7 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     const files = readdirSync(dir);
     expect(files.length).toBe(1);
     const envelope = statSync(join(dir, files[0])).size;
+    const firstGeneration = files[0];
     clearResponseStateMemoryForTests();
     setResponseSpillPayloadCapForTests(envelope - 1);
     const dropsBefore = responseAdmissionCountersForTests().oversizedDrops;
@@ -3828,9 +3741,9 @@ describe("Responses state admission boundary (oversized direct-spill)", () => {
     // replay reports the tombstone (spill_failed); the sync lane's spill_too_large is a
     // read-time classification of a file that was never written here.
     expect(previousResponseReplayFailure(body)?.reason).toBe("spill_failed");
-    // The over-ceiling publication was deleted, and the absent-snapshot startup
-    // retirement pass removed the first generation orphaned by the memory clear.
-    expect(readdirSync(dir)).toHaveLength(1);
+    // The over-ceiling publication was deleted; only the first generation's file (orphaned by
+    // the memory clear, owned by the orphan GC) remains.
+    expect(readdirSync(dir)).toEqual([firstGeneration]);
   });
 
   test("win32: async direct-spill write failure installs a tombstone and keeps unrelated residents", async () => {
