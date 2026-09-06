@@ -26,6 +26,12 @@ import { setActiveProviderApiKey } from "../../src/providers/api-keys";
 import { subscribeAccountSelections } from "../../src/lib/account-selection-events";
 import { providerManagementConfigError, safeConfigDTO } from "../../src/server/auth-cors";
 import type { OcxConfig, OcxParsedRequest, OcxProviderConfig } from "../../src/types";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import {
+  resetHardenedStateForTests,
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+} from "../../src/lib/windows-secret-acl";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let home: string;
@@ -57,10 +63,18 @@ function pool3(): OcxProviderConfig["apiKeyPool"] {
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "ocx-keyfailover-"));
   process.env.OPENCODEX_HOME = home;
+  resetHardenedStateForTests();
+  const icaclsOk = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+  setIcaclsRunnerForTests(() => icaclsOk);
+  setAsyncIcaclsRunnerForTests(async () => icaclsOk);
   clearKeyCooldowns();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  resetHardenedStateForTests();
   delete process.env.OPENCODEX_HOME;
   removeTreeWithRetry(home);
   clearKeyCooldowns();
@@ -84,6 +98,12 @@ describe("hasKeyPoolFailover", () => {
     expect(hasKeyPoolFailover({ adapter: "openai-chat", baseUrl: "x" } as OcxProviderConfig)).toBe(false);
     expect(hasKeyPoolFailover({ adapter: "anthropic", baseUrl: "x", authMode: "oauth", apiKeyPool: pool3() } as OcxProviderConfig)).toBe(false);
     expect(hasKeyPoolFailover({ adapter: "openai-responses", baseUrl: "x", authMode: "forward", apiKeyPool: pool3() } as OcxProviderConfig)).toBe(false);
+    expect(hasKeyPoolFailover({
+      adapter: "azure-openai",
+      baseUrl: "https://resource.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential" },
+      apiKeyPool: pool3(),
+    } as OcxProviderConfig)).toBe(false);
   });
 });
 
@@ -193,6 +213,13 @@ describe("rotateKeyOn429", () => {
     expect(rotateKeyOn429(oauth, "p", null)).toBeNull();
     const single = makeConfig({ apiKey: "key-alpha-000111222333", apiKeyPool: [pool3()![0]] });
     expect(rotateKeyOn429(single, "p", null)).toBeNull();
+    const identity = makeConfig({
+      adapter: "azure-openai",
+      baseUrl: "https://resource.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential" },
+      apiKeyPool: pool3(),
+    });
+    expect(rotateKeyOn429(identity, "p", null)).toBeNull();
     expect(rotateKeyOn429(makeConfig({}), "missing", null)).toBeNull();
   });
 

@@ -10,8 +10,10 @@
  */
 import { commitProviderApiKeySelection } from "./api-key-selection";
 import type { ProviderApiKeySelection } from "../types/provider";
+import { isAzureIdentityProvider } from "../config/provider-validation";
 import { routedProviderConfig } from "../router";
 import type { OcxConfig, OcxProviderConfig, RateLimitRetryPolicy, TransientRetryPolicy } from "../types";
+import { resolveProviderApiKey } from "./key-store";
 import { OPENCODE_GO_SESSION_HEADER } from "./opencode-go-transport";
 import { resolveProviderTransport, type OcxProviderTransport } from "./xai-transport";
 import { sweepExpiredOnWrite } from "../lib/state-store-sweeper";
@@ -96,6 +98,7 @@ function isKeyInCooldown(providerName: string, keyId: string, now = Date.now()):
  * Returns true only for key-auth providers with 2+ pool entries.
  */
 export function hasKeyPoolFailover(provider: OcxProviderConfig): boolean {
+  if (isAzureIdentityProvider(provider)) return false;
   if (provider.authMode === "oauth" || provider.authMode === "forward") return false;
   return (provider.apiKeyPool?.length ?? 0) >= 2;
 }
@@ -108,7 +111,7 @@ export function hasKeyPoolFailover(provider: OcxProviderConfig): boolean {
  * callers never re-check fields.
  */
 export function rateLimitRetryPolicyFor(
-  provider: Pick<OcxProviderConfig, "retryOn429" | "authMode">,
+  provider: Pick<OcxProviderConfig, "retryOn429" | "authMode" | "adapter" | "azureCredential">,
 ): Required<RateLimitRetryPolicy> | null {
   const policy = provider.retryOn429;
   if (!policy || policy.enabled === false) return null;
@@ -117,6 +120,7 @@ export function rateLimitRetryPolicyFor(
   // same token, local runtimes have no remote key to preserve, and unknown/custom values are
   // rejected rather than guessed at.
   if (provider.authMode !== undefined && provider.authMode !== "key") return null;
+  if (isAzureIdentityProvider(provider)) return null;
   return {
     enabled: policy.enabled ?? DEFAULT_RATE_LIMIT_RETRY.enabled,
     attempts: policy.attempts ?? DEFAULT_RATE_LIMIT_RETRY.attempts,
@@ -137,12 +141,13 @@ export function rateLimitRetryPolicyFor(
  * unknown value.
  */
 export function transientRetryPolicyFor(
-  provider: Pick<OcxProviderConfig, "transientRetryOn5xx" | "authMode" | "adapter">,
+  provider: Pick<OcxProviderConfig, "transientRetryOn5xx" | "authMode" | "adapter" | "azureCredential">,
 ): Required<TransientRetryPolicy> | null {
   const policy = provider.transientRetryOn5xx;
   if (!policy || policy.enabled === false) return null;
   if (provider.adapter !== "openai-chat") return null;
   if (provider.authMode !== undefined && provider.authMode !== "key") return null;
+  if (isAzureIdentityProvider(provider)) return null;
   return {
     enabled: policy.enabled ?? DEFAULT_TRANSIENT_RETRY.enabled,
     attempts: policy.attempts ?? DEFAULT_TRANSIENT_RETRY.attempts,
@@ -191,6 +196,7 @@ function rotateKeyAfterFailure(
 ): OcxProviderConfig | null {
   const provider = config.providers[providerName];
   if (!provider) return null;
+  if (isAzureIdentityProvider(provider)) return null;
   if (provider.authMode === "oauth" || provider.authMode === "forward") return null;
 
   const failedKey = attemptedSelection?.reference ?? attemptedKey ?? provider.apiKey;
@@ -205,9 +211,12 @@ function rotateKeyAfterFailure(
     // defer the in-memory cooldown side effect until persistence has succeeded.
     const failedEntry = attemptedSelection?.entryId
       ? pool.find(entry => entry.id === attemptedSelection.entryId && entry.key === failedKey)
-      : pool.find(entry => entry.key === failedKey);
+      : pool.find(entry => entry.key === failedKey
+        || (failedKey !== undefined && resolveProviderApiKey(entry.key) === failedKey));
 
-    if (freshProvider.apiKey !== failedKey) {
+    const activeMatchesFailure = freshProvider.apiKey === failedKey
+      || (failedKey !== undefined && resolveProviderApiKey(freshProvider.apiKey) === failedKey);
+    if (!activeMatchesFailure) {
       const activeEntry = pool.find(entry => entry.key === freshProvider.apiKey);
       if (activeEntry && !isKeyInCooldown(providerName, activeEntry.id, now)) {
         return {

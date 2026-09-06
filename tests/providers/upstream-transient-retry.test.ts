@@ -43,6 +43,12 @@ describe("transientRetryPolicyFor", () => {
     for (const authMode of ["oauth", "forward", "local"]) {
       expect(transientRetryPolicyFor({ ...base, authMode, transientRetryOn5xx: {} } as unknown as OcxProviderConfig)).toBeNull();
     }
+    expect(transientRetryPolicyFor({
+      ...base,
+      adapter: "azure-openai",
+      azureCredential: { type: "default-azure-credential" },
+      transientRetryOn5xx: {},
+    } as unknown as OcxProviderConfig)).toBeNull();
     // An omitted authMode is the documented key-auth default for custom providers.
     expect(transientRetryPolicyFor({ adapter: "openai-chat", transientRetryOn5xx: {} } as unknown as OcxProviderConfig))
       .toEqual({ enabled: true, attempts: 3 });
