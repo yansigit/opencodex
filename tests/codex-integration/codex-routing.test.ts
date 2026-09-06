@@ -1713,6 +1713,8 @@ describe("codex routing", () => {
       shortPercent: 11,
       shortResetAt: 1,
       shortWindowSeconds: 5 * 60 * 60,
+      fiveHourPercent: 11,
+      fiveHourResetAt: 1,
       weeklyPercent: 22,
       weeklyResetAt: 2,
       customWindows: [{ label: "GPT-5.3-Codex-Spark Weekly", percent: 33, resetAt: 3 }],
