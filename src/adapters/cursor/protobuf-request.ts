@@ -297,7 +297,7 @@ function rootPromptMessages(
     normalized: string,
   ): void => {
     const previous = replayRuns.get(role);
-    if (externalModel && previous?.text === normalized) {
+    if (echoToolResultInRoot && previous?.text === normalized) {
       const runLength = previous.length + 1;
       if (runLength > maxRunLength) maxRunLength = runLength;
       const marked = `${normalized}\n[note: this exact output was produced ${runLength} times in a row]`;
@@ -333,6 +333,7 @@ function rootPromptMessages(
         }, "user", { messageIndex: i }));
       }
     } else if (message.role === "assistant") {
+      if (externalModel && message.phase === "commentary") continue;
       // External Cursor clients do not replay hidden reasoning as assistant-visible prompt text.
       // Native Composer state can preserve it through ThinkingMessage/history structures.
       const text = assistantRootText(message, !externalModel).trim();
@@ -368,12 +369,13 @@ function rootPromptMessages(
       // the same payload as assistant-role "[Tool Result]" / "[tool_result]" text teaches Auto
       // to echo that envelope as chat instead of continuing from the structured result.
       if (!echoToolResultInRoot) continue;
-      // #1920: the prefix must reflect the NORMALIZED error state (an empty
-      // node_repl result is an error even when the runtime said isError=false).
-      const prefix = normalizedToolResult(message, contentToText(message.content)).isError ? "[Tool Error]" : "[Tool Result]";
       // The bound compares in full-history space: this loop's `i` is already full-history on the
       // full-replay path, and `knownCallsOffset` re-bases it when only a suffix is replayed.
-      const text = `${prefix}\n${toolResultToText(message, callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i))}`;
+      const text = externalToolResultToText(
+        message,
+        callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i),
+        request.modelId.includes("grok-4.6") || request.modelId.startsWith("composer-2.5"),
+      );
       pushDeduped(toolResultRootPayload(text), "toolResult", { messageIndex: i, text }, text);
     }
   }
@@ -383,7 +385,7 @@ function rootPromptMessages(
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same tool call repeated ${maxToolCallCount} times in this user turn. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
     }, "user", {}));
-  } else if (externalModel && maxRunLength >= 3) {
+  } else if (echoToolResultInRoot && maxRunLength >= 3) {
     entries.push(rootBlobCandidate({
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same output repeated ${maxRunLength} times in a row. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
@@ -1041,14 +1043,38 @@ function toolResultToText(
   call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
 ): string {
   const normalized = normalizedToolResult(message, contentToText(message.content));
+  const name = namespacedToolName(message.toolNamespace, message.toolName);
+  const label = normalized.isError ? "Tool error" : "Tool output";
   return [
     "[tool_result]",
+    `${label} for ${name}`,
     `call_id: ${decodeCursorCallId(message.toolCallId)}`,
-    `name: ${namespacedToolName(message.toolNamespace, message.toolName)}`,
     ...(call ? [toolInvocationLine(call)] : []),
-    `is_error: ${normalized.isError}`,
+    ...(normalized.isError ? ["is_error: true"] : []),
     "output:",
     normalized.text,
+  ].join("\n");
+}
+
+function externalToolResultToText(
+  message: OcxToolResultMessage,
+  call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
+  protocolEnvelope = false,
+): string {
+  const normalized = normalizedToolResult(message, contentToText(message.content));
+  if (protocolEnvelope) {
+    const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
+    const completion = normalized.isError
+      ? ""
+      : "\n[completed: this tool invocation already ran successfully; do not repeat it]";
+    return `${prefix}\n${toolResultToText(message, call)}${completion}`;
+  }
+  const label = normalized.isError ? "Tool error" : "Tool output";
+  return [
+    `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${decodeCursorCallId(message.toolCallId)}, is_error: ${normalized.isError}):`,
+    ...(call ? [toolInvocationLine(call)] : []),
+    normalized.text,
+    ...(!normalized.isError ? ["[completed: this tool invocation already ran successfully; do not repeat it]"] : []),
   ].join("\n");
 }
 
@@ -1220,6 +1246,7 @@ function conversationTurns(
     const fullIndex = knownCallsOffset + start + w;
     if (message.role === "assistant") {
       if (!current) continue;
+      if (externalModel && message.phase === "commentary") continue;
       for (const part of message.content) {
         if (externalModel) {
           // Working external-model clients replay only assistant text. Native mcpToolCall and
@@ -1250,16 +1277,20 @@ function conversationTurns(
         // #1920/#1866: this external-replay site bypasses toolResultToText, so it
         // must consume the normalizer directly — cursor/grok-4.6 is the exact
         // reported repro path for empty Computer Use results.
-        const normalized = normalizedToolResult(message, contentToText(message.content));
-        const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
         // Name the invocation here as well, for the same reason the root replay does: a result with
         // no visible originating call reads as an interrupted attempt (devlog 260829 000_rca).
         const call = callBefore(turnCalls, decodeCursorCallId(message.toolCallId), fullIndex);
-        const invocation = call ? `${toolInvocationLine(call)}\n` : "";
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, { text: `${prefix}\n${invocation}${normalized.text}` }),
+            value: create(AssistantMessageSchema, {
+              text: externalToolResultToText(
+                message,
+                call,
+                (request.modelId.includes("grok-4.6") || request.modelId.startsWith("composer-2.5"))
+                  && message.toolName !== "exec",
+              ),
+            }),
           },
         })), requestScope));
         continue;
