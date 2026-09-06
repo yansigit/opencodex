@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clearPoolRotationState, notePoolRotationFailure, POOL_KEY_ANTHROPIC } from "../src/codex/pool-rotation";
+import { clearPoolRotationState, notePoolRotationFailure, POOL_KEY_ANTHROPIC } from "../../../src/codex/pool-rotation";
 import {
   anthropicQuotaWindow,
   anthropicSessionKeyFromParts,
@@ -16,23 +16,16 @@ import {
   resolveAnthropicAccountForSession,
   resetAnthropicRoutingForManualSelection,
   rotateAnthropicAccountOn429,
-} from "../src/oauth/anthropic-routing";
-import { getAccountSet, saveCredential, setActiveAccount } from "../src/oauth/store";
-import { clearAccountQuotaCache, setCachedProviderAccountQuotaForTests } from "../src/providers/quota";
-import type { OcxAccountPoolQuotaWindow, OcxAccountPoolRotationStrategy, OcxConfig } from "../src/types";
-import { flushConfigDirHardeningForTests } from "../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
+} from "../../../src/oauth/anthropic-routing";
+import { getAccountSet, saveCredential, setActiveAccount } from "../../../src/oauth/store";
+import { clearAccountQuotaCache, setCachedProviderAccountQuotaForTests } from "../../../src/providers/quota";
+import type { OcxAccountPoolQuotaWindow, OcxAccountPoolRotationStrategy, OcxConfig } from "../../../src/types";
+import { removeTreeWithRetry } from "../../helpers/remove-tree";
 
 const originalHome = process.env.OPENCODEX_HOME;
 let home: string;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 beforeEach(() => {
-  // Account routing is the subject here; real ACL process behavior is covered
-  // separately. Keep this credential-heavy suite from loading unrelated shards.
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   home = mkdtempSync(join(tmpdir(), "ocx-anthropic-pool-"));
   process.env.OPENCODEX_HOME = home;
   clearAnthropicAccountPoolState();
@@ -40,16 +33,13 @@ beforeEach(() => {
   clearAccountQuotaCache("anthropic");
 });
 
-afterEach(async () => {
+afterEach(() => {
   clearAnthropicAccountPoolState();
   clearPoolRotationState();
   clearAccountQuotaCache("anthropic");
-  await flushConfigDirHardeningForTests();
-  setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
-  removeTreeWithRetry(home);
   if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = originalHome;
+  removeTreeWithRetry(home);
 });
 
 async function seedTwoAccounts() {
@@ -68,7 +58,7 @@ async function seedTwoAccounts() {
     email: "b@example.test",
   });
   // saveCredential activates the newly appended account (B). Pin A as active for predictable tests.
-  const { getAccountSet } = await import("../src/oauth/store");
+  const { getAccountSet } = await import("../../../src/oauth/store");
   const set = getAccountSet("anthropic")!;
   const a = set.accounts.find(acc => acc.credential.accountId === "uuid-aaaa")!;
   const b = set.accounts.find(acc => acc.credential.accountId === "uuid-bbbb")!;
@@ -121,7 +111,7 @@ async function seedThreeAccounts() {
     accountId: "uuid-cccc",
     email: "c@example.test",
   });
-  const { getAccountSet } = await import("../src/oauth/store");
+  const { getAccountSet } = await import("../../../src/oauth/store");
   const set = getAccountSet("anthropic")!;
   const a = set.accounts.find(acc => acc.credential.accountId === "uuid-aaaa")!;
   const b = set.accounts.find(acc => acc.credential.accountId === "uuid-bbbb")!;

@@ -23,7 +23,7 @@ import {
   resolveCodexAuthContext,
   shouldMarkAccountNeedsReauthForCodexAuthFailure,
   stripCodexRuntimeProviderFields,
-} from "../src/codex/auth-context";
+} from "../../src/codex/auth-context";
 import {
   CodexCredentialGenerationConflictError,
   CodexCredentialRefreshLockTimeoutError,
@@ -34,13 +34,13 @@ import {
   readCodexAccountRecord,
   removeCodexAccountCredential,
   saveCodexAccountCredential,
-} from "../src/codex/account-store";
-import { ConfigMutationLockError, getConfigPath } from "../src/config";
+} from "../../src/codex/account-store";
+import { ConfigMutationLockError, getConfigPath } from "../../src/config";
 import {
   getMainAccountPlan,
   MAIN_CODEX_ACCOUNT_ID,
   setMainAccountPlan,
-} from "../src/codex/main-account";
+} from "../../src/codex/main-account";
 import {
   clearAccountNeedsReauth,
   clearAccountQuota,
@@ -48,8 +48,8 @@ import {
   isAccountNeedsReauth,
   markAccountNeedsReauth,
   setAccountQuotaFromParsed,
-} from "../src/codex/auth-api";
-import { __resetGuardianState, guardianSweep } from "../src/oauth/token-guardian";
+} from "../../src/codex/auth-api";
+import { __resetGuardianState, guardianSweep } from "../../src/oauth/token-guardian";
 import {
   CODEX_THREAD_AFFINITY_IDLE_TTL_MS,
   CODEX_QUOTA_PROBE_INTERVAL_MS,
@@ -57,36 +57,33 @@ import {
   clearThreadAccountMap,
   recordCodexUpstreamOutcome,
   resetCodexRoutingForManualSelection,
-} from "../src/codex/routing";
-import type { OcxConfig, OcxProviderConfig } from "../src/types";
-import { flushConfigDirHardeningForTests } from "../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
+} from "../../src/codex/routing";
+import type { OcxConfig, OcxProviderConfig } from "../../src/types";
+import { setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import {
   blockNativeMainStartupForUnownedServiceHome,
   completeNativeMainRecovery,
   initializeNativeMainStartupGate,
-} from "../src/codex/native-profile-startup";
-import type { NativeProfileManager } from "../src/codex/native-profile-manager";
+} from "../../src/codex/native-profile-startup";
+import type { NativeProfileManager } from "../../src/codex/native-profile-manager";
 import {
   acquireNativeMainProfileDrain,
   codexAccountSelectionForTurn,
   tryAdmitTurn,
-} from "../src/server/lifecycle";
-import type { CodexModelEntitlementSnapshot } from "../src/codex/model-entitlements";
-import { hasForwardableCodexBearer } from "../src/server/auth-cors";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
+} from "../../src/server/lifecycle";
+import type { CodexModelEntitlementSnapshot } from "../../src/codex/model-entitlements";
+import { hasForwardableCodexBearer } from "../../src/server/auth-cors";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let testDir: string;
 let previousOpencodexHome: string | undefined;
 let previousCodexHome: string | undefined;
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 beforeEach(() => {
   // This suite validates refresh admission and auth-context outcomes. Real icacls
   // processes are covered elsewhere and can retain temp-dir handles long enough
   // to obscure those assertions under Windows isolated-test load.
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
   testDir = mkdtempSync(join(tmpdir(), "ocx-auth-ctx-"));
   previousOpencodexHome = process.env.OPENCODEX_HOME;
   process.env.OPENCODEX_HOME = testDir;
@@ -103,10 +100,8 @@ beforeEach(() => {
   clearAccountNeedsReauth("pool-b");
 });
 
-afterEach(async () => {
-  await flushConfigDirHardeningForTests();
+afterEach(() => {
   setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
   removeTreeWithRetry(testDir);
   clearThreadAccountMap();
   clearCodexUpstreamHealth();
@@ -1173,13 +1168,17 @@ describe("Codex auth context", () => {
       "chatgpt-account-id": "caller-keyring-account",
     }), cfg, "pool", {
       requestScopedMainCredential: true,
-      modelId: "gpt-5.6-sol",
+      // Uses the one model still account-gated. These #3157 cases are about how a caller
+      // entitlement MISS interacts with the main pin, so they need a model whose entitlement is
+      // actually consulted; the flagships stopped being gated on 2026-09-04 and now skip the
+      // check entirely, which would leave directEntitlementChecks at 0 and prove nothing.
+      modelId: "gpt-daybreak-blue-latest",
       isDirectCallerEntitledToCodexModel: async () => {
         directEntitlementChecks += 1;
         return options.callerEntitled;
       },
       resolveCodexModelEntitlements: async () => ({
-        modelsByAccount: new Map([["pool-a", new Set(["gpt-5.6-sol"])]]),
+        modelsByAccount: new Map([["pool-a", new Set(["gpt-daybreak-blue-latest"])]]),
         clientVersionByAccount: new Map([["pool-a", "0.150.1"]]),
         confirmedAccountIds: new Set(["pool-a"]),
         credentialIdentities: new Map([["pool-a", "pool:1:pool-account"]]),
@@ -2001,7 +2000,7 @@ describe("Codex auth context", () => {
     ["busy", new CodexCredentialRefreshBusyError()],
     ["stale", new CodexCredentialRefreshStaleError()],
   ])("login returns a retryable response for a %s credential refresh failure", async (_kind, refreshError) => {
-    const oauth = await import("../src/oauth");
+    const oauth = await import("../../src/oauth");
     const startLogin = spyOn(oauth, "startLoginFlow").mockRejectedValue(refreshError);
     const cfg = config();
     try {

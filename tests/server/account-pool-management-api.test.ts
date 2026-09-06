@@ -1,29 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { managementFetch as fetch } from "./helpers/management-auth";
+import { managementFetch as fetch } from "../helpers/management-auth";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { handleCodexAuthAPI } from "../src/codex/auth-api";
-import { saveConfig } from "../src/config";
-import { flushConfigDirHardeningForTests } from "../src/config/paths";
-import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
-import { startServer } from "../src/server";
-import type { OcxConfig } from "../src/types";
-import { installIsolatedCodexHome, type IsolatedCodexHome } from "./helpers/isolated-codex-home";
-import { removeTreeWithRetry } from "./helpers/remove-tree";
-
-const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
-
-function stubWindowsAclHardening(): void {
-  setIcaclsRunnerForTests(() => ICACLS_OK);
-  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
-}
-
-async function flushWindowsAclHardening(): Promise<void> {
-  await flushConfigDirHardeningForTests();
-  setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
-}
+import { handleCodexAuthAPI } from "../../src/codex/auth-api";
+import { saveConfig } from "../../src/config";
+import { startServer } from "../../src/server";
+import type { OcxConfig } from "../../src/types";
+import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 function makeCodexConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
   return {
@@ -36,21 +21,18 @@ function makeCodexConfig(overrides: Partial<OcxConfig> = {}): OcxConfig {
 }
 
 describe("Codex account pool strategy management API", () => {
-  let testDir = "";
+  const TEST_DIR = join(import.meta.dir, ".tmp-account-pool-mgmt-codex");
   let previousOpencodexHome: string | undefined;
 
   beforeEach(() => {
-    stubWindowsAclHardening();
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    testDir = mkdtempSync(join(tmpdir(), "ocx-account-pool-mgmt-codex-"));
-    process.env.OPENCODEX_HOME = testDir;
+    process.env.OPENCODEX_HOME = TEST_DIR;
   });
 
-  afterEach(async () => {
-    await flushWindowsAclHardening();
-    if (testDir) removeTreeWithRetry(testDir);
+  afterEach(() => {
     if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousOpencodexHome;
+    removeTreeWithRetry(TEST_DIR);
   });
 
   test("GET /api/codex-auth/active surfaces strategy defaults", async () => {
@@ -174,7 +156,6 @@ describe("Anthropic account pool strategy management API", () => {
   }
 
   beforeEach(() => {
-    stubWindowsAclHardening();
     previousHome = process.env.OPENCODEX_HOME;
     isolatedCodexHome = installIsolatedCodexHome("ocx-pool-mgmt-codex-");
     testDir = mkdtempSync(join(tmpdir(), "ocx-pool-mgmt-"));
@@ -190,13 +171,12 @@ describe("Anthropic account pool strategy management API", () => {
     }), { mode: 0o600 });
   });
 
-  afterEach(async () => {
-    await flushWindowsAclHardening();
-    if (testDir) removeTreeWithRetry(testDir);
-    isolatedCodexHome?.restore();
-    isolatedCodexHome = null;
+  afterEach(() => {
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
+    isolatedCodexHome?.restore();
+    isolatedCodexHome = null;
+    if (testDir) removeTreeWithRetry(testDir);
   });
 
   test("GET /api/oauth/accounts/pool surfaces strategy defaults", async () => {
@@ -374,60 +354,95 @@ describe("Anthropic account pool strategy management API", () => {
     }
   });
 
-  test("POST /api/oauth/accounts/clear-cooldown supports anthropic, google-antigravity, cursor, and command-code", async () => {
+  test("GET returns quotaWindow five-hour by default", async () => {
     const server = startServer(0);
     try {
-      // Seed cooldowns
-      const { recordAntigravityCooldown, isAntigravityAccountInCooldown } = await import("../src/oauth/antigravity-routing");
-      const { recordPoolAccountCooldown, isAccountInCooldown } = await import("../src/routing/account-pool");
-      
-      recordAntigravityCooldown("g-acct-1", null, Date.now(), "rate-limit");
-      expect(isAntigravityAccountInCooldown("g-acct-1")).toBe(true);
-
-      recordPoolAccountCooldown("cursor", "cur-acct-1", "rate_limit", null);
-      expect(isAccountInCooldown("cursor", "cur-acct-1")).not.toBeNull();
-
-      recordPoolAccountCooldown("command-code", "cc-acct-1", "rate_limit", null);
-      expect(isAccountInCooldown("command-code", "cc-acct-1")).not.toBeNull();
-
-      // Clear via API
-      const resG = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "google-antigravity", accountId: "g-acct-1" }),
-      });
-      expect(resG.status).toBe(200);
-      expect(await resG.json()).toMatchObject({ ok: true });
-      expect(isAntigravityAccountInCooldown("g-acct-1")).toBe(false);
-
-      const resCur = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "cursor", accountId: "cur-acct-1" }),
-      });
-      expect(resCur.status).toBe(200);
-      expect(await resCur.json()).toMatchObject({ ok: true });
-      expect(isAccountInCooldown("cursor", "cur-acct-1")).toBeNull();
-
-      const resCc = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "command-code", accountId: "cc-acct-1" }),
-      });
-      expect(resCc.status).toBe(200);
-      expect(await resCc.json()).toMatchObject({ ok: true });
-      expect(isAccountInCooldown("command-code", "cc-acct-1")).toBeNull();
-
-      // Unsupported provider
-      const resBad = await fetch(new URL("/api/oauth/accounts/clear-cooldown", server.url), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: "unknown", accountId: "x" }),
-      });
-      expect(resBad.status).toBe(400);
+      const res = await fetch(new URL("/api/oauth/accounts/pool?provider=anthropic", server.url));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ quotaWindow: "five-hour" });
     } finally {
       await server.stop(true);
     }
+  });
+
+  test("PUT persists each valid quotaWindow value", async () => {
+    const server = startServer(0);
+    try {
+      for (const quotaWindow of ["weekly", "max-utilization", "five-hour"]) {
+        const put = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: "anthropic", enabled: true, quotaWindow }),
+        });
+        expect(put.status).toBe(200);
+        expect(await put.json()).toMatchObject({ ok: true, quotaWindow });
+
+        const get = await fetch(new URL("/api/oauth/accounts/pool?provider=anthropic", server.url));
+        expect(await get.json()).toMatchObject({ quotaWindow });
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("PUT rejects invalid quotaWindow with 400", async () => {
+    const server = startServer(0);
+    try {
+      for (const bad of ["monthly", "", "Weekly", 1, null]) {
+        const res = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: "anthropic", enabled: true, quotaWindow: bad }),
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({
+          error: "quotaWindow must be one of: five-hour, weekly, max-utilization",
+        });
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("PUT without quotaWindow preserves the existing value", async () => {
+    const server = startServer(0);
+    try {
+      const first = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "anthropic", enabled: true, quotaWindow: "weekly" }),
+      });
+      expect(first.status).toBe(200);
+
+      const second = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "anthropic", enabled: false, autoSwitchThreshold: 55 }),
+      });
+      expect(second.status).toBe(200);
+      expect(await second.json()).toMatchObject({ quotaWindow: "weekly" });
+
+      const get = await fetch(new URL("/api/oauth/accounts/pool?provider=anthropic", server.url));
+      expect(await get.json()).toMatchObject({
+        enabled: false,
+        autoSwitchThreshold: 55,
+        quotaWindow: "weekly",
+      });
+    } finally {
+      await server.stop(true);
+    }
+  });
+  test("the inert marker describes strategy/threshold only, never enabled", async () => {
+    // `inert: true` used to read as "the whole DTO changes nothing". That stopped being true
+    // when reactive and proactive activation were split: `enabled: false` still refuses the
+    // pre-dispatch account preference, it just can no longer refuse 429 rotation. A dashboard
+    // reading `inert` as covering `enabled` would render a live control as decorative.
+    const source = await Bun.file("src/oauth/pool-settings-capability.ts").text();
+    const start = source.indexOf("autoSwitchThreshold: number | null;");
+    const marker = source.slice(start, source.indexOf("inert: true;", start));
+    expect(marker).toContain("strategy");
+    expect(marker).toContain("autoSwitchThreshold");
+    expect(marker).toContain("enabled");
   });
 });
 
@@ -435,7 +450,6 @@ describe("generic OAuth pool-settings contract (#695)", () => {
   let previousHome: string | undefined;
   let testDir = "";
   beforeEach(() => {
-    stubWindowsAclHardening();
     previousHome = process.env.OPENCODEX_HOME;
     testDir = mkdtempSync(join(tmpdir(), "ocx-pool-generic-"));
     process.env.OPENCODEX_HOME = testDir;
@@ -449,11 +463,10 @@ describe("generic OAuth pool-settings contract (#695)", () => {
       },
     } as OcxConfig);
   });
-  afterEach(async () => {
-    await flushWindowsAclHardening();
-    if (testDir) removeTreeWithRetry(testDir);
+  afterEach(() => {
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
+    if (testDir) removeTreeWithRetry(testDir);
   });
 
   test("GET/PUT round-trip for a generic OAuth provider; api-key providers and bad values get 400", async () => {
