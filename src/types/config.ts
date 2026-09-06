@@ -140,6 +140,8 @@ export interface OcxClaudeCodeConfig {
    * Routing-sidecar alias decoding is unchanged — only the Desktop model list writer.
    */
   desktopNativeModels?: boolean;
+  /** Claude ingress compatibility gate. Defaults to enforce. */
+  compatibility?: "shadow" | "enforce";
 }
 
 export type OcxClaudeDesktopFamily = "opus" | "fable" | "sonnet" | "haiku";

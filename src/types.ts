@@ -33,6 +33,7 @@ export type {
   OcxReasoningReplayIdentity,
   OcxReasoningReplayScopeRef,
   OcxParsedRequest,
+  ClaudeSourceEnvelope,
   OcxContext,
   OcxMessage,
   OcxUserMessage,

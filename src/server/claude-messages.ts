@@ -10,14 +10,22 @@ import { FORWARD_HEADERS } from "../adapters/openai-responses";
 import { sseFieldValue } from "../lib/sse-decoder";
 import { enforceAnthropicImageLimits, sniffImageDimensions } from "../adapters/anthropic-image-guard";
 import { normalizeAnthropicImages } from "../adapters/anthropic-image-normalize";
-import { AnthropicRequestError, DesktopModelMappingUnavailableError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { AnthropicRequestError, DesktopModelMappingUnavailableError, anthropicToResponsesTranslation, extractOcxEffortDirective, extractOcxRouteDirective, verifyAndExtractDirectives, resolveInboundModel, type ClaudeCacheKeySource } from "../claude/inbound";
+import { getOrCreateDirectiveSigningKey } from "../claude/directive-key";
+import { isAllowedLegacyDirective } from "../claude/agents-inject";
 import { isKnownDesktop3pModelId, resolveDesktop3pAlias } from "../claude/desktop-3p";
 import { resolveAlias, claudeCodeNativeAlias } from "../claude/alias";
 import { recordDesktopRequest } from "../claude/desktop-health";
 import { stripOneMillionMarker } from "../claude/context-windows";
-import { captureClaudeInbound } from "../claude/inbound-debug";
+import { annotateClaudeInboundDecision, captureClaudeInbound } from "../claude/inbound-debug";
 import { isTransientUpstreamStatus } from "../lib/upstream-retry";
 import { resolveClientRetryAfter } from "../lib/retry-after";
+import { createHash } from "node:crypto";
+import {
+  analyzeClaudeCompatibility,
+  collectClaudeFeatureCodes,
+  resolveClaudeCompatibilityMode,
+} from "../claude/compatibility";
 import {
   anthropicErrorBody,
   anthropicErrorResponse,
@@ -27,10 +35,8 @@ import {
 } from "../claude/outbound";
 import { clearableDeadline, idleDeadline } from "../lib/abort";
 import { estimateTokens } from "../lib/token-estimate";
-import { NoEligiblePolicyCandidateError, UnknownRoutingPolicyError, routeModel } from "../router";
-import { evidenceFromBody } from "../routing/request-evidence";
-import { resolveWireProtocolOverride } from "./adapter-resolve";
-import type { OcxConfig } from "../types";
+import { modelInList } from "../types/tools";
+import type { ClaudeSourceEnvelope, OcxConfig, OcxUsage } from "../types";
 import { readJsonRequestBody } from "./request-decompress";
 import { addFinalRequestLog, httpStatusForRequestLogTerminal, recordFirstOutput, type RequestLogContext, type RequestLogEntry } from "./request-log";
 import { conversationIdFromClaudeMetadata } from "./request-log-conversation";
@@ -61,8 +67,46 @@ import {
   parseSyntheticRowId,
   type ParsedFastRowId,
 } from "./fast-row";
+import { supportedLadderFor } from "./effort-policy";
+import { NoEligiblePolicyCandidateError, UnknownRoutingPolicyError, routeModel } from "../router";
+import { POLICY_NAMESPACE, resolvePolicyProfileId } from "../routing/profile";
+import { evidenceFromBody } from "../routing/request-evidence";
 
 type Rec = Record<string, unknown>;
+
+function resolveClaudePolicySelector(
+  config: OcxConfig,
+  model: string,
+): { decodedModel: string; isPolicy: boolean } {
+  // Claude Code sends the readable aliases published by /v1/models, not necessarily the
+  // underlying route (`claude-ocx-policy--daily` -> `policy/daily`). Policy detection must
+  // use the same identity the Messages translator will route, while preserving an exact
+  // operator alias such as `claude-smart` when it has no Claude model-map entry.
+  const decodedModel = resolveInboundModel(model, config.claudeCode);
+  return {
+    decodedModel,
+    isPolicy: resolvePolicyProfileId(config, decodedModel) !== null
+      || decodedModel.startsWith(`${POLICY_NAMESPACE}/`),
+  };
+}
+
+function isLocalPolicyRoutingError(
+  status: number,
+  message: string,
+  logCtx: Pick<RequestLogContext, "requestedModel" | "routeDecision">,
+): boolean {
+  if (status !== 404) return false;
+  if (
+    logCtx.routeDecision?.routeKind === "policy"
+    && logCtx.routeDecision.selected.reason === "no-eligible-candidate"
+  ) {
+    return true;
+  }
+  return (
+    logCtx.requestedModel?.startsWith(`${POLICY_NAMESPACE}/`) === true
+    && message.startsWith("Unknown routing policy:")
+  );
+}
 
 /**
  * Decode a Claude selector that may carry the fast marker.
@@ -119,12 +163,174 @@ export function buildClaudeReplayConfig(config: OcxConfig): OcxConfig {
   };
 }
 
+/**
+ * Phase 4 plan 04-02: benchmark-only raw-usage observation.
+ *
+ * The optional benchmark observer receives a sanitized structural record only —
+ * final adapter kind, resolved model id, and the raw OcxUsage reported before
+ * Anthropic wire normalization. It never receives request bodies, headers,
+ * provider names/aliases, endpoint, account identity, raw provider response, or
+ * error text. Standard Messages behavior is unchanged when omitted.
+ */
+export interface ClaudeBenchmarkRawUsage {
+  adapterKind: string;
+  modelId: string;
+  usage: OcxUsage | undefined;
+}
+
+export interface ClaudeBenchmarkObserverOptions {
+  onRawUsage?: (observation: ClaudeBenchmarkRawUsage) => void;
+}
+
 function claudeInboundDisabled(config: OcxConfig): Response | null {
   if (config.claudeCode?.enabled === false) {
     return anthropicErrorResponse(403, "Claude inbound is disabled (GUI: Claude ON toggle / config.claudeCode.enabled)", "permission_error");
   }
   return null;
 }
+
+// ── Claude source envelope & session precedence (ingress slice) ────────────────
+
+/**
+ * Capture sanitized immutable envelope before destructive translation.
+ * Charges the same TranslatorBudget for the retained copy + header bytes.
+ */
+export function captureClaudeSourceEnvelope(
+  req: Request,
+  rawBody: unknown,
+  budget: TranslatorBudget,
+): ClaudeSourceEnvelope {
+  const beta = req.headers.get("anthropic-beta")?.trim() || undefined;
+  const rawVersion = req.headers.get("anthropic-version");
+  const version = rawVersion === null ? undefined : rawVersion.trim();
+  if (!isRec(rawBody)) throw new AnthropicRequestError("Anthropic request body must be an object");
+  const bodyClone = structuredClone(rawBody);
+  const bodyBytes = new TextEncoder().encode(JSON.stringify(bodyClone)).byteLength;
+  let headerBytes = 0;
+  if (beta) headerBytes += new TextEncoder().encode(beta).byteLength;
+  if (version) headerBytes += new TextEncoder().encode(version).byteLength;
+  budget.chargeRetained(bodyBytes + headerBytes, { kind: "request_copies" });
+  return {
+    body: bodyClone,
+    headers: {
+      ...(beta ? { "anthropic-beta": beta } : {}),
+      ...(version !== undefined ? { "anthropic-version": version } : {}),
+    },
+  };
+}
+
+/**
+ * Session precedence: x-claude-code-session-id header > metadata.user_id > system cohort.
+ * Returns the canonical session id string or null when none is determinable before translation.
+ * Agent/parent IDs are NOT session ids — they are only HMAC8 debug tags (see inbound-debug).
+ */
+export function claudeSessionIdFromRequest(req: Request, body: unknown): string | null {
+  const headerSid = req.headers.get("x-claude-code-session-id")?.trim();
+  if (headerSid) return headerSid;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    const rec = body as Record<string, unknown>;
+    const metadata = rec.metadata;
+    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+      const uid = (metadata as Record<string, unknown>).user_id;
+      if (typeof uid === "string" && uid.trim().length > 0) return uid.trim();
+    }
+  }
+  return null;
+}
+
+function claudeAgentIdsFromRequest(req: Request): { agentId?: string; parentAgentId?: string } {
+  const out: { agentId?: string; parentAgentId?: string } = {};
+  const headerAgent = req.headers.get("x-claude-code-agent-id")?.trim();
+  const headerParent = req.headers.get("x-claude-code-parent-agent-id")?.trim();
+  if (headerAgent) out.agentId = headerAgent;
+  if (headerParent) out.parentAgentId = headerParent;
+  return out;
+}
+
+/**
+ * Compute prompt_cache_key from a session id (header precedence path).
+ * Uses same sha256 hex slice as inbound.ts (32 hex chars) for per-session keys.
+ * Returns null when sessionId is null (caller should keep translation's system cohort key).
+ */
+export function promptCacheKeyForSession(sessionId: string | null): string | null {
+  if (!sessionId) return null;
+  return createHash("sha256").update(sessionId).digest("hex").slice(0, 32);
+}
+
+/** Idempotent, synchronous work for every effective Responses route resolution. */
+export function claudeFinalRouteHandler(
+  parsed: { options: Record<string, unknown>; modelId: string; _rawBody?: unknown; _promptCacheKeyIsSharedCohort?: boolean },
+  route: { provider: OcxConfig["providers"][string]; providerName: string; modelId: string },
+  ctx: {
+    sourceEnvelope: ClaudeSourceEnvelope;
+    cacheKeySource: ClaudeCacheKeySource;
+    config: OcxConfig;
+    logCtx: RequestLogContext;
+  },
+): { adapter: string; decision: ReturnType<typeof analyzeClaudeCompatibility>["decision"]; featureCodes: string[] } {
+  const adapter = route.provider.adapter;
+  // Route-aware fail-closed gate for auto-only models (e.g. muse-spark-1.2-contributor on opencode-go).
+  // Must run before any upstream; uses the routed modelId + provider list so a forced/named
+  // tool_choice never silently downgrades to auto (Responses core would do that for openai-chat).
+  {
+    const tc = (ctx.sourceEnvelope.body as Record<string, unknown>).tool_choice as unknown;
+    const tcType = tc && typeof tc === "object" && !Array.isArray(tc) && typeof (tc as Record<string, unknown>).type === "string" ? (tc as Record<string, unknown>).type as string : undefined;
+    if ((tcType === "any" || tcType === "tool") && modelInList((route.provider as { autoToolChoiceOnlyModels?: string[] }).autoToolChoiceOnlyModels, route.modelId)) {
+      throw new AnthropicRequestError(
+        `tool_choice type '${tcType}' is not supported for model "${route.modelId}" (provider ${route.providerName}): this model supports only tool_choice auto or none. Remove tool_choice, use {"type":"auto"} or {"type":"none"}, or choose a different model.`,
+      );
+    }
+  }
+  // Idempotent sampling strip for openai-responses forward (native ChatGPT pierce)
+  if (adapter === "openai-responses") {
+    const raw = parsed._rawBody as Record<string, unknown> | undefined;
+    if (raw) {
+      // _rawBody is snake_case Responses JSON; be idempotent for both snake and camel keys
+      delete raw.max_output_tokens;
+      delete (raw as Record<string, unknown>).maxOutputTokens;
+      delete raw.temperature;
+      delete raw.top_p;
+      delete (raw as Record<string, unknown>).topP;
+      delete raw.stop;
+      delete (raw as Record<string, unknown>).stopSequences;
+      delete raw.user;
+    }
+    // OcxRequestOptions is camelCase; _rawBody snake is already handled above. Strip both forms idempotently.
+    delete (parsed.options as Record<string, unknown>).max_output_tokens;
+    delete (parsed.options as Record<string, unknown>).maxOutputTokens;
+    delete (parsed.options as Record<string, unknown>).temperature;
+    delete (parsed.options as Record<string, unknown>).top_p;
+    delete (parsed.options as Record<string, unknown>).topP;
+    delete (parsed.options as Record<string, unknown>).stop;
+    delete (parsed.options as Record<string, unknown>).stopSequences;
+    delete (parsed.options as Record<string, unknown>).user;
+  }
+  // Usage estimate only for cursor/kiro (estimated-usage adapters)
+  if (adapter === "cursor" || adapter === "kiro") {
+    try {
+      const bodyRec = ctx.sourceEnvelope.body as Record<string, unknown>;
+      const model = typeof bodyRec.model === "string" ? bodyRec.model : ctx.config.claudeCode?.model;
+      ctx.logCtx.usageLogInputTokens = estimateClaudeRequestTokens(bodyRec as { system?: unknown; messages?: unknown; tools?: unknown }, model);
+    } catch {
+      // ignore estimation failures
+    }
+  }
+  // Opus-shaped aliases can make every routed model look reasoning-capable to Claude
+  // clients. Strip a forced effort only when the final route explicitly has no ladder.
+  if (parsed.options.reasoning !== undefined) {
+    const ladder = supportedLadderFor({ provider: route.provider, modelId: route.modelId });
+    if (ladder !== undefined && ladder.length === 0) delete parsed.options.reasoning;
+  }
+  // Compatibility evaluation before network (enforce mode may reject)
+  const mode = resolveClaudeCompatibilityMode(ctx.config.claudeCode);
+  const anthropicBeta = ctx.sourceEnvelope.headers["anthropic-beta"];
+  const result = analyzeClaudeCompatibility(ctx.sourceEnvelope.body, { mode, adapter, anthropicBeta });
+  if (result.decision === "reject") {
+    throw new AnthropicRequestError(result.reason ?? "incompatible features for routed adapter");
+  }
+  return { adapter, decision: result.decision, featureCodes: result.featureCodes };
+}
+
 
 async function readAnthropicBody(req: Request, budget: TranslatorBudget): Promise<unknown> {
   try {
@@ -616,11 +822,12 @@ export async function handleClaudeMessages(
   logCtx: RequestLogContext,
   logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission },
   requestPolicy: RequestPolicyView = config,
+  benchmark?: ClaudeBenchmarkObserverOptions,
 ): Promise<Response> {
   const translatorBudget = createTranslatorBudget();
   try {
     return finalizeTranslatorBudgetResponse(
-      await handleClaudeMessagesWithBudget(req, config, logCtx, translatorBudget, logIds, requestPolicy),
+      await handleClaudeMessagesWithBudget(req, config, logCtx, translatorBudget, logIds, requestPolicy, benchmark),
       translatorBudget,
     );
   } catch (error) {
@@ -636,6 +843,7 @@ async function handleClaudeMessagesWithBudget(
   translatorBudget: TranslatorBudget,
   logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission },
   requestPolicy: RequestPolicyView = config,
+  benchmark?: ClaudeBenchmarkObserverOptions,
 ): Promise<Response> {
   logCtx.surface = "claude";
   const disabled = claudeInboundDisabled(config);
@@ -651,6 +859,11 @@ async function handleClaudeMessagesWithBudget(
   let effortRow: ParsedEffortRowId | null = null;
   let fastRow: ParsedFastRowId | null = null;
   let requestedModel = "";
+  let sourceEnvelope: ClaudeSourceEnvelope | null = null;
+  let headerSessionId: string | null = null;
+  let featureCodesEarly: string[] = [];
+  let agentIds: { agentId?: string; parentAgentId?: string } = {};
+  let debugCaptureId: number | undefined;
   try {
     anthropicBody = await readAnthropicBody(req, translatorBudget);
     // Defensive [1m] strip (devlog 138): clients normally remove the context-variant
@@ -659,15 +872,21 @@ async function handleClaudeMessagesWithBudget(
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
       anthropicBody.model = stripOneMillionMarker(anthropicBody.model);
     }
-    // ocx-route override (devlog 072): injected agent bodies pin their model via a
+    // ocx-route override (devlog 072 + TRUST-01..05): injected agent bodies pin their model via a
     // system-prompt directive because 2.1.207 ignores custom ids in agent
     // frontmatter. Must run BEFORE the native-passthrough branch — the CLI sends
     // these subagent turns under a fallback claude model id.
     if (isRec(anthropicBody)) {
-      const routeOverride = extractOcxRouteDirective(anthropicBody);
-      if (routeOverride && typeof anthropicBody.model === "string") {
-        anthropicBody.model = stripOneMillionMarker(routeOverride);
-        effortOverride = extractOcxEffortDirective(anthropicBody);
+      const directives = verifyAndExtractDirectives(
+        anthropicBody,
+        getOrCreateDirectiveSigningKey(),
+        (route, effort) => isAllowedLegacyDirective(route, effort, config),
+      );
+      if (directives.route && typeof anthropicBody.model === "string") {
+        anthropicBody.model = stripOneMillionMarker(directives.route);
+        if (directives.effort) {
+          effortOverride = directives.effort;
+        }
       }
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
@@ -690,15 +909,25 @@ async function handleClaudeMessagesWithBudget(
       }
       if (fastRow) anthropicBody.model = fastRow.baseId;
     }
+    headerSessionId = claudeSessionIdFromRequest(req, anthropicBody);
+    agentIds = claudeAgentIdsFromRequest(req);
+    featureCodesEarly = collectClaudeFeatureCodes(anthropicBody, req.headers.get("anthropic-beta") ?? undefined);
     // Debug capture (opt-in allowlist scalars) BEFORE the passthrough branch so
     // native, routed, and disabled-alias paths are all observable (devlog 130 B1).
-    captureClaudeInbound(
+    // Extended ring carries featureCodes/adapter/decision + HMAC8 session/agent tags.
+    debugCaptureId = captureClaudeInbound(
       "messages",
       anthropicBody,
       isRec(anthropicBody) && typeof anthropicBody.model === "string"
         ? resolveInboundModel(anthropicBody.model, config.claudeCode)
         : undefined,
       req.headers.get("anthropic-beta") ?? undefined,
+      {
+        ...(headerSessionId ? { sessionId: headerSessionId } : {}),
+        ...(agentIds.agentId ? { agentId: agentIds.agentId } : {}),
+        ...(agentIds.parentAgentId ? { parentAgentId: agentIds.parentAgentId } : {}),
+        ...(featureCodesEarly.length > 0 ? { featureCodes: featureCodesEarly } : {}),
+      },
     );
     // Client surface discrimination: Desktop 3P aliases resolve through the
     // desktop registry; Code uses readable aliases or direct model names.
@@ -716,7 +945,17 @@ async function handleClaudeMessagesWithBudget(
     // A fast row blocks passthrough, unlike the chat case: this path forwards to Anthropic's
     // own API, whose wire has no service_tier field and whose FastWire kind has an empty
     // adapter set by design, so the tier would be silently dropped.
-    if (!effortRow && !fastRow && isRec(anthropicBody) && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model)) {
+    const policySelector = isRec(anthropicBody) && typeof anthropicBody.model === "string"
+      ? resolveClaudePolicySelector(config, anthropicBody.model)
+      : null;
+    if (
+      !effortRow
+      && !fastRow
+      && policySelector?.isPolicy !== true
+      && isRec(anthropicBody)
+      && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model)
+    ) {
+      annotateClaudeInboundDecision(debugCaptureId, "anthropic", "native", featureCodesEarly);
       return await anthropicNativePassthrough(req, config, logCtx, logIds, anthropicBody, "/v1/messages");
     }
     if (isRec(anthropicBody) && effortOverride) {
@@ -726,6 +965,9 @@ async function handleClaudeMessagesWithBudget(
       };
       delete anthropicBody.thinking;
     }
+    // Routed requests retain the post-directive source body. Native passthrough never
+    // pays for or observes this clone, preserving its existing byte-for-byte path.
+    sourceEnvelope = captureClaudeSourceEnvelope(req, anthropicBody, translatorBudget);
     const translation = anthropicToResponsesTranslation(anthropicBody, config.claudeCode);
     internalBody = translation.body;
     // The Anthropic translator builds its body from model/input/store/stream plus sampling
@@ -733,7 +975,22 @@ async function handleClaudeMessagesWithBudget(
     // inbound one.
     if (fastRow) internalBody.service_tier = "priority";
     translatorBudget.chargeRetained(new TextEncoder().encode(JSON.stringify(internalBody)).byteLength, { kind: "request_copies" });
-    cacheKeySource = translation.cacheKeySource;
+    // Session header precedence feeds prompt_cache_key (header > metadata > system cohort).
+    // When the x-claude-code-session-id header is present, it replaces the
+    // translation's per-session/system key with a stable per-header sha256 key
+    // and promotes cacheKeySource to "metadata" so downstream affinity/session_id
+    // logic treats it as a real per-session key (not the shared system cohort).
+    if (headerSessionId) {
+      const sessionCacheKey = promptCacheKeyForSession(headerSessionId);
+      if (sessionCacheKey) {
+        internalBody.prompt_cache_key = sessionCacheKey;
+        cacheKeySource = "metadata";
+      } else {
+        cacheKeySource = translation.cacheKeySource;
+      }
+    } else {
+      cacheKeySource = translation.cacheKeySource;
+    }
   } catch (err) {
     const overflow = isTranslatorBudgetExceededError(err);
     const unavailable = err instanceof DesktopModelMappingUnavailableError;
@@ -754,54 +1011,33 @@ async function handleClaudeMessagesWithBudget(
   // the translated Anthropic SSE into a message JSON for non-streaming clients.
   internalBody.stream = true;
 
-  // Native ChatGPT passthrough (openai-responses forward) accepts only Codex-shaped
-  // bodies: it 400s on sampling params ("Unsupported parameter: max_output_tokens",
-  // verified live 2026-07-11). Strip them for that route; routed providers keep them.
-  let nativeRoute = false;
-  try {
-    const route = routeModel(config, internalBody.model as string, evidenceFromBody(internalBody));
-    // Settle the wire once so the sampling decision below reads the effective
-    // adapter rather than the provider-wide default (#404).
-    route.provider = resolveWireProtocolOverride(route.providerName, route.modelId, route.provider, "anthropic");
-    logCtx.routeDecision = route.routeDecision;
-    if (route.provider.adapter === "openai-responses") {
-      nativeRoute = true;
-      delete internalBody.max_output_tokens;
-      delete internalBody.temperature;
-      delete internalBody.top_p;
-      delete internalBody.stop;
-      delete internalBody.user;
+  // ── Final-route callback (post-route, pre-network) ───────────────────────────────────────
+  // Adapter-specific work runs only after Responses core owns the final route.
+  const claudeOnResolvedRoute = (info: import("./responses/core").ResolvedRouteInfo): void => {
+    if (!sourceEnvelope) return;
+    const result = claudeFinalRouteHandler(
+      info.parsed as unknown as Parameters<typeof claudeFinalRouteHandler>[0],
+      { provider: { ...info.provider, adapter: info.adapterName }, providerName: info.route.providerName, modelId: info.modelId } as Parameters<typeof claudeFinalRouteHandler>[1],
+      {
+        sourceEnvelope,
+        cacheKeySource,
+        config,
+        logCtx,
+      },
+    );
+    // Session_id header synthesis: only for openai-responses and only for a
+    // real per-session prompt_cache_key (metadata), never the system-hash
+    // cohort. Idempotent: check headers.has before set.
+    {
+      const pck = (info.parsed.options as Rec).promptCacheKey ?? (info.parsed.options as Rec).prompt_cache_key ?? ((info.parsed as unknown as Rec)._rawBody as Rec | undefined)?.prompt_cache_key;
+      if (info.adapterName === "openai-responses" && cacheKeySource === "metadata" && typeof pck === "string" && !info.headers.has("session_id")) {
+        info.headers.set("session_id", uuidFromHex(pck as string));
+      } else if (info.adapterName !== "openai-responses") {
+        info.headers.delete("session_id");
+      }
     }
-    // Estimated-usage adapters (cursor/kiro) report no per-turn input tokens; stash a
-    // request-side estimate so the log's in:0 rows get a floor. NEVER set this for
-    // accurate-usage adapters — the request-log merge is max(reported, estimate) and
-    // would overwrite real usage (audit 133 R1#7).
-    if (route.provider.adapter === "cursor" || route.provider.adapter === "kiro") {
-      logCtx.usageLogInputTokens = estimateClaudeRequestTokens(anthropicBody as Rec, requestedModel);
-    }
-    // Effort safety valve (devlog 136 B6, audit 139 R2#2): opus-shaped aliases make
-    // every routed model look like a reasoning model to Claude clients, so a forced
-    // effort (CLAUDE_CODE_ALWAYS_ENABLE_EFFORT) would leak reasoning params to routes
-    // that affirmatively expose NO effort control. Strip only on a definitive [] from
-    // supportedLadderFor; unknown (undefined) passes through untouched.
-    if (internalBody.reasoning !== undefined) {
-      const { supportedLadderFor } = await import("./effort-policy");
-      const ladder = supportedLadderFor({ provider: route.provider, modelId: route.modelId });
-      if (ladder !== undefined && ladder.length === 0) delete internalBody.reasoning;
-    }
-  } catch (err) {
-    if (err instanceof UnknownRoutingPolicyError) {
-      logCtx.requestedModel = requestedModel;
-      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
-      return anthropicErrorResponse(404, err.message, "invalid_request_error");
-    }
-    if (err instanceof NoEligiblePolicyCandidateError) {
-      logCtx.routeDecision = err.trace;
-      if (logIds) addFinalRequestLog(logIds.requestId, logIds.start, logCtx, 404, { closeReason: "non_stream" });
-      return anthropicErrorResponse(404, err.message, "invalid_request_error");
-    }
-    /* unknown model: let handleResponses shape the 404 */
-  }
+    annotateClaudeInboundDecision(debugCaptureId, result.adapter, result.decision, result.featureCodes);
+  };
 
   const headers = new Headers({ "content-type": "application/json" });
   for (const name of FORWARD_HEADERS) {
@@ -821,18 +1057,6 @@ async function handleClaudeMessagesWithBudget(
     if (token) {
       headers.set("authorization", `Bearer ${token.accessToken}`);
       headers.set("chatgpt-account-id", token.chatgptAccountId);
-    }
-  }
-  if (nativeRoute) {
-    // ChatGPT-backend prompt-cache affinity rides the session_id HEADER (codex
-    // clients always send their session uuid; devlog 090 follow-up: body-level
-    // prompt_cache_key alone still yielded cached_tokens:0). Claude Code never sends
-    // the header, so synthesize a stable per-session uuid from the same cache key —
-    // but ONLY for a real per-session key (metadata.user_id). The system-hash fallback
-    // key is shared across Desktop conversations, and a shared session_id's backend
-    // semantics are unproven (audit 133 R2#3): body prompt_cache_key only there.
-    if (cacheKeySource === "metadata" && !headers.has("session_id") && typeof internalBody.prompt_cache_key === "string") {
-      headers.set("session_id", uuidFromHex(internalBody.prompt_cache_key));
     }
   }
   const internalBodyJson = JSON.stringify(internalBody);
@@ -866,9 +1090,18 @@ async function handleClaudeMessagesWithBudget(
     inboundWire: "anthropic",
     stripClaudeMainAuthForNoncanonicalForward: true,
     translatorBudget,
+    // Forward the sanitized immutable source envelope (charged to the same budget)
+    // so core can perform fidelity-preserving work. The envelope is the
+    // pre-translation clone (body + anthropic-beta/version headers only).
+    ...(sourceEnvelope ? { claudeSourceEnvelope: sourceEnvelope } : {}),
+    // Adapter-aware final-route gate: idempotent strip / session_id synthesis /
+    // usage estimate / compatibility enforce. Core should invoke this after
+    // each routeModel+resolveWireProtocolOverride (see note above).
+    onResolvedRoute: claudeOnResolvedRoute,
     ...(logIds ? { onFirstOutput: () => recordFirstOutput(logCtx, logIds.start) } : {}),
     onNativePassthroughTerminal: status => finalizeNativeLog(httpStatusForRequestLogTerminal(status, logCtx), { terminalStatus: status, closeReason: "terminal" }),
     onNativePassthroughCancel: () => finalizeNativeLog(499, { closeReason: "client_cancel" }),
+    ...(benchmark?.onRawUsage ? { claudeBenchmarkObserver: benchmark.onRawUsage } : {}),
   });
   const response = logIds ? responseWithDeferredRequestLog(upstream, logIds.requestId, logIds.start, logCtx) : upstream;
 
@@ -907,7 +1140,10 @@ async function handleClaudeMessagesWithBudget(
       && message === CODEX_MAIN_PROFILE_MAINTENANCE_MESSAGE;
     const transient = !nativeMainFence && isTransientUpstreamStatus(response.status);
     const outStatus = nativeMainFence ? 503 : transient ? 529 : response.status;
-    const out = new Response(JSON.stringify(anthropicErrorBody(outStatus, message)), {
+    const errorType = isLocalPolicyRoutingError(response.status, message, logCtx)
+      ? "invalid_request_error"
+      : undefined;
+    const out = new Response(JSON.stringify(anthropicErrorBody(outStatus, message, errorType)), {
       status: outStatus,
       headers: {
         "Content-Type": "application/json",
@@ -1084,6 +1320,9 @@ export async function handleClaudeCountTokens(
   } catch (err) {
     if (err instanceof DesktopModelMappingUnavailableError) return desktopMappingUnavailableResponse(err);
     if (err instanceof AnthropicRequestError) return anthropicErrorResponse(400, err.message);
+    if (isTranslatorBudgetExceededError(err)) {
+      return anthropicErrorResponse(413, "request translation buffer exceeded the safe limit", "request_too_large", "translation_buffer_limit");
+    }
     return anthropicErrorResponse(500, err instanceof Error ? err.message : String(err));
   } finally { translatorBudget.dispose(); }
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -1094,40 +1333,75 @@ export async function handleClaudeCountTokens(
     return anthropicErrorResponse(400, "model is required");
   }
   try {
-    let model = raw.model;
-    // Case-insensitive [1m] strip (audit 021 #7 — the CLI matches /\[1m\]/i).
-    const stripped = stripOneMillionMarker(model);
-    if (stripped !== model) {
-      model = stripped;
-      raw.model = model;
-    }
-    // ocx-route override (devlog 072): keep count_tokens consistent with messages.
-    const countRoute = extractOcxRouteDirective(raw);
-    if (countRoute) {
-      model = stripOneMillionMarker(countRoute);
-      raw.model = model;
-    }
-    model = decodeFablePickerAlias(model, config.claudeCode);
+  let model = raw.model;
+  // Case-insensitive [1m] strip (audit 021 #7 — the CLI matches /\[1m\]/i).
+  const stripped = stripOneMillionMarker(model);
+  if (stripped !== model) {
+    model = stripped;
     raw.model = model;
-    // Fast-only: count_tokens never parsed an effort row, so it must not start. It returns a
-    // token estimate and sends no tier, so only the IDENTITY is corrected - without this the
-    // synthetic id reaches native passthrough as a model Anthropic has never heard of.
-    const countFastRow = parseFastOnlyRowId(
-      config, () => decodeClaudeFastSelector(model, config.claudeCode),
+  }
+  // ocx-route override (devlog 072 + TRUST-01..05): keep count_tokens consistent with messages.
+  let directives;
+  try {
+    directives = verifyAndExtractDirectives(
+      raw,
+      getOrCreateDirectiveSigningKey(),
+      (route, effort) => isAllowedLegacyDirective(route, effort, config),
     );
-    if (countFastRow) {
-      model = countFastRow.baseId;
+  } catch (err) {
+    if (err instanceof AnthropicRequestError) {
+      return anthropicErrorResponse(400, err.message, "invalid_request_error");
+    }
+    throw err;
+  }
+  if (directives.route) {
+    model = stripOneMillionMarker(directives.route);
+    raw.model = model;
+  }
+  model = decodeFablePickerAlias(model, config.claudeCode);
+  raw.model = model;
+  // Fast-only count requests carry a synthetic selector but never parsed an effort row.
+  // Normalize the identity before native passthrough or estimation; no tier is sent here.
+  const countFastRow = parseFastOnlyRowId(
+    config, () => decodeClaudeFastSelector(model, config.claudeCode),
+  );
+  if (countFastRow) {
+    model = countFastRow.baseId;
+    raw.model = model;
+  }
+  const policySelector = resolveClaudePolicySelector(config, model);
+  let resolvedPolicy = false;
+  if (policySelector.isPolicy) {
+    try {
+      const route = routeModel(config, policySelector.decodedModel, evidenceFromBody(raw));
+      model = route.modelId;
       raw.model = model;
+      resolvedPolicy = true;
+    } catch (err) {
+      if (err instanceof UnknownRoutingPolicyError || err instanceof NoEligiblePolicyCandidateError) {
+        return anthropicErrorResponse(404, err.message, "invalid_request_error");
+      }
+      throw err;
     }
-    captureClaudeInbound("count_tokens", raw, resolveInboundModel(model, config.claudeCode), req.headers.get("anthropic-beta") ?? undefined);
-    if (wantsNativePassthrough(req, config, requestPolicy, model)) {
-      return await anthropicNativePassthrough(req, config, { model, provider: "anthropic-native", surface: "claude" }, undefined, raw, "/v1/messages/count_tokens");
-    }
-    const inputTokens = estimateClaudeRequestTokens(raw, model);
-    return new Response(JSON.stringify({ input_tokens: inputTokens }), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
+  }
+  const ctHeaderSessionId = claudeSessionIdFromRequest(req, raw);
+  const ctAgentIds = claudeAgentIdsFromRequest(req);
+  const ctAnthropicBeta = req.headers.get("anthropic-beta") ?? undefined;
+  const ctFeatureCodes = collectClaudeFeatureCodes(raw, ctAnthropicBeta);
+  captureClaudeInbound("count_tokens", raw, resolveInboundModel(model, config.claudeCode), ctAnthropicBeta, {
+    ...(ctHeaderSessionId ? { sessionId: ctHeaderSessionId } : {}),
+    ...(ctAgentIds.agentId ? { agentId: ctAgentIds.agentId } : {}),
+    ...(ctAgentIds.parentAgentId ? { parentAgentId: ctAgentIds.parentAgentId } : {}),
+    ...(ctFeatureCodes.length > 0 ? { featureCodes: ctFeatureCodes } : {}),
+  });
+  if (!resolvedPolicy && wantsNativePassthrough(req, config, requestPolicy, model)) {
+    return await anthropicNativePassthrough(req, config, { model, provider: "anthropic-native", surface: "claude" }, undefined, raw, "/v1/messages/count_tokens");
+  }
+  const inputTokens = estimateClaudeRequestTokens(raw, model);
+  return new Response(JSON.stringify({ input_tokens: inputTokens }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
   } catch (error) {
     if (error instanceof DesktopModelMappingUnavailableError) return desktopMappingUnavailableResponse(error);
     if (error instanceof AnthropicRequestError) return anthropicErrorResponse(400, error.message);

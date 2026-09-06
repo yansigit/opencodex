@@ -96,9 +96,17 @@ export function effortFromOutputConfig(outputConfig: unknown): string | undefine
   return typeof effort === "string" && OUTPUT_CONFIG_EFFORTS.has(effort) ? effort : undefined;
 }
 
-export function formatFromOutputConfig(outputConfig: unknown): Rec | undefined {
-  if (!isRec(outputConfig) || !isRec(outputConfig.format)) return undefined;
-  const format = outputConfig.format;
+export function formatFromOutputConfig(outputConfig: unknown, outputFormat?: unknown): Rec | undefined {
+  const hasNested = isRec(outputConfig) && isRec(outputConfig.format);
+  const hasTop = isRec(outputFormat);
+  if (hasNested && hasTop) {
+    throw new AnthropicRequestError(
+      "Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated).",
+    );
+  }
+  const rawFormat = hasNested ? outputConfig.format : hasTop ? outputFormat : undefined;
+  if (!isRec(rawFormat)) return undefined;
+  const format = rawFormat;
   if (
     format.type !== "json_schema"
     || !isRec(format.schema)

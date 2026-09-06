@@ -84,12 +84,13 @@ describe("claude inbound translation", () => {
     expect(tools[1]).toEqual({ type: "web_search" });
 
     const input = body.input as Record<string, any>[];
-    // user text, assistant text (thinking dropped), function_call, function_call_output, user tail
-    expect(input.map(i => i.type ?? i.role)).toEqual(["message", "message", "function_call", "function_call_output", "message"]);
-    expect(input[1].content).toEqual([{ type: "output_text", text: "Reading it now." }]);
-    expect(input[2]).toMatchObject({ call_id: "toolu_01", name: "Read", arguments: JSON.stringify({ file_path: "/README.md" }) });
-    expect(input[3]).toMatchObject({ call_id: "toolu_01", output: [{ type: "input_text", text: "# hello" }] });
-    const tail = input[4].content as Record<string, any>[];
+    // thinking preserved as reasoning (hardening slice) + assistant text, function_call, function_call_output, user tail
+    expect(input.map(i => i.type ?? i.role)).toEqual(["message", "reasoning", "message", "function_call", "function_call_output", "message"]);
+    expect(input[1].type).toBe("reasoning");
+    expect(input[2].content).toEqual([{ type: "output_text", text: "Reading it now." }]);
+    expect(input[3]).toMatchObject({ call_id: "toolu_01", name: "Read", arguments: JSON.stringify({ file_path: "/README.md" }) });
+    expect(input[4]).toMatchObject({ call_id: "toolu_01", output: [{ type: "input_text", text: "# hello" }] });
+    const tail = input[5].content as Record<string, any>[];
     expect(tail[0]).toEqual({ type: "input_text", text: "now summarize" });
     expect(tail[1]).toEqual({ type: "input_image", image_url: "data:image/png;base64,aWc=" });
   });
@@ -252,6 +253,33 @@ describe("claude inbound translation", () => {
 
     expect(body.text).toEqual({ format: { type: "json_schema", name: "response", schema } });
     expect(parseRequest(body).options.textFormat).toEqual({ type: "json_schema", name: "response", schema });
+
+    // deprecated top-level output_format
+    const topBody = anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_format: { type: "json_schema", schema },
+    });
+    expect(topBody.text).toEqual({ format: { type: "json_schema", name: "response", schema } });
+
+    // fail clearly when both official shapes are provided (Anthropic SDK parity)
+    expect(() => anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_config: { format: { type: "json_schema", schema } },
+      output_format: { type: "json_schema", schema },
+    })).toThrow("Both output_format and output_config.format were provided. Please use only output_config.format (output_format is deprecated).");
+
+    // invalid nested output_config.output_format is ignored
+    const invalidNested = anthropicToResponsesBody({
+      model: "claude-sonnet-5",
+      max_tokens: 256,
+      messages: [{ role: "user", content: "Return JSON" }],
+      output_config: { output_format: { type: "json_schema", schema } },
+    });
+    expect(invalidNested.text).toBeUndefined();
   });
 
   test("structured output rejects unsupported schemas and preserves root references", () => {
@@ -302,6 +330,129 @@ describe("claude inbound translation", () => {
     expect(body.tools).toEqual([{ type: "web_search" }]);
     expect(body.tool_choice).toEqual({ type: "web_search" });
     expect(body.reasoning).toEqual({ effort: "none" });
+    expect(() => responsesRequestSchema.parse(body)).not.toThrow();
+    expect(() => parseRequest(body)).not.toThrow();
+  });
+
+  test("ordinary client function tools named web_search or tool_search stay function tools", () => {
+    const body = anthropicToResponsesBody({
+      model: "gpt-5.6-luna",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "run local searches" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "call_ws_1", name: "web_search", input: { q: "local" } },
+            { type: "tool_use", id: "call_ts_1", name: "tool_search", input: { q: "local" } },
+          ],
+        },
+      ],
+      tools: [
+        { name: "web_search", description: "Client web search", input_schema: { type: "object", properties: { q: { type: "string" } } } },
+        { name: "tool_search", description: "Client tool search", input_schema: { type: "object", properties: { q: { type: "string" } } } },
+      ],
+      tool_choice: { type: "tool", name: "web_search" },
+    }) as Record<string, any>;
+
+    expect(body.tools).toEqual([
+      { type: "function", name: "web_search", description: "Client web search", parameters: { type: "object", properties: { q: { type: "string" } } } },
+      { type: "function", name: "tool_search", description: "Client tool search", parameters: { type: "object", properties: { q: { type: "string" } } } },
+    ]);
+    expect(body.tool_choice).toEqual({ type: "function", name: "web_search" });
+    expect(body.input).toEqual(expect.arrayContaining([
+      { type: "function_call", call_id: "call_ws_1", name: "web_search", arguments: JSON.stringify({ q: "local" }) },
+      { type: "function_call", call_id: "call_ts_1", name: "tool_search", arguments: JSON.stringify({ q: "local" }) },
+    ]));
+
+    const bodyTsChoice = anthropicToResponsesBody({
+      model: "gpt-5.6-luna",
+      max_tokens: 10,
+      messages: [{ role: "user", content: "test" }],
+      tools: [
+        { name: "tool_search", description: "Client tool search", input_schema: { type: "object" } },
+      ],
+      tool_choice: { type: "tool", name: "tool_search" },
+    }) as Record<string, any>;
+    expect(bodyTsChoice.tool_choice).toEqual({ type: "function", name: "tool_search" });
+  });
+
+  test("official tool-search call/results preserve ids, loaded definitions, failures, and forced choice", () => {
+    const body = anthropicToResponsesBody({
+      model: "gpt-5.6-luna",
+      max_tokens: 256,
+      messages: [
+        { role: "user", content: "find the lookup tool" },
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "server_tool_use",
+              id: "srv_search_1",
+              name: "tool_search_tool_bm25",
+              input: { query: "lookup" },
+            },
+            {
+              type: "tool_search_tool_result",
+              tool_use_id: "srv_search_1",
+              content: {
+                type: "tool_search_tool_search_result",
+                tool_references: [{ type: "tool_reference", tool_name: "lookup" }],
+              },
+            },
+          ],
+        },
+        {
+          role: "user",
+          content: [{
+            type: "tool_search_tool_result",
+            tool_use_id: "srv_search_2",
+            content: { type: "tool_search_tool_result_error", error_code: "unavailable" },
+          }],
+        },
+      ],
+      tools: [
+        { type: "tool_search_tool_bm25_20251119", name: "tool_search_tool_bm25" },
+        {
+          name: "lookup",
+          description: "Look something up",
+          input_schema: { type: "object", properties: { id: { type: "string" } } },
+          defer_loading: true,
+          strict: true,
+        },
+      ],
+      tool_choice: { type: "tool", name: "tool_search_tool_bm25" },
+    }) as Record<string, any>;
+
+    expect(body.tools).toEqual([
+      { type: "tool_search" },
+      {
+        type: "function",
+        name: "lookup",
+        description: "Look something up",
+        parameters: { type: "object", properties: { id: { type: "string" } } },
+        defer_loading: true,
+        strict: true,
+      },
+    ]);
+    expect(body.tool_choice).toEqual({ type: "tool_search" });
+    expect(body.input).toEqual(expect.arrayContaining([
+      { type: "tool_search_call", call_id: "srv_search_1", arguments: JSON.stringify({ query: "lookup" }) },
+      {
+        type: "tool_search_output",
+        call_id: "srv_search_1",
+        status: "completed",
+        execution: "client",
+        tools: [expect.objectContaining({ type: "function", name: "lookup", defer_loading: true })],
+      },
+      {
+        type: "tool_search_output",
+        call_id: "srv_search_2",
+        status: "failed",
+        execution: "client",
+        tools: [],
+      },
+    ]));
     expect(() => responsesRequestSchema.parse(body)).not.toThrow();
     expect(() => parseRequest(body)).not.toThrow();
   });

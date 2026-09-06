@@ -17,6 +17,8 @@ import { isClaudeDebugEnabled } from "../lib/debug-settings";
 import { retainedUtf8Bytes, truncateRetainedUtf8 } from "../lib/admission";
 import { enforceAppOwnedMemoryBudget } from "../lib/app-owned-memory";
 
+export type ClaudeInboundDecision = "allow" | "reject" | "shadow" | "native";
+
 export interface ClaudeInboundDebugEntry {
   /** Monotonic capture id — unique even when several entries share Date.now(). */
   id: number;
@@ -39,12 +41,24 @@ export interface ClaudeInboundDebugEntry {
   /** Ephemeral equality tags (process-salted HMAC, 8 chars) — run-local identity only. */
   userIdTag?: string;
   systemTag?: string;
+  /** Session identity precedence was applied for this capture. */
+  sessionTag?: string;
+  /** HMAC8 tags for agent/parent correlation (never raw ids). */
+  agentIdTag?: string;
+  parentAgentIdTag?: string;
+  /** Bounded feature codes from compatibility analysis (see src/claude/compatibility.ts). */
+  featureCodes?: string[];
+  /** Effective adapter at final route evaluation time, if known. */
+  adapter?: string;
+  /** Compatibility decision (shadow/enforce/none or native passthrough). */
+  decision?: ClaudeInboundDecision;
 }
 
 const RING_LIMIT = 20;
 const MAX_DIAGNOSTIC_VALUE_BYTES = 8 * 1024;
 const MAX_CLAUDE_INBOUND_METADATA_KEYS = 64;
 const MAX_CLAUDE_INBOUND_ROW_BYTES = 32 * 1024;
+const MAX_DIAGNOSTIC_FEATURE_CODES = 16;
 const ring: ClaudeInboundDebugEntry[] = [];
 let ringBytes = 0;
 const salt = randomBytes(16).toString("hex");
@@ -84,27 +98,61 @@ function removeOldest(): number {
   return bytes;
 }
 
+function normalizeFeatureCodes(codes: unknown): string[] | undefined {
+  if (!Array.isArray(codes)) return undefined;
+  const out: string[] = [];
+  for (const c of codes) {
+    if (typeof c !== "string") continue;
+    const trimmed = c.trim().slice(0, 64);
+    if (!trimmed) continue;
+    out.push(truncateRetainedUtf8(trimmed, MAX_DIAGNOSTIC_VALUE_BYTES));
+    if (out.length >= MAX_DIAGNOSTIC_FEATURE_CODES) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function maybeTag(raw?: string): string | undefined {
+  if (!raw || typeof raw !== "string") return undefined;
+  const v = raw.trim();
+  if (!v) return undefined;
+  return tag(v);
+}
+
 /** Record one inbound request. No-op (and ring flush) when the claude debug flag is off. */
 export function captureClaudeInbound(
   endpoint: "messages" | "count_tokens",
   body: unknown,
   resolvedModel?: string,
   anthropicBeta?: string,
-): void {
+  extra?: {
+    agentId?: string;
+    parentAgentId?: string;
+    sessionId?: string;
+    featureCodes?: string[];
+    adapter?: string;
+    decision?: ClaudeInboundDecision;
+  },
+): number | undefined {
   const enabled = isClaudeDebugEnabled();
   if (!enabled) {
     if (lastEnabled) clearClaudeInboundDebug(); // flag turned off: drop captured entries
     lastEnabled = false;
-    return;
+    return undefined;
   }
   lastEnabled = true;
-  if (!isRec(body)) return;
+  if (!isRec(body)) return undefined;
   const thinking = isRec(body.thinking) ? body.thinking : undefined;
   const outputConfig = isRec(body.output_config) ? body.output_config : undefined;
   const metadata = isRec(body.metadata) ? body.metadata : undefined;
   const userId = metadata && typeof metadata.user_id === "string" ? metadata.user_id : undefined;
   const system = systemText(body.system);
   const metadataNames = metadata ? Object.keys(metadata) : [];
+  // Session tag precedence is supplied via extra.sessionId (header > metadata > system); fallback to userId for legacy.
+  const rawSessionId = extra?.sessionId;
+  const effectiveSessionTag = rawSessionId ? maybeTag(rawSessionId) : (userId !== undefined ? tag(userId) : undefined);
+  const featureCodes = normalizeFeatureCodes(extra?.featureCodes);
+  const agentIdTag = maybeTag(extra?.agentId);
+  const parentAgentIdTag = maybeTag(extra?.parentAgentId);
   const entry: ClaudeInboundDebugEntry = {
     id: ++nextCaptureId,
     at: Date.now(),
@@ -123,6 +171,12 @@ export function captureClaudeInbound(
     ...(anthropicBeta ? { anthropicBeta: truncateRetainedUtf8(anthropicBeta, MAX_DIAGNOSTIC_VALUE_BYTES) } : {}),
     ...(userId !== undefined ? { userIdTag: tag(userId) } : {}),
     ...(system !== undefined ? { systemTag: tag(system) } : {}),
+    ...(effectiveSessionTag ? { sessionTag: effectiveSessionTag } : {}),
+    ...(agentIdTag ? { agentIdTag } : {}),
+    ...(parentAgentIdTag ? { parentAgentIdTag } : {}),
+    ...(featureCodes ? { featureCodes } : {}),
+    ...(extra?.adapter ? { adapter: truncateRetainedUtf8(extra.adapter, MAX_DIAGNOSTIC_VALUE_BYTES) } : {}),
+    ...(extra?.decision ? { decision: extra.decision } : {}),
   };
   while (entryBytes(entry) > MAX_CLAUDE_INBOUND_ROW_BYTES && entry.metadataKeys?.length) {
     entry.metadataKeys.pop();
@@ -139,6 +193,26 @@ export function captureClaudeInbound(
   ring.push(entry);
   ringBytes += entryBytes(entry);
   if (ring.length > RING_LIMIT) removeOldest();
+  enforceAppOwnedMemoryBudget();
+  return entry.id;
+}
+
+/** Add the final route decision to the request's existing row without duplicating retries. */
+export function annotateClaudeInboundDecision(
+  id: number | undefined,
+  adapter: string,
+  decision: ClaudeInboundDecision,
+  featureCodes: string[],
+): void {
+  if (id === undefined || !isClaudeDebugEnabled()) return;
+  const entry = ring.find(candidate => candidate.id === id);
+  if (!entry) return;
+  const before = entryBytes(entry);
+  entry.adapter = truncateRetainedUtf8(adapter, MAX_DIAGNOSTIC_VALUE_BYTES);
+  entry.decision = decision;
+  const normalized = normalizeFeatureCodes(featureCodes);
+  if (normalized) entry.featureCodes = normalized;
+  ringBytes += entryBytes(entry) - before;
   enforceAppOwnedMemoryBudget();
 }
 
