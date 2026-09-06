@@ -79,9 +79,14 @@ Those controls still have no owner, so there is no image-publish workflow or off
 
 | Workflow | Trigger | Purpose |
 | --- | --- | --- |
-| `.github/workflows/ci.yml` | Any `pull_request`; runtime/package `push` to `main`/`preview`/`dev`; manual dispatch | Linux runs four suite shards plus `gates`; macOS runs two shards. Windows runs six shards only on manual dispatch with `lane=all` (or empty), not on push events. Aggregate `ci` accepts an intentional Windows skip, so release evidence must inspect all six actual job results on the exact publish SHA. `npm-global-smoke` remains GitHub-hosted because it mutates the global package prefix. |
-| `.github/workflows/dev-version-bump.yml` | Manual dispatch with an intended version and `pre-move` or `repair` mode | Opens the reviewed pull request that moves `dev` past a release target. The default `pre-move` mode runs before promotion and publication; explicit `repair` mode retains the post-publish catch-up path. It is neither called by `release.yml` nor triggered by publication. |
-| `.github/workflows/release.yml` | Manual dispatch only | npm publish/dry-run workflow. It requires successful Cross-platform CI for the exact `GITHUB_SHA`, requires `dev` to outrank the target, then checks the target against the freshly fetched global tag set before publish or dry-run. |
+| `.github/workflows/ci.yml` | `pull_request`, merge-queue `merge_group`, `push` to `main`/`preview`/`dev`, or manual dispatch | Cross-platform quality gate. Linux uses four timing-aware general-suite shards plus dedicated isolation jobs and `gates`; macOS is the unsharded control; Windows uses six timing-aware shards. Concurrency supersedes stale PR/push runs without canceling immutable merge-queue or manual evidence, and the stable `ci` aggregate fails closed over every producer. All Windows work stays on ephemeral GitHub-hosted runners. |
+| `.github/workflows/release-pr.yml` | Manual dispatch only (main branch) | Maintains a reviewable Release Please version PR without creating a GitHub release or publishing a package during the candidate-artifact rollout. |
+| `.github/workflows/release-candidate.yml` | Successful `Cross-platform CI` push run on `main`, or exact-SHA manual dispatch | Builds one npm tarball, records canonical source/tree/input/package provenance, and uploads it without publish credentials. |
+| `.github/workflows/fork-auto-release.yml` | Successful `Build release candidate` completion on `main` | Resolves exactly one unexpired artifact from the trusted candidate run and sends the audited stable `repository_dispatch` carrying its run/artifact IDs. |
+| `.github/workflows/fork-dev-auto-release.yml` | Successful `Cross-platform CI` push run on `dev` | Dispatches the transitional `dev` prerelease path for the exact green head; it does not publish stable releases or write the next stable development version. |
+| `.github/workflows/release.yml` | Audited stable `repository_dispatch` or transitional manual dispatch | Re-verifies and publishes the exact candidate tarball without lifecycle scripts or repacking. Stable repository dispatch must come from the provenance chain and carries immutable candidate IDs; existing manual dev/preview callers remain a transition path. |
+| `.github/workflows/promote-dev.yml` | Successful `Cross-platform CI` on `dev`/`main`, successful `Release` on `main`, or default-branch manual dispatch | Maintains the human-gated `dev`-to-`main` promotion, reconciles verified `main` ancestry into `dev`, and is the sole live post-release writer that advances `dev` after proving the npm version, GitHub Release, tag, and exact release SHA. |
+| `.github/workflows/dev-version-bump.yml` | Reusable `workflow_call` only; dormant | Retained upstream recovery implementation. No workflow calls it and it has no branch-selectable manual trigger; `promote-dev.yml` must remain the sole live post-release authority unless a reviewed design explicitly replaces it. |
 | `.github/workflows/deploy-docs.yml` | `push` to `main` touching `docs-site/**` or the workflow, or manual dispatch | Build and publish the Astro/Starlight docs site to GitHub Pages. |
 | `.github/workflows/service-lifecycle.yml` | `pull_request` to `main`/`dev` and `push`, both filtered on the service path set (`src/service.ts`, `src/cli.ts`, `src/cli/index.ts`, `src/lib/bun-runtime.ts`, `package.json`, `bun.lock`, the workflow), or manual dispatch | Service-lifecycle smoke on three platforms: Linux systemd, macOS launchd, and Windows Scheduled Tasks. Each installs, verifies, stops via `ocx stop`, and uninstalls. The path list is kept in sync with the `release.yml` service-gate regex. |
 | `.github/workflows/enforce-pr-target.yml` | `pull_request_target` (opened, reopened, edited, labeled, unlabeled, ready_for_review, synchronize) plus default-branch `status` events filtered to successful `CodeRabbit` statuses | The `enforce-target` gate: rejects pull requests whose head ancestry sits on the `main` tip while far behind `dev`, rejects empty or malformed descriptions, requires a GUI screenshot when the title/body mentions `gui` (immediately waivable with the maintainer-controlled `gui-screenshot-waived` label; legacy maintainer comments remain compatibility evidence on later PR events), keeps contributor PRs in draft until a four-box readiness checklist is complete, verifies the CI / latest-dev / Codex+CodeRabbit-findings claims (review threads plus current-head CodeRabbit review-body findings outside the diff range), and adds a `review-ready` status label at the ready moment. CodeRabbit status SHAs must resolve to exactly one open current-head PR before writes. Stacked child PRs targeting another open PR's head skip the wrong-base gate. |
@@ -96,14 +101,11 @@ Those controls still have no owner, so there is no image-publish workflow or off
 branch, not from `dev`. Landing a change to one of them on `dev` does not change live behavior until
 it is promoted, so those files follow the promotion model rather than ordinary integration.
 
-The Windows selector is an operational stability control, not a security boundary. A pull request
-controls the `pull_request` workflow body and can rewrite an event-name check, repository variable,
-or selector output. Because this is a public user-owned repository and runner groups are unavailable,
-the repository setting **Fork pull request workflows from outside collaborators: Require approval
-for all outside collaborators** (`all_external_contributors`) must remain enabled before any self-
-hosted runner is registered. Maintainers must inspect workflow changes before approving an external
-run. If that setting cannot be verified, unset `OCX_SELF_HOSTED_WINDOWS` and deregister the runner;
-the workflow then fails back to `windows-latest` rather than exposing a persistent maintainer host.
+Every Windows CI lane uses `windows-latest`. Pull-request workflows execute proposed workflow code,
+so an event-name selector inside the same file cannot safely protect a persistent self-hosted host.
+Do not register a repository-level self-hosted runner for this public user-owned repository. If a
+future organization migration introduces isolated ephemeral runner groups, access must be restricted
+outside candidate-controlled YAML and security-reviewed before any workflow starts using them.
 
 Docs-only changes intentionally route through the docs workflow instead of the runtime CI gate. If a
 docs change also edits runtime/package/release files, run the relevant local runtime checks before
@@ -149,17 +151,20 @@ exists so the repository-shape source of truth does not omit the shape of its ow
   published outcome — the fix, its regression test, the release note, the advisory once public —
   reaches the repository.
 
+After a successful real stable release from `main`, `promote-dev.yml` advances `dev` to the next
+stable patch in a package.json-only commit based on that released main commit. Re-running the
+completion event is idempotent when `dev` already carries that successor; any other branch or
+version state fails closed. `dev-version-bump.yml` is dormant `workflow_call`-only recovery code,
+not a second post-release writer. Upstream sync applies the package recipe without ever decreasing
+the current valid version.
+
 ## Maintenance governance
 
 `MAINTAINERS.md` is the source of truth for current project roles and the review and merge policy.
 `.github/CODEOWNERS` declares default reviewers and repeats ownership for authentication, repository
 automation, release, and governance paths where an explicit security review is required. GitHub
 repository settings remain the source of truth for actual account permissions and protected-branch
-enforcement. For `dev`, a current maintainer with live `maintain` or `admin` access can
-explicitly integrate a PR without a second maintainer approval. The optional merge-review
-helper validates this actor/base exception separately from its default contributor-approval
-path; it does not certify CI or security review. The PR-only bypass leaves direct pushes,
-force-pushes and deletion blocked. `main` and `preview` retain their existing review rules.
+enforcement.
 
 [Decision Log]
 - 목적과 의도: Make project ownership and review authority discoverable without exposing credentials or treating a documentation file as an access-control mechanism.
@@ -193,18 +198,17 @@ Invariants:
 
 ## Release workflow
 
-Package release is npm-focused. `package.json` exposes `opencodex` and `ocx`, `prepublishOnly` runs
-typecheck and GUI build. `scripts/release.ts` accepts either an explicit version or
-`--bump patch|minor|major`; the stable and preview channels use separate resolvers in
-`scripts/version-line.ts`. It runs local typecheck, `bun test --isolate tests`, and
-`bun run privacy:scan` before the version bump, commit/push, Cross-platform CI wait, and GitHub
-Release workflow dispatch. Docs publishing is separate from npm release publishing.
-
-Opening a release starts with the `dev` pre-move. Dispatch
-`.github/workflows/dev-version-bump.yml` with the intended version, merge the pull request it opens,
-then promote and release. A no-op is valid when `dev` already outranks the target. `release.yml`
-independently enforces that readiness condition and refuses publication if the pre-move is missing.
-The design and repair history live in `devlog/_plan/260904_release_version_line/`.
+Package release is npm-focused. Stable automation follows one provenance chain:
+`Cross-platform CI` → `Build release candidate` → `Fork auto-release` → `Release`. The candidate
+workflow packages once; the dispatcher selects exactly one unexpired artifact from that successful
+same-repository `main` run; the publisher re-verifies the run, artifact, manifest, source tree,
+inputs, version, and tarball digests before publishing the same file. Stable automation reaches
+`release.yml` through the audited `fork-auto-release` repository dispatch with immutable candidate
+IDs. `scripts/release.ts` suppresses the competing automatic dispatcher for helper-created stable
+commits, waits for the same immutable candidate, and passes its run and artifact IDs to the
+publisher. Dev/preview manual dispatch remains a transition path until a real stable candidate
+release proves the chain and maintainers authorize retirement. Docs publishing is separate from
+npm release publishing.
 
 Opening a preview for the next core ends the current patch line. After
 `vX.Y.0-preview.*` is tagged, a fix ships as part of `X.Y.0`, not as
@@ -248,18 +252,19 @@ Every npm release version must map cleanly across four surfaces:
 | Surface | Required state |
 | --- | --- |
 | `package.json` | `version` equals the release workflow `version` input. |
-| npm registry | `@yansigit/opencodex@<version>` does not exist before publish, then exists after publish with the requested dist-tag. |
-| Git tag | `v<version>` does not exist before publish, then points at the exact release commit. |
-| GitHub Release | `v<version>` does not exist before publish, then is created from the exact release commit. |
+| npm registry | Absent for a fresh release, or already published with `gitHead` equal to the exact release commit for a verified resume; afterward it exists with the requested dist-tag. |
+| Git tag | Absent for a fresh release, or already points at the exact release commit for a verified resume; afterward `v<version>` points there. |
+| GitHub Release | Absent for a fresh release, or is consistent with the verified tag for a resume; afterward `v<version>` exists from the exact release commit. |
 
-The release must fail before `npm publish` if npm, the Git tag, or the GitHub Release already has the
-requested version. This prevents partial releases where npm is published but GitHub Release creation
-fails afterward.
+The metadata preflight runs before publication and fails closed on conflicting state. A wholly new
+version proceeds to npm first; after the registry confirms that exact version, the workflow creates
+and verifies the Git tag at the exact release commit, then creates the GitHub Release from the already
+validated notes. A partial-publication retry is permitted only when the existing npm `gitHead`, tag,
+and release state are consistent with the exact `GITHUB_SHA`; it resumes only the missing later
+surfaces instead of republishing or moving public metadata.
 
-Two ordering checks run before publication. The version on `origin/dev` must strictly outrank the
-release target, proving the pre-move has landed. After a fresh tag fetch, the release target must also
-outrank the global release-tag set. The only equality exception is a dry run whose existing tag points
-at the exact `GITHUB_SHA`; a real publish never receives that exception.
+After a fresh tag fetch, the release target must outrank the global release-tag set. An exact tag at
+the exact `GITHUB_SHA` is accepted only for the provenance-verified resume described above.
 
 Do not force-move public version tags by default. If release metadata is already inconsistent, treat
 the version as consumed and publish the next unused patch version instead. Only rewrite a public tag
@@ -281,12 +286,12 @@ preview has closed that stable patch line.
 ## Cross-platform CI
 
 `.github/workflows/ci.yml` is the ordinary quality gate for runtime/package changes. Linux runs
-the suite in four shards with a separate `gates` job, and macOS runs it in two shards. Windows
-runs the full suite in six shards only on manual `workflow_dispatch` with `lane=all` (or an
-empty lane). Pushes to `dev`, `main` and `preview` do not activate that Windows matrix. A
-release that requires Windows proof must dispatch it for the exact publish SHA and inspect
-all six successful jobs; an aggregate green `ci` check can include a deliberate Windows skip.
-Across the jobs, the workflow runs:
+the general lane in four timing-aware fresh-process shards, with unstable process families isolated
+in dedicated jobs and fixed-cost checks in `gates`. macOS remains the unsharded control. Windows
+runs six timing-aware shards on ephemeral `windows-latest` runners for pull requests, merge-queue
+candidates, integration pushes, and manual dispatch. Test membership comes from the repository's
+lane manifest; the upstream domain-layout migration changes file locations without weakening lane
+coverage. Across the jobs, the workflow runs the equivalent of:
 
 ```bash
 bun install --frozen-lockfile
@@ -311,11 +316,11 @@ ocx help
 The CI intentionally does not build docs, run coverage, or perform remote Ubuntu/RDP smoke tests.
 Those stay outside the default gate until a concrete regression justifies the extra runtime.
 
-The Release workflow remains manual and publish-focused. Before any dry-run or publish step, it
-checks that the exact release commit (`GITHUB_SHA`) already has a successful Cross-platform CI run,
-that `dev` already outranks the target, and that the target passes the fresh global tag-ordering gate.
-This keeps release runs short and makes release a deployment of a verified commit after the required
-`dev` pre-move rather than a second CI pipeline.
+The Release workflow remains publish-focused. Before any dry-run or publish step, it checks that the
+exact release commit (`GITHUB_SHA`) already has a successful branch-push Cross-platform CI run and
+that the target passes the fresh global tag-ordering gate. Stable automation additionally requires
+the immutable, provenance-verified candidate tarball produced for that exact `main` commit; after a
+successful stable run, `promote-dev.yml` alone verifies public metadata and advances `dev`.
 
 ## Remote Hub locale and release gate
 
