@@ -15,7 +15,8 @@
  */
 
 import { signalWithTimeout } from "../lib/abort";
-import { assertUrlResolvesPublic } from "../lib/destination-policy";
+import { resolvePublicAddresses } from "../lib/destination-policy";
+import { pinnedHttpPost } from "../lib/pinned-http";
 import { cancelResponseBodyBestEffort } from "../lib/upstream-retry";
 import type { QuotaResetEvent } from "./reset-detector";
 import type { ResolvedQuotaResetNotify } from "./reset-notify-config";
@@ -34,6 +35,44 @@ export type QuotaResetDeliveryResult = {
   readonly ok: boolean;
   readonly reason?: "blocked-destination" | "timeout" | "http-error" | "spawn-failed";
 };
+
+export interface QuotaResetSinkDependencies {
+  resolveAddresses?: typeof resolvePublicAddresses;
+  pinnedPost?: typeof pinnedHttpPost;
+}
+
+let quotaResetSinkDependenciesForTests: QuotaResetSinkDependencies | null = null;
+
+/** Test-only transport seam for the lazy activation path, which cannot pass call-local dependencies. */
+export function setQuotaResetSinkDependenciesForTests(
+  dependencies: QuotaResetSinkDependencies | null,
+): void {
+  quotaResetSinkDependenciesForTests = dependencies;
+}
+
+async function awaitWithSignal<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(
+      signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"),
+    ));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    operation.then(
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error)),
+    );
+  });
+}
 
 /**
  * The delivered payload.
@@ -88,34 +127,46 @@ export function quotaResetPayloadForTests(event: QuotaResetEvent): unknown {
 async function deliverWebhook(
   json: string,
   config: ResolvedQuotaResetNotify,
+  dependencies: QuotaResetSinkDependencies,
 ): Promise<QuotaResetDeliveryResult> {
   const url = config.webhookUrl;
   if (url === undefined) return { sink: "webhook", ok: true };
 
-  // An operator-supplied URL is an SSRF surface: this process can reach loopback services and
-  // cloud metadata endpoints that the operator's browser cannot. The repository already owns
-  // this policy, so the check is reused rather than reinvented. Self-hosted receivers opt in.
-  if (!config.allowPrivateNetwork) {
-    try {
-      await assertUrlResolvesPublic(url);
-    } catch {
-      return { sink: "webhook", ok: false, reason: "blocked-destination" };
-    }
-  }
-
   const timeout = signalWithTimeout(config.timeoutMs);
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: json,
-      // The destination check above validated THIS url. Following a redirect would send the
-      // payload somewhere unvalidated, so a hop is refused rather than re-validated: the
-      // operator can configure the final URL directly, which is the stance
-      // providerRedirectError already takes for provider traffic.
-      redirect: "manual",
-      signal: timeout.signal,
-    });
+    let pinned: { address: string; family: number } | undefined;
+    try {
+      const resolved = await awaitWithSignal(
+        (dependencies.resolveAddresses ?? resolvePublicAddresses)(url, {
+          context: "quota reset webhook URL",
+          allowPrivateNetwork: config.allowPrivateNetwork,
+        }),
+        timeout.signal,
+      );
+      pinned = resolved.addresses.find(address => address.family === 4)
+        ?? resolved.addresses[0];
+      if (!pinned) return { sink: "webhook", ok: false, reason: "blocked-destination" };
+    } catch {
+      return {
+        sink: "webhook",
+        ok: false,
+        reason: timeout.signal.aborted ? "timeout" : "blocked-destination",
+      };
+    }
+
+    // Admission and connection must use the SAME DNS answer. This remains true when the
+    // operator opts into private-network receivers: that opt-in admits loopback/private peers,
+    // but metadata, link-local, and unspecified destinations still stay forbidden.
+    const response = await (dependencies.pinnedPost ?? pinnedHttpPost)(
+      url,
+      pinned,
+      json,
+      timeout.signal,
+      {
+        headers: { "content-type": "application/json" },
+        context: "quota reset webhook response",
+      },
+    );
     // Nothing reads the body, and an undrained response holds the connection open.
     cancelResponseBodyBestEffort(response);
     if (response.status >= 300 && response.status < 400) {
@@ -173,6 +224,7 @@ async function deliverCommand(
 export async function deliverQuotaResetEvent(
   event: QuotaResetEvent,
   config: ResolvedQuotaResetNotify,
+  dependencies: QuotaResetSinkDependencies = quotaResetSinkDependenciesForTests ?? {},
 ): Promise<QuotaResetDeliveryResult[]> {
   // Filtered here as well as at the sink registration, because this function is the public
   // entry point and a caller should not be able to deliver a kind the operator excluded.
@@ -180,7 +232,7 @@ export async function deliverQuotaResetEvent(
 
   const json = JSON.stringify(payloadFor(event));
   const attempts: Array<Promise<QuotaResetDeliveryResult>> = [];
-  if (config.webhookUrl !== undefined) attempts.push(deliverWebhook(json, config));
+  if (config.webhookUrl !== undefined) attempts.push(deliverWebhook(json, config, dependencies));
   if (config.command !== undefined && config.command.length > 0) {
     attempts.push(deliverCommand(json, config));
   }

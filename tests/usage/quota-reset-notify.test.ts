@@ -29,9 +29,12 @@ import {
 import {
   deliverQuotaResetEvent,
   quotaResetPayloadForTests,
+  setQuotaResetSinkDependenciesForTests,
 } from "../../src/quota/reset-sinks";
 
 const NOW = Date.now();
+
+afterEach(() => setQuotaResetSinkDependenciesForTests(null));
 
 function event(overrides: Partial<QuotaResetEvent> = {}): QuotaResetEvent {
   return {
@@ -87,6 +90,108 @@ describe("the delivered payload carries no identity", () => {
 });
 
 describe("webhook sink", () => {
+  test("public delivery pins the validated DNS answer against rebinding", async () => {
+    const pinnedCalls: Array<{ address: string; body: string }> = [];
+    let resolutions = 0;
+    const config = resolveQuotaResetNotify({
+      enabled: true,
+      webhookUrl: "https://rebind.example.test/hook",
+    });
+
+    const results = await deliverQuotaResetEvent(event(), config, {
+      resolveAddresses: async () => {
+        resolutions += 1;
+        return {
+          hostname: "rebind.example.test",
+          addresses: [{ address: "93.184.216.34", family: 4 }],
+          privateNetwork: false,
+        };
+      },
+      pinnedPost: async (_url, pinned, body) => {
+        pinnedCalls.push({ address: pinned.address, body });
+        return new Response("ok");
+      },
+    });
+
+    expect(results).toEqual([{ sink: "webhook", ok: true }]);
+    expect(resolutions).toBe(1);
+    expect(pinnedCalls).toHaveLength(1);
+    expect(pinnedCalls[0]?.address).toBe("93.184.216.34");
+    expect(JSON.parse(pinnedCalls[0]?.body ?? "{}")).toHaveProperty("type", "quota_reset");
+  });
+
+  test("private-network delivery pins the admitted answer against rebinding", async () => {
+    const pinnedCalls: Array<{ address: string; body: string }> = [];
+    let resolutions = 0;
+    const config = resolveQuotaResetNotify({
+      enabled: true,
+      webhookUrl: "https://internal.example.test/hook",
+      allowPrivateNetwork: true,
+    });
+
+    const results = await deliverQuotaResetEvent(event(), config, {
+      resolveAddresses: async (_url, options) => {
+        resolutions += 1;
+        expect(options).toMatchObject({ allowPrivateNetwork: true });
+        return {
+          hostname: "internal.example.test",
+          addresses: [{ address: "10.0.0.7", family: 4 }],
+          privateNetwork: true,
+        };
+      },
+      pinnedPost: async (_url, pinned, body) => {
+        pinnedCalls.push({ address: pinned.address, body });
+        return new Response("ok");
+      },
+    });
+
+    expect(results).toEqual([{ sink: "webhook", ok: true }]);
+    expect(resolutions).toBe(1);
+    expect(pinnedCalls).toHaveLength(1);
+    expect(pinnedCalls[0]?.address).toBe("10.0.0.7");
+    expect(JSON.parse(pinnedCalls[0]?.body ?? "{}")).toHaveProperty("type", "quota_reset");
+  });
+
+  test.each([
+    "https://169.254.169.254/hook",
+    "https://[fe80::1]/hook",
+  ])("private-network opt-in still refuses %s", async (webhookUrl) => {
+    let pinnedPosts = 0;
+    const config = resolveQuotaResetNotify({
+      enabled: true,
+      webhookUrl,
+      allowPrivateNetwork: true,
+    });
+
+    expect(await deliverQuotaResetEvent(event(), config, {
+      pinnedPost: async () => {
+        pinnedPosts += 1;
+        return new Response("must not connect");
+      },
+    })).toEqual([
+      { sink: "webhook", ok: false, reason: "blocked-destination" },
+    ]);
+    expect(pinnedPosts).toBe(0);
+  });
+
+  test("the delivery timeout includes DNS resolution", async () => {
+    let pinnedPosts = 0;
+    const config = resolveQuotaResetNotify({
+      enabled: true,
+      webhookUrl: "https://slow-dns.example.test/hook",
+      timeoutMs: 50,
+    });
+
+    expect(await deliverQuotaResetEvent(event(), config, {
+      resolveAddresses: () => new Promise(() => { /* never resolves */ }),
+      pinnedPost: async () => {
+        pinnedPosts += 1;
+        return new Response("must not connect");
+      },
+    })).toEqual([{ sink: "webhook", ok: false, reason: "timeout" }]);
+    expect(pinnedPosts).toBe(0);
+  });
+
   test("a fired event POSTs exactly one JSON body with no identifying data", async () => {
     const bodies: string[] = [];
     const server = Bun.serve({
@@ -158,27 +263,30 @@ describe("webhook sink", () => {
     // 302 the POST to loopback or a metadata address, which would re-open the SSRF hole the
     // destination check just closed. Stubbed rather than served: this asserts the request
     // mode itself, and a real listener is unavailable under the sandbox.
-    const seen: Array<RequestInit | undefined> = [];
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
-      seen.push(init);
-      return new Response(null, { status: 302, headers: { location: "http://127.0.0.1:9/" } });
-    }) as unknown as typeof globalThis.fetch;
-    try {
-      const config = resolveQuotaResetNotify({
-        enabled: true,
-        webhookUrl: "https://hooks.example.test/hook",
-        allowPrivateNetwork: true,
-      });
-      expect(await deliverQuotaResetEvent(event(), config)).toEqual([
-        { sink: "webhook", ok: false, reason: "blocked-destination" },
-      ]);
-      // The refusal must come from not following, not from a followed request that failed.
-      expect(seen).toHaveLength(1);
-      expect(seen[0]?.redirect).toBe("manual");
-    } finally {
-      globalThis.fetch = realFetch;
-    }
+    const pinnedPosts: string[] = [];
+    const config = resolveQuotaResetNotify({
+      enabled: true,
+      webhookUrl: "https://hooks.example.test/hook",
+      allowPrivateNetwork: true,
+    });
+    expect(await deliverQuotaResetEvent(event(), config, {
+      resolveAddresses: async () => ({
+        hostname: "hooks.example.test",
+        addresses: [{ address: "10.0.0.8", family: 4 }],
+        privateNetwork: true,
+      }),
+      pinnedPost: async (url) => {
+        pinnedPosts.push(url);
+        return new Response(null, {
+          status: 302,
+          headers: { location: "http://127.0.0.1:9/" },
+        });
+      },
+    })).toEqual([
+      { sink: "webhook", ok: false, reason: "blocked-destination" },
+    ]);
+    // The pinned primitive never follows redirects; the sink classifies the single response.
+    expect(pinnedPosts).toEqual(["https://hooks.example.test/hook"]);
   });
 
   test("a hanging receiver times out rather than blocking forever", async () => {
@@ -514,7 +622,6 @@ describe("activation is the single switch", () => {
     // This proves activation/delivery, not TLS integration.
     const webhookUrl = "https://hooks.example.test/activation";
     const receiverUrl = `http://127.0.0.1:${server.port}/hook`;
-    const realFetch = globalThis.fetch;
     const dispatched: string[] = [];
     let receiveTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -537,13 +644,23 @@ describe("activation is the single switch", () => {
     const previousHome = process.env["OPENCODEX_HOME"];
     process.env["OPENCODEX_HOME"] = home;
     try {
-      globalThis.fetch = Object.assign((input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
-        if (input === webhookUrl) {
+      setQuotaResetSinkDependenciesForTests({
+        resolveAddresses: async input => ({
+          hostname: new URL(input).hostname,
+          addresses: [{ address: "127.0.0.1", family: 4 }],
+          privateNetwork: true,
+        }),
+        pinnedPost: async (input, _pinned, body, signal, options) => {
           dispatched.push(input);
-          return realFetch(receiverUrl, init);
-        }
-        return realFetch(input, init);
-      }, realFetch);
+          return fetch(receiverUrl, {
+            method: "POST",
+            headers: options?.headers,
+            body,
+            redirect: "manual",
+            signal,
+          });
+        },
+      });
       resetQuotaResetNotifyCacheForTests();
       resetQuotaResetStoreForTests();
       resetQuotaResetActivationForTests();
@@ -583,7 +700,7 @@ describe("activation is the single switch", () => {
       expect(payload).not.toHaveProperty("key");
     } finally {
       if (receiveTimeout !== undefined) clearTimeout(receiveTimeout);
-      globalThis.fetch = realFetch;
+      setQuotaResetSinkDependenciesForTests(null);
       setQuotaResetSink(null);
       resetQuotaResetActivationForTests();
       resetQuotaResetNotifyCacheForTests();
