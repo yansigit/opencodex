@@ -44,10 +44,12 @@ import { DAILY_ANTIGRAVITY_HOST, PROD_ANTIGRAVITY_HOST } from "../../adapters/go
 import { parseAntigravityAvailableModels } from "../../providers/antigravity-models";
 import { enrichProviderFromCatalog, listKeyLoginProviders } from "../../oauth/key-providers";
 import { deriveProviderPresets, providerConfigSeed } from "../../providers/derive";
+import { initializeProviderModelSelection } from "../../providers/initial-model-selection";
 import { effectiveGoogleMode, providerCodexAccountMode, providerMatchesRegistryTransport } from "../../providers/registry";
 import {
   extractModelEnvelopeRows,
   extractProviderModelItems,
+  isRegistryModelDiscoveryUrl,
   readBoundedDiscoveryJson,
   resolveProviderModelDiscovery,
 } from "../../providers/model-discovery";
@@ -111,6 +113,7 @@ import { refreshUserCostOverlays } from "../../usage/user-cost-overlays";
 import { redactSecretString } from "../../lib/redact";
 import {
   XAI_RESPONSES_OPT_IN_MODELS,
+  XAI_RESPONSES_DEFAULT_VERSION,
   xaiResponsesOptInState,
 } from "../../providers/xai-responses-opt-in";
 import { dropProviderCustomModels } from "../../providers/provider-id-rewrite";
@@ -424,6 +427,10 @@ function adoptProviderEditorCandidate(live: OcxConfig, persisted: OcxConfig): vo
   else live.customModels = structuredClone(persisted.customModels);
   if (persisted.providerContextCaps === undefined) delete live.providerContextCaps;
   else live.providerContextCaps = structuredClone(persisted.providerContextCaps);
+  if (persisted.disabledModels === undefined) delete live.disabledModels;
+  else live.disabledModels = [...persisted.disabledModels];
+  if (persisted.modelDiscovery === undefined) delete live.modelDiscovery;
+  else live.modelDiscovery = structuredClone(persisted.modelDiscovery);
 }
 
 /**
@@ -565,10 +572,11 @@ function applyProviderPatchFields(
     const modelAdapters = { ...(next.modelAdapters ?? {}) };
     for (const model of XAI_RESPONSES_OPT_IN_MODELS) {
       if (rawBody.xaiResponsesOptIn) modelAdapters[model] = "openai-responses";
-      else delete modelAdapters[model];
+      else modelAdapters[model] = "openai-chat";
     }
     if (Object.keys(modelAdapters).length > 0) next.modelAdapters = modelAdapters;
     else delete next.modelAdapters;
+    next.xaiResponsesDefaultVersion = Math.max(next.xaiResponsesDefaultVersion ?? 0, XAI_RESPONSES_DEFAULT_VERSION);
     touched = true;
   }
   if (Object.hasOwn(rawBody, "requestPacing")) {
@@ -1020,8 +1028,15 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
       const changed = !isDeepStrictEqual(providerEditorConfigDTO(persisted), nextResult.value);
       if (!changed) return { changed: false, value: candidate };
 
+      for (const [name, provider] of Object.entries(candidate.config.providers)) {
+        if (!Object.hasOwn(persisted.providers, name)) {
+          initializeProviderModelSelection(name, provider, undefined, candidate.config);
+        }
+      }
       persisted.defaultProvider = candidate.config.defaultProvider;
       persisted.providers = structuredClone(candidate.config.providers);
+      persisted.disabledModels = candidate.config.disabledModels;
+      persisted.modelDiscovery = candidate.config.modelDiscovery;
       for (const name of candidate.removedProviders) {
         dropProviderCustomModels(persisted, name);
         setProviderContextCap(persisted, name, false);
@@ -1209,11 +1224,24 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return { changed: false, value: { error: namespaceCollision, status: 409 } };
       }
       const persisted = fresh.providers[name];
+      const nextSubmitted = structuredClone(submitted);
+      // The editor omits dedicated alias and xAI wire-choice state. Re-read it under
+      // the persistence mutation so a concurrent switch remains authoritative.
+      restorePersistedAliasOverlays(nextSubmitted, persisted);
+      if (name === "xai") {
+        if (!Object.hasOwn(body.provider as object, "modelAdapters") && persisted?.modelAdapters) {
+          nextSubmitted.modelAdapters = { ...persisted.modelAdapters };
+        }
+        if (persisted?.xaiResponsesDefaultVersion !== undefined) {
+          nextSubmitted.xaiResponsesDefaultVersion = persisted.xaiResponsesDefaultVersion;
+        }
+      }
+      initializeProviderModelSelection(name, nextSubmitted, persisted, fresh);
       const committed = {
         ...(persisted ? structuredClone(persisted) : {}),
-        ...structuredClone(submitted),
+        ...nextSubmitted,
       } as OcxProviderConfig;
-      if (submitted.azureCredential) {
+      if (nextSubmitted.azureCredential) {
         // Switching identity modes is an explicit credential replacement. The atomic merge
         // preserves omitted secrets generally, but Azure identity cannot coexist with a stale
         // key or key pool from the prior row.
@@ -1490,16 +1518,20 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const discovery = resolveProviderModelDiscovery(name, prov);
     const started = Date.now();
     try {
+      // Same canonical-URL TUN transparency as catalog discovery: the registry's
+      // own fixed discovery URL survives purely-benchmark (Clash/Surge/Mihomo
+      // fake-IP) DNS without proxy env.
+      const outboundDependencies = { isCanonicalUrl: isRegistryModelDiscoveryUrl };
       const res = method === "POST"
         ? await providerOutboundPost(name, prov, modelsUrl, {
           headers,
           body: JSON.stringify({ project }),
           signal: AbortSignal.timeout(8000),
-        })
+        }, outboundDependencies)
         : await providerOutboundGet(name, prov, modelsUrl, {
           headers,
           signal: AbortSignal.timeout(8000),
-        });
+        }, outboundDependencies);
       const latencyMs = Date.now() - started;
       const redirectError = await providerRedirectError(res, modelsUrl);
       if (redirectError) {

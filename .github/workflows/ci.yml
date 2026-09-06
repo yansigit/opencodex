@@ -185,7 +185,7 @@ jobs:
           # No job here pushes, so leaving a usable token in .git/config is
           # avoidable residue. Matches the other workflows.
           persist-credentials: false
-          # tests/release-version-line.test.ts compares package.json against the
+          # tests/ci-workflows/release-version-line.test.ts compares package.json against the
           # newest release tag. actions/checkout fetches no tags by default, so
           # without this the check reads an empty tag set and passes on anything -
           # the exact regression it exists to catch would ride through CI green.
@@ -499,7 +499,7 @@ jobs:
         run: bun run privacy:scan
 
       # The ocx skill ships a capability -> route map generated from src/cli/capabilities.ts.
-      # `bun run test` already covers this via tests/skill-ocx.test.ts; this step exists so the
+      # `bun run test` already covers this via tests/ci-workflows/skill-ocx.test.ts; this step exists so the
       # failure names the fix instead of surfacing as a byte-comparison diff in a test log.
       - name: Check the generated ocx skill surface is current
         run: bun run skill:surface:check
@@ -540,7 +540,7 @@ jobs:
           # No job here pushes, so leaving a usable token in .git/config is
           # avoidable residue. Matches the other workflows.
           persist-credentials: false
-          # tests/release-version-line.test.ts compares package.json against the
+          # tests/ci-workflows/release-version-line.test.ts compares package.json against the
           # newest release tag. actions/checkout fetches no tags by default, so
           # without this the check reads an empty tag set and passes on anything -
           # the exact regression it exists to catch would ride through CI green.
@@ -584,7 +584,7 @@ jobs:
           needs.changes.outputs.swift == 'true' &&
           (github.event_name == 'pull_request' || github.event_name == 'merge_group' ||
            (github.event_name == 'push' && github.ref == 'refs/heads/dev'))
-        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 tests/aistudio-native-webkit.test.ts
+        run: bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 tests/adapters/google/aistudio-native-webkit.test.ts
 
       - name: Focused Darwin/process lifecycle tests
         if: >-
@@ -593,16 +593,16 @@ jobs:
         run: |
           bash scripts/ci/run-bun-with-crash-retry.sh -- bun scripts/test.ts --isolate --timeout 60000 \
             --timings .bun-timings.json --update-timings \
-            tests/codex-app-server-processes.test.ts \
-            tests/codex-prompt-text-probe.test.ts \
-            tests/cursor-native-exec-shell.test.ts \
-            tests/process-control.test.ts \
-            tests/process-state.test.ts \
-            tests/service.test.ts \
-            tests/storage-worker-lifecycle.test.ts \
-            tests/storage-worker-os-join-settle.test.ts \
-            tests/storage-worker-teardown-isolate.test.ts \
-            tests/test-runner.test.ts
+            tests/codex-integration/codex-app-server-processes.test.ts \
+            tests/codex-integration/codex-prompt-text-probe.test.ts \
+            tests/providers/cursor/cursor-native-exec-shell.test.ts \
+            tests/lib/process-control.test.ts \
+            tests/service/process-state.test.ts \
+            tests/service/service.test.ts \
+            tests/storage/storage-worker-lifecycle.test.ts \
+            tests/storage/storage-worker-os-join-settle.test.ts \
+            tests/storage/storage-worker-teardown-isolate.test.ts \
+            tests/ci-workflows/test-runner.test.ts
 
       - name: Full macOS suite
         if: >-
@@ -672,7 +672,7 @@ jobs:
           # avoidable residue. Matches the other workflows.
           persist-credentials: false
           # Same reason as the Linux shards and the macOS control: this leg runs the
-          # whole suite, and tests/release-version-line.test.ts reads release tags.
+          # whole suite, and tests/ci-workflows/release-version-line.test.ts reads release tags.
           # Without tags the check sees an empty set and cannot fail.
           fetch-tags: true
 
@@ -761,7 +761,7 @@ jobs:
               # runtime/handle pressure before the next file spawns its own children.
               for serial_file in "${serial_files[@]}"; do
                 serial_timeout=60000
-                if [[ "$serial_file" == "tests/codex-composed-acceptance.test.ts" ]]; then
+                if [[ "$serial_file" == "tests/codex-integration/codex-composed-acceptance.test.ts" ]]; then
                   # Case E starts two real lock children. Each resolves its
                   # effective-token namespace through bounded PowerShell calls,
                   # so the file's 240s case budget must not be preempted by the
@@ -862,7 +862,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.packaging == 'true'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 8
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

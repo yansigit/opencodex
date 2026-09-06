@@ -17,7 +17,7 @@ description: 默认提供方选择、模型解析顺序、组合别名、目标�
 opencodex 按以下顺序解析请求的模型：
 
 1. 已配置的 `policy/<id>` 或路由策略配置文件别名，会执行策略评估器并路由到选定的候选。
-   未解析的 `policy/<id>` 会继续按后续规则进行常规解析。
+   未解析的 `policy/<id>` 不会继续按后续规则解析，而会在本地失败。
 2. 已配置的 `<account-selector>/<native-openai-model>` 命名空间，只会路由到映射的已存储 Codex
    账户。无效或不可用的精确目标会以 fail closed 方式失败。
 3. 规范化的 `combo/<id>` 或已配置的 combo 别名。规范化 id 会优先于别名匹配。

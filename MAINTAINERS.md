@@ -78,6 +78,14 @@ when a maintainer steps down.
 - Required CI and documentation checks apply to owner merges and direct pushes.
 - Required merge checks are `ci`, `hygiene`, `enforce-target`, and `mergeable`, bound to the trusted check App where supported. Autonomous sync requires exact published-head provenance and no handoff, protected path, ownership conflict, or agent resolution. Jules controller advances require recorded parents `[previous Jules head, current dev]`; active editing blocks them. Holds older than 24 hours are summarized and never removed automatically.
 - Promotion from `dev` to `main` and npm releases is controlled by the fork owner.
+- Post-release version advancement has one writer: `promote-dev.yml` verifies the
+  published tag and exact release SHA, then advances `dev` through the repository
+  App. `dev-version-bump.yml` remains a dormant fallback and must not become a
+  second live authority.
+- Opening a preview for the next core ends the current patch line. After
+  `vX.Y.0-preview.*` is tagged, a fix ships as part of `X.Y.0`, not as
+  `X.(Y-1).(Z+1)`. The release helper refuses that lower stable patch instead
+  of publishing a version already outranked by the repository's release line.
 
 ## The retired `dev2-go` line
 

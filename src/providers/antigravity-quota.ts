@@ -21,6 +21,22 @@ interface QuotaCandidate {
   path: string[];
 }
 
+export type AntigravityLiveQuotaSource =
+  | "google-antigravity:retrieveUserQuota"
+  | "google-antigravity:retrieveUserQuotaSummary";
+
+interface HostQuotaCandidate {
+  quota: ProviderQuota;
+  source: AntigravityLiveQuotaSource;
+  retryForCompleteness: boolean;
+}
+
+const liveQuotaSources = new WeakMap<ProviderQuota, AntigravityLiveQuotaSource>();
+
+export function antigravityLiveQuotaSource(quota: ProviderQuota): AntigravityLiveQuotaSource {
+  return liveQuotaSources.get(quota) ?? "google-antigravity:retrieveUserQuota";
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -50,12 +66,13 @@ function resetAt(value: unknown): number | undefined {
 }
 
 function remainingPercent(record: Record<string, unknown>): number | undefined {
-  const fraction = finiteNumber(record.remainingFraction);
+  const target = asRecord(record.remaining) ?? record;
+  const fraction = finiteNumber(target.remainingFraction);
   if (fraction !== undefined) return normalizePercent(fraction * 100);
   const percentage = finiteNumber(
-    record.remainingPercentage
-      ?? record.remainingPercent
-      ?? record.remaining_percent,
+    target.remainingPercentage
+      ?? target.remainingPercent
+      ?? target.remaining_percent,
   );
   if (percentage !== undefined) return normalizePercent(percentage);
   return undefined;
@@ -128,6 +145,52 @@ function parseWeeklyWindow(payload: unknown): { percent: number; resetAt?: numbe
   return undefined;
 }
 
+function summaryFamily(group: Record<string, unknown>): "Gem" | "Cla" | undefined {
+  const name = `${typeof group.displayName === "string" ? group.displayName : ""} ${
+    typeof group.description === "string" ? group.description : ""
+  }`.toLowerCase();
+  if (name.includes("gemini")) return "Gem";
+  if (name.includes("claude") || name.includes("3p") || name.includes("gpt")) return "Cla";
+  return undefined;
+}
+
+/** Family-scoped 5-hour and weekly windows from retrieveUserQuotaSummary. */
+function parseSummaryWindows(payload: unknown): ProviderQuotaWindow[] {
+  const body = asRecord(payload);
+  const groups = Array.isArray(body?.groups) ? body.groups : [];
+  const windows = new Map<string, ProviderQuotaWindow>();
+  for (const rawGroup of groups) {
+    const group = asRecord(rawGroup);
+    const family = group ? summaryFamily(group) : undefined;
+    if (!group || !family || !Array.isArray(group.buckets)) continue;
+    for (const rawBucket of group.buckets) {
+      const bucket = asRecord(rawBucket);
+      if (!bucket) continue;
+      const windowName = `${typeof bucket.window === "string" ? bucket.window : ""} ${
+        typeof bucket.bucketId === "string" ? bucket.bucketId : ""
+      } ${typeof bucket.displayName === "string" ? bucket.displayName : ""}`.toLowerCase();
+      const suffix = windowName.includes("5h") || windowName.includes("five")
+        ? ""
+        : windowName.includes("week")
+          ? " (Weekly)"
+          : undefined;
+      if (suffix === undefined) continue;
+      const label = `${family}${suffix}`;
+      if (windows.has(label)) continue;
+      const percent = usedPercent(bucket);
+      if (percent === undefined) continue;
+      const reset = recordResetAt(bucket);
+      windows.set(label, {
+        label,
+        percent,
+        ...(reset !== undefined ? { resetAt: reset } : {}),
+      });
+    }
+  }
+  const order = ["Gem", "Gem (Weekly)", "Cla", "Cla (Weekly)"];
+  return [...windows.values()].sort((a, b) => order.indexOf(a.label) - order.indexOf(b.label));
+}
+
 async function readJson(response: Response, timeoutMs: number): Promise<unknown> {
   const payload = await readProviderQuotaJsonForTests(response, timeoutMs);
   if (payload === null) throw new Error("Antigravity quota RPC returned unreadable JSON");
@@ -176,26 +239,44 @@ async function fetchHostQuota(
   fetchImpl: FetchImpl,
   host: string,
   args: AntigravityLiveQuotaArgs,
-): Promise<ProviderQuota | null> {
+): Promise<HostQuotaCandidate | null> {
   const [quotaResult, summaryResult] = await Promise.allSettled([
     fetchRpc(fetchImpl, host, "retrieveUserQuota", args),
     fetchRpc(fetchImpl, host, "retrieveUserQuotaSummary", args),
   ]);
   const terminalError = terminalRpcError(quotaResult) ?? terminalRpcError(summaryResult);
   if (terminalError) throw terminalError;
-  if (quotaResult.status === "rejected") return null;
-  const quotaPayload = quotaResult.value;
+  const quotaPayload = quotaResult.status === "fulfilled" ? quotaResult.value : null;
   const summaryPayload = summaryResult.status === "fulfilled" ? summaryResult.value : null;
   const gem = parseGeminiWindow(quotaPayload);
+  const summaryWindows = parseSummaryWindows(summaryPayload);
   const weekly = parseWeeklyWindow(summaryPayload);
-  if (!gem && !weekly) return null;
-  return {
-    ...(gem ? { customWindows: [gem] } : {}),
-    ...(weekly ? {
-      weeklyPercent: weekly.percent,
-      ...(weekly.resetAt !== undefined ? { weeklyResetAt: weekly.resetAt } : {}),
+  // A legacy weekly-only summary is supplemental to retrieveUserQuota. If the
+  // daily RPC failed, keep trying the production host instead of accepting it.
+  if (quotaResult.status === "rejected" && summaryWindows.length === 0) return null;
+  const customWindows = new Map(summaryWindows.map(window => [window.label, window]));
+  if (gem && !customWindows.has("Gem")) customWindows.set("Gem", gem);
+  if (customWindows.size === 0 && !weekly) return null;
+  const order = ["Gem", "Gem (Weekly)", "Cla", "Cla (Weekly)"];
+  const quota: ProviderQuota = {
+    ...(customWindows.size > 0 ? {
+      customWindows: [...customWindows.values()].sort((a, b) => order.indexOf(a.label) - order.indexOf(b.label)),
     } : {}),
+    ...(weekly && !customWindows.has("Gem (Weekly)") && !customWindows.has("Cla (Weekly)")
+      ? {
+          weeklyPercent: weekly.percent,
+          ...(weekly.resetAt !== undefined ? { weeklyResetAt: weekly.resetAt } : {}),
+        }
+      : {}),
     updatedAt: Date.now(),
+  };
+  const completeSummary = order.every(label => customWindows.has(label));
+  return {
+    quota,
+    source: summaryWindows.length > 0
+      ? "google-antigravity:retrieveUserQuotaSummary"
+      : "google-antigravity:retrieveUserQuota",
+    retryForCompleteness: quotaResult.status === "rejected" && !completeSummary,
   };
 }
 
@@ -203,16 +284,25 @@ export async function fetchAntigravityLiveQuota(
   args: AntigravityLiveQuotaArgs,
 ): Promise<ProviderQuota | null> {
   const fetchImpl = args.fetchImpl ?? fetch;
+  let partial: HostQuotaCandidate | null = null;
   for (const host of antigravityHostCandidates(args.baseUrl)) {
     if (!isAntigravityHttpsHost(host)) continue;
     try {
-      const quota = await fetchHostQuota(fetchImpl, host, args);
-      if (quota) return quota;
+      const candidate = await fetchHostQuota(fetchImpl, host, args);
+      if (!candidate) continue;
+      if (candidate.retryForCompleteness) {
+        partial ??= candidate;
+        continue;
+      }
+      liveQuotaSources.set(candidate.quota, candidate.source);
+      return candidate.quota;
     } catch (error) {
       if (error instanceof AntigravityQuotaRpcError && isTerminalAntigravityQuotaStatus(error.status)) {
         throw error;
       }
     }
   }
-  return null;
+  if (!partial) return null;
+  liveQuotaSources.set(partial.quota, partial.source);
+  return partial.quota;
 }
