@@ -1,4 +1,12 @@
 import { configuredAdminToken } from "../../src/lib/admin-secrets";
+import {
+  mutatePersistedConfig,
+  saveConfigPreservingClaudeCode,
+  type PersistedConfigMutation,
+  type PersistedConfigMutationOutcome,
+} from "../../src/config";
+import type { ManagementApiDeps } from "../../src/server/management-api";
+import type { OcxConfig } from "../../src/types";
 
 function isLocalManagementRequest(input: RequestInfo | URL): boolean {
   try {
@@ -40,4 +48,24 @@ export class ManagementRequest extends globalThis.Request {
     if (isLocalManagementRequest(input) && !headers.has("Host")) headers.set("Host", url.host);
     super(input, { ...init, headers });
   }
+}
+
+/** Direct management dispatches that deliberately use a fixture rather than disk. */
+export function inMemoryManagementPersistence(config: OcxConfig): Pick<ManagementApiDeps, "saveConfigPreservingClaudeCode" | "mutatePersistedConfig"> {
+  return {
+    saveConfigPreservingClaudeCode: () => {},
+    mutatePersistedConfig<T>(mutate: (persisted: OcxConfig) => PersistedConfigMutation<T>): PersistedConfigMutationOutcome<T> {
+      const candidate = structuredClone(config);
+      const result = mutate(candidate);
+      if (!result.changed) return { status: "unchanged", value: result.value };
+      for (const key of Object.keys(config)) delete (config as Record<string, unknown>)[key];
+      Object.assign(config, candidate);
+      return { status: "committed", value: result.value };
+    },
+  };
+}
+
+/** Direct management dispatches whose test has already isolated OPENCODEX_HOME. */
+export function isolatedDiskManagementPersistence(): Pick<ManagementApiDeps, "saveConfigPreservingClaudeCode" | "mutatePersistedConfig"> {
+  return { saveConfigPreservingClaudeCode, mutatePersistedConfig };
 }

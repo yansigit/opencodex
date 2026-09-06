@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 
 /**
  * Codex parses a catalog entry's `input_modalities` as a closed enum, and one out-of-enum
@@ -152,7 +153,7 @@ import type {
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { mutateManagementConfig, type ManagementContext } from "./context";
 import { listManagementModelRows, loadExportModels } from "./model-rows";
 import { initialModelSelectionPending } from "../../providers/initial-model-selection";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
@@ -174,6 +175,26 @@ function summarizeExportedModels(client: ExportClientId, document: unknown): { m
   // "anything that is not OpenCode must be Pi", which silently misread the
   // moment a third client existed.
   return EXPORT_CLIENTS[client].summarize(document);
+}
+
+type ModelPresetMutationValue =
+  | { config: OcxConfig; selected?: string[] }
+  | { error: string; code?: string; status?: number };
+
+function providerDiscoveryFingerprint(provider: OcxProviderConfig): OcxProviderConfig {
+  return structuredClone(provider);
+}
+
+function adoptCommittedConfig(target: OcxConfig, source: OcxConfig): void {
+  for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
+  Object.assign(target, structuredClone(source));
+}
+
+function unavailableMutationResponse(reason: "missing" | "invalid" | "conflict", req: Request, config: OcxConfig): Response {
+  const message = reason === "conflict"
+    ? "config changed while applying this update; retry"
+    : `config is ${reason}`;
+  return jsonResponse({ error: message }, reason === "conflict" ? 409 : 500, req, config);
 }
 
 export async function handleModelRoutes(ctx: ManagementContext): Promise<Response | null> {
@@ -860,19 +881,54 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       return jsonResponse({ error: "Initial model discovery is pending. Refresh the model list and retry.", code: "initial_model_selection_pending" }, 409);
     }
     if (mode === "all") {
-      // Same effect as today's empty-list PUT: no allowlist, no marker to reconcile.
-      delete target.selectedModels;
-      delete target.modelPreset;
-      persistConfig(config);
+      const outcome = mutateManagementConfig<ModelPresetMutationValue>(deps, fresh => {
+        const target = fresh.providers[provider];
+        if (!target) return { changed: false, value: { error: "unknown provider" } };
+        if (initialModelSelectionPending(target)) {
+          return { changed: false, value: {
+            error: "Initial model discovery is pending. Refresh the model list and retry.",
+            code: "initial_model_selection_pending",
+            status: 409,
+          } };
+        }
+        // Same effect as today's empty-list PUT: no allowlist, no marker to reconcile.
+        delete target.selectedModels;
+        delete target.modelPreset;
+        return { changed: true, value: { config: structuredClone(fresh) } };
+      });
+      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+      if ("error" in outcome.value) return jsonResponse({
+        error: outcome.value.error,
+        ...(outcome.value.code ? { code: outcome.value.code } : {}),
+      }, outcome.value.status ?? 404);
+      adoptCommittedConfig(config, outcome.value.config);
       return jsonResponse({ ok: true, provider, mode, selected: [], ...await convergeVisibleCatalogs() });
     }
     if (mode === "custom") {
-      // Keep whatever is selected; only the marker changes, so a user can pin their edits
-      // without the proxy re-materializing over them.
-      target.modelPreset = { ...(target.modelPreset ?? {}), mode: "custom" };
-      persistConfig(config);
-      return jsonResponse({ ok: true, provider, mode, selected: [...(target.selectedModels ?? [])] });
+      const outcome = mutateManagementConfig<ModelPresetMutationValue>(deps, fresh => {
+        const target = fresh.providers[provider];
+        if (!target) return { changed: false, value: { error: "unknown provider" } };
+        if (initialModelSelectionPending(target)) {
+          return { changed: false, value: {
+            error: "Initial model discovery is pending. Refresh the model list and retry.",
+            code: "initial_model_selection_pending",
+            status: 409,
+          } };
+        }
+        // Keep whatever is selected; only the marker changes, so a user can pin their edits
+        // without the proxy re-materializing over them.
+        target.modelPreset = { ...(target.modelPreset ?? {}), mode: "custom" };
+        return { changed: true, value: { config: structuredClone(fresh), selected: [...(target.selectedModels ?? [])] } };
+      });
+      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+      if ("error" in outcome.value) return jsonResponse({
+        error: outcome.value.error,
+        ...(outcome.value.code ? { code: outcome.value.code } : {}),
+      }, outcome.value.status ?? 404);
+      adoptCommittedConfig(config, outcome.value.config);
+      return jsonResponse({ ok: true, provider, mode, selected: outcome.value.selected });
     }
+    const admittedProviderFingerprint = providerDiscoveryFingerprint(target);
     const models = await fetchAllModels(config);
     const catalogIds = models.filter(m => m.provider === provider).map(m => m.id);
     const presetIds = materializeModelPreset(provider, catalogIds);
@@ -881,28 +937,50 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       // NEVER write an empty allowlist from a preset: empty means ALL, so it would silently
       // un-curate instead of curating. Keep the previous selection and record the fallback so
       // the next convergence can retry.
-      target.modelPreset = {
-        mode: "all",
-        appliedVersion: preset.version,
-        appliedAt: new Date().toISOString(),
-        fallback: "preset-empty",
-      };
-      persistConfig(config);
+      const appliedAt = new Date().toISOString();
+      const outcome = mutateManagementConfig<ModelPresetMutationValue>(deps, fresh => {
+        const target = fresh.providers[provider];
+        if (!target) return { changed: false, value: { error: "unknown provider" } };
+        if (!isDeepStrictEqual(providerDiscoveryFingerprint(target), admittedProviderFingerprint)) {
+          return { changed: false, value: { error: "provider changed during model discovery; retry", status: 409 } };
+        }
+        target.modelPreset = {
+          mode: "all",
+          appliedVersion: preset.version,
+          appliedAt,
+          fallback: "preset-empty",
+        };
+        return { changed: true, value: { config: structuredClone(fresh), selected: [...(target.selectedModels ?? [])] } };
+      });
+      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 404);
+      adoptCommittedConfig(config, outcome.value.config);
       return jsonResponse({
         ok: true,
         provider,
         mode: "all",
         fallback: "preset-empty",
-        selected: [...(target.selectedModels ?? [])],
+        selected: outcome.value.selected,
       });
     }
-    target.selectedModels = presetIds;
-    target.modelPreset = {
-      mode: "preset",
-      appliedVersion: preset.version,
-      appliedAt: new Date().toISOString(),
-    };
-    persistConfig(config);
+    const appliedAt = new Date().toISOString();
+    const outcome = mutateManagementConfig<ModelPresetMutationValue>(deps, fresh => {
+      const target = fresh.providers[provider];
+      if (!target) return { changed: false, value: { error: "unknown provider" } };
+      if (!isDeepStrictEqual(providerDiscoveryFingerprint(target), admittedProviderFingerprint)) {
+        return { changed: false, value: { error: "provider changed during model discovery; retry", status: 409 } };
+      }
+      target.selectedModels = presetIds;
+      target.modelPreset = {
+        mode: "preset",
+        appliedVersion: preset.version,
+        appliedAt,
+      };
+      return { changed: true, value: { config: structuredClone(fresh) } };
+    });
+    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 404);
+    adoptCommittedConfig(config, outcome.value.config);
     return jsonResponse({
       ok: true,
       provider,
@@ -925,14 +1003,31 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const models = Array.isArray(body.models)
       ? [...new Set(body.models.filter((m): m is string => typeof m === "string"))]
       : [];
-    // Empty list clears the allowlist (provider reverts to exposing all models).
-    if (models.length > 0) config.providers[provider].selectedModels = models;
-    else delete config.providers[provider].selectedModels;
-    // Divergence is detected at the WRITE path, not by diffing (#2465): a user edit while the
-    // provider is in preset mode makes the selection theirs, and the proxy must never
-    // re-materialize over it afterwards.
-    markModelPresetDiverged(config.providers[provider]);
-    persistConfig(config);
+    const outcome = mutateManagementConfig<ModelPresetMutationValue>(deps, fresh => {
+      const target = fresh.providers[provider];
+      if (!target) return { changed: false, value: { error: "unknown provider" } };
+      if (initialModelSelectionPending(target)) {
+        return { changed: false, value: {
+          error: "Initial model discovery is pending. Refresh the model list and retry.",
+          code: "initial_model_selection_pending",
+          status: 409,
+        } };
+      }
+      // Empty list clears the allowlist (provider reverts to exposing all models).
+      if (models.length > 0) target.selectedModels = models;
+      else delete target.selectedModels;
+      // Divergence is detected at the WRITE path, not by diffing (#2465): a user edit while the
+      // provider is in preset mode makes the selection theirs, and the proxy must never
+      // re-materialize over it afterwards.
+      markModelPresetDiverged(target);
+      return { changed: true, value: { config: structuredClone(fresh) } };
+    });
+    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
+    if ("error" in outcome.value) return jsonResponse({
+      error: outcome.value.error,
+      ...(outcome.value.code ? { code: outcome.value.code } : {}),
+    }, outcome.value.status ?? 404);
+    adoptCommittedConfig(config, outcome.value.config);
     return jsonResponse({ ok: true, provider, selected: models, ...await convergeVisibleCatalogs() });
   }
   return null;

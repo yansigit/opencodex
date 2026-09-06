@@ -10,7 +10,7 @@ import { handleManagementAPI } from "../../src/server/management-api";
 import type { OcxConfig, OcxProviderConfig } from "../../src/types";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
-import { ManagementRequest } from "../helpers/management-auth";
+import { isolatedDiskManagementPersistence, ManagementRequest } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const ids = ["anthropic/claude-opus-5", "openai/gpt-5.6-sol"];
@@ -58,7 +58,10 @@ async function request(config: OcxConfig, path: string, body: string): Promise<R
     method: "PUT", headers: { "Content-Type": "application/json" },
     body,
   });
-  const response = await handleManagementAPI(request, url, config, { createManagementConvergeCodex: catalogConvergenceFactory() });
+  const response = await handleManagementAPI(request, url, config, {
+    ...isolatedDiskManagementPersistence(),
+    createManagementConvergeCodex: catalogConvergenceFactory(),
+  });
   if (!response) throw new Error("missing management route");
   return response;
 }
