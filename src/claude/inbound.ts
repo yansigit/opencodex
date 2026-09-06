@@ -4,8 +4,8 @@
  * Design (devlog/260711_claude_inbound/010, 003_evidence.md):
  *  - translate-and-replay: the produced body MUST pass the real responsesRequestSchema
  *    parse so routing/OAuth/pool/failover are inherited unchanged.
- *  - thinking/redacted_thinking blocks on replay are DROPPED (v1 policy) — routed
- *    providers carry reasoning in Responses items/ocxr1 envelopes instead.
+ *  - thinking/redacted_thinking replay is preserved in Responses reasoning items;
+ *    signatures and redacted payloads travel in bounded ocxr1 envelopes.
  *  - thinking.budget_tokens is NEVER forwarded raw; it maps to an effort tier.
  *  - top_k is accepted and silently dropped (no Responses equivalent, CCR parity).
  */

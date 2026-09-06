@@ -420,7 +420,7 @@ Claude Code 的 `/effort` 設定會完整保留並傳遞給適配器：
 | Assistant 文字 | `output_text` |
 | Assistant `tool_use` | `function_call`（`input` → JSON 字串化的 `arguments`） |
 | 使用者 `tool_result` | `function_call_output`（`is_error` → `[tool error]` 字首） |
-| 重放 `thinking` / `redacted_thinking` | 丟棄 |
+| 重放 `thinking` / `redacted_thinking` | `reasoning` 項目；簽名與遮蔽載荷保存在有界 `ocxr1` 信封中 |
 | Function 工具 | `{type: "function"}`（`web_search*` → `{type: "web_search"}`） |
 | `tool_choice` | `auto`→`auto`，`none`→`none`，`any`→`required`，指定名稱 function→`{type:"function",name}`，hosted WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
@@ -437,7 +437,7 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 | `response.created` | `message_start` + `ping` |
 | 心跳 | `ping` |
 | 文字增量 | `content_block_start` → `content_block_delta`（文字）→ `content_block_stop` |
-| 推理摘要/文字 | 帶合成簽名的 `thinking` 塊 |
+| 推理摘要/文字 | 帶重播簽名或有界 `ocxr1` 備援信封的 `thinking` 塊 |
 | Function-call 幀 | 帶 `input_json_delta` 的 `tool_use` 塊 |
 | 終止事件 | `message_delta` → `message_stop` |
 | 在終止事件前 EOF | 502 風格的 `api_error` |

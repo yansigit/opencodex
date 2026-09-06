@@ -344,7 +344,7 @@ Claude Code 的 `/effort` 设置会完整保留并传递给适配器：
 | Assistant 文本 | `output_text` |
 | Assistant `tool_use` | `function_call`（`input` → JSON 字符串化的 `arguments`） |
 | 用户 `tool_result` | `function_call_output`（`is_error` → `[tool error]` 前缀） |
-| 重放 `thinking` / `redacted_thinking` | 丢弃 |
+| 重放 `thinking` / `redacted_thinking` | `reasoning` 项；签名和脱敏载荷保存在有界 `ocxr1` 信封中 |
 | Function 工具 | `{type: "function"}`（`web_search*` → `{type: "web_search"}`） |
 | `tool_choice` | `auto`→`auto`，`none`→`none`，`any`→`required`，指定函数→`{type:"function",name}`，托管 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
@@ -361,7 +361,7 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 | `response.created` | `message_start` + `ping` |
 | 心跳 | `ping` |
 | 文本增量 | `content_block_start` → `content_block_delta`（文本）→ `content_block_stop` |
-| 推理摘要/文本 | 带合成签名的 `thinking` 块 |
+| 推理摘要/文本 | 带重放签名或有界 `ocxr1` 回退信封的 `thinking` 块 |
 | Function-call 帧 | 带 `input_json_delta` 的 `tool_use` 块 |
 | 终止事件 | `message_delta` → `message_stop` |
 | 在终止事件前 EOF | 502 风格的 `api_error` |

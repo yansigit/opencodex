@@ -1178,4 +1178,19 @@ describe("sanitizeWebSearchInput (#381)", () => {
     ]);
     expect(events[2].data.content_block).toEqual({ type: "redacted_thinking", data: "opaque" });
   });
+
+  test("signature-only reasoning emits an empty thinking block with the genuine signature", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.output_item.done", {
+        item: { type: "reasoning", id: "rs_sig", encrypted_content: encodeReasoningEnvelope({ sig: "sig-only" }) },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ].join("")), "m"));
+    expect(events.map(event => event.name)).toEqual([
+      "message_start", "ping", "content_block_start", "content_block_delta", "content_block_stop",
+      "message_delta", "message_stop",
+    ]);
+    expect(events[2].data.content_block).toEqual({ type: "thinking", thinking: "", signature: "" });
+    expect(events[3].data.delta).toEqual({ type: "signature_delta", signature: "sig-only" });
+  });
 });

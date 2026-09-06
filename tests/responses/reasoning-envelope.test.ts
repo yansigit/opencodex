@@ -62,4 +62,18 @@ describe("reasoning and tool/result envelopes", () => {
     expect(body.input[0].type).toBe("reasoning");
     expect(decodeReasoningEnvelope(body.input[0].encrypted_content)?.red).toEqual(["opaque"]);
   });
+
+  test("drops an empty unsigned thinking block", () => {
+    const body = anthropicToResponsesBody({
+      model: "m", messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "", signature: "" }] }],
+    }) as any;
+    expect(body.input).toEqual([]);
+  });
+
+  test("preserves signature-only reasoning in JSON output", () => {
+    const message = responsesJsonToAnthropicMessage({
+      output: [{ type: "reasoning", summary: [], encrypted_content: encodeReasoningEnvelope({ sig: "sig-only" }) }],
+    }, "m") as any;
+    expect(message.content).toEqual([{ type: "thinking", thinking: "", signature: "sig-only" }]);
+  });
 });

@@ -368,7 +368,7 @@ Claude Code の `/effort` 設定はアダプターでも維持されます。
 | Assistant テキスト | `output_text` |
 | Assistant `tool_use` | `function_call`(`input` → JSON 文字列に変換した `arguments`) |
 | ユーザー `tool_result` | `function_call_output`(`is_error` → `[tool error]` 接頭辞) |
-| `thinking` / `redacted_thinking` 再生 | 破棄 |
+| `thinking` / `redacted_thinking` 再生 | シグネチャと秘匿ペイロードを境界付き `ocxr1` エンベロープに保持した `reasoning` 項目 |
 | Function ツール | `{type: "function"}`(`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`、`none`→`none`、`any`→`required`、名前指定関数→`{type:"function",name}`、ホスト型 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
@@ -384,7 +384,7 @@ role、`tool_use_id` のない `tool_result`、id/name のない `tool_use`、na
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | テキスト delta | `content_block_start` → `content_block_delta`(text) → `content_block_stop` |
-| 推論要約/テキスト | 合成シグネチャ付きの `thinking` ブロック |
+| 推論要約/テキスト | 再生されたシグネチャ、または境界付き `ocxr1` フォールバックを持つ `thinking` ブロック |
 | Function-call フレーム | `input_json_delta` を持つ `tool_use` ブロック |
 | 終了イベント | `message_delta` → `message_stop` |
 | 終了前に EOF | 502 形式 `api_error` |

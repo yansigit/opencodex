@@ -406,7 +406,7 @@ Claude Code의 `/effort` 설정은 어댑터에서도 유지돼요.
 | Assistant 텍스트 | `output_text` |
 | Assistant `tool_use` | `function_call`(`input` → JSON 문자열로 변환한 `arguments`) |
 | 사용자 `tool_result` | `function_call_output`(`is_error` → `[tool error]` 접두사) |
-| `thinking` / `redacted_thinking` 재생 | 버려요 |
+| `thinking` / `redacted_thinking` 재생 | 서명과 비공개 페이로드를 제한된 `ocxr1` 봉투에 담은 `reasoning` 항목 |
 | Function 도구 | `{type: "function"}`(`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, 이름 지정 함수→`{type:"function",name}`, 호스팅 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
@@ -422,7 +422,7 @@ role, `tool_use_id` 없는 `tool_result`, id/name 없는 `tool_use`, name 없는
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | 텍스트 delta | `content_block_start` → `content_block_delta`(text) → `content_block_stop` |
-| 추론 요약/텍스트 | 합성 signature가 있는 `thinking` 블록 |
+| 추론 요약/텍스트 | 재생된 서명 또는 제한된 `ocxr1` 폴백이 있는 `thinking` 블록 |
 | Function-call 프레임 | `input_json_delta`가 있는 `tool_use` 블록 |
 | 종료 이벤트 | `message_delta` → `message_stop` |
 | 종료 전에 EOF | 502 형식 `api_error` |

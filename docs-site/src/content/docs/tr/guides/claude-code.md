@@ -582,7 +582,7 @@ dönüştürür:
 | Asistan metni | `output_text` |
 | Asistan `tool_use` | `function_call` (`input` → JSON dizgeleştirilmiş `arguments`) |
 | Kullanıcı `tool_result` | `function_call_output` (`is_error` → `[tool error]` öneki) |
-| `thinking` / `redacted_thinking` tekrarı | Bırakılır |
+| `thinking` / `redacted_thinking` tekrarı | İmzaları ve gizli yükleri sınırlı `ocxr1` zarflarında taşıyan `reasoning` öğeleri |
 | Fonksiyon araçları | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, adlandırılmış fonksiyon→`{type:"function",name}`, barındırılan WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
@@ -599,7 +599,7 @@ kimlik/ad içermeyen `tool_use`; ad içermeyen adlandırılmış `tool_choice`.
 | `response.created` | `message_start` + `ping` |
 | Kalp atışı (Heartbeat) | `ping` |
 | Metin farkları | `content_block_start` → `content_block_delta` (metin) → `content_block_stop` |
-| Akıl yürütme özeti/metni | Sentetik imzalı `thinking` bloğu |
+| Akıl yürütme özeti/metni | Tekrarlanan imzayı veya sınırlı bir `ocxr1` yedeğini taşıyan `thinking` bloğu |
 | Fonksiyon çağrısı çerçeveleri | `input_json_delta` ile `tool_use` bloğu |
 | Terminal olayı | `message_delta` → `message_stop` |
 | Terminalden önce EOF | 502 tarzı `api_error` |

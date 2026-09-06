@@ -5,8 +5,8 @@
  *  - Transport-only `ping` events may appear at any point, including before
  *    message_start. Semantic framing stays message_start ->
  *    (content_block_start -> deltas -> content_block_stop)* -> message_delta -> message_stop.
- *  - thinking blocks get thinking_delta(s) then ONE synthetic signature_delta just
- *    before content_block_stop (CCR precedent: Claude Code does not verify signatures).
+ *  - thinking blocks get thinking_delta(s), then one signature_delta containing the
+ *    genuine replay signature or a bounded ocxr1 fallback envelope.
  *  - message_delta.usage is cumulative; message_start embeds a full message snapshot.
  *  - errors: {type:"error", error:{type,message}}; may arrive mid-stream after HTTP 200.
  */
@@ -554,6 +554,7 @@ export function responsesSseToAnthropicSse(
               const encrypted = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
               const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
               const red = env?.red ?? [];
+              if (env?.sig && open?.kind !== "thinking") ensureBlock("thinking");
               if (open?.kind === "thinking") {
                 if (env?.sig) open.reasoningSig = env.sig;
                 closeOpenBlock();
@@ -805,7 +806,7 @@ export function responsesJsonToAnthropicMessage(json: unknown, model: string): R
         }
         const encrypted = typeof raw.encrypted_content === "string" ? raw.encrypted_content : "";
         const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
-        if (parts.length > 0) {
+        if (parts.length > 0 || env?.sig) {
           content.push({ type: "thinking", thinking: parts.join("\n\n"), signature: env?.sig ?? encodeReasoningEnvelope({ txt: parts.join("\n\n") }) });
         }
         for (const data of env?.red ?? []) content.push({ type: "redacted_thinking", data });

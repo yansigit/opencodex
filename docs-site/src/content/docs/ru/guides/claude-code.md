@@ -393,7 +393,7 @@ Claude Code — это лишь учётные данные для доступ�
 | Текст ассистента | `output_text` |
 | `tool_use` ассистента | `function_call` (`input` → `arguments` в виде JSON-строки) |
 | `tool_result` пользователя | `function_call_output` (`is_error` → префикс `[tool error]`) |
-| Повтор `thinking` / `redacted_thinking` | Отбрасывается |
+| Повтор `thinking` / `redacted_thinking` | Элементы `reasoning` с ограниченными конвертами `ocxr1` для подписей и скрытых данных |
 | Function-инструменты | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, именованная функция→`{type:"function",name}`, размещённый WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
@@ -410,7 +410,7 @@ id/name; именованный `tool_choice` без имени.
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | Текстовые дельты | `content_block_start` → `content_block_delta` (text) → `content_block_stop` |
-| Резюме/текст рассуждений | Блок `thinking` с синтетической подписью |
+| Резюме/текст рассуждений | Блок `thinking` с повторно переданной подписью или ограниченным резервным конвертом `ocxr1` |
 | Кадры function-call | Блок `tool_use` с `input_json_delta` |
 | Завершающее событие | `message_delta` → `message_stop` |
 | EOF до завершающего события | `api_error` в стиле 502 |

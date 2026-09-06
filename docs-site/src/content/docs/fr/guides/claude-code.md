@@ -500,7 +500,7 @@ Le proxy traduit chaque requête Anthropic Messages API au format Codex Response
 | Texte assistant | `output_text` |
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringifié `arguments`) |
 | Utilisateur `tool_result` | `function_call_output` (`is_error` → préfixe `[tool error]`) |
-| Relecture de `thinking` / `redacted_thinking` | Ignorée |
+| Relecture de `thinking` / `redacted_thinking` | Éléments `reasoning` avec enveloppes `ocxr1` bornées pour les signatures et les contenus masqués |
 | Outils fonctionnels | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, fonction nommée→`{type:"function",name}`, hébergée WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
@@ -516,7 +516,7 @@ Le proxy traduit chaque requête Anthropic Messages API au format Codex Response
 | `response.created` | `message_start` + `ping` |
 | Battement de coeur | `ping` |
 | Deltas de texte | `content_block_start` → `content_block_delta` (texte) → `content_block_stop` |
-| Résumé ou texte de raisonnement | Bloc `thinking` avec signature synthétique |
+| Résumé ou texte de raisonnement | Bloc `thinking` avec la signature relue, ou une enveloppe de secours `ocxr1` bornée |
 | Trames d'appel de fonction | Bloc `tool_use` avec `input_json_delta` |
 | Événement terminal | `message_delta` → `message_stop` |
 | EOF avant la borne | style 502 `api_error` |
