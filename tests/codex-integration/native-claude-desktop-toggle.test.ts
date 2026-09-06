@@ -8,6 +8,7 @@ import { setIntegrationEnabled } from "../../src/codex/desired-state";
 import { MANAGEMENT_JSON_BODY_MAX_BYTES } from "../../src/server/management/body";
 import type { ManagementApiDeps } from "../../src/server/management/context";
 import type { OcxConfig } from "../../src/types";
+import { isolatedDiskManagementPersistence } from "../helpers/management-auth";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 let root = "";
@@ -34,6 +35,7 @@ async function dispatch(path: string, init?: RequestInit, deps: ManagementApiDep
     ...init,
     headers: { Host: url.host, ...(init?.headers ?? {}) },
   }), url, inputConfig, {
+    ...isolatedDiskManagementPersistence(),
     writeDesktop3pConfig: (port, slugs, models, key, mode, profile, cap) =>
       writeDesktop3pConfig(port, slugs, models, key, mode, profile, cap, { lockPath: join(root, "lifecycle.sqlite") }),
     removeDesktop3pStandardPivot: options => removeDesktop3pStandardPivot({ ...options, lifecycleLockDeps: { lockPath: join(root, "lifecycle.sqlite") } }),
@@ -216,6 +218,7 @@ test("post-commit unsafe and incomplete refusals disclose desired OFF without co
   });
   expect(unsafe.status).toBe(409);
   expect(unsafe.body).toMatchObject({ reason: "metadata_unreadable", desiredEnabled: false });
+  expect(persistedIntent()).toBe(false);
 
   writeFileSync(join(root, "config.json"), JSON.stringify(config()));
   const incomplete = await toggle(false, {
@@ -229,6 +232,7 @@ test("post-commit unsafe and incomplete refusals disclose desired OFF without co
     desiredEnabled: false,
     residualPaths: [join(library, "owned.json.bak")],
   });
+  expect(persistedIntent()).toBe(false);
 });
 
 test("auto-apply re-reads desired state after catalog fetch and skips a concurrent OFF", async () => {
