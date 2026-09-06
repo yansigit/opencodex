@@ -15,6 +15,18 @@ function permit(input: Parameters<typeof fetch>[0]): void {
       const record = JSON.parse(readFileSync(join(process.env.OPENCODEX_HOME!, "runtime-port.json"), "utf8"));
       if (record.pid === process.pid && record.port === Number(url.port)) return;
     } catch { /* no owned listener yet */ }
+
+    // TLS-aware liveness deliberately tries the opposite scheme after a refused
+    // primary probe. Before the child has written its runtime record, the only
+    // authoritative endpoint is the configured port (including the ephemeral
+    // `0` requested by this fixture). Admit only its identity-checking route so
+    // an accidental inference or model-discovery request is still recorded.
+    if (url.pathname === "/healthz") {
+      try {
+        const config = JSON.parse(readFileSync(join(process.env.OPENCODEX_HOME!, "config.json"), "utf8"));
+        if (config.port === Number(url.port)) return;
+      } catch { /* config is not available yet */ }
+    }
   }
   if (deniedFile) appendFileSync(deniedFile, url.origin + "\n");
   throw new Error("OCX_TEST_EXTERNAL_REQUEST_BLOCKED");
