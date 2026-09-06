@@ -1528,6 +1528,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
                   ? nativeFastEligible(model.id)
                   : catalogRowFastEligible(model)
               : undefined,
+            { modelPickerOrder: config.modelPickerOrder, featured: config.subagentModels },
           );
           return jsonResponse({ data }, 200, req, policy);
         }
@@ -1562,6 +1563,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
             accountNativeSlugs,
             accountNativeSlugsBySelector,
             config.keepNativeChatGptOnV1 === true,
+            config.modelPickerOrder,
           );
           return jsonResponse({
             models: applyNativeVisibility(
@@ -1763,7 +1765,9 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
           try {
-            response = await handleResponsesCompact(req, config, logCtx, turnAdmissionLease, admission);
+            response = await handleResponsesCompact(req, config, logCtx, turnAdmissionLease, admission, {
+              onRequestBodyRead: () => disableResponsesRequestTimeout(req, requestServer),
+            });
           } catch {
             response = formatErrorResponse(500, "server_error", "Unexpected compact request failure");
           }

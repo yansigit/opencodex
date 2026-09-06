@@ -17,7 +17,7 @@ import { XAI_OAUTH_DISCOVERY_URL } from "../../src/oauth/xai";
 import { XAI_GROK_CLI_BASE_URL } from "../../src/providers/xai-transport";
 import type { AdapterEvent, OcxConfig, OcxProviderConfig, OcxProviderContinuationState } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
-import { clearRequestLogsForTests, hydrateRequestLogsFromDisk, type RequestLogContext } from "../../src/server/request-log";
+import { clearRequestLogsForTests, hydrateRequestLogsFromDisk, httpStatusForRequestLogTerminal, inspectResponseLogSsePayload, type RequestLogContext } from "../../src/server/request-log";
 import { responseWithDeferredRequestLog } from "../../src/server/relay";
 import { readUsageEntries } from "../../src/usage/log";
 import { saveCodexAccountCredential } from "../../src/codex/account-store";
@@ -414,6 +414,23 @@ async function within<T>(promise: Promise<T>, ms = 2_000): Promise<T> {
   }
 }
 
+function heldNativeTerminal(payload: Record<string, unknown>) {
+  const release = deferred();
+  const encoder = new TextEncoder();
+  const upstream = serve(() => new Response(new ReadableStream<Uint8Array>({
+    async start(controller) {
+      controller.enqueue(encoder.encode(`event: response.output_text.delta\ndata: ${JSON.stringify({
+        type: "response.output_text.delta", item_id: "msg_late", output_index: 0,
+        content_index: 0, delta: "already visible",
+      })}\n\n`));
+      await release.promise;
+      controller.enqueue(encoder.encode(`event: ${payload.type}\ndata: ${JSON.stringify(payload)}\n\n`));
+      controller.close();
+    },
+  }), { headers: { "content-type": "text/event-stream" } }));
+  return { upstream, release: release.resolve };
+}
+
 describe("server combo failover 030 activation matrix", () => {
   test("dispatches a selected concrete target despite a shadowing combo alias", async () => {
     const hits: string[] = [];
@@ -580,6 +597,79 @@ describe("server combo failover 030 activation matrix", () => {
       expect(receipt.attempts[0]).not.toHaveProperty("firstOutputMs");
     }
   });
+
+  for (const scenario of [
+    {
+      name: "quota incomplete", status: "incomplete", logStatus: 429,
+      details: { incomplete_details: { reason: "usage_limit_reached" }, error: { message: "quota exhausted after output" } },
+      message: "quota exhausted after output",
+    },
+    {
+      name: "normal output limit", status: "incomplete", logStatus: 200,
+      details: { incomplete_details: { reason: "max_output_tokens" }, error: { message: "output limit reached" } },
+      message: "output limit reached",
+    },
+    {
+      name: "policy refusal", status: "failed", logStatus: 400,
+      details: { error: { code: "cyber_policy", message: "blocked by cyber policy" } },
+      message: "blocked by cyber policy",
+    },
+  ]) {
+    test(`late committed native ${scenario.name} reaches the HTTP combo log`, async () => {
+      const held = heldNativeTerminal({
+        type: `response.${scenario.status}`,
+        response: { ...responsesSuccess("already visible", "m1"), status: scenario.status, ...scenario.details },
+      });
+      let backupHits = 0;
+      const backup = serve(() => { backupHits++; return chatStream("must not replay"); });
+      const config = comboConfig({
+        a: provider("openai-responses", baseUrl(held.upstream), "key-a"),
+        b: provider("openai-chat", baseUrl(backup), "key-b"),
+      });
+      config.streamMode = "legacy-tee";
+      saveConfig(config);
+      const server = startServer(0);
+      try {
+        const response = await within(fetch(new URL("/v1/responses", server.url), {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: "combo/free", input: "hello", stream: true }),
+        }));
+        expect(response.status).toBe(200);
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let text = "";
+        while (!text.includes("already visible")) {
+          const chunk = await within(reader.read());
+          expect(chunk.done).toBe(false);
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+        // Client-visible content proves preflight committed and copied childLog.
+        // There is still no terminal to inspect, so no finalized parent receipt.
+        expect(logsFromApiBody(await (await fetch(new URL("/api/logs?tail=1", server.url))).json())).toHaveLength(0);
+        held.release();
+        for (;;) {
+          const chunk = await within(reader.read());
+          if (chunk.done) break;
+          text += decoder.decode(chunk.value, { stream: true });
+        }
+        expect(text).toContain(`response.${scenario.status}`);
+        expect(backupHits).toBe(0);
+        const logs = logsFromApiBody(await (await fetch(new URL("/api/logs?tail=1", server.url))).json());
+        expect(logs).toHaveLength(1);
+        expect(logs[0]).toMatchObject({
+          provider: "combo", model: "combo/free", resolvedModel: "m1",
+          status: scenario.logStatus, terminalStatus: scenario.status,
+          closeReason: "terminal", upstreamError: scenario.message,
+        });
+        expect(logs[0]!.attempts).toMatchObject([{ provider: "a", model: "m1", status: scenario.logStatus }]);
+        expect(logs[0]!.attempts).toHaveLength(1);
+        if (scenario.status === "failed") expect(logs[0]!.errorCode).toBe("cyber_policy");
+      } finally {
+        held.release();
+        await server.stop(true);
+      }
+    });
+  }
 
   test("terminal SSE failure after output stays on the first target and never replays", async () => {
     const hits: string[] = [];
@@ -2790,12 +2880,15 @@ describe("server combo failover 030 activation matrix", () => {
   test("failed passthrough child callbacks stay buffered and only B finalizes", async () => {
     const terminalFrame = (status: "failed" | "completed") => [
       `event: response.${status}`,
-      `data: ${JSON.stringify({ type: `response.${status}`, response: { id: `resp_${status}`, status, output: [] } })}`,
+      `data: ${JSON.stringify({ type: `response.${status}`, response: {
+        id: `resp_${status}`, status, output: [],
+        ...(status === "failed" ? { error: { code: "rate_limit_exceeded", message: "discarded quota failure" } } : {}),
+      } })}`,
       "",
       "",
     ].join("\n");
     const a = serve(() => new Response(terminalFrame("failed"), {
-      status: 503,
+      status: 200,
       headers: { "content-type": "text/event-stream" },
     }));
     const b = serve(() => new Response(terminalFrame("completed"), {
@@ -2808,9 +2901,15 @@ describe("server combo failover 030 activation matrix", () => {
     const finalized = deferred();
     const statuses: string[] = [];
     let cancels = 0;
-    const response = await post(config, { stream: true }, {
+    const parent: RequestLogContext = { model: "", provider: "" };
+    const snapshots: RequestLogContext[] = [];
+    const response = await handleResponses(new Request("http://localhost/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "combo/free", input: "hello", stream: true }),
+    }), config, parent, {
       onNativePassthroughTerminal: status => {
         statuses.push(status);
+        snapshots.push({ ...parent });
         finalized.resolve();
       },
       onNativePassthroughCancel: () => { cancels += 1; },
@@ -2820,6 +2919,72 @@ describe("server combo failover 030 activation matrix", () => {
     await within(finalized.promise);
     expect(statuses).toEqual(["completed"]);
     expect(cancels).toBe(0);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({ provider: "combo", model: "combo/free", resolvedModel: "m2" });
+    for (const field of ["terminalHttpStatus", "terminalIncompleteReason", "terminalErrorCode", "upstreamError"] as const) {
+      expect(snapshots[0]![field]).toBeUndefined();
+    }
+    expect(parent.attempts).toMatchObject([
+      { provider: "a", model: "m1", status: 429 },
+      { provider: "b", model: "m2" },
+    ]);
+  });
+
+  test("a metadata-less committed child preserves independently inspected parent metadata and scope", async () => {
+    const held = heldNativeTerminal({
+      type: "response.incomplete",
+      response: { ...responsesSuccess("already visible", "m1"), status: "incomplete" },
+    });
+    const config = comboConfig({ a: provider("openai-responses", baseUrl(held.upstream), "key-a") });
+    config.streamMode = "legacy-tee";
+    const parent: RequestLogContext = { model: "", provider: "" };
+    const finalized = deferred();
+    const observed: Array<{ status: number; log: RequestLogContext }> = [];
+    try {
+      const response = await within(handleResponses(new Request("http://localhost/v1/responses", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "combo/free", input: "hello", stream: true }),
+      }), config, parent, {
+        onNativePassthroughTerminal: status => {
+          observed.push({ status: httpStatusForRequestLogTerminal(status, parent), log: { ...parent } });
+          finalized.resolve();
+        },
+      }));
+      expect(response.status).toBe(200);
+      expect(observed).toHaveLength(0);
+      const parentTrace = parent.routeDecision;
+      const parentAttempts = parent.attempts;
+      parent.firstOutputMs = 17;
+      // Scope-boundary regression, not a claim about WS scheduling: the WS
+      // bridge can inspect into its parent log independently of child inspection.
+      // Populate that state through the real inspector after preflight committed;
+      // the held child terminal deliberately defines none of these four fields.
+      inspectResponseLogSsePayload(parent, JSON.stringify({
+        type: "response.incomplete",
+        response: {
+          incomplete_details: { reason: "usage_limit_reached" },
+          error: { message: "parent-observed quota" },
+        },
+      }));
+      expect(parent.terminalHttpStatus).toBe(429);
+      held.release();
+      expect(await within(response.text())).toContain("response.incomplete");
+      await within(finalized.promise);
+      expect(observed).toHaveLength(1);
+      expect(observed[0]).toMatchObject({
+        status: 429,
+        log: {
+          provider: "combo", model: "combo/free", requestedModel: "combo/free",
+          resolvedModel: "m1", comboId: "free", firstOutputMs: 17,
+          terminalHttpStatus: 429, terminalIncompleteReason: "usage_limit_reached",
+          upstreamError: "parent-observed quota",
+        },
+      });
+      expect(observed[0]!.log.routeDecision).toBe(parentTrace);
+      expect(observed[0]!.log.attempts).toBe(parentAttempts);
+    } finally {
+      held.release();
+    }
   });
 
   test("connect cancellation wins with 499, no backup, warning, or cooldown", async () => {

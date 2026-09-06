@@ -27,6 +27,7 @@ import {
   sanitizeLogEntryRouteDecision,
   validCachedRouteDecision,
 } from "./log-route-decision";
+import { mergeLogDelta, parseLogPollResponse } from "./log-poll";
 
 function logsCacheKey(apiBase: string): string {
   return `ocx.logs.list.v1:${apiBase}`;
@@ -385,11 +386,16 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const filterClockRef = useRef<{
     key: string; anchor?: LogsClockAnchor; active: boolean; request: number;
   }>({ key: resourceKey, active: false, request: 0 });
+  const logPollRef = useRef<{ key: string; cursor: string | null; rows: LogEntry[] }>(
+    { key: resourceKey, cursor: null, rows: [] },
+  );
   // Invalidate the old resource at commit, before passive resource-loader effects.
   // A late body read must not mutate this page's clock, cache or retry state.
   useLayoutEffect(() => {
     const clock = { key: resourceKey, active: true, request: 0 };
     filterClockRef.current = clock;
+    // Cached display rows never establish a cursor, including A -> B -> A.
+    logPollRef.current = { key: resourceKey, cursor: null, rows: [] };
     setFilterClockNow(Date.now());
     return () => { clock.active = false; };
   }, [resourceKey]);
@@ -462,16 +468,22 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       logRetryRef.current = retry;
     }
     if (retry.failures > 0 && Date.now() < retry.nextAttemptAt) throw retry.error;
+    const poll = logPollRef.current;
+    const cursor = poll.key === resourceKey ? poll.cursor : null;
+    const url = `${apiBase}/api/logs?limit=2000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     try {
-      const res = await fetch(`${apiBase}/api/logs?limit=2000`, { signal });
+      const res = await fetch(url, { signal });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
-      const body = await res.json() as LogEntry[] | { logs?: LogEntry[]; generatedAt?: unknown };
+      const body: unknown = await res.json();
       const receivedAt = performance.now();
-      const raw = Array.isArray(body) ? body : (body.logs ?? []);
-      const next = raw.map(sanitizeLogEntryRouteDecision);
+      const parsed = parseLogPollResponse<LogEntry>(body);
+      const incoming = parsed.rows.map(sanitizeLogEntryRouteDecision);
+      const next = cursor && parsed.cursor && !parsed.reset
+        ? mergeLogDelta(poll.rows, incoming) : incoming;
       // The resource-store generation guard runs only after this loader returns.
       // Guard these local side effects here as fetch/body readers may ignore abort.
       if (!isCurrent()) throw signal.reason ?? new DOMException("Obsolete log request", "AbortError");
+      logPollRef.current = { key: resourceKey, cursor: parsed.cursor, rows: next };
       // Reconcile when the accepted snapshot changes, using the latest user state
       // rather than filters captured when the request started. Persist disappearance
       // as All so a later ring cannot resurrect a cleared selection.
@@ -488,7 +500,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
         if (previous.model === nextModel && previous.provider === nextProvider) return previous;
         return { ...previous, model: nextModel, provider: nextProvider };
       });
-      const sample = logsClockAnchor(Array.isArray(body) ? undefined : body.generatedAt, receivedAt);
+      const sample = logsClockAnchor(parsed.generatedAt, receivedAt);
       if (sample) clock.anchor = sample;
       setFilterClockNow(logsClockNow(clock.anchor, receivedAt, Date.now()));
       logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
@@ -525,6 +537,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const fetchLogs = logsResource.refresh;
   const retryLogs = useCallback(() => {
     logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
+    logPollRef.current = { key: resourceKey, cursor: null, rows: [] };
     fetchLogs({ forceLoading: true });
   }, [fetchLogs, resourceKey]);
 

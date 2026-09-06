@@ -169,7 +169,10 @@ async function snapshotOnDiskMatches(path: string, payload: string, payloadBytes
     return false;
   }
 }
-const spillCounters = { writes: 0, writeFailures: 0, readFailures: 0 };
+const spillCounters = {
+  writes: 0, writeFailures: 0, readFailures: 0,
+  aclRetryReturnedTimeouts: 0, aclTimeoutMemoRefusals: 0,
+};
 
 export type ResponseSpillWriteFailureCode =
   | "EACLRETRYEXHAUSTED"
@@ -184,9 +187,14 @@ export type ResponseSpillWriteFailureCode =
 
 export type ResponseSpillWriteStatus = "initial" | "healthy" | "degraded";
 
+export type ResponseSpillWriteFailureOrigin =
+  | "retry_returned_timeout"
+  | "timeout_memo_refusal";
+
 interface ResponseSpillWriteHealth {
   consecutiveFailures: number;
   lastFailureCode: ResponseSpillWriteFailureCode | null;
+  lastFailureOrigin: ResponseSpillWriteFailureOrigin | null;
   lastFailureAt: number | null;
   lastSuccessAt: number | null;
 }
@@ -194,6 +202,7 @@ interface ResponseSpillWriteHealth {
 const spillWriteHealth: ResponseSpillWriteHealth = {
   consecutiveFailures: 0,
   lastFailureCode: null,
+  lastFailureOrigin: null,
   lastFailureAt: null,
   lastSuccessAt: null,
 };
@@ -226,6 +235,20 @@ function classifySpillWriteFailure(error: unknown): ResponseSpillWriteFailureCod
   return "EUNKNOWN";
 }
 
+/** The spill writer preserves ACL errors in cause; only a fixed memo marker is diagnostic. */
+function spillAclMemoRefusalOrigin(error: unknown): "timeout_memo_refusal" | null {
+  let cursor = error;
+  for (let depth = 0; depth < 4 && cursor && typeof cursor === "object"; depth += 1) {
+    const record = cursor as { code?: unknown; aclFailureOrigin?: unknown; cause?: unknown };
+    if ((record.code === "ETIMEDOUT" || record.code === "EACLRETRYEXHAUSTED")
+      && record.aclFailureOrigin === "timeout_memo_refusal") {
+      return "timeout_memo_refusal";
+    }
+    cursor = record.cause;
+  }
+  return null;
+}
+
 function noteSpillWriteSuccess(): void {
   spillCounters.writes += 1;
   spillWriteHealth.consecutiveFailures = 0;
@@ -235,11 +258,20 @@ function noteSpillWriteSuccess(): void {
 function noteSpillWriteFailure(
   error: unknown,
   override?: ResponseSpillWriteFailureCode,
+  retryOrigin: ResponseSpillWriteFailureOrigin | null = null,
 ): void {
+  const code = override ?? classifySpillWriteFailure(error);
+  const origin = code === "ETIMEDOUT" || code === "EACLRETRYEXHAUSTED"
+    ? spillAclMemoRefusalOrigin(error) ?? retryOrigin
+    : null;
   spillCounters.writeFailures += 1;
   spillWriteHealth.consecutiveFailures += 1;
-  spillWriteHealth.lastFailureCode = override ?? classifySpillWriteFailure(error);
+  spillWriteHealth.lastFailureCode = code;
+  spillWriteHealth.lastFailureOrigin = origin;
   spillWriteHealth.lastFailureAt = now();
+  // Count terminal publications, not ACL calls or a transient first attempt.
+  if (origin === "retry_returned_timeout") spillCounters.aclRetryReturnedTimeouts += 1;
+  else if (origin === "timeout_memo_refusal") spillCounters.aclTimeoutMemoRefusals += 1;
 }
 /**
  * Admission-boundary observability (test-visible). directSpills: oversized
@@ -418,6 +450,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
   const candidate = job.candidate;
   let ref: ResponseSpillRef | null = null;
   let exhaustedAclRetry = false;
+  let aclRetryFailureOrigin: ResponseSpillWriteFailureOrigin | null = null;
   try {
     const state = spillPayloadForResident(candidate);
     try {
@@ -437,6 +470,9 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
         });
       } catch (retryError) {
         exhaustedAclRetry = isAclTimeout(retryError);
+        // A returned timeout can also mean an exhausted budget before the next OS command.
+        aclRetryFailureOrigin = spillAclMemoRefusalOrigin(retryError)
+          ?? (exhaustedAclRetry ? "retry_returned_timeout" : null);
         throw retryError;
       }
     }
@@ -460,7 +496,7 @@ async function runPendingResponseSpill(job: PendingResponseSpill): Promise<void>
   } catch (error) {
     if (ref) deleteResponseSpill(ref);
     if (states.get(job.id) === candidate && !job.cancelled) {
-      noteSpillWriteFailure(error, exhaustedAclRetry ? "EACLRETRYEXHAUSTED" : undefined);
+      noteSpillWriteFailure(error, exhaustedAclRetry ? "EACLRETRYEXHAUSTED" : undefined, aclRetryFailureOrigin);
       replaceWithSpillFailure(job.id, candidate);
       deferSupersededSpill(job.supersededSpill);
     }
@@ -2188,6 +2224,9 @@ export interface ResponseStateMetrics {
   spillWriteStatus: ResponseSpillWriteStatus;
   spillWriteConsecutiveFailures: number;
   spillLastWriteFailureCode: ResponseSpillWriteFailureCode | null;
+  spillLastWriteFailureOrigin: ResponseSpillWriteFailureOrigin | null;
+  spillAclRetryReturnedTimeouts: number;
+  spillAclTimeoutMemoRefusals: number;
   spillLastWriteFailureAt: number | null;
   spillLastWriteSuccessAt: number | null;
   spillReadFailures: number;
@@ -2240,6 +2279,9 @@ export function responseStateMetrics(): ResponseStateMetrics {
         : "initial",
     spillWriteConsecutiveFailures: spillWriteHealth.consecutiveFailures,
     spillLastWriteFailureCode: spillWriteHealth.lastFailureCode,
+    spillLastWriteFailureOrigin: spillWriteHealth.lastFailureOrigin,
+    spillAclRetryReturnedTimeouts: spillCounters.aclRetryReturnedTimeouts,
+    spillAclTimeoutMemoRefusals: spillCounters.aclTimeoutMemoRefusals,
     spillLastWriteFailureAt: spillWriteHealth.lastFailureAt,
     spillLastWriteSuccessAt: spillWriteHealth.lastSuccessAt,
     spillReadFailures: spillCounters.readFailures,
@@ -2360,8 +2402,11 @@ export function clearResponseStateMemoryForTests(): void {
   spillCounters.writes = 0;
   spillCounters.writeFailures = 0;
   spillCounters.readFailures = 0;
+  spillCounters.aclRetryReturnedTimeouts = 0;
+  spillCounters.aclTimeoutMemoRefusals = 0;
   spillWriteHealth.consecutiveFailures = 0;
   spillWriteHealth.lastFailureCode = null;
+  spillWriteHealth.lastFailureOrigin = null;
   spillWriteHealth.lastFailureAt = null;
   spillWriteHealth.lastSuccessAt = null;
   replayScopeMismatchDrops = 0;

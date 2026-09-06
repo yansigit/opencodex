@@ -25,6 +25,17 @@ ocx init
 
 The result is saved to `$OPENCODEX_HOME/config.json` (default `~/.opencodex/config.json`).
 
+`ocx init` creates a config only when none exists. An existing valid config is kept and setup
+exits; use `ocx config` or the dashboard to update it. Invalid, unreadable, or symlinked config
+entries are preserved and reported as errors. If another process creates the config during the
+wizard, its file wins and setup stops before backup housekeeping or integration prompts.
+
+EOF or Ctrl+C before creation cancels setup. Cancellation after creation keeps the saved config.
+Initial publication requires hard-link support and permission on the config filesystem; failures
+stop setup without falling back to an overwrite. If publication or temporary-file cleanup cannot
+finish, inspect the config directory before retrying: a complete config or private temporary file
+may remain.
+
 :::note[GPT-5.6 rollout entries]
 The current stable release seeds GPT-5.6 Sol/Terra/Luna for ChatGPT passthrough, OpenAI API-key,
 OpenRouter, and

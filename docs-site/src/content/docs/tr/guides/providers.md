@@ -138,6 +138,9 @@ ocx logout <saglayici>
 | `cursor` | `cursor` | `https://api2.cursor.sh` | Deneysel PKCE girişi, canlı HTTP/2 aktarımı ve hesap filtreli model keşfi. |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | Deneysel. GitHub cihaz akışı + `copilot_internal` değişimi (VS Code OAuth istemcisi). Aktif bir Copilot aboneliği gerektirir; resmi bir üçüncü taraf API değildir. |
 
+Google Antigravity hesap ve sağlayıcı kota sorguları, model listesine geri dönüş dahil sabit Google uç noktalarını kullanır. Bu hedefler için şeffaf Fake-IP DNS desteklenirken TLS doğrulaması, yönlendirme reddi ve özel adres kontrolleri korunur. Özel base URL yalnızca model isteklerini değiştirir; `NO_PROXY` doğrudan bağlantı politikasını korur.
+
+
 Uç bir Nous yenileme hatasından sonra yeniden kimlik doğrulamak için `ocx login
 nous` çalıştırın.
 

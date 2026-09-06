@@ -1079,6 +1079,9 @@ describe("Responses previous_response_id state", () => {
       spillWriteFailures: 0,
       spillWriteStatus: "healthy",
       spillWriteConsecutiveFailures: 0,
+      spillLastWriteFailureOrigin: null,
+      spillAclRetryReturnedTimeouts: 0,
+      spillAclTimeoutMemoRefusals: 0,
     });
   });
 
@@ -1112,6 +1115,9 @@ describe("Responses previous_response_id state", () => {
       spillWriteConsecutiveFailures: 1,
       spillLastWriteFailureCode: "EACLRETRYEXHAUSTED",
       spillLastWriteSuccessAt: null,
+      spillLastWriteFailureOrigin: "retry_returned_timeout",
+      spillAclRetryReturnedTimeouts: 1,
+      spillAclTimeoutMemoRefusals: 0,
     });
     expect(metrics.spillLastWriteFailureAt).toBeGreaterThanOrEqual(0);
 
@@ -1127,9 +1133,63 @@ describe("Responses previous_response_id state", () => {
       spillWriteStatus: "healthy",
       spillWriteConsecutiveFailures: 0,
       spillLastWriteFailureCode: "EACLRETRYEXHAUSTED",
+      spillLastWriteFailureOrigin: "retry_returned_timeout",
+      spillAclRetryReturnedTimeouts: 1,
+      spillAclTimeoutMemoRefusals: 0,
     });
     expect(typeof recovered.spillLastWriteSuccessAt === "number"
       && recovered.spillLastWriteSuccessAt >= (recovered.spillLastWriteFailureAt ?? 0)).toBe(true);
+  });
+
+  test("Windows stable-directory memo refusals stay distinct after the runner becomes healthy", async () => {
+    forceWindowsAclLane();
+    const previousVerify = process.env.OPENCODEX_ACL_VERIFY_EXISTING;
+    delete process.env.OPENCODEX_ACL_VERIFY_EXISTING;
+    let clock = 0;
+    let grantCalls = 0;
+    setNowForTests(() => clock);
+    setResponseSpillNowForTests(() => clock);
+    setResponseSpillAsyncAclAttemptBudgetForTests(100);
+    setResponseStateByteCapForTests(1_024);
+    const spillDir = responseSpillDirectory();
+    let healthy = false;
+    setAsyncIcaclsRunnerForTests(async args => {
+      if (args[0] !== spillDir) return ICACLS_OK;
+      if (args.includes("/grant:r")) grantCalls += 1;
+      if (healthy) return ICACLS_OK;
+      clock += 100;
+      return { success: false, exitCode: null, timedOut: true, stdout: "private-acl-output" };
+    });
+    try {
+      rememberLarge("resp_stable_timeout", "x".repeat(8_000));
+      await flushPendingResponseSpillsForTests();
+      expect(responseStateMetrics()).toMatchObject({
+        spillWrites: 0, spillWriteFailures: 1,
+        spillLastWriteFailureCode: "EACLRETRYEXHAUSTED",
+        spillLastWriteFailureOrigin: "retry_returned_timeout",
+        spillAclRetryReturnedTimeouts: 1, spillAclTimeoutMemoRefusals: 0,
+      });
+      expect(grantCalls).toBe(2);
+      healthy = true; // Same stable directory and process; no memo reset between jobs.
+      for (let refusal = 1; refusal <= 2; refusal += 1) {
+        rememberLarge(`resp_stable_refusal_${refusal}`, "y".repeat(8_000));
+        await flushPendingResponseSpillsForTests();
+        expect(responseStateMetrics()).toMatchObject({
+          spillWrites: 0, spillWriteFailures: 1 + refusal,
+          spillWriteStatus: "degraded", spillWriteConsecutiveFailures: 1 + refusal,
+          spillLastWriteFailureCode: "EACLRETRYEXHAUSTED",
+          spillLastWriteFailureOrigin: "timeout_memo_refusal",
+          spillAclRetryReturnedTimeouts: 1, spillAclTimeoutMemoRefusals: refusal,
+          spillLastWriteSuccessAt: null, spillStubCount: 0,
+        });
+        expect(grantCalls).toBe(2);
+        expect(spillFileNames(home)).toHaveLength(0);
+        expect(spillTempNames(home)).toHaveLength(0);
+      }
+    } finally {
+      if (previousVerify === undefined) delete process.env.OPENCODEX_ACL_VERIFY_EXISTING;
+      else process.env.OPENCODEX_ACL_VERIFY_EXISTING = previousVerify;
+    }
   });
 
   test("Windows async spill attempts share one bounded ACL budget across every harden", async () => {
@@ -2591,6 +2651,7 @@ describe("Responses previous_response_id state", () => {
     const {
       spillWriteStatus,
       spillLastWriteFailureCode,
+      spillLastWriteFailureOrigin,
       spillLastWriteFailureAt,
       spillLastWriteSuccessAt,
       ...numericMetrics
@@ -2599,6 +2660,7 @@ describe("Responses previous_response_id state", () => {
       .every(value => typeof value === "number" && Number.isFinite(value))).toBe(true);
     expect(spillWriteStatus).toBe("healthy");
     expect(spillLastWriteFailureCode).toBeNull();
+    expect(spillLastWriteFailureOrigin).toBeNull();
     expect(spillLastWriteFailureAt).toBeNull();
     expect(typeof spillLastWriteSuccessAt === "number" && Number.isFinite(spillLastWriteSuccessAt)).toBe(true);
     const serialized = JSON.stringify(metrics);
@@ -3359,10 +3421,60 @@ describe("Responses previous_response_id state", () => {
         spillWriteStatus: "initial",
         spillWriteConsecutiveFailures: 0,
         spillLastWriteFailureCode: null,
+        spillLastWriteFailureOrigin: null,
+        spillAclRetryReturnedTimeouts: 0,
+        spillAclTimeoutMemoRefusals: 0,
         spillLastWriteFailureAt: null,
         spillLastWriteSuccessAt: null,
         spillReadFailures: 0,
         replayScopeMismatchDrops: 0,
+      });
+    });
+
+    test("spill failure origin decoding stays bounded, closed and paired with the effective code", () => {
+      setResponseStateByteCapForTests(1_024);
+      const memoError = Object.assign(new Error("private-path-and-payload"), {
+        code: "ETIMEDOUT", aclFailureOrigin: "timeout_memo_refusal",
+      });
+      const cycle: { code: string; cause?: unknown; aclFailureOrigin: string } = {
+        code: "ETIMEDOUT", aclFailureOrigin: "private-origin",
+      };
+      cycle.cause = cycle;
+      const cases = [
+        { error: new Error("wrapper", { cause: memoError }), code: "ETIMEDOUT", origin: "timeout_memo_refusal" },
+        { error: Object.assign(new Error("denied", { cause: memoError }), { code: "EACCES" }), code: "EACCES", origin: null },
+        { error: { code: "EACLRETRYEXHAUSTED" }, code: "EACLRETRYEXHAUSTED", origin: null },
+        { error: { code: "ETIMEDOUT", aclFailureOrigin: "private-origin" }, code: "ETIMEDOUT", origin: null },
+        { error: { code: "ETIMEDOUT", aclFailureOrigin: ["timeout_memo_refusal"] }, code: "ETIMEDOUT", origin: null },
+        { error: cycle, code: "ETIMEDOUT", origin: null },
+        // Including the writer's wrapper, the marker is beyond the four-object scan.
+        { error: { code: "ETIMEDOUT", cause: { cause: { cause: memoError } } }, code: "ETIMEDOUT", origin: null },
+      ];
+      cases.forEach(({ error, code, origin }, index) => {
+        setSpillIoForTest({ write: () => { throw error; } });
+        rememberLarge(`resp_private_origin_${index}`, "private-content".repeat(1_000));
+        const metrics = responseStateMetrics();
+        expect(metrics).toMatchObject({
+          spillWriteFailures: index + 1,
+          spillLastWriteFailureCode: code,
+          spillLastWriteFailureOrigin: origin,
+          spillAclRetryReturnedTimeouts: 0, spillAclTimeoutMemoRefusals: 1,
+        });
+        const serialized = JSON.stringify(metrics);
+        for (const privateValue of ["private-path-and-payload", "private-origin", "private-content", "resp_private_origin", home]) {
+          expect(serialized).not.toContain(privateValue);
+        }
+      });
+      setSpillIoForTest(null);
+      rememberLarge("resp_after_origin_failures", "healthy".repeat(1_500));
+      expect(responseStateMetrics()).toMatchObject({
+        spillWriteStatus: "healthy", spillWriteConsecutiveFailures: 0,
+        spillLastWriteFailureCode: "ETIMEDOUT", spillLastWriteFailureOrigin: null,
+        spillAclRetryReturnedTimeouts: 0, spillAclTimeoutMemoRefusals: 1,
+      });
+      clearResponseStateMemoryForTests();
+      expect(responseStateMetrics()).toMatchObject({
+        spillLastWriteFailureOrigin: null, spillAclRetryReturnedTimeouts: 0, spillAclTimeoutMemoRefusals: 0,
       });
     });
 
@@ -3471,6 +3583,9 @@ describe("Responses previous_response_id state", () => {
         spillWriteStatus: "initial",
         spillWriteConsecutiveFailures: 0,
         spillLastWriteFailureCode: null,
+        spillLastWriteFailureOrigin: null,
+        spillAclRetryReturnedTimeouts: 0,
+        spillAclTimeoutMemoRefusals: 0,
         spillLastWriteFailureAt: null,
         spillLastWriteSuccessAt: null,
         spillReadFailures: 0,

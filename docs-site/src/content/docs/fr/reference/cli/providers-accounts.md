@@ -203,12 +203,11 @@ renvoient 1 ; une sonde de quota en amont qui échoue ou expire produit plutôt 
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-Contrôle uniquement le groupe de comptes Codex `openai`. `on` règle 80 %, `off` règle 0 %, `status` lit la
-valeur actuelle et `threshold <n>` accepte un entier de 0 à 100. Les autres fournisseurs et les valeurs
-invalides entraînent le code de sortie 1. `--json` renvoie :
+Contrôle le seuil du pool Codex `openai`, ou enregistre celui d’un pool OAuth générique. `on` enregistre 80 %, `off` 0 % et `threshold <n>` accepte 0–100. Les seuils génériques sont actuellement inactifs : leur sauvegarde ne change ni le basculement par seuil, ni l’activation du fournisseur, ni la rotation réactive après une erreur 429. Pour les pools génériques, les sorties utilisent la réponse confirmée du serveur. Pour un pool générique, `poolEnabled` est le réglage enregistré (`null` signifie non spécifié), pas l’état effectif hérité. `inert: true` indique que le seuil ne s’applique pas ; une capacité inconnue ne produit jamais `enabled: true`. Les fournisseurs à clé API, Anthropic et les valeurs invalides sont refusés.
 
 ```text
-{ provider, autoSwitchThreshold: number, enabled: boolean }
+openai: { provider, autoSwitchThreshold: number, enabled: boolean }
+generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: true | null }
 ```
 
 ### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`

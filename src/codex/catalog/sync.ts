@@ -471,12 +471,14 @@ export function buildCatalogEntries(
   accountNativeSlugs?: readonly string[],
   accountNativeSlugsBySelector?: ReadonlyMap<string, readonly string[]>,
   keepNativeChatGptOnV1 = false,
+  modelPickerOrder: readonly string[] = [],
 ): RawEntry[] {
-  return buildCatalogEntriesFromObservedState({
+  const entries = buildCatalogEntriesFromObservedState({
     template,
     gptSlugs,
     goModels,
     featured,
+    modelPickerOrder,
     wsEnabled,
     multiAgentMode,
     exactComboSlugs,
@@ -489,6 +491,8 @@ export function buildCatalogEntries(
     accountNativeSlugs,
     accountNativeSlugsBySelector,
   });
+  applyFullModelPickerOrder(entries, modelPickerOrder);
+  return entries;
 }
 
 /** Build entries solely from caller-observed inputs, with no feature-state filesystem read. */
@@ -720,6 +724,30 @@ export function orderForSubagents(goModels: CatalogModel[], featured?: string[])
   });
 }
 
+/** Routed discovery projection; native groups and alias ownership belong to the caller. */
+export function orderForModelPicker(
+  models: readonly CatalogModel[],
+  order: readonly string[] = [],
+  featured: readonly string[] = [],
+): CatalogModel[] {
+  const pickerOrder = normalizeModelPickerOrder(order);
+  if (pickerOrder.length === 0) return [...models];
+  const pickerRank = modelPickerRank(pickerOrder);
+  const featuredRank = modelPickerRank(featured);
+  const complete = pickerOrder.some(slug => !slug.includes("/"));
+  const rank = (model: CatalogModel): number => {
+    const slug = catalogModelSlug(model);
+    const featuredIndex = featuredRank(slug) ?? featuredRank(`${model.provider}/${model.id}`);
+    const natural = featuredIndex ?? 5;
+    const index = pickerRank(slug) ?? pickerRank(`${model.provider}/${model.id}`);
+    if (complete) return index ?? pickerOrder.length + natural;
+    // Preserve the legacy featured/alias bands, including unlisted rows before listed rows.
+    if (featuredIndex !== undefined || model.nativeAlias === true) return natural;
+    return index === undefined ? natural : PICKER_ORDER_PRIORITY_BASE + index;
+  };
+  return [...models].sort((a, b) => rank(a) - rank(b));
+}
+
 /**
  * True when an existing catalog row was authored by OpenCodex routing (#855).
  * Every generated routed row — current full-slug form, the June–July 2026
@@ -875,6 +903,10 @@ export function mergeCatalogEntriesFromObservedState({
   const detachedBaselineCatalogModels = baselineCatalogModels
     .map(entry => structuredClone(entry) as RawEntry);
   const detachedRoutedEntries = routedEntries.map(entry => structuredClone(entry) as RawEntry);
+  // Track this invocation's generated custom rows, not ownership markers read from disk.
+  // Their builder already finalized exact native ladders and ordinary routed mock tiers.
+  const freshCustomEntries = new Set(detachedRoutedEntries.filter(entry =>
+    entry.opencodex_catalog_kind === CODEX_CUSTOM_MODEL_CATALOG_KIND));
   const detachedAccountBoundEntries = accountBoundEntries
     .map(entry => structuredClone(entry) as RawEntry);
   const disabledModelKeys = new Set([...disabledModels].map(slugEquivalenceKey));
@@ -1195,7 +1227,7 @@ export function mergeCatalogEntriesFromObservedState({
     // Mock-max universality (260709): preserved routed entries from disk may predate
     // the max rung — ensure it here so subagent max spawns validate on every
     // reasoning-capable entry. max only: 5.6 exact ladders (luna: no ultra) stay intact.
-    if (!exactCombo && !reserveProjection && !String(e.slug ?? "").startsWith("opencode-go/")) {
+    if (!freshCustomEntries.has(m) && !exactCombo && !reserveProjection && !String(e.slug ?? "").startsWith("opencode-go/")) {
       const levels = Array.isArray(e.supported_reasoning_levels)
         ? e.supported_reasoning_levels as Array<{ effort?: string }>
         : [];

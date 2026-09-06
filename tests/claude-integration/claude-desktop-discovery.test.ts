@@ -132,9 +132,10 @@ describe("Desktop snapshot through authenticated model discovery", () => {
     removeTreeWithRetry(dir);
   });
 
-  function launch(enabled = true): void {
+  function launch(enabled = true, pickerOrder?: string[]): void {
     saveConfig({
       port: 0, hostname: "0.0.0.0", defaultProvider: "test", runtimeRole: "hub",
+      ...(pickerOrder ? { modelPickerOrder: pickerOrder, subagentModels: [], subagentModelsVersion: 1 } : {}),
       providers: {
         test: { adapter: "openai-chat", baseUrl: `http://127.0.0.1:${upstream.port}/v1`, apiKey: "fixture", allowPrivateNetwork: true, models: ["model-123", "model-155"] },
       },
@@ -154,6 +155,23 @@ describe("Desktop snapshot through authenticated model discovery", () => {
   function request(query: string, headers: Record<string, string> = { "x-opencodex-api-key": key }): Promise<Response> {
     return fetch(`http://127.0.0.1:${server!.port}/v1/models${query}`, { headers });
   }
+
+  test("saved order reaches both public Codex and Claude discovery consumers", async () => {
+    launch(true, ["test/model-155", "test/model-123"]);
+    const anthropic = await request("?flavor=anthropic&ids=cli");
+    expect(anthropic.status).toBe(200);
+    const info = await anthropic.json() as { data: Array<{ display_name: string }> };
+    expect(info.data.filter(row => row.display_name.endsWith("(test)")).map(row => row.display_name))
+      .toEqual(["model-155 (test)", "model-123 (test)"]);
+    const codex = await request("?client_version=0.145.0");
+    expect(codex.status).toBe(200);
+    const catalog = await codex.json() as { models: Array<{ slug: string; priority: number }> };
+    const routed = catalog.models.filter(row => row.slug.startsWith("test/"));
+    expect(routed.toSorted((a, b) => a.priority - b.priority).map(row => row.slug))
+      .toEqual(["test/model-155", "test/model-123"]);
+    expect(routed.find(row => row.slug === "test/model-155")?.priority).toBe(1000);
+    expect(routed.find(row => row.slug === "test/model-123")?.priority).toBe(1001);
+  });
 
   test("snapshot installs its exact aliases and retains ordinary discovery shapes", async () => {
     launch();

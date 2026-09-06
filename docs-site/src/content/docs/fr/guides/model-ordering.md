@@ -113,7 +113,7 @@ Utilisez `subagentModels` pour choisir et ordonner les premiers modèles que Cod
 `spawn_agent`. La page **Sous-agents** du tableau de bord peut réorganiser les identifiants natifs non
 qualifiés et les identifiants routés. Utilisez `ocx agent subagents set` ou modifiez la configuration
 OpenCodex pour définir des choix exacts de la forme `<selector>/<native-openai-model>` ; le tableau de bord
-ne les répertorie pas et les omet s’il enregistre la liste. Configurez au maximum cinq identifiants. Avec
+conserve ces identifiants déjà enregistrés, même indisponibles. Configurez au maximum cinq identifiants. Avec
 des sélecteurs de compte, un choix natif non qualifié peut se décliner en plusieurs lignes de catalogue
 qualifiées par sélecteur ; les choix configurés et les lignes annoncées ne correspondent donc pas
 nécessairement un à un.
@@ -178,3 +178,11 @@ l’outil natif.
 `disabledModels` et `selectedModels` de chaque fournisseur
 restent des champs de visibilité, pas des contrôles d’ordre. Il n’existe aucun paramètre distinct
 `modelOrder`, `providerOrder` ou de carte de priorité.
+
+## Préréglages du sélecteur
+
+Dans **Models**, choisissez Par défaut, A–Z par modèle, Par fournisseur ou Instantané des usages, puis appliquez l’ordre. Les identifiants routés actuellement disponibles et `modelPickerOrderMode` (`alphabetical`, `provider`, `most-used`) sont enregistrés. Les usages conservés sont lus une seule fois lors de l’application ; un rechargement ou un changement de modèles ne recalcule rien. Un ordre personnalisé ou natif complet reste intact jusqu’à une application explicite. Par défaut efface les deux champs même sans modèle disponible.
+
+`GET/PUT /api/subagent-models` conserve les choix enregistrés désactivés ou absents dans `chosen` et `available` ; `pickerAvailable` contient les identifiants routés admissibles. Models envoie `pickerOrder` et `pickerOrderMode`, jamais `models`. Une sauvegarde du roster seul conserve l’ordre. Entrée invalide ou échec de sauvegarde préserve l’état précédent.
+
+Les plages prioritaires et natives restent en place. Les préréglages affectent le catalogue Codex et les groupes routés de la découverte Claude, sans modifier le préfixe natif Claude ni les profils Desktop explicites ou la propriété des alias. Les rangs de guidage OpenCodex et les réglages de repli sont conservés ; les cinq choix annoncés nativement par Codex et le défaut recommandé peuvent changer. Aucun client n’est redémarré ; une actualisation peut rester en attente et nécessiter de rouvrir le client.

@@ -15,7 +15,7 @@
  *  - created_at is a fixed constant; max_input_tokens is authoritative-or-null;
  *    max_tokens is always null (no authoritative output limit exists proxy-side).
  */
-import { catalogModelEfforts, nativeEffortClamp, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type CatalogModel, type NativeContextLimitsInput } from "../codex/catalog";
+import { orderForModelPicker, catalogModelEfforts, nativeEffortClamp, nativeOpenAiContextWindow, nativeOpenAiMaxInputTokens, type CatalogModel, type NativeContextLimitsInput } from "../codex/catalog";
 import { claudeCodeAlias, claudeCodeNativeAlias } from "./alias";
 import { cursorFastIdFor } from "../adapters/cursor/catalog";
 import { desktop3pAlias } from "./desktop-3p";
@@ -114,6 +114,7 @@ export function buildAnthropicModelInfos(
   // Presence is the feature gate: the caller passes undefined when `fastRows` is off, so a
   // default install publishes nothing. The predicate answers ELIGIBILITY, not enablement.
   fastRows?: (model: CatalogModel | { provider: string; id: string }) => boolean,
+  ordering?: { modelPickerOrder?: readonly string[]; featured?: readonly string[] },
 ): AnthropicModelInfo[] {
   const out: AnthropicModelInfo[] = [];
   const seen = new Set<string>();
@@ -198,6 +199,8 @@ export function buildAnthropicModelInfos(
     // omitting it would leave this surface without the model the feature exists for.
     if (fastRows?.({ provider: "native", id: slug }) === true) pushFastVariant(info);
   }
+  const nativeEnd = out.length;
+  const routedGroups = new Map<CatalogModel, AnthropicModelInfo[]>();
   for (const m of routedModels) {
     // Global Fast has no toggle on this surface, so the fast identity is what gets listed —
     // a client here can only pick a listed id. Limited to the readable CLI style: Desktop 3P
@@ -211,6 +214,7 @@ export function buildAnthropicModelInfos(
       : aliasForRoute(m.provider, m.id);
     if (seen.has(id)) continue;
     seen.add(id);
+    const groupStart = out.length;
     const ladder = Array.isArray(m.reasoningEfforts) ? m.reasoningEfforts : [];
     const imageInput = Array.isArray(m.inputModalities) ? m.inputModalities.includes("image") : false;
     // max_input_tokens is an input limit, so a row that publishes a lower input ceiling than
@@ -238,6 +242,14 @@ export function buildAnthropicModelInfos(
     // namespace with no config.providers entry, so the caller classifies it from the
     // aggregated supportsServiceTier the row already carries.
     if (fastRows?.(m) === true) pushFastVariant(info);
+    routedGroups.set(m, out.slice(groupStart));
   }
-  return out;
+  if (!ordering?.modelPickerOrder?.length) return out;
+  // Sort only after deduplication, preserving the registry's original collision winner
+  // and keeping each model's base/1M/Fast siblings together.
+  return [
+    ...out.slice(0, nativeEnd),
+    ...orderForModelPicker([...routedGroups.keys()], ordering.modelPickerOrder, ordering.featured)
+      .flatMap(model => routedGroups.get(model)!),
+  ];
 }
