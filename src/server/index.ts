@@ -70,7 +70,7 @@ import { runAlibabaRegionStartupMigration } from "../providers/alibaba-region-st
 import { runModelRenameStartupMigration } from "../providers/model-rename-startup";
 import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../providers/openai-tiers";
 import { providerCodexAccountMode } from "../providers/registry";
-import type { StorageCleanupPolicy } from "../types";
+import type { OcxConfig, StorageCleanupPolicy } from "../types";
 import { MAX_DECOMPRESSED_BODY_BYTES } from "./request-decompress";
 import { canonicalServerOrigin } from "../lib/server-tls";
 import {
@@ -130,6 +130,7 @@ import {
   type RequestLogEntry,
 } from "./request-log";
 import { sessionLaneIdFromRequest } from "./request-log-conversation";
+import { classifyAgentKind } from "./effort-policy";
 export {
   addFinalRequestLog,
   filterRequestLogs,
@@ -169,6 +170,7 @@ import {
   jsonResponse,
   admissionFields,
   resolveApiAuth,
+  resolveDataPlaneAdmissionSecret,
   resolveResponsesApiAuth,
   requestPolicyView,
   type DataPlaneAdmission,
@@ -178,6 +180,7 @@ import {
   withCors,
   withManagementCors,
 } from "./auth-cors";
+import { managementBodyTooLargeResponse, readManagementJsonBody } from "./management/body";
 export {
   assertServerAuthConfig,
   corsHeaders,
@@ -247,6 +250,19 @@ import { loadCursorEffortTable } from "../integrations/cursor-effort-table";
 import { expandCursorEffortRow, knownEffortRowIds } from "./effort-row";
 import { runAiStudioNativeLogin } from "../oauth/aistudio-native-daemon";
 import { catalogFastRowEligible, expandFastRow } from "./fast-row";
+
+function isAiStudioSessionOrigin(origin: string | null, config: Pick<OcxConfig, "corsAllowOrigins">): boolean {
+  return !!origin && (
+    origin === "https://aistudio.google.com"
+    || (origin.startsWith("chrome-extension://") && config.corsAllowOrigins?.includes(origin) === true)
+  );
+}
+
+function withAiStudioSessionCors(resp: Response, req: Request, config: RequestPolicyView): Response {
+  const origin = req.headers.get("Origin");
+  if (isAiStudioSessionOrigin(origin, config) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
+  return resp;
+}
 
 export const MAX_WS_FRAME_BYTES = 50 * 1024 * 1024;
 const WEBSOCKET_IDLE_TIMEOUT_SECONDS = 0;
@@ -1137,6 +1153,20 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         if (readyzPath !== undefined) {
           return withCors(formatErrorResponse(404, "not_found", `Unknown endpoint: ${req.method} ${url.pathname}`), req, policy);
         }
+        if (url.pathname === "/api/aistudio/session") {
+          const origin = req.headers.get("Origin");
+          if (isAiStudioSessionOrigin(origin, policy)) {
+            return new Response(null, {
+              status: 204,
+              headers: {
+                "Access-Control-Allow-Origin": origin as string,
+                "Access-Control-Allow-Methods": "POST, OPTIONS",
+                "Access-Control-Allow-Headers": "Content-Type, X-OpenCodex-API-Key",
+                Vary: "Origin, Access-Control-Request-Headers",
+              },
+            });
+          }
+        }
         const managementPreflight = url.pathname.startsWith("/api/");
         const allowed = managementPreflight
           ? isAllowedManagementOrigin(req, config)
@@ -1187,6 +1217,66 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         })) return undefined as unknown as Response;
         websocketLease.release();
         return withCors(formatErrorResponse(426, "upgrade_required", "WebSocket upgrade failed"), req, policy);
+      }
+
+      if (url.pathname === "/v1/ws/aistudio" || url.pathname === "/aistudio/ws" || url.pathname === "/v1/ws/aistudio/status") {
+        return withCors(jsonResponse({
+          error: "gone",
+          message: "AI Studio browser relay endpoints are deprecated and return 410 Gone. Use native macOS login (ocx login) or the session exporter extension.",
+        }, 410), req, policy);
+      }
+
+      if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
+        const dedicated = req.headers.get("x-opencodex-api-key")?.trim() ?? "";
+        const admission = dedicated
+          ? resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated")
+          : null;
+        if (!admission) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy), req, policy);
+        }
+        const origin = req.headers.get("Origin");
+        if (!isAiStudioSessionOrigin(origin, policy)) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy), req, policy);
+        }
+        try {
+          const bodyJson = await readManagementJsonBody(req) as any;
+          const { saveAiStudioSession, saveAiStudioSessionFromToken } = await import("../oauth/aistudio-session-sync");
+          if (typeof bodyJson.token === "string" && bodyJson.token) {
+            saveAiStudioSessionFromToken(bodyJson.token);
+          } else if (Array.isArray(bodyJson.cookies)) {
+            saveAiStudioSession({
+              selectedProject: bodyJson.selectedProject || "",
+              windowId: bodyJson.windowId || "",
+              cookies: bodyJson.cookies,
+            });
+          } else {
+            return withAiStudioSessionCors(withCors(jsonResponse({ error: "invalid session payload" }, 400), req, policy), req, policy);
+          }
+          return withAiStudioSessionCors(withCors(jsonResponse({ ok: true, message: "AI Studio session updated successfully" }), req, policy), req, policy);
+        } catch (error) {
+          const tooLarge = managementBodyTooLargeResponse(error, req, config);
+          return withAiStudioSessionCors(
+            withCors(tooLarge ?? jsonResponse({ error: "invalid session payload" }, 400), req, policy),
+            req,
+            policy,
+          );
+        }
+      }
+
+      if (url.pathname === "/aistudio/bridge" && req.method === "GET") {
+        const bridgeHtml = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Google AI Studio Relay Deprecated - OpenCodex</title></head>
+<body><h1>HTTP 410 Gone: AI Studio Browser Relay Deprecated</h1>
+<p>The browser relay has been retired. Use native macOS authentication or the session exporter extension.</p>
+<p>Run <code>ocx login</code> to connect.</p></body></html>`;
+        return new Response(bridgeHtml, { status: 410, headers: { "Content-Type": "text/html; charset=utf-8" } });
+      }
+
+      if (url.pathname === "/aistudio/bridge.user.js" && req.method === "GET") {
+        return new Response("// HTTP 410 Gone: OpenCodex AI Studio browser relay and userscripts are deprecated.\n", {
+          status: 410,
+          headers: { "Content-Type": "application/javascript; charset=utf-8" },
+        });
       }
 
       if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
@@ -1805,6 +1895,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         return runAdmittedHttpTurn(req, policy, async turnAdmissionLease => {
           let response: Response;
@@ -1918,6 +2009,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
           provider: "unknown",
           ...admissionFields(admission),
           inboundProtocol: "responses",
+          agentKind: classifyAgentKind(req.headers, "responses"),
         };
         if (req.headers.get("x-opencodex-grok") === "1") logCtx.surface = "grok";
         let logged = false;

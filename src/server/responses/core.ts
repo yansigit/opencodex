@@ -299,7 +299,7 @@ import {
 } from "../../lib/errors";
 import type { AdmissionLease } from "../../lib/admission";
 import { supportedLadderFor } from "../effort-policy";
-import { isThreadSpawnRequest } from "../effort-policy";
+import { classifyAgentKind, isThreadSpawnRequest } from "../effort-policy";
 import {
   applySubagentModelFallback,
   maybePrimeSubagentQuota,
@@ -2726,6 +2726,7 @@ export async function handleComboResponses(
     const childLog: RequestLogContext = {
       model: pick.target.model,
       provider: pick.target.provider,
+      ...(logCtx.agentKind ? { agentKind: logCtx.agentKind } : {}),
       ...(logCtx.conversationId ? { conversationId: logCtx.conversationId } : {}),
       ...(logCtx.surface ? { surface: logCtx.surface } : {}),
     };
@@ -3487,7 +3488,8 @@ async function handleResponsesInner(
   // Exact account selectors are isolated from Pool-wide quota work. A canonical replay miss must
   // also fail closed without polling quota upstream. Cached fallback state can still select a
   // provider with native continuation support below.
-  const threadSpawn = isThreadSpawnRequest(req.headers);
+  const agentKind = logCtx.agentKind ?? classifyAgentKind(req.headers, "responses");
+  const threadSpawn = isThreadSpawnRequest(req.headers, agentKind);
   const initialSubagentFallbackChain = threadSpawn && !options.comboAttempt
     ? resolveSubagentFallbackChain(parsed, config)
     : null;
@@ -3764,24 +3766,18 @@ async function handleResponsesInner(
   }
 
   // Child fallback and encrypted-task recovery can change both the parsed catalog and the
-  // destination. Arm the plaintext mirror only after that selection is final.
-  const turnMetadataHasSubagentKind = (() => {
-    const value = req.headers.get("x-codex-turn-metadata");
-    if (!value) return false;
-    try {
-      const metadata = JSON.parse(value) as { subagent_kind?: unknown };
-      return typeof metadata.subagent_kind === "string" && metadata.subagent_kind.length > 0;
-    } catch {
-      return false;
-    }
-  })();
+  // destination. Arm the plaintext mirror only after that selection is final: eligible native
+  // children may then delegate to routed grandchildren without creating ChatGPT-only ciphertext,
+  // while routed fallbacks and non-spawn maintenance turns never see the private namespace.
   const bridgeDecision = decideV2RoutedDelegationBridge({
     enabled: config.v2RoutedDelegationBridge === true,
     inboundWire,
     multiAgentMode: config.multiAgentMode,
     upstreamV2Enabled: isMultiAgentV2Enabled(),
     canonicalNativeRoute: isCanonicalOpenAiForwardProvider(route.provider),
-    hasSubagentMarker: req.headers.has("x-openai-subagent") || turnMetadataHasSubagentKind,
+    // `classifyAgentKind` incorporates both x-openai-subagent and the JSON
+    // x-codex-turn-metadata marker. Undefined is malformed/conflicting and fails closed.
+    hasSubagentMarker: agentKind !== "main",
     threadSpawn,
     comboAttempt: options.comboAttempt === true,
     compaction: parsed._compactionRequest === true,
@@ -4010,6 +4006,10 @@ async function handleResponsesInner(
     const admitted = await commitResolvedOAuthSelection(candidate);
     if (!admitted) throw new Error("OAuth selection changed during credential recovery");
     genericFailoverAccountId = admitted.accountId;
+    if (isAntigravityOAuth) {
+      antigravityAccountId = admitted.accountId;
+      bindAntigravitySessionAffinity(antigravitySessionKey, admitted.accountId);
+    }
     stampOAuthAccountLabel(logCtx, route.providerName, route.provider, admitted.accountId);
     return admitted;
   };
@@ -4403,7 +4403,7 @@ async function handleResponsesInner(
         if (route.provider.googleMode === "cloud-code-assist") {
           if (isAntigravityOAuth) {
             if (!resolved.projectId) {
-              return formatErrorResponse(400, "invalid_request_error", "Antigravity project unavailable — re-run `ocx login google-antigravity`");
+              return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Antigravity account project is unavailable")));
             }
           } else if (!resolved.projectId) {
             return formatErrorResponse(401, "authentication_error", publicOAuthAuthenticationErrorMessage(new Error("Cloud Code Assist account project is unavailable")));
@@ -6627,6 +6627,7 @@ async function handleResponsesInner(
     const imgResponse = await runWithImageBridge({
       parsed, adapter,
       incomingMeta: { headers: selectedForwardHeaders, abortSignal: options.abortSignal, translatorBudget },
+      ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       ...(imgPlan ? { plan: imgPlan } : {}),
       ...(vidPlan ? { videoPlan: vidPlan } : {}),
       forwardHeaders: selectedForwardHeaders,
@@ -6723,6 +6724,7 @@ async function handleResponsesInner(
         translatorBudget,
         providerFetch: routedProviderFetch,
       },
+      ...(antigravityAccountId ? { accountId: antigravityAccountId } : {}),
       backend: wsPlan.backend,
       forwardProvider: wsPlan.forwardSidecar?.provider,
       anthropicSidecar: wsPlan.anthropicSidecar,
