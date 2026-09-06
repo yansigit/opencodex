@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { chatCompletionsToResponsesBody } from "../src/chat/inbound";
 import { anthropicToResponsesTranslation } from "../src/claude/inbound";
+import { DIRECTIVE_KEY_FILE } from "../src/claude/directive-key";
 import { evidenceFromBody } from "../src/routing/request-evidence";
 import { flushConfigDirHardeningForTests } from "../src/config/paths";
 import {
@@ -142,6 +143,10 @@ beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
   testHome = mkdtempSync(join(tmpdir(), "ocx-routing-policy-"));
   process.env.OPENCODEX_HOME = testHome;
+  // Directive-key creation takes the SQLite-backed config mutation lock. That
+  // lifecycle is unrelated to routing parity and can keep the scratch home open
+  // briefly on Windows, so provide the valid fixture state up front.
+  writeFileSync(join(testHome, DIRECTIVE_KEY_FILE), `${"a".repeat(64)}\n`, { mode: 0o600 });
   clearRequestLogsForTests();
 });
 
