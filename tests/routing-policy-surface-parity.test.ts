@@ -1,17 +1,27 @@
-import { afterEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { chatCompletionsToResponsesBody } from "../src/chat/inbound";
 import { anthropicToResponsesTranslation } from "../src/claude/inbound";
 import { evidenceFromBody } from "../src/routing/request-evidence";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import {
+  setAsyncIcaclsRunnerForTests,
+  setIcaclsRunnerForTests,
+} from "../src/lib/windows-secret-acl";
 import type { ProviderAdapter } from "../src/adapters/base";
 import type { AdapterEvent, OcxConfig, OcxProviderConfig } from "../src/types";
-import type { RequestLogContext } from "../src/server/request-log";
+import { clearRequestLogsForTests, type RequestLogContext } from "../src/server/request-log";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const MODEL = "policy/daily";
 const EXPECTED_RICH_EVIDENCE = {
   toolsRequired: true,
   imageInputRequired: true,
 };
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 describe("routing policy request evidence parity (translator-level coverage)", () => {
   test("tools and image input produce the same evidence across Responses, Chat Completions, and Claude Messages", () => {
@@ -121,8 +131,33 @@ const { handleResponses } = await import("../src/server/responses");
 const { handleChatCompletions } = await import("../src/server/chat-completions");
 const { handleClaudeMessages } = await import("../src/server/claude-messages");
 
-afterEach(() => {
+let testHome = "";
+let previousHome: string | undefined;
+
+beforeEach(() => {
+  // Handler coverage can create config-owned state. Keep it isolated and stub both Windows
+  // ACL runners so no real icacls child can retain the scratch home during teardown.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  previousHome = process.env.OPENCODEX_HOME;
+  testHome = mkdtempSync(join(tmpdir(), "ocx-routing-policy-"));
+  process.env.OPENCODEX_HOME = testHome;
+  clearRequestLogsForTests();
+});
+
+afterEach(async () => {
   adapterFactory = undefined;
+  clearRequestLogsForTests();
+  try {
+    await flushConfigDirHardeningForTests();
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (testHome) removeTreeWithRetry(testHome);
+    testHome = "";
+  }
 });
 
 function testConfig(): OcxConfig {
