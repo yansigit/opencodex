@@ -96,10 +96,6 @@ async function mountDetails(item: WorkspaceItem, focus: { token: number; provide
           availableModels={[]}
           hasLiveModels={false}
           selectedModels={[]}
-          modelRows={[]}
-          modelRevision="accounts-focus-1"
-          modelRowsReady={true}
-          onOpenModels={() => {}}
           onDeselect={() => {}}
           apiBase=""
           accounts={[]}

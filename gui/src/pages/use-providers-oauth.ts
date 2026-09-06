@@ -143,11 +143,11 @@ export function useProvidersOAuth({
             finished = true;
             break;
           }
-          // Seed only a missing roster. This status read can predate a manual selection;
-          // an existing roster is reconciled by the guarded /accounts read below.
+          // Seed the account list from the status poll immediately so Accounts does not
+          // briefly render empty while the follow-up /api/oauth/accounts round-trip runs.
           if (s.accounts) {
             const activeFromRow = s.accounts.find(a => a.active)?.id ?? null;
-            setAccountSets(current => current[provider] ? current : ({
+            setAccountSets(current => ({
               ...current,
               [provider]: {
                 activeAccountId: s.activeAccountId ?? activeFromRow,

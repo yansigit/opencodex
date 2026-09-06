@@ -72,7 +72,6 @@ export interface ProviderContextCapsResponse {
   cap?: number;
   value?: number;
   caps?: Record<string, number>;
-  values?: Record<string, number>;
 }
 
 export interface V2Status {
