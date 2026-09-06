@@ -85,6 +85,46 @@ npm install -g @yansigit/opencodex   # Node 22+; the Bun runtime is bundled auto
 ocx start                            # or `ocx service` to run it in the background
 ```
 
+### Docker Compose
+
+The repository ships a digest-pinned, non-root Compose build. With Git and Bun installed on the
+host, generate the canonical compatibility manifest before every image build, then initialize
+the data-plane token once through stdin and start the hub. The first normal start creates a
+per-volume self-signed TLS identity; copy its public certificate out for local verification:
+
+```bash
+git clone https://github.com/yansigit/opencodex.git
+cd opencodex
+bun scripts/generate-compatibility-version.ts
+docker compose build
+openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
+docker compose up -d
+mkdir -p .tmp
+docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
+curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/readyz
+```
+
+The default host binding is `127.0.0.1:10100`. Remote exposure requires explicit
+`OPENCODEX_BIND_ADDRESS=<LAN-or-Tailscale-IP> docker compose up -d`; `0.0.0.0` opts into
+all host interfaces. `OPENCODEX_PORT` also updates the generated localhost `tls.publicOrigin`;
+set `OPENCODEX_PUBLIC_ORIGIN` only when installing a matching operator-managed identity. The
+generated certificate covers only `localhost` and `127.0.0.1`; keep the
+default loopback publication behind an authenticated TLS/tailnet frontend, or install a certificate
+and `tls.publicOrigin` for the exact remote name before publishing directly. Restrict either setup
+with a firewall.
+The generated JSON stays untracked; it is copied into the image without including `.git`.
+Regenerate it after source changes, and do not change the source between generation and build.
+The build rejects stale manifests, missing or mismatched files, extra source or Docker-authority
+files, and symlinks. It checks every recorded SHA-256 against the build context and copied runtime
+files, including the Dockerfile, Compose/config/bootstrap/probe files, `package.json`, `bun.lock`,
+and the specifically included `scripts/model-metadata.source.json`.
+
+The token, TLS private key, and mutable state stay in the `ocx-state` named volume; no credential is
+placed in the image, Compose file, environment, or shell arguments. See the
+[Remote Hub deployment guide](https://opencodex.me/guides/remote-hub/#docker-compose) for provider
+setup, authenticated acceptance checks, remote management, and rollback.
+
 <details>
 <summary>Install from source (latest dev)</summary>
 

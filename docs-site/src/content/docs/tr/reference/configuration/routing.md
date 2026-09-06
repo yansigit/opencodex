@@ -20,7 +20,7 @@ opencodex istenen modeli şu sırayla çözer:
 
 1. İlke değerlendiricisini yürüten ve seçilen adayı yönlendiren yapılandırılmış
    bir `policy/<id>` veya yönlendirme profili takma adı. Çözümlenmemiş bir
-   `policy/<id>` sonraki kurallara düşer.
+   `policy/<id>` sonraki kurallara geçmek yerine yerel olarak başarısız olur.
 2. Tam olarak eşlenen saklanan Codex hesabı aracılığıyla yönlendirilen
    yapılandırılmış bir `<hesap-secici>/<yerel-openai-modeli>` ad alanı. Geçersiz
    veya kullanılamaz tam bir hedef kapalı olarak başarısız olur.
@@ -310,4 +310,3 @@ değişmeden ayrıştırılır. Geçmiş dizini tek kullanımlıktır -
 otomatik bir yeniden oluşturmayı tetikler; `ocx logs rebuild-index` bunu zorlar.
 Bu sistemdeki hiçbir şey ağırlıkları, bütçeleri veya aday kümelerini otomatik
 olarak ayarlamaz.
-

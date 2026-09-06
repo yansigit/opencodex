@@ -25,17 +25,17 @@
 **Files:**
 - Modify: `src/oauth/aistudio-session-sync.ts`
 - Modify: `src/oauth/login-cli.ts`
-- Test: `tests/aistudio-session-sync.test.ts`
-- Test: `tests/aistudio-login-cli.test.ts`
+- Test: `tests/adapters/google/aistudio-session-sync.test.ts`
+- Test: `tests/adapters/google/aistudio-login-cli.test.ts`
 
 **Interfaces:**
 - Consumes: existing `src/oauth/google-aistudio-auth.ts` helpers (SAPISID parse), `src/config.ts` load/save
 - Produces: `serializeSessionBundle(data)->string`, `parseSessionBundle(token)->AiStudioSessionData`, `saveAiStudioSession(data,dest)->string`, `saveAiStudioSessionFromToken(token,dest)->string`, `loadAiStudioSession(path)->AiStudioSessionData|null`, `cookieHeaderFromSession(session)->string`, `getAiStudioSessionPath()->string`
 
-- [ ] Step 1: Write failing test in `tests/aistudio-session-sync.test.ts` for invalid base64 / missing cookies rejection and for cookieHeaderFromSession joining.
+- [ ] Step 1: Write failing test in `tests/adapters/google/aistudio-session-sync.test.ts` for invalid base64 / missing cookies rejection and for cookieHeaderFromSession joining.
 - [ ] Step 2: Run test verify fail
 - [ ] Step 3: Implement minimal session sync (base64 JSON bundle, schema validation, file read/write under ~/.opencodex/aistudio-session.json, cookie header builder)
-- [ ] Step 4: Write failing test in `tests/aistudio-login-cli.test.ts` for registry entry `google-aistudio` label/googleMode/note and `serialize/parse` round-trip
+- [ ] Step 4: Write failing test in `tests/adapters/google/aistudio-login-cli.test.ts` for registry entry `google-aistudio` label/googleMode/note and `serialize/parse` round-trip
 - [ ] Step 5: Implement/verify `login-cli.ts` handleAiStudioBridgeLogin paste-token path (prompt, decode via saveAiStudioSessionFromToken, print success) and registry note contains /aistudio/bridge
 - [ ] Step 6: Verify tests pass
 - [ ] Step 7: Commit
@@ -45,8 +45,8 @@
 **Files:**
 - Create: `src/adapters/google-aistudio-parser.ts`
 - Modify: `src/adapters/google.ts`
-- Test: `tests/aistudio-login-flow.test.ts`
-- Test: `tests/google-aistudio-stream.test.ts`
+- Test: `tests/adapters/google/aistudio-login-flow.test.ts`
+- Test: `tests/adapters/google/google-aistudio-stream.test.ts`
 
 **Interfaces:**
 - Consumes: `parseMakerSuiteChunk(raw:string)->MakerSuiteParsedResult {text, thought?, thoughtSignature?}`
@@ -69,8 +69,8 @@
 - Modify: `integrations/aistudio-extension/popup.js`
 - Modify: `integrations/aistudio-extension/popup.html`
 - Test: `tests/aistudio-ws-hub.test.ts`
-- Test: `tests/aistudio-bridge-endpoint.test.ts`
-- Test: `tests/aistudio-extension.test.ts`
+- Test: `tests/adapters/google/aistudio-bridge-endpoint.test.ts`
+- Test: `tests/adapters/google/aistudio-extension.test.ts`
 
 **Interfaces:**
 - Consumes: hub `register/unregister`, `dispatchRequest`, bridge HTML/WS routes
@@ -91,10 +91,10 @@
 - Modify: `integrations/aistudio-daemon/main.swift`
 - Modify: `src/oauth/aistudio-native-daemon.ts`
 - Modify: `src/providers/registry.ts` (already has pacing, verify)
-- Test: `tests/aistudio-native-webkit.test.ts`
-- Test: `tests/google-aistudio-hardening.test.ts`
-- Test: `tests/google-aistudio-quota.test.ts`
-- Test: `tests/google-aistudio-discovery.test.ts`
+- Test: `tests/adapters/google/aistudio-native-webkit.test.ts`
+- Test: `tests/adapters/google/google-aistudio-hardening.test.ts`
+- Test: `tests/adapters/google/google-aistudio-quota.test.ts`
+- Test: `tests/adapters/google/google-aistudio-discovery.test.ts`
 
 **Interfaces:**
 - Consumes: registry requestPacing, quota inspection, model discovery over bridge

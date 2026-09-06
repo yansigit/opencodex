@@ -2,9 +2,10 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
+import { repoPath } from "../helpers/repo-root";
 
-const helperPath = resolve(import.meta.dir, "../../.github/scripts/fork-promotion-backmerge.cjs");
+const backmergeScript = repoPath(".github/scripts/fork-promotion-backmerge.cjs");
 const roots: string[] = [];
 
 function git(cwd: string, ...args: string[]): string {
@@ -34,7 +35,7 @@ function fixture() {
 }
 
 function reconcile(cwd: string, main: string, dev: string): { action: string; targetSha: string } {
-  return JSON.parse(execFileSync("node", [helperPath, main, dev, "--json"], { cwd, encoding: "utf8" }));
+  return JSON.parse(execFileSync("node", [backmergeScript, main, dev, "--json"], { cwd, encoding: "utf8" }));
 }
 
 afterEach(() => {

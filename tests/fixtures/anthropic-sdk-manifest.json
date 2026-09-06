@@ -8,5 +8,5 @@
     "source": "src/adapters/client-fingerprint.ts:CLAUDE_CODE_HEADERS",
     "note": "Outbound Anthropic fingerprint stays pinned to 0.74.0 regardless of dev SDK bump; see src/adapters/anthropic.ts, src/vision/anthropic-describe.ts, src/web-search/anthropic-executor.ts"
   },
-  "purpose": "Dev-only reference for Claude Code ingress/compatibility fixtures and type surfaces; production src must not runtime-import @anthropic-ai/sdk (import type only). Exact pin enforced by tests/anthropic-sdk-import.test.ts."
+  "purpose": "Dev-only reference for Claude Code ingress/compatibility fixtures and type surfaces; production src must not runtime-import @anthropic-ai/sdk (import type only). Exact pin enforced by tests/adapters/anthropic/anthropic-sdk-import.test.ts."
 }

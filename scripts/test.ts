@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   acquireTestRunLock,
   resolveWrappedTestRunLockPath,
@@ -327,7 +327,10 @@ export const SERIAL_FULL_SUITE_FILES = SERIAL_TEST_FILES.map(
   (file): SerialFullSuiteFile => file.slice("tests/".length) as SerialFullSuiteFile,
 );
 
-const SERIAL_LANE_TIMEOUT_MS: Partial<Record<SerialFullSuiteFile, number>> = {
+type SerialLaneBasename = SerialFullSuiteFile extends infer P
+  ? P extends `${string}/${infer B}` ? B : P
+  : never;
+const SERIAL_LANE_TIMEOUT_MS: Partial<Record<SerialLaneBasename, number>> = {
   // The packaged first-start case has its own 4-minute budget and performs npm
   // pack/install plus a real proxy lifecycle. Keep the outer lane able to
   // contain that bounded work on cold runners.
@@ -425,15 +428,15 @@ export function resolveBunTestPlan(requested: string[], comparisonCommit?: strin
 
   const mainArgs = resolveBunTestArgs(requested, comparisonCommit);
   const rootIndex = mainArgs.lastIndexOf("./tests/");
-  const ignores = SERIAL_FULL_SUITE_FILES.flatMap(file => ["--path-ignore-patterns", `**/${file}`]);
+  const ignores = SERIAL_FULL_SUITE_FILES.flatMap(file => ["--path-ignore-patterns", `**/${basename(file)}`]);
   mainArgs.splice(rootIndex === -1 ? mainArgs.length : rootIndex, 0, ...ignores);
   const serialRequested = withoutParallelOverride(requested);
   return [
     { label: "parallel suite", args: mainArgs, timeoutMs: 15 * 60 * 1000 },
     ...SERIAL_FULL_SUITE_FILES.map(file => ({
-      label: file,
+      label: basename(file),
       args: resolveBunTestArgs(["--parallel=1", ...serialRequested, `./tests/${file}`]),
-      timeoutMs: SERIAL_LANE_TIMEOUT_MS[file] ?? 3 * 60 * 1000,
+      timeoutMs: SERIAL_LANE_TIMEOUT_MS[basename(file) as SerialLaneBasename] ?? 3 * 60 * 1000,
     })),
   ];
 }
@@ -647,7 +650,7 @@ function processGroupAlive(pid: number): boolean {
 
 /**
  * `gui` is not a workspace of the root package and declares React only in `gui/package.json`, so a
- * root `bun install` never creates `gui/node_modules`. Twenty-five files under `tests/` import
+ * root `bun install` never creates `gui/node_modules`. Twenty-six files under `tests/` import
  * modules from `gui/src`, which makes those tests fail on a fresh clone or worktree with
  * `Cannot find package 'react'` — reported as an "Unhandled error between tests" that names no
  * test, so the cause is not obvious from the output.

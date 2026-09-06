@@ -13,7 +13,7 @@
 
 **Global Constraints:**
 - Bun-native only; no Node-only APIs, no new compile step.
-- Optional subsystems stay off core path (`tests/core-lab-boundary.test.ts` must pass).
+- Optional subsystems stay off core path (`tests/lab/core-lab-boundary.test.ts` must pass).
 - Subagent model: `command-code/meta-muse-spark-1.2-contributor` with `fork_turns: "none"`.
 - TDD: write failing test before modifying production code.
 - Privacy scan: `bun run privacy:scan` must stay green.
@@ -24,14 +24,14 @@
 
 **Files:**
 - Modify: `src/adapters/google.ts`
-- Modify: `tests/google-aistudio-adapter.test.ts`
+- Modify: `tests/adapters/google/google-aistudio-adapter.test.ts`
 - Modify: `tests/google-aistudio-e2e-smoke.test.ts`
-- Test: `tests/google-aistudio-stream.test.ts`
+- Test: `tests/adapters/google/google-aistudio-stream.test.ts`
 
-- [ ] Step 1: Write failing test in `tests/google-aistudio-stream.test.ts` verifying that an upstream HTML response (e.g. `<!doctype html>...<base href="https://accounts.google.com">...</body>`) yields an error `Google AI Studio session expired — re-authentication required` rather than `upstream non-SSE response: </script>...`.
+- [ ] Step 1: Write failing test in `tests/adapters/google/google-aistudio-stream.test.ts` verifying that an upstream HTML response (e.g. `<!doctype html>...<base href="https://accounts.google.com">...</body>`) yields an error `Google AI Studio session expired — re-authentication required` rather than `upstream non-SSE response: </script>...`.
 - [ ] Step 2: Update `src/adapters/google.ts` in `parseStream` to detect if `Content-Type` contains `text/html` or if non-SSE buffer begins with `<!doctype` or contains `accounts.google.com/v3/signin`, yielding the descriptive re-authentication error.
-- [ ] Step 3: Fix test isolation in `tests/google-aistudio-adapter.test.ts` and `tests/google-aistudio-e2e-smoke.test.ts` so that all tests pass an isolated temp file path to `saveAiStudioSession` (or set `OPENCODEX_HOME`), ensuring `~/.opencodex/aistudio-session.json` is never modified by tests.
-- [ ] Step 4: Run `bun test tests/google-aistudio-stream.test.ts tests/google-aistudio-adapter.test.ts tests/google-aistudio-e2e-smoke.test.ts` and confirm all pass.
+- [ ] Step 3: Fix test isolation in `tests/adapters/google/google-aistudio-adapter.test.ts` and `tests/google-aistudio-e2e-smoke.test.ts` so that all tests pass an isolated temp file path to `saveAiStudioSession` (or set `OPENCODEX_HOME`), ensuring `~/.opencodex/aistudio-session.json` is never modified by tests.
+- [ ] Step 4: Run `bun test tests/adapters/google/google-aistudio-stream.test.ts tests/adapters/google/google-aistudio-adapter.test.ts tests/google-aistudio-e2e-smoke.test.ts` and confirm all pass.
 
 ---
 
@@ -39,11 +39,11 @@
 
 **Files:**
 - Modify: `src/oauth/login-cli.ts`
-- Test: `tests/aistudio-login-cli.test.ts`
+- Test: `tests/adapters/google/aistudio-login-cli.test.ts`
 
-- [ ] Step 1: Write failing test in `tests/aistudio-login-cli.test.ts` checking that successful native WebKit login or token paste does NOT invoke `openUrl` with the bridge URL.
+- [ ] Step 1: Write failing test in `tests/adapters/google/aistudio-login-cli.test.ts` checking that successful native WebKit login or token paste does NOT invoke `openUrl` with the bridge URL.
 - [ ] Step 2: In `src/oauth/login-cli.ts`, remove the trailing unconditional `openUrl(bridgeUrl);` in `handleAiStudioBridgeLogin()`, only calling it when Option 3 (browser bridge) is deliberately chosen.
-- [ ] Step 3: Run `bun test tests/aistudio-login-cli.test.ts` to verify.
+- [ ] Step 3: Run `bun test tests/adapters/google/aistudio-login-cli.test.ts` to verify.
 
 ---
 
@@ -52,12 +52,12 @@
 **Files:**
 - Modify: `src/server/aistudio-ws-hub.ts`
 - Modify: `src/server/index.ts`
-- Test: `tests/aistudio-bridge-endpoint.test.ts`
+- Test: `tests/adapters/google/aistudio-bridge-endpoint.test.ts`
 - Test: `tests/aistudio-ws-hub.test.ts`
 
-- [ ] Step 1: Write failing test in `tests/aistudio-bridge-endpoint.test.ts` verifying that `/aistudio/bridge` HTML checks status via HTTP `/v1/ws/aistudio/status` instead of connecting to the worker WebSocket hub `/v1/ws/aistudio`.
+- [ ] Step 1: Write failing test in `tests/adapters/google/aistudio-bridge-endpoint.test.ts` verifying that `/aistudio/bridge` HTML checks status via HTTP `/v1/ws/aistudio/status` instead of connecting to the worker WebSocket hub `/v1/ws/aistudio`.
 - [ ] Step 2: Update `getAiStudioBridgeHtml` in `src/server/aistudio-ws-hub.ts` to poll `/v1/ws/aistudio/status` for displaying local proxy connectivity and active relay session count, rather than opening a dummy WebSocket that registers as an inference worker.
-- [ ] Step 3: Run `bun test tests/aistudio-bridge-endpoint.test.ts tests/aistudio-ws-hub.test.ts` to verify.
+- [ ] Step 3: Run `bun test tests/adapters/google/aistudio-bridge-endpoint.test.ts tests/aistudio-ws-hub.test.ts` to verify.
 
 ---
 
@@ -67,13 +67,13 @@
 - Modify: `src/server/index.ts`
 - Modify: `src/server/auth-cors.ts`
 - Modify: `integrations/aistudio-extension/popup.js`
-- Test: `tests/aistudio-bridge-endpoint.test.ts`
-- Test: `tests/aistudio-extension.test.ts`
+- Test: `tests/adapters/google/aistudio-bridge-endpoint.test.ts`
+- Test: `tests/adapters/google/aistudio-extension.test.ts`
 
-- [ ] Step 1: Write failing test in `tests/aistudio-bridge-endpoint.test.ts` for `OPTIONS /api/aistudio/session` with `Origin: chrome-extension://test-extension-id`, expecting HTTP 204 with `Access-Control-Allow-Origin: chrome-extension://test-extension-id`.
+- [ ] Step 1: Write failing test in `tests/adapters/google/aistudio-bridge-endpoint.test.ts` for `OPTIONS /api/aistudio/session` with `Origin: chrome-extension://test-extension-id`, expecting HTTP 204 with `Access-Control-Allow-Origin: chrome-extension://test-extension-id`.
 - [ ] Step 2: In `src/server/index.ts`, update the `OPTIONS` preflight handler to permit `chrome-extension://` and `https://aistudio.google.com` for `/api/aistudio/session` and return matching CORS headers. Update the `POST /api/aistudio/session` response headers to return matching `Access-Control-Allow-Origin`.
 - [ ] Step 3: In `integrations/aistudio-extension/popup.js`, read `proxyPort` from `chrome.storage.local` (defaulting to 10100) before making the auto-sync fetch.
-- [ ] Step 4: Run `bun test tests/aistudio-bridge-endpoint.test.ts tests/aistudio-extension.test.ts` to verify.
+- [ ] Step 4: Run `bun test tests/adapters/google/aistudio-bridge-endpoint.test.ts tests/adapters/google/aistudio-extension.test.ts` to verify.
 
 ---
 
@@ -83,8 +83,8 @@
 - Modify: `src/server/auth-cors.ts`
 - Modify: `src/server/management/provider-routes.ts`
 - Modify: `src/server/index.ts`
-- Test: `tests/google-aistudio-discovery.test.ts`
-- Test: `tests/aistudio-native-webkit.test.ts`
+- Test: `tests/adapters/google/google-aistudio-discovery.test.ts`
+- Test: `tests/adapters/google/aistudio-native-webkit.test.ts`
 
 - [ ] Step 1: Write failing test verifying:
   - `safeConfigDTO` returns `hasAiStudioSession: boolean` and `aiStudioRelayActive: boolean` for `google-aistudio`.
@@ -109,4 +109,3 @@
 - [ ] Step 2: Update `isConfigurationReady` in `gui/src/provider-workspace/catalog.ts` to require `p.hasAiStudioSession === true || p.aiStudioRelayActive === true`.
 - [ ] Step 3: In `ProviderOverview.tsx`, when `item.googleMode === "ai-studio-web"` and it needs setup or re-auth, display a prominent "Re-authenticate" / "Connect" button that calls `/api/aistudio/login/native` or opens the bridge.
 - [ ] Step 4: Run `bun run test` on GUI tests and build check `bun run lint:gui` to ensure cleanliness.
-

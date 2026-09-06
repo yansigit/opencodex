@@ -17,7 +17,7 @@ Le routage transforme l’identifiant de modèle envoyé par un client en un fou
 
 opencodex résout le modèle demandé dans l’ordre suivant :
 
-1. Un `policy/<id>` configuré ou l’alias d’un profil de routage : l’évaluateur de politique est exécuté et le candidat retenu est routé. Si `policy/<id>` n’est pas résolu, les règles suivantes sont examinées.
+1. Un `policy/<id>` configuré ou l’alias d’un profil de routage : l’évaluateur de politique est exécuté et le candidat retenu est routé. Si `policy/<id>` n’est pas résolu, la requête échoue localement au lieu de passer aux règles suivantes.
 2. Un espace de noms `<account-selector>/<native-openai-model>` configuré : la requête utilise exactement le compte Codex enregistré qui lui est associé. Une cible exacte invalide ou indisponible échoue de manière sûre.
 3. Un `combo/<id>` canonique ou l’alias d’une combinaison configurée. Les identifiants canoniques sont examinés avant les alias.
 4. Un espace de noms explicite `<provider>/<model>` dont le préfixe désigne un fournisseur configuré.

@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, lstatSync, openSync, readFileSync, unlinkSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { getConfigDir } from "../config";
 import { atomicWriteFile } from "../config/atomic-write";
 
 const MAX_SERVICE_API_TOKEN_BYTES = 512;
+// Persisted tokens include the single trailing newline written by this module.
+const MAX_SERVICE_API_TOKEN_FILE_BYTES = MAX_SERVICE_API_TOKEN_BYTES + 1;
 
 export interface PersistedServiceApiToken {
   path: string;
@@ -28,6 +30,23 @@ export function serviceApiTokenFingerprint(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
+function readTokenValue(contents: string): string | null {
+  const token = contents.trim();
+  if (!token || /[\r\n\0]/.test(token) || Buffer.byteLength(token) > MAX_SERVICE_API_TOKEN_BYTES) {
+    return null;
+  }
+  return token;
+}
+
+function isSafeServiceTokenFile(stat: Stats): boolean {
+  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_SERVICE_API_TOKEN_FILE_BYTES) {
+    return false;
+  }
+  if (process.platform === "win32") return true;
+  const uid = process.getuid?.();
+  return (stat.mode & 0o077) === 0 && (uid === undefined || stat.uid === uid);
+}
+
 export function readServiceApiTokenState(): ServiceApiTokenState {
   const path = serviceApiTokenFilePath();
   if (!existsSync(path)) return { kind: "absent" };
@@ -37,12 +56,12 @@ export function readServiceApiTokenState(): ServiceApiTokenState {
   } catch {
     return { kind: "unsafe", reason: "service token path could not be inspected" };
   }
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_SERVICE_API_TOKEN_BYTES) {
-    return { kind: "unsafe", reason: "service token path is not a bounded regular file" };
+  if (!isSafeServiceTokenFile(stat)) {
+    return { kind: "unsafe", reason: "service token path is not an owner-only bounded regular file" };
   }
   try {
-    const token = readFileSync(path, "utf8").trim();
-    if (!token) return { kind: "unsafe", reason: "service token file is empty" };
+    const token = readTokenValue(readFileSync(path, "utf8"));
+    if (!token) return { kind: "unsafe", reason: "service token file is invalid" };
     return { kind: "present", token, fingerprint: serviceApiTokenFingerprint(token) };
   } catch {
     return { kind: "unsafe", reason: "service token file could not be read" };
@@ -98,13 +117,12 @@ export function readTokenBackupState(): ServiceApiTokenState {
   let stat;
   try { stat = lstatSync(path); }
   catch { return { kind: "unsafe", reason: "service token backup could not be inspected" }; }
-  if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_SERVICE_API_TOKEN_BYTES
-    || (process.platform !== "win32" && (stat.mode & 0o077) !== 0)) {
+  if (!isSafeServiceTokenFile(stat)) {
     return { kind: "unsafe", reason: "service token backup is not an owner-only bounded regular file" };
   }
   try {
-    const token = readFileSync(path, "utf8").trim();
-    if (!token || /[\r\n\0]/.test(token)) return { kind: "unsafe", reason: "service token backup is invalid" };
+    const token = readTokenValue(readFileSync(path, "utf8"));
+    if (!token) return { kind: "unsafe", reason: "service token backup is invalid" };
     return { kind: "present", token, fingerprint: serviceApiTokenFingerprint(token) };
   } catch {
     return { kind: "unsafe", reason: "service token backup could not be read" };
@@ -170,15 +188,16 @@ export function removeServiceApiTokenFileIfOwned(
  * App-side service token loading (WinSW native mode has no batch wrapper to read the
  * token file into the environment). Pure: returns the token or null — the CALLER
  * assigns it to process.env.OPENCODEX_API_AUTH_TOKEN. Loads only when the env token
- * is empty and OCX_API_TOKEN_FILE names a readable file.
+ * is empty and OCX_API_TOKEN_FILE names a bounded regular file (never a symlink).
  */
 export function loadServiceTokenFromFile(env: Record<string, string | undefined>): string | null {
   if (env.OPENCODEX_API_AUTH_TOKEN?.trim()) return null;
   const file = env.OCX_API_TOKEN_FILE?.trim();
   if (!file) return null;
   try {
-    const token = readFileSync(file, "utf8").trim();
-    return token || null;
+    const stat = lstatSync(file);
+    if (!isSafeServiceTokenFile(stat)) return null;
+    return readTokenValue(readFileSync(file, "utf8"));
   } catch {
     return null;
   }
@@ -194,9 +213,8 @@ export function readInstalledServiceToken(): string | null {
   try {
     const path = serviceApiTokenFilePath();
     const stat = lstatSync(path);
-    if (stat.isSymbolicLink() || !stat.isFile() || stat.size > MAX_SERVICE_API_TOKEN_BYTES) return null;
-    const token = readFileSync(path, "utf8").trim();
-    return token || null;
+    if (!isSafeServiceTokenFile(stat)) return null;
+    return readTokenValue(readFileSync(path, "utf8"));
   } catch {
     return null;
   }
