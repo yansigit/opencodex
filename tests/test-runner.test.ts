@@ -875,9 +875,13 @@ describe("bun test user lock", () => {
   test("one run owns the lock while sibling workers with its run ID join", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
+    // Lock semantics must not depend on the environment of the runner that is
+    // executing this test file. Hosted CI deliberately disables its redundant
+    // outer queue, while these unit cases still need to exercise the queue.
+    const env: NodeJS.ProcessEnv = {};
     try {
-      const owner = await acquireTestRunLock({ runId: "suite-a", lockPath, pollMs: 5, maxWaitMs: 50 });
-      const sibling = await acquireTestRunLock({ runId: "suite-a", lockPath, pollMs: 5, maxWaitMs: 50 });
+      const owner = await acquireTestRunLock({ runId: "suite-a", lockPath, pollMs: 5, maxWaitMs: 50, env });
+      const sibling = await acquireTestRunLock({ runId: "suite-a", lockPath, pollMs: 5, maxWaitMs: 50, env });
       expect(owner.acquired).toBe(true);
       expect(sibling.acquired).toBe(false);
       sibling.release();
@@ -892,13 +896,15 @@ describe("bun test user lock", () => {
   test("an inherited worker can only join the exact live wrapper owner", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
+    const env: NodeJS.ProcessEnv = {};
     try {
-      const owner = await acquireTestRunLock({ runId: "wrapped", lockPath, pollMs: 5, maxWaitMs: 50 });
+      const owner = await acquireTestRunLock({ runId: "wrapped", lockPath, pollMs: 5, maxWaitMs: 50, env });
       expect(owner.owner).not.toBeNull();
       const sibling = await acquireTestRunLock({
         runId: "wrapped",
         lockPath,
         joinExistingOwnerToken: owner.owner!.token,
+        env,
       });
       expect(sibling.acquired).toBe(false);
       const wrongToken = owner.owner!.token === "57f44b0e-b750-4bd2-b23d-4a035e75da18"
@@ -909,6 +915,7 @@ describe("bun test user lock", () => {
         runId: "wrapped",
         lockPath,
         joinExistingOwnerToken: wrongToken,
+        env,
       })).rejects.toThrow("refusing to create or reclaim");
 
       owner.release();
@@ -917,6 +924,7 @@ describe("bun test user lock", () => {
         runId: "wrapped",
         lockPath,
         joinExistingOwnerToken: owner.owner!.token,
+        env,
       })).rejects.toThrow("refusing to create or reclaim");
       expect(existsSync(lockPath)).toBe(false);
     } finally {
@@ -927,6 +935,7 @@ describe("bun test user lock", () => {
   test("a dead owner is reclaimed even when the next bare invocation derives the same run ID", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
+    const env: NodeJS.ProcessEnv = {};
     try {
       const stale = await acquireTestRunLock({
         runId: "stale",
@@ -934,8 +943,9 @@ describe("bun test user lock", () => {
         lockPath,
         pollMs: 5,
         maxWaitMs: 50,
+        env,
       });
-      const replacement = await acquireTestRunLock({ runId: "stale", lockPath, pollMs: 5, maxWaitMs: 50 });
+      const replacement = await acquireTestRunLock({ runId: "stale", lockPath, pollMs: 5, maxWaitMs: 50, env });
       expect(replacement.acquired).toBe(true);
       stale.release();
       expect(existsSync(lockPath)).toBe(true);
@@ -949,14 +959,16 @@ describe("bun test user lock", () => {
   test("a live competing run fails closed after the bounded wait", async () => {
     const root = mkdtempSync(join(tmpdir(), "opencodex-test-lock-"));
     const lockPath = join(root, "suite.lock");
+    const env: NodeJS.ProcessEnv = {};
     try {
-      const owner = await acquireTestRunLock({ runId: "live", lockPath, pollMs: 5, maxWaitMs: 50 });
+      const owner = await acquireTestRunLock({ runId: "live", lockPath, pollMs: 5, maxWaitMs: 50, env });
       let waits = 0;
       await expect(acquireTestRunLock({
         runId: "blocked",
         lockPath,
         pollMs: 5,
         maxWaitMs: 20,
+        env,
         onWait: () => { waits += 1; },
       })).rejects.toThrow("timed out");
       expect(waits).toBe(1);
