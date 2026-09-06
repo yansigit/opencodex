@@ -77,6 +77,7 @@ import { registerTurn, trackStreamLifetime, unregisterTurn } from "../lifecycle"
 import { redactSecretString } from "../../lib/redact";
 import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { supportedLadderFor } from "../effort-policy";
+import { resolveNativeDefaultState, type NativeDefaultState } from "../../codex/subagent-defaults";
 import {
   beginRequestAttempt,
   catalogModelSupportsServiceTier,
@@ -280,11 +281,18 @@ export interface MultiAgentGuidanceOptions {
   subagentModels?: string[];
   subagentModelFallback?: string[];
   injectionPrompt?: string;
+  nativeDefaultState?: NativeDefaultState;
+  syncCodexSubagentDefaults?: boolean;
 }
 
 
 
 export interface MultiAgentGuidanceDeps {
+  resolveNativeDefaultState?: (config: {
+    injectionModel?: string;
+    injectionEffort?: string;
+    syncCodexSubagentDefaults?: boolean;
+  }) => NativeDefaultState | Promise<NativeDefaultState>;
   resolveEffectiveSubagentRoster?: (
     configuredModels: readonly string[],
     surface: SpawnAgentSurface,
@@ -371,6 +379,8 @@ export async function multiAgentGuidanceText(
     subagentModels,
     subagentModelFallback,
     injectionPrompt,
+    nativeDefaultState: configuredNativeDefaultState,
+    syncCodexSubagentDefaults,
   } = options;
   const activeAccountNamespace = codexAccountNamespace?.length
     ? codexAccountNamespace
@@ -403,6 +413,10 @@ export async function multiAgentGuidanceText(
     if (catalogState.state === "stale" || catalogState.state === "unknown") {
       return null;
     }
+    const nativeDefaultState = configuredNativeDefaultState
+      ?? await (deps.resolveNativeDefaultState ?? resolveNativeDefaultState)({
+        injectionModel, injectionEffort, syncCodexSubagentDefaults,
+      });
     // codex-rs supplies the Proactive text on v2; the proxy only adds model-designation
     // guidance, and only when there is something concrete to designate: a configured
     // injectionModel and/or a roster entry that resolves in the injected catalog.
@@ -468,7 +482,7 @@ export async function multiAgentGuidanceText(
       // fallback only for explicit routed/account-qualified ids.
       const promptModel = preferred?.model
         ?? (injectionModel?.includes("/") ? injectionModel : undefined);
-      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance)}</multi_agent_mode>`;
+      return `<multi_agent_mode>${applyInjectionPlaceholders(injectionPrompt, promptModel, injectionEffort, roster, fallbackGuidance, nativeDefaultState)}</multi_agent_mode>`;
     }
     if (!preferred && roster === "" && fallbackGuidance === "") return null;
     let text = "When the active spawn_agent tool supports optional \"model\" or \"reasoning_effort\" overrides, "
@@ -479,7 +493,8 @@ export async function multiAgentGuidanceText(
     if (preferred) {
       text += ` Preferred sub-agent: model "${preferred.model}"`
         + (injectionEffort ? `, reasoning_effort "${injectionEffort}"` : "")
-        + " — use it unless the user names another.";
+        + `; nativeDefaultState: ${nativeDefaultState}.`
+        + " — use it unless the user names another. Confirm a different listed model for one spawn only; do not persist the exception.";
     }
     text += fallbackGuidance;
     text += roster;
@@ -501,12 +516,13 @@ export async function multiAgentGuidanceText(
 
 export const V2_GUIDANCE_CHAR_BUDGET = 700;
 
-export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string): string {
+export function applyInjectionPlaceholders(prompt: string, model?: string, effort?: string, roster?: string, fallback?: string, nativeDefaultState?: NativeDefaultState): string {
   return prompt
     .replaceAll("{{model}}", model ?? "")
     .replaceAll("{{effort}}", effort ?? "")
     .replaceAll("{{roster}}", roster ?? "")
-    .replaceAll("{{fallback}}", fallback ?? "");
+    .replaceAll("{{fallback}}", fallback ?? "")
+    .replaceAll("{{nativeDefaultState}}", nativeDefaultState ?? "");
 }
 
 
