@@ -600,7 +600,7 @@ kimlik/ad içermeyen `tool_use`; ad içermeyen adlandırılmış `tool_choice`.
 | Kalp atışı (Heartbeat) | `ping` |
 | Metin farkları | `content_block_start` → `content_block_delta` (metin) → `content_block_stop` |
 | Akıl yürütme özeti/metni | Tekrarlanan imzayı veya sınırlı bir `ocxr1` yedeğini taşıyan `thinking` bloğu |
-| Düzenlenmiş akıl yürütme | Akıl yürütme zarfından yeniden oynatılan `redacted_thinking` blokları |
+| Gizli akıl yürütme | Akıl yürütme zarfından yeniden oynatılan `redacted_thinking` blokları |
 | Fonksiyon çağrısı çerçeveleri | `input_json_delta` ile `tool_use` bloğu |
 | Terminal olayı | `message_delta` → `message_stop` |
 | Terminalden önce EOF | 502 tarzı `api_error` |

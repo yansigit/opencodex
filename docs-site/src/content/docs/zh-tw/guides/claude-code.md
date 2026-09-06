@@ -438,7 +438,7 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 | 心跳 | `ping` |
 | 文字增量 | `content_block_start` → `content_block_delta`（文字）→ `content_block_stop` |
 | 推理摘要/文字 | 帶重播簽名或有界 `ocxr1` 備援信封的 `thinking` 塊 |
-| 已編輯推理 | 從推理信封重播的 `redacted_thinking` 塊 |
+| 遮蔽推理 | 從推理信封重播的 `redacted_thinking` 塊 |
 | Function-call 幀 | 帶 `input_json_delta` 的 `tool_use` 塊 |
 | 終止事件 | `message_delta` → `message_stop` |
 | 在終止事件前 EOF | 502 風格的 `api_error` |

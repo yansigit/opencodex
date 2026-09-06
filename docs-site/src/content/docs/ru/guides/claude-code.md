@@ -411,7 +411,7 @@ id/name; именованный `tool_choice` без имени.
 | Heartbeat | `ping` |
 | Текстовые дельты | `content_block_start` → `content_block_delta` (text) → `content_block_stop` |
 | Резюме/текст рассуждений | Блок `thinking` с повторно переданной подписью или ограниченным резервным конвертом `ocxr1` |
-| Отредактированное рассуждение | Блоки `redacted_thinking`, воспроизведённые из конверта рассуждений |
+| Скрытое рассуждение | Блоки `redacted_thinking`, воспроизведённые из конверта рассуждений |
 | Кадры function-call | Блок `tool_use` с `input_json_delta` |
 | Завершающее событие | `message_delta` → `message_stop` |
 | EOF до завершающего события | `api_error` в стиле 502 |

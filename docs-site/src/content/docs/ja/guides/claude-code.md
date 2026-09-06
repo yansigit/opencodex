@@ -385,7 +385,7 @@ role、`tool_use_id` のない `tool_result`、id/name のない `tool_use`、na
 | Heartbeat | `ping` |
 | テキスト delta | `content_block_start` → `content_block_delta`(text) → `content_block_stop` |
 | 推論要約/テキスト | 再生されたシグネチャ、または境界付き `ocxr1` フォールバックを持つ `thinking` ブロック |
-| 編集済み推論 | 推論エンベロープから再生される `redacted_thinking` ブロック |
+| 秘匿化された推論 | 推論エンベロープから再生される `redacted_thinking` ブロック |
 | Function-call フレーム | `input_json_delta` を持つ `tool_use` ブロック |
 | 終了イベント | `message_delta` → `message_stop` |
 | 終了前に EOF | 502 形式 `api_error` |
