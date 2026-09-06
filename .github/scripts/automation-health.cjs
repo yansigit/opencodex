@@ -210,6 +210,8 @@ function shaRelation({ branchShas, compare }) {
   const dev = branchShas?.dev ?? null;
   const main = branchShas?.main ?? null;
   const status = compare?.status || (dev && main ? (dev === main ? "identical" : "different") : "unknown");
+  const baseTreeSha = compare?.base_commit?.commit?.tree?.sha ?? null;
+  const mergeBaseTreeSha = compare?.merge_base_commit?.commit?.tree?.sha ?? null;
   return {
     dev,
     main,
@@ -217,6 +219,12 @@ function shaRelation({ branchShas, compare }) {
     aheadBy: Number.isInteger(compare?.ahead_by) ? compare.ahead_by : null,
     behindBy: Number.isInteger(compare?.behind_by) ? compare.behind_by : null,
     mergeBaseSha: compare?.merge_base_commit?.sha ?? null,
+    treesIdentical: Boolean(
+      compare?.base_commit?.sha === main &&
+      compare?.merge_base_commit?.sha === dev &&
+      baseTreeSha &&
+      baseTreeSha === mergeBaseTreeSha
+    ),
   };
 }
 
@@ -305,12 +313,17 @@ function promotionReconciliationPending({ relation, mainCiSignal, now }) {
     relation.aheadBy !== 0 ||
     relation.behindBy !== 1 ||
     relation.mergeBaseSha !== relation.dev ||
+    relation.treesIdentical !== true ||
     mainCiSignal?.matchesTip !== true ||
     latest?.headSha !== relation.main
   ) {
     return false;
   }
-  if (latest.status !== "completed") return mainCiSignal.status !== "alert";
+  if (latest.status === "queued" || latest.status === "in_progress") {
+    const observedAt = asTime(latest.updatedAt) ?? asTime(latest.createdAt);
+    return observedAt !== null && nowMs - observedAt <= PROMOTION_RECONCILIATION_GRACE_MS;
+  }
+  if (latest.status !== "completed") return false;
   if (latest.conclusion !== "success") return false;
   const observedAt = asTime(latest.updatedAt) ?? asTime(latest.createdAt);
   return observedAt !== null && nowMs - observedAt <= PROMOTION_RECONCILIATION_GRACE_MS;
@@ -364,6 +377,20 @@ function evaluateHealth({ now, workflowRuns, ciRuns, branchShas, compare, pullRe
 
   const relation = shaRelation({ branchShas, compare });
   const prs = openPromotionSyncPrs({ pullRequests, repository });
+  const reconciliationPending = promotionReconciliationPending({
+    relation,
+    mainCiSignal: workflowSignals["ci.yml"].branches.main,
+    now: atMs,
+  });
+  if (reconciliationPending && workflowSignals["ci.yml"].branches.main.status === "alert") {
+    workflowSignals["ci.yml"].branches.main.status = "warning";
+    workflowSignals["ci.yml"].branches.main.reason =
+      "exact-tip main CI is active while the tree-identical promotion awaits protected dev reconciliation";
+    workflowSignals["ci.yml"].status = Object.values(workflowSignals["ci.yml"].branches)
+      .some(signal => signal.status === "alert")
+      ? "alert"
+      : "warning";
+  }
   const repositoryState = evaluateRepositoryState({
     relation,
     prs,
