@@ -74,7 +74,7 @@ export interface OcxParsedRequest {
   _cursorConversationId?: string;
   /** Stable upstream client thread identity, used only to derive provider-scoped continuation ids. */
   _clientThreadId?: string;
-  /** True when promptCacheKey is a shared cache cohort rather than a conversation identity. */
+  /** True when promptCacheKey identifies a shared cache cohort rather than one conversation. */
   _promptCacheKeyIsSharedCohort?: boolean;
   /** Provider-private Command Code session affinity id, stable across in-process request mutation. */
   _commandCodeSessionId?: string;

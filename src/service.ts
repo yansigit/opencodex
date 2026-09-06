@@ -1924,7 +1924,7 @@ export function buildWindowsTaskXml(
     <Enabled>true</Enabled>
     <Hidden>false</Hidden>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <Priority>4</Priority>
     <RestartOnFailure>
       <Interval>PT1M</Interval>
       <Count>3</Count>
@@ -2923,6 +2923,10 @@ export async function repairService(deps: RepairServiceDeps = {}): Promise<void>
     const identityUpgradeNeeded = registrationHealthy
       && preferredSid !== undefined
       && !windowsTaskHasSessionRecoveryTriggers(triggers, preferredSid);
+    // Omitted Priority also defaults to 7; background priority can starve health probes under CPU load.
+    const priorityUpgradeNeeded = registrationHealthy && taskXmlOptionalValueEquals(
+      taskXmlSection(taskXmlWithoutCommentsAndCdata(registeredXml), "Settings"), "Priority", "7",
+    );
     const refreshableLegacy = windowsTaskRegistrationRefreshableLegacy(
       registeredXml,
       deps.schedulerWscript,
@@ -2949,7 +2953,7 @@ export async function repairService(deps: RepairServiceDeps = {}): Promise<void>
     // Re-register only when the registered XML is actually stale, so the ordinary repair
     // stays free of `schtasks /create` and its UAC prompt.
     let startExpectedXml = registeredXml;
-    if (!registrationHealthy || identityUpgradeNeeded) {
+    if (!registrationHealthy || identityUpgradeNeeded || priorityUpgradeNeeded) {
       // The task was stopped above, so a failed replacement must not exit here: `/create /f`
       // can be rejected, elevation can be cancelled, and staging or verification can fail.
       // Any of those would leave a previously runnable proxy stopped and the user worse off

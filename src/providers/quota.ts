@@ -10,7 +10,7 @@ import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { codexPlanKey } from "../codex/plan";
 import { resolveProviderApiKey } from "./key-store";
-import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, getValidAccessTokenSnapshotForAccount, type OAuthAccessSnapshot } from "../oauth";
+import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, getValidAccessSnapshotForAccount, type OAuthAccessSnapshot } from "../oauth";
 import { getAccountCredential, getAccountSet } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
 import {
@@ -2658,11 +2658,22 @@ function parseAntigravityQuotaSummary(body: Record<string, unknown> | null): Pro
 }
 
 const ANTIGRAVITY_ACCOUNT_QUOTA_BASE = "https://daily-cloudcode-pa.googleapis.com";
-let antigravityOutboundDependencies: ProviderOutboundDependencies = {};
+const ANTIGRAVITY_QUOTA_SUMMARY_URL = `${ANTIGRAVITY_ACCOUNT_QUOTA_BASE}/v1internal:retrieveUserQuotaSummary`;
+const ANTIGRAVITY_QUOTA_MODELS_URL = `${ANTIGRAVITY_ACCOUNT_QUOTA_BASE}/v1internal:fetchAvailableModels`;
 
-/** Test seam: inject resolver/pinned transport for the per-account Antigravity probe. */
+/** Only these fixed accounting destinations may use transparent Fake-IP DNS. */
+export function isCanonicalAntigravityQuotaUrl(name: string, url: string): boolean {
+  return name === "google-antigravity"
+    && (url === ANTIGRAVITY_QUOTA_SUMMARY_URL || url === ANTIGRAVITY_QUOTA_MODELS_URL);
+}
+
+let antigravityOutboundDependencies: ProviderOutboundDependencies = {
+  isCanonicalUrl: isCanonicalAntigravityQuotaUrl,
+};
+
+/** Test seam: inject resolver/pinned transport for provider and per-account probes. */
 export function setAntigravityAccountQuotaTransportForTests(dependencies: ProviderOutboundDependencies | null): void {
-  antigravityOutboundDependencies = dependencies ?? {};
+  antigravityOutboundDependencies = { ...dependencies, isCanonicalUrl: isCanonicalAntigravityQuotaUrl };
 }
 
 type AntigravitySummaryProbe =
@@ -2671,7 +2682,7 @@ type AntigravitySummaryProbe =
   | { kind: "unavailable" };
 
 async function fetchAntigravitySummaryQuota(accessToken: string, projectId: string): Promise<AntigravitySummaryProbe> {
-  const summaryUrl = `${ANTIGRAVITY_ACCOUNT_QUOTA_BASE}/v1internal:retrieveUserQuotaSummary`;
+  const summaryUrl = ANTIGRAVITY_QUOTA_SUMMARY_URL;
   try {
     const summaryResponse = await providerOutboundPost("google-antigravity", { baseUrl: ANTIGRAVITY_ACCOUNT_QUOTA_BASE }, summaryUrl, {
       headers: {
@@ -2705,7 +2716,7 @@ export async function fetchAntigravityUsageQuota(accessToken: string, projectId:
   if (summary.kind === "terminal") return null;
   if (summary.kind === "quota") return summary.quota;
 
-  const url = `${ANTIGRAVITY_ACCOUNT_QUOTA_BASE}/v1internal:fetchAvailableModels`;
+  const url = ANTIGRAVITY_QUOTA_MODELS_URL;
   const response = await providerOutboundPost("google-antigravity", { baseUrl: ANTIGRAVITY_ACCOUNT_QUOTA_BASE }, url, {
     headers: {
       Accept: "application/json",
@@ -2726,7 +2737,7 @@ export async function fetchAntigravityUsageQuota(accessToken: string, projectId:
 async function fetchAntigravityAccountQuota(accountId: string): Promise<ProviderQuota | null> {
   let snapshot: OAuthAccessSnapshot;
   try {
-    snapshot = await getValidAccessTokenSnapshotForAccount("google-antigravity", accountId);
+    snapshot = await getValidAccessSnapshotForAccount("google-antigravity", accountId);
   } catch {
     return null;
   }

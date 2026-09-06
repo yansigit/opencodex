@@ -9,9 +9,6 @@ import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
 import { waitForProviderRequestSlot } from "../../providers/request-pacing";
 import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
-import { providerTlsFetch } from "../../lib/provider-tls-profile";
-import { testProviderFetch } from "../../lib/test-provider-fetch";
-import { runtimeProviderFetch } from "../../lib/provider-runtime-fetch";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 
 export { withUpstreamHttpVersion };
@@ -55,25 +52,17 @@ export interface PaceAwareFetch {
 
 export type ProviderFetch = typeof globalThis.fetch & PaceAwareFetch;
 
-export class UpstreamRedirectError extends Error {
-  override readonly name = "UpstreamRedirectError";
-
-  constructor(readonly status: number) {
-    super(`upstream returned ${status} redirect; configure the final upstream URL directly`);
-  }
-}
-
 export interface ProviderFetchOptions {
   providerName?: string;
   modelId?: string;
   /** One pacing slot was acquired immediately before this fetch wrapper was created. */
   pacingSlotAcquired?: boolean;
-  /** Explicit test/integration executor; never read from serialized provider config. */
-  fetch?: typeof globalThis.fetch;
   /** Captured selected-account observer, attached before the native WS send. */
   onCodexWsQuota?: CodexWsQuotaObserver;
   /** Synchronous admission at actual credential dispatch, after pacing/backoff. */
   beforeDispatch?: (headers: Headers) => void;
+  /** Revalidate/rebuild a queued request at its physical send boundary, after pacing. */
+  dispatchOverride?: (input: Parameters<typeof globalThis.fetch>[0], init: RequestInit, execute: typeof globalThis.fetch) => Promise<Response>;
 }
 
 export function providerFetch(
@@ -81,17 +70,17 @@ export function providerFetch(
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   options: ProviderFetchOptions = {},
 ): ProviderFetch {
-  const base = options.fetch ?? testProviderFetch(provider) ?? runtimeProviderFetch(provider, options.providerName) ?? globalThis.fetch;
+  const base = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
   };
-  const transport = options.providerName
-    ? providerTlsFetch(options.providerName, provider, base)
-    : base;
   const httpFetch = Object.assign(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
-      return transport(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 });
+      const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
+      return options.dispatchOverride
+        ? options.dispatchOverride(input, dispatchInit, base)
+        : base(input, dispatchInit);
     },
     { preconnect },
   ) as typeof globalThis.fetch;
@@ -100,19 +89,12 @@ export function providerFetch(
   // else keeps the provider's HTTP fetch. See ws-upstream.ts for the details.
   const unpaced = async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
     const upstreamWebsocket = provider.upstreamWebsocket === true;
-    const wsOpts = {
-      // Keep the canonical ChatGPT fast lane independent: upstreamWebsocket opts a
-      // configured HTTPS /responses endpoint in, but must not silently enable Codex WS.
-      wsUpstream: provider.wsUpstream,
-      maxWsFrameBytes: provider.maxWsFrameBytes,
-      upstreamWebsocket,
-    };
-    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, wsOpts)) {
+    if (typeof input === "string" && init && shouldUseCodexWsUpstream(input, init, runtime, upstreamWebsocket)) {
       // The fallback has to be the same HTTP fetch the non-WS branch would have
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOpts, options.onCodexWsQuota, options.beforeDispatch);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, options.onCodexWsQuota, options.beforeDispatch);
     }
     return httpFetch(input, init);
   };
@@ -188,7 +170,7 @@ export async function fetchWithHeaderTimeout(
   timeoutMs: number,
   preferIdentityEncoding = false,
   executor: typeof globalThis.fetch = globalThis.fetch,
-  _manualRedirect = true,
+  manualRedirect = false,
 ): Promise<Response> {
   const pacing = executor as ProviderFetch;
   await pacing.waitForPacing?.(abortSignal);
@@ -204,20 +186,16 @@ export async function fetchWithHeaderTimeout(
     headers.set("accept-encoding", "identity");
   }
   try {
-    const response = await fetchExecutor(url, {
+    return await fetchExecutor(url, {
       ...init,
       headers,
-      // Upstream URLs are configuration, not navigation. Refuse every redirect
-      // so POST bodies and provider headers are never replayed to another hop.
-      redirect: "manual",
+      // Credential-bearing sends opt into manual redirects so a 3xx is relayed
+      // as a Response instead of being followed into a rejection that is
+      // indistinguishable from a pre-connection failure (#914).
+      ...(manualRedirect ? { redirect: "manual" as const } : {}),
       signal: AbortSignal.any([abortSignal, timeout.signal]),
       timeout: 0,
     });
-    if (response.status >= 300 && response.status < 400) {
-      try { await response.body?.cancel(); } catch { /* ignore cancellation failures */ }
-      throw new UpstreamRedirectError(response.status);
-    }
-    return response;
   } finally {
     clearTimeout(timer);
   }

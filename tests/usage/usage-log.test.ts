@@ -7,12 +7,13 @@ import {
   appendUsageEntry,
   currentUsageLogRevision,
   normalizeUsageEntryForTest,
+  normalizeClaudeCompatibilityUsageLog,
+  normalizePersistedUsageRow,
   readRecentUsageEntries,
   readUsageEntries,
   readUsageEntriesForManagement,
   readUsageSnapshotForManagement,
   resetUsageReadCacheForTests,
-  setManagementUsageReadOpenedSizeForTests,
   usageForFinalLog,
   usageLogPath,
   usageStatusForFinalLog,
@@ -40,51 +41,65 @@ afterEach(() => {
 });
 
 describe("usage log", () => {
-  test("normalizes Routed V2 bridge diagnostics as closed enums", () => {
-    const base = {
-      requestId: "ocx-v2-bridge",
-      timestamp: 1,
-      provider: "openai",
-      model: "gpt-test",
-      status: 200,
-      durationMs: 1,
-      usageStatus: "unreported" as const,
-    };
-    expect(normalizeUsageEntryForTest({
-      ...base,
-      v2BridgeScope: "root",
-      v2BridgeDecision: "no_collaboration_catalog",
-      v2BridgeStateDurability: "memory-only",
-    })).toMatchObject({
-      v2BridgeScope: "root",
-      v2BridgeDecision: "no_collaboration_catalog",
-      v2BridgeStateDurability: "memory-only",
+  test("Claude shadow metadata round trips as closed codes and a regenerated reason", () => {
+    const evidence = normalizeClaudeCompatibilityUsageLog({
+      decision: "shadow", featureCodes: ["unknown_beta", "documents", "documents", "private-header", "__proto__"],
+      reason: "private-reason", extra: "private-payload",
     });
-    const invalid = normalizeUsageEntryForTest({
-      ...base,
-      v2BridgeScope: "secret",
-      v2BridgeDecision: "secret",
-      v2BridgeStateDurability: "secret",
-    } as unknown as PersistedUsageEntry);
-    expect(invalid).not.toHaveProperty("v2BridgeScope");
-    expect(invalid).not.toHaveProperty("v2BridgeDecision");
-    expect(invalid).not.toHaveProperty("v2BridgeStateDurability");
+    const expected = { decision: "shadow", featureCodes: ["documents", "unknown_beta"], reason: "shadow: would reject: documents" };
+    expect(evidence).toEqual(expected);
+    appendUsageEntry({ requestId: "claude-shadow", timestamp: 1, provider: "mock", model: "test-model",
+      status: 200, durationMs: 1, usageStatus: "reported", usage: { inputTokens: 3, outputTokens: 2 },
+      claudeCompatibility: evidence });
+    // Later mutation of the caller's evidence cannot rewrite the serialized record.
+    evidence!.featureCodes.length = 0;
+    resetUsageReadCacheForTests();
+    expect(readUsageEntries()[0]?.claudeCompatibility).toEqual(expected);
+    expect(readRecentUsageEntries(1)[0]?.claudeCompatibility).toEqual(expected);
+    expect(readUsageEntries()[0]?.usage).toMatchObject({ inputTokens: 3, outputTokens: 2 });
+    expect(readFileSync(usageLogPath(), "utf8")).not.toContain("private-");
   });
 
-  test("round-trips agentKind and drops invalid historical values", () => {
-    const base = {
-      requestId: "ocx-agent-kind",
-      timestamp: 1,
-      provider: "openai",
-      model: "gpt-test",
-      status: 200,
-      durationMs: 1,
-      usageStatus: "reported" as const,
+  test("legacy and malformed persisted Claude metadata does not poison readers", () => {
+    const base = { requestId: "claude-legacy", timestamp: 1, provider: "mock", model: "test-model",
+      status: 200, durationMs: 1, usageStatus: "unreported" };
+    const invalid: unknown[] = [undefined, null, [], "private-value", 1,
+      { decision: "reject", featureCodes: ["documents"] },
+      { decision: "shadow", featureCodes: "documents" },
+      { decision: "shadow", featureCodes: [null, {}, "constructor", "private-header"] },
+      { decision: "shadow", featureCodes: ["cache_control"], reason: "private-reason" },
+    ];
+    for (const claudeCompatibility of invalid) {
+      const row = normalizePersistedUsageRow({ ...base, claudeCompatibility });
+      expect(row).toBeDefined();
+      expect(row?.claudeCompatibility).toBeUndefined();
+    }
+    writeFileSync(usageLogPath(), invalid.map(claudeCompatibility => JSON.stringify({ ...base, claudeCompatibility })).join("\n") + "\n");
+    resetUsageReadCacheForTests();
+    expect(readUsageEntries()).toHaveLength(invalid.length);
+    expect(readUsageEntries().every(row => row.claudeCompatibility === undefined)).toBe(true);
+  });
+
+  test("round trips only recognized per-attempt xAI credential sources", () => {
+    const attempt = {
+      ordinal: 1, provider: "xai", model: "grok-test", adapter: "openai-chat", status: 200,
+      durationMs: 1, sendCount: 1, recoveryKinds: [], usageStatus: "reported" as const,
+      usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 }, totalTokens: 5,
     };
-    expect(normalizeUsageEntryForTest({ ...base, agentKind: "subagent" })).toMatchObject({ agentKind: "subagent" });
-    expect(normalizeUsageEntryForTest({ ...base, agentKind: "corrupt" } as unknown as PersistedUsageEntry)).not.toHaveProperty("agentKind");
-    appendUsageEntry({ ...base, agentKind: "internal" });
-    expect(readUsageEntries()[0]).toMatchObject({ agentKind: "internal" });
+    appendUsageEntry({
+      requestId: "credential-source", timestamp: Date.now(), provider: "combo", model: "combo/test",
+      status: 200, durationMs: 1, usageStatus: "reported", attempts: [
+        { ...attempt, credentialSource: "grok-oauth" },
+        { ...attempt, ordinal: 2, credentialSource: "xai-api-key" },
+        { ...attempt, ordinal: 3, credentialSource: "secret-canary" as never },
+        { ...attempt, ordinal: 4, provider: "custom", credentialSource: "grok-oauth" },
+        { ...attempt, ordinal: 5 },
+      ],
+    });
+    resetUsageReadCacheForTests();
+    const sources = readUsageEntries()[0]?.attempts?.map(row => row.credentialSource);
+    expect(sources).toEqual(["grok-oauth", "xai-api-key", undefined, undefined, undefined]);
+    expect(readFileSync(usageLogPath(), "utf8")).not.toContain("secret-canary");
   });
 
   test("preserves explicitly empty attempts through normalization", () => {
@@ -160,32 +175,6 @@ describe("usage log", () => {
     };
     appendUsageEntry(entry);
     expect(readUsageEntries()[0]?.attempts?.[0]?.recoveryKinds).toEqual(["rate-limit-429"]);
-  });
-
-  test("persists the Cursor duplicate-tool recovery kind on attempts", () => {
-    const entry: PersistedUsageEntry = {
-      requestId: "ocx-cursor-duplicate-tool-kind",
-      timestamp: 1,
-      provider: "cursor",
-      model: "cursor/grok-4.6",
-      status: 200,
-      durationMs: 4,
-      usageStatus: "reported",
-      attempts: [{
-        ordinal: 1,
-        provider: "cursor",
-        model: "cursor/grok-4.6",
-        adapter: "cursor",
-        status: 200,
-        durationMs: 4,
-        sendCount: 2,
-        recoveryKinds: ["cursor-duplicate-tool-call"],
-        usageStatus: "reported",
-      }],
-    };
-    appendUsageEntry(entry);
-    expect(readUsageEntries()[0]?.attempts?.[0]?.recoveryKinds)
-      .toEqual(["cursor-duplicate-tool-call"]);
   });
 
   test("persists the key-401 recovery kind on attempts", () => {
@@ -361,24 +350,18 @@ describe("usage log", () => {
     }
   });
 
-  test("a shrunk ledger does not join its previous in-flight read", async () => {
-    // Exercise the production same-identity shrink branch without truncating while
-    // the cooperative reader owns a Windows handle. Bun can deadlock that artificial
-    // same-file mutation before the cache-replacement behavior is ever reached.
+  test("a replacement does not join an in-flight read for the previous file revision", async () => {
     writeFileSync(
       usageLogPath(),
       `${Array.from({ length: 2_100 }, (_, index) => persistedLine(`old-${index}`)).join("\n")}\n`,
     );
     const oldRead = readUsageSnapshotForManagement();
     await new Promise<void>(resolve => setTimeout(resolve, 0));
-    const unchangedSize = statSync(usageLogPath()).size;
-    setManagementUsageReadOpenedSizeForTests(unchangedSize + 1);
+    writeFileSync(usageLogPath(), `${persistedLine("replacement")}\n`);
     const newRead = readUsageSnapshotForManagement();
-
     await expect(oldRead).rejects.toThrow("management usage read superseded");
     const newSnapshot = await newRead;
-    expect(newSnapshot.entries).toHaveLength(2_100);
-    expect(newSnapshot.entries.at(-1)?.requestId).toBe("old-2099");
+    expect(newSnapshot.entries.map(entry => entry.requestId)).toEqual(["replacement"]);
   });
 
   test("persists conversationId for Logs session correlation", () => {

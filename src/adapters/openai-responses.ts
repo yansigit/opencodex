@@ -1,3 +1,4 @@
+import { isOpenCodeGo, normalizeOpenCodeGoAgentMessages } from "./opencode-go";
 import { createHash } from "node:crypto";
 import type { IncomingMeta, ProviderAdapter } from "./base";
 import { namespacedToolName, type AdapterEvent, type OcxParsedRequest, type OcxProviderConfig, type OcxUsage, type TierDecision } from "../types";
@@ -47,7 +48,6 @@ export const FORWARD_HEADERS = [
   "x-codex-beta-features",
   "x-codex-installation-id",
   "x-codex-parent-thread-id",
-  "x-session-id",
   "x-codex-turn-metadata",
   "x-codex-turn-state",
   "x-codex-window-id",
@@ -616,23 +616,6 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /** Codex's reserved client-tool group on Responses Lite; carries no wire prefix. */
 const SPARK_RESERVED_FUNCTIONS_NAMESPACE = "functions";
-
-function isLiteSparkRequestBody(body: unknown): boolean {
-  if (!isPlainObject(body)) return false;
-  const model = typeof body.model === "string" ? body.model : "";
-  if (!model.includes("codex-spark")) return false;
-  const input = (body as Record<string, unknown>).input;
-  if (!Array.isArray(input)) return false;
-  for (const item of input) {
-    if (!isPlainObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) continue;
-    for (const tool of item.tools) {
-      if (isPlainObject(tool) && tool.type === "namespace" && tool.name === SPARK_RESERVED_FUNCTIONS_NAMESPACE) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
 
 /**
  * Apply the routed provider's real effort ladder to an existing Responses reasoning field.
@@ -2368,13 +2351,12 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       let routedCustomToolRepairNames: Set<string> | undefined;
       let convertedRoutedToolSearchNames: Set<string> | undefined;
       let convertedRoutedNamespaceToolAliases: Map<string, { namespace: string; name: string; kind: "function" | "custom" }> | undefined;
-      const canonicalSpark = isCanonicalOpenAiForwardProvider(provider)
-        && parsed.modelId.includes("codex-spark");
       const unexpandedMiss = !!parsed.previousResponseId && parsed._previousResponseInputExpanded !== true;
       let outBody = stripPreviousResponseId(
         parsed._rawBody,
         forward || parsed._previousResponseInputExpanded === true,
       );
+      if (!forward && isOpenCodeGo(provider.baseUrl)) outBody = normalizeOpenCodeGoAgentMessages(outBody);
       outBody = mapRoutedResponsesReasoningEffort(outBody, provider, parsed.modelId);
       // stripPreviousResponseId() intentionally returns its input on a no-op. Detach before the
       // tier write so a force-fast/default decision can never mutate parsed._rawBody.
@@ -2427,7 +2409,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = stripInternalChatMessageMetadataPassthrough(outBody);
         outBody = promoteClientLoadedTools(outBody);
       }
-      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
+      if (!isCanonicalOpenAiForwardProvider(provider)) {
         const rewritten = rewriteRoutedCustomToolsForUpstream(
           outBody,
           provider.supportsResponsesCustomTools,
@@ -2436,23 +2418,20 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         convertedRoutedCustomToolNames = rewritten.names;
         routedCustomToolRepairNames = rewritten.repairNames;
       }
-      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
+      if (!isCanonicalOpenAiForwardProvider(provider)) {
         // Run after custom-tool lowering so the search compatibility layer can choose a
         // collision-free public function name against the final routed function catalog.
         const rewritten = rewriteRoutedToolSearchForUpstream(outBody);
         outBody = rewritten.body;
         convertedRoutedToolSearchNames = rewritten.names;
       }
-      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
+      if (!isCanonicalOpenAiForwardProvider(provider)) {
         // Codex 0.147 emits private namespace tool groups, while public/third-party Responses
-        // gateways accept only flat tool variants. Spark keeps the reserved `functions` group intact
-        // (#3217) via stripSparkCompatibility, so routed namespace lowering is skipped for spark.
-        // lowering so namespace children already carry their final public kind before promotion.
-        const rewritten = rewriteRoutedNamespaceToolsForUpstream(outBody);
+        // gateways accept only flat tool variants. Run after custom/tool-search lowering so
+        // namespace children already carry their final public kind before they are promoted.
+        const rewritten = rewriteRoutedNamespaceToolsForUpstream(outBody, convertedRoutedCustomToolNames);
         outBody = rewritten.body;
         convertedRoutedNamespaceToolAliases = rewritten.aliases;
-      }
-      if (!isCanonicalOpenAiForwardProvider(provider)) {
         // Preserve xAI's cached-only fail-closed semantics and image-search mapping before the
         // generic capability fallback removes the private OpenAI fields.
         outBody = normalizeXaiResponsesWebSearch(outBody, provider);
@@ -2567,6 +2546,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       let snapshot = "";
       let usage: OcxUsage | undefined;
       let compactionEncryptedContent: string | undefined;
+      let completedSeen = false;
       for await (const event of decodeServerSentEvents(response.body, { translatorBudget: budget })) {
         let payload: unknown;
         try { payload = JSON.parse(event.data); } catch { continue; }
@@ -2601,6 +2581,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
             return;
           case "response.completed":
             {
+              completedSeen = true;
               const responsePayload = isPlainObject(payload.response) ? payload.response : undefined;
               const output = Array.isArray(responsePayload?.output) ? responsePayload.output : [];
               const compaction = output.find(item => isPlainObject(item) && item.type === "compaction");
@@ -2640,6 +2621,18 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
               }
             }
             break;
+        }
+        // Buffered text is still upstream progress, but gateway keepalives are not.
+        // Yield after accounting, directly to the consumer: no progress queue or content leak.
+        if (
+          !completedSeen
+          && (payload.type === "response.output_text.delta"
+            || payload.type === "response.reasoning_summary_text.delta"
+            || payload.type === "response.reasoning_text.delta")
+          && typeof payload.delta === "string"
+          && payload.delta.length > 0
+        ) {
+          yield { type: "heartbeat" };
         }
       }
       // Gateways differ in which of these they emit; prefer the authoritative
