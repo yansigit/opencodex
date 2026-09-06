@@ -531,6 +531,7 @@ name.
 | Heartbeat | `ping` |
 | Text deltas | `content_block_start` → `content_block_delta` (text) → `content_block_stop` |
 | Reasoning summary/text | `thinking` block with the replayed signature, or a bounded `ocxr1` fallback envelope |
+| Redacted reasoning | `redacted_thinking` blocks replayed from the reasoning envelope |
 | Function-call frames | `tool_use` block with `input_json_delta` |
 | Terminal event | `message_delta` → `message_stop` |
 | EOF before terminal | 502-style `api_error` |

@@ -423,6 +423,7 @@ role, `tool_use_id` 없는 `tool_result`, id/name 없는 `tool_use`, name 없는
 | Heartbeat | `ping` |
 | 텍스트 delta | `content_block_start` → `content_block_delta`(text) → `content_block_stop` |
 | 추론 요약/텍스트 | 재생된 서명 또는 제한된 `ocxr1` 폴백이 있는 `thinking` 블록 |
+| 편집된 추론 | 추론 봉투에서 재생되는 `redacted_thinking` 블록 |
 | Function-call 프레임 | `input_json_delta`가 있는 `tool_use` 블록 |
 | 종료 이벤트 | `message_delta` → `message_stop` |
 | 종료 전에 EOF | 502 형식 `api_error` |

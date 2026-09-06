@@ -362,6 +362,7 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 | 心跳 | `ping` |
 | 文本增量 | `content_block_start` → `content_block_delta`（文本）→ `content_block_stop` |
 | 推理摘要/文本 | 带重放签名或有界 `ocxr1` 回退信封的 `thinking` 块 |
+| 已编辑推理 | 从推理信封重放的 `redacted_thinking` 块 |
 | Function-call 帧 | 带 `input_json_delta` 的 `tool_use` 块 |
 | 终止事件 | `message_delta` → `message_stop` |
 | 在终止事件前 EOF | 502 风格的 `api_error` |
