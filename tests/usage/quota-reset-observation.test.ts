@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import {
   clearAccountQuota,
   flushQuotaObservationsForTests,
@@ -22,11 +23,20 @@ import {
   stopQuotaResetPoller,
 } from "../../src/quota/reset-poller";
 import { resetQuotaResetNotifyCacheForTests } from "../../src/quota/reset-notify-config";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const ACCOUNT = "acct_reset_observation";
 const HOUR = 60 * 60_000;
 
 let captured: QuotaResetEvent[] = [];
+let previousOpenCodexHome: string | undefined;
+const scratchHomes = new Set<string>();
+
+function makeScratchHome(prefix: string): string {
+  const home = mkdtempSync(join(tmpdir(), prefix));
+  scratchHomes.add(home);
+  return home;
+}
 
 /** Join the writer's ordered observation/forget chain, including cold imports. */
 async function settle(): Promise<void> {
@@ -35,6 +45,8 @@ async function settle(): Promise<void> {
 
 beforeEach(async () => {
   await settle();
+  previousOpenCodexHome = process.env["OPENCODEX_HOME"];
+  process.env["OPENCODEX_HOME"] = makeScratchHome("ocx-quota-reset-observation-");
   captured = [];
   resetQuotaResetStoreForTests();
   resetQuotaResetNotifyCacheForTests();
@@ -51,7 +63,20 @@ afterEach(async () => {
   setQuotaResetSink(null);
   resetQuotaResetPollerForTests();
   clearAccountQuota();
-  await settle();
+  try {
+    await settle();
+  } finally {
+    resetQuotaResetStoreForTests();
+    resetQuotaResetNotifyCacheForTests();
+    try {
+      await flushConfigDirHardeningForTests();
+    } finally {
+      if (previousOpenCodexHome === undefined) delete process.env["OPENCODEX_HOME"];
+      else process.env["OPENCODEX_HOME"] = previousOpenCodexHome;
+      for (const home of scratchHomes) removeTreeWithRetry(home);
+      scratchHomes.clear();
+    }
+  }
 });
 
 describe("codex quota seam", () => {
