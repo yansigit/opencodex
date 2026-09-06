@@ -14,6 +14,7 @@ import { loadConfig, saveConfig } from "../../src/config";
 import { isMultiAgentV2Enabled } from "../../src/codex/features";
 import { handleManagementAPI } from "../../src/server/management-api";
 import { catalogConvergenceFactory } from "../helpers/catalog-convergence";
+import { isolatedDiskManagementPersistence } from "../helpers/management-auth";
 import type { OcxConfig } from "../../src/types";
 
 describe("keepNativeChatGptOnV1", () => {
@@ -365,7 +366,13 @@ describe("/api/v2 keepNativeChatGptOnV1", () => {
     isolateHomes();
     const codexConfig = join(process.env.CODEX_HOME!, "config.toml");
     writeFileSync(codexConfig, "[features.multi_agent_v2]\nenabled = false\n");
-    const config: OcxConfig = { providers: {}, hostname: "127.0.0.1", port: 10100, defaultProvider: "openai" } as OcxConfig;
+    const config: OcxConfig = {
+      providers: { openai: { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" } },
+      hostname: "127.0.0.1",
+      port: 10100,
+      defaultProvider: "openai",
+    } as OcxConfig;
+    saveConfig(config);
     const seen: Array<{ keepNativeChatGptOnV1?: boolean; multiAgentMode?: string }> = [];
     let converges = 0;
     const factory = catalogConvergenceFactory(() => {
@@ -376,6 +383,7 @@ describe("/api/v2 keepNativeChatGptOnV1", () => {
       });
     });
     const deps = {
+      ...isolatedDiskManagementPersistence(),
       createManagementConvergeCodex: factory,
       toggleCodexMultiAgentV2: (enabled: boolean) => {
         writeFileSync(codexConfig, readFileSync(codexConfig, "utf8").replace(/enabled = (?:true|false)/, `enabled = ${enabled}`));
