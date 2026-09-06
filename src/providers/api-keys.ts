@@ -7,7 +7,7 @@
  * A legacy bare `apiKey` is projected as one row on reads and seeded on first mutation.
  */
 import { createHash } from "node:crypto";
-import { saveConfigPreservingClaudeCode } from "../config";
+import { isAzureIdentityProvider } from "../config/provider-validation";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import type { AccountQuotaFields } from "./quota-types";
 import { commitProviderApiKeySelection } from "./api-key-selection";
@@ -40,7 +40,7 @@ export function apiKeyPoolEntryId(key: string): string {
 
 /** True for providers whose upstream auth is a configured API key (not oauth/forward). */
 export function isKeyAuthProvider(provider: OcxProviderConfig): boolean {
-  return provider.authMode !== "oauth" && provider.authMode !== "forward";
+  return !isAzureIdentityProvider(provider) && provider.authMode !== "oauth" && provider.authMode !== "forward";
 }
 
 /** Trim and reject blank / CRLF-bearing secrets. Shared by pool writes and OAuth upsert. */
@@ -87,18 +87,23 @@ export function addProviderApiKey(config: OcxConfig, name: string, key: string, 
   const trimmed = sanitizeApiKeyValue(key);
   if (!trimmed) return { error: "key must not include line breaks" };
   const id = apiKeyPoolEntryId(trimmed);
-  const committed = commitProviderApiKeySelection(config, name, fresh => {
+  const committed = commitProviderApiKeySelection<{ id: string } | { error: string }>(config, name, fresh => {
     const pool = ensurePool(fresh);
-    const existing = pool.find(e => e.id === id);
+    const existing = pool.find(entry => entry.key === trimmed);
     if (existing) {
       if (label?.trim()) existing.label = label.trim();
+      fresh.apiKey = trimmed;
+      return { changed: true, selectionChanged: true, value: { id: existing.id } };
     } else {
+      if (pool.some(entry => entry.id === id)) {
+        return { changed: false, value: { error: "key id collision" } };
+      }
       pool.push({ id, key: trimmed, ...(label?.trim() ? { label: label.trim() } : {}), addedAt: Date.now() });
     }
     fresh.apiKey = trimmed;
-    return { changed: true, selectionChanged: true, value: id };
+    return { changed: true, selectionChanged: true, value: { id } };
   });
-  return committed.status === "committed" ? { id } : { error: "provider selection unavailable" };
+  return committed.status === "committed" ? committed.value : { error: "provider selection unavailable" };
 }
 
 /** Switch the ACTIVE key (mirrors into `provider.apiKey`). Persists config. */
@@ -117,14 +122,23 @@ export function setActiveProviderApiKey(config: OcxConfig, name: string, id: str
 
 /** Rename a key slot without changing its id, secret, or active routing state. */
 export function setProviderApiKeyLabel(config: OcxConfig, name: string, id: string, label: string | undefined): boolean {
-  const provider = config.providers[name];
-  if (!provider || !isKeyAuthProvider(provider)) return false;
-  const entry = ensurePool(provider).find(e => e.id === id);
-  if (!entry) return false;
-  if (label) entry.label = label;
-  else delete entry.label;
-  saveConfigPreservingClaudeCode(config);
-  return true;
+  const configured = config.providers[name];
+  if (!configured || !isKeyAuthProvider(configured)) return false;
+  const configuredEntry = configured.apiKeyPool?.find(candidate => candidate.id === id)
+    ?? (!configured.apiKeyPool?.length && configured.apiKey && apiKeyPoolEntryId(configured.apiKey) === id
+      ? { id, key: configured.apiKey } : undefined);
+  if (!configuredEntry) return false;
+  const committed = commitProviderApiKeySelection(config, name, provider => {
+    const entry = provider.apiKeyPool?.find(candidate => candidate.id === id)
+      ?? (!provider.apiKeyPool?.length && provider.apiKey && apiKeyPoolEntryId(provider.apiKey) === id
+        ? { id, key: provider.apiKey } : undefined);
+    if (!entry) return { changed: false, value: false };
+    const persistedEntry = ensurePool(provider).find(candidate => candidate.id === id)!;
+    if (label) persistedEntry.label = label;
+    else delete persistedEntry.label;
+    return { changed: true, value: true };
+  });
+  return committed.status === "committed" && committed.value;
 }
 
 /** Remove one key; removing the active one promotes the first remaining. Persists config. */

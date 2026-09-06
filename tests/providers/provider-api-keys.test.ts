@@ -1,16 +1,24 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { managementFetch as fetch } from "../helpers/management-auth";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { saveConfig } from "../../src/config";
+import { replacePersistedConfig, saveConfig } from "../../src/config";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
 import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { startServer } from "../../src/server";
 import type { OcxConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { listProviderApiKeys } from "../../src/providers/api-keys";
+import {
+  addProviderApiKey,
+  apiKeyPoolEntryId,
+  isKeyAuthProvider,
+  listProviderApiKeys,
+  removeProviderApiKey,
+  setActiveProviderApiKey,
+  setProviderApiKeyLabel,
+} from "../../src/providers/api-keys";
 import { clearProviderQuotaCache, fetchProviderApiKeyQuotas, fetchProviderQuotaReports, providerApiKeyQuotaMode } from "../../src/providers/quota";
 
 const originalUpstreamFetch = globalThis.fetch;
@@ -56,6 +64,166 @@ afterEach(async () => {
 });
 
 describe("provider API key pool", () => {
+  test("fails closed for Azure identity without mutating or persisting keys", () => {
+    const provider = {
+      adapter: "azure-openai",
+      baseUrl: "https://resource.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential" as const },
+      models: ["gpt-4o"],
+      liveModels: false,
+    };
+    const config = { ...baseConfig(), providers: { identity: provider } };
+    const before = structuredClone(provider);
+    expect(isKeyAuthProvider(provider)).toBe(false);
+    expect(listProviderApiKeys(config, "identity")).toEqual({ activeId: null, keys: [] });
+    expect(addProviderApiKey(config, "identity", "secret-key")).toEqual({ error: "provider does not use API-key auth" });
+    expect(setActiveProviderApiKey(config, "identity", "entry")).toBe(false);
+    expect(setProviderApiKeyLabel(config, "identity", "entry", "label")).toBe(false);
+    expect(removeProviderApiKey(config, "identity", "entry")).toBe(false);
+    expect(provider).toEqual(before);
+    expect(provider.apiKey).toBeUndefined();
+    expect(provider.apiKeyPool).toBeUndefined();
+  });
+
+  test("a failed key-pool persistence leaves the live provider unchanged", () => {
+    const config = baseConfig();
+    const before = structuredClone(config.providers["opencode-go"]);
+    rmSync(join(testDir, "config.json"));
+
+    expect(addProviderApiKey(config, "opencode-go", "key-second-444555666777"))
+      .toEqual({ error: "provider selection unavailable" });
+    expect(config.providers["opencode-go"]).toEqual(before);
+  });
+
+  test("direct key upsert preserves legacy ids and refuses derived-id collisions", () => {
+    const key = "key-second-444555666777";
+    const config = baseConfig();
+    config.providers["opencode-go"] = {
+      ...config.providers["opencode-go"]!,
+      apiKey: key,
+      apiKeyPool: [{ id: "legacy-slot", key }],
+    };
+    replacePersistedConfig(config);
+    expect(addProviderApiKey(config, "opencode-go", key)).toEqual({ id: "legacy-slot" });
+    expect(config.providers["opencode-go"]?.apiKeyPool).toHaveLength(1);
+
+    const collisionKey = "provider-key-collision-58449";
+    const existingKey = "provider-key-collision-56847";
+    const collisionId = apiKeyPoolEntryId(collisionKey);
+    expect(collisionId).toBe(apiKeyPoolEntryId(existingKey));
+    config.providers["opencode-go"] = {
+      ...config.providers["opencode-go"]!,
+      apiKey: existingKey,
+      apiKeyPool: [{ id: collisionId, key: existingKey }],
+    };
+    replacePersistedConfig(config);
+    const liveBefore = structuredClone(config.providers["opencode-go"]);
+    const diskBefore = readFileSync(join(testDir, "config.json"), "utf8");
+    expect(addProviderApiKey(config, "opencode-go", collisionKey)).toEqual({ error: "key id collision" });
+    expect(config.providers["opencode-go"]).toEqual(liveBefore);
+    expect(readFileSync(join(testDir, "config.json"), "utf8")).toBe(diskBefore);
+  });
+
+  test("key POST preserves a legacy ID and rejects an ID collision with another key", async () => {
+    const collisionKey = "key-collision-888999000111";
+    const config = baseConfig();
+    config.providers["opencode-go"]!.apiKeyPool = [
+      { id: "legacy-slot", key: "key-first-000111222333" },
+      { id: apiKeyPoolEntryId(collisionKey), key: "different-key-222333444555" },
+    ];
+    replacePersistedConfig(config);
+    const server = startServer(0);
+    try {
+      const same = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", key: "key-first-000111222333" }),
+      });
+      expect(same.status).toBe(201);
+      expect(await same.json()).toMatchObject({ id: "legacy-slot" });
+      expect(JSON.parse(readFileSync(join(testDir, "config.json"), "utf-8")).providers["opencode-go"].apiKeyPool)
+        .toEqual(config.providers["opencode-go"]!.apiKeyPool);
+
+      const beforeCollision = readFileSync(join(testDir, "config.json"), "utf-8");
+      const collision = await fetch(new URL("/api/providers/keys", server.url), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "opencode-go", key: collisionKey }),
+      });
+      expect(collision.status).toBe(409);
+      expect(readFileSync(join(testDir, "config.json"), "utf-8")).toBe(beforeCollision);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("provider POST preserves a legacy key ID and rejects an ID collision", async () => {
+    const collisionKey = "key-collision-888999000111";
+    const config = baseConfig();
+    config.providers["opencode-go"]!.apiKeyPool = [
+      { id: "legacy-slot", key: "key-first-000111222333" },
+      { id: apiKeyPoolEntryId(collisionKey), key: "different-key-222333444555" },
+    ];
+    replacePersistedConfig(config);
+    const server = startServer(0);
+    const submit = (apiKey: string) => fetch(new URL("/api/providers", server.url), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "opencode-go",
+        provider: { adapter: "openai-chat", baseUrl: "http://8.8.8.8/v1", apiKey, liveModels: false },
+      }),
+    });
+    try {
+      const same = await submit("key-first-000111222333");
+      expect(same.status).toBe(200);
+      expect(JSON.parse(readFileSync(join(testDir, "config.json"), "utf-8")).providers["opencode-go"].apiKeyPool)
+        .toEqual(config.providers["opencode-go"]!.apiKeyPool);
+
+      const beforeCollision = readFileSync(join(testDir, "config.json"), "utf-8");
+      const collision = await submit(collisionKey);
+      expect(collision.status).toBe(409);
+      expect(readFileSync(join(testDir, "config.json"), "utf-8")).toBe(beforeCollision);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("rejects every management key-pool operation for Azure identity", async () => {
+    const config = baseConfig();
+    config.defaultProvider = "azure-identity";
+    config.providers["azure-identity"] = {
+      adapter: "azure-openai",
+      baseUrl: "https://resource.openai.azure.com/openai",
+      azureCredential: { type: "default-azure-credential" },
+      models: ["gpt-4o"],
+      liveModels: false,
+    };
+    replacePersistedConfig(config);
+    const server = startServer(0);
+    try {
+      const before = readFileSync(join(testDir, "config.json"), "utf-8");
+      const requests: Array<Promise<Response>> = [
+        fetch(new URL("/api/providers/keys?name=azure-identity", server.url)),
+        fetch(new URL("/api/providers/keys", server.url), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "azure-identity", key: "should-not-persist" }),
+        }),
+        fetch(new URL("/api/providers/keys/active", server.url), {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "azure-identity", id: "entry" }),
+        }),
+        fetch(new URL("/api/providers/keys/alias", server.url), {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "azure-identity", id: "entry", alias: "label" }),
+        }),
+        fetch(new URL("/api/providers/keys?name=azure-identity&id=entry", server.url), { method: "DELETE" }),
+      ];
+      const responses = await Promise.all(requests);
+      expect(responses.map(response => response.status)).toEqual([400, 400, 400, 400, 400]);
+      expect(readFileSync(join(testDir, "config.json"), "utf-8")).toBe(before);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   test("cheap legacy projection never mutates even frozen config or writes config", () => {
     const config = baseConfig();
     const disk = readFileSync(join(testDir, "config.json"), "utf8");

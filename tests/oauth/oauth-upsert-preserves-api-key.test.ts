@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync} from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OAUTH_PROVIDERS, upsertOAuthProvider } from "../../src/oauth";
-import { loadConfig, mutatePersistedConfig, saveConfig } from "../../src/config";
+import { getConfigPath, loadConfig, mutatePersistedConfig, saveConfig } from "../../src/config";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
 import { migrateXaiResponsesDefault } from "../../src/providers/xai-responses-opt-in";
 import { resolveWireProtocolOverride } from "../../src/server/adapter-resolve";
 import {
@@ -39,6 +41,51 @@ function configWithKey(provider: string, adapter: string, baseUrl: string): OcxC
 }
 
 describe("upsertOAuthProvider credential preservation", () => {
+  test("rejects a derived key ID collision without changing live or persisted config", async () => {
+    const activeKey = "provider-key-collision-58449";
+    const differentKey = "provider-key-collision-56847";
+    expect(apiKeyPoolEntryId(activeKey)).toBe(apiKeyPoolEntryId(differentKey));
+    const config = {
+      port: 10100,
+      defaultProvider: "xai",
+      providers: {
+        xai: {
+          adapter: "openai-chat",
+          baseUrl: "https://api.x.ai/v1",
+          authMode: "key",
+          apiKey: activeKey,
+          apiKeyPool: [{ id: apiKeyPoolEntryId(activeKey), key: differentKey }],
+        },
+      },
+    } as OcxConfig;
+    const previousHome = process.env.OPENCODEX_HOME;
+    const testHome = mkdtempSync(join(tmpdir(), "ocx-oauth-upsert-collision-"));
+    const icaclsOk = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+    setIcaclsRunnerForTests(() => icaclsOk);
+    setAsyncIcaclsRunnerForTests(async () => icaclsOk);
+    process.env.OPENCODEX_HOME = testHome;
+    try {
+      const liveBefore = structuredClone(config);
+      expect(() => upsertOAuthProvider(config, "xai")).toThrow(/pool ID collision/);
+      expect(config).toEqual(liveBefore);
+
+      saveConfig(config);
+      const diskBefore = readFileSync(getConfigPath());
+      expect(() => mutatePersistedConfig(fresh => {
+        upsertOAuthProvider(fresh, "xai");
+        return { changed: true, value: undefined };
+      })).toThrow(/pool ID collision/);
+      expect(readFileSync(getConfigPath())).toEqual(diskBefore);
+    } finally {
+      await flushConfigDirHardeningForTests();
+      setIcaclsRunnerForTests(null);
+      setAsyncIcaclsRunnerForTests(null);
+      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+      else process.env.OPENCODEX_HOME = previousHome;
+      removeTreeWithRetry(testHome);
+    }
+  });
+
   test.each([undefined, 1, 2])("Grok login preserves wire choice and migration version %j", version => {
     const config = configWithKey("xai", "openai-chat", "https://api.x.ai/v1");
     const before = config.providers.xai!;

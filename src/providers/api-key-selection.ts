@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mutatePersistedConfig } from "../config";
+import { isAzureIdentityProvider } from "../config/provider-validation";
 import { publishAccountSelection } from "../lib/account-selection-events";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import type { ProviderApiKeySelection } from "../types/provider";
@@ -23,7 +24,7 @@ function matchesSelection(provider: OcxProviderConfig, expected: ProviderApiKeyS
 
 function currentKeyProvider(config: OcxConfig, name: string): OcxProviderConfig | null {
   const configured = config.providers[name];
-  if (!configured || configured.disabled) return null;
+  if (!configured || configured.disabled || isAzureIdentityProvider(configured)) return null;
   const current = routedProviderConfig(name, { ...configured, _apiKeyAttempt: undefined });
   if (current.authMode === "oauth" || current.authMode === "forward") return null;
   if (current.authMode === "key" && !current.keyOptional && !current.apiKey?.trim()) return null;
@@ -86,7 +87,7 @@ export function commitProviderApiKeySelection<T>(
 ): ProviderApiKeyCommit<T> {
   const outcome = mutatePersistedConfig<ProviderApiKeyCommit<T> & { notify?: boolean }>(fresh => {
     const provider = fresh.providers[name];
-    if (!provider || provider.authMode === "oauth" || provider.authMode === "forward") {
+    if (!provider || isAzureIdentityProvider(provider) || provider.authMode === "oauth" || provider.authMode === "forward") {
       return { changed: false, value: { status: "unavailable" } };
     }
     if (expectedSelection && !matchesSelection(provider, expectedSelection)) {

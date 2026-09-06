@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { discoverAntigravityProject, refreshAntigravityToken } from "../../../src/oauth/google-antigravity";
+import { AntigravityTokenRequestError, discoverAntigravityProject, refreshAntigravityToken } from "../../../src/oauth/google-antigravity";
 import { mkdirSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -143,6 +143,20 @@ describe("antigravity refresh", () => {
     expect(caught).toBeDefined();
     expect(caught!.message).toContain("400");
     expect(caught!.message).not.toContain("secret-detail");
+  });
+
+  test("preserves only an allowlisted terminal OAuth code", async () => {
+    routeFetch((url) => url.includes("oauth2.googleapis.com/token")
+      ? new Response(JSON.stringify({ error: "invalid_grant", error_description: "private detail" }), { status: 400 })
+      : new Response("no", { status: 404 }));
+    await expect(refreshAntigravityToken("refresh-tok")).rejects.toMatchObject({
+      constructor: AntigravityTokenRequestError,
+      httpStatus: 400,
+      oauthError: "invalid_grant",
+    });
+    try { await refreshAntigravityToken("refresh-tok"); } catch (error) {
+      expect((error as Error).message).not.toContain("private detail");
+    }
   });
 });
 
