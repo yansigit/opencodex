@@ -21,6 +21,7 @@ const RETRYABLE_WORKFLOWS = new Map([
   ["Service lifecycle", ".github/workflows/service-lifecycle.yml"],
 ]);
 const RETRYABLE_CONCLUSIONS = new Set(["failure", "startup_failure", "timed_out"]);
+const RETRYABLE_READ_STATUSES = new Set([500, 502, 503, 504]);
 const KNOWN_CHECKS = new Set([
   ...REQUIRED_CHECKS,
   "react-doctor",
@@ -180,6 +181,20 @@ function workflowRunRetryDisposition({ run, pr, repository } = {}) {
 
 function isMissingPullRequestError(error) {
   return Number(error?.status) === 404;
+}
+
+async function retryIdempotentRead(operation, {
+  sleep = (delay) => new Promise(resolve => setTimeout(resolve, delay)),
+} = {}) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (attempt === 2 || !RETRYABLE_READ_STATUSES.has(Number(error?.status))) throw error;
+      await sleep(250 * (2 ** attempt));
+    }
+  }
+  throw new Error("unreachable read retry state");
 }
 
 function filePathEntries(files = []) {
@@ -446,6 +461,7 @@ module.exports = {
   classifyPullRequest,
   exactHeadGate,
   isMissingPullRequestError,
+  retryIdempotentRead,
   summarizeAgedHolds,
   workflowRunRetryDisposition,
 };
