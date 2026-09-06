@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { AdapterEvent, OcxProviderConfig } from "../types";
 import type { ProviderAdapter } from "./base";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
+import { getSharedCursorPoolKernel, sharedCursorPoolCapability } from "../providers/cursor-pool";
 import { cursorExecDeniedMessage, cursorRequestDeclaresFullAccess } from "./cursor/exec-policy";
 import { isCursorBenignCancelError, isCursorInvalidArgumentError, isCursorRootEnvelopeError, safeCursorErrorMessage, type CursorSizeContext } from "./cursor/cursor-errors";
 import { cursorCheckpointModelAffinityId, inferCursorContextWindow, isCursorExternalWireModel } from "./cursor/discovery";
@@ -161,7 +162,15 @@ export function createCursorAdapter(provider: OcxProviderConfig, deps: CursorAda
             // Missing credentials fail closed in the live transport path.
           }
         }
-        const pooledToken = deps.selectPoolToken?.(_parsed._cursorIdentityScope ?? "", _parsed._clientThreadId ?? "");
+        const poolTokenSelector = deps.selectPoolToken ?? (
+          provider.cursorAccountPool?.enabled === true
+            ? (owner: string, thread: string) => {
+                if (!owner || !thread) return undefined;
+                return getSharedCursorPoolKernel().pick(owner, thread, sharedCursorPoolCapability)?.token;
+              }
+            : undefined
+        );
+        const pooledToken = poolTokenSelector?.(_parsed._cursorIdentityScope ?? "", _parsed._clientThreadId ?? "");
         const activeProvider = pooledToken ? { ...provider, apiKey: pooledToken } : provider;
         const inheritedCheckpointRef = _parsed._providerContinuation?.cursor?.checkpointRef;
         const previousConversationId = _parsed._cursorConversationId;

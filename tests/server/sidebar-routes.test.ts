@@ -20,12 +20,17 @@ async function call(
   pathname: string,
   headers: Record<string, string> = {},
   principal?: "admin-token" | "gui-session" | "gui-pair-capability",
+  body?: unknown,
 ): Promise<{ status: number; body: unknown; raw: string; routed: boolean }> {
   // `isAllowedManagementOrigin` derives the expected origin from the Host header and
   // rejects the request outright when it is missing, so Host is required here. Omitting
   // Origin models the GUI's own same-origin fetch.
   const url = new URL(`http://127.0.0.1:10100${pathname}`);
-  const req = new Request(url, { method, headers: { host: "127.0.0.1:10100", ...headers } });
+  const req = new Request(url, {
+    method,
+    headers: { host: "127.0.0.1:10100", ...headers },
+    ...(body !== undefined ? { body: typeof body === "string" ? body : JSON.stringify(body) } : {}),
+  });
   const res = await handleManagementAPI(req, url, config, {}, principal);
   if (!res) return { status: 404, body: null, raw: "", routed: false };
   const raw = await res.text();
@@ -300,5 +305,57 @@ describe("route surface", () => {
       expect(blocked.status).toBe(403);
       expect(blocked.raw).not.toContain("lidge-jun");
     }
+  });
+});
+
+describe("Cursor pool management route dispatch", () => {
+  test("GET /api/oauth/accounts/pool?provider=cursor answers safe status with no secrets", async () => {
+    const { status, body, raw } = await call("GET", "/api/oauth/accounts/pool?provider=cursor");
+    expect(status).toBe(200);
+    expect(body).toEqual({
+      provider: "cursor",
+      enabled: false,
+      status: "disabled",
+      aggregateStatus: "disabled",
+      accounts: [],
+    });
+    expect(raw).not.toContain("token");
+    expect(raw).not.toContain("password");
+  });
+
+  test("PUT /api/oauth/accounts/pool requires established mutation principal and serializes no secrets", async () => {
+    const payload = { provider: "cursor", enabled: true };
+    // Untrusted/capability principal is rejected with 403
+    const blocked = await call(
+      "PUT",
+      "/api/oauth/accounts/pool",
+      { "content-type": "application/json" },
+      "gui-pair-capability",
+      payload,
+    );
+    expect(blocked.status).toBe(403);
+    expect((blocked.body as Record<string, unknown>).error).toBe("unauthorized mutation principal");
+
+    // Missing principal is rejected with 403
+    const unauth = await call(
+      "PUT",
+      "/api/oauth/accounts/pool",
+      { "content-type": "application/json" },
+      undefined,
+      payload,
+    );
+    expect(unauth.status).toBe(403);
+
+    // Established admin-token principal is accepted
+    const allowed = await call(
+      "PUT",
+      "/api/oauth/accounts/pool",
+      { "content-type": "application/json" },
+      "admin-token",
+      payload,
+    );
+    expect(allowed.status).toBe(200);
+    expect((allowed.body as Record<string, unknown>).ok).toBe(true);
+    expect(allowed.raw).not.toContain("token");
   });
 });

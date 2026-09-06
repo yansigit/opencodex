@@ -1,5 +1,7 @@
 /** Cursor OAuth account-pool kernel. No configuration or HTTP surface lives here. */
 import { getAccountSet } from "../oauth/store";
+import { redactSecretString } from "../lib/redact";
+import type { OcxProviderConfig } from "../types";
 
 export const CURSOR_POOL_KEY = "cursor";
 export const CURSOR_POOL_TTL_MS = 30 * 60_000;
@@ -311,6 +313,98 @@ export class CursorPoolKernel {
 }
 export function createCursorPoolCapability(): symbol {
   return Symbol(`cursor-pool:${crypto.randomUUID()}`);
+}
+
+export const sharedCursorPoolCapability = createCursorPoolCapability();
+let defaultCursorPoolKernel: CursorPoolKernel | undefined;
+
+export function getSharedCursorPoolKernel(): CursorPoolKernel {
+  if (!defaultCursorPoolKernel) {
+    defaultCursorPoolKernel = new CursorPoolKernel(sharedCursorPoolCapability);
+  }
+  return defaultCursorPoolKernel;
+}
+
+export function resetSharedCursorPoolKernelForTests(): void {
+  defaultCursorPoolKernel = undefined;
+}
+
+export function isCursorAccountPoolConfigured(config?: {
+  providers?: Record<string, OcxProviderConfig>;
+}): boolean {
+  if (!config?.providers) return false;
+  const cursorProvider =
+    config.providers.cursor ??
+    Object.values(config.providers).find((p) => p.adapter === "cursor");
+  return cursorProvider?.cursorAccountPool?.enabled === true;
+}
+
+export interface CursorPoolStatusAccountDto {
+  readonly ordinal: number;
+  readonly alias: string;
+  readonly usable: boolean;
+}
+
+export interface CursorPoolStatusDto {
+  readonly provider: "cursor";
+  readonly enabled: boolean;
+  readonly status: "disabled" | "ready" | "undersized";
+  readonly aggregateStatus: "disabled" | "ready" | "undersized";
+  readonly accounts: ReadonlyArray<CursorPoolStatusAccountDto>;
+}
+
+export function getCursorAccountPoolStatus(
+  config?: { providers?: Record<string, OcxProviderConfig> },
+  now = Date.now(),
+  storeAccounts?: ReadonlyArray<
+    | CursorPoolAccount
+    | { id?: string; alias?: string; email?: string; credential?: CursorPoolAccount; needsReauth?: boolean }
+  >,
+): CursorPoolStatusDto {
+  const source =
+    storeAccounts ??
+    (getAccountSet(CURSOR_POOL_KEY)?.accounts ?? []).map((a) => ({
+      id: a.id,
+      alias: a.alias,
+      ...a.credential,
+      needsReauth: a.needsReauth,
+    }));
+  const accounts: CursorPoolStatusAccountDto[] = source.map((a, i) => {
+    const isUsable = usable(a, now);
+    let alias = `Account ${i + 1}`;
+    if ("alias" in a && typeof a.alias === "string") {
+      const trimmed = a.alias.trim();
+      if (
+        trimmed.length > 0 &&
+        trimmed.length <= 80 &&
+        !/[\x00-\x1f\x7f]/.test(trimmed) &&
+        redactSecretString(trimmed) === trimmed
+      ) {
+        alias = trimmed;
+      }
+    }
+    return {
+      ordinal: i + 1,
+      alias,
+      usable: isUsable,
+    };
+  });
+
+  const enabled = isCursorAccountPoolConfigured(config);
+  const usableCount = accounts.filter((a) => a.usable).length;
+  const status: "disabled" | "ready" | "undersized" = !enabled
+    ? "disabled"
+    : usableCount >= 2
+      ? "ready"
+      : "undersized";
+
+  return {
+    provider: "cursor",
+    enabled,
+    status,
+    aggregateStatus: status,
+    accounts,
+  };
 }
 
 /** Legacy weighted router; generic 429 rotation is owned elsewhere. */

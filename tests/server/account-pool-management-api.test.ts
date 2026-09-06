@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { handleCodexAuthAPI } from "../../src/codex/auth-api";
+import { handleManagementAPI } from "../../src/server/management-api";
 import { saveConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import type { OcxConfig } from "../../src/types";
@@ -504,6 +505,405 @@ describe("generic OAuth pool-settings contract (#695)", () => {
       });
       expect(clear.status).toBe(200);
       expect(await clear.json()).toMatchObject({ strategy: null, autoSwitchThreshold: null, enabled: true });
+    } finally {
+      await server.stop(true);
+    }
+  });
+});
+
+describe("Cursor account pool management API", () => {
+  let testDir = "";
+  let previousHome: string | undefined;
+
+  function cursorBaseConfig(): OcxConfig {
+    return {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "cursor",
+      providers: {
+        cursor: {
+          adapter: "cursor",
+          baseUrl: "https://api2.cursor.sh",
+          authMode: "oauth",
+        },
+        deepseek: {
+          adapter: "openai-chat",
+          baseUrl: "https://api.deepseek.com/v1",
+          apiKey: "deepseek-key-fixture",
+        },
+      },
+    } as OcxConfig;
+  }
+
+  beforeEach(() => {
+    previousHome = process.env.OPENCODEX_HOME;
+    testDir = mkdtempSync(join(tmpdir(), "ocx-pool-cursor-"));
+    process.env.OPENCODEX_HOME = testDir;
+    saveConfig(cursorBaseConfig());
+  });
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    if (testDir) removeTreeWithRetry(testDir);
+  });
+
+  function writeCursorAuthStore(
+    accounts: Array<{
+      id: string;
+      alias?: string;
+      access?: string;
+      refresh?: string;
+      expires?: number;
+      needsReauth?: boolean;
+    }>,
+  ) {
+    writeFileSync(
+      join(testDir, "auth.json"),
+      JSON.stringify({
+        cursor: {
+          activeAccountId: accounts[0]?.id ?? "",
+          accounts: accounts.map((a) => ({
+            id: a.id,
+            ...(a.alias ? { alias: a.alias } : {}),
+            credential: {
+              access: a.access ?? "access-token-fixture",
+              refresh: a.refresh ?? "refresh-token-fixture",
+              expires: a.expires ?? 9999999999999,
+            },
+            ...(a.needsReauth ? { needsReauth: true } : {}),
+          })),
+        },
+      }),
+      { mode: 0o600 },
+    );
+  }
+
+  function recursiveScanForSecrets(obj: unknown, forbidden: string[]) {
+    if (!obj) return;
+    if (typeof obj === "string") {
+      for (const secret of forbidden) {
+        expect(obj).not.toContain(secret);
+      }
+      return;
+    }
+    if (Array.isArray(obj)) {
+      for (const item of obj) {
+        recursiveScanForSecrets(item, forbidden);
+      }
+      return;
+    }
+    if (typeof obj === "object") {
+      for (const [k, v] of Object.entries(obj)) {
+        for (const secret of forbidden) {
+          expect(k).not.toContain(secret);
+        }
+        recursiveScanForSecrets(v, forbidden);
+      }
+    }
+  }
+
+  test("defaults: omission defaults to disabled and returns aggregateStatus disabled", async () => {
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/oauth/accounts/pool?provider=cursor", server.url));
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json).toEqual({
+        provider: "cursor",
+        enabled: false,
+        status: "disabled",
+        aggregateStatus: "disabled",
+        accounts: [],
+      });
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("strict: rejects knobs, accountId, and non-boolean enabled in PUT/PATCH", async () => {
+    const server = startServer(0);
+    try {
+      // Rejects knobs
+      for (const body of [
+        { provider: "cursor", enabled: true, autoSwitchThreshold: 80 },
+        { provider: "cursor", enabled: true, strategy: "quota" },
+        { provider: "cursor", enabled: true, stickyLimit: 1 },
+        { provider: "cursor", enabled: true, quotaWindow: "five-hour" },
+      ]) {
+        const res = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: "cursor pool does not support knobs" });
+      }
+
+      // Rejects accountId
+      for (const body of [
+        { provider: "cursor", enabled: true, accountId: "acc-1" },
+        { provider: "cursor", enabled: true, id: "acc-1" },
+        { provider: "cursor", enabled: true, account: "acc-1" },
+      ]) {
+        const res = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: "cursor pool toggle does not accept account ID" });
+      }
+
+      // Rejects non-boolean enabled
+      for (const val of ["true", 1, null, {}, []]) {
+        const res = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: "cursor", enabled: val }),
+        });
+        expect(res.status).toBe(400);
+        expect(await res.json()).toMatchObject({ error: "enabled must be a boolean" });
+      }
+
+      // Rejects unknown unexpected fields
+      const resUnknown = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "cursor", enabled: true, extraKey: "unexpected" }),
+      });
+      expect(resUnknown.status).toBe(400);
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("undersized: reports undersized when enabled: true but fewer than 2 usable accounts exist", async () => {
+    writeCursorAuthStore([]);
+    const server = startServer(0);
+    try {
+      let put = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "cursor", enabled: true }),
+      });
+      expect(put.status).toBe(200);
+      expect(await put.json()).toMatchObject({
+        provider: "cursor",
+        enabled: true,
+        aggregateStatus: "undersized",
+        accounts: [],
+      });
+
+      // 1 usable account
+      writeCursorAuthStore([{ id: "acc-1", access: "token-1" }]);
+      let get = await fetch(new URL("/api/oauth/accounts/pool?provider=cursor", server.url));
+      expect(get.status).toBe(200);
+      expect(await get.json()).toMatchObject({
+        provider: "cursor",
+        enabled: true,
+        aggregateStatus: "undersized",
+        accounts: [{ ordinal: 1, usable: true }],
+      });
+
+      // 2 accounts but one is expired (expires in past)
+      writeCursorAuthStore([
+        { id: "acc-1", access: "token-1", expires: 9999999999999 },
+        { id: "acc-2", access: "token-2", expires: 100 },
+      ]);
+      get = await fetch(new URL("/api/oauth/accounts/pool?provider=cursor", server.url));
+      expect(await get.json()).toMatchObject({
+        enabled: true,
+        aggregateStatus: "undersized",
+        accounts: [
+          { ordinal: 1, usable: true },
+          { ordinal: 2, usable: false },
+        ],
+      });
+
+      // 2 accounts but one has needsReauth: true
+      writeCursorAuthStore([
+        { id: "acc-1", access: "token-1", expires: 9999999999999 },
+        { id: "acc-2", access: "token-2", expires: 9999999999999, needsReauth: true },
+      ]);
+      get = await fetch(new URL("/api/oauth/accounts/pool?provider=cursor", server.url));
+      expect(await get.json()).toMatchObject({
+        enabled: true,
+        aggregateStatus: "undersized",
+        accounts: [
+          { ordinal: 1, usable: true },
+          { ordinal: 2, usable: false },
+        ],
+      });
+
+      // 2 usable accounts -> ready!
+      writeCursorAuthStore([
+        { id: "acc-1", access: "token-1", expires: 9999999999999 },
+        { id: "acc-2", access: "token-2", expires: 9999999999999 },
+      ]);
+      get = await fetch(new URL("/api/oauth/accounts/pool?provider=cursor", server.url));
+      expect(await get.json()).toMatchObject({
+        enabled: true,
+        aggregateStatus: "ready",
+        status: "ready",
+        accounts: [
+          { ordinal: 1, usable: true },
+          { ordinal: 2, usable: true },
+        ],
+      });
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("auth: requires authenticated mutation principal, rejecting unauthenticated or unauthorized principals", async () => {
+    const server = startServer(0);
+    try {
+      // Unauthenticated on the wire (no auth header) -> 401
+      const unauth = await globalThis.fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "cursor", enabled: true }),
+      });
+      expect(unauth.status).toBe(401);
+
+      // Authenticated with admin-token through managementFetch -> 200
+      const auth = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "cursor", enabled: true }),
+      });
+      expect(auth.status).toBe(200);
+      expect(await auth.json()).toMatchObject({ ok: true, enabled: true });
+
+      // Direct dispatch checks for mutation principal rules
+      const config = cursorBaseConfig();
+      const url = new URL("http://127.0.0.1:10100/api/oauth/accounts/pool");
+      const makeReq = () => new Request(url, {
+        method: "PUT",
+        headers: { host: "127.0.0.1:10100", "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "cursor", enabled: true }),
+      });
+
+      // Unauthorized mutation principals -> 403
+      for (const unauthorized of [undefined, "local-read-capability", "gui-pair-capability"] as const) {
+        const res = await handleManagementAPI(makeReq(), url, config, {}, unauthorized);
+        expect(res?.status).toBe(403);
+        expect(await res?.json()).toMatchObject({ error: "unauthorized mutation principal" });
+      }
+
+      // Authorized mutation principals -> 200
+      for (const authorized of ["admin-token", "gui-session"] as const) {
+        const res = await handleManagementAPI(makeReq(), url, config, {}, authorized);
+        expect(res?.status).toBe(200);
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("persistence failure: handles persistence error gracefully without leaking secrets and preserves unrelated config", async () => {
+    const config = cursorBaseConfig();
+    const url = new URL("http://127.0.0.1:10100/api/oauth/accounts/pool");
+    const failingDeps = {
+      saveConfigPreservingClaudeCode: () => {
+        throw new Error("Simulated disk I/O failure");
+      },
+    };
+    const req = new Request(url, {
+      method: "PUT",
+      headers: { host: "127.0.0.1:10100", "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "cursor", enabled: true }),
+    });
+    const res = await handleManagementAPI(req, url, config, failingDeps, "admin-token");
+    expect(res?.status).toBe(500);
+    const body = await res?.json();
+    expect(body).toMatchObject({ error: "failed to persist cursor pool configuration" });
+    expect(JSON.stringify(body)).not.toContain("Simulated disk I/O failure");
+
+    // Unrelated config sections preserved
+    expect(config.providers.deepseek).toEqual({
+      adapter: "openai-chat",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: "deepseek-key-fixture",
+    });
+  });
+
+  test("recursive secret-ID scan: never exposes account IDs, JWTs, emails, tokens, or raw secrets", async () => {
+    const secretId1 = "acc_super_secret_id_11111";
+    const secretId2 = "acc_super_secret_id_22222";
+    const secretJwt = ["ey", "JhbGciOi", "JIUzI1NiI", "sinR5cCI6Ik", "pXVCJ9.sensitive_payload_bytes.signature"].join("");
+    const secretRefresh = "rt_secret_refresh_token_99999";
+    const secretEmail = "secret_dev_user@example.com";
+
+    writeCursorAuthStore([
+      { id: secretId1, access: secretJwt, refresh: secretRefresh, alias: "Dev Account" },
+      { id: secretId2, access: "access-token-2", refresh: "refresh-token-2", alias: "Prod Account" },
+    ]);
+    const server = startServer(0);
+    try {
+      const getRes = await fetch(new URL("/api/oauth/accounts/pool?provider=cursor", server.url));
+      expect(getRes.status).toBe(200);
+      const getRaw = await getRes.text();
+      const getJson = JSON.parse(getRaw);
+
+      const secrets = [secretId1, secretId2, secretJwt, secretRefresh, secretEmail, "sensitive_payload_bytes"];
+      for (const secret of secrets) {
+        expect(getRaw).not.toContain(secret);
+      }
+      recursiveScanForSecrets(getJson, secrets);
+
+      for (const acc of getJson.accounts) {
+        expect(acc).not.toHaveProperty("id");
+        expect(acc).not.toHaveProperty("accountId");
+        expect(acc).not.toHaveProperty("token");
+        expect(acc).not.toHaveProperty("access");
+        expect(acc).not.toHaveProperty("email");
+        expect(acc).toHaveProperty("ordinal");
+        expect(acc).toHaveProperty("alias");
+        expect(acc).toHaveProperty("usable");
+      }
+
+      const putRes = await fetch(new URL("/api/oauth/accounts/pool", server.url), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: "cursor", enabled: true }),
+      });
+      expect(putRes.status).toBe(200);
+      const putRaw = await putRes.text();
+      const putJson = JSON.parse(putRaw);
+      for (const secret of secrets) {
+        expect(putRaw).not.toContain(secret);
+      }
+      recursiveScanForSecrets(putJson, secrets);
+      for (const acc of putJson.accounts) {
+        expect(acc).not.toHaveProperty("id");
+        expect(acc).not.toHaveProperty("accountId");
+        expect(acc).not.toHaveProperty("token");
+      }
+    } finally {
+      await server.stop(true);
+    }
+  });
+
+  test("alias stability: preserves valid aliases and falls back safely to stable ordinals", async () => {
+    writeCursorAuthStore([
+      { id: "acc-1", access: "tok-1", alias: "Primary Machine" },
+      { id: "acc-2", access: "tok-2" },
+      { id: "acc-3", access: "tok-3", alias: "Invalid\x00Control\x07Chars" },
+      { id: "acc-4", access: "tok-4", alias: "A".repeat(81) },
+    ]);
+    const server = startServer(0);
+    try {
+      const res = await fetch(new URL("/api/oauth/accounts/pool?provider=cursor", server.url));
+      expect(res.status).toBe(200);
+      const json = await res.json();
+      expect(json.accounts).toEqual([
+        { ordinal: 1, alias: "Primary Machine", usable: true },
+        { ordinal: 2, alias: "Account 2", usable: true },
+        { ordinal: 3, alias: "Account 3", usable: true },
+        { ordinal: 4, alias: "Account 4", usable: true },
+      ]);
     } finally {
       await server.stop(true);
     }

@@ -336,6 +336,10 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
   // Opt-in Anthropic OAuth account pool (#294): enable/threshold/strategy + clear cooldown.
   if (url.pathname === "/api/oauth/accounts/pool" && req.method === "GET") {
     const provider = (url.searchParams.get("provider") ?? "").trim().toLowerCase();
+    if (provider === "cursor") {
+      const { getCursorAccountPoolStatus } = await import("../../providers/cursor-pool");
+      return jsonResponse(getCursorAccountPoolStatus(config));
+    }
     if (provider !== "anthropic") {
       // Generic OAuth pool-settings contract (#695 slice 1): persisted per provider. `strategy`
       // and `autoSwitchThreshold` stay inert until the selector consumes them; `enabled` already
@@ -344,7 +348,7 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       const { poolSettingsCapability, genericPoolSettingsDto } = await import("../../oauth/pool-settings-capability");
       const prov = config.providers[provider];
       if (!provider || !prov || poolSettingsCapability(provider, prov) !== "generic") {
-        return jsonResponse({ error: "pool config is only supported for anthropic and generic OAuth providers" }, 400);
+        return jsonResponse({ error: "pool config is only supported for anthropic, cursor, and generic OAuth providers" }, 400);
       }
       return jsonResponse(genericPoolSettingsDto(provider, prov));
     }
@@ -373,6 +377,53 @@ export async function handleOauthAccountRoutes(ctx: ManagementContext): Promise<
       quotaWindow?: unknown;
     };
     const provider = typeof body.provider === "string" ? body.provider.trim().toLowerCase() : "";
+    if (provider === "cursor") {
+      if (ctx.principal !== "admin-token" && ctx.principal !== "gui-session") {
+        return jsonResponse({ error: "unauthorized mutation principal" }, 403);
+      }
+      if ("accountId" in body || "id" in body || "account" in body) {
+        return jsonResponse({ error: "cursor pool toggle does not accept account ID" }, 400);
+      }
+      if (
+        body.autoSwitchThreshold !== undefined ||
+        body.strategy !== undefined ||
+        body.stickyLimit !== undefined ||
+        body.quotaWindow !== undefined
+      ) {
+        return jsonResponse({ error: "cursor pool does not support knobs" }, 400);
+      }
+      const allowedKeys = new Set(["provider", "enabled"]);
+      for (const key of Object.keys(body)) {
+        if (!allowedKeys.has(key)) {
+          return jsonResponse({ error: `unexpected field '${key}' in cursor pool config` }, 400);
+        }
+      }
+      if (typeof body.enabled !== "boolean") {
+        return jsonResponse({ error: "enabled must be a boolean" }, 400);
+      }
+      let prov = config.providers.cursor ?? Object.values(config.providers).find((p) => p.adapter === "cursor");
+      if (!prov) {
+        const reg = getProviderRegistryEntry("cursor");
+        prov = {
+          adapter: reg?.adapter ?? "cursor",
+          baseUrl: reg?.baseUrl ?? "https://api2.cursor.sh",
+          authMode: "oauth",
+        };
+        config.providers.cursor = prov;
+      }
+      prov.cursorAccountPool = { enabled: body.enabled };
+      const persist = ctx.deps?.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode;
+      try {
+        persist(config);
+      } catch {
+        return jsonResponse({ error: "failed to persist cursor pool configuration" }, 500);
+      }
+      const { getCursorAccountPoolStatus } = await import("../../providers/cursor-pool");
+      return jsonResponse({
+        ok: true,
+        ...getCursorAccountPoolStatus(config),
+      });
+    }
     if (provider !== "anthropic") {
       const {
         poolSettingsCapability, genericPoolSettingsDto, parseGenericPoolStrategy, parseGenericAutoSwitchThreshold,

@@ -584,6 +584,9 @@ const providerConfigSchema = z.object({
   responsesSnapshotRepair: z.boolean().optional(),
   xaiResponsesXSearch: z.boolean().optional(),
   xaiResponsesDefaultVersion: z.number().int().positive().optional().catch(undefined),
+  cursorAccountPool: z.object({
+    enabled: z.boolean(),
+  }).strict().optional(),
 }).passthrough();
 
 export { isValidProviderName, hasOwnProvider } from "./config/provider-name";
@@ -1400,6 +1403,13 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "modelPreferHostedTools"],
         message: preferHostedToolsError,
+      });
+    }
+    if (provider.cursorAccountPool !== undefined && name !== "cursor" && provider.adapter !== "cursor") {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "cursorAccountPool"],
+        message: "cursorAccountPool is only supported on Cursor providers",
       });
     }
     const maxInputError = positiveIntegerRecordConfigError(

@@ -867,6 +867,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   googleMode: "editor",
   project: "editor",
   location: "editor",
+  cursorAccountPool: "editor",
   mcpServers: "redacted",
   desktopExecutor: "redacted",
   unsafeAllowNativeLocalExec: "editor",

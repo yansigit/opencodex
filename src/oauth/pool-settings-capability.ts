@@ -14,7 +14,7 @@ import type { OcxProviderConfig } from "../types";
  * no longer do is refuse reactive 429 rotation, which activates on account presence and is not
  * disableable.
  */
-export type PoolSettingsKind = "codex" | "anthropic" | "generic";
+export type PoolSettingsKind = "codex" | "anthropic" | "cursor" | "generic";
 
 export const GENERIC_POOL_STRATEGIES = ["quota", "round-robin", "fill-first"] as const;
 export type GenericPoolStrategy = typeof GENERIC_POOL_STRATEGIES[number];
@@ -22,6 +22,7 @@ export type GenericPoolStrategy = typeof GENERIC_POOL_STRATEGIES[number];
 export function poolSettingsCapability(name: string, provider: OcxProviderConfig | undefined): PoolSettingsKind | null {
   if (name === "openai") return "codex";
   if (name === "anthropic") return "anthropic";
+  if (name === "cursor" || provider?.adapter === "cursor") return "cursor";
   if (!provider) return null;
   return isGenericFailoverProvider(name, provider) ? "generic" : null;
 }

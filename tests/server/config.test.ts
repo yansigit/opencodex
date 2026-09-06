@@ -1371,6 +1371,100 @@ describe("opencodex config defaults", () => {
     expect(readConfigDiagnostics().error).toContain("responsesSnapshotRepair");
   });
 
+  test("accepts strict cursorAccountPool on cursor providers and rejects knobs or non-cursor placement", () => {
+    writeConfig({
+      port: 12345,
+      providers: {
+        cursor: {
+          adapter: "cursor",
+          baseUrl: "https://api2.cursor.sh",
+          cursorAccountPool: { enabled: true },
+        },
+      },
+      defaultProvider: "cursor",
+    });
+    expect(readConfigDiagnostics().error).toBeNull();
+    expect(readConfigDiagnostics().config.providers.cursor.cursorAccountPool).toEqual({
+      enabled: true,
+    });
+
+    writeConfig({
+      port: 12345,
+      providers: {
+        cursor: {
+          adapter: "cursor",
+          baseUrl: "https://api2.cursor.sh",
+          cursorAccountPool: { enabled: false },
+        },
+      },
+      defaultProvider: "cursor",
+    });
+    expect(readConfigDiagnostics().error).toBeNull();
+    expect(readConfigDiagnostics().config.providers.cursor.cursorAccountPool).toEqual({
+      enabled: false,
+    });
+
+    // Rejects extra knobs (e.g. strategy, autoSwitchThreshold, stickyLimit)
+    writeConfig({
+      port: 12345,
+      providers: {
+        cursor: {
+          adapter: "cursor",
+          baseUrl: "https://api2.cursor.sh",
+          cursorAccountPool: { enabled: true, autoSwitchThreshold: 80 } as unknown as { enabled: boolean },
+        },
+      },
+      defaultProvider: "cursor",
+    });
+    expect(readConfigDiagnostics().source).toBe("fallback");
+    expect(readConfigDiagnostics().error).toContain("cursorAccountPool");
+
+    // Rejects non-boolean enabled
+    writeConfig({
+      port: 12345,
+      providers: {
+        cursor: {
+          adapter: "cursor",
+          baseUrl: "https://api2.cursor.sh",
+          cursorAccountPool: { enabled: "true" as unknown as boolean },
+        },
+      },
+      defaultProvider: "cursor",
+    });
+    expect(readConfigDiagnostics().source).toBe("fallback");
+    expect(readConfigDiagnostics().error).toContain("cursorAccountPool");
+
+    // Rejects empty object
+    writeConfig({
+      port: 12345,
+      providers: {
+        cursor: {
+          adapter: "cursor",
+          baseUrl: "https://api2.cursor.sh",
+          cursorAccountPool: {} as { enabled: boolean },
+        },
+      },
+      defaultProvider: "cursor",
+    });
+    expect(readConfigDiagnostics().source).toBe("fallback");
+    expect(readConfigDiagnostics().error).toContain("cursorAccountPool");
+
+    // Rejects placement on non-Cursor provider
+    writeConfig({
+      port: 12345,
+      providers: {
+        custom: {
+          adapter: "openai-responses",
+          baseUrl: "https://example.test/v1",
+          cursorAccountPool: { enabled: true },
+        },
+      },
+      defaultProvider: "custom",
+    });
+    expect(readConfigDiagnostics().source).toBe("fallback");
+    expect(readConfigDiagnostics().error).toContain("cursorAccountPool is only supported on Cursor providers");
+  });
+
   test("accepts only a boolean xaiResponsesXSearch provider opt-in", () => {
     const provider = {
       adapter: "openai-responses",

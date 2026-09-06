@@ -6,6 +6,8 @@ import {
   createCursorPoolCapability,
   CURSOR_POOL_COOLDOWN_MS,
   CURSOR_POOL_TTL_MS,
+  isCursorAccountPoolConfigured,
+  getCursorAccountPoolStatus,
 } from "../../../src/providers/cursor-pool";
 
 describe("CursorCredentialRouter", () => {
@@ -342,5 +344,109 @@ describe("CursorPoolKernel", () => {
     expect(activated).not.toBeNull();
     expect(listAccountsCalls).toBe(2);
     expect(resolveCalls).toBe(4);
+  });
+});
+
+describe("Cursor pool configuration and status helper", () => {
+  test("isCursorAccountPoolConfigured detects enabled state on cursor provider", () => {
+    expect(isCursorAccountPoolConfigured()).toBe(false);
+    expect(isCursorAccountPoolConfigured({})).toBe(false);
+    expect(isCursorAccountPoolConfigured({ providers: {} })).toBe(false);
+    expect(
+      isCursorAccountPoolConfigured({
+        providers: { cursor: { adapter: "cursor", baseUrl: "https://api2.cursor.sh" } },
+      }),
+    ).toBe(false);
+    expect(
+      isCursorAccountPoolConfigured({
+        providers: {
+          cursor: {
+            adapter: "cursor",
+            baseUrl: "https://api2.cursor.sh",
+            cursorAccountPool: { enabled: false },
+          },
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isCursorAccountPoolConfigured({
+        providers: {
+          cursor: {
+            adapter: "cursor",
+            baseUrl: "https://api2.cursor.sh",
+            cursorAccountPool: { enabled: true },
+          },
+        },
+      }),
+    ).toBe(true);
+    expect(
+      isCursorAccountPoolConfigured({
+        providers: {
+          mycursor: {
+            adapter: "cursor",
+            baseUrl: "https://api2.cursor.sh",
+            cursorAccountPool: { enabled: true },
+          },
+        },
+      }),
+    ).toBe(true);
+  });
+
+  test("getCursorAccountPoolStatus maps accounts and computes aggregateStatus accurately", () => {
+    const config = {
+      providers: {
+        cursor: {
+          adapter: "cursor",
+          baseUrl: "https://api2.cursor.sh",
+          cursorAccountPool: { enabled: true },
+        },
+      },
+    };
+    // 0 accounts -> undersized
+    let status = getCursorAccountPoolStatus(config, 1000, []);
+    expect(status).toEqual({
+      provider: "cursor",
+      enabled: true,
+      status: "undersized",
+      aggregateStatus: "undersized",
+      accounts: [],
+    });
+
+    // 1 usable account -> undersized
+    status = getCursorAccountPoolStatus(config, 1000, [
+      { id: "a", access: "tok-a", expires: 2000 },
+    ]);
+    expect(status.aggregateStatus).toBe("undersized");
+    expect(status.accounts).toEqual([
+      { ordinal: 1, alias: "Account 1", usable: true },
+    ]);
+
+    // 2 accounts, both usable -> ready
+    status = getCursorAccountPoolStatus(config, 1000, [
+      { id: "a", access: "tok-a", expires: 2000, alias: "Personal" },
+      { id: "b", access: "tok-b", expires: 2000, alias: "Work" },
+    ]);
+    expect(status.aggregateStatus).toBe("ready");
+    expect(status.accounts).toEqual([
+      { ordinal: 1, alias: "Personal", usable: true },
+      { ordinal: 2, alias: "Work", usable: true },
+    ]);
+
+    // disabled config -> disabled even if accounts exist
+    const disabledConfig = {
+      providers: {
+        cursor: {
+          adapter: "cursor",
+          baseUrl: "https://api2.cursor.sh",
+          cursorAccountPool: { enabled: false },
+        },
+      },
+    };
+    status = getCursorAccountPoolStatus(disabledConfig, 1000, [
+      { id: "a", access: "tok-a", expires: 2000 },
+      { id: "b", access: "tok-b", expires: 2000 },
+    ]);
+    expect(status.aggregateStatus).toBe("disabled");
+    expect(status.enabled).toBe(false);
   });
 });
