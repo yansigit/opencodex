@@ -129,3 +129,24 @@ test("uses the active UI locale instead of re-detecting browser storage", async 
   dialog.dispatchEvent(new testWindow.Event("cancel", { cancelable: true }));
   expect(await pending).toBeNull();
 });
+
+test("notice display rules are scoped so a hidden notice cannot paint", async () => {
+  const css = await Bun.file(new URL("../src/styles.css", import.meta.url)).text();
+
+  expect(css).toContain(".notice:not([hidden])");
+  expect(css).toContain(".notice-warn:not([hidden])");
+  expect(css).toContain(".notice.notice-warn.startup-runtime-notice:not([hidden])");
+
+  for (const block of css.matchAll(/(^|\})\s*([^{}]*\.notice[^{}]*)\{([^}]*)\}/g)) {
+    const selector = block[2]!.trim();
+    const body = block[3]!;
+    const displayValues = [...body.matchAll(/(?:^|;)\s*display\s*:\s*([^;]+)/g)]
+      .map(match => match[1]!.trim());
+    if (displayValues.length === 0) continue;
+    if (displayValues.every(value => /^none(?:\s*!important)?$/.test(value))) {
+      expect(selector).toContain("[hidden]");
+      continue;
+    }
+    expect(selector).toContain(":not([hidden])");
+  }
+});
