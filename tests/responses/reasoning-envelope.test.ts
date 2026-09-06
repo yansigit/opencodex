@@ -45,4 +45,13 @@ describe("reasoning and tool/result envelopes", () => {
     expect(signature.startsWith("ocxr1:")).toBe(true);
     expect(decodeReasoningEnvelope(signature)).toEqual({ txt: "think" });
   });
+
+  test("inbound preserves redacted-only reasoning when visible text is empty", () => {
+    const body = anthropicToResponsesBody({
+      model: "m", messages: [{ role: "assistant", content: [{ type: "redacted_thinking", data: "opaque" }] }],
+    }) as any;
+    expect(body.input).toHaveLength(1);
+    expect(body.input[0].type).toBe("reasoning");
+    expect(decodeReasoningEnvelope(body.input[0].encrypted_content)?.red).toEqual(["opaque"]);
+  });
 });

@@ -377,17 +377,20 @@ export function responsesSseToAnthropicSse(
           case "response.output_text.delta": {
             if (typeof data.delta !== "string" || data.delta.length === 0) break;
             ensureBlock("text");
+            const active = open;
+            if (!active || active.kind !== "text") break;
             emit("content_block_delta", {
-              type: "content_block_delta", index: open!.index,
+              type: "content_block_delta", index: active.index,
               delta: { type: "text_delta", text: data.delta },
             });
-            open!.thinkingBuf = (open!.thinkingBuf ?? "") + data.delta;
             break;
           }
           case "response.reasoning_summary_text.delta":
           case "response.reasoning_text.delta": {
             if (typeof data.delta !== "string" || data.delta.length === 0) break;
             ensureBlock("thinking");
+            const active = open;
+            if (!active || active.kind !== "thinking") break;
             // The JSON path joins reasoning summary/content parts with "\n\n"
             // (responsesJsonToAnthropicMessage); mirror that at part and item boundaries
             // so multi-part summaries do not glue into one run-on paragraph. Frames
@@ -399,18 +402,18 @@ export function responsesSseToAnthropicSse(
             // components while retaining item and part equality, rather than dropping item_id and
             // accidentally joining distinct malformed reasoning items.
             const partKey = `${boundedReasoningIdentity(data.item_id)}:${slot}`;
-            if (open!.reasoningPartKey !== undefined && open!.reasoningPartKey !== partKey) {
+            if (active.reasoningPartKey !== undefined && active.reasoningPartKey !== partKey) {
               emit("content_block_delta", {
-                type: "content_block_delta", index: open!.index,
+                type: "content_block_delta", index: active.index,
                 delta: { type: "thinking_delta", thinking: "\n\n" },
               });
             }
-            open!.reasoningPartKey = partKey;
+            active.reasoningPartKey = partKey;
             emit("content_block_delta", {
-              type: "content_block_delta", index: open!.index,
+              type: "content_block_delta", index: active.index,
               delta: { type: "thinking_delta", thinking: data.delta },
             });
-            open!.thinkingBuf = (open!.thinkingBuf ?? "") + data.delta;
+            active.thinkingBuf = (active.thinkingBuf ?? "") + data.delta;
             break;
           }
           case "response.output_item.added": {
@@ -504,10 +507,9 @@ export function responsesSseToAnthropicSse(
               if (pair.completed) webSearchRequests++;
               break;
             }
-            if (!open) break;
             // Close the matching open block (message/reasoning items close implicitly on
             // the next block; function_call items must close here so tool input parses).
-            if (open.kind === "tool_use" && item.type === "function_call") {
+            if (open && open.kind === "tool_use" && item.type === "function_call") {
               if (open.bufferWebSearchArgs && !open.webSearchArgsEmitted) {
                 const rawArgs = typeof item.arguments === "string" && item.arguments.length > 0
                   ? item.arguments
@@ -523,13 +525,15 @@ export function responsesSseToAnthropicSse(
               }
               closeOpenBlock();
             }
-            else if (open.kind === "text" && item.type === "message") closeOpenBlock();
-            else if (open.kind === "thinking" && item.type === "reasoning") {
+            else if (open && open.kind === "text" && item.type === "message") closeOpenBlock();
+            else if (item.type === "reasoning") {
               const encrypted = typeof item.encrypted_content === "string" ? item.encrypted_content : "";
               const env = encrypted ? decodeReasoningEnvelope(encrypted) : null;
-              if (env?.sig) open.reasoningSig = env.sig;
               const red = env?.red ?? [];
-              closeOpenBlock();
+              if (open?.kind === "thinking") {
+                if (env?.sig) open.reasoningSig = env.sig;
+                closeOpenBlock();
+              }
               for (const data of red) {
                 const idx = blockIndex++;
                 emit("content_block_start", { type: "content_block_start", index: idx, content_block: { type: "redacted_thinking", data } });

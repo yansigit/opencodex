@@ -164,7 +164,7 @@ function systemMessageText(content: unknown): string {
   return parts.join("\n\n");
 }
 
-function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionContext = NO_ELISION, knownToolIds: ReadonlySet<string> = new Set()): void {
+function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionContext = NO_ELISION): void {
   if (typeof content === "string") {
     if (content.length > 0) pushUserMessage(input, [{ type: "input_text", text: content }]);
     return;
@@ -210,7 +210,7 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
   pushUserMessage(input, pending);
 }
 
-function assistantMessageToItems(content: unknown, input: Rec[], knownToolIds: Set<string>): void {
+function assistantMessageToItems(content: unknown, input: Rec[]): void {
   if (typeof content === "string") {
     if (content.length > 0) input.push({ type: "message", role: "assistant", content: [{ type: "output_text", text: content }] });
     return;
@@ -232,8 +232,6 @@ function assistantMessageToItems(content: unknown, input: Rec[], knownToolIds: S
         if (typeof raw.id !== "string" || raw.id.length === 0 || typeof raw.name !== "string" || raw.name.length === 0) {
           throw new AnthropicRequestError("tool_use requires id and name");
         }
-        knownToolIds.add(raw.id);
-        if (raw.type === "tool_use" && typeof raw.name !== "string") break;
         input.push({ type: "function_call", call_id: raw.id, name: raw.name, arguments: JSON.stringify(raw.input ?? {}) });
         break;
       }
@@ -306,7 +304,6 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   }
 
   const input: Rec[] = [];
-  const knownToolIds = new Set<string>();
   const systemParts: string[] = [];
   const topLevelSystem = systemToInstructions(raw.system);
   if (topLevelSystem !== undefined) systemParts.push(topLevelSystem);
@@ -317,8 +314,8 @@ export function anthropicToResponsesTranslation(raw: unknown, cc?: OcxClaudeCode
   };
   for (const msg of raw.messages) {
     if (!isRec(msg)) throw new AnthropicRequestError("each message must be an object");
-    if (msg.role === "user") userMessageToItems(msg.content, input, elide, knownToolIds);
-    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input, knownToolIds);
+    if (msg.role === "user") userMessageToItems(msg.content, input, elide);
+    else if (msg.role === "assistant") assistantMessageToItems(msg.content, input);
     else if (msg.role === "system") {
       const text = systemMessageText(msg.content);
       if (text.length > 0) systemParts.push(text);

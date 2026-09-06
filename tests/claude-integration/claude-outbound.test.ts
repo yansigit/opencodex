@@ -13,6 +13,7 @@ import {
   TRANSLATOR_MAX_CALL_ARGUMENT_BYTES,
   type TranslatorBudget,
 } from "../../src/lib/translator-budget";
+import { encodeReasoningEnvelope } from "../../src/responses/reasoning-envelope";
 
 const streamBudgets = new WeakMap<ReadableStream<Uint8Array>, TranslatorBudget>();
 
@@ -1109,4 +1110,14 @@ describe("sanitizeWebSearchInput (#381)", () => {
       data: { error: { type: "request_too_large", code: "translation_buffer_limit" } },
     });
   }, 60_000);
+
+  test("redacted-only reasoning emits a standalone redacted_thinking block", async () => {
+    const events = await collectEvents(responsesSseToAnthropicSse(streamFrom([
+      sse("response.output_item.done", {
+        item: { type: "reasoning", id: "rs_red", encrypted_content: encodeReasoningEnvelope({ red: ["opaque"] }) },
+      }),
+      sse("response.completed", { response: { status: "completed", usage: {} } }),
+    ].join("")), "m"));
+    expect(events.some(event => event.data.content_block?.type === "redacted_thinking")).toBe(true);
+  });
 });
