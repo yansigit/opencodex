@@ -48,7 +48,7 @@ if [ "${#positionals[@]}" -lt 1 ] || [ "${#positionals[@]}" -gt 2 ]; then
   exit 2
 fi
 PR="${positionals[0]}"
-REPO="${positionals[1]:-lidge-jun/opencodex}"
+REPO="${positionals[1]:-yansigit/opencodex}"
 if [[ ! "$PR" =~ ^[0-9]+$ ]] || [[ ! "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
   echo "FAIL: invalid pull-request number or repository" >&2
   exit 2

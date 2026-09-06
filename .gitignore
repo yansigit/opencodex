@@ -46,6 +46,7 @@ devlog/**/security-advisory-draft*
 **/.codexclaw/
 .omo/
 **/.omo/
+.planning/
 
 # Local development worktrees
 .worktrees/

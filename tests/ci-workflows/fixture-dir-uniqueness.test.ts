@@ -84,13 +84,31 @@ describe("test fixture directories", () => {
     expect(shared).toEqual([]);
   });
 
-  test("the two files behind the original flake no longer use a fixed path", () => {
-    // Regression pin for the specific pair. Both now derive a per-run directory, which also
+  test("ACL-sensitive fixtures and observed collision cases use per-run paths", () => {
+    // These files either caused a real collision/Windows teardown cascade or persisted state
+    // through the same ACL-hardening path. Each now derives a per-run directory, which also
     // makes two concurrent runs of the SAME file safe — something a rename alone would miss.
     const layout = loadLayout();
-    for (const file of ["server-auth.test.ts", "management-provider-validation.test.ts"]) {
+    for (const [file, fixedPath] of [
+      ["server-auth.test.ts", ".tmp-server-auth-test"],
+      ["management-provider-validation.test.ts", ".tmp-server-auth-test"],
+      ["codex-quota-prime.test.ts", ".tmp-codex-quota-prime-test"],
+      ["codex-routing.test.ts", ".tmp-codex-routing-test"],
+      ["codex-pool-rotation.test.ts", ".tmp-codex-pool-rotation-test"],
+      ["codex-main-rotation.test.ts", ".tmp-main-rotation-codex"],
+      ["codex-main-rotation.test.ts", ".tmp-main-rotation-store"],
+      ["codex-plan.test.ts", ".tmp-codex-plan-test"],
+      ["codex-cooldown-recovery.test.ts", ".tmp-codex-cooldown-recovery-test"],
+      ["session-affinity.test.ts", ".tmp-session-affinity-test"],
+      ["issue-914-transport-attribution.test.ts", ".tmp-issue-914-test"],
+      ["kimi-oauth-identity.test.ts", ".tmp-kimi-oauth-identity-test"],
+      ["oauth-account-id-collision.test.ts", ".tmp-oauth-account-id-collision-test"],
+      ["codex-auth-collision.test.ts", ".tmp-codex-auth-collision-test"],
+      ["codex-account-delete-atomicity.test.ts", ".tmp-codex-account-delete-atomicity"],
+    ]) {
       const source = withoutComments(readFileSync(join(TESTS_DIR, currentPath(layout, file)), "utf8"));
-      expect(source).not.toContain('join(import.meta.dir, ".tmp-server-auth-test")');
+      const fixedFixtures = [...source.matchAll(FIXTURE_LITERAL)].map(match => match[2]);
+      expect(fixedFixtures).not.toContain(fixedPath);
       expect(source).toContain("mkdtempSync(join(tmpdir()");
     }
   });

@@ -4,13 +4,13 @@ set -euo pipefail
 echo "Installing opencodex..."
 
 if ! command -v node &>/dev/null; then
-  echo "Node.js 18+ is required. Install Node from https://nodejs.org/ and rerun this script." >&2
+  echo "Node.js 22+ is required. Install Node from https://nodejs.org/ and rerun this script." >&2
   exit 1
 fi
 
 NODE_MAJOR=$(node -p "Number(process.versions.node.split('.')[0])")
-if [ "$NODE_MAJOR" -lt 18 ]; then
-  echo "Node.js 18+ is required. Current version: $(node --version)" >&2
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  echo "Node.js 22+ is required. Current version: $(node --version)" >&2
   exit 1
 fi
 
@@ -23,9 +23,9 @@ echo "Using Node $(node --version)"
 
 # Install opencodex globally
 # If npm reports "install scripts blocked" for bun, rerun as:
-#   npm install -g --allow-scripts=bun @bitkyc08/opencodex
+#   npm install -g --allow-scripts=bun @yansigit/opencodex
 # (keep sudo if the original install used sudo)
-npm install -g @bitkyc08/opencodex
+npm install -g @yansigit/opencodex
 
 if ! command -v ocx &>/dev/null; then
   NPM_BIN="$(npm bin -g 2>/dev/null || printf "%s/bin" "$(npm prefix -g)")"

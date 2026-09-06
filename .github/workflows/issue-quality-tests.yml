@@ -28,6 +28,14 @@ on:
       - ".github/scripts/run-copilot-inference*.cjs"
       - ".github/scripts/parse-issue-translation-response.cjs"
       - ".github/scripts/parse-issue-translation-response.test.cjs"
+      - ".github/scripts/pr-automation*.cjs"
+      - ".github/scripts/agent-maintenance*.cjs"
+      - ".github/scripts/automation-health*.cjs"
+      - ".github/scripts/closed-pr-branch-cleanup.cjs"
+      - ".github/scripts/closed-pr-branch-cleanup.test.cjs"
+      - ".github/workflows/pr-automation.yml"
+      - ".github/workflows/agent-maintenance.yml"
+      - ".github/workflows/automation-health.yml"
       - ".github/workflows/enforce-issue-quality.yml"
       - ".github/workflows/enforce-pr-target.yml"
       - ".github/workflows/pr-labeler.yml"
@@ -61,6 +69,14 @@ on:
       - ".github/scripts/run-copilot-inference*.cjs"
       - ".github/scripts/parse-issue-translation-response.cjs"
       - ".github/scripts/parse-issue-translation-response.test.cjs"
+      - ".github/scripts/pr-automation*.cjs"
+      - ".github/scripts/agent-maintenance*.cjs"
+      - ".github/scripts/automation-health*.cjs"
+      - ".github/scripts/closed-pr-branch-cleanup.cjs"
+      - ".github/scripts/closed-pr-branch-cleanup.test.cjs"
+      - ".github/workflows/pr-automation.yml"
+      - ".github/workflows/agent-maintenance.yml"
+      - ".github/workflows/automation-health.yml"
       - ".github/workflows/enforce-issue-quality.yml"
       - ".github/workflows/enforce-pr-target.yml"
       - ".github/workflows/pr-labeler.yml"
@@ -77,7 +93,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
 
@@ -96,6 +112,10 @@ jobs:
           node --test .github/scripts/copilot-workflows.test.cjs
           node --test .github/scripts/run-copilot-inference.test.cjs
           node --test .github/scripts/parse-issue-translation-response.test.cjs
+          node --test .github/scripts/pr-automation*.test.cjs
+          node --test .github/scripts/agent-maintenance*.test.cjs
+          node --test .github/scripts/automation-health.test.cjs
+          node --test .github/scripts/closed-pr-branch-cleanup.test.cjs
 
       - name: Validate issue-form YAML
         run: |

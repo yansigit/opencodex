@@ -21,16 +21,16 @@ test("Linux shards isolate the storage API runtime family into its own gated job
   };
 
   const shardRun = workflow.jobs?.test?.steps?.find(
-    step => step.name === "Test in fresh-process batches",
+    step => step.name === "Test in fresh-process timing-aware batches",
   )?.run ?? "";
   expect(shardRun).toContain("scripts/ci/run-bun-test-batches.sh");
 
   const batchHelper = await Bun.file(
     new URL("../../scripts/ci/run-bun-test-batches.sh", import.meta.url),
   ).text();
-  // Basename-anchored so the exclusion follows the files into tests/storage/.
-  expect(batchHelper).toContain("*/api-storage-policy*.test.ts");
-  expect(batchHelper).toContain("*/api-storage.test.ts");
+  expect(batchHelper).toContain("scripts/ci/test-lanes.ts --lane general");
+  expect(batchHelper).toContain("scripts/test.ts --isolate");
+  expect(batchHelper).not.toContain("is_general_test_file");
 
   const storageJob = workflow.jobs?.["storage-policy"];
   expect(storageJob?.["runs-on"]).toBe("ubuntu-latest");
@@ -39,23 +39,9 @@ test("Linux shards isolate the storage API runtime family into its own gated job
   const storageRun = storageJob?.steps?.find(
     step => step.name === "Test storage policy API",
   )?.run ?? "";
-  const dedicatedFiles = [
-    "tests/storage/api-storage-policy-already-running.test.ts",
-    "tests/storage/api-storage-policy-mutation-busy.test.ts",
-    "tests/storage/api-storage-policy-put-race.test.ts",
-    "tests/storage/api-storage-policy-run.test.ts",
-    "tests/storage/api-storage-policy.test.ts",
-    "tests/storage/api-storage.test.ts",
-  ];
-
-  // Extract all test file paths from the run command
-  const testPathPattern = /\.\/tests\/[a-z0-9/-]+\.test\.ts/g;
-  const actualFiles = (storageRun.match(testPathPattern) || [])
-    .map(path => path.slice(2)) // Remove leading "./"
-    .sort();
-
-  const expectedFiles = [...dedicatedFiles].sort();
-  expect(actualFiles).toEqual(expectedFiles);
+  expect(storageRun).toContain("scripts/ci/test-lanes.ts --lane dedicated-storage");
+  expect(storageRun).toContain('"${dedicated_files[@]}"');
+  expect(storageRun).not.toContain("--timings");
 
   expect(storageRun).not.toContain("--shard");
 

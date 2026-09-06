@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assertReleasable,
   compareTagsLenient,
   compareVersions,
+  isPreviewVersion,
+  isReleaseChannelVersion,
   nextDevelopmentVersion,
   nextPreviewRelease,
   nextStableRelease,
@@ -9,6 +12,27 @@ import {
 } from "../../scripts/version-line";
 
 describe("version line algebra", () => {
+  test("distinguishes preview-channel versions from development tags", () => {
+    expect(isPreviewVersion("v2.44.0-preview.20260907")).toBe(true);
+    expect(isPreviewVersion("v2.44.0-dev.20260907.1")).toBe(false);
+    expect(isPreviewVersion("v2.44.0")).toBe(false);
+    expect(isPreviewVersion("not-a-version")).toBe(false);
+  });
+
+  test("limits the release channel to stable and preview versions", () => {
+    expect(isReleaseChannelVersion("v2.43.0")).toBe(true);
+    expect(isReleaseChannelVersion("v2.44.0-preview.20260907")).toBe(true);
+    expect(isReleaseChannelVersion("v2.44.0-dev.20260907.1")).toBe(false);
+    expect(isReleaseChannelVersion("not-a-version")).toBe(false);
+  });
+
+  test("development tags do not become a release-channel floor", () => {
+    expect(assertReleasable({
+      candidate: "2.43.1",
+      tags: ["v2.43.0", "v2.44.0-dev.20260907.1"],
+    })).toEqual({ ok: true });
+  });
+
   test("parses optional v, prerelease identifiers, and ignored build metadata", () => {
     expect(parseVersion(" v2.36.0-preview.20260829+build.1 ")).toEqual({
       major: 2,

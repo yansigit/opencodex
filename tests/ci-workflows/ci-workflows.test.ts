@@ -87,10 +87,30 @@ function expectSecureLinuxKeyringBootstrap(workflow: string): void {
 }
 
 describe("GitHub Actions hardening", () => {
+  test("repository-owned root tests always use the isolated wrapper", async () => {
+    const paths = [
+      ".github/workflows/ci.yml",
+      ".github/workflows/nightly-macos.yml",
+      "scripts/ci/run-bun-test-batches.sh",
+      "scripts/release.ts",
+      "scripts/openai-provider-option-final-gates.ts",
+    ];
+    const rawRootTest = /(?:^|[;&| \t])(?:bun|\$BUN_BIN) test(?:\s|$)/;
+    for (const path of paths) {
+      const text = await readText(path);
+      for (const line of text.split(/\r?\n/)) {
+        if (/^\s*(?:#|\/\/|\*|\/\*)/.test(line)) continue;
+        if (line.includes("cd gui") || line.includes("replit-gateway")) continue;
+        expect(`${path}:${line}`).not.toMatch(rawRootTest);
+      }
+    }
+  });
+
   test("cross-platform CI keeps bounded jobs and immutable action references", async () => {
     const workflow = await readText(".github/workflows/ci.yml");
     const ci = Bun.YAML.parse(workflow) as {
       permissions?: Record<string, string>;
+      concurrency?: { group?: string; "cancel-in-progress"?: string };
       jobs?: Record<string, { "timeout-minutes"?: number } | undefined>;
       on?: {
         workflow_dispatch?: {
@@ -106,27 +126,38 @@ describe("GitHub Actions hardening", () => {
       };
     };
 
+    expect(ci.concurrency?.group).toBe(
+      "cross-platform-ci-${{ github.event_name }}-${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.event_name == 'workflow_dispatch' && github.run_id || github.run_id }}",
+    );
+    expect(ci.concurrency?.["cancel-in-progress"]).toBe(
+      "${{ github.event_name == 'pull_request' || github.event_name == 'push' }}",
+    );
+
     // Job-scoped: a global count still passes if values are swapped between jobs.
     // Pin ownership explicitly. The Windows leg is sharded like the Linux ones
     // since 8034cd7c0 — a single leg reached 30m on a green suite and was killed
     // in cleanup, so each shard now holds the same 15m a Linux shard holds. A
     // shard that needs longer is wedged, not slow.
-    expect(ci.jobs?.["select-windows-runner"]?.["timeout-minutes"]).toBe(2);
+    expect(ci.jobs?.["select-windows-runner"]).toBeUndefined();
     expect(ci.jobs?.test?.["timeout-minutes"]).toBe(15);
     expect(ci.jobs?.gates?.["timeout-minutes"]).toBe(15);
-    expect(ci.jobs?.["platform-macos"]?.["timeout-minutes"]).toBe(20);
-    expect(ci.jobs?.["macos-control"]?.["timeout-minutes"]).toBe(30);
+    expect(ci.jobs?.["platform-macos"]?.["timeout-minutes"]).toBe(30);
+    expect(ci.jobs?.["macos-control"]).toBeUndefined();
     // Higher than the Linux shards on purpose: at 15 the Windows leg cancelled a
     // shard mid-suite, which reports as neither pass nor fail (#2152).
     expect(ci.jobs?.["platform-windows"]?.["timeout-minutes"]).toBe(30);
     expect(ci.jobs?.["keyring-smoke"]?.["timeout-minutes"]).toBe(8);
-    // Same lesson as the Windows shards above, one job later: at 8 the Windows leg
-    // spent ~7 minutes installing dependencies and was cancelled at the wall before
-    // it could pack and install. A cancellation is neither a pass nor a fail, and it
-    // landed on whichever step happened to be running — four times on the global
-    // install and once on a one-second asset check — which read as a flaky download
-    // rather than a budget one OS cannot meet (#3441).
+    // Eight minutes repeatedly cancelled the Windows global-install smoke during
+    // dependency installation. Retain upstream's corrected budget while keeping
+    // the fork's package-name-independent install command.
     expect(ci.jobs?.["npm-global-smoke"]?.["timeout-minutes"]).toBe(20);
+    // The packed tarball name follows package.json (`yansigit-opencodex-*.tgz` on
+    // this fork). Installing a hardcoded upstream filename makes the smoke fail
+    // after `npm pack` with ENOENT.
+    expect(workflow).toContain(
+      `npm install -g "./$(node -p "require('./pack.json')[0].filename")"`,
+    );
+    expect(workflow).not.toContain("bitkyc08-opencodex-*.tgz");
     expect(ci.jobs?.ci?.["timeout-minutes"]).toBe(5);
     expect(ci.permissions).toEqual({ contents: "read" });
 
@@ -162,7 +193,7 @@ describe("GitHub Actions hardening", () => {
     expect(await readText(".github/actions/setup-project-bun/action.yml"))
       .toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
     expect(workflow).toContain("actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e");
-    expect(workflow).toContain("bun test --isolate tests");
+    expect(workflow).toContain("bun scripts/test.ts --isolate");
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
 
     // Sharding is only safe while the shards tile the suite exactly. If the
@@ -184,26 +215,29 @@ describe("GitHub Actions hardening", () => {
     // how the first cut of that test shipped, so pin the flag rather than trusting a
     // comment. Asserted per job so a future edit cannot drop it from one leg while
     // the other still carries it.
-    for (const jobName of ["test", "platform-macos", "macos-control", "platform-windows"]) {
+    for (const jobName of ["test", "platform-macos", "platform-windows"]) {
       const steps = (ci.jobs?.[jobName] as { steps?: Array<{ uses?: string; with?: Record<string, unknown> }> })?.steps ?? [];
       const checkout = steps.find(step => typeof step.uses === "string" && step.uses.includes("actions/checkout"));
       expect(`${jobName}:${String(checkout?.with?.["fetch-tags"])}`).toBe(`${jobName}:true`);
     }
 
-    // Windows shards more finely than Linux: the same suite takes 17-25 minutes per
-    // quarter on windows-latest, which is the leg's own 25-minute ceiling (run
-    // 33934756997 cancelled a green 3/4 at 25m12s). The invariant that matters is the
-    // one above — the matrix and the divisor tile the suite exactly — so pin the
-    // Windows matrix to its own divisor rather than to Linux's, and pin it to be
-    // contiguous from 1 so a dropped entry cannot leave a slice of the suite unrun.
+    // Windows uses more, smaller shards because its process-heavy suite and NTFS
+    // filesystem work repeatedly exhausted four hosted runners under load. Keep
+    // its matrix contiguous and bind the lane selector divisor to that matrix so
+    // load reduction cannot silently drop part of the suite.
     const windowsShards = (ci.jobs?.["platform-windows"] as {
       strategy?: { matrix?: { shard?: number[] } };
     })?.strategy?.matrix?.shard ?? [];
     expect(windowsShards).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(windowsShards).toEqual(windowsShards.map((_, i) => i + 1));
-    const windowsSteps = (ci.jobs?.["platform-windows"] as { steps?: Array<{ run?: string }> })?.steps ?? [];
-    expect(windowsSteps.some(step => step.run?.includes(`--shard=\${{ matrix.shard }}/${windowsShards.length}`))).toBe(true);
-    expect(ci.jobs?.["platform-windows"]?.name).toBe(`windows \${{ matrix.shard }}/${windowsShards.length}`);
+    expect(windowsShards).toEqual(windowsShards.map((_, index) => index + 1));
+    const windowsSteps = (ci.jobs?.["platform-windows"] as {
+      steps?: Array<{ run?: string }>;
+    })?.steps ?? [];
+    expect(windowsSteps.some(step =>
+      step.run?.includes(`--shard \${{ matrix.shard }}/${windowsShards.length}`),
+    )).toBe(true);
+    expect(ci.jobs?.["platform-windows"]?.name)
+      .toBe(`windows \${{ matrix.shard }}/${windowsShards.length}`);
 
     // The aggregate gate is the check a human trusts. Three ways to break it
     // silently: drop `if: always()` so it skips (and a skipped job reports
@@ -215,6 +249,9 @@ describe("GitHub Actions hardening", () => {
     const ungated = new Set(["ci"]);
     expect([...(gate?.needs ?? [])].sort())
       .toEqual(Object.keys(ci.jobs ?? {}).filter(name => !ungated.has(name)).sort());
+    expect(workflow).toContain("WINDOWS_REQUIRED: ${{ (github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.ci == 'true' }}");
+    expect(workflow).toContain("WINDOWS_RESULT: ${{ needs.platform-windows.result }}");
+    expect(workflow).toContain('if [ "$WINDOWS_REQUIRED" = "true" ] && [ "$WINDOWS_RESULT" != "success" ]; then');
 
     // The focused doctor contract config is ADDITIVE evidence. It must never
     // replace the repository-wide strict typecheck: doing so made the aggregate
@@ -238,23 +275,49 @@ describe("GitHub Actions hardening", () => {
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test --isolate tests")).toBe(true);
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test tests")).toBe(false);
 
-    // macOS shards cover every CI-relevant change. They may skip
-    // only when the shared path filter says the entire expensive suite is out of
-    // scope (for example a docs-site-only PR).
-    const macosSteps = (ci.jobs?.["platform-macos"] as { steps?: { name?: string; env?: Record<string, string>; run?: string }[] })?.steps ?? [];
+    // macOS is focused on dev and relevant PRs; main/preview keep full control.
+    const macosSteps = (ci.jobs?.["platform-macos"] as {
+      steps?: { name?: string; if?: string; run?: string }[];
+    })?.steps ?? [];
     // The 60s per-test ceiling is part of the pinned shape: dropping it silently
     // restores the timing-flake class this lane kept surfacing.
-    const macosTestStep = macosSteps.find(step => step.name === "Test");
-    expect(macosTestStep?.env?.MACOS_TEST_SHARD).toBe("${{ matrix.shard }}");
-    expect(hasShellCommandHead(macosTestStep?.run, 'bun test --isolate --timeout 60000 "$@"')).toBe(true);
-    expect(hasExactShellCommand(macosTestStep?.run, 'run_macos_suite tests "--shard=$MACOS_TEST_SHARD/2" "${ignore_args[@]}"')).toBe(true);
-    expect(hasExactShellCommand(macosTestStep?.run, 'run_macos_suite --parallel=1 "./tests/$file"')).toBe(true);
-    expect(macosTestStep?.run).toContain('import { SERIAL_FULL_SUITE_FILES } from "./scripts/test.ts"');
-    const macosShards = (ci.jobs?.["platform-macos"] as {
-      strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] } };
-    })?.strategy;
-    expect(macosShards?.["fail-fast"]).toBe(false);
-    expect(macosShards?.matrix?.shard).toEqual([1, 2]);
+    expect(macosSteps.some(step => step.run?.includes("run-bun-with-crash-retry.sh"))).toBe(true);
+    expect(macosSteps.some(step => step.run?.includes("--shard"))).toBe(false);
+    const focusedMacos = macosSteps.find(step => step.name === "Focused Darwin/process lifecycle tests");
+    expect(focusedMacos?.run).toContain("tests/codex-integration/codex-prompt-text-probe.test.ts");
+    const fullMacos = macosSteps.find(step => step.name === "Full macOS suite");
+    expect(fullMacos?.if).toContain("github.event_name == 'pull_request' && github.base_ref == 'main'");
+    const pathPolicy = Bun.YAML.parse(await readText(".github/policies/ci-paths.yml")) as {
+      macos?: string[];
+      swift?: string[];
+    };
+    expect(pathPolicy.macos).toEqual([
+      ".github/workflows/**",
+      ".github/actions/**",
+      ".github/policies/**",
+      "scripts/ci/**",
+      "scripts/test.ts",
+      "src/adapters/cursor/native-exec-shell.ts",
+      "src/lib/machine-test-lock.ts",
+      "src/oauth/**",
+      "src/service.ts",
+      "integrations/aistudio-daemon/**",
+      "tests/adapters/google/aistudio-native-webkit.test.ts",
+      "tests/codex-integration/codex-app-server-processes.test.ts",
+      "tests/codex-integration/codex-prompt-text-probe.test.ts",
+      "tests/providers/cursor/cursor-native-exec-shell.test.ts",
+      "tests/preload.ts",
+      "tests/service/process-state.test.ts",
+      "tests/lib/process-control*.test.ts",
+      "tests/service/service*.test.ts",
+      "tests/storage/storage-worker*.test.ts",
+      "tests/ci-workflows/test-runner.test.ts",
+    ]);
+    expect(pathPolicy.swift).toEqual([
+      "integrations/aistudio-daemon/**",
+      "tests/adapters/google/aistudio-native-webkit.test.ts",
+      "src/oauth/aistudio-native-daemon.ts",
+    ]);
 
     // The macOS leg retries ONLY a Bun runtime crash, and only once. Bun 1.3.14
     // segfaults reclaiming a Worker at an `--isolate` file boundary with
@@ -263,84 +326,46 @@ describe("GitHub Actions hardening", () => {
     // `scripts/ci/run-bun-test-batches.sh`. Two ways to break this silently:
     // drop the crash-signature guard so an assertion failure gets retried into
     // green, or let the retry loop swallow a repeated crash. Pin both.
-    const macosTestRun = macosTestStep?.run ?? "";
-    // Actions invokes multiline `run:` blocks with `bash -e`. The retry loop
-    // must disable errexit before the crash-prone command or exit 133 aborts
-    // the step before PIPESTATUS can be inspected and the retry can run.
-    expect(hasExactShellCommand(macosTestRun, "set +e")).toBe(true);
-    expect(macosTestRun).toContain("Segmentation fault at address");
-    expect(macosTestRun).toContain("oh no: Bun has crashed");
-    expect(macosTestRun).toContain("assertion failures are not retried");
-    expect(macosTestRun).toContain("failing after one retry");
-    // `for attempt in 1 2` — one retry, never an unbounded loop.
-    expect(macosTestRun).toContain("for attempt in 1 2");
-    expect(macosTestRun).not.toContain("while true");
+    const macosTestRun = macosSteps.find(step => step.run?.includes("run-bun-with-crash-retry.sh"))?.run ?? "";
+    expect(macosTestRun).toContain("bun scripts/test.ts --isolate --timeout 60000");
+    const crashRetry = await readText("scripts/ci/run-bun-with-crash-retry.sh");
+    expect(crashRetry).toContain("for attempt in 1 2");
+    expect(crashRetry).toContain("assertion failures are not retried");
+    expect(crashRetry).toContain("failing after one retry");
+    expect(crashRetry).not.toContain("while true");
     expect((ci.jobs?.["platform-macos"] as { needs?: string; if?: string })?.needs).toBe("changes");
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
-      .toBe("github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'");
+      .toBe("(github.event_name != 'pull_request' && github.event_name != 'merge_group') || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') || needs.changes.outputs.macos == 'true'");
 
-    // Whole-pool control lives on dispatch so every push does not pay the
-    // unsharded macOS critical path. Keep the unsharded bun test line and the
-    // 30-minute budget; do not sneak a shard divisor into this job.
-    const macosControlJob = ci.jobs?.["macos-control"] as {
-      name?: string;
-      needs?: string;
-      if?: string;
-      "runs-on"?: string;
-      "timeout-minutes"?: number;
-      strategy?: unknown;
-      steps?: { run?: string }[];
-    } | undefined;
-    expect(macosControlJob?.name).toBe("macos control");
-    expect(macosControlJob?.needs).toBe("changes");
-    expect(macosControlJob?.if).toBe("github.event_name == 'workflow_dispatch'");
-    expect(macosControlJob?.["runs-on"]).toBe("macos-latest");
-    expect(macosControlJob?.strategy).toBeUndefined();
-    const macosControlSteps = macosControlJob?.steps ?? [];
-    expect(macosControlSteps.some(step => step.run?.includes("bun test --isolate --timeout 60000 tests"))).toBe(true);
-    expect(macosControlSteps.some(step => step.run?.includes("--shard"))).toBe(false);
-    const macosControlTestRun = macosControlSteps.find(step => step.run?.includes("bun test --isolate --timeout 60000 tests"))?.run ?? "";
-    expect(hasExactShellCommand(macosControlTestRun, "set +e")).toBe(true);
-    expect(macosControlTestRun).toContain("for attempt in 1 2");
-    expect(macosControlTestRun).not.toContain("while true");
-    expect(macosControlTestRun).toContain("assertion failures are not retried");
-    expect(macosControlTestRun).toContain("failing after one retry");
+    // Windows is required for every integration push and CI-relevant PR. The
+    // changes dependency keeps documentation-only PRs cheap without letting a
+    // code change or shipping-boundary push silently lose Windows coverage.
+    const windowsJob = ci.jobs?.["platform-windows"] as { if?: string; needs?: string[]; "runs-on"?: string } | undefined;
+    expect(windowsJob?.needs).toEqual(["changes"]);
+    expect(windowsJob?.["runs-on"]).toBe("windows-latest");
+    expect(windowsJob?.if)
+      .toBe("(github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.ci == 'true'");
 
-    // Windows is dispatch-only: it gates nothing, not even the shipping
-    // boundary. The sharded promotion run surfaced ~207 Windows-only failures
-    // that pre-date every released version, so the leg became a measurement
-    // tool a maintainer runs by hand, not a gate. Assert the positive
-    // condition and the absence of every automatic trigger — a stray
-    // `|| github.ref == ...` would restore a red leg to the release path.
-    const windowsIf = String((ci.jobs?.["platform-windows"] as { if?: string })?.if ?? "");
-    expect(windowsIf).toBe(
-      "github.event_name == 'workflow_dispatch' && (github.event.inputs.lane == '' || github.event.inputs.lane == 'all')",
-    );
-    expect(windowsIf).not.toContain("refs/heads/main");
-    expect(windowsIf).not.toContain("refs/heads/preview");
-    expect(windowsIf).not.toContain("refs/heads/dev");
-    expect(windowsIf).not.toContain("pull_request");
-
-    // A lane=macos-control dispatch must skip Windows so a red Windows burn-down
-    // cannot fail the unsharded macOS control run. A plain dispatch still runs
-    // everything, including Windows, which is what empty-or-all encodes.
-    expect(ci.on?.workflow_dispatch?.inputs?.lane).toEqual({
-      description: "all (default) or macos-control",
-      type: "choice",
-      default: "all",
-      options: ["all", "macos-control"],
-    });
-
-    // Windows runs the same suite, sharded like the Linux legs, and keeps the
-    // self-hosted workspace wipe. Without the wipe a deleted file survives on
-    // the runner's disk and the suite passes against a tree that no longer
-    // exists in git.
-    const winSteps = (ci.jobs?.["platform-windows"] as { steps?: { if?: string; run?: string }[] })?.steps ?? [];
+    // Windows runs the same suite, sharded like the Linux legs, on an ephemeral
+    // GitHub-hosted runner. Public pull-request code must never reach a
+    // persistent self-hosted host.
+    const winSteps = (ci.jobs?.["platform-windows"] as {
+      steps?: { name?: string; if?: string; run?: string; env?: Record<string, unknown> }[];
+    })?.steps ?? [];
+    const windowsSmokeIndex = winSteps.findIndex(step => step.name === "CLI help smoke");
+    const windowsTestIndex = winSteps.findIndex(step => step.name === "Test");
+    expect(windowsSmokeIndex).toBeGreaterThanOrEqual(0);
+    expect(windowsTestIndex).toBeGreaterThan(windowsSmokeIndex);
+    expect(winSteps[windowsSmokeIndex]?.if).toBeUndefined();
+    expect(hasExactShellCommand(
+      winSteps[windowsSmokeIndex]?.run,
+      "bun run src/cli/index.ts help",
+    )).toBe(true);
     // --timeout is part of the contract, not incidental: this leg ran on Bun's 5s default
     // while Linux and macOS both pass 60000, and it is the slowest hardware on the board.
     // Three composed-acceptance failures were that default firing on tests still working
     // at 41s. Pin the flag so the leg cannot silently drift back to the default.
-    const windowsTestCommand = `bun test --isolate --timeout 60000 tests --shard=\${{ matrix.shard }}/${windowsShards.length}`;
+    const windowsTestCommand = 'bun scripts/test.ts --isolate --timeout 60000 "${general_files[@]}"';
     expect(hasShellCommandHead(`echo ${windowsTestCommand}`, windowsTestCommand)).toBe(false);
     // Binding the assertion to an executable line is only half the guarantee: a
     // step carrying the exact command still runs nothing under `if: false`, and
@@ -349,8 +374,25 @@ describe("GitHub Actions hardening", () => {
     const windowsTestSteps = winSteps.filter(step => hasShellCommandHead(step.run, windowsTestCommand));
     expect(windowsTestSteps.length).toBeGreaterThan(0);
     expect(windowsTestSteps.every(step => step.if === undefined)).toBe(true);
-    expect(winSteps.some(step => step.if === "runner.environment == 'self-hosted'"
-      && step.run?.includes("git clean -xffd"))).toBe(true);
+    // The hosted Windows shard owns an ephemeral VM and invokes every wrapper
+    // sequentially in this one shell step. Requiring the local multi-worktree
+    // queue there adds a pre-test PowerShell SID/known-folder dependency without
+    // preventing any possible overlap; run 34000228308 lost the entire shard when
+    // that bounded identity lookup timed out before Bun started a test.
+    expect(windowsTestSteps.every(step => step.env?.OCX_TEST_NO_QUEUE === "1")).toBe(true);
+    const windowsTestRun = windowsTestSteps[0]?.run ?? "";
+    expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane general');
+    expect(windowsTestRun).toContain('scripts/ci/test-lanes.ts --lane serial');
+    expect(windowsTestRun).toContain('Windows lane selection returned an empty shard');
+    expect(windowsTestRun).not.toContain('mapfile -t general_files < <(');
+    expect(windowsTestRun).toContain('for serial_file in "${serial_files[@]}"');
+    expect(windowsTestRun).toContain('serial_timeout=60000');
+    expect(windowsTestRun).toContain('serial_timeout=300000');
+    expect(windowsTestRun).toContain('[[ "$serial_file" == "tests/codex-integration/codex-composed-acceptance.test.ts" ]]');
+    expect(windowsTestRun).toContain('--parallel=1 --timeout "$serial_timeout" "$serial_file"');
+    expect(windowsTestRun).not.toContain('--parallel=1 --timeout 60000 "${serial_files[@]}"');
+    expect(windowsTestRun).not.toContain(`tests --shard=\${{ matrix.shard }}/${windowsShards.length}`);
+    expect(workflow).not.toContain("ocx-home");
 
     // The three crash-signature lists must stay identical, and they must not key on
     // `panic(thread`.
@@ -368,17 +410,15 @@ describe("GitHub Actions hardening", () => {
       "Illegal instruction",
       "Bus error",
     ];
-    const windowsTestRun = windowsTestSteps[0]?.run ?? "";
     const batchScript = await readText("scripts/ci/run-bun-test-batches.sh");
+    const crashRetryScript = await readText("scripts/ci/run-bun-with-crash-retry.sh");
     for (const signature of crashSignatures) {
-      expect(`macos:${signature}:${macosTestRun.includes(signature)}`).toBe(`macos:${signature}:true`);
-      expect(`macos-control:${signature}:${macosControlTestRun.includes(signature)}`).toBe(`macos-control:${signature}:true`);
+      expect(`macos:${signature}:${crashRetryScript.includes(signature)}`).toBe(`macos:${signature}:true`);
       expect(`windows:${signature}:${windowsTestRun.includes(signature)}`).toBe(`windows:${signature}:true`);
       expect(`script:${signature}:${batchScript.includes(signature)}`).toBe(`script:${signature}:true`);
     }
     // The thread-numbered form must not be the anchor anywhere.
-    expect(macosTestRun).not.toContain("panic\\(thread");
-    expect(macosControlTestRun).not.toContain("panic\\(thread");
+    expect(crashRetryScript).not.toContain("panic\\(thread");
     expect(windowsTestRun).not.toContain("panic\\(thread");
     expect(batchScript).not.toContain("panic\\(thread");
 
@@ -396,16 +436,14 @@ describe("GitHub Actions hardening", () => {
     // accident, because the same job also ran the GUI build — splitting the suite
     // away from the gates removed that coincidence, and the shards went red on a
     // pull request before this pin existed.
-    for (const jobName of ["test", "platform-macos", "macos-control", "platform-windows"]) {
+    for (const jobName of ["test", "platform-macos", "platform-windows"]) {
       const steps = (ci.jobs?.[jobName] as { steps?: { if?: string; run?: string }[] })?.steps ?? [];
       const build = steps.find(step => step.run?.includes("bun run build"));
       expect(`${jobName}:${build === undefined}`).toBe(`${jobName}:false`);
       expect(`${jobName}:${build?.if ?? "unconditional"}`).toBe(`${jobName}:unconditional`);
     }
 
-    // No job in this workflow pushes, and the self-hosted runner keeps its
-    // checkout between jobs, so a persisted token is avoidable residue. The
-    // other workflows in this repository already set this; ci.yml was the gap.
+    // No job in this workflow pushes, so a persisted token is avoidable residue.
     const checkouts = Object.values(ci.jobs ?? {})
       .flatMap(job => (job as { steps?: { uses?: string; with?: Record<string, unknown> }[] })?.steps ?? [])
       .filter(step => step.uses?.startsWith("actions/checkout@"));
@@ -414,13 +452,6 @@ describe("GitHub Actions hardening", () => {
       expect(`checkout[${index}]:${step.with?.["persist-credentials"]}`).toBe(`checkout[${index}]:false`);
     }
 
-    // The self-hosted workspace wipe must not swallow its own failure. A clean
-    // that fails on permissions leaves deleted files on disk, and the checkout
-    // after it then validates a tree that no longer exists in git.
-    const wipe = ((ci.jobs?.["platform-windows"] as { steps?: { if?: string; run?: string }[] })?.steps ?? [])
-      .find(step => step.run?.includes("git clean -xffd"));
-    expect(wipe?.run).not.toContain("|| true");
-    expect(wipe?.run).toContain("git rev-parse --is-inside-work-tree");
   });
 
   test("PR checks reach every branch the target gate accepts", async () => {
@@ -435,10 +466,12 @@ describe("GitHub Actions hardening", () => {
     // `ci.yml` therefore carries no base filter at all. `service-lifecycle.yml`
     // keeps its list: it gates the release service path, not review.
     const gate = await readText(".github/workflows/enforce-pr-target.yml");
-    const allowed = gate.match(/const ALLOWED_BASES = \[([^\]]*)\];/);
+    const allowed = gate.match(
+      /const ALLOWED_BASES\s*=\s*context\.repo\.owner === "lidge-jun"\s*\? \["dev"\]\s*:\s*\["dev", "main"\]/,
+    );
     expect(allowed).not.toBeNull();
-    const bases = [...(allowed?.[1] ?? "").matchAll(/"([^"]+)"/g)].map(m => m[1]);
-    expect(bases).toEqual(["dev"]);
+    expect(allowed?.[0]).toContain('["dev"]');
+    expect(allowed?.[0]).toContain('["dev", "main"]');
 
     // The gate itself must stay unfiltered by base, or the stacked exemption it
     // implements would never be evaluated for the branches it exempts.
@@ -472,18 +505,20 @@ describe("GitHub Actions hardening", () => {
       }
     }
 
-    // The push trigger stays pinned to the release-relevant lines: release.yml
-    // gates on main and preview, so widening this one would pull an unrelated
-    // branch into that path.
+    // Every integration head needs exact push-CI evidence. In particular, a
+    // tree-preserving main backmerge changes no path but promotion still gates
+    // on a successful Cross-platform CI push run for that exact dev SHA.
     const ci = Bun.YAML.parse(await readText(".github/workflows/ci.yml")) as {
       on?: {
         push?: { branches?: string[]; paths?: string[] };
         pull_request?: { branches?: string[]; paths?: string[] };
+        merge_group?: { types?: string[]; branches?: string[]; paths?: string[] };
       };
       jobs?: Record<string, Record<string, unknown> | undefined>;
     };
     expect([...(ci.on?.push?.branches ?? [])].sort())
       .toEqual(["dev", "main", "preview"]);
+    expect(ci.on?.push?.paths).toBeUndefined();
 
     // The PR trigger must carry NO base-branch filter, and the two triggers
     // differ on purpose. GitHub matches `branches:` against the BASE ref, so
@@ -501,16 +536,16 @@ describe("GitHub Actions hardening", () => {
     // filter: every head needs an aggregate `ci` check.
     expect(ci.on?.pull_request?.branches).toBeUndefined();
     expect(ci.on?.pull_request?.paths).toBeUndefined();
+    expect(ci.on?.merge_group).toEqual({ types: ["checks_requested"] });
 
-    // The push trigger and pull-request `changes` job share one expensive-CI
-    // allowlist. PRs always create the workflow and aggregate check; this list
-    // decides whether the costly jobs run. Pin the entire list on both paths.
+    // The `changes` job owns the one expensive-CI allowlist for both events.
+    // Every head gets the workflow and aggregate check; this list decides
+    // whether the costly jobs run.
     const ciPaths = [
       ".gitattributes",
-      ".github/workflows/ci.yml",
-      ".github/workflows/enforce-pr-target.yml",
-      ".github/workflows/release.yml",
-      ".github/workflows/stale-needs-info.yml",
+      ".github/actions/**",
+      ".github/policies/**",
+      ".github/workflows/**",
       ".npmignore",
       "LICENSE",
       "README.md",
@@ -518,21 +553,26 @@ describe("GitHub Actions hardening", () => {
       "bin/**",
       "bun.lock",
       "gui/**",
+      "integrations/replit-gateway/**",
       "package.json",
       "scripts/**",
       "src/**",
       "tests/**",
       "tsconfig.json",
     ];
-    expect([...(ci.on?.push?.paths ?? [])].sort()).toEqual(ciPaths);
-
     const filterStep = (ci.jobs?.changes as {
       steps?: { with?: Record<string, string> }[];
     })?.steps?.find(step => step.with?.filters);
-    const areaFilters = Bun.YAML.parse(String(filterStep?.with?.filters ?? "")) as {
+    expect(filterStep?.with?.filters).toBe(".github/policies/ci-paths.yml");
+    const areaFilters = Bun.YAML.parse(await readText(".github/policies/ci-paths.yml")) as {
       ci?: string[];
+      dependencies?: string[];
     };
     expect([...(areaFilters.ci ?? [])].sort()).toEqual(ciPaths);
+    expect([...(areaFilters.dependencies ?? [])].sort()).toEqual([
+      "bun.lock",
+      "gui/bun.lock",
+    ]);
 
     const changesJob = ci.jobs?.changes as {
       outputs?: Record<string, string>;
@@ -549,28 +589,96 @@ describe("GitHub Actions hardening", () => {
       step => step.name === "Assert the scope output is usable",
     );
     expect(changesJob?.outputs?.ci).toBe("${{ steps.scope.outputs.ci }}");
+    expect(changesJob?.outputs?.dependencies).toBe(
+      "${{ steps.scope.outputs.dependencies }}",
+    );
+    expect(changesJob?.outputs?.reuse_dependency_audit).toBe(
+      "${{ steps.promotion-audit.outputs.reuse }}",
+    );
     expect(scopeStep?.id).toBe("scope");
     expect(scopeStep?.shell).toBe("bash");
-    expect(scopeStep?.env?.CI_SCOPE).toBe("${{ steps.filter.outputs.ci }}");
+    expect(scopeStep?.env?.EVENT_NAME).toBe("${{ github.event_name }}");
+    expect(scopeStep?.env?.NORMAL_CI_SCOPE).toBe("${{ steps.filter.outputs.ci }}");
+    expect(scopeStep?.env?.NORMAL_DEPENDENCIES_SCOPE).toBe(
+      "${{ steps.filter.outputs.dependencies }}",
+    );
+    expect(scopeStep?.env?.MERGE_GROUP_CI_SCOPE).toBe(
+      "${{ steps.merge-group-filter.outputs.ci }}",
+    );
+    expect(scopeStep?.env?.MERGE_GROUP_DEPENDENCIES_SCOPE).toBe(
+      "${{ steps.merge-group-filter.outputs.dependencies }}",
+    );
     expect(scopeStep?.run).not.toContain("${{");
-    expect(scopeStep?.run).toContain('case "$CI_SCOPE" in');
+    expect(scopeStep?.run).toContain('case "$value" in');
     expect(scopeStep?.run).toContain("true|false)");
-    expect(scopeStep?.run).toContain(`printf 'ci=%s\\n' "$CI_SCOPE" >> "$GITHUB_OUTPUT"`);
+    expect(scopeStep?.run).toContain('[ "$EVENT_NAME" = merge_group ] && prefix=MERGE_GROUP');
+    expect(scopeStep?.run).toContain('value="${!name-}"');
+    expect(scopeStep?.run).toContain('printf \'%s=%s\\n\' "$scope" "$value" >> "$GITHUB_OUTPUT"');
     expect(scopeStep?.run).toContain("exit 1");
     const filterIndex = changesJob?.steps?.findIndex(step => step.id === "filter") ?? -1;
     const scopeIndex = changesJob?.steps?.findIndex(step => step.id === "scope") ?? -1;
     expect(filterIndex).toBeGreaterThanOrEqual(0);
     expect(scopeIndex).toBeGreaterThan(filterIndex);
 
-    const scopedCondition = "github.event_name != 'pull_request' || needs.changes.outputs.ci == 'true'";
-    for (const jobName of ["test", "storage-policy", "gates", "platform-macos", "keyring-smoke"]) {
+    const promotionAuditStep = changesJob?.steps?.find(
+      step => step.name === "Verify reusable promotion audit evidence",
+    );
+    expect(promotionAuditStep?.id).toBe("promotion-audit");
+    expect(promotionAuditStep?.env?.BEFORE_SHA).toBe("${{ github.event.before }}");
+    expect(promotionAuditStep?.env?.DEPENDENCIES_CHANGED).toBe(
+      "${{ steps.scope.outputs.dependencies }}",
+    );
+    expect(promotionAuditStep?.run).toBe(
+      "node .github/scripts/promotion-audit-reuse.cjs",
+    );
+    expect(promotionAuditStep?.if).toBe(
+      "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+    );
+    expect(promotionAuditStep?.env?.GITHUB_TOKEN).toBe("${{ github.token }}");
+
+    expect((ci.jobs?.changes as { permissions?: Record<string, string> })?.permissions)
+      .toEqual({ actions: "read", contents: "read", "pull-requests": "read" });
+
+    const gatesJob = ci.jobs?.gates as {
+      steps?: Array<{ name?: string; if?: string; run?: string }>;
+    } | undefined;
+    const auditStep = gatesJob?.steps?.find(
+      step => step.name === "Dependency audit (high severity)",
+    );
+    expect((auditStep as { id?: string } | undefined)?.id).toBe("dependency-audit");
+    expect(auditStep?.if).toBe(
+      "needs.changes.outputs.dependencies == 'true' && needs.changes.outputs.reuse_dependency_audit != 'true'",
+    );
+    expect(auditStep?.run).toBe("bun run audit:high");
+    const auditProofStep = gatesJob?.steps?.find(
+      step => step.name === "Create dependency audit proof",
+    );
+    expect((auditProofStep as { id?: string } | undefined)?.id).toBe("dependency-audit-proof");
+    expect(auditProofStep?.if).toBe(
+      "github.event_name == 'pull_request' && steps.dependency-audit.outcome == 'success'",
+    );
+    expect(auditProofStep?.run).toContain("git rev-parse 'HEAD^{tree}'");
+    expect(auditProofStep?.run).toContain("dependency-audit-pr-${PR_NUMBER}-base-${BASE_SHA}-head-${HEAD_SHA}-tree-${audited_tree}");
+    const publishProofStep = gatesJob?.steps?.find(
+      step => step.name === "Publish dependency audit proof",
+    ) as { "continue-on-error"?: boolean; if?: string; uses?: string; with?: Record<string, string | number> } | undefined;
+    expect(publishProofStep?.if).toBe("steps.dependency-audit-proof.outcome == 'success'");
+    expect(publishProofStep?.["continue-on-error"]).toBe(true);
+    expect(publishProofStep?.uses).toBe(
+      "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    );
+    expect(publishProofStep?.with?.name).toBe("${{ steps.dependency-audit-proof.outputs.name }}");
+    expect(publishProofStep?.with?.["if-no-files-found"]).toBe("error");
+
+    const scopedCondition = "(github.event_name != 'pull_request' && github.event_name != 'merge_group') || needs.changes.outputs.ci == 'true'";
+    for (const jobName of ["test", "storage-policy", "gates", "keyring-smoke"]) {
       const job = ci.jobs?.[jobName] as { needs?: string; if?: string } | undefined;
       expect(`${jobName}:${job?.needs}`).toBe(`${jobName}:changes`);
       expect(`${jobName}:${job?.if}`).toBe(`${jobName}:${scopedCondition}`);
     }
-    const macosControlIf = ci.jobs?.["macos-control"] as { needs?: string; if?: string } | undefined;
-    expect(macosControlIf?.needs).toBe("changes");
-    expect(macosControlIf?.if).toBe("github.event_name == 'workflow_dispatch'");
+    const macosJob = ci.jobs?.["platform-macos"] as { needs?: string; if?: string } | undefined;
+    expect(`platform-macos:${macosJob?.needs}`).toBe("platform-macos:changes");
+    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:(github.event_name != 'pull_request' && github.event_name != 'merge_group') || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') || needs.changes.outputs.macos == 'true'");
   });
 
   test("cross-platform CI keeps the GUI lint and build gates", async () => {
@@ -608,21 +716,29 @@ describe("GitHub Actions hardening", () => {
     // promotion still reads as changed and the scoped jobs run anyway — the
     // filter would look correct, stay green, and save nothing.
     expect(filterStep?.with?.base).toBe("${{ github.ref }}");
+    expect(filterStep?.with?.ref).toBeUndefined();
+    const mergeFilterStep = (ci.jobs?.changes as {
+      steps?: { id?: string; if?: string; with?: Record<string, string> }[];
+    })?.steps?.find(step => step.id === "merge-group-filter");
+    expect(mergeFilterStep?.if).toBe("github.event_name == 'merge_group'");
+    expect(mergeFilterStep?.with?.base).toBe("${{ github.event.merge_group.base_sha }}");
+    expect(mergeFilterStep?.with?.ref).toBe("${{ github.event.merge_group.head_sha }}");
+    expect(mergeFilterStep?.with?.filters).toBe(".github/policies/ci-paths.yml");
 
     // paths-filter cannot read a PR's file list without this, and a filter that
     // errors produces empty outputs — which every `== 'true'` condition reads as
     // "skip". The scoped jobs would silently stop running.
     expect((ci.jobs?.changes as { permissions?: Record<string, string> })?.permissions)
-      .toEqual({ contents: "read", "pull-requests": "read" });
+      .toEqual({ actions: "read", contents: "read", "pull-requests": "read" });
 
     // Whole-list comparison, not samples. Every entry is an input to the
     // published tarball; dropping one silently stops packaging verification for
     // that surface. `src/**` is the load-bearing one: it keeps a source-only PR
     // running the Windows smoke jobs (keyring, npm-global) now that the full
     // Windows suite runs only on manual dispatch.
-    const filters = String(filterStep?.with?.filters ?? "");
-    const packagingBlock = filters.split(/\n\s*packaging:\s*\n/)[1] ?? "";
-    const packaging = [...packagingBlock.matchAll(/-\s*'([^']+)'/g)].map(match => match[1]).sort();
+    const filters = await readText(".github/policies/ci-paths.yml");
+    const parsedFilters = Bun.YAML.parse(filters) as Record<string, string[]>;
+    const packaging = [...(parsedFilters.packaging ?? [])].sort();
     expect(packaging).toEqual([
       ".npmignore",
       ".gitattributes",
@@ -640,11 +756,21 @@ describe("GitHub Actions hardening", () => {
     // Every packaging pattern that names a real path must also appear in the
     // shared expensive-CI filter. Otherwise the workflow records a cheap green
     // aggregate while silently skipping the packaging verification.
-    const ciPatterns = (Bun.YAML.parse(filters) as { ci?: string[] }).ci ?? [];
+    const ciPatterns = parsedFilters.ci ?? [];
     for (const pattern of packaging) {
       if (pattern === "scripts/prepare-package.ts") continue; // covered by scripts/**
       expect(`${pattern}:${ciPatterns.includes(pattern)}`).toBe(`${pattern}:true`);
     }
+  });
+
+  test("cross-platform CI enforces the checked-in workflow policy", async () => {
+    const workflow = Bun.YAML.parse(await readText(".github/workflows/ci.yml")) as {
+      jobs?: Record<string, { steps?: Array<{ name?: string; run?: string }> }>;
+    };
+    const policyStep = workflow.jobs?.gates?.steps?.find(
+      step => step.name === "Validate repository workflow policy",
+    );
+    expect(policyStep?.run).toBe("bun scripts/ci/check-workflow-policy.ts");
   });
 
   test("stale needs-info workflow is schedule-only and least-privilege", async () => {
@@ -717,19 +843,17 @@ describe("GitHub Actions hardening", () => {
     expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
   });
 
-  test("dev version bump is a default-ref pre-move opener with one normalized target", async () => {
+  test("dev version bump stays a dormant callable fallback with a bounded repair", async () => {
     const text = await readText(".github/workflows/dev-version-bump.yml");
     const workflow = Bun.YAML.parse(text) as {
       on?: {
-        workflow_dispatch?: {
+        workflow_call?: {
           inputs?: Record<string, {
             required?: boolean;
-            default?: string;
             type?: string;
-            options?: string[];
           }>;
         };
-        workflow_call?: unknown;
+        workflow_dispatch?: unknown;
       };
       jobs?: {
         "open-bump-pr"?: {
@@ -744,64 +868,34 @@ describe("GitHub Actions hardening", () => {
       };
     };
 
-    expect(workflow.on?.workflow_call).toBeUndefined();
-    expect(Object.keys(workflow.on ?? {})).toEqual(["workflow_dispatch"]);
-    const inputs = workflow.on?.workflow_dispatch?.inputs ?? {};
-    expect(inputs["intended-version"]).toMatchObject({ required: true, type: "string" });
-    expect(inputs.mode).toMatchObject({
-      required: false,
-      default: "pre-move",
-      type: "choice",
-      options: ["pre-move", "repair"],
-    });
+    expect(workflow.on?.workflow_dispatch).toBeUndefined();
+    expect(Object.keys(workflow.on ?? {})).toEqual(["workflow_call"]);
+    const inputs = workflow.on?.workflow_call?.inputs ?? {};
+    expect(inputs["released-version"]).toMatchObject({ required: true, type: "string" });
 
     const steps = workflow.jobs?.["open-bump-pr"]?.steps ?? [];
-    const refGuard = steps.find(step => step.name === "Refuse a dispatch from a non-default ref");
-    expect(refGuard?.run).toContain(
-      'test "$GITHUB_REF" = "refs/heads/${{ github.event.repository.default_branch }}"',
-    );
-
-    const target = steps.find(step => step.name === "Resolve the target version");
     const decision = steps.find(step => step.name === "Decide the version dev should carry");
-    const targetFreeness = steps.find(
-      step => step.name === "Prove the intended version is not already released",
-    );
     const chosenFreeness = steps.find(step => step.name === "Prove the chosen version is unused");
     const openPr = steps.find(step => step.name === "Open the bump pull request");
 
-    expect(target?.id).toBe("target");
-    expect(target?.env).toEqual({
-      INTENDED: "${{ inputs.intended-version }}",
-      MODE: "${{ inputs.mode }}",
-    });
-    expect(target?.run).toContain('echo "version=${target}" >> "$GITHUB_OUTPUT"');
-    expect(target?.run).toContain('echo "mode=repair" >> "$GITHUB_OUTPUT"');
-    expect(target?.run).toContain('echo "mode=pre-move" >> "$GITHUB_OUTPUT"');
-    expect(text.indexOf("- name: Resolve the target version")).toBeLessThan(
-      text.indexOf("- name: Decide the version dev should carry"),
-    );
-
-    expect(decision?.env?.RELEASED_VERSION).toBe("${{ steps.target.outputs.version }}");
-    expect(targetFreeness?.if).toBe("${{ steps.target.outputs.mode == 'pre-move' }}");
-    expect(targetFreeness?.env?.INTENDED).toBe("${{ steps.target.outputs.version }}");
-    expect(targetFreeness?.run).toContain("git fetch --force --tags origin");
-    expect(targetFreeness?.run).toContain('npm view "@bitkyc08/opencodex@${INTENDED#v}" version');
+    expect(decision?.env?.RELEASED_VERSION).toBe("${{ inputs.released-version }}");
     expect(chosenFreeness?.run).toBe("bun test tests/ci-workflows/release-version-line.test.ts");
     expect(openPr?.env).toMatchObject({
-      MODE: "${{ steps.target.outputs.mode }}",
-      TARGET_VERSION: "${{ steps.target.outputs.version }}",
+      NEXT_VERSION: "${{ steps.decide.outputs.version }}",
+      RELEASED_VERSION: "${{ inputs.released-version }}",
     });
     expect(openPr?.run).toContain(
-      'chore(release): open dev at ${NEXT_VERSION} before releasing ${TARGET_VERSION}',
+      'fix(release): move dev to ${NEXT_VERSION} after ${RELEASED_VERSION}',
     );
-    expect(openPr?.run).toContain(
-      'fix(release): move dev to ${NEXT_VERSION} after ${TARGET_VERSION}',
+    // Keep upstream's server-side owner/head filter: a locally filtered, paginated
+    // pull-request listing can miss an already-open repair from this repository.
+    expect(openPr?.run).toContain('gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls"');
+    expect(openPr?.run).toContain('-f "head=${GITHUB_REPOSITORY_OWNER}:${branch}"');
+    expect(openPr?.run).toContain("--force-with-lease=");
+    // The fork's promotion controller is the sole live post-release writer.
+    expect(await readText(".github/workflows/release.yml")).not.toContain(
+      "uses: ./.github/workflows/dev-version-bump.yml",
     );
-
-    // The resolver is the sole raw-input boundary. Every consumer after it reads the
-    // normalized output, so a future input rename cannot split the decision from its PR.
-    expect(count(text, "${{ inputs.intended-version }}")).toBe(1);
-    expect(count(text, "${{ inputs.mode }}")).toBe(1);
   });
 
   test("release workflow gates the exact SHA, channel, and service surface without injection", async () => {
@@ -824,6 +918,10 @@ describe("GitHub Actions hardening", () => {
     // Keep the workflow unprivileged by default. Dispatch validation gets only
     // read access; write + OIDC permissions exist only on the gated publish job.
     expect(release.permissions).toEqual({});
+    expect(workflow).toContain("repository_dispatch:\n    types: [fork-auto-release]");
+    expect(workflow).toContain("github.event.client_payload.expected_sha");
+    expect(release.jobs).not.toHaveProperty("bump-dev-version");
+    expect(workflow).not.toContain("uses: ./.github/workflows/dev-version-bump.yml");
     
     expect(release.jobs?.["validate-dispatch"]?.["runs-on"]).toBe("ubuntu-latest");
     expect(release.jobs?.["validate-dispatch"]?.permissions).toEqual({
@@ -857,7 +955,7 @@ describe("GitHub Actions hardening", () => {
       scripts?: Record<string, string>;
     };
     expect(packageJson.scripts?.["audit:high"]).toBe(
-      "bun audit --audit-level=high && cd gui && bun audit --audit-level=high",
+      "bun run scripts/ci/audit-high.ts",
     );
     expect(workflow).toContain("run: bun run audit:high");
     expect(workflow).not.toContain("run: bun audit --audit-level=high");
@@ -912,70 +1010,62 @@ describe("GitHub Actions hardening", () => {
     }
 
     // The service gate must cover the post-restructure service surface and stay
-    // in sync with every service-lifecycle.yml push trigger path.
+    // in sync with service-lifecycle.yml PR trigger paths. Every integration push
+    // to main/preview/dev runs without path filter to guarantee exact-head evidence.
     const gateMatch = workflow.match(/grep -Eq '(\^\([^']+\)\$)'/);
     expect(gateMatch).not.toBeNull();
     const gate = new RegExp(gateMatch![1]!);
-    const lifecycle = await readText(".github/workflows/service-lifecycle.yml");
-    const pushPaths = lifecycle
-      .split("push:")[1]!
-      .split("workflow_dispatch:")[0]!
-      .split("\n")
-      .map(line => line.trim())
-      .filter(line => line.startsWith('- "'))
-      .map(line => line.slice(3, -1));
-    expect(pushPaths.length).toBeGreaterThanOrEqual(6);
-    for (const path of pushPaths) {
+    const lifecycle = Bun.YAML.parse(await readText(".github/workflows/service-lifecycle.yml")) as {
+      on?: {
+        push?: { branches?: string[]; paths?: string[] };
+        pull_request?: { branches?: string[]; paths?: string[] };
+      };
+    };
+    expect([...(lifecycle.on?.push?.branches ?? [])].sort()).toEqual([
+      "dev",
+      "main",
+      "preview",
+    ]);
+    expect(lifecycle.on?.push?.paths).toBeUndefined();
+
+    const prPaths = (lifecycle.on?.pull_request?.paths ?? []) as string[];
+    expect(prPaths.length).toBeGreaterThanOrEqual(6);
+    for (const path of prPaths) {
       expect(gate.test(path)).toBe(true);
     }
     expect(gate.test("src/cli/index.ts")).toBe(true);
     expect(gate.test("src/lib/bun-runtime.ts")).toBe(true);
     expect(gate.test("src/cli.ts")).toBe(true);
-
-    // PR and push triggers must stay path-set identical, and both must cover the
-    // pre-restructure compat stub src/cli.ts that the release gate regex checks
-    // (devlog 260716_passthrough_followups/020 — a release whose only service change
-    // is src/cli.ts must auto-trigger service-lifecycle instead of dead-ending the gate).
-    const prPaths = lifecycle
-      .split("pull_request:")[1]!
-      .split("push:")[0]!
-      .split("\n")
-      .map(line => line.trim())
-      .filter(line => line.startsWith('- "'))
-      .map(line => line.slice(3, -1));
-    expect([...prPaths].sort()).toEqual([...pushPaths].sort());
     expect(prPaths).toContain("src/cli.ts");
-    expect(pushPaths).toContain("src/cli.ts");
     expect(gate.test("src/router.ts")).toBe(false);
     expect(gate.test("docs-site/src/pages/index.astro")).toBe(false);
 
     // Channel guards stay branch-exact.
-    expect(workflow).toContain("Release must run from main or preview");
+    expect(workflow).toContain("Release must run from main, preview, or dev");
     expect(workflow).toContain("main releases must use a stable semver version");
     expect(workflow).toContain("preview releases must use a preview prerelease version");
+    expect(workflow).toContain("dev releases must use a dev prerelease version");
 
-    const readinessStep = workflow
-      .split("- name: Require dev to be ready for this release")[1]
-      ?.split(/\n {6}- name:/)[0];
-    expect(readinessStep).toBeDefined();
-    expect(readinessStep).toContain(
-      "git fetch --force --tags origin +refs/heads/dev:refs/remotes/origin/dev",
-    );
-    expect(readinessStep).toContain("git show origin/dev:package.json");
-    expect(readinessStep).toContain(
-      'bun scripts/version-line.ts assert-ahead "$dev_version" "$RELEASE_VERSION"',
-    );
+    // The fork advances dev through promote-dev.yml after the exact release tag is
+    // verified. A second pre-release writer here would race that controller and
+    // recreate the conflicting bump PR this topology deliberately removed.
+    expect(workflow).not.toContain("- name: Require dev to be ready for this release");
+    expect(workflow).not.toContain("uses: ./.github/workflows/dev-version-bump.yml");
 
     const orderingStep = workflow
       .split("- name: Refuse a release the current tag set already outranks")[1]
       ?.split(/\n {6}- name:/)[0];
     expect(orderingStep).toBeDefined();
     expect(orderingStep).toContain(
-      'git tag --list \'v*\' | bun scripts/version-line.ts assert-releasable "$RELEASE_VERSION" $allow',
+      'git tag --list \'v*\' | bun scripts/version-line.ts assert-releasable "$RELEASE_VERSION" "${allow[@]}"',
     );
     expect(orderingStep).toContain('existing_tag_sha="$(git rev-parse');
-    expect(orderingStep).toContain('[ "$DRY_RUN" = "true" ]');
     expect(orderingStep).toContain('[ "$existing_tag_sha" = "$GITHUB_SHA" ]');
+    // release-postpublish.cjs has already rejected public state from any other
+    // source commit. Exact-head tags are therefore resumable for both a dry run
+    // and a real post-publish recovery, rather than being keyed to DRY_RUN here.
+    expect(orderingStep).not.toContain("DRY_RUN");
+    expect(orderingStep).toContain('allow=(--allow-existing-tag "v${RELEASE_VERSION}")');
 
     // This is an ordering gate, not an existence pin. It must consume the freshly
     // fetched tag set and must run before either dry-run packing or publication.
@@ -1031,9 +1121,10 @@ describe("GitHub Actions hardening", () => {
     expect(createStep).toContain('notes_file="$GITHUB_WORKSPACE/.release-notes.md"');
     expect(createStep).toContain('test -s "$notes_file"');
     expect(createStep).not.toContain("generate-notes");
-    expect(createStep).not.toContain("gh api");
+    expect(createStep).toContain('gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs"');
+    expect(createStep).not.toContain('git push origin "refs/tags/${release_tag}"');
     expect(createStep.indexOf('test -s "$notes_file"')).toBeLessThan(
-      createStep.indexOf('git tag "$release_tag"'),
+      createStep.indexOf('gh api --method POST'),
     );
 
     // The merged-only restriction remains on the service gate, whose
@@ -1112,7 +1203,7 @@ describe("GitHub Actions hardening", () => {
     "require",
     "require",
     "require",
-    // pr-referenced-authors.cjs, for the carry-attribution assessor.
+    "require",
     "require",
   ] as const;
 
@@ -1128,9 +1219,8 @@ describe("GitHub Actions hardening", () => {
       "pulls.get",
       "pulls.listFiles",
       "pulls.get",
-      // The carry-attribution assessor reads the branch's commit messages: a
-      // Co-authored-by trailer can live in a commit rather than the body.
       "pulls.listCommits",
+      "checks.listForRef",
       ...tail,
     ];
   }
@@ -1147,6 +1237,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.listFiles",
       "pulls.get",
       "pulls.listCommits",
+      "checks.listForRef",
       ...tail,
     ];
   }
@@ -1169,6 +1260,7 @@ describe("GitHub Actions hardening", () => {
       "pulls.get",
       "pulls.listCommits",
       "pulls.listCommits",
+      "checks.listForRef",
       ...tail,
     ];
   }
@@ -1256,12 +1348,15 @@ describe("GitHub Actions hardening", () => {
     // workflow YAML under a write token against base-pinned scripts — a
     // mismatch that crashes the gate and breaks the trusted-base model.
     //
-    // `status` is the only extra trigger. CodeRabbit publishes a legacy
-    // commit status; this privileged workflow is loaded from the default branch
-    // and re-reads live review evidence before any mutation.
+    // CodeRabbit publishes a legacy commit status; Cursor Bugbot publishes a
+    // check run. Both are wake-up signals only: this privileged workflow is
+    // loaded from the default branch and re-reads live evidence before writes.
     expect(Object.keys(workflow.on ?? {}).sort()).toEqual([
+      "check_run",
       "pull_request_target",
       "status",
+      "workflow_dispatch",
+      "workflow_run",
     ]);
 
     // And the trigger is exactly a `types:` list — nothing else.
@@ -1275,6 +1370,12 @@ describe("GitHub Actions hardening", () => {
     // single assertion.
     expect(Object.keys(workflow.on?.pull_request_target ?? {})).toEqual(["types"]);
     expect(Object.prototype.hasOwnProperty.call(workflow.on ?? {}, "status")).toBe(true);
+    expect(workflow.on?.check_run).toEqual({ types: ["completed"] });
+    expect(workflow.on?.workflow_run).toEqual({
+      workflows: ["Cross-platform CI"],
+      types: ["completed"],
+    });
+    expect(Object.keys(workflow.on?.workflow_dispatch?.inputs ?? {})).toEqual(["pull_number"]);
 
     // Exactly the scopes this gate needs. `pull-requests: write` covers title and
     // comment updates. `contents: write` is required for the draft GraphQL
@@ -1282,6 +1383,7 @@ describe("GitHub Actions hardening", () => {
     // when contents was unset). Asserting the whole object pins both presence
     // and the absence of anything broader (write-all, contents alone, …).
     expect(workflow.permissions).toEqual({
+      checks: "read",
       contents: "write",
       "pull-requests": "write",
     });
@@ -1299,6 +1401,7 @@ describe("GitHub Actions hardening", () => {
     ]);
     expect(resolver?.["runs-on"]).toBe("ubuntu-latest");
     expect(resolver?.permissions).toEqual({
+      checks: "read",
       contents: "read",
       "pull-requests": "read",
     });
@@ -1306,6 +1409,10 @@ describe("GitHub Actions hardening", () => {
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.state == 'success'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.sender.login == 'coderabbitai[bot]'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.sender.id == 136622811");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.name == 'Cross-platform CI'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.event == 'pull_request'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.status == 'completed'");
+    expect(String(resolver?.["if"] ?? "")).toContain("github.event.workflow_run.repository.full_name == github.repository");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'gui-screenshot-waived'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'intake: hygiene-blocked'");
     expect(String(resolver?.["if"] ?? "")).toContain("github.event.label.name == 'maintainer-sponsored'");
@@ -1336,6 +1443,7 @@ describe("GitHub Actions hardening", () => {
     ]);
     expect(job?.["runs-on"]).toBe("ubuntu-latest");
     expect(job?.permissions).toEqual({
+      checks: "read",
       contents: "write",
       "pull-requests": "write",
     });
@@ -1352,7 +1460,7 @@ describe("GitHub Actions hardening", () => {
     const [checkout, scriptStep] = steps as [WorkflowStep, WorkflowStep];
     expect(Object.keys(checkout).sort()).toEqual(["name", "uses", "with"]);
     expect(checkout.uses).toBe(
-      "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+      "actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
     );
     expect(Object.keys(checkout.with ?? {}).sort()).toEqual([
       "persist-credentials",
@@ -1369,7 +1477,7 @@ describe("GitHub Actions hardening", () => {
       // so the scripts match the workflow definition `pull_request_target`
       // itself loaded; everything else resolves to `dev`.
       ref:
-        "${{ github.event_name == 'status' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
+        "${{ github.event_name != 'pull_request_target' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
       "persist-credentials": false,
       // MAINTAINERS.md rides along so the completion ping reads the canonical
       // maintainer list from the same trusted base revision as the scripts.
@@ -1378,6 +1486,8 @@ describe("GitHub Actions hardening", () => {
 
     expect(Object.keys(scriptStep).sort()).toEqual(["env", "name", "uses", "with"]);
     expect(scriptStep.env).toEqual({
+      CURSOR_BUGBOT_APP_ID: "${{ vars.CURSOR_BUGBOT_APP_ID }}",
+      CURSOR_BUGBOT_POLICY: "${{ vars.CURSOR_BUGBOT_POLICY }}",
       RESOLVED_PULL_NUMBER: "${{ needs.resolve-pr.outputs.pull-number }}",
     });
 
@@ -1449,10 +1559,11 @@ describe("GitHub Actions hardening", () => {
     expect(script).toContain("PR head moved while listing changed files");
     expect(script).toContain("github.rest.repos.getCollaboratorPermissionLevel");
     expect(script).toContain("github.rest.repos.compareCommitsWithBasehead");
-    // The allow-list is the gate's whole policy, so it is pinned by value and
-    // not just by shape: a widened list is the one edit that opens every base
-    // at once while every behavioural scenario below still passes.
-    expect(script).toMatch(/const ALLOWED_BASES = \["dev"\];/);
+    // The allow-list is fork-aware: upstream stays dev-only while the public
+    // fork also permits merge-from-main sync PRs.
+    expect(script).toMatch(
+      /const ALLOWED_BASES\s*=\s*context\.repo\.owner === "lidge-jun"\s*\? \["dev"\]\s*:\s*\["dev", "main"\]/,
+    );
     expect(script).toMatch(/const DEFAULT_BASE = "dev";/);
 
     // The read-only resolver is the single authority for PR identity. The
@@ -1561,9 +1672,9 @@ describe("GitHub Actions hardening", () => {
           name !== "github.rest.repos.compareCommitsWithBasehead" &&
           name !== "github.rest.repos.listPullRequestsAssociatedWithCommit" &&
           name !== "github.rest.issues.listEvents" &&
+          name !== "github.rest.checks.listForRef" &&
           // Hygiene reassessment reads the changed-file list; not a write.
           name !== "github.rest.pulls.listFiles" &&
-          // Carry attribution reads the branch's commit messages; not a write.
           name !== "github.rest.pulls.listCommits",
       );
     expect([...new Set(restWrites)].sort()).toEqual([
@@ -1589,7 +1700,7 @@ describe("GitHub Actions hardening", () => {
    *     await github.rest.pulls.update({ ...{ base: "main" }, owner, … })
    *     Object.assign(pr.base, { ref: EXPECTED_BASE })
    *     if (false) { …the entire body… }
-   *     try { …the entire body… } catch {}
+   *     wrap the entire body in exception swallowing
    *
    * A recording client does not care how the call was spelled. It records what
    * came out. `if (false)` and a swallowed exception show up as an empty call
@@ -1758,6 +1869,37 @@ describe("GitHub Actions hardening", () => {
       // Reads only. If a rewrite adds a write here, it appears in this list.
       expect(methodsOf(result)).toEqual(readsAllowedBase());
       expect(result.logs.join(" ")).toContain("All PR quality gates passed");
+    });
+
+    test("required Bugbot policy accepts only the configured App's success on the live head", async () => {
+      const clean = await run({
+        pr: { base: { ref: "dev" } },
+        authorPermission: "write",
+        bugbotPolicy: "required",
+        bugbotAppId: 99,
+        checkRuns: [{
+          name: "Cursor Bugbot",
+          status: "completed",
+          conclusion: "success",
+          app: { id: 99 },
+        }],
+      });
+      expect(clean.warnings.some(warning => warning.startsWith("setFailed:"))).toBe(false);
+
+      for (const check of [
+        { name: "Cursor Bugbot", status: "completed", conclusion: "neutral", app: { id: 99 } },
+        { name: "Cursor Bugbot", status: "completed", conclusion: "success", app: { id: 7 } },
+        { name: "Cursor Bugbot", status: "in_progress", conclusion: null, app: { id: 99 } },
+      ]) {
+        const blocked = await run({
+          pr: { base: { ref: "dev" } },
+          authorPermission: "write",
+          bugbotPolicy: "required",
+          bugbotAppId: 99,
+          checkRuns: [check],
+        });
+        expect(blocked.warnings.some(warning => warning.includes("bugbot_review"))).toBe(true);
+      }
     });
 
     test("a contributor PR targeting dev is drafted with a readiness checklist", async () => {
@@ -2179,7 +2321,7 @@ describe("GitHub Actions hardening", () => {
         "graphql",
         "issues.createComment",
       ]));
-      expect(callsTo(result, "checks.listForRef")).toEqual([]);
+      expect(callsTo(result, "checks.listForRef")).toHaveLength(1);
       expect(callsTo(result, "pulls.update")).toEqual([]);
       const drafts = callsTo(result, "graphql") as [{ query: string }, { query: string }];
       expect(drafts[0]!.query).toContain("reviewThreads");
@@ -2310,7 +2452,7 @@ describe("GitHub Actions hardening", () => {
           checkRuns,
         });
 
-        expect(callsTo(result, "checks.listForRef")).toEqual([]);
+        expect(callsTo(result, "checks.listForRef")).toHaveLength(1);
         expect(callsTo(result, "pulls.update")).toEqual([]);
         const drafts = callsTo(result, "graphql") as [{ query: string }, { query: string }];
         expect(drafts[1]!.query).toContain("markPullRequestReadyForReview");
@@ -3242,6 +3384,31 @@ describe("GitHub Actions hardening", () => {
       expect(callsTo(result, "graphql")).toEqual([]);
     });
 
+    test("manual reconciliation resolves only a live open unmerged PR", async () => {
+      const open = await runResolver({
+        pr: { number: 42, base: { ref: "dev" }, state: "open", merged: false },
+        eventName: "workflow_dispatch",
+        resolvedPullNumber: 42,
+      });
+      expect(open.outputs).toEqual([{ name: "pull-number", value: "42" }]);
+      expect(callsTo(open, "pulls.get")).toEqual([
+        { owner: "lidge-jun", repo: "opencodex", pull_number: 42 },
+      ]);
+
+      for (const pr of [
+        { number: 42, base: { ref: "dev" }, state: "closed" as const, merged: false },
+        { number: 42, base: { ref: "dev" }, state: "closed" as const, merged: true },
+      ]) {
+        const terminal = await runResolver({
+          pr,
+          eventName: "workflow_dispatch",
+          resolvedPullNumber: 42,
+        });
+        expect(terminal.outputs).toEqual([]);
+        expect(terminal.logs.join(" ")).toContain("not an open, unmerged PR");
+      }
+    });
+
     test("the write gate consumes the resolved PR number without re-resolving status SHA", async () => {
       const result = await run({
         pr: { base: { ref: "dev" }, number: 4242 },
@@ -3377,6 +3544,129 @@ describe("GitHub Actions hardening", () => {
         "Could not list PRs associated with commit",
       );
       expect(result.warnings.join(" ")).toContain("Could not list open PRs");
+    });
+
+    test("the resolver maps a completed same-repository Cross-platform CI run to its one current open PR", async () => {
+      const headSha = "7d42d17f213a632fc2def56053f0cd574b13d459";
+      const result = await runResolver({
+        pr: { base: { ref: "dev" }, number: 4242, head: { sha: headSha } },
+        eventName: "workflow_run",
+        workflowRun: {
+          name: "Cross-platform CI",
+          event: "pull_request",
+          status: "completed",
+          conclusion: "success",
+          head_sha: headSha,
+          repository: { full_name: "lidge-jun/opencodex" },
+          head_repository: { full_name: "lidge-jun/opencodex" },
+        },
+        openPulls: [
+          { number: 4242, state: "open", head: { sha: headSha } },
+          { number: 7777, state: "open", head: { sha: "other" } },
+        ],
+      });
+
+      expect(result.outputs).toEqual([{ name: "pull-number", value: "4242" }]);
+      expect(callsTo(result, "pulls.list")).toHaveLength(1);
+      expect(callsTo(result, "repos.listPullRequestsAssociatedWithCommit")).toEqual([]);
+    });
+
+    test("the workflow_run resolver fails closed for untrusted, stale, or non-unique completions", async () => {
+      const headSha = "7d42d17f213a632fc2def56053f0cd574b13d459";
+      const baseWorkflowRun = {
+        name: "Cross-platform CI",
+        event: "pull_request",
+        status: "completed",
+        conclusion: "success" as const,
+        head_sha: headSha,
+        repository: { full_name: "lidge-jun/opencodex" },
+        head_repository: { full_name: "contributor/opencodex" },
+      };
+      const cases = [
+        {
+          name: "wrong workflow name",
+          workflowRun: { ...baseWorkflowRun, name: "Untrusted CI" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "wrong original event",
+          workflowRun: { ...baseWorkflowRun, event: "push" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "non-completed status",
+          workflowRun: { ...baseWorkflowRun, status: "in_progress" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "wrong repository",
+          workflowRun: {
+            ...baseWorkflowRun,
+            repository: { full_name: "attacker/opencodex" },
+          },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "missing head SHA",
+          workflowRun: (() => {
+            const { head_sha: _headSha, ...missing } = baseWorkflowRun;
+            return missing;
+          })(),
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "blank head SHA",
+          workflowRun: { ...baseWorkflowRun, head_sha: "" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 0,
+        },
+        {
+          name: "stale head",
+          workflowRun: { ...baseWorkflowRun, head_sha: "stale-head" },
+          openPulls: [{ number: 4242, state: "open", head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "closed candidate",
+          workflowRun: baseWorkflowRun,
+          openPulls: [{ number: 4242, state: "closed", head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "merged candidate",
+          workflowRun: baseWorkflowRun,
+          openPulls: [{ number: 4242, state: "open", merged: true, head: { sha: headSha } }],
+          listed: 1,
+        },
+        {
+          name: "ambiguous same-head candidates",
+          workflowRun: baseWorkflowRun,
+          openPulls: [
+            { number: 4242, state: "open", head: { sha: headSha } },
+            { number: 7777, state: "open", head: { sha: headSha } },
+          ],
+          listed: 1,
+        },
+      ] as const;
+
+      for (const scenario of cases) {
+        const result = await runResolver({
+          pr: { base: { ref: "dev" }, number: 4242, head: { sha: headSha } },
+          eventName: "workflow_run",
+          workflowRun: scenario.workflowRun,
+          openPulls: scenario.openPulls,
+        });
+        expect(result.outputs, scenario.name).toEqual([]);
+        expect(callsTo(result, "pulls.list"), scenario.name).toHaveLength(scenario.listed);
+        expect(callsTo(result, "pulls.get"), scenario.name).toEqual([]);
+        expect(callsTo(result, "issues.createComment"), scenario.name).toEqual([]);
+        expect(callsTo(result, "issues.updateComment"), scenario.name).toEqual([]);
+      }
     });
 
     test("a non-maintainer issue_comment does not re-run the gate", async () => {
@@ -5258,6 +5548,108 @@ describe("GitHub Actions hardening", () => {
     expect(rootPkg).toContain("bun run typecheck && bun run lint:gui:if-changed && bun run test");
     expect(rootPkg).toContain("bun run privacy:scan && bun run doctor:gui:if-changed");
   });
+
+  test("cross-platform CI gates include dependency and workflow validation", async () => {
+    const workflow = await readText(".github/workflows/ci.yml");
+    const ci = Bun.YAML.parse(workflow) as {
+      jobs?: Record<string, { steps?: Array<{ name?: string; run?: string }> }>;
+    };
+    const gatesSteps = ci.jobs?.gates?.steps ?? [];
+    const audit = gatesSteps.find(step => step.name === "Dependency audit (high severity)");
+    expect(audit).toBeDefined();
+    expect(audit?.run).toBe("bun run audit:high");
+    const workflowLint = gatesSteps.find(step => step.name === "Validate GitHub Actions workflows");
+    expect(workflowLint?.run).toBe("bun run lint:workflows");
+    expect(workflow).toContain("run: bun run audit:high");
+    const packageJson = JSON.parse(await readText("package.json")) as {
+      scripts?: Record<string, string>;
+    };
+    expect(packageJson.scripts?.["audit:high"]).toBe(
+      "bun run scripts/ci/audit-high.ts",
+    );
+  });
+
+  test("scheduled dependency audit is minimal, read-only, pinned and bounded", async () => {
+    const workflow = await readText(".github/workflows/dependency-audit.yml");
+    const audit = Bun.YAML.parse(workflow) as {
+      on?: Record<string, unknown>;
+      permissions?: Record<string, string>;
+      jobs?: Record<string, { "timeout-minutes"?: number; permissions?: Record<string, string>; steps?: Array<{ uses?: string; run?: string }> }>;
+    };
+    expect(audit.on).toBeDefined();
+    expect(audit.on?.schedule).toBeDefined();
+    expect(audit.on?.workflow_dispatch).toBeDefined();
+    expect(workflow).toContain('cron: "0 6 * * *"');
+    expect(workflow).toContain("group: dependency-audit");
+    expect(workflow).toContain("cancel-in-progress: false");
+    expect(audit.permissions).toEqual({ contents: "read" });
+    const jobs = Object.entries(audit.jobs ?? {});
+    expect(jobs.length).toBeGreaterThanOrEqual(1);
+    for (const [name, job] of jobs) {
+      expect(typeof job["timeout-minutes"]).toBe("number");
+      expect(job.permissions).toEqual({ contents: "read" });
+      const runs = (job.steps ?? []).map(s => s.run ?? "").join("\n");
+      expect(runs).toContain("bun run audit:high");
+    }
+    expect(workflow).toContain("actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0");
+    expect(workflow).toContain("./.github/actions/setup-project-bun");
+    expect(workflow).not.toMatch(/uses:\s+\S+@(?:v\d+|main|master)\b/);
+    expect(workflow).toContain("timeout-minutes:");
+  });
+
+  test("reusable workflow calls do not use env or secrets in with and caller covers callee permissions", async () => {
+    const { readdir } = await import("node:fs/promises");
+    const workflowDir = new URL("../../.github/workflows/", import.meta.url);
+    const files = await readdir(workflowDir);
+    const yamlFiles = files.filter(f => f.endsWith(".yml") || f.endsWith(".yaml"));
+    for (const file of yamlFiles) {
+      const text = await readText(`.github/workflows/${file}`);
+      const parsed = Bun.YAML.parse(text) as {
+        permissions?: Record<string, string> | string;
+        jobs?: Record<string, { uses?: string; with?: Record<string, unknown>; permissions?: Record<string, string> | string }>;
+      };
+      const callerPerms = parsed.permissions;
+      for (const [jobName, job] of Object.entries(parsed.jobs ?? {})) {
+        if (!job.uses || !job.uses.startsWith("./.github/workflows/")) continue;
+        const withText = JSON.stringify(job.with ?? {});
+        expect(withText).not.toMatch(/\b(?:env|secrets)\s*\./);
+        const calleePath = String(job.uses).split("#")[0]!.replace(/^\.\//, "");
+        const calleeText = await readText(calleePath);
+        const callee = Bun.YAML.parse(calleeText) as {
+          permissions?: Record<string, string> | string;
+          jobs?: Record<string, { permissions?: Record<string, string> | string }>;
+        };
+        const asPermissionMap = (
+          value: Record<string, string> | string | undefined,
+          location: string,
+        ): Record<string, string> => {
+          if (value === undefined) return {};
+          if (typeof value === "string") {
+            throw new Error(`${location} uses ${value}; declare explicit permission scopes`);
+          }
+          return value;
+        };
+        const callerEffective = asPermissionMap(
+          job.permissions ?? callerPerms,
+          `${file}:${jobName}`,
+        );
+        const permissionRank: Record<string, number> = { none: 0, read: 1, write: 2 };
+        for (const [calleeJobName, calleeJob] of Object.entries(callee.jobs ?? {})) {
+          const needed = asPermissionMap(
+            calleeJob.permissions ?? callee.permissions,
+            `${calleePath}:${calleeJobName}`,
+          );
+          for (const [scope, level] of Object.entries(needed)) {
+            expect(permissionRank[callerEffective[scope] ?? "none"] ?? -1).toBeGreaterThanOrEqual(
+              permissionRank[level] ?? Number.POSITIVE_INFINITY,
+            );
+          }
+        }
+      }
+    }
+    // Zero calls is valid: tests/ci-workflows/bump-dev-version.test.ts explicitly protects the
+    // dormant bump workflow from being wired back into this fork's live release path.
+  });
 });
 
 describe("doctor-gui-if-changed", () => {
@@ -5459,26 +5851,10 @@ describe("gui exhaustive-deps suppression stays scoped and effective", () => {
     expect(config.blocking).toBe("warning");
   });
 
-  test("the effect keeps the in-file record of why the dep array stays short", async () => {
+  test("the Models effect tracks its stable loader dependencies", async () => {
     const models = await readText("gui/src/pages/Models.tsx");
-    const effectEnd = models.indexOf("}, [catalogActive, loadShadowCall, loadV2]);");
+    const effectEnd = models.indexOf("}, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2, reloadAliases]);");
     expect(effectEnd).toBeGreaterThan(-1);
-
-    // The reasoning has to sit on the effect, not in a commit message. Read the comment
-    // block immediately above the dep array rather than the whole file, or this passes on
-    // any incidental mention elsewhere.
-    const preceding = models.slice(0, effectEnd).split(/\r?\n/).slice(-8).join("\n");
-    expect(preceding).toContain("PreserveManualMemo");
-    expect(preceding).toContain("five react-compiler");
-
-    // Both suppressions are config-side, so the note must point at the two files a reader
-    // would otherwise have to find by grep.
-    expect(preceding).toContain("gui/.oxlintrc.json");
-    expect(preceding).toContain("gui/doctor.config.json");
-
-    // An in-file react-doctor disable was tried and removed: doctor passes without it, and
-    // react/react-compiler penalises a component merely for carrying suppressions. If one
-    // reappears, the config route has been misunderstood.
     expect(models).not.toContain("react-doctor-disable-next-line");
   });
 });

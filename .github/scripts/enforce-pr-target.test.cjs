@@ -31,13 +31,35 @@ describe("enforce-pr-target workflow", () => {
       .map((line) => line.trim())
       .filter(Boolean)
       .sort();
-    assert.deepEqual(lines, ["contents: write", "pull-requests: write"]);
+    assert.deepEqual(lines, ["checks: read", "contents: write", "pull-requests: write"]);
   });
 
   it("fails the required check on a wrong base even if draft conversion fails", () => {
     assert.match(workflow, /core\.setFailed\(/);
     assert.match(workflow, /draftConversionFailed/);
     assert.match(workflow, /Could not convert pull request to draft/);
+  });
+
+  it("allows main only on the public fork while upstream stays dev-only", () => {
+    assert.match(
+      workflow,
+      /const ALLOWED_BASES =\s*context\.repo\.owner === "lidge-jun"\s*\? \["dev"\]\s*:\s*\["dev", "main"\]/,
+    );
+    assert.match(workflow, /const DEFAULT_BASE = "dev";/);
+  });
+
+  it("treats generated sync PRs as checklist-free but still requires exact-head baseline evidence", () => {
+    assert.match(workflow, /syncGenerated/);
+    assert.match(workflow, /sync.*upstream-/);
+    assert.match(workflow, /generatedSyncBaselineDisposition/);
+    assert.doesNotMatch(workflow, /requiredChecksSuccessful/);
+    assert.match(workflow, /syncBaselineReady/);
+    assert.match(workflow, /syncGenerated && syncBaselineReady/);
+  });
+
+  it("treats promotion PRs from dev to main as checklist-free", () => {
+    assert.match(workflow, /isPromotionPr/);
+    assert.match(workflow, /checklistRequired = !authorIsMaintainer && !syncGenerated && !promotionPr;/);
   });
 
   it("soft-fails ready-for-review restoration the same way", () => {
@@ -62,6 +84,20 @@ describe("enforce-pr-target workflow", () => {
     assert.match(workflow, /listPullRequestsAssociatedWithCommit/);
     assert.match(workflow, /candidate\.head\?\.sha === statusSha/);
     assert.match(workflow, /candidates\.length !== 1/);
+  });
+
+  it("wakes from trusted Bugbot checks and revalidates exact-head evidence", () => {
+    assert.match(workflow, /^  check_run:\n\s+types: \[completed\]/m);
+    assert.match(workflow, /^  workflow_dispatch:/m);
+    assert.match(workflow, /CURSOR_BUGBOT_APP_ID/);
+    assert.match(workflow, /CURSOR_BUGBOT_POLICY/);
+    assert.match(workflow, /trustedBaseline/);
+    assert.match(workflow, /\["ci", "hygiene"\]/);
+    assert.match(workflow, /exactHeadBugbotEvidence/);
+    assert.match(workflow, /checks\.listForRef/);
+    assert.match(workflow, /check\.app\?\.id/);
+    assert.match(workflow, /pr\.head\.sha/);
+    assert.match(workflow, /Invalid CURSOR_BUGBOT_POLICY/);
   });
 
   it("does not add review events that would break the trusted-base model", () => {
@@ -180,7 +216,7 @@ describe("enforce-pr-target workflow", () => {
     assert.ok(ref, "trusted checkout must declare ref");
     assert.equal(
       ref.replace(/\s+/g, " ").trim(),
-      "${{ github.event_name == 'status' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
+      "${{ github.event_name != 'pull_request_target' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
     );
     assert.doesNotMatch(ref, /base\.sha|head\.(?:sha|ref)/);
     // Pinning the checkout ref only gates one step. A later `run:` or
@@ -213,7 +249,7 @@ describe("enforce-pr-target workflow", () => {
     const checkouts = workflow.match(/uses:\s*actions\/checkout@[\s\S]*?(?=\n {6}- name:|$)/g) ?? [];
     for (const step of checkouts) {
       const stepRef = (step.match(/^\s*ref:\s*(.+)$/m)?.[1] ?? "").replace(/\s+/g, " ").trim();
-      assert.equal(stepRef, "${{ github.event_name == 'status' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}", "every checkout must use the trusted ref");
+      assert.equal(stepRef, "${{ github.event_name != 'pull_request_target' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}", "every checkout must use the trusted ref");
       assert.doesNotMatch(step, /repository:/, "a checkout must not retarget its repository");
     }
     // Checkout is not the only way to obtain PR-controlled code. A `run:` step

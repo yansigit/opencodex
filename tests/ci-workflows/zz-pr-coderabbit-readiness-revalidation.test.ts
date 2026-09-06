@@ -102,7 +102,10 @@ describe("workflow comment-spam hardening", () => {
 
     expect(workflow.on?.issue_comment).toBeUndefined();
     expect(workflow.on?.pull_request_review).toBeUndefined();
-    expect(workflow.on?.workflow_run).toBeUndefined();
+    expect(workflow.on?.workflow_run).toEqual({
+      workflows: ["Cross-platform CI"],
+      types: ["completed"],
+    });
     expect(Object.prototype.hasOwnProperty.call(workflow.on ?? {}, "status")).toBe(true);
     expect(workflow.on?.pull_request_target?.types).toEqual(expect.arrayContaining([
       "edited",
@@ -138,7 +141,7 @@ describe("workflow comment-spam hardening", () => {
     // boundary that owns the event; a `main`-targeting PR matches the workflow
     // definition loaded from `main`; every other base resolves to `dev`.
     expect(checkoutStep?.with?.ref).toBe(
-      "${{ github.event_name == 'status' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
+      "${{ github.event_name != 'pull_request_target' && github.event.repository.default_branch || (github.event.pull_request.base.ref == 'main' && 'main' || 'dev') }}",
     );
 
     const gateStep = job?.steps?.find(

@@ -21,6 +21,17 @@ export function parseVersion(raw: string): ParsedVersion | null {
   };
 }
 
+/** True only for versions published on the preview channel. */
+export function isPreviewVersion(raw: string): boolean {
+  return parseVersion(raw)?.prerelease?.[0] === "preview";
+}
+
+/** True for stable and preview release-channel versions, but not dev builds. */
+export function isReleaseChannelVersion(raw: string): boolean {
+  const parsed = parseVersion(raw);
+  return parsed !== null && (parsed.prerelease === null || parsed.prerelease[0] === "preview");
+}
+
 function compareParsedVersions(
   left: ParsedVersion,
   right: ParsedVersion,
@@ -254,23 +265,24 @@ export function nextPreviewRelease(input: {
 /**
  * The publication-boundary ordering policy: a candidate must strictly outrank
  * every release tag. The equality exception is granted only by release.yml for
- * a dry run whose existing tag already names the commit under test.
+ * the exact existing tag whose commit identity was verified for a resume.
  */
 export function assertReleasable(input: {
   candidate: string;
   tags: readonly string[];
-  allowExistingTagAtHead?: boolean;
+  allowedEqualTag?: string;
 }): { ok: true } | { ok: false; blockedBy: string } {
   for (const tag of input.tags) {
+    if (!isReleaseChannelVersion(tag)) continue;
     const order = compareVersions(input.candidate, tag);
-    if (order < 0 || (order === 0 && !input.allowExistingTagAtHead)) {
+    if (order < 0 || (order === 0 && tag !== input.allowedEqualTag)) {
       return { ok: false, blockedBy: tag };
     }
   }
   return { ok: true };
 }
 
-const VERSION_LINE_USAGE = "usage: bun scripts/version-line.ts assert-ahead <a> <b> | assert-releasable <version> [--allow-existing-tag-at-head]";
+const VERSION_LINE_USAGE = "usage: bun scripts/version-line.ts assert-ahead <a> <b> | assert-releasable <version> [--allow-existing-tag <tag>]";
 
 if (import.meta.main) {
   const [command, ...rest] = process.argv.slice(2);
@@ -296,6 +308,14 @@ if (import.meta.main) {
       console.error(VERSION_LINE_USAGE);
       process.exit(1);
     }
+    let allowedEqualTag: string | undefined;
+    if (flags.length > 0) {
+      if (flags.length !== 2 || flags[0] !== "--allow-existing-tag" || !flags[1]) {
+        console.error(VERSION_LINE_USAGE);
+        process.exit(1);
+      }
+      allowedEqualTag = flags[1];
+    }
     const tags = (await Bun.stdin.text())
       .split("\n")
       .map(line => line.trim())
@@ -303,7 +323,7 @@ if (import.meta.main) {
     const verdict = assertReleasable({
       candidate,
       tags,
-      allowExistingTagAtHead: flags.includes("--allow-existing-tag-at-head"),
+      allowedEqualTag,
     });
     if (!verdict.ok) {
       console.error(

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { removeTreeWithRetry } from "./helpers/remove-tree";
 import { repoPath, repoRoot } from "./helpers/repo-root";
-import { listTestFiles, planMoves } from "../scripts/test-layout/plan";
+import { isTestFileName, listTestFiles, planMoves } from "../scripts/test-layout/plan";
 import { runMove } from "../scripts/test-layout/move";
 import { runVerify } from "../scripts/test-layout/verify";
 import {
@@ -24,6 +24,35 @@ import {
 // fixture. The layout guard shares the resolver with the mover, so a resolver defect could move
 // a file to the wrong place and bless it; this fixture is the second opinion that catches it.
 const EXPECTED = JSON.parse(readFileSync(repoPath("tests", "fixtures", "test-layout-expected.json"), "utf8")) as Record<string, string>;
+
+describe("test file discovery", () => {
+  test("includes JavaScript and TypeScript test module variants", () => {
+    const root = mkdtempSync(join(tmpdir(), "ocx-test-layout-discovery-"));
+    try {
+      mkdirSync(join(root, "tests"));
+      const supported = [
+        "a.test.ts",
+        "b.test.tsx",
+        "c.test.mts",
+        "d.test.cts",
+        "e.test.js",
+        "f.test.jsx",
+        "g.test.mjs",
+        "h.test.cjs",
+      ];
+      for (const name of [...supported, "support.ts", "notes.test.md"]) {
+        writeFileSync(join(root, "tests", name), "");
+      }
+
+      expect(supported.every(isTestFileName)).toBe(true);
+      expect(isTestFileName("support.ts")).toBe(false);
+      expect(isTestFileName("notes.test.md")).toBe(false);
+      expect(listTestFiles(root)).toEqual(supported.map(name => `tests/${name}`));
+    } finally {
+      removeTreeWithRetry(root);
+    }
+  });
+});
 
 describe("rewriteSpecifier", () => {
   const forms = [
@@ -272,7 +301,8 @@ describe("membership oracle", () => {
     const expected: Record<string, number> = {};
     for (const m of doc.matchAll(/^#### `tests\/([a-z0-9/-]+)\/` \((\d+)\)\r?$/gm)) expected[m[1]!] = Number(m[2]);
     expect(Object.keys(expected).length).toBeGreaterThan(20);
-    expect(Object.keys(histogram).sort()).toEqual(Object.keys(expected).sort());
+    const missingDomains = Object.keys(expected).filter(dir => !(dir in histogram));
+    expect(missingDomains).toEqual([]);
     const below = Object.entries(expected).filter(([dir, n]) => (histogram[dir] ?? 0) < n).map(([dir, n]) => `${dir}: ${histogram[dir]} < ${n}`);
     expect(below).toEqual([]);
   });
@@ -289,6 +319,9 @@ describe("membership oracle", () => {
       // Placed under routing/ by its author (#3523, restored by #3530): it exercises the oauth
       // routing quorum, not the Anthropic adapter, so the anthropic- seed is wrong for it.
       "anthropic-quorum-cache.test.ts",
+      // The preservation test exercises Responses control flow; "core-" alone would otherwise
+      // classify it as the Lab import-boundary test.
+      "core-fork-preservation.test.ts",
     ]);
     const mismatches: string[] = [];
     let resolved = 0;
@@ -296,7 +329,9 @@ describe("membership oracle", () => {
       const r = resolveTarget(seedOnly, name);
       if (r === null) continue;
       resolved += 1;
-      if (r !== target && !pinnedOverrides.has(name)) mismatches.push(`${name}: seed ${r} != ${target}`);
+      // Fork-maintenance tests intentionally use an explicit-only domain: generic sync/release
+      // seeds describe product and CI tests, not the repository's preservation machinery.
+      if (r !== target && target !== "fork" && !pinnedOverrides.has(name)) mismatches.push(`${name}: seed ${r} != ${target}`);
     }
     expect(resolved).toBeGreaterThan(600);
     expect(mismatches).toEqual([]);
@@ -322,7 +357,7 @@ describe("move end to end", () => {
     writeFileSync(join(root, "src", "thing.ts"), "export const thing = 1;\n");
     writeFileSync(join(root, "tests", "helpers", "remove-tree.ts"), "export const removeTree = 1;\n");
     writeFileSync(join(root, "tests", "helpers", "child.ts"), "console.log(1);\n");
-    writeFileSync(join(root, "tests", "server-a.test.ts"), 'import { thing } from "../src/thing";\nimport { removeTree } from "./helpers/remove-tree";\nconst c = join(import.meta.dir, "helpers", "child.ts");\n');
+    writeFileSync(join(root, "tests", "server-a.test.ts"), 'import { thing } from "../src/thing";\nimport { removeTree } from "./helpers/remove-tree";\nconst c = join(import.meta.dir, "helpers", "child.ts");\nconst f = new URL("./fixtures/cert.pem", import.meta.url);\n');
     writeFileSync(join(root, "tests", "cursor-b.test.ts"), 'import { thing } from "../src/thing";\nconst r = new URL("../package.json", import.meta.url);\n');
     writeFileSync(join(root, "tests", "provider-c.test.ts"), 'import { thing } from "../src/thing"; // names tests/cursor-b.test.ts\n');
     writeFileSync(join(root, "scripts", "test.ts"), 'export const SERIAL_FULL_SUITE_FILES = [\n  "cursor-b.test.ts",\n] as const;\n');
@@ -382,6 +417,7 @@ describe("move end to end", () => {
       expect(serverA).toContain('from "../../src/thing"');
       expect(serverA).toContain('from "../helpers/remove-tree"');
       expect(serverA).toContain('helperPath("child.ts")');
+      expect(serverA).toContain('new URL("../fixtures/cert.pem", import.meta.url)');
       expect(serverA).toContain('from "../helpers/repo-root"');
       const cursorB = readFileSync(join(root, "tests", "providers", "cursor", "cursor-b.test.ts"), "utf8");
       expect(cursorB).toContain('from "../../../src/thing"');

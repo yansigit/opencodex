@@ -46,7 +46,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
     meta_api_failure) exit 72 ;;
     missing_head) printf '%s\n' '{"headRefOid":null,"author":{"login":"author"},"title":"fixture"}' ;;
     missing_author) printf '%s\n' '{"headRefOid":"HEADSHA","author":null,"title":"fixture"}' ;;
-    self_approval|case_variant_self_approval) printf '%s\n' '{"headRefOid":"HEADSHA","author":{"login":"lidge-jun"},"title":"fixture"}' ;;
+    self_approval|case_variant_self_approval) printf '%s\n' '{"headRefOid":"HEADSHA","author":{"login":"yansigit"},"title":"fixture"}' ;;
     head_changes_after_meta)
       if [ -f "$CASE_STATE_DIR/meta-read" ]; then
         printf '%s\n' '{"headRefOid":"NEWSHA","author":{"login":"author"},"title":"fixture"}'
@@ -59,7 +59,7 @@ if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
       printf '%s\n' '{"headRefOid":"HEADSHA","author":{"login":"author"},"title":"fixture"}'
       ;;
     mi_author_self)
-      printf '%s\n' '{"headRefOid":"HEADSHA","author":{"login":"lidge-jun"},"title":"fixture","baseRefName":"dev"}'
+      printf '%s\n' '{"headRefOid":"HEADSHA","author":{"login":"yansigit"},"title":"fixture","baseRefName":"dev"}'
       ;;
     mi_base_main)
       printf '%s\n' '{"headRefOid":"HEADSHA","author":{"login":"author"},"title":"fixture","baseRefName":"main"}'
@@ -112,7 +112,7 @@ if [ "$1" = "api" ]; then
       mi_failed_actor) exit 76 ;;
       mi_malformed_actor) printf '%s\n' 'not-json' ;;
       mi_missing_actor) printf '%s\n' '{}' ;;
-      mi_bot_actor) printf '%s\n' '{"login":"lidge-jun","type":"Bot"}' ;;
+      mi_bot_actor) printf '%s\n' '{"login":"yansigit","type":"Bot"}' ;;
       mi_maintain_no_review) printf '%s\n' '{"login":"Ingwannu","type":"User"}' ;;
       mi_outsider) printf '%s\n' '{"login":"outsider","type":"User"}' ;;
       mi_final_actor_drift)
@@ -120,11 +120,11 @@ if [ "$1" = "api" ]; then
           printf '%s\n' '{"login":"Ingwannu","type":"User"}'
         else
           : > "$CASE_STATE_DIR/user-read"
-          printf '%s\n' '{"login":"lidge-jun","type":"User"}'
+          printf '%s\n' '{"login":"yansigit","type":"User"}'
         fi
         ;;
       mi_*)
-        printf '%s\n' '{"login":"lidge-jun","type":"User"}'
+        printf '%s\n' '{"login":"yansigit","type":"User"}'
         ;;
       *)
         printf 'unexpected gh invocation: %s\n' "$*" >&2
@@ -181,11 +181,11 @@ if [ "$1" = "api" ]; then
       exit 0
     fi
     if [ "$case_name" = "bot_rostered" ]; then
-      printf '%b' '# Maintainers\n\n## Current maintainers\n\n| [@lidge-jun](x) | owner |\n| [@Ingwannu](x) | maintainer |\n| [@coderabbitai](x) | automation |\n\n## Former maintainers\n' | base64
+      printf '%b' '# Maintainers\n\n## Current maintainers\n\n| [@yansigit](x) | owner |\n| [@Ingwannu](x) | maintainer |\n| [@coderabbitai](x) | automation |\n\n## Former maintainers\n' | base64
       exit 0
     fi
     if [ "$case_name" = "case_variant_self_approval" ]; then
-      printf '%b' '# Maintainers\n\n## Current maintainers\n\n| [@LIDGE-JUN](x) | owner |\n| [@Ingwannu](x) | maintainer |\n\n## Former maintainers\n' | base64
+      printf '%b' '# Maintainers\n\n## Current maintainers\n\n| [@YANSIGIT](x) | owner |\n| [@Ingwannu](x) | maintainer |\n\n## Former maintainers\n' | base64
       exit 0
     fi
     if [ "$case_name" = "mi_malformed_roster" ]; then
@@ -197,11 +197,11 @@ if [ "$1" = "api" ]; then
         printf '%b' '# Maintainers\n\n## Current maintainers\n\n## Former maintainers\n' | base64
       else
         : > "$CASE_STATE_DIR/roster-read"
-        printf '%b' '# Maintainers\n\n## Current maintainers\n\n| [@lidge-jun](x) | owner |\n| [@Ingwannu](x) | maintainer |\n\n## Former maintainers\n' | base64
+        printf '%b' '# Maintainers\n\n## Current maintainers\n\n| [@yansigit](x) | owner |\n| [@Ingwannu](x) | maintainer |\n\n## Former maintainers\n' | base64
       fi
       exit 0
     fi
-    printf '%b' '# Maintainers\n\n## Current maintainers\n\n| [@lidge-jun](x) | owner |\n| [@Ingwannu](x) | maintainer |\n\n## Former maintainers\n' | base64
+    printf '%b' '# Maintainers\n\n## Current maintainers\n\n| [@yansigit](x) | owner |\n| [@Ingwannu](x) | maintainer |\n\n## Former maintainers\n' | base64
     exit 0
   fi
 
@@ -227,19 +227,19 @@ if [ "$1" = "api" ]; then
         printf '[['; review Ingwannu APPROVED OLDSHA 2026-08-29T00:00:00Z 1; printf ']]\n'
         ;;
       self_approval)
-        printf '[['; review lidge-jun APPROVED HEADSHA 2026-08-29T00:00:00Z 1; printf ']]\n'
+        printf '[['; review yansigit APPROVED HEADSHA 2026-08-29T00:00:00Z 1; printf ']]\n'
         ;;
       case_variant_self_approval)
-        printf '[['; review LIDGE-JUN APPROVED HEADSHA 2026-08-29T00:00:00Z 1; printf ']]\n'
+        printf '[['; review YANSIGIT APPROVED HEADSHA 2026-08-29T00:00:00Z 1; printf ']]\n'
         ;;
       outside_approval)
         printf '[['; review outsider APPROVED HEADSHA 2026-08-29T00:00:00Z 1; printf ']]\n'
         ;;
       maintainer_blocker_same_page)
-        printf '[['; review lidge-jun CHANGES_REQUESTED HEADSHA 2026-08-29T00:00:00Z 1; printf ','; review Ingwannu APPROVED HEADSHA 2026-08-29T00:01:00Z 2; printf ']]\n'
+        printf '[['; review yansigit CHANGES_REQUESTED HEADSHA 2026-08-29T00:00:00Z 1; printf ','; review Ingwannu APPROVED HEADSHA 2026-08-29T00:01:00Z 2; printf ']]\n'
         ;;
       maintainer_blocker_multi_page)
-        printf '[['; review lidge-jun CHANGES_REQUESTED HEADSHA 2026-08-29T00:00:00Z 1; printf ','; review outsider COMMENTED HEADSHA 2026-08-29T00:00:30Z 2; printf '],['; review Ingwannu APPROVED HEADSHA 2026-08-29T00:01:00Z 3; printf ']]\n'
+        printf '[['; review yansigit CHANGES_REQUESTED HEADSHA 2026-08-29T00:00:00Z 1; printf ','; review outsider COMMENTED HEADSHA 2026-08-29T00:00:30Z 2; printf '],['; review Ingwannu APPROVED HEADSHA 2026-08-29T00:01:00Z 3; printf ']]\n'
         ;;
       dismissed_after_approval)
         printf '[['; review Ingwannu APPROVED HEADSHA 2026-08-29T00:00:00Z 1; printf '],['; review Ingwannu DISMISSED HEADSHA 2026-08-29T00:01:00Z 2; printf ']]\n'
@@ -408,10 +408,14 @@ describe.skipIf(process.platform === "win32")("assert-mergeable-review", () => {
         const calls = readFileSync(join(caseStateDir, "gh-calls"), "utf8").trim().split("\n");
         expect(calls.filter(call => call === "api user")).toHaveLength(2);
         expect(calls.filter(call => call.includes("/contents/MAINTAINERS.md?ref=dev"))).toHaveLength(2);
-        const actor = name === "mi_maintain_no_review" ? "ingwannu" : "lidge-jun";
+        const actor = name === "mi_maintain_no_review" ? "ingwannu" : "yansigit";
         expect(calls.filter(call => call.includes(`/collaborators/${actor}/permission`))).toHaveLength(2);
         expect(calls.some(call => call.includes("reviewDecision"))).toBe(false);
         expect(calls.at(-1)).toContain("--json headRefOid,baseRefName,author");
+        if (name === "mi_option_optional_repo") {
+          expect(calls.every(call => !call.includes("lidge-jun/opencodex"))).toBe(true);
+          expect(calls.some(call => call.includes("--repo yansigit/opencodex"))).toBe(true);
+        }
       } else {
         expect(result.exitCode, output).not.toBe(0);
       }

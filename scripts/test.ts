@@ -9,6 +9,8 @@ import {
   TEST_RUN_LOCK_PATH_ENV,
   TEST_RUN_LOCK_TOKEN_ENV,
 } from "./test-run-lock";
+import { resolveTrustedWindowsTaskkillExe } from "../src/lib/windows-elevation";
+import { SERIAL_TEST_FILES } from "./ci/test-lanes";
 
 export interface IsolatedTestEnvironment {
   root: string;
@@ -293,11 +295,8 @@ function isFullSuiteRun(requested: string[]): boolean {
  * Default `bun test` argv for this repo.
  *
  * `--isolate` keeps a fresh global per file. Bounded parallelism is what makes the suite
- * finishable: with isolate alone Bun re-evaluates
- * the module graph once per file on a single core, so past ~900 files the run stops looking slow
- * and starts looking hung — measured here at 1 h 29 m with zero output, ~57 % CPU and 8.5 MB RSS,
- * against a few minutes for the identical suite with four workers. Leaving Bun to select all ten
- * workers made deadline-sensitive tests fail under load, so the repository default is deterministic.
+ * finishable: with isolate alone Bun re-evaluates the module graph once per file on a single core,
+ * while leaving Bun to select every host core makes deadline-sensitive tests fail under load.
  * A caller-supplied `--parallel` or `--parallel=N` is left alone.
  */
 export function resolveBunTestArgs(
@@ -322,21 +321,20 @@ export function resolveBunTestArgs(
   return args;
 }
 
-// Paths relative to tests/. An entry moves with its file (scripts/test-layout/move.ts rewrites
-// it); the lane label, the ignore glob, and the timeout table all key on the basename.
-export const SERIAL_FULL_SUITE_FILES = [
-  "codex-integration/codex-shim.test.ts",
-  "providers/cursor/cursor-native-exec-shell.test.ts",
-  "codex-integration/issue-452-empty-503.test.ts",
-  "adapters/openai/openai-provider-option-e2e.test.ts",
-  "ci-workflows/release-helper.test.ts",
-  "update/update-stop-first.test.ts",
-] as const;
+type SerialFullSuiteFile = (typeof SERIAL_TEST_FILES)[number] extends `tests/${infer File}` ? File : never;
 
-type SerialLaneBasename = (typeof SERIAL_FULL_SUITE_FILES)[number] extends infer P
+export const SERIAL_FULL_SUITE_FILES = SERIAL_TEST_FILES.map(
+  (file): SerialFullSuiteFile => file.slice("tests/".length) as SerialFullSuiteFile,
+);
+
+type SerialLaneBasename = SerialFullSuiteFile extends infer P
   ? P extends `${string}/${infer B}` ? B : P
   : never;
 const SERIAL_LANE_TIMEOUT_MS: Partial<Record<SerialLaneBasename, number>> = {
+  // The packaged first-start case has its own 4-minute budget and performs npm
+  // pack/install plus a real proxy lifecycle. Keep the outer lane able to
+  // contain that bounded work on cold runners.
+  "ocx-launcher-runtime.test.ts": 5 * 60 * 1000,
   // This file intentionally exercises 33 complete release-script subprocess trees.
   // It is ~90s on an idle machine and measured at ~170s under unrelated host load.
   "release-helper.test.ts": 5 * 60 * 1000,
@@ -346,6 +344,71 @@ export interface BunTestLane {
   label: string;
   args: string[];
   timeoutMs: number;
+}
+
+export function terminationCommandForTests(
+  pid: number,
+  platform = process.platform,
+  resolveTaskkill: () => string = resolveTrustedWindowsTaskkillExe,
+): string[] | null {
+  return platform === "win32"
+    ? [resolveTaskkill(), "/PID", String(pid), "/T", "/F"]
+    : null;
+}
+
+export interface TestTerminationOptions {
+  pid: number;
+  platform: string;
+  signal?: NodeJS.Signals;
+  exited: Promise<number>;
+  signalGroup?: (signal: NodeJS.Signals) => void;
+  isAlive?: () => boolean;
+  resolveTaskkill?: () => string;
+  taskkill?: (command: string[]) => number;
+  graceMs?: number;
+  killGraceMs?: number;
+}
+
+export interface TestTerminationGraceOptions {
+  graceMs?: number;
+  killGraceMs?: number;
+}
+
+export async function terminateTestProcessForTests(options: TestTerminationOptions): Promise<void> {
+  if (!Number.isSafeInteger(options.pid) || options.pid <= 0) {
+    throw new Error(`[test] child pid must be a positive safe integer; received ${options.pid}`);
+  }
+  const graceMs = options.graceMs ?? 5_000;
+  const killGraceMs = options.killGraceMs ?? 2_000;
+  if (options.platform === "win32") {
+    const command = terminationCommandForTests(options.pid, "win32", options.resolveTaskkill)!;
+    const result = options.taskkill?.(command) ?? 0;
+    if (result !== 0) {
+      throw new Error(`[test] failed to terminate process tree with ${command[0]} (exit ${result})`);
+    }
+    if (await waitWithMonotonicTimeout(options.exited, killGraceMs) === null) {
+      throw new Error(`[test] process tree ${options.pid} did not terminate after taskkill`);
+    }
+    return;
+  }
+  const signal = options.signalGroup ?? (() => {});
+  const alive = options.isAlive ?? (() => false);
+  signal(options.signal ?? "SIGTERM");
+  if (await waitForProcessDeath(alive, graceMs)) return;
+  signal("SIGKILL");
+  if (!await waitForProcessDeath(alive, killGraceMs)) {
+    throw new Error(`[test] process group ${options.pid} did not terminate after SIGKILL`);
+  }
+}
+
+async function waitForProcessDeath(isAlive: () => boolean, timeoutMs: number): Promise<boolean> {
+  const deadline = performance.now() + timeoutMs;
+  while (isAlive()) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return false;
+    await Bun.sleep(Math.min(10, remaining));
+  }
+  return true;
 }
 
 function withoutParallelOverride(requested: string[]): string[] {
@@ -378,20 +441,64 @@ export function resolveBunTestPlan(requested: string[], comparisonCommit?: strin
   ];
 }
 
-function waitWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
+export interface MonotonicTimeoutRuntime {
+  now(): number;
+  schedule(callback: () => void, delayMs: number): unknown;
+  clear(handle: unknown): void;
+}
+
+const monotonicTimeoutRuntime: MonotonicTimeoutRuntime = {
+  now: () => performance.now(),
+  schedule: (callback, delayMs) => setTimeout(callback, delayMs),
+  clear: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/**
+ * Bound a promise without trusting one wall-clock-sensitive timer wakeup.
+ *
+ * Some Bun/macOS combinations wake a long timer when the host clock jumps. Rechecking a
+ * monotonic deadline turns that wakeup into a harmless re-arm instead of killing healthy CI.
+ */
+export function waitWithMonotonicTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  runtime: MonotonicTimeoutRuntime = monotonicTimeoutRuntime,
+): Promise<T | null> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => resolve(null), timeoutMs);
+    const deadline = runtime.now() + Math.max(0, timeoutMs);
+    let timer: unknown;
+    let settled = false;
+
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) runtime.clear(timer);
+      callback();
+    };
+    const arm = () => {
+      const remaining = Math.max(0, deadline - runtime.now());
+      timer = runtime.schedule(() => {
+        timer = undefined;
+        if (runtime.now() < deadline) {
+          arm();
+          return;
+        }
+        finish(() => resolve(null));
+      }, remaining);
+    };
+
+    arm();
     promise.then(
-      value => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      error => {
-        clearTimeout(timer);
-        reject(error);
-      },
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error)),
     );
   });
+}
+
+export interface TestLaneRuntimeOptions extends TestTerminationGraceOptions {
+  command?: string[];
+  createEnvironment?: typeof createIsolatedTestEnvironment;
+  terminateProcess?: (child: Bun.Subprocess, signal: NodeJS.Signals) => Promise<void>;
 }
 
 async function runTestLane(
@@ -399,8 +506,9 @@ async function runTestLane(
   runId: string,
   inheritedLock: { lockPath: string; ownerToken: string } | undefined,
   capture = false,
+  options: TestLaneRuntimeOptions = {},
 ): Promise<{ exitCode: number; output: string }> {
-  const isolated = createIsolatedTestEnvironment({
+  const isolated = (options.createEnvironment ?? createIsolatedTestEnvironment)({
     ...process.env,
     [TEST_RUN_ID_ENV]: runId,
     [TEST_RUN_LOCK_PATH_ENV]: inheritedLock?.lockPath,
@@ -410,36 +518,63 @@ async function runTestLane(
     // See tests/helpers/ci-watchdog.ts `isolationBudgetMs`.
     OCX_TEST_FULL_SUITE: "1",
   });
-  const startedAt = Date.now();
+  const startedAt = performance.now();
   let interrupted: NodeJS.Signals | null = null;
-  const child = Bun.spawn([process.execPath, "test", ...lane.args], {
-    env: isolated.env,
-    stdin: "inherit",
-    stdout: capture ? "pipe" : "inherit",
-    stderr: capture ? "pipe" : "inherit",
-  });
-  const stdoutP = capture ? new Response(child.stdout).text() : Promise.resolve("");
-  const stderrP = capture ? new Response(child.stderr).text() : Promise.resolve("");
+  let termination: Promise<void> | null = null;
+  let child: Bun.Subprocess | null = null;
+  let resolveInterrupt!: (signal: NodeJS.Signals) => void;
+  const interruptRequested = new Promise<NodeJS.Signals>(resolve => { resolveInterrupt = resolve; });
+  const terminate = options.terminateProcess ?? ((target: Bun.Subprocess, signal: NodeJS.Signals) => (
+    terminateSpawnedTestProcessForTests(target, signal, options)
+  ));
+  const beginTermination = () => {
+    const target = child;
+    const signal = interrupted;
+    if (!target || !signal || termination) return;
+    termination = Promise.resolve().then(() => terminate(target, signal));
+  };
   const forward = (signal: NodeJS.Signals) => {
+    if (interrupted) return;
     interrupted = signal;
-    try { child.kill(signal); } catch { /* child already exited */ }
+    beginTermination();
+    resolveInterrupt(signal);
   };
   const onInterrupt = () => forward("SIGINT");
   const onTerminate = () => forward("SIGTERM");
+  // Register before spawning. A fast child can publish readiness while this process is
+  // still returning from Bun.spawn; without handlers already installed, a supervisor's
+  // immediate signal takes the default path and can orphan that new process group.
   process.once("SIGINT", onInterrupt);
   process.once("SIGTERM", onTerminate);
 
-  const exited = child.exited;
   try {
-    const exitCode = await waitWithTimeout(exited, lane.timeoutMs);
+    child = Bun.spawn(options.command ?? [process.execPath, "test", ...lane.args], {
+      env: isolated.env,
+      stdin: "inherit",
+      stdout: capture ? "pipe" : "inherit",
+      stderr: capture ? "pipe" : "inherit",
+      detached: process.platform !== "win32",
+    });
+    beginTermination();
+    const target = child;
+    const stdoutP = capture ? new Response(target.stdout).text() : Promise.resolve("");
+    const stderrP = capture ? new Response(target.stderr).text() : Promise.resolve("");
+    const exited = target.exited;
+    const outcome = await Promise.race([
+      waitWithMonotonicTimeout(exited, lane.timeoutMs).then(exitCode => ({ kind: "exit" as const, exitCode })),
+      interruptRequested.then(async signal => {
+        await termination;
+        return { kind: "interrupt" as const, signal };
+      }),
+    ]);
+    if (outcome.kind === "interrupt") {
+      return { exitCode: outcome.signal === "SIGINT" ? 130 : 143, output: "" };
+    }
+    const exitCode = outcome.exitCode;
     if (exitCode === null) {
-      console.error(`[test] ${lane.label} exceeded ${Math.round(lane.timeoutMs / 1000)}s; terminating pid ${child.pid}.`);
-      try { child.kill("SIGTERM"); } catch { /* child already exited */ }
-      const graceful = await waitWithTimeout(exited, 5_000);
-      if (graceful === null) {
-        try { child.kill("SIGKILL"); } catch { /* child already exited */ }
-        await waitWithTimeout(exited, 2_000);
-      }
+      console.error(`[test] ${lane.label} exceeded ${Math.round(lane.timeoutMs / 1000)}s; terminating pid ${target.pid}.`);
+      termination ??= Promise.resolve().then(() => terminate(target, "SIGTERM"));
+      await termination;
       return { exitCode: 124, output: "" };
     }
     const [stdout, stderr] = await Promise.all([stdoutP, stderrP]);
@@ -448,13 +583,68 @@ async function runTestLane(
     const output = stdout + "\n" + stderr;
     if (interrupted === "SIGINT") return { exitCode: 130, output };
     if (interrupted === "SIGTERM") return { exitCode: 143, output };
-    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
     console.warn(`[test] ${lane.label} finished in ${seconds}s (exit ${exitCode}).`);
     return { exitCode, output };
   } finally {
-    process.off("SIGINT", onInterrupt);
-    process.off("SIGTERM", onTerminate);
-    isolated.cleanup();
+    try {
+      if (termination) await termination;
+    } finally {
+      process.off("SIGINT", onInterrupt);
+      process.off("SIGTERM", onTerminate);
+      isolated.cleanup();
+    }
+  }
+}
+
+export async function runTestLaneForTests(
+  lane: BunTestLane,
+  runId: string,
+  options: TestLaneRuntimeOptions = {},
+): Promise<number> {
+  return (await runTestLane(lane, runId, undefined, false, options)).exitCode;
+}
+
+export async function terminateSpawnedTestProcessForTests(
+  child: { pid: number; exited: Promise<number>; kill(signal: NodeJS.Signals): void },
+  signal: NodeJS.Signals,
+  grace: TestTerminationGraceOptions = {},
+): Promise<void> {
+  if (process.platform === "win32") {
+    return terminateTestProcessForTests({
+      pid: child.pid,
+      platform: "win32",
+      signal,
+      exited: child.exited,
+      taskkill: command => Bun.spawnSync(command, { stdout: "ignore", stderr: "pipe" }).exitCode,
+      ...grace,
+    });
+  }
+
+  const signalGroup = (name: NodeJS.Signals) => {
+    try {
+      process.kill(-child.pid, name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  };
+  return terminateTestProcessForTests({
+    pid: child.pid,
+    platform: process.platform,
+    signal,
+    exited: child.exited,
+    signalGroup,
+    isAlive: () => processGroupAlive(child.pid),
+    ...grace,
+  });
+}
+
+function processGroupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
@@ -537,7 +727,7 @@ if (import.meta.main) {
       ),
       onAcquiredAfterWait: elapsedMs => console.warn(`[test] acquired the user lock after ${Math.round(elapsedMs / 1000)}s.`),
     });
-    const startedAt = Date.now();
+    const startedAt = performance.now();
     try {
       const inheritedLock = process.platform === "win32" && lockPath && lock.owner
         ? { lockPath, ownerToken: lock.owner.token }
@@ -557,8 +747,8 @@ if (import.meta.main) {
           exitCode = 1;
         }
       }
-      const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
-      if (isFullSuiteRun(requestedTests) && elapsedSeconds > 600) {
+      const elapsedSeconds = Math.round((performance.now() - startedAt) / 1000);
+      if (isFullSuiteRun(requestedTests) && elapsedSeconds > 10 * 60) {
         console.warn(
           `[test] the suite took ${elapsedSeconds}s; with --parallel=${DEFAULT_TEST_PARALLELISM} it should finish in a few minutes on an idle machine. `
           + "Check for another test runner, a busy CPU, or a test that started polling something real.",

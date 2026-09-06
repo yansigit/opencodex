@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decideDevVersion } from "../../scripts/bump-dev-version";
+import { decideDevVersion, replacePackageJsonAtomically } from "../../scripts/bump-dev-version";
 import { assertReleasable } from "../../scripts/version-line";
 
 /**
@@ -18,7 +18,11 @@ import { assertReleasable } from "../../scripts/version-line";
 // which bun cannot open, so every CLI case exited 1 before reaching the code under test —
 // and the malformed-input case read that same load failure as a correct rejection.
 const CLI = fileURLToPath(new URL("../../scripts/bump-dev-version.ts", import.meta.url));
-const WORKFLOW = fileURLToPath(new URL("../../.github/workflows/dev-version-bump.yml", import.meta.url));
+const WORKFLOW = readFileSync(
+  new URL("../../.github/workflows/dev-version-bump.yml", import.meta.url),
+  "utf8",
+);
+const WORKFLOWS_DIR = fileURLToPath(new URL("../../.github/workflows/", import.meta.url));
 const VERSION_LINE_CLI = fileURLToPath(new URL("../../scripts/version-line.ts", import.meta.url));
 
 function runCli(...args: string[]) {
@@ -62,7 +66,7 @@ function tempPackageJson(version: string): string {
 
 describe("dev version bump rule", () => {
   test("the idempotency check filters the repository-owned head before pagination", () => {
-    const workflow = readFileSync(WORKFLOW, "utf8");
+    const workflow = WORKFLOW;
     const block = workflow.match(/open_prs="\$\(([\s\S]*?)\n\s*\)"/)?.[1];
     expect(block).toBeDefined();
     expect(block).toContain('gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls"');
@@ -151,7 +155,7 @@ describe("dev version bump rule", () => {
     })).toEqual({ ok: false, blockedBy: "v2.43.0-preview.1" });
   });
 
-  test("release ordering preserves only the explicit equal-tag dry-run exception", () => {
+  test("release ordering preserves only the exact equal-tag resume exception", () => {
     expect(assertReleasable({
       candidate: "2.42.0",
       tags: ["v2.42.0"],
@@ -159,13 +163,18 @@ describe("dev version bump rule", () => {
     expect(assertReleasable({
       candidate: "2.42.0",
       tags: ["v2.42.0"],
-      allowExistingTagAtHead: true,
+      allowedEqualTag: "v2.42.0",
     })).toEqual({ ok: true });
     expect(assertReleasable({
       candidate: "2.42.0",
       tags: ["v2.42.0", "v2.43.0-preview.1"],
-      allowExistingTagAtHead: true,
+      allowedEqualTag: "v2.42.0",
     })).toEqual({ ok: false, blockedBy: "v2.43.0-preview.1" });
+    expect(assertReleasable({
+      candidate: "2.42.0",
+      tags: ["v2.42.0", "v2.42.0+other-source"],
+      allowedEqualTag: "v2.42.0",
+    })).toEqual({ ok: false, blockedBy: "v2.42.0+other-source" });
   });
 
   test("the version-line CLI wires both gates, stdin tags, and usage failures", async () => {
@@ -190,15 +199,22 @@ describe("dev version bump rule", () => {
     expect(blocked.stderrText).toContain("blocked by v2.43.0-preview.1");
 
     const allowedEqual = await runVersionLineCli(
-      ["assert-releasable", "2.42.0", "--allow-existing-tag-at-head"],
+      ["assert-releasable", "2.42.0", "--allow-existing-tag", "v2.42.0"],
       "v2.42.0\n",
     );
     expect(allowedEqual.exitCode, allowedEqual.stderrText).toBe(0);
 
+    const blockedEquivalent = await runVersionLineCli(
+      ["assert-releasable", "2.42.0", "--allow-existing-tag", "v2.42.0"],
+      "v2.42.0\nv2.42.0+other-source\n",
+    );
+    expect(blockedEquivalent.exitCode).not.toBe(0);
+    expect(blockedEquivalent.stderrText).toContain("blocked by v2.42.0+other-source");
+
     const unknown = await runVersionLineCli(["nonsense"]);
     expect(unknown.exitCode).not.toBe(0);
     expect(unknown.stderrText).toContain(
-      "usage: bun scripts/version-line.ts assert-ahead <a> <b> | assert-releasable <version> [--allow-existing-tag-at-head]",
+      "usage: bun scripts/version-line.ts assert-ahead <a> <b> | assert-releasable <version> [--allow-existing-tag <tag>]",
     );
   });
 
@@ -246,6 +262,53 @@ describe("dev version bump rule", () => {
     expect(after.endsWith("}\n")).toBe(true);
   });
 
+  test("the atomic rewrite retries a transient Windows EPERM", () => {
+    const path = tempPackageJson("2.36.0");
+    const dir = dirname(path);
+    const rewritten = readFileSync(path, "utf8").replace("2.36.0", "2.37.0");
+    const sleeps: number[] = [];
+    let attempts = 0;
+
+    replacePackageJsonAtomically(path, rewritten, {
+      platform: "win32",
+      rename: (source, destination) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw Object.assign(new Error("transient sharing violation"), { code: "EPERM" });
+        }
+        renameSync(source, destination);
+      },
+      sleep: milliseconds => sleeps.push(milliseconds),
+    });
+
+    expect(attempts).toBe(2);
+    expect(sleeps).toEqual([25]);
+    expect(JSON.parse(readFileSync(path, "utf8")).version).toBe("2.37.0");
+    expect(readdirSync(dir)).toEqual(["package.json"]);
+  });
+
+  test("an exhausted Windows EPERM leaves the original intact and cleans the temp", () => {
+    const path = tempPackageJson("2.36.0");
+    const before = readFileSync(path, "utf8");
+    const dir = dirname(path);
+    const sleeps: number[] = [];
+    let attempts = 0;
+
+    expect(() => replacePackageJsonAtomically(path, before.replace("2.36.0", "2.37.0"), {
+      platform: "win32",
+      rename: () => {
+        attempts += 1;
+        throw Object.assign(new Error("persistent sharing violation"), { code: "EPERM" });
+      },
+      sleep: milliseconds => sleeps.push(milliseconds),
+    })).toThrow("persistent sharing violation");
+
+    expect(attempts).toBe(3);
+    expect(sleeps).toEqual([25, 50]);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readdirSync(dir)).toEqual(["package.json"]);
+  });
+
   // Skipped on Windows: `chmod 0500` is not access control there, so the write would
   // succeed and this test would fail red for a reason that has nothing to do with the
   // behavior under test. Same guard as tests/codex-integration/codex-native-residue.test.ts uses for its
@@ -277,5 +340,46 @@ describe("dev version bump rule", () => {
     // The specific rejection, not "any nonzero": a module-load failure also exits 1.
     expect(proc.stderrText).toContain("released version is not parseable");
     expect(readFileSync(path, "utf8")).toBe(before);
+  });
+});
+
+describe("dev version bump workflow safety", () => {
+  test("remains a dormant least-privilege fallback with immutable external actions", () => {
+    expect(WORKFLOW).toContain("permissions: {}");
+    expect(WORKFLOW).toContain("workflow_call:");
+    expect(WORKFLOW).toContain("released-version:");
+    expect(WORKFLOW).not.toContain("release:\n    types: [published]");
+    expect(WORKFLOW).not.toMatch(/^\s+workflow_dispatch:/m);
+    const callers = readdirSync(WORKFLOWS_DIR)
+      .filter(file => /\.ya?ml$/.test(file) && file !== "dev-version-bump.yml")
+      .filter(file =>
+        readFileSync(join(WORKFLOWS_DIR, file), "utf8").includes(
+          "uses: ./.github/workflows/dev-version-bump.yml",
+        ),
+      );
+    expect(callers).toEqual([]);
+    for (const match of WORKFLOW.matchAll(/^\s+uses:\s+([^\s#]+)/gm)) {
+      const action = match[1];
+      if (action.startsWith("./")) continue;
+      expect(action).toMatch(/@[0-9a-f]{40}$/);
+    }
+    expect(WORKFLOW).toContain("contents: write");
+    expect(WORKFLOW).toContain("pull-requests: write");
+    expect(WORKFLOW).toContain("issues: write");
+  });
+
+  test("rebuilds a validated retry branch from current dev under an exact lease", () => {
+    expect(WORKFLOW).toContain('git checkout -B "${branch}" origin/dev');
+    expect(WORKFLOW).toContain('--force-with-lease="refs/heads/${branch}:${existing_branch_sha}"');
+    expect(WORKFLOW).toContain('changed_files="$(git diff --name-only "origin/dev...origin/${branch}")"');
+    expect(WORKFLOW).not.toMatch(/git push[^\n]*\bdev\b/);
+  });
+
+  test("deduplicates failure alerts, queues Jules, and closes the alert on recovery", () => {
+    expect(WORKFLOW).toContain("opencodex-dev-version-bump-failure");
+    expect(WORKFLOW).toContain('"agent:jules"');
+    expect(WORKFLOW).toContain('"agent:queued"');
+    expect(WORKFLOW).toContain('state_reason: "completed"');
+    expect(WORKFLOW).toContain("The dev-version bump automation failed again");
   });
 });

@@ -1075,6 +1075,33 @@ describe("collectPrQualityFailures", () => {
     });
     assert.ok(!failures.some((f) => f.code === "missing_ui_screenshot"));
   });
+
+  it("waives UI screenshot and wrong base for automated promotion PRs to main", () => {
+    const promotionBody = [
+      "## Summary",
+      "Promote the verified dev integration branch to main.",
+      "",
+      "## Verification",
+      "This PR was opened automatically after successful Cross-platform CI on dev.",
+      "A human maintainer must review and merge it. This automation never merges main.",
+      "",
+      "## Checklist",
+      "- [ ] Required CI is green for the exact dev commit.",
+      "- [ ] Release notes and versioning are ready.",
+      "- [ ] A maintainer reviewed the promotion.",
+    ].join("\n");
+    const failures = collectPrQualityFailures({
+      baseRef: "main",
+      allowedBases: ["dev"],
+      title: "promote: dev to main",
+      body: promotionBody,
+      behindMain: 0,
+      behindBase: 0,
+      authorPermission: "read",
+      changedFilePaths: ["gui/src/App.tsx"],
+    });
+    assert.deepEqual(failures, []);
+  });
 });
 
 describe("comment stripping respects fenced code (regression)", () => {

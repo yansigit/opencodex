@@ -122,7 +122,8 @@ export function runVerify(options: VerifyOptions): VerifyReport {
     const base = JSON.parse(readFileSync(baseConfig, "utf8")) as { include: string[] };
     const include = [
       ...base.include.map(entry => join(root, "scripts", "test-layout", entry)),
-      ...domains.map(d => join(root, "tests", d, "**", "*.ts")),
+      ...domains.flatMap(d => ["*.ts", "*.tsx", "*.mts", "*.cts"]
+        .map(pattern => join(root, "tests", d, "**", pattern))),
     ];
     writeFileSync(tmpConfig, JSON.stringify({ extends: baseConfig, include }, null, 2));
     try {

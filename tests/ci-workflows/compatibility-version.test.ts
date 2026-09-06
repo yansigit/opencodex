@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { buildCompatibilityVersionManifest } from "../../scripts/generate-compatibility-version";
+import {
+  buildCompatibilityVersionManifest,
+  REQUIRED_COMPATIBILITY_FILES,
+} from "../../scripts/generate-compatibility-version";
 
 describe("Compatibility Lab generated implementation identity", () => {
   test("manifest covers exact tracked source authority without self-reference", () => {
@@ -9,9 +12,7 @@ describe("Compatibility Lab generated implementation identity", () => {
     expect(manifest.assertionDslVersion).toBe("1.0.0");
     expect(manifest.evidenceSchemaVersion).toBe("1.0.0");
     expect(manifest.bunRuntimeVersion).toBe(Bun.version);
-    expect(paths).toContain("package.json");
-    expect(paths).toContain("bun.lock");
-    expect(paths).toContain("scripts/model-metadata.source.json");
+    for (const path of REQUIRED_COMPATIBILITY_FILES) expect(paths).toContain(path);
     expect(paths).toContain("src/routing/compatibility/version.ts");
     expect(paths).not.toContain("src/generated/compatibility-version.json");
     expect(new Set(paths).size).toBe(paths.length);

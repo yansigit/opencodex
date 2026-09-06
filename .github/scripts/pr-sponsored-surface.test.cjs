@@ -2,13 +2,18 @@
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { assessSponsoredSurface, isRestrictedPath } = require("./pr-sponsored-surface.cjs");
+const {
+  assessSponsoredSurface,
+  isAgentProtectedPath,
+  isRestrictedPath,
+} = require("./pr-sponsored-surface.cjs");
 
 describe("isRestrictedPath", () => {
   it("covers auth, workflow, release, and dependency surfaces", () => {
     for (const path of [
       "src/oauth/store.ts",
       ".github/workflows/release.yml",
+      ".github/scripts/agent-maintenance.cjs",
       "scripts/release.ts",
       "src/server/management-auth.ts",
       "package.json",
@@ -31,24 +36,48 @@ describe("isRestrictedPath", () => {
   });
 });
 
+describe("isAgentProtectedPath", () => {
+  it("escalates optional-Lab boundaries, provider code, and rename sources", () => {
+    for (const file of [
+      { filename: "src/router.ts" },
+      { filename: "src/server/lifecycle.ts" },
+      { filename: "src/providers/new-provider.ts" },
+      { filename: ".github/scripts/agent-maintenance.cjs" },
+      { filename: "docs-site/new.md", previous_filename: "src/server/responses/core.ts" },
+    ]) {
+      assert.equal(isAgentProtectedPath(file), true, JSON.stringify(file));
+    }
+  });
+
+  it("allows the two scheduled maintenance surfaces", () => {
+    for (const file of [
+      { filename: "README.md" },
+      { filename: "docs-site/src/content/docs/x.md" },
+      { filename: "tests/routing/router.test.ts" },
+    ]) {
+      assert.equal(isAgentProtectedPath(file), false, JSON.stringify(file));
+    }
+  });
+});
+
 describe("assessSponsoredSurface", () => {
   it("requires sponsorship for a restricted surface", () => {
-    const failures = assessSponsoredSurface({ changedFiles: ["src/oauth/store.ts"] });
+    const failures = assessSponsoredSurface({ changedFiles: [".github/scripts/agent-maintenance.cjs"] });
     assert.equal(failures[0].code, "unsponsored_surface");
-    assert.deepEqual(failures[0].paths, ["src/oauth/store.ts"]);
+    assert.deepEqual(failures[0].paths, [".github/scripts/agent-maintenance.cjs"]);
   });
 
   it("passes once a maintainer sponsors it", () => {
     assert.deepEqual(
       assessSponsoredSurface({
-        changedFiles: ["src/oauth/store.ts"],
+        changedFiles: [".github/scripts/agent-maintenance.cjs"],
         labels: ["maintainer-sponsored"],
       }),
       [],
     );
     assert.deepEqual(
       assessSponsoredSurface({
-        changedFiles: ["src/oauth/store.ts"],
+        changedFiles: [".github/scripts/agent-maintenance.cjs"],
         labels: [{ name: "maintainer-sponsored" }],
       }),
       [],
@@ -59,7 +88,7 @@ describe("assessSponsoredSurface", () => {
     assert.deepEqual(
       assessSponsoredSurface({
         authorHasPushPermission: true,
-        changedFiles: ["scripts/release.ts"],
+        changedFiles: [".github/scripts/agent-maintenance.cjs"],
       }),
       [],
     );
