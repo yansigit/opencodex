@@ -115,6 +115,13 @@ export interface CatalogModel {
   defaultReasoningEffort?: string;
   contextWindow?: number;
   maxInputTokens?: number;
+  detectedContextWindow?: number;
+  metadataSource?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+  metadataObservedAt?: string;
+  metadataStale?: boolean;
+  metadataFieldSources?: {
+    contextWindow?: "live" | "registry" | "snapshot" | "config_fallback" | "unknown" | "derived";
+  };
   /** Model-scoped output-token ceiling; omitted when no authoritative value is known. */
   maxOutputTokens?: number;
   /** Soft client compaction threshold; hard context/input limits remain authoritative. */

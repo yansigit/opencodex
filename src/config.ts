@@ -153,6 +153,7 @@ export {
   writeRuntimePort,
   type RuntimePortState,
 } from "./config/process-state";
+import { serverTlsConfigError } from "./lib/server-tls";
 import {
   clearPendingConfigTopLevelDeletions,
   configHasRebaseProvenance,
@@ -1110,6 +1111,11 @@ const configSchema = z.object({
   // is safe: startServer() already falls back to 127.0.0.1 for a missing hostname. Write-time
   // rejection lives in validateConfigCandidate() so bad values still surface to the caller.
   hostname: z.string().trim().min(1).optional().catch(undefined),
+  tls: z.object({
+    certFile: z.string().trim().min(1),
+    keyFile: z.string().trim().min(1),
+    publicOrigin: z.string().trim().min(1),
+  }).strict().optional().catch(undefined),
   // Discriminated on `enabled` so a disabled entry cannot be forced to carry a port, and an
   // enabled one cannot omit it (#1102). A malformed value degrades to undefined rather than
   // failing the whole parse: this is an opt-in convenience surface, and a hand-edit typo here
@@ -2720,6 +2726,11 @@ function managementIngressConfigError(value: unknown): string | null {
 
 export function validateConfigCandidate(value: unknown): { ok: true; config: OcxConfig } | { ok: false; error: string } {
   const boundaryError = blankHostnameError(value)
+    ?? (() => {
+      const raw = rawConfigRecord(value);
+      const error = raw ? serverTlsConfigError(raw.tls) : null;
+      return error ? `schema_invalid: ${error}` : null;
+    })()
     ?? claudeSubagentEffortError(value)
     ?? appOwnedMemoryBudgetError(value)
     ?? upstreamHostCircuitThresholdError(value)

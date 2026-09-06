@@ -247,9 +247,32 @@ export interface OcxClientIntegrationsConfig {
   "claude-desktop"?: boolean;
 }
 
+/** User-authored specialist the Codex parent may spawn by name. */
+export interface OcxSubagentRole {
+  /** `[a-z][a-z0-9-]{0,31}`, unique within the catalog. */
+  id: string;
+  /** 1..240 chars; parent "when to use" this specialist. */
+  description: string;
+  /** Bare native or `provider/model`, at most 128 characters. */
+  model: string;
+  /** Codex reasoning ladder; optional. */
+  effort?: string;
+  /** 1..8000 chars; child's developer prompt. */
+  developerInstructions: string;
+  /** Default true. Disabled roles stay in config but are omitted from guidance. */
+  enabled?: boolean;
+}
+
 export interface OcxConfigRebaseProvenance {
   version: 1;
   deletedTopLevelKeys: string[];
+}
+
+export interface OcxServerTlsConfig {
+  certFile: string;
+  keyFile: string;
+  /** Exact externally reachable HTTPS origin; paths, query strings, fragments, and credentials are rejected. */
+  publicOrigin: string;
 }
 
 export type OcxRuntimeRole = "standalone" | "hub" | "client";
@@ -423,6 +446,14 @@ export interface OcxConfig {
    * into a selector-qualified group; Codex still advertises only the first 5 visible rows.
    */
   subagentModels?: string[];
+  /** Named specialist roles the parent may spawn by id. */
+  subagentRoles?: OcxSubagentRole[];
+  /**
+   * Project enabled roles into marker-owned `$CODEX_HOME/agents/ocx-<id>.toml`.
+   * Unset means on once any enabled role exists. `false` leaves user files
+   * untouched and prunes our owned `ocx-*.toml` files.
+   */
+  syncCodexAgentRoles?: boolean;
   /** One-time featured-roster upgrade marker; later user ordering is preserved. */
   subagentModelsVersion?: number;
   /**
@@ -616,6 +647,8 @@ export interface OcxConfig {
   contextCapValue?: number;
   /** Bind hostname. Default "127.0.0.1" (loopback only). Set "0.0.0.0" to expose on all interfaces. */
   hostname?: string;
+  /** Native Bun TLS for the public listener. Required for non-loopback binds. */
+  tls?: OcxServerTlsConfig;
   /**
    * Optional second listener bound to 127.0.0.1 that admits data-plane requests without a
    * credential (issue #1102).

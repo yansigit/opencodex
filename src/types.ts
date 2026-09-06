@@ -65,6 +65,8 @@ export type {
   OcxApiKeyEntry,
   OcxClientIntegrationsConfig,
   OcxConfigRebaseProvenance,
+  OcxSubagentRole,
+  OcxServerTlsConfig,
   OcxHubConfig,
   OcxRemoteGuiConfig,
   OcxConnectedClientId,
