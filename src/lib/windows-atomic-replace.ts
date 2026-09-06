@@ -35,7 +35,8 @@ export type ReplacePublisher =
   | "lab-automation"
   | "lab-ledger"
   | "storage-cleanup"
-  | "tray";
+  | "tray"
+  | "dev-version-bump";
 
 /** The Windows error codes this module treats as a momentary hold. */
 export type ReplaceRetryCode = "EBUSY" | "EPERM" | "EACCES";
