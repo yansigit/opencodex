@@ -56,6 +56,13 @@ beforeAll(async () => {
       name: "web_search",
       parameters: { type: "object", properties: {} },
     }),
+    mediaBridgeWillRun: (
+      hasMediaPlan: boolean,
+      hasWebSearchPlan: boolean,
+      adapterRunsTurn: boolean,
+      isStreaming = true,
+    ) => hasMediaPlan && isStreaming && (!hasWebSearchPlan || adapterRunsTurn),
+    resolveCcaInTurnGrounding: () => undefined,
     planWebSearch: () => sidecarMode
       ? {
           backend: "anthropic",
