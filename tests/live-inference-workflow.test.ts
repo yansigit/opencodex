@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
 const workflow = readFileSync(join(import.meta.dir, "..", ".github", "workflows", "live-inference.yml"), "utf8");
+const supervisorPath = join(import.meta.dir, "..", "scripts", "live-inference-supervisor.ts");
+const supervisorSource = readFileSync(supervisorPath, "utf8");
 
 function cleanupScript(): string {
   const stepStart = workflow.indexOf("      - name: Stop proxy and remove credentials");
@@ -32,8 +34,10 @@ function runCleanup(runnerTemp: string, opencodexHome: string, path = process.en
   });
 }
 
-function processStartTime(pid: number): string {
-  return readFileSync(`/proc/${pid}/stat`, "utf8").trim().split(/\s+/)[21] ?? "";
+async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path) && Date.now() < deadline) await Bun.sleep(20);
+  expect(existsSync(path)).toBe(true);
 }
 
 describe("live inference workflow hardening", () => {
@@ -56,44 +60,61 @@ describe("live inference workflow hardening", () => {
       .toBeLessThan(workflow.indexOf("Reconcile Jules live-inference supervision"));
   });
 
-  test("waits for TERM, escalates only while the proxy lives, then verifies cleanup", () => {
+  test("uses an owning supervisor and removes credentials only after its exit receipt", () => {
     const cleanup = cleanupScript();
-    const term = cleanup.indexOf('kill -TERM "$proxy_pid"');
-    const kill = cleanup.indexOf('kill -KILL "$proxy_pid"');
-    const escalationGuard = cleanup.lastIndexOf('kill -0 "$proxy_pid"', kill);
-    const wait = cleanup.indexOf('wait "$proxy_pid"');
+    const receipt = cleanup.indexOf('[ ! -s "$control_dir/stopped" ]');
     const remove = cleanup.indexOf('rm -rf -- "$OPENCODEX_HOME"');
     const absence = cleanup.lastIndexOf('[ -e "$OPENCODEX_HOME" ]');
 
-    expect(term).toBeGreaterThanOrEqual(0);
-    expect(escalationGuard).toBeGreaterThan(term);
-    expect(kill).toBeGreaterThan(escalationGuard);
-    expect(wait).toBeGreaterThan(kill);
-    expect(remove).toBeGreaterThan(wait);
+    expect(workflow).toContain("scripts/live-inference-supervisor.ts");
+    expect(workflow.match(/scripts\/live-inference-supervisor\.ts/g)).toHaveLength(3);
+    expect(supervisorSource).toContain("detached: true");
+    expect(supervisorSource.indexOf('process.on("SIGTERM"'))
+      .toBeLessThan(supervisorSource.indexOf("Bun.spawn(command"));
+    expect(supervisorSource).toContain('signalGroup("SIGTERM")');
+    expect(supervisorSource).toContain('signalGroup("SIGKILL")');
+    expect(supervisorSource.indexOf("waitForGroupExit"))
+      .toBeLessThan(supervisorSource.indexOf('atomicReceipt(controlDir, "stopped"'));
+    expect(cleanup).not.toContain("kill ");
+    expect(receipt).toBeGreaterThanOrEqual(0);
+    expect(remove).toBeGreaterThan(receipt);
     expect(absence).toBeGreaterThan(remove);
     expect(cleanup).toContain('"$canonical_runner_temp"/ocx-live-home.*)');
-    expect(cleanup).toContain('actual_start_time="$(awk');
+    expect(cleanup).toContain('if [ "$cleanup_failed" = false ] && [ -n "${OPENCODEX_HOME:-}" ]');
+    expect(cleanup).toContain("Retaining the credential home because proxy exit is unconfirmed");
   });
 
-  test.skipIf(process.platform !== "linux")("stops a live writer before removing its credential home", async () => {
+  test.skipIf(process.platform === "win32")("stops a supervised live writer before removing its credential home", async () => {
     const runnerTemp = mkdtempSync(join(tmpdir(), "ocx-live-process-cleanup-"));
     const opencodexHome = join(runnerTemp, "ocx-live-home.fixture");
-    const pidFile = join(runnerTemp, "ocx-live-fixture.pid");
-    const pidStartFile = join(runnerTemp, "ocx-live-fixture.pid-start");
+    const controlDir = join(runnerTemp, "ocx-live-control-fixture");
     mkdirSync(opencodexHome);
-    const writer = Bun.spawn([
-      "bash",
-      "-c",
-      'trap "exit 0" TERM; while :; do mkdir -p "$OPENCODEX_HOME"; touch "$OPENCODEX_HOME/state"; sleep 0.02; done',
+    mkdirSync(controlDir);
+    writeFileSync(join(controlDir, "launch-intent"), "");
+    const supervisor = Bun.spawn([
+      process.execPath,
+      supervisorPath,
+      controlDir,
+      process.execPath,
+      "-e",
+      `import { mkdirSync, writeFileSync } from "node:fs";
+       process.on("SIGTERM", () => process.exit(0));
+       setInterval(() => {
+         mkdirSync(process.env.OPENCODEX_HOME, { recursive: true });
+         writeFileSync(process.env.OPENCODEX_HOME + "/state", "live");
+       }, 20);`,
     ], {
-      env: { ...process.env, OPENCODEX_HOME: opencodexHome },
+      env: {
+        ...process.env,
+        OPENCODEX_HOME: opencodexHome,
+        OCX_LIVE_SUPERVISOR_TERM_GRACE_MS: "100",
+      },
       stdout: "ignore",
       stderr: "ignore",
     });
-    writeFileSync(pidFile, String(writer.pid));
-    writeFileSync(pidStartFile, processStartTime(writer.pid));
 
     try {
+      await waitForFile(join(controlDir, "pid"));
       const cleanup = Bun.spawn(["bash", "-e", "-o", "pipefail", "-c", cleanupScript()], {
         env: {
           ...process.env,
@@ -103,15 +124,93 @@ describe("live inference workflow hardening", () => {
         stdout: "pipe",
         stderr: "pipe",
       });
-      const [cleanupExit, writerExit] = await Promise.all([cleanup.exited, writer.exited]);
+      const [cleanupExit, supervisorExit] = await Promise.all([cleanup.exited, supervisor.exited]);
       expect(cleanupExit).toBe(0);
-      expect(writerExit).toBe(0);
+      expect(supervisorExit).toBe(0);
       expect(existsSync(opencodexHome)).toBe(false);
     } finally {
-      writer.kill("SIGKILL");
-      await writer.exited;
+      supervisor.kill("SIGKILL");
+      await supervisor.exited;
       rmSync(runnerTemp, { recursive: true, force: true });
     }
+  });
+
+  test.skipIf(process.platform === "win32")("retains credentials when the owner cannot confirm process exit", () => {
+    const runnerTemp = mkdtempSync(join(tmpdir(), "ocx-live-unconfirmed-cleanup-"));
+    const opencodexHome = join(runnerTemp, "ocx-live-home.fixture");
+    const controlDir = join(runnerTemp, "ocx-live-control-fixture");
+    const binDir = join(runnerTemp, "bin");
+    mkdirSync(opencodexHome);
+    mkdirSync(controlDir);
+    mkdirSync(binDir);
+    writeFileSync(join(opencodexHome, "config.json"), "must survive");
+    writeFileSync(join(controlDir, "launch-intent"), "");
+    writeFileSync(join(binDir, "seq"), "#!/usr/bin/env bash\necho 1\n");
+    writeFileSync(join(binDir, "sleep"), "#!/usr/bin/env bash\nexit 0\n");
+    chmodSync(join(binDir, "seq"), 0o755);
+    chmodSync(join(binDir, "sleep"), 0o755);
+
+    try {
+      const result = runCleanup(runnerTemp, opencodexHome, `${binDir}:${process.env.PATH ?? ""}`);
+      expect(result.exitCode).not.toBe(0);
+      expect(existsSync(join(opencodexHome, "config.json"))).toBe(true);
+      expect(existsSync(join(controlDir, "stop"))).toBe(true);
+      expect(existsSync(join(controlDir, "launch-intent"))).toBe(true);
+    } finally {
+      rmSync(runnerTemp, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform === "win32")("the owner escalates a TERM-resistant child without PID reuse", async () => {
+    const runnerTemp = mkdtempSync(join(tmpdir(), "ocx-live-supervisor-kill-"));
+    const controlDir = join(runnerTemp, "control");
+    const descendantPidFile = join(runnerTemp, "descendant.pid");
+    mkdirSync(controlDir);
+    const supervisor = Bun.spawn([
+      process.execPath,
+      supervisorPath,
+      controlDir,
+      process.execPath,
+      "-e",
+      `import { writeFileSync } from "node:fs";
+       const descendant = Bun.spawn([
+         process.execPath,
+         "-e",
+         "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)",
+       ], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+       writeFileSync(${JSON.stringify(descendantPidFile)}, String(descendant.pid));
+       process.on("SIGTERM", () => {});
+       setInterval(() => {}, 1000);`,
+    ], {
+      env: { ...process.env, OCX_LIVE_SUPERVISOR_TERM_GRACE_MS: "50" },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+
+    try {
+      await waitForFile(join(controlDir, "pid"));
+      await waitForFile(descendantPidFile);
+      const proxyPid = Number(readFileSync(join(controlDir, "pid"), "utf8").trim());
+      const descendantPid = Number(readFileSync(descendantPidFile, "utf8").trim());
+      writeFileSync(join(controlDir, "stop"), "");
+      expect(await supervisor.exited).toBe(0);
+      expect(JSON.parse(readFileSync(join(controlDir, "stopped"), "utf8"))).toMatchObject({ pid: proxyPid });
+      expect(() => process.kill(proxyPid, 0)).toThrow();
+      expect(() => process.kill(descendantPid, 0)).toThrow();
+    } finally {
+      supervisor.kill("SIGKILL");
+      await supervisor.exited;
+      rmSync(runnerTemp, { recursive: true, force: true });
+    }
+  });
+
+  test("discovers an alternate runtime port, attests its PID, and passes an explicit smoke URL", () => {
+    expect(workflow).toContain('runtime_file="$OPENCODEX_HOME/runtime-port.json"');
+    expect(workflow).toContain(".pid == $pid");
+    expect(workflow).toContain(".port != 10100");
+    expect(workflow).toContain('.service == "opencodex" and .pid == $pid and .port == $port');
+    expect(workflow).toContain('--url "http://127.0.0.1:${proxy_port}/v1/responses"');
+    expect(workflow).not.toContain("http://127.0.0.1:10100/");
   });
 
   test.skipIf(process.platform === "win32")("retries a transient credential-directory removal failure", () => {

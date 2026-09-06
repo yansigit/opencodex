@@ -25,6 +25,7 @@ on:
       - "src/smoke/**"
       - "scripts/live-smoke.ts"
       - "scripts/live-smoke-ci.ts"
+      - "scripts/live-inference-supervisor.ts"
       - "package.json"
       - "bun.lock"
       - ".github/workflows/live-inference.yml"
@@ -68,6 +69,7 @@ jobs:
               - 'src/smoke/**'
               - 'scripts/live-smoke.ts'
               - 'scripts/live-smoke-ci.ts'
+              - 'scripts/live-inference-supervisor.ts'
               - 'package.json'
               - 'bun.lock'
               - '.github/workflows/live-inference.yml'
@@ -170,18 +172,32 @@ jobs:
           OPENCODEX_HOME: ${{ steps.prepare.outputs.home }}
         run: |
           log_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.log"
-          pid_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid"
-          pid_start_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid-start"
-          bun run src/cli/index.ts start >"$log_file" 2>&1 &
-          proxy_pid=$!
-          echo "$proxy_pid" > "$pid_file"
-          if ! awk '{ print $22 }' "/proc/$proxy_pid/stat" > "$pid_start_file"; then
-            echo "::error::Could not record isolated proxy process identity."
-            exit 1
-          fi
+          control_dir="$RUNNER_TEMP/ocx-live-control-${{ matrix.provider }}"
+          runtime_file="$OPENCODEX_HOME/runtime-port.json"
+          mkdir -m 700 -- "$control_dir"
+          touch "$control_dir/launch-intent"
+          bun scripts/live-inference-supervisor.ts "$control_dir" \
+            bun run src/cli/index.ts start >"$log_file" 2>&1 &
+
           for _ in $(seq 1 60); do
-            if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:10100/healthz >/dev/null; then
-              exit 0
+            if [ -s "$control_dir/pid" ] && [ -s "$runtime_file" ]; then
+              proxy_pid="$(cat "$control_dir/pid")"
+              proxy_port="$(jq -er --argjson pid "$proxy_pid" \
+                'select(.pid == $pid and (.port | type) == "number" and .port > 0 and .port != 10100) | .port' \
+                "$runtime_file" 2>/dev/null || true)"
+              if [ -n "$proxy_port" ]; then
+                health="$(curl --fail --silent --show-error --max-time 2 \
+                  "http://127.0.0.1:${proxy_port}/healthz" 2>/dev/null || true)"
+                if jq -e --argjson pid "$proxy_pid" --argjson port "$proxy_port" \
+                  '.service == "opencodex" and .pid == $pid and .port == $port' \
+                  >/dev/null 2>&1 <<<"$health"; then
+                  echo "$proxy_port" > "$control_dir/port"
+                  exit 0
+                fi
+              fi
+            fi
+            if [ -s "$control_dir/stopped" ]; then
+              break
             fi
             sleep 1
           done
@@ -194,10 +210,18 @@ jobs:
         env:
           OPENCODEX_HOME: ${{ steps.prepare.outputs.home }}
         run: |
+          control_dir="$RUNNER_TEMP/ocx-live-control-${{ matrix.provider }}"
+          proxy_port="$(cat "$control_dir/port" 2>/dev/null || true)"
+          if ! [[ "$proxy_port" =~ ^[1-9][0-9]*$ ]] || [ "$proxy_port" -eq 10100 ] || [ "$proxy_port" -gt 65535 ]; then
+            echo "::error::Missing or invalid isolated proxy port."
+            exit 1
+          fi
+
           run_attempt() {
             attempt="$1"
             result_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}-attempt-${attempt}.json"
-            if bun scripts/live-smoke.ts --provider "${{ matrix.provider }}" --json >"$result_file"; then
+            if bun scripts/live-smoke.ts --provider "${{ matrix.provider }}" \
+              --url "http://127.0.0.1:${proxy_port}/v1/responses" --json >"$result_file"; then
               smoke_status=0
             else
               smoke_status=$?
@@ -226,63 +250,22 @@ jobs:
         env:
           OPENCODEX_HOME: ${{ steps.prepare.outputs.home }}
         run: |
-          pid_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid"
-          pid_start_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid-start"
+          control_dir="$RUNNER_TEMP/ocx-live-control-${{ matrix.provider }}"
           cleanup_failed=false
 
-          if [ -s "$pid_file" ]; then
-            proxy_pid="$(cat "$pid_file")"
-            if [[ "$proxy_pid" =~ ^[1-9][0-9]*$ ]]; then
-              if kill -0 "$proxy_pid" 2>/dev/null; then
-                expected_start_time="$(cat "$pid_start_file" 2>/dev/null || true)"
-                actual_start_time="$(awk '{ print $22 }' "/proc/$proxy_pid/stat" 2>/dev/null || true)"
-                if [ -z "$expected_start_time" ] || [ "$actual_start_time" != "$expected_start_time" ]; then
-                  echo "::error::Isolated proxy process identity changed; refusing to signal it."
-                  cleanup_failed=true
-                else
-                  kill -TERM "$proxy_pid" 2>/dev/null || true
-                  for _ in $(seq 1 15); do
-                    if ! kill -0 "$proxy_pid" 2>/dev/null; then
-                      break
-                    fi
-                    sleep 1
-                  done
-                fi
-              fi
-
-              if [ "$cleanup_failed" = false ] && kill -0 "$proxy_pid" 2>/dev/null; then
-                actual_start_time="$(awk '{ print $22 }' "/proc/$proxy_pid/stat" 2>/dev/null || true)"
-                if [ -z "$actual_start_time" ] && ! kill -0 "$proxy_pid" 2>/dev/null; then
-                  true
-                elif [ "$actual_start_time" != "$expected_start_time" ]; then
-                  echo "::error::Isolated proxy process identity changed during shutdown; refusing to signal it."
-                  cleanup_failed=true
-                else
-                  echo "Proxy did not exit after TERM; escalating to KILL."
-                  kill -KILL "$proxy_pid" 2>/dev/null || true
-                  for _ in $(seq 1 5); do
-                    if ! kill -0 "$proxy_pid" 2>/dev/null; then
-                      break
-                    fi
-                    sleep 1
-                  done
-                fi
-              fi
-
-              # This is a no-op when the proxy was reparented between Actions
-              # steps, but reaps it when the shell still owns the child.
-              wait "$proxy_pid" 2>/dev/null || true
-              if kill -0 "$proxy_pid" 2>/dev/null; then
-                echo "::error::Isolated proxy process did not exit."
-                cleanup_failed=true
-              fi
-            else
-              echo "::error::Invalid isolated proxy PID."
+          if [ -e "$control_dir/launch-intent" ]; then
+            touch "$control_dir/stop"
+            for _ in $(seq 1 25); do
+              [ -s "$control_dir/stopped" ] && break
+              sleep 1
+            done
+            if [ ! -s "$control_dir/stopped" ]; then
+              echo "::error::The owning proxy supervisor did not confirm process exit."
               cleanup_failed=true
             fi
           fi
 
-          if [ -n "${OPENCODEX_HOME:-}" ]; then
+          if [ "$cleanup_failed" = false ] && [ -n "${OPENCODEX_HOME:-}" ]; then
             if [ -e "$OPENCODEX_HOME" ]; then
               canonical_home="$(cd -P -- "$OPENCODEX_HOME" 2>/dev/null && pwd -P || true)"
               canonical_runner_temp="$(cd -P -- "$RUNNER_TEMP" 2>/dev/null && pwd -P || true)"
@@ -308,9 +291,10 @@ jobs:
               echo "::error::Ephemeral provider credentials were not removed."
               cleanup_failed=true
             fi
+          elif [ "$cleanup_failed" = true ]; then
+            echo "::error::Retaining the credential home because proxy exit is unconfirmed."
           fi
 
-          rm -f -- "$pid_file" "$pid_start_file"
           if [ "$cleanup_failed" = true ]; then
             exit 1
           fi

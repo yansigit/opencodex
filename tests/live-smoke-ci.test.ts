@@ -9,13 +9,35 @@ describe("live smoke CI credential bundle", () => {
     const home = await mkdtemp(join(tmpdir(), "ocx-live-smoke-"));
     const secret = "provider-secret-that-must-not-be-logged";
     const bundle = Buffer.from(JSON.stringify({
-      config: { defaultProvider: "openai", providers: { openai: { apiKey: secret } } },
+      config: {
+        defaultProvider: "openai",
+        providers: { openai: { apiKey: secret } },
+        hostname: "0.0.0.0",
+        port: 10100,
+        runtimeRole: "hub",
+        hub: { managementIngress: { enabled: true, port: 10101 } },
+        remoteGui: { enabled: true },
+        client: { serverUrl: "https://hub.example.test" },
+        tls: { certFile: "/tmp/cert", keyFile: "/tmp/key", publicOrigin: "https://example.test" },
+        unauthenticatedLoopbackListener: { enabled: true, port: 10100 },
+      },
       auth: { openai: { activeAccountId: "acct", accounts: [{ id: "acct", credential: { access: secret } }] } },
     }), "utf8").toString("base64");
 
     try {
       await materializeLiveSmokeBundle(bundle, home);
-      expect(JSON.parse(await readFile(join(home, "config.json"), "utf8"))).toMatchObject({ defaultProvider: "openai" });
+      const config = JSON.parse(await readFile(join(home, "config.json"), "utf8"));
+      expect(config).toMatchObject({
+        defaultProvider: "openai",
+        hostname: "127.0.0.1",
+        port: 0,
+        runtimeRole: "standalone",
+      });
+      expect(config).not.toHaveProperty("client");
+      expect(config).not.toHaveProperty("hub");
+      expect(config).not.toHaveProperty("remoteGui");
+      expect(config).not.toHaveProperty("tls");
+      expect(config).not.toHaveProperty("unauthenticatedLoopbackListener");
       expect(JSON.parse(await readFile(join(home, "auth.json"), "utf8"))).toMatchObject({ openai: { activeAccountId: "acct" } });
     } finally {
       await rm(home, { recursive: true, force: true });
