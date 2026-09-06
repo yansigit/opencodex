@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync} from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig } from "../../src/config";
+import { loadConfig, replacePersistedConfig, saveConfig } from "../../src/config";
 import { maskApiKey } from "../../src/providers/api-keys";
 import {
   PROVIDER_KEYCHAIN_SERVICE,
@@ -127,10 +127,12 @@ describe("store / restore", () => {
     expect(result).toEqual({ ok: true, moved: 2 });
     expect(config.providers.relay!.apiKey).toBe("keychain:relay/a1");
     expect(config.providers.relay!.apiKeyPool!.map(e => e.key)).toEqual(["keychain:relay/a1", "keychain:relay/b2"]);
+    replacePersistedConfig(config);
     const onDisk = readFileSync(join(testDir, "config.json"), "utf8");
     expect(onDisk).not.toContain(SECRET);
     expect(onDisk).not.toContain(POOL_SECRET);
     expect(onDisk).toContain("keychain:relay/a1");
+    expect(onDisk).toContain("keychain:relay/b2");
     expect(store.size).toBe(2);
     // resolves back to the plaintext at request time
     expect(resolveProviderApiKey(config.providers.relay!.apiKey)).toBe(SECRET);
@@ -192,4 +194,3 @@ describe("store / restore", () => {
     }
   });
 });
-

@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { resolveEnvValue, saveConfigPreservingClaudeCode } from "../config";
+import { resolveEnvValue } from "../config";
 import type { OcxConfig, OcxProviderConfig } from "../types";
 import type { ProviderRegistryEntry } from "./registry";
 
@@ -62,6 +62,15 @@ export function isKeychainReference(value: string | undefined): value is string 
 
 function keychainAccount(reference: string): string {
   return reference.slice(KEYCHAIN_REFERENCE_PREFIX.length);
+}
+
+/** Delete referenced keychain entries after the corresponding config commit succeeds. */
+export function deleteProviderKeychainReferences(references: readonly string[]): void {
+  for (const reference of new Set(references.filter(isKeychainReference))) {
+    try { entryFactory(PROVIDER_KEYCHAIN_SERVICE, keychainAccount(reference)).deletePassword(); } catch { /* best effort */ }
+  }
+  resolvedCache.clear();
+  warnedAccounts.clear();
 }
 
 function readKeychain(account: string): string | undefined {
@@ -174,12 +183,11 @@ export function storeProviderKeyInKeychain(config: OcxConfig, name: string): { o
   for (const apply of planned) apply();
   resolvedCache.clear();
   warnedAccounts.clear();
-  saveConfigPreservingClaudeCode(config);
   return { ok: true, moved: written.length };
 }
 
 /** Reverse of `storeProviderKeyInKeychain`: read every reference back, write plaintext, delete items. */
-export function restoreProviderKeyFromKeychain(config: OcxConfig, name: string): { ok: true; restored: number } | { ok: false; error: string; status: number } {
+export function restoreProviderKeyFromKeychain(config: OcxConfig, name: string, opts: { deleteAfter?: boolean } = {}): { ok: true; restored: number } | { ok: false; error: string; status: number } {
   const provider = config.providers[name];
   if (!provider) return { ok: false, error: "unknown provider", status: 404 };
   const pool = provider.apiKeyPool ?? [];
@@ -197,11 +205,10 @@ export function restoreProviderKeyFromKeychain(config: OcxConfig, name: string):
     if (isKeychainReference(entry.key)) entry.key = resolved.get(keychainAccount(entry.key))!;
   }
   if (isKeychainReference(provider.apiKey)) provider.apiKey = resolved.get(keychainAccount(provider.apiKey))!;
-  for (const account of resolved.keys()) {
-    try { entryFactory(PROVIDER_KEYCHAIN_SERVICE, account).deletePassword(); } catch { /* best effort */ }
+  if (opts.deleteAfter !== false) {
+    deleteProviderKeychainReferences(refs);
   }
   resolvedCache.clear();
   warnedAccounts.clear();
-  saveConfigPreservingClaudeCode(config);
   return { ok: true, restored: resolved.size };
 }
