@@ -17,7 +17,7 @@
 import { clearableDeadline } from "./abort";
 
 // 1 initial + 2 retries: the pool may hold more than one stale socket.
-const RESET_RETRY_MAX_ATTEMPTS = 3;
+const RESET_RETRY_MAX_ATTEMPTS = 1;
 const RESET_RETRY_BASE_DELAY_MS = 150;
 const RESET_RETRY_MAX_DELAY_MS = 1_000;
 
@@ -241,11 +241,15 @@ export interface ResetRetryOptions {
   label?: string;
   /** Total upstream sends allowed, including the first one. Not a per-layer retry count. */
   attempts?: number;
+  /** Shared replay allowance across sends in one logical generation. */
+  replayBudget?: { remaining: number };
 }
 
 export interface TransientRetryOptions extends ResetRetryOptions {
   /** Test seam: per-attempt slow budget override (defaults to TRANSIENT_RETRY_SLOW_ATTEMPT_MS). */
   slowAttemptMs?: number;
+  /** Opt in to replaying transient 5xx responses (up to three total sends). */
+  replayTransientFailures?: boolean;
   /**
    * Reports how many upstream sends this call actually consumed, so a caller that spans
    * several legs of one request (initial send, then a 429/account-recovery refetch) can
@@ -337,7 +341,7 @@ export async function fetchWithResetRetry(
         if (sawReset) throw new UpstreamRetryEvidenceError([], err, true);
         throw err;
       }
-      if (attempt === attempts - 1) throw err;
+      if (attempt === attempts - 1 || (opts.replayBudget && opts.replayBudget.remaining <= 0)) throw err;
       sawReset = true;
       lastError = err;
       console.warn(
@@ -347,6 +351,7 @@ export async function fetchWithResetRetry(
         baseDelayMs: RESET_RETRY_BASE_DELAY_MS,
         maxDelayMs: RESET_RETRY_MAX_DELAY_MS,
       }), opts.abortSignal);
+      if (opts.replayBudget) opts.replayBudget.remaining -= 1;
     }
   }
   throw lastError ?? new Error("upstream fetch failed");
@@ -367,7 +372,13 @@ export async function fetchWithTransientRetry(
   doFetch: ReplayableFetch,
   opts: TransientRetryOptions = {},
 ): Promise<Response> {
-  const budget = Math.max(1, opts.attempts ?? TRANSIENT_RETRY_MAX_ATTEMPTS);
+  const configuredBudget = Math.max(
+    1,
+    opts.attempts ?? (opts.replayTransientFailures ? TRANSIENT_RETRY_MAX_ATTEMPTS : 1),
+  );
+  const budget = opts.replayBudget
+    ? Math.min(configuredBudget, Math.max(1, opts.replayBudget.remaining + 1))
+    : configuredBudget;
   const slowAttemptMs = opts.slowAttemptMs ?? TRANSIENT_RETRY_SLOW_ATTEMPT_MS;
   const transientStatuses: number[] = [];
   // `attempts` is ONE total-send budget shared with the inner reset layer, not a per-layer
@@ -379,6 +390,7 @@ export async function fetchWithTransientRetry(
   // already-failing provider is worse than not retrying at all.
   let sent = 0;
   const countedFetch: ReplayableFetch = (recovery) => {
+    if (sent > 0 && opts.replayBudget) opts.replayBudget.remaining -= 1;
     // Incremented BEFORE the await so a rejected send still consumes budget; counting only
     // successes would let a reset storm loop without bound.
     sent += 1;
@@ -392,7 +404,7 @@ export async function fetchWithTransientRetry(
   // real count on every one of them.
   try {
   let attemptStart = Date.now();
-  let res = await fetchWithResetRetry(countedFetch, { ...opts, attempts: remaining() });
+  let res = await fetchWithResetRetry(countedFetch, { ...opts, replayBudget: undefined, attempts: remaining() });
   for (let attempt = 0; sent < budget; attempt++) {
     if (res.ok || !isTransientUpstreamStatus(res.status)) return res;
     // Checked before cancelResponseBodyBestEffort so an already-aborted caller never receives
@@ -414,7 +426,11 @@ export async function fetchWithTransientRetry(
     attemptStart = Date.now();
     transientStatuses.push(res.status);
     try {
-      res = await fetchWithResetRetry(countedFetch, { ...opts, attempts: remaining() }, "transient-5xx");
+      res = await fetchWithResetRetry(
+        countedFetch,
+        { ...opts, replayBudget: undefined, attempts: remaining() },
+        "transient-5xx",
+      );
     } catch (err) {
       // Keep the prior 5xx evidence attached: the origin already responded, so
       // this rejection is not pre-connection and must not classify as neutral.

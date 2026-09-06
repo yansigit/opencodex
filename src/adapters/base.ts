@@ -1,6 +1,7 @@
 import type { AdapterEvent, OcxParsedRequest } from "../types";
 import type { TranslatorBudget } from "../lib/translator-budget";
 import type { AdapterTierMetadata } from "../providers/fastwire";
+import type { AttemptRecoveryKind } from "../usage/log";
 
 /** Metadata about the caller's incoming request, for auth-forwarding adapters. */
 export interface IncomingMeta {
@@ -19,10 +20,24 @@ export interface IncomingMeta {
    * anthropic adapter consumes it; others ignore it.
    */
   imageTierBias?: number;
+  /** Provider-scoped structured error observation; never receives ordinary model payloads. */
+  onProviderError?: (error: { code?: string; status?: number; message?: string }) => void;
+  /** Shared transient replay allowance for one logical generation. */
+  replayBudget?: { remaining: number };
+  /** Opt in to replaying transient failures across transports. */
+  replayTransientFailures?: boolean;
+  /** Privacy-safe adapter retry callback to record recovery evidence and count attempts. */
+  onAdapterRetry?: (recovery: AttemptRecoveryKind) => void;
 }
 
 export interface ProviderAdapter {
   name: string;
+
+  /**
+   * Validate a parsed request before any attempt, sidecar, pacing, queue, or transport work.
+   * Adapters may throw a client-facing validation error when the request is unsupported.
+   */
+  validateRequest?(parsed: OcxParsedRequest): void;
 
   /**
    * Convert an already-read provider HTTP error into client-safe text. This hook must be pure and
@@ -125,6 +140,8 @@ export interface AdapterRequest {
 export interface AdapterFetchContext {
   /** Remains attached to the returned response body after the response headers arrive. */
   abortSignal?: AbortSignal;
+  /** OAuth account identity used for provider-local cooldown bookkeeping. */
+  accountId?: string;
   /** Deadline for receiving response headers on each attempt, not for consuming the response body. */
   timeoutMs?: number;
   /** Return final non-2xx responses untouched so the caller can own the error-body read. */
@@ -133,6 +150,8 @@ export interface AdapterFetchContext {
   stream?: boolean;
   /** Custom fetch executor to use for physical upstream network requests (defaults to globalThis.fetch). */
   executor?: typeof globalThis.fetch;
+  /** Shared transient replay allowance for one logical generation. */
+  replayBudget?: { remaining: number };
 }
 
 /**

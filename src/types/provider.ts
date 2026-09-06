@@ -105,6 +105,8 @@ export interface RequestPacingRule {
   requestsPerMinute?: number;
   /** Minimum delay between request starts. The slower configured value wins. */
   minIntervalMs?: number;
+  /** Positive-only random delay added to each request-start slot. */
+  jitterMs?: number;
 }
 
 export interface ProviderRequestPacingConfig extends RequestPacingRule {
@@ -231,6 +233,8 @@ export interface OcxProviderConfig {
    * version here instead of waiting for a code change. Absent uses the adapter's current default.
    */
   commandCodeVersion?: string;
+  /** Include bounded repository context in Command Code envelopes. */
+  projectContext?: "off" | "on";
   /**
    * Responses upstream that stores nothing server-side (DeepSeek documents "the API
    * is stateless"). Stateful request parameters are dropped, `store` is pinned false,
@@ -686,6 +690,8 @@ export interface OcxProviderConfig {
    * before any response bytes are relayed, so the replay is lossless.
    */
   retryOn429?: RateLimitRetryPolicy;
+  /** Opt in to replaying transient upstream failures within one bounded request budget. */
+  replayTransientFailures?: boolean;
   /**
    * Opt-in retry for pre-stream transient upstream statuses
    * (`providers.<name>.transientRetryOn5xx`). Disabled unless present; a bare `{}` opts in

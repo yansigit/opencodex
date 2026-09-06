@@ -8,6 +8,7 @@ import {
   providerModelCostsConfigError,
   requestPacingConfigError,
   retryOn429PolicyConfigError,
+  transientRetryOn5xxPolicyConfigError,
   sanitizeModelCostsForDisplay,
 } from "../config";
 import {
@@ -15,11 +16,13 @@ import {
   azureCredentialConfigError,
   booleanRecordConfigError,
   modelAdapterRecordConfigError,
+  modelDisplayNamesConfigError,
   nonBlankStringArrayConfigError,
   positiveIntegerConfigError,
   positiveIntegerRecordConfigError,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  providerEmptyToolOutputConfigError,
   reasoningSummaryDeliveryRecordConfigError,
   maxWsFrameBytesConfigError,
   upstreamHttpVersionConfigError,
@@ -36,6 +39,7 @@ import { vercelGatewayRoutingConfigError } from "../providers/vercel-gateway-rou
 import { googleVertexLocationConfigError } from "../providers/google-vertex-location";
 import { xaiResponsesOptInState } from "../providers/xai-responses-opt-in";
 import { resolveAiStudioCredentials } from "../oauth/aistudio-credentials";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "../lib/provider-tls-profile";
 
 let _corsOrigin = "http://localhost:10100";
 export function setCorsOrigin(port: number): void { _corsOrigin = `http://localhost:${port}`; }
@@ -639,6 +643,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   }
   const destinationError = providerDestinationConfigError(name, typed);
   if (destinationError) return `provider ${name} ${destinationError}`;
+  const tlsProfileError = providerTlsProfileConfigError(name, typed);
+  if (tlsProfileError) return `provider ${JSON.stringify(redactSecretString(name))} ${tlsProfileError}`;
+  const antigravityError = antigravityOAuthDestinationConfigError(name, typed);
+  if (antigravityError) return `provider ${JSON.stringify(redactSecretString(name))} ${antigravityError}`;
   const headersError = providerHeadersConfigError(typed.headers);
   if (headersError) return `provider ${name} ${headersError}`;
   const retryOn429Error = retryOn429PolicyConfigError(raw.retryOn429);
@@ -646,6 +654,10 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
     // it before it reaches the management API response.
     return `provider ${JSON.stringify(redactSecretString(name))} ${retryOn429Error}`;
+  }
+  const transientRetryError = transientRetryOn5xxPolicyConfigError(raw.transientRetryOn5xx);
+  if (transientRetryError) {
+    return `provider ${JSON.stringify(redactSecretString(name))} ${transientRetryError}`;
   }
   const requestPacingError = requestPacingConfigError(raw.requestPacing);
   if (requestPacingError) {
@@ -659,6 +671,13 @@ export function providerManagementConfigError(name: unknown, provider: unknown):
   if (wsUpstreamError) return `provider ${name} ${wsUpstreamError}`;
   const maxWsFrameBytesError = maxWsFrameBytesConfigError(raw.maxWsFrameBytes);
   if (maxWsFrameBytesError) return `provider ${name} ${maxWsFrameBytesError}`;
+  const displayNamesError = modelDisplayNamesConfigError(raw.modelDisplayNames);
+  if (displayNamesError) return `provider ${name} ${displayNamesError}`;
+  if (raw.replayTransientFailures !== undefined && typeof raw.replayTransientFailures !== "boolean") {
+    return `provider ${JSON.stringify(redactSecretString(name))} replayTransientFailures must be a boolean`;
+  }
+  const emptyToolOutputError = providerEmptyToolOutputConfigError(name, raw);
+  if (emptyToolOutputError) return emptyToolOutputError;
   const modelCostsError = providerModelCostsConfigError(raw.modelCosts);
   if (modelCostsError) {
     // The provider name is caller-controlled and can be token-shaped; redact and JSON-escape
@@ -792,6 +811,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   baseUrl: "editor",
   responsesPath: "editor",
   commandCodeVersion: "editor",
+  projectContext: "editor",
   statelessResponses: "editor",
   requiresAdjacentResponsesToolResults: "editor",
   annotateEmptyToolOutputs: "editor",
@@ -874,6 +894,7 @@ const PROVIDER_CONFIG_FIELD_POLICY = {
   preserveReasoningContentModels: "editor",
   requiresReasoningPlaceholderModels: "editor",
   retryOn429: "editor",
+  replayTransientFailures: "editor",
   transientRetryOn5xx: "editor",
   reasoningSplitModels: "editor",
   reasoningDetailsModels: "editor",

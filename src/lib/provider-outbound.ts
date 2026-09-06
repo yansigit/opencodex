@@ -19,6 +19,7 @@ export interface ProviderOutboundDependencies {
   resolveAddresses?: typeof resolvePublicAddresses;
   pinnedGet?: typeof pinnedHttpGet;
   pinnedPost?: typeof pinnedHttpPost;
+  fetch?: typeof globalThis.fetch;
   /**
    * Canonical-URL proof for the transparent fake-IP exception (Clash TUN mode
    * without proxy env). Injected so this transport core stays decoupled from

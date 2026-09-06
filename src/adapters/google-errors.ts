@@ -3,7 +3,8 @@ import { isLocationUnsupportedMessage } from "../lib/errors";
 
 /** Pull the human detail out of the Google API error envelope `{error:{message,status,code}}`. */
 function googleErrorDetail(payloadText: string): { message?: string; status?: string } {
-  const trimmed = payloadText.trim();
+  let trimmed = payloadText.trim();
+  if (trimmed.startsWith("data:")) trimmed = trimmed.replace(/^data:\s*/, "").trim();
   if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
     return { message: trimmed || undefined };
   }
@@ -53,6 +54,10 @@ export function isGoogleQuotaExhaustedText(text: string): boolean {
   const lower = text.toLowerCase();
   if (GOOGLE_TRANSIENT_RATE_LIMIT_PATTERNS.some(needle => lower.includes(needle))) return false;
   return GOOGLE_QUOTA_EXHAUSTED_NEEDLES.some(needle => lower.includes(needle));
+}
+
+export function isAntigravityGeoBlockedBody(payloadText: string): boolean {
+  return isLocationUnsupportedMessage(payloadText);
 }
 
 

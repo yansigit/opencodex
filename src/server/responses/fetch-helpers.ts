@@ -206,7 +206,7 @@ export async function fetchWithHeaderTimeout(
       headers,
       // Upstream URLs are configuration, not navigation. Refuse every redirect
       // so POST bodies and provider headers are never replayed to another hop.
-      redirect: "manual",
+      redirect: "manual" as const,
       signal: AbortSignal.any([abortSignal, timeout.signal]),
       timeout: 0,
     });

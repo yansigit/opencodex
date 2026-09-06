@@ -301,6 +301,8 @@ export interface WebSearchLoopDeps {
   onUsage?: (usage: OcxUsage | undefined) => void;
   /** Observe the exact adapter request selected for each routed-model iteration. */
   onRequestBuilt?: (request: AdapterRequest) => void;
+  /** Validate the final adapter before every cached replay or request build. */
+  validateAdapter?: (parsed: OcxParsedRequest, adapter: ProviderAdapter) => void;
   /** Request-scoped executor retains the core's selection binding across loop retries. */
   fetchForRequest?: (request: AdapterRequest, parsed: OcxParsedRequest) => typeof globalThis.fetch;
   /** Called before each routed-model dispatch in the loop, for attempt telemetry. Same-target 429 replays pass the `rate-limit-429` recovery kind. */
@@ -426,6 +428,7 @@ export async function runWithWebSearch(deps: WebSearchLoopDeps): Promise<Respons
        * header deadline. The caller owns same-target 429 replays and key rotation around it.
        */
       const fetchOnce = async (requestAdapter: ProviderAdapter, recovery?: AttemptRecoveryKind): Promise<IterationResponse> => {
+        deps.validateAdapter?.(iterParsed, requestAdapter);
         let request: AdapterRequest;
         if (cachedRequest !== undefined && cachedAdapter === requestAdapter) {
           request = cachedRequest;
