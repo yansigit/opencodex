@@ -1,6 +1,85 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createServer, type Server } from "node:net";
+import { fileURLToPath } from "node:url";
 import { findAvailablePort, isAddrInUse, isPortAvailable, PortUnavailableError, shouldPersistSelectedPort, waitForPortAvailable } from "../src/server/ports";
+
+// Prototype overrides exist only inside the disposable child process.
+const PORT_PROBE_PEER_DISPOSAL_CHILD = `
+  import assert from "node:assert/strict";
+  import { EventEmitter } from "node:events";
+  import { Server } from "node:net";
+
+  const [operation, portsUrl] = process.argv.slice(-2);
+  const peers = Array.from({ length: 2 }, () => {
+    const peer = new EventEmitter();
+    peer.destroyed = false;
+    peer.destroyCalls = 0;
+    peer.destroy = () => {
+      peer.destroyCalls++;
+      peer.destroyed = true;
+      return peer;
+    };
+    return peer;
+  });
+  let bindOptions;
+  let completeClose;
+  let closeCompleted = false;
+  let probeCalls = 0;
+  // Native createServer stays real, including its connection-listener registration.
+  Server.prototype.address = function () {
+    return { address: "127.0.0.1", family: "IPv4", port: 43219 };
+  };
+  Server.prototype.close = function (callback) {
+    completeClose = () => {
+      if (peers.some(peer => !peer.destroyed)) return false;
+      closeCompleted = true;
+      callback();
+      return true;
+    };
+    return this;
+  };
+  Server.prototype.listen = function (options) {
+    probeCalls++;
+    bindOptions = options;
+    for (const peer of peers) this.emit("connection", peer);
+    this.emit("listening");
+    return this;
+  };
+
+  const ports = await import(portsUrl);
+  let settled = false;
+  let rejection;
+  const pending = (operation === "isPortAvailable"
+    ? ports.isPortAvailable(43117, "127.0.0.1")
+    : ports.findAvailablePort(0, "127.0.0.1")).then(value => {
+      settled = true;
+      return value;
+    }, error => {
+      settled = true;
+      rejection = error;
+    });
+  // One event-loop turn drains promise reactions without time-based polling.
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(probeCalls, 1, "must intercept the real temporary Server instance");
+  assert.deepEqual(bindOptions, {
+    port: operation === "isPortAvailable" ? 43117 : 0, host: "127.0.0.1",
+  });
+  assert.equal(rejection, undefined, "probe must not reject before disposal assertions");
+  assert.equal(typeof completeClose, "function", "server.close callback must be registered");
+  assert.deepEqual(peers.map(peer => peer.destroyed), [true, true],
+    "probe must destroy both accepted peers");
+  for (const peer of peers) {
+    const beforeError = peer.destroyCalls;
+    assert.doesNotThrow(() => peer.emit("error", new Error("peer reset")));
+    assert.ok(peer.destroyCalls > beforeError, "socket errors must dispose the peer");
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, "destroying peers must not resolve before close callback");
+  assert.equal(closeCompleted, false);
+  assert.equal(completeClose(), true);
+  const value = await pending;
+  console.log(JSON.stringify({ value, closeCompleted }));
+`;
 
 const servers: Server[] = [];
 
@@ -30,6 +109,33 @@ afterEach(async () => {
 });
 
 describe("port selection", () => {
+  test.each(["isPortAvailable", "findAvailablePort"] as const)(
+    "%s disposes accepted peers and waits for probe close completion",
+    (operation) => {
+      // Keep Server.prototype overrides out of this process and its real-socket tests.
+      const portsUrl = new URL("../src/server/ports.ts", import.meta.url).href;
+      const child = Bun.spawnSync([
+        process.execPath,
+        "--eval",
+        PORT_PROBE_PEER_DISPOSAL_CHILD,
+        "--",
+        operation,
+        portsUrl,
+      ], {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 5000,
+      });
+      expect(child.exitCode, child.stderr.toString()).toBe(0);
+      expect(JSON.parse(child.stdout.toString())).toEqual({
+        value: operation === "isPortAvailable" ? true : 43219,
+        closeCompleted: true,
+      });
+    },
+    10000,
+  );
+
   test("resolves port 0 to a concrete ephemeral port", async () => {
     const selected = await findAvailablePort(0);
 

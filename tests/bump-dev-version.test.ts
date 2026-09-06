@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { decideDevVersion } from "../scripts/bump-dev-version";
+import { decideDevVersion, replacePackageJsonAtomically } from "../scripts/bump-dev-version";
 
 /**
  * The bump rule that keeps dev off an already-published version.
@@ -142,6 +142,53 @@ describe("dev version bump rule", () => {
     expect(JSON.parse(after).version).toBe("2.37.0");
     expect(JSON.parse(after).name).toBe("@bitkyc08/opencodex");
     expect(after.endsWith("}\n")).toBe(true);
+  });
+
+  test("the atomic rewrite retries a transient Windows EPERM", () => {
+    const path = tempPackageJson("2.36.0");
+    const dir = dirname(path);
+    const rewritten = readFileSync(path, "utf8").replace("2.36.0", "2.37.0");
+    const sleeps: number[] = [];
+    let attempts = 0;
+
+    replacePackageJsonAtomically(path, rewritten, {
+      platform: "win32",
+      rename: (source, destination) => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw Object.assign(new Error("transient sharing violation"), { code: "EPERM" });
+        }
+        renameSync(source, destination);
+      },
+      sleep: milliseconds => sleeps.push(milliseconds),
+    });
+
+    expect(attempts).toBe(2);
+    expect(sleeps).toEqual([25]);
+    expect(JSON.parse(readFileSync(path, "utf8")).version).toBe("2.37.0");
+    expect(readdirSync(dir)).toEqual(["package.json"]);
+  });
+
+  test("an exhausted Windows EPERM leaves the original intact and cleans the temp", () => {
+    const path = tempPackageJson("2.36.0");
+    const before = readFileSync(path, "utf8");
+    const dir = dirname(path);
+    const sleeps: number[] = [];
+    let attempts = 0;
+
+    expect(() => replacePackageJsonAtomically(path, before.replace("2.36.0", "2.37.0"), {
+      platform: "win32",
+      rename: () => {
+        attempts += 1;
+        throw Object.assign(new Error("persistent sharing violation"), { code: "EPERM" });
+      },
+      sleep: milliseconds => sleeps.push(milliseconds),
+    })).toThrow("persistent sharing violation");
+
+    expect(attempts).toBe(3);
+    expect(sleeps).toEqual([25, 50]);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readdirSync(dir)).toEqual(["package.json"]);
   });
 
   // Skipped on Windows: `chmod 0500` is not access control there, so the write would

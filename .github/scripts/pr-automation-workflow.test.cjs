@@ -175,6 +175,21 @@ describe("PR automation workflow contract", () => {
     assert.doesNotMatch(source, /pr-authored state|pull_request.*maintenance-state/i);
   });
 
+  it("retries only the maintenance-map GitHub reads without enabling global request retries", () => {
+    const source = workflow();
+    const start = source.indexOf("async function loadMaintenanceMap()");
+    const end = source.indexOf("async function updateBranch", start);
+    assert.notEqual(start, -1);
+    assert.notEqual(end, -1);
+    const maintenanceLoader = source.slice(start, end);
+
+    assert.match(source, /retryIdempotentRead/);
+    assert.equal((source.match(/retryIdempotentRead\(/g) || []).length, 2);
+    assert.match(maintenanceLoader, /retryIdempotentRead\(\(\) => github\.paginate\(github\.rest\.issues\.listForRepo/);
+    assert.match(maintenanceLoader, /retryIdempotentRead\(\(\) => github\.paginate\(github\.rest\.issues\.listComments/);
+    assert.doesNotMatch(source, /^\s*retries:/m);
+  });
+
   it("binds approval and sync provenance to the current trusted event", () => {
     const source = workflow();
     assert.match(source, /context\.eventName === "pull_request_target"/);

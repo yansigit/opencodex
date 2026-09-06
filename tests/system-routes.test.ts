@@ -11,7 +11,7 @@
  * zero across the suite would need a finalizer that aggregates many short-lived
  * sharded processes, which does not exist. This file covers the route.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { handleManagementAPI } from "../src/server/management-api";
 import {
@@ -56,6 +56,10 @@ function flakyIo(failures: number, code = "EBUSY", platform: NodeJS.Platform = "
     sleep: () => {},
   };
 }
+
+beforeEach(() => {
+  resetWindowsReplaceRetryCountersForTests();
+});
 
 afterEach(() => {
   resetWindowsReplaceRetryCountersForTests();
@@ -116,6 +120,7 @@ describe("windows replace retry counters", () => {
       "config-ownership",
       "claude-agents",
       "codex-agent-roles",
+      "dev-version-bump",
       "lab-automation",
       "lab-ledger",
       "storage-cleanup",
@@ -127,6 +132,7 @@ describe("windows replace retry counters", () => {
       "codex-agent-roles:EBUSY",
       "config-ownership:EBUSY",
       "config:EBUSY",
+      "dev-version-bump:EBUSY",
       "lab-automation:EBUSY",
       "lab-ledger:EBUSY",
       "prompt-journal:EBUSY",

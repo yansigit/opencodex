@@ -76,6 +76,7 @@ jobs:
               classifyPullRequest,
               exactHeadGate,
               isMissingPullRequestError,
+              retryIdempotentRead,
               summarizeAgedHolds,
               workflowRunRetryDisposition,
             } = require(path.join(process.cwd(), ".github", "scripts", "pr-automation.cjs"));
@@ -405,16 +406,16 @@ jobs:
               return { classification, gate, merge, approval, sync, reviews: reviewEvidence(evidence), maintenance, maintenanceError };
             }
             async function loadMaintenanceMap() {
-              const issues = await github.paginate(github.rest.issues.listForRepo, {
+              const issues = await retryIdempotentRead(() => github.paginate(github.rest.issues.listForRepo, {
                 owner, repo, state: "all", per_page: 100
-              });
+              }));
               const records = new Map();
               const maintenanceStateErrors = new Map();
               const orphanErrors = [];
               for (const issue of issues.filter(item => !item.pull_request)) {
-                const comments = await github.paginate(github.rest.issues.listComments, {
+                const comments = await retryIdempotentRead(() => github.paginate(github.rest.issues.listComments, {
                   owner, repo, issue_number: issue.number, per_page: 100
-                });
+                }));
                 const stateComments = comments.filter(comment =>
                   comment.user?.login === "github-actions[bot]" && Number(comment.user?.id) === 41898282 &&
                   comment.body?.includes("<!-- opencodex-agent-maintenance-state:")
