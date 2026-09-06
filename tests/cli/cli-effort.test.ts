@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { handleEffortCommand } from "../../src/cli/effort";
 import { dispatchCommand } from "../../src/cli/dispatch";
 import type { CliDispatchDeps } from "../../src/cli/dispatch";
+import { setPersistedConfigMutationBeforeCommitForTests } from "../../src/config";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 import type { OcxConfig } from "../../src/types";
 
@@ -42,6 +43,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  setPersistedConfigMutationBeforeCommitForTests(null);
   console.log = logOrig;
   console.error = errorOrig;
   if (savedHome === undefined) delete process.env.OPENCODEX_HOME;
@@ -140,6 +142,27 @@ describe("ocx effort offline config operations", () => {
     const updated = readTestConfig();
     expect(updated.effortCap).toBe("max");
     expect(updated.subagentEffortCap).toBe("medium");
+  });
+
+  test("offline effort updates preserve a concurrent unrelated config edit", async () => {
+    let injected = false;
+    setPersistedConfigMutationBeforeCommitForTests(() => {
+      injected = true;
+      const concurrent = readTestConfig();
+      concurrent.port = 23456;
+      concurrent.websockets = true;
+      writeFileSync(join(tempHome!, "config.json"), JSON.stringify(concurrent, null, 2), "utf8");
+    });
+
+    const { deps } = fakeDeps(["set", "--main", "max"]);
+    const code = await handleEffortCommand(["set", "--main", "max"], deps);
+
+    expect(code).toBe(0);
+    expect(injected).toBe(true);
+    const updated = readTestConfig();
+    expect(updated.effortCap).toBe("max");
+    expect(updated.port).toBe(23456);
+    expect(updated.websockets).toBe(true);
   });
 
   test("ocx effort clear unsets both caps but preserves injection effort", async () => {

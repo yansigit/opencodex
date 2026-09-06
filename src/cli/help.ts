@@ -26,7 +26,7 @@ export function printUsage(): void {
   console.log(`opencodex (ocx) — Universal provider proxy for Codex
 
 Usage:
-  ocx setup                   Interactive setup (alias: init)
+  ocx setup [--yes]           Interactive setup (alias: init)
   ocx start [--port <port>]   Start the proxy server (auto-syncs models to Codex)
   ocx stop                    Stop the proxy AND restore native Codex (plain codex works again)
   ocx restore                 Restore native Codex without stopping (alias: eject)
@@ -65,7 +65,7 @@ Usage:
   ocx models <sub>            Live/custom models, visibility, context, and shadow calls
   ocx alias <sub>             Short names for providers and models (list, set, rm, defaults)
   ocx combo <sub>             Combo routing strategies and failover
-  ocx agent <sub>             Subagents, injection, effort caps, and sidecars
+  ocx agent <sub>             Subagents, roles, injection, effort caps, and sidecars
   ocx effort [sub]            Inspect and configure reasoning effort caps and defaults
   ocx observe <sub>           Logs, usage, storage, memory, and debug data
   ocx inspect <sub>           Effective config, catalog, analytics, pacing, client-config
@@ -93,7 +93,7 @@ Usage:
   ocx --version | -v          Print version
 
 Examples:
-  ocx init                    Set up provider and inject into Codex
+  ocx init [--yes]            Set up provider and inject into Codex (replace existing config only with --yes)
   ocx start                   Start on default port (10100)
   ocx start --port 8080       Start on custom port
   ocx help service            Show service command help

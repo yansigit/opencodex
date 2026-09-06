@@ -66,6 +66,23 @@ describe("CLI subcommand help", () => {
     expect(result.stdout).toContain("Start the proxy server and sync models to Codex.");
   });
 
+  test("init help documents explicit overwrite consent and agent roles", () => {
+    const topLevel = runCli([]);
+    expectSpawnFinished(topLevel, "ocx help");
+    expect(topLevel.status).toBe(0);
+    expect(topLevel.stdout).toContain("ocx setup [--yes]");
+    expect(topLevel.stdout).toContain("ocx init [--yes]");
+    expect(topLevel.stdout).toContain("Subagents, roles, injection");
+
+    for (const command of ["init", "setup"]) {
+      const result = runCli(["help", command]);
+      expectSpawnFinished(result, `ocx help ${command}`);
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toContain(`Usage: ocx ${command} [--yes]`);
+    }
+  });
+
   test("top-level help counts every export client and export help names them", () => {
     const topLevel = runCli([]);
     expectSpawnFinished(topLevel, "ocx help");

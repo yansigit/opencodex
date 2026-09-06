@@ -247,6 +247,7 @@ describe("ocx provider", () => {
         "--base-url", "http://localhost:8080/v1",
         "--api-key", "test-key",
         "--default-model", "my-model",
+        "--allow-private-network",
       ], { OPENCODEX_HOME: dir });
       expect(result.status).toBe(0);
 
@@ -351,6 +352,27 @@ describe("ocx provider", () => {
     }
   });
 
+  test("provider remove rejects routing profile dependencies", () => {
+    const { dir, configPath } = freshConfig({
+      providers: {
+        openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+        deepseek: { adapter: "openai-chat", baseUrl: "https://api.deepseek.com/v1", apiKey: "k" },
+      },
+      routingProfiles: {
+        daily: { candidates: [{ provider: "deepseek", model: "deepseek-chat" }] },
+      },
+    });
+    try {
+      const before = readFileSync(configPath, "utf8");
+      const result = runCli(["provider", "remove", "deepseek"], { OPENCODEX_HOME: dir });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("routing profile(s) depend on it: daily");
+      expect(readFileSync(configPath, "utf8")).toBe(before);
+    } finally {
+      removeTreeWithRetry(dir);
+    }
+  });
+
   test("provider remove rejects default provider", () => {
     const { dir } = freshConfig();
     try {
@@ -401,6 +423,34 @@ describe("ocx provider", () => {
       expect(parsed.name).toBe("openai");
       expect(parsed.isDefault).toBe(true);
       expect(parsed.adapter).toBe("openai-responses");
+    } finally {
+      removeTreeWithRetry(dir);
+    }
+  });
+
+  test("provider show --json redacts Azure managed identity client ids", () => {
+    const { dir } = freshConfig({
+      providers: {
+        openai: { adapter: "openai-responses", baseUrl: "https://chatgpt.com/backend-api/codex", authMode: "forward" },
+        azure: {
+          adapter: "azure-openai",
+          baseUrl: "https://resource.openai.azure.com/openai",
+          azureCredential: {
+            type: "default-azure-credential",
+            managedIdentityClientId: "client-id-must-not-leak",
+          },
+        },
+      },
+    });
+    try {
+      const result = runCli(["provider", "show", "azure", "--json"], { OPENCODEX_HOME: dir });
+      expect(result.status).toBe(0);
+      expect(result.stdout).not.toContain("client-id-must-not-leak");
+      const parsed = JSON.parse(result.stdout);
+      expect(parsed.azureCredential).toEqual({
+        type: "default-azure-credential",
+        hasManagedIdentityClientId: true,
+      });
     } finally {
       removeTreeWithRetry(dir);
     }

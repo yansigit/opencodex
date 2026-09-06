@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig } from "../config";
+import { loadConfig, mutatePersistedConfig } from "../config";
 import {
   CODEX_REASONING_LEVELS,
   configuredReasoningEfforts,
@@ -213,21 +213,46 @@ async function setEffort(
     return;
   }
 
-  // Offline persistence path: only reached when no live proxy was found before mutation
-  const config = loadConfig();
-  if (validatedMain !== undefined) {
-    if (validatedMain === null) delete config.effortCap;
-    else config.effortCap = validatedMain;
+  // Offline persistence path: only reached when no live proxy was found before mutation.
+  // Apply the field-level update against the latest persisted snapshot so a concurrent
+  // dashboard or CLI edit cannot be replaced by the config observed before this command.
+  const outcome = mutatePersistedConfig(config => {
+    let changed = false;
+    if (validatedMain !== undefined) {
+      if (validatedMain === null) {
+        if (config.effortCap !== undefined) changed = true;
+        delete config.effortCap;
+      } else if (config.effortCap !== validatedMain) {
+        config.effortCap = validatedMain;
+        changed = true;
+      }
+    }
+    if (validatedSubagent !== undefined) {
+      if (validatedSubagent === null) {
+        if (config.subagentEffortCap !== undefined) changed = true;
+        delete config.subagentEffortCap;
+      } else if (config.subagentEffortCap !== validatedSubagent) {
+        config.subagentEffortCap = validatedSubagent;
+        changed = true;
+      }
+    }
+    if (validatedInjection !== undefined) {
+      if (validatedInjection === null) {
+        if (config.injectionEffort !== undefined) changed = true;
+        delete config.injectionEffort;
+      } else if (config.injectionEffort !== validatedInjection) {
+        config.injectionEffort = validatedInjection;
+        changed = true;
+      }
+    }
+    return { changed, value: config };
+  });
+  if (outcome.status === "unavailable") {
+    throw new Error(outcome.reason === "conflict"
+      ? "config changed while applying this effort update; retry"
+      : `config is ${outcome.reason}`);
   }
-  if (validatedSubagent !== undefined) {
-    if (validatedSubagent === null) delete config.subagentEffortCap;
-    else config.subagentEffortCap = validatedSubagent;
-  }
-  if (validatedInjection !== undefined) {
-    if (validatedInjection === null) delete config.injectionEffort;
-    else config.injectionEffort = validatedInjection;
-  }
-  saveConfig(config);
+  const config = outcome.value;
 
   const result = {
     ok: true,

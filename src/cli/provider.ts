@@ -8,7 +8,7 @@
  *   show <name>   Show provider config details (secrets masked)
  *   set-default <name>  Change the default provider
  */
-import { hasOwnProvider, isValidProviderName, loadConfig, sanitizeModelCostsForDisplay, saveConfig } from "../config";
+import { hasOwnProvider, isValidProviderName, loadConfig, mutatePersistedConfig, sanitizeModelCostsForDisplay } from "../config";
 import { apiKeyTransportConfigError } from "../config/provider-validation";
 import { hasHelpFlag } from "./help";
 import { getProviderRegistryEntry, PROVIDER_REGISTRY } from "../providers/registry";
@@ -58,19 +58,26 @@ function maskSecret(value: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Validation helper (F1 fix: validate before saveConfig)
+// Validation helper
 // ---------------------------------------------------------------------------
 
-function validateAndSave(config: ReturnType<typeof loadConfig>): void {
+function validateProviderConfig(config: ReturnType<typeof loadConfig>): void {
   if (!config.providers || Object.keys(config.providers).length === 0) {
-    console.error("Error: config would have no providers. Aborting.");
-    process.exit(1);
+    throw new Error("config would have no providers");
   }
   if (!hasOwnProvider(config.providers, config.defaultProvider)) {
-    console.error(`Error: defaultProvider "${config.defaultProvider}" does not exist in providers. Aborting.`);
-    process.exit(1);
+    throw new Error(`defaultProvider "${config.defaultProvider}" does not exist in providers`);
   }
-  saveConfig(config);
+}
+
+function mutateProviderConfig<T>(mutate: (config: ReturnType<typeof loadConfig>) => { changed: boolean; value: T }): T {
+  const outcome = mutatePersistedConfig(mutate);
+  if (outcome.status === "unavailable") {
+    throw new Error(outcome.reason === "conflict"
+      ? "config changed while applying this provider update; retry"
+      : `config is ${outcome.reason}`);
+  }
+  return outcome.value;
 }
 
 // ---------------------------------------------------------------------------
@@ -155,19 +162,6 @@ async function handleAdd(args: string[]): Promise<void> {
   const defaultModel = consumeFlagValue(restArgs, "--default-model");
   rejectUnknownArgs(restArgs, ADD_USAGE);
 
-  const config = loadConfig();
-
-  const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, name);
-  if (namespaceCollision) {
-    console.error(`Error: ${namespaceCollision}.`);
-    process.exit(1);
-  }
-
-  if (hasOwnProvider(config.providers, name) && !force) {
-    console.error(`Provider "${name}" already exists. Use --force to overwrite.`);
-    process.exit(1);
-  }
-
   let provConfig: OcxProviderConfig;
   const registryEntry = getProviderRegistryEntry(name);
 
@@ -212,20 +206,27 @@ async function handleAdd(args: string[]): Promise<void> {
     provConfig.apiKeyTransport = apiKeyTransport;
   }
 
-  const existingProvider = config.providers[name];
   const { initializeProviderModelSelection } = await import("../providers/initial-model-selection");
-  initializeProviderModelSelection(name, provConfig, existingProvider, config);
-  config.providers[name] = provConfig;
-  // A --force overwrite rotates the key/endpoint but must not drop a
-  // user-configured price overlay (same rule as the /api/providers path and
-  // the login paths); there is no explicit clear/replace flag yet.
-  if (existingProvider?.modelCosts !== undefined && provConfig.modelCosts === undefined) {
-    provConfig.modelCosts = existingProvider.modelCosts;
-  }
   if (allowPrivateNetwork) provConfig.allowPrivateNetwork = true;
-  if (setDefault) config.defaultProvider = name;
-
-  validateAndSave(config);
+  const saved = mutateProviderConfig(config => {
+    const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, name);
+    if (namespaceCollision) throw new Error(`${namespaceCollision}.`);
+    const existingProvider = config.providers[name];
+    if (existingProvider && !force) throw new Error(`Provider "${name}" already exists. Use --force to overwrite.`);
+    const next = structuredClone(provConfig);
+    // A --force overwrite rotates the key/endpoint but must not drop a user-configured price overlay.
+    if (existingProvider?.modelCosts !== undefined && next.modelCosts === undefined) next.modelCosts = existingProvider.modelCosts;
+    initializeProviderModelSelection(name, next, existingProvider, config);
+    config.providers[name] = next;
+    if (setDefault) config.defaultProvider = name;
+    validateProviderConfig(config);
+    return {
+      changed: JSON.stringify(existingProvider) !== JSON.stringify(next)
+        || (setDefault && config.defaultProvider === name),
+      value: { provider: next, defaultProvider: config.defaultProvider },
+    };
+  });
+  provConfig = saved.provider;
 
   if (wantsJson) {
     console.log(JSON.stringify({
@@ -235,7 +236,7 @@ async function handleAdd(args: string[]): Promise<void> {
       adapter: provConfig.adapter,
       baseUrl: provConfig.baseUrl,
       defaultModel: provConfig.defaultModel ?? null,
-      isDefault: config.defaultProvider === name,
+      isDefault: saved.defaultProvider === name,
       source: registryEntry ? "registry" : "custom",
       needsSync: true,
     }, null, 2));
@@ -290,42 +291,35 @@ function handleRemove(args: string[]): void {
   }
   rejectUnknownArgs(restArgs.slice(1), "Usage: ocx provider remove <name> [--json]");
 
-  const config = loadConfig();
-  if (!hasOwnProvider(config.providers, name)) {
-    console.error(`Provider "${name}" is not configured.`);
-    process.exit(1);
-  }
-
-  if (name === config.defaultProvider) {
-    console.error(`Cannot remove "${name}" — it is the default provider. Change the default first: ocx provider set-default <other>`);
-    process.exit(1);
-  }
-
-  if (Object.keys(config.providers).length <= 1) {
-    console.error("Cannot remove the last provider.");
-    process.exit(1);
-  }
-
-  const dependentCombos = Object.entries(config.combos ?? {})
-    .filter(([, combo]) => combo.targets.some(target => target.provider === name))
-    .map(([id]) => id)
-    .sort();
-  if (dependentCombos.length > 0) {
-    console.error(`Cannot remove "${name}" — combo(s) depend on it: ${dependentCombos.join(", ")}`);
-    process.exit(1);
-  }
-
-  delete config.providers[name];
-  const droppedCustomModels = dropProviderCustomModels(config, name);
-  validateAndSave(config);
+  const saved = mutateProviderConfig(config => {
+    if (!hasOwnProvider(config.providers, name)) throw new Error(`Provider "${name}" is not configured.`);
+    if (name === config.defaultProvider) throw new Error(`Cannot remove "${name}" — it is the default provider. Change the default first: ocx provider set-default <other>`);
+    if (Object.keys(config.providers).length <= 1) throw new Error("Cannot remove the last provider.");
+    const dependentCombos = Object.entries(config.combos ?? {})
+      .filter(([, combo]) => combo.targets.some(target => target.provider === name))
+      .map(([id]) => id).sort();
+    if (dependentCombos.length > 0) throw new Error(`Cannot remove "${name}" — combo(s) depend on it: ${dependentCombos.join(", ")}`);
+    const dependentProfiles = Object.entries(config.routingProfiles ?? {})
+      .filter(([, profile]) => profile.candidates.some(candidate => candidate.provider === name))
+      .map(([id]) => id).sort();
+    if (dependentProfiles.length > 0) throw new Error(`Cannot remove "${name}" — routing profile(s) depend on it: ${dependentProfiles.join(", ")}`);
+    delete config.providers[name];
+    const droppedCustomModels = dropProviderCustomModels(config, name);
+    validateProviderConfig(config);
+    return {
+      changed: true,
+      value: { droppedCustomModels, providers: Object.keys(config.providers), defaultProvider: config.defaultProvider },
+    };
+  });
+  const { droppedCustomModels } = saved;
 
 
   if (wantsJson) {
     console.log(JSON.stringify({
       action: "removed",
       provider: name,
-      remainingProviders: Object.keys(config.providers),
-      defaultProvider: config.defaultProvider,
+      remainingProviders: saved.providers,
+      defaultProvider: saved.defaultProvider,
       needsSync: true,
       ...(droppedCustomModels > 0 ? { droppedCustomModels } : {}),
     }, null, 2));
@@ -365,6 +359,12 @@ function handleShow(args: string[]): void {
     ...(prov.modelCosts !== undefined ? { modelCosts: sanitizeModelCostsForDisplay(prov.modelCosts) } : {}),
     ...(prov.apiKey ? { apiKey: maskSecret(prov.apiKey) } : {}),
     ...(prov.apiKeyPool ? { apiKeyPool: prov.apiKeyPool.map(e => ({ ...e, key: maskSecret(e.key) })) } : {}),
+    ...(prov.azureCredential ? {
+      azureCredential: {
+        type: prov.azureCredential.type,
+        hasManagedIdentityClientId: Boolean(prov.azureCredential.managedIdentityClientId?.trim()),
+      },
+    } : {}),
   };
 
   if (wantsJson) {
@@ -395,13 +395,14 @@ function handleSetDefault(args: string[]): void {
   }
   rejectUnknownArgs(restArgs.slice(1), "Usage: ocx provider set-default <name> [--json]");
 
-  const config = loadConfig();
-  if (!hasOwnProvider(config.providers, name)) {
-    console.error(`Provider "${name}" is not configured. Add it first: ocx provider add ${name}`);
-    process.exit(1);
-  }
-
-  if (config.defaultProvider === name) {
+  const changed = mutateProviderConfig(config => {
+    if (!hasOwnProvider(config.providers, name)) throw new Error(`Provider "${name}" is not configured. Add it first: ocx provider add ${name}`);
+    if (config.defaultProvider === name) return { changed: false, value: false };
+    config.defaultProvider = name;
+    validateProviderConfig(config);
+    return { changed: true, value: true };
+  });
+  if (!changed) {
     if (wantsJson) {
       console.log(JSON.stringify({ action: "noop", provider: name, defaultProvider: name, needsSync: false }, null, 2));
     } else {
@@ -409,10 +410,6 @@ function handleSetDefault(args: string[]): void {
     }
     return;
   }
-
-  config.defaultProvider = name;
-  validateAndSave(config);
-
 
   if (wantsJson) {
     console.log(JSON.stringify({ action: "set-default", provider: name, defaultProvider: name, needsSync: true }, null, 2));

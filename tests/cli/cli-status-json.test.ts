@@ -720,3 +720,40 @@ describe("status reports stale process records end to end", () => {
     }
   });
 });
+
+describe("TLS-aware status URLs", () => {
+  test("selectListenTarget uses https and canonical public origin when tls is set", () => {
+    const target = selectListenTarget(
+      { port: 10443, hostname: "0.0.0.0", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
+      null,
+      null,
+    );
+    expect(target.healthUrl).toBe("https://127.0.0.1:10443/healthz");
+    expect(target.dashboardUrl).toBe("https://example.com");
+  });
+
+  test("selectListenTarget brackets IPv6 and uses https when tls set", () => {
+    const target = selectListenTarget(
+      { port: 10443, hostname: "::1", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
+      123,
+      { pid: 123, port: 10443, hostname: "::1" },
+    );
+    expect(target.healthUrl).toBe("https://[::1]:10443/healthz");
+    expect(target.dashboardUrl).toBe("https://example.com");
+  });
+
+  test("selectListenTarget maps 0.0.0.0 to 127.0.0.1 with https", () => {
+    const target = selectListenTarget(
+      { port: 10443, hostname: "0.0.0.0", tls: { certFile: "c", keyFile: "k", publicOrigin: "https://example.com" } },
+      null,
+      null,
+    );
+    expect(target.healthUrl).toBe("https://127.0.0.1:10443/healthz");
+  });
+
+  test("without tls dashboard stays http localhost", () => {
+    const target = selectListenTarget({ port: 10100, hostname: "0.0.0.0" }, null, null);
+    expect(target.healthUrl).toBe("http://127.0.0.1:10100/healthz");
+    expect(target.dashboardUrl).toBe("http://localhost:10100/");
+  });
+});
