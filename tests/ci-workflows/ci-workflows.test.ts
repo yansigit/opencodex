@@ -350,8 +350,17 @@ describe("GitHub Actions hardening", () => {
     // GitHub-hosted runner. Public pull-request code must never reach a
     // persistent self-hosted host.
     const winSteps = (ci.jobs?.["platform-windows"] as {
-      steps?: { if?: string; run?: string; env?: Record<string, unknown> }[];
+      steps?: { name?: string; if?: string; run?: string; env?: Record<string, unknown> }[];
     })?.steps ?? [];
+    const windowsSmokeIndex = winSteps.findIndex(step => step.name === "CLI help smoke");
+    const windowsTestIndex = winSteps.findIndex(step => step.name === "Test");
+    expect(windowsSmokeIndex).toBeGreaterThanOrEqual(0);
+    expect(windowsTestIndex).toBeGreaterThan(windowsSmokeIndex);
+    expect(winSteps[windowsSmokeIndex]?.if).toBeUndefined();
+    expect(hasExactShellCommand(
+      winSteps[windowsSmokeIndex]?.run,
+      "bun run src/cli/index.ts help",
+    )).toBe(true);
     // --timeout is part of the contract, not incidental: this leg ran on Bun's 5s default
     // while Linux and macOS both pass 60000, and it is the slowest hardware on the board.
     // Three composed-acceptance failures were that default firing on tests still working
