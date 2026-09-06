@@ -2,6 +2,7 @@ import { describe, expect, test, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { initializePersistedConfigIfMissing, saveConfig } from "../../src/config";
 import { STORE_BUDGET_MS } from "../helpers/test-budget";
 import {
   CODEX_FAILURE_WINDOW_MS,
@@ -134,6 +135,7 @@ describe("codex routing", () => {
     expect(computeCodexUsageScore({ weeklyPercent: 81 })).toBe(81);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 91 })).toBe(91);
     expect(computeCodexUsageScore({ weeklyPercent: 15, monthlyPercent: 20, shortPercent: 92 })).toBe(92);
+    expect(computeCodexUsageScore({ weeklyPercent: 15, fiveHourPercent: 92 })).toBe(92);
     expect(computeCodexUsageScore({ weeklyPercent: 15 })).toBe(15);
   });
 
@@ -145,7 +147,8 @@ describe("codex routing", () => {
     expect(computeCodexUsageScore({ shortPercent: 0 })).toBe(CODEX_UNKNOWN_USAGE_SCORE);
     expect(computeCodexUsageScore({ shortPercent: 87 })).toBe(CODEX_UNKNOWN_USAGE_SCORE);
     // Once a governing window is known, the burst still wins when it is hotter.
-    expect(computeCodexUsageScore({ weeklyPercent: 1, shortPercent: 100 })).toBe(100);
+    expect(computeCodexUsageScore({ weeklyPercent: 1, shortPercent: 100,
+      shortResetAt: Date.now() + 60_000 })).toBe(100);
     expect(computeCodexUsageScore({ weeklyPercent: 40, shortPercent: 0 })).toBe(40);
   });
 
@@ -163,9 +166,12 @@ describe("codex routing", () => {
     // inverted into a recovered account that stays excluded.
     expect(computeCodexUsageScore({ shortPercent: 100, shortResetAt: now - 60_000 }, undefined, now))
       .toBe(CODEX_UNKNOWN_USAGE_SCORE);
+    expect(computeCodexUsageScore({ weeklyPercent: 20, shortPercent: 100, shortResetAt: now - 60_000 }, undefined, now))
+      .toBe(20);
     // No resetAt at all cannot be aged, so it stays unknown: a wrongly-selected account
     // fails one request, a wrongly-excluded one is invisible until someone reads the pool.
     expect(computeCodexUsageScore({ shortPercent: 100 }, undefined, now)).toBe(CODEX_UNKNOWN_USAGE_SCORE);
+    expect(computeCodexUsageScore({ weeklyPercent: 20, shortPercent: 100 }, undefined, now)).toBe(20);
     // Still narrow: a non-terminal short-only reading is unchanged.
     expect(computeCodexUsageScore({ shortPercent: 99, shortResetAt: now + 60_000 }, undefined, now))
       .toBe(CODEX_UNKNOWN_USAGE_SCORE);
@@ -244,7 +250,20 @@ describe("codex routing", () => {
     // clock far from wall time is the point: a fixture whose now matches Date.now() cannot
     // tell a threaded clock from one that was dropped somewhere in the helper chain.
     const now = 1_700_000_000_000;
-    const config = makeConfig({ activeCodexAccountId: "a" });
+    const config = makeConfig({
+      activeCodexAccountId: "a",
+      defaultProvider: "test",
+      providers: {
+        test: {
+          adapter: "openai-responses",
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "test-key",
+        },
+      },
+    });
+    // Automatic quota moves persist by design. Seed the fixture through the same
+    // fail-closed initialization boundary production uses instead of weakening it.
+    expect(initializePersistedConfigIfMissing(config)).toBe("created");
 
     // A is full for the next hour, recorded in SECONDS. B has ordinary headroom.
     setAccountQuotaFromParsed("a", { shortPercent: 100, shortResetAt: (now + 3_600_000) / 1000 });
@@ -286,7 +305,20 @@ describe("codex routing", () => {
     setAccountQuotaFromParsed("a", { shortPercent: 100 });
     const now = Date.now();
     updateAccountQuota("b", 3);
-    const config = makeConfig({ activeCodexAccountId: "a" });
+    const config = makeConfig({
+      activeCodexAccountId: "a",
+      defaultProvider: "test",
+      providers: {
+        test: {
+          adapter: "openai-responses",
+          baseUrl: "https://example.invalid/v1",
+          apiKey: "test-key",
+        },
+      },
+    });
+    // Moving away from an exhausted account persists the active selection. Seed the same
+    // valid on-disk boundary used by production so this regression can run in isolation.
+    expect(initializePersistedConfigIfMissing(config)).toBe("created");
     expect(resolveCodexAccountForThread("thread-storm-new", config, now)).toBe("b");
 
     // A thread already bound to A must move too - this is the half the reporter saw as 118
@@ -297,6 +329,7 @@ describe("codex routing", () => {
     updateAccountQuota("a", 10);
     updateAccountQuota("b", 20);
     const bound = makeConfig({ activeCodexAccountId: "a" });
+    saveConfig(bound);
     expect(resolveCodexAccountForThread("thread-storm-bound", bound, now)).toBe("a");
     clearAccountQuota("a");
     setAccountQuotaFromParsed("a", { shortPercent: 100 });
