@@ -12,7 +12,6 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
-  saveConfigPreservingClaudeCode,
 } from "../../config";
 import {
   clearLoginState,

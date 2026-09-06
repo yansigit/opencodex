@@ -13,8 +13,9 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
-  saveConfigPreservingClaudeCode,
+  validateConfigCandidate,
 } from "../../config";
+import { canonicalServerOrigin, serverTlsConfigError } from "../../lib/server-tls";
 import {
   clearLoginState,
   getLoginStatus,
@@ -104,7 +105,7 @@ import { drainAndShutdown } from "../lifecycle";
 import { filterRequestLogs, getRequestLogEntries, type RequestLogEntry } from "../request-log";
 import { estimateComboCost, estimateRequestCost, normalizeCostTokens, tokensPerSecond } from "../../usage/cost";
 import type { PersistedUsageAttempt } from "../../usage/log";
-import { isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
+import { assertServerAuthConfig, configuredApiAuthToken, isAllowedRequestOrigin, jsonResponse, providerManagementConfigError, publicProviderBaseUrl, safeConfigDTO } from "../auth-cors";
 import { withProviderServiceTierDTO } from "./provider-capability-config";
 import { applySystemEnvToggle } from "../system-env";
 import { getCachedStartupHealth, invalidateStartupHealthCache } from "../startup-health-cache";
@@ -114,7 +115,7 @@ import { displayCodexRuntimePath, effortClampAppliesToRuntime, loadLastEffortCla
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { mutateManagementConfig, saveManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 
 function quotaAutoRefreshSettings(config: OcxConfig) {
@@ -149,6 +150,40 @@ async function sidecarVisionResponseSettings(config: OcxConfig): Promise<{
     models.unshift({ value: model, label: model, backend });
   }
   return { model, reasoning, models };
+}
+
+function aiStudioExtensionOrigin(config: Pick<OcxConfig, "corsAllowOrigins">): string | null {
+  return config.corsAllowOrigins?.find(origin => origin.startsWith("chrome-extension://")) ?? null;
+}
+
+function serverSettings(
+  config: OcxConfig,
+  activeOrigin?: string,
+  activeConfig?: Pick<OcxConfig, "hostname" | "port" | "tls">,
+) {
+  const active = activeOrigin ?? canonicalServerOrigin(config, config.port);
+  const configuredOrigin = canonicalServerOrigin(config, config.port);
+  const configuredListener = {
+    hostname: config.hostname ?? "127.0.0.1",
+    port: config.port,
+    tls: config.tls ?? null,
+  };
+  const activeListener = activeConfig && {
+    hostname: activeConfig.hostname ?? "127.0.0.1",
+    port: activeConfig.port,
+    tls: activeConfig.tls ?? null,
+  };
+  return {
+    configured: {
+      ...configuredListener,
+      aiStudioOrigin: aiStudioExtensionOrigin(config),
+    },
+    activeOrigin: active,
+    credentialConfigured: !!configuredApiAuthToken(config)
+      || (config.apiKeys ?? []).some(entry => !!entry.key.trim()),
+    restartRequired: active !== configuredOrigin
+      || !!activeListener && JSON.stringify(activeListener) !== JSON.stringify(configuredListener),
+  };
 }
 
 /** One client's outcome from a fan-out sync. Absent from the list means "left alone". */
@@ -323,7 +358,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       // Absent means the historical auto-open, so the GUI can render the toggle
       // without having to know that `undefined` and `true` mean the same thing.
       oauthOpenBrowser: config.oauthOpenBrowser !== false,
-      // Absent means off (today's Design B injection), so the GUI/CLI render a plain switch.
+      server: serverSettings(config, deps.activeServerOrigin, deps.activeServerConfig),
       codexDesktopAuthless: config.codexDesktopAuthless === true,
       startupHealth: await readStartupHealth(config),
       codexRuntime: {
@@ -412,6 +447,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexQuotaAutoRefresh?: unknown;
       oauthOpenBrowser?: unknown;
       showCodexSparkQuota?: unknown;
+      server?: unknown;
       ultraFastTier?: unknown;
       codexMainAccountHardLock?: unknown;
       codexDesktopAuthless?: unknown;
@@ -423,10 +459,11 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       && body.codexQuotaAutoRefresh === undefined
       && body.oauthOpenBrowser === undefined
       && body.showCodexSparkQuota === undefined
+      && body.server === undefined
       && body.ultraFastTier === undefined
       && body.codexMainAccountHardLock === undefined
       && body.codexDesktopAuthless === undefined) {
-      return jsonResponse({ error: "provide codexAutoStart, streamMode, appOwnedMemoryBudgetMb, codexAccountPickerEnabled, codexQuotaAutoRefresh, oauthOpenBrowser, showCodexSparkQuota, ultraFastTier, codexMainAccountHardLock, or codexDesktopAuthless" }, 400);
+      return jsonResponse({ error: "provide a supported settings field" }, 400);
     }
     if (body.codexAutoStart !== undefined && typeof body.codexAutoStart !== "boolean") {
       return jsonResponse({ error: "codexAutoStart boolean is required" }, 400);
@@ -452,6 +489,30 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
     }
     if (body.codexDesktopAuthless !== undefined && typeof body.codexDesktopAuthless !== "boolean") {
       return jsonResponse({ error: "codexDesktopAuthless boolean is required" }, 400);
+    }
+    let nextServer: {
+      hostname: string;
+      port: number;
+      tls: OcxConfig["tls"];
+      aiStudioOrigin: string | null;
+    } | undefined;
+    if (body.server !== undefined) {
+      if (!isPlainRecord(body.server)) return jsonResponse({ error: "server must be an object" }, 400);
+      const raw = body.server;
+      if (typeof raw.hostname !== "string" || !raw.hostname.trim()) return jsonResponse({ error: "server.hostname must be a non-empty string" }, 400);
+      if (typeof raw.port !== "number" || !Number.isInteger(raw.port) || raw.port < 0 || raw.port > 65535) return jsonResponse({ error: "server.port must be an integer from 0 to 65535" }, 400);
+      const tlsError = raw.tls === null ? null : serverTlsConfigError(raw.tls);
+      if (tlsError) return jsonResponse({ error: tlsError }, 400);
+      if (raw.aiStudioOrigin !== null && (
+        typeof raw.aiStudioOrigin !== "string"
+        || !/^chrome-extension:\/\/[a-z]{32}$/.test(raw.aiStudioOrigin)
+      )) return jsonResponse({ error: "server.aiStudioOrigin must be an exact chrome-extension origin or null" }, 400);
+      nextServer = {
+        hostname: raw.hostname.trim(),
+        port: raw.port,
+        tls: raw.tls === null ? undefined : raw.tls as OcxConfig["tls"],
+        aiStudioOrigin: raw.aiStudioOrigin,
+      };
     }
     let quotaAutoRefreshChange: { id: string; window: "fiveHour" | "weekly"; enabled: boolean } | undefined;
     if (body.codexQuotaAutoRefresh !== undefined) {
@@ -499,6 +560,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasOauthOpenBrowser: Object.hasOwn(config, "oauthOpenBrowser"),
       showCodexSparkQuota: config.showCodexSparkQuota,
       hasShowCodexSparkQuota: Object.hasOwn(config, "showCodexSparkQuota"),
+      hostname: config.hostname,
+      hasHostname: Object.hasOwn(config, "hostname"),
+      port: config.port,
+      tls: config.tls,
+      hasTls: Object.hasOwn(config, "tls"),
+      corsAllowOrigins: config.corsAllowOrigins,
+      hasCorsAllowOrigins: Object.hasOwn(config, "corsAllowOrigins"),
       ultraFastTier: config.ultraFastTier,
       hasUltraFastTier: Object.hasOwn(config, "ultraFastTier"),
       codexMainAccountHardLock: config.codexMainAccountHardLock,
@@ -507,55 +575,79 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       hasCodexDesktopAuthless: Object.hasOwn(config, "codexDesktopAuthless"),
     };
     const pickerWasEnabled = codexAccountPickerEnabled(config);
-    let pickerIsEnabled = pickerWasEnabled;
     const authlessWasEnabled = config.codexDesktopAuthless === true;
-    try {
+    const applySettings = (target: OcxConfig): boolean => {
       if (typeof body.codexAutoStart === "boolean") {
-        config.codexAutoStart = body.codexAutoStart;
+        target.codexAutoStart = body.codexAutoStart;
       }
       if (body.streamMode !== undefined) {
         if (body.streamMode === "auto") {
-          deleteConfigTopLevelKey(config, "streamMode");
+          deleteConfigTopLevelKey(target, "streamMode");
         } else {
-          config.streamMode = body.streamMode as "legacy-tee" | "eager-relay";
+          target.streamMode = body.streamMode as "legacy-tee" | "eager-relay";
         }
       }
       if (typeof body.appOwnedMemoryBudgetMb === "number") {
-        config.appOwnedMemoryBudgetMb = body.appOwnedMemoryBudgetMb;
+        target.appOwnedMemoryBudgetMb = body.appOwnedMemoryBudgetMb;
       }
       if (body.codexAccountPickerEnabled === true) {
-        config.codexAccountPickerEnabled = true;
-        initializeDefaultCodexAccountNamespaces(config);
+        target.codexAccountPickerEnabled = true;
+        initializeDefaultCodexAccountNamespaces(target);
       } else if (body.codexAccountPickerEnabled === false) {
-        config.codexAccountPickerEnabled = false;
+        target.codexAccountPickerEnabled = false;
       }
       if (typeof body.oauthOpenBrowser === "boolean") {
-        config.oauthOpenBrowser = body.oauthOpenBrowser;
+        target.oauthOpenBrowser = body.oauthOpenBrowser;
       }
       if (typeof body.showCodexSparkQuota === "boolean") {
-        config.showCodexSparkQuota = body.showCodexSparkQuota;
+        target.showCodexSparkQuota = body.showCodexSparkQuota;
       }
-      // Off deletes the key rather than persisting `false`: absent is the documented
-      // default, and a written `false` would survive as a decision nobody made.
-      if (body.ultraFastTier === true) config.ultraFastTier = true;
-      else if (body.ultraFastTier === false) deleteConfigTopLevelKey(config, "ultraFastTier");
-      if (body.codexMainAccountHardLock === true) config.codexMainAccountHardLock = true;
-      else if (body.codexMainAccountHardLock === false) deleteConfigTopLevelKey(config, "codexMainAccountHardLock");
-      if (body.codexDesktopAuthless === true) config.codexDesktopAuthless = true;
-      else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(config, "codexDesktopAuthless");
+      // Off deletes opt-in keys rather than persisting false, preserving the documented
+      // absent-is-default representation used by the rest of the settings surface.
+      if (body.ultraFastTier === true) target.ultraFastTier = true;
+      else if (body.ultraFastTier === false) deleteConfigTopLevelKey(target, "ultraFastTier");
+      if (body.codexMainAccountHardLock === true) target.codexMainAccountHardLock = true;
+      else if (body.codexMainAccountHardLock === false) deleteConfigTopLevelKey(target, "codexMainAccountHardLock");
+      if (body.codexDesktopAuthless === true) target.codexDesktopAuthless = true;
+      else if (body.codexDesktopAuthless === false) deleteConfigTopLevelKey(target, "codexDesktopAuthless");
       if (quotaAutoRefreshChange) {
         const { id, window, enabled } = quotaAutoRefreshChange;
-        const setting = { ...(config.codexQuotaAutoRefresh?.[id] ?? {}) };
+        const setting = { ...(target.codexQuotaAutoRefresh?.[id] ?? {}) };
         if (enabled) setting[window] = true;
         else delete setting[window];
-        const all = { ...(config.codexQuotaAutoRefresh ?? {}) };
+        const all = { ...(target.codexQuotaAutoRefresh ?? {}) };
         if (Object.keys(setting).length > 0) all[id] = setting;
         else delete all[id];
-        if (Object.keys(all).length > 0) config.codexQuotaAutoRefresh = all;
-        else deleteConfigTopLevelKey(config, "codexQuotaAutoRefresh");
+        if (Object.keys(all).length > 0) target.codexQuotaAutoRefresh = all;
+        else deleteConfigTopLevelKey(target, "codexQuotaAutoRefresh");
       }
-      pickerIsEnabled = codexAccountPickerEnabled(config);
-      (deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode)(config);
+      if (nextServer) {
+        target.hostname = nextServer.hostname;
+        target.port = nextServer.port;
+        if (nextServer.tls) target.tls = nextServer.tls;
+        else deleteConfigTopLevelKey(target, "tls");
+        const origins = (target.corsAllowOrigins ?? []).filter(origin => !origin.startsWith("chrome-extension://"));
+        if (nextServer.aiStudioOrigin) origins.push(nextServer.aiStudioOrigin);
+        if (origins.length) target.corsAllowOrigins = origins;
+        else deleteConfigTopLevelKey(target, "corsAllowOrigins");
+      }
+      return codexAccountPickerEnabled(target);
+    };
+    if (nextServer) {
+      const candidate = structuredClone(config);
+      applySettings(candidate);
+      const validation = validateConfigCandidate(candidate);
+      if (!validation.ok) return jsonResponse({ error: validation.error }, 400);
+      try {
+        assertServerAuthConfig(candidate);
+      } catch (error) {
+        return jsonResponse({ error: error instanceof Error ? error.message : String(error) }, 400);
+      }
+    }
+    let pickerIsEnabled = pickerWasEnabled;
+    try {
+      pickerIsEnabled = applySettings(config);
+      saveManagementConfig(deps, config);
     } catch (error) {
       if (previousSettings.hasCodexAutoStart) config.codexAutoStart = previousSettings.codexAutoStart;
       else deleteConfigTopLevelKey(config, "codexAutoStart");
@@ -579,6 +671,13 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (previousSettings.hasShowCodexSparkQuota) {
         config.showCodexSparkQuota = previousSettings.showCodexSparkQuota;
       } else deleteConfigTopLevelKey(config, "showCodexSparkQuota");
+      if (previousSettings.hasHostname) config.hostname = previousSettings.hostname;
+      else deleteConfigTopLevelKey(config, "hostname");
+      config.port = previousSettings.port;
+      if (previousSettings.hasTls) config.tls = previousSettings.tls;
+      else deleteConfigTopLevelKey(config, "tls");
+      if (previousSettings.hasCorsAllowOrigins) config.corsAllowOrigins = previousSettings.corsAllowOrigins;
+      else deleteConfigTopLevelKey(config, "corsAllowOrigins");
       if (previousSettings.hasUltraFastTier) {
         config.ultraFastTier = previousSettings.ultraFastTier;
       } else deleteConfigTopLevelKey(config, "ultraFastTier");
@@ -594,8 +693,6 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       configureAppOwnedMemoryBudget(resolveAppOwnedMemoryBudgetBytes(body.appOwnedMemoryBudgetMb));
       enforceAppOwnedMemoryBudget();
     }
-    // The authless switch changes the injected config.toml shape, so converge now rather than
-    // waiting for the next start; the injector re-reads config and rewrites the form.
     const authlessIsEnabled = config.codexDesktopAuthless === true;
     const catalogRefresh = pickerWasEnabled !== pickerIsEnabled || authlessWasEnabled !== authlessIsEnabled
       ? await convergeCodexCatalog()
@@ -619,6 +716,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       codexMainAccountHardLock: config.codexMainAccountHardLock === true,
       mainAccountHardLock: getMainAccountHardLockStatus(config),
       startupHealth: await readStartupHealth(config),
+      server: serverSettings(config, deps.activeServerOrigin, deps.activeServerConfig),
     });
   }
 
@@ -804,6 +902,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         : normalizeVisionReasoningForModel(model, sourceReasoning);
     }
 
+    const nextConfig = structuredClone(config);
     if (body.webSearch) {
       const pairTouched = body.webSearch.model !== undefined || body.webSearch.backend !== undefined;
       // Validate against the backend the caller SUBMITTED, across the whole
@@ -829,7 +928,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
           return jsonResponse(webSearchModelRejection("webSearch.model", effectiveBackend, effectiveModel, candidates), 400);
         }
       }
-      const webSearchCandidate = { ...config.webSearchSidecar };
+      const webSearchCandidate = { ...nextConfig.webSearchSidecar };
       if (typeof body.webSearch.model === "string") {
         if (body.webSearch.model === "") delete webSearchCandidate.model;
         else webSearchCandidate.model = body.webSearch.model;
@@ -899,36 +998,63 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
         if (body.webSearch.streamRoutedModelOutput) webSearchCandidate.streamRoutedModelOutput = true;
         else delete webSearchCandidate.streamRoutedModelOutput;
       }
-      config.webSearchSidecar = webSearchCandidate;
+      nextConfig.webSearchSidecar = webSearchCandidate;
     }
     if (body.vision) {
-      config.visionSidecar = { ...config.visionSidecar };
+      nextConfig.visionSidecar = { ...nextConfig.visionSidecar };
       if (typeof body.vision.model === "string") {
-        if (body.vision.model === "") delete config.visionSidecar.model;
-        else config.visionSidecar.model = body.vision.model;
+        if (body.vision.model === "") delete nextConfig.visionSidecar.model;
+        else nextConfig.visionSidecar.model = body.vision.model;
       }
-      if (body.vision.backend === null) delete config.visionSidecar.backend;
+      if (body.vision.backend === null) delete nextConfig.visionSidecar.backend;
       else if (body.vision.backend === "openai" || body.vision.backend === "anthropic"
         || body.vision.backend === "routed") {
-        config.visionSidecar.backend = body.vision.backend;
+        nextConfig.visionSidecar.backend = body.vision.backend;
       }
       if (typeof body.vision.maxDescriptionsPerTurn === "number") {
-        config.visionSidecar.maxDescriptionsPerTurn = body.vision.maxDescriptionsPerTurn;
+        nextConfig.visionSidecar.maxDescriptionsPerTurn = body.vision.maxDescriptionsPerTurn;
       }
       if (typeof body.vision.enabled === "boolean") {
         // `true` is the default — drop the key so disable/re-enable does not rewrite the file.
-        if (body.vision.enabled) delete config.visionSidecar.enabled;
-        else config.visionSidecar.enabled = false;
+        if (body.vision.enabled) delete nextConfig.visionSidecar.enabled;
+        else nextConfig.visionSidecar.enabled = false;
       }
       if (typeof body.vision.timeoutMs === "number") {
-        config.visionSidecar.timeoutMs = body.vision.timeoutMs;
+        nextConfig.visionSidecar.timeoutMs = body.vision.timeoutMs;
       }
       if (visionReasoningTouched) {
-        if (normalizedVisionReasoning === undefined) delete config.visionSidecar.reasoning;
-        else config.visionSidecar.reasoning = normalizedVisionReasoning;
+        if (normalizedVisionReasoning === undefined) delete nextConfig.visionSidecar.reasoning;
+        else nextConfig.visionSidecar.reasoning = normalizedVisionReasoning;
       }
     }
-    saveConfigPreservingClaudeCode(config);
+    let committedWebSearch: OcxConfig["webSearchSidecar"];
+    let committedVision: OcxConfig["visionSidecar"];
+    const persisted = mutateManagementConfig(deps, disk => {
+      if (body.webSearch) {
+        const latest = { ...disk.webSearchSidecar };
+        for (const key of ["model", "backend", "reasoning", "streamRoutedModelOutput", "exaApiKey", "xSearch"] as const) {
+          if (!Object.hasOwn(body.webSearch, key)) continue;
+          if (Object.hasOwn(nextConfig.webSearchSidecar ?? {}, key)) latest[key] = nextConfig.webSearchSidecar![key] as never;
+          else delete latest[key];
+        }
+        disk.webSearchSidecar = latest;
+        committedWebSearch = structuredClone(latest);
+      }
+      if (body.vision) {
+        const latest = { ...disk.visionSidecar };
+        for (const key of ["model", "backend", "reasoning", "maxDescriptionsPerTurn", "enabled", "timeoutMs"] as const) {
+          if (!Object.hasOwn(body.vision, key) && !(key === "reasoning" && visionReasoningTouched)) continue;
+          if (Object.hasOwn(nextConfig.visionSidecar ?? {}, key)) latest[key] = nextConfig.visionSidecar![key] as never;
+          else delete latest[key];
+        }
+        disk.visionSidecar = latest;
+        committedVision = structuredClone(latest);
+      }
+      return { changed: true, value: true };
+    });
+    if (persisted.status === "unavailable") return jsonResponse({ error: "management persistence unavailable" }, 500, req, config);
+    if (body.webSearch) config.webSearchSidecar = committedWebSearch;
+    if (body.vision) config.visionSidecar = committedVision;
     const ws = config.webSearchSidecar ?? {};
     const vision = await sidecarVisionResponseSettings(config);
     const savedWebSearchCandidates = await webSearchCandidateRows(config);
@@ -982,7 +1108,7 @@ export async function handleConfigRoutes(ctx: ManagementContext): Promise<Respon
       if (body.model === "") delete config.shadowCallIntercept.model;
       else config.shadowCallIntercept.model = body.model;
     }
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     const sci = config.shadowCallIntercept;
     return jsonResponse({
       ok: true,

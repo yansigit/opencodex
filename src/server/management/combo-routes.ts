@@ -11,7 +11,6 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
-  saveConfigPreservingClaudeCode,
 } from "../../config";
 import {
   clearLoginState,
@@ -63,7 +62,7 @@ import { applySystemEnvToggle } from "../system-env";
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import type { ManagementContext } from "./context";
+import { saveManagementConfig, type ManagementContext } from "./context";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
 import { shadowCallTargetError } from "./shadow-call-validation";
 import { COMBO_DEFAULT_WAIT_FOR_COOLDOWN_MS } from "../../combos";
@@ -242,8 +241,19 @@ export async function handleComboRoutes(ctx: ManagementContext): Promise<Respons
       if (config.subagentModels) {
         config.subagentModels = [...new Set(config.subagentModels.map(migrateAgentReference))];
       }
+      if (config.subagentRoles) {
+        for (const role of config.subagentRoles) {
+          role.model = migrateAgentReference(role.model);
+        }
+      }
       if (config.injectionModel && migratedModels.has(config.injectionModel)) {
         config.injectionModel = migrateReference(config.injectionModel);
+      }
+      if (config.v2NativeParentOverride?.model && migratedModels.has(config.v2NativeParentOverride.model)) {
+        config.v2NativeParentOverride = {
+          ...config.v2NativeParentOverride,
+          model: migrateReference(config.v2NativeParentOverride.model),
+        };
       }
       if (config.shadowCallIntercept?.model && migratedModels.has(config.shadowCallIntercept.model)) {
         config.shadowCallIntercept = {
@@ -274,7 +284,7 @@ export async function handleComboRoutes(ctx: ManagementContext): Promise<Respons
         oldDisabledSelectors.has(model) ? newDisabledModel : model
       )))];
     }
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     clearComboSelectionState(id);
     clearComboTargetCooldowns(id);
@@ -297,7 +307,7 @@ export async function handleComboRoutes(ctx: ManagementContext): Promise<Respons
     const { clearComboSelectionState, clearComboTargetCooldowns } = await import("../../combos");
     delete config.combos![id];
     if (Object.keys(config.combos!).length === 0) deleteConfigTopLevelKey(config, "combos");
-    saveConfigPreservingClaudeCode(config);
+    saveManagementConfig(deps, config);
     reconcileLiveStateStores();
     clearComboSelectionState(id);
     clearComboTargetCooldowns(id);
