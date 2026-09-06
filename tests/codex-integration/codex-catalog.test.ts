@@ -8,7 +8,7 @@ import { isGpt56NativeSlug } from "../../src/codex/catalog/effort";
 import { nativeOpenAiContextTier, nativeOpenAiMaxInputTokens } from "../../src/codex/catalog";
 import { shouldUpgradeToUpstreamEntry } from "../../src/codex/catalog/metadata";
 import { applyNativeVisibility, augmentRoutedModelsWithMetadata, augmentRoutedModelsWithRegistryOpenAiApiRows, buildCatalogEntries, buildComboCatalogOmission, catalogModelSlug, clampCatalogModelsToCodexSupport, clampEntryToCodexSupportedEfforts, clampedDefaultEffort, CODEX_ACCOUNT_BOUND_CATALOG_KIND, CODEX_NATIVE_ALIAS_CATALOG_KIND, comboCatalogOmissionReason, deriveComboCatalogModel, exactComboCatalogSlugs, filterCatalogVisibleModels, filterSupportedNativeSlugs, gatherRoutedModels as gatherRoutedModelsDirect, isDatedVariantId, isMediaGenerationModelId, loadBundledCodexCatalog, materializeBundledCodexCatalog, mergeCatalogEntriesForSync, NATIVE_DAYBREAK_BLUE_MODEL, NATIVE_GPT6_ASTRA_MODEL, NATIVE_OPENAI_MODELS, nativeDefaultReasoningEffort, nativeInputModalities, nativeOpenAiCapabilitySourceSlug, nativeOpenAiContextWindow, nativeReasoningEfforts, normalizeRoutedCatalogEntry, resetCatalogRuntimeStateForTests, resetOpenAiApiCatalogWarningStateForTests, resolveComboCatalogMember, shouldExposeRoutedModel, upstreamNativeEntry } from "../../src/codex/catalog";
-import { applyProviderConfigHints, fetchProviderModels, mergeConfiguredModelsIntoLiveCatalog } from "../../src/codex/catalog/provider-fetch";
+import { applyProviderConfigHints, catalogHintsFromModelsApiItem, fetchProviderModels, mergeConfiguredModelsIntoLiveCatalog } from "../../src/codex/catalog/provider-fetch";
 import {
   CODEX_CUSTOM_MODEL_CATALOG_KIND,
   CODEX_PROVIDER_MODEL_CATALOG_KIND,
@@ -6119,6 +6119,19 @@ describe("Codex catalog routed normalization", () => {
     expect(routed?.auto_compact_token_limit).toBe(900_000);
     expect(models.find(model => model.id === "copilot-existing-metadata")?.contextWindow).toBe(256_000);
     expect(models.find(model => model.id === "copilot-invalid-window")?.contextWindow).toBeUndefined();
+  });
+
+  test.each([
+    ["context_window", { context_window: 310_001 }, 310_001],
+    ["max_context_window", { max_context_window: 310_002 }, 310_002],
+    ["max_context_size", { max_context_size: 310_003 }, 310_003],
+    ["n_ctx", { n_ctx: 310_004 }, 310_004],
+    ["top_provider.max_context_length", { top_provider: { max_context_length: 310_005 } }, 310_005],
+    ["metadata.top_provider.max_context_length", { metadata: { top_provider: { max_context_length: 310_006 } } }, 310_006],
+    ["default_context_size", { default_context_size: 310_007 }, 310_007],
+  ] as const)("preserves the %s live context-window alias", (_label, fields, expected) => {
+    const hints = catalogHintsFromModelsApiItem("compatible", { id: "model", ...fields });
+    expect(hints.contextWindow).toBe(expected);
   });
 
   test("liveModels false preserves configured catalog metadata without live fetch", async () => {

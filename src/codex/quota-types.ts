@@ -4,6 +4,9 @@ export type StoredAccountQuota = {
   monthlyPercent?: number;
   weeklyResetAt?: number;
   monthlyResetAt?: number;
+  /** Legacy explicit alias for the sub-day burst reading; retained for API compatibility. */
+  fiveHourPercent?: number;
+  fiveHourResetAt?: number;
   /** Sub-day burst window, independent of the weekly window; duration supplies its meaning. */
   shortPercent?: number;
   shortResetAt?: number;
