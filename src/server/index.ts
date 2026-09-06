@@ -64,6 +64,7 @@ import { isCanonicalOpenAiForwardProvider, OPENAI_CODEX_PROVIDER_ID } from "../p
 import { providerCodexAccountMode } from "../providers/registry";
 import type { StorageCleanupPolicy } from "../types";
 import { MAX_DECOMPRESSED_BODY_BYTES } from "./request-decompress";
+import { canonicalServerOrigin } from "../lib/server-tls";
 import {
   CodexAccountCooldownError,
   cooldownErrorMessage,
@@ -1040,7 +1041,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     // Started inside the guarded startup transaction so the catch below can
     // release the owner-scoped lease on any listener failure.
     userCostOverlayReconciler = startUserCostOverlayReconciler({ liveConfig: config });
-    const serveOptions = {
+    const plaintextServeOptions = {
       idleTimeout: 255,
       maxRequestBodySize: MAX_DECOMPRESSED_BODY_BYTES,
       async fetch(req: Request, requestServer: Server<WsData>): Promise<Response> {
@@ -2375,6 +2376,14 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     },
     } as const;
 
+    // TLS belongs only to the configured public listener. The two auxiliary sockets are
+    // intentionally plaintext loopback origins: local clients dial the unauthenticated data
+    // listener directly over HTTP, while Tailscale Serve or an operator proxy terminates TLS
+    // before forwarding to the hub-management listener.
+    const serveOptions = {
+      ...plaintextServeOptions,
+      ...(config.tls ? { tls: { cert: Bun.file(config.tls.certFile), key: Bun.file(config.tls.keyFile) } } : {}),
+    } as const;
     server = Bun.serve<WsData>({ ...serveOptions, port: listenPort, hostname: bindHost });
 
     // Both binds are one startup transaction (#1102). If the loopback bind fails after the
@@ -2384,7 +2393,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (loopbackListenerPort !== null) {
       try {
         loopbackServer = Bun.serve<WsData>({
-          ...serveOptions,
+          ...plaintextServeOptions,
           port: loopbackListenerPort,
           hostname: "127.0.0.1",
         });
@@ -2404,7 +2413,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
     if (managementIngressPort !== null) {
       try {
         managementIngressServer = Bun.serve<WsData>({
-          ...serveOptions,
+          ...plaintextServeOptions,
           port: managementIngressPort,
           hostname: "127.0.0.1",
         });
@@ -2472,7 +2481,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
   boundPort = actualPort;
   setCorsOrigin(actualPort);
 
-  console.log(`🚀 opencodex proxy running on http://localhost:${actualPort}`);
+  console.log(`🚀 opencodex proxy running on ${canonicalServerOrigin(config, actualPort)}`);
   console.log(`   POST /v1/responses → provider translation`);
   console.log(`   POST /v1/chat/completions → OpenAI-compatible clients`);
   console.log(`   GET  /healthz      → health check`);
