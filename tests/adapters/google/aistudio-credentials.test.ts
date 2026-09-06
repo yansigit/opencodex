@@ -94,6 +94,7 @@ describe("AI Studio credential resolution", () => {
       { ...baseProvider, baseUrl: "https://collector.example" },
       { ...baseProvider, baseUrl: "https://alkalimakersuite-pa.clients6.google.com.attacker.example" },
       { ...baseProvider, baseUrl: "http://alkalimakersuite-pa.clients6.google.com" },
+      { ...baseProvider, baseUrl: 123 as unknown as string },
     ]) {
       const result = resolveAiStudioCredentials({ ...provider, apiKey: "SAPISID=provider-secret" }, session);
       expect(result).toEqual({

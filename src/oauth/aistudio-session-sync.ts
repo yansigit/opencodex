@@ -171,14 +171,16 @@ export function loadAiStudioSession(path = getAiStudioSessionPath()): AiStudioSe
   }
 }
 
-function cookieDomainMatches(hostname: string, domain: string | undefined): boolean {
-  if (!domain) return true;
+function cookieDomainMatches(hostname: string, domain: unknown): boolean {
+  if (domain === undefined) return true;
+  if (typeof domain !== "string" || !domain) return false;
   const cookieDomain = domain.toLowerCase().replace(/^\./, "");
   return hostname === cookieDomain || hostname.endsWith(`.${cookieDomain}`);
 }
 
-function cookiePathMatches(requestPath: string, cookiePath: string | undefined): boolean {
-  if (!cookiePath) return true;
+function cookiePathMatches(requestPath: string, cookiePath: unknown): boolean {
+  if (cookiePath === undefined) return true;
+  if (typeof cookiePath !== "string" || !cookiePath) return false;
   if (requestPath === cookiePath) return true;
   if (!requestPath.startsWith(cookiePath)) return false;
   return cookiePath.endsWith("/") || requestPath[cookiePath.length] === "/";

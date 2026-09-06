@@ -19,6 +19,7 @@ const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
 export const AI_STUDIO_WEB_BASE_URL = "https://alkalimakersuite-pa.clients6.google.com";
 
 export function isCanonicalAiStudioWebBaseUrl(value: unknown): boolean {
+  if (value !== undefined && typeof value !== "string") return false;
   const candidate = typeof value === "string" && value.trim() ? value.trim() : AI_STUDIO_WEB_BASE_URL;
   try {
     const url = new URL(candidate);
