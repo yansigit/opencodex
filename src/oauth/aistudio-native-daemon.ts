@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, rmdirSync, truncateSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -53,8 +53,11 @@ export interface AiStudioNativeLoginOptions {
 
 function cleanupNativeSessionOutput(path: string, directory: string): void {
   if (existsSync(path)) {
-    try { truncateSync(path, 0); } catch { /* unlink may still succeed */ }
-    try { unlinkSync(path); } catch { /* hardened residual is safer than a broad delete */ }
+    // Unlink by name instead of truncating first: if a same-user process swaps the
+    // path for a symlink after validation, unlink removes only the link and never
+    // follows it into an unrelated file. A failed unlink leaves a mode-protected
+    // credential inside the owner-only staging directory.
+    try { unlinkSync(path); } catch { /* hardened residual is safer than following a replacement */ }
   }
   try { rmdirSync(directory); } catch { /* retain only an owner-only staging directory */ }
 }
