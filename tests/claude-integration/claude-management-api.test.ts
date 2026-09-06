@@ -3,7 +3,7 @@ import { managementFetch as fetch } from "../helpers/management-auth";
 import { mkdtempSync, readdirSync, readFileSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, saveConfig } from "../../src/config";
+import { loadConfig, mutatePersistedConfig, saveConfig } from "../../src/config";
 import { startServer as startServerImpl } from "../../src/server";
 import { writeDesktop3pConfig, removeDesktop3pStandardPivot } from "../../src/claude/desktop-3p";
 import * as systemEnv from "../../src/server/system-env";
@@ -729,12 +729,10 @@ test("Claude Desktop apply installs the alias registry in the serving process (#
   const { resolveDesktop3pAlias, activeDesktop3pAlias } = await import("../../src/claude/desktop-3p");
   // A provider unique to this test: no prior test can have populated its
   // alias, so resolution proves THIS apply built the registry in-process.
-  const seeded = loadConfig();
-  seeded.providers = {
-    ...seeded.providers,
-    unique859: { adapter: "openai-chat", baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", allowPrivateNetwork: true, models: ["test-model-x"] },
-  };
-  saveConfig(seeded);
+  mutatePersistedConfig(fresh => {
+    fresh.providers.unique859 = { adapter: "openai-chat", baseUrl: "http://127.0.0.1:1/v1", apiKey: "k", allowPrivateNetwork: true, models: ["test-model-x"] };
+    return { changed: true, value: undefined };
+  });
   const server = startServer(0);
   try {
     const apply = await fetch(new URL("/api/claude-desktop/apply", server.url), {
@@ -870,8 +868,10 @@ test("Claude Desktop PUT retains but cannot move an unavailable route", async ()
       version: 1,
       assignments: {
         "missing/old-model": { family: "opus", alias: "claude-opus-4-8-20260101" },
+        "missing/haiku-model": { family: "haiku", alias: "claude-opus-4-8-20260102" },
+        "missing/haiku-model-2": { family: "haiku", alias: "claude-opus-4-8-20260103" },
       },
-      defaults: { opus: "missing/old-model", fable: null, sonnet: null, haiku: null },
+      defaults: { opus: "missing/old-model", fable: null, sonnet: null, haiku: "missing/haiku-model" },
     },
   };
   saveConfig(seeded);
@@ -888,9 +888,35 @@ test("Claude Desktop PUT retains but cannot move an unavailable route", async ()
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile: edited }),
     });
-    expect(put.status).toBe(400);
-    expect((await put.json() as { error: string }).error).toContain("사용할 수 없는 모델");
+    expect(put.status).toBe(409);
+    const conflict = await put.json() as {
+      error: { code: string; message: string; route: string };
+      current: { profile: typeof state.profile; models: Array<{ route: string; available: boolean }>; rendered: unknown; port: number };
+    };
+    expect(conflict.error).toEqual({
+      code: "catalog_changed",
+      message: "현재 사용할 수 없는 모델은 옮길 수 없습니다: missing/old-model",
+      route: "missing/old-model",
+    });
+    expect(conflict.current.models.find(model => model.route === "missing/old-model")?.available).toBe(false);
+    expect(conflict.current.profile).toEqual(state.profile);
+    expect(conflict.current.port).toBe(Number(new URL(server.url).port));
     expect(loadConfig().claudeCode?.desktopProfile?.assignments["missing/old-model"]?.family).toBe("opus");
+
+    const defaultEdit = structuredClone(state.profile);
+    defaultEdit.defaults.haiku = "missing/haiku-model-2";
+    const defaultPut = await fetch(new URL("/api/claude-desktop", server.url), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile: defaultEdit }),
+    });
+    expect(defaultPut.status).toBe(409);
+    const defaultConflict = await defaultPut.json() as {
+      error: { code: string; route: string };
+      current: { profile: typeof state.profile };
+    };
+    expect(defaultConflict.error).toMatchObject({ code: "catalog_changed", route: "missing/haiku-model-2" });
+    expect(defaultConflict.current.profile).toEqual(state.profile);
   } finally {
     await server.stop(true);
   }
