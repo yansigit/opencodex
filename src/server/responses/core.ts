@@ -2484,8 +2484,8 @@ async function applyFinalRouteRequestNormalization(args: {
   {
     const { applyEffortCap, effortCapAppliesTo, supportedLadderFor } = await import("../effort-policy");
     const surface = collabSurface(parsed);
-    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true)) {
-      const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route));
+    if (effortCapAppliesTo(surface, req.headers, config, parsed._compactionRequest === true, logCtx.agentKind)) {
+      const capped = applyEffortCap(parsed, req.headers, config, supportedLadderFor(route), logCtx.agentKind);
       if (capped) {
         logCtx.requestedEffort = `${capped.from}->${capped.to}`;
         if (isInjectionDebugEnabled()) {
@@ -2494,6 +2494,19 @@ async function applyFinalRouteRequestNormalization(args: {
       }
     } else if (isInjectionDebugEnabled() && (config.effortCap || config.subagentEffortCap)) {
       injectionDebugLog(`[opencodex] ${route.modelId}: effort cap skipped (surface=${surface ?? "none"}, v2 feature only)`);
+    }
+  }
+
+  {
+    const { sanitizeEffortForModel, supportedLadderFor } = await import("../effort-policy");
+    const previousEffort = parsed.options.reasoning;
+    const ladder = supportedLadderFor(route);
+    if (ladder !== undefined && ladder.length === 0 && previousEffort) {
+      sanitizeEffortForModel(parsed, ladder);
+      logCtx.requestedEffort = `${logCtx.requestedEffort ?? previousEffort}->none`;
+      if (isInjectionDebugEnabled()) {
+        injectionDebugLog(`[opencodex] ${route.modelId}: stripped reasoning effort for effortless model`);
+      }
     }
   }
 
