@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   getConfigPath,
   loadConfig,
+  mutatePersistedConfig,
   readConfigDiagnostics,
   saveConfig,
 } from "../../src/config";
@@ -48,11 +49,13 @@ function readDiskConfig(): OcxConfig {
 }
 
 function seedOverlay(): OcxConfig {
-  const config = loadConfig();
-  config.providers.acme!.modelCosts = { "model-x": OVERLAY };
-  saveConfig(config);
+  const outcome = mutatePersistedConfig(config => {
+    config.providers.acme!.modelCosts = { "model-x": OVERLAY };
+    return { changed: true, value: undefined };
+  });
+  expect(outcome.status).toBe("committed");
   expect(resolveMatchedPrice("acme", "model-x")?.source).toBe("user");
-  return config;
+  return loadConfig();
 }
 
 async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {

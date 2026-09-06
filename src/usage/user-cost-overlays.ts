@@ -132,12 +132,25 @@ export function setPreservedDiskOnlyProviders(
  * preservation row and removes the provider from every active live projection,
  * so a second owner cannot resurrect it on a later unrelated save.
  */
-function commitPersistedProviderDeletions(config: OcxConfig): void {
+function commitTaggedPersistedProviderDeletions(config: OcxConfig): void {
   const tagged = config as PreservationTaggedConfig;
   const deletions = tagged[PERSISTED_PROVIDER_DELETIONS];
   if (!deletions || deletions.length === 0) return;
 
+  commitPersistedProviderDeletions(deletions);
+  delete tagged[PERSISTED_PROVIDER_DELETIONS];
+}
+
+/**
+ * Converge every live preservation owner after an authoritative atomic
+ * provider mutation has committed. The mutation boundary starts from the
+ * latest validated disk snapshot, so a missing row there is an intentional
+ * deletion rather than a stale whole-config projection.
+ */
+export function commitPersistedProviderDeletions(deletions: Iterable<string>): void {
   const deleted = new Set(deletions);
+  if (deleted.size === 0) return;
+
   if (preservedDiskOnlyProviders) {
     const next = { ...preservedDiskOnlyProviders };
     for (const name of deleted) delete next[name];
@@ -150,7 +163,6 @@ function commitPersistedProviderDeletions(config: OcxConfig): void {
       if (state.config.providers) delete state.config.providers[name];
     }
   }
-  delete tagged[PERSISTED_PROVIDER_DELETIONS];
 }
 
 /**
@@ -241,7 +253,7 @@ export function refreshUserCostOverlays(config: OcxConfig): void {
   // Only persisted serialization views carry PERSISTED_PROVIDER_DELETIONS.
   // Committing here means changed writes update owner state only after the
   // atomic write succeeds, while byte-identical successful saves also converge.
-  commitPersistedProviderDeletions(config);
+  commitTaggedPersistedProviderDeletions(config);
 
   const rows: ExpectedPriceOverlay[] = [];
   const providers = config.providers;

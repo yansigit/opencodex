@@ -97,6 +97,7 @@ import { parseDesktopProfile } from "./claude/desktop-profile";
 import { isCodexReasoningEffort } from "./reasoning-effort";
 import {
   COST4_RATE_KEYS,
+  commitPersistedProviderDeletions,
   isValidCost4Rate,
   refreshPreservedProviderOwner,
   refreshUserCostOverlays,
@@ -3236,6 +3237,10 @@ function persistConfigUnlocked(config: OcxConfig, authority: PersistConfigAuthor
   // intentionally drops. Resolve that ownership before projecting JSON provenance.
   const provenanceProjection = projectConfigRebaseProvenance(config);
   const persisted = base;
+  const persistedProviderDeletions = authority === "mutation" && snapshot.diagnostics.source === "file"
+    ? Object.keys(snapshot.diagnostics.config.providers ?? {})
+      .filter(name => !Object.hasOwn(persisted.providers ?? {}, name))
+    : [];
   if (provenanceProjection.configRebaseProvenance === undefined) delete persisted.configRebaseProvenance;
   else persisted.configRebaseProvenance = provenanceProjection.configRebaseProvenance;
   const bytes = JSON.stringify(persisted, null, 2) + "\n";
@@ -3250,12 +3255,14 @@ function persistConfigUnlocked(config: OcxConfig, authority: PersistConfigAuthor
   // the same bytes (e.g. before a proxy notification), and Logs/Usage must
   // adopt the overlay without waiting for a changed save or restart.
   if (unchanged) {
+    commitPersistedProviderDeletions(persistedProviderDeletions);
     refreshUserCostOverlays(persisted);
     return false;
   }
   atomicWriteFile(configPath, bytes);
   // For changed saves, refresh only AFTER the write succeeded so a failed
   // write cannot leave estimates reflecting configuration never persisted.
+  commitPersistedProviderDeletions(persistedProviderDeletions);
   refreshUserCostOverlays(persisted);
   return true;
 }
