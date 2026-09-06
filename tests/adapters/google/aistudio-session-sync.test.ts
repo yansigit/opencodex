@@ -99,6 +99,27 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
       windowId: "w",
       cookies: [{ name: "SAPISID", value: "secret", domain: ".attacker.example" }],
     })).toThrow("cookie domain");
+    expect(() => validateAiStudioSessionData({
+      selectedProject: "p",
+      windowId: "w",
+      cookies: [{ name: "SAPISID", value: "secret", domain: "accounts.google.com", path: "/" }],
+    })).toThrow("valid SAPISID cookie required");
+  });
+
+  test("drops valid but out-of-scope Google cookies before persistence", () => {
+    const dest = join(testHome, "aistudio-session.json");
+    saveAiStudioSession({
+      selectedProject: "p",
+      windowId: "w",
+      cookies: [
+        { name: "SAPISID", value: "shared", domain: ".google.com", path: "/" },
+        { name: "AISTUDIO_ONLY", value: "private", domain: "aistudio.google.com", path: "/" },
+        { name: "ACCOUNTS_ONLY", value: "private", domain: ".accounts.google.com", path: "/" },
+        { name: "WRONG_PATH", value: "private", domain: ".google.com", path: "/accounts" },
+      ],
+    }, dest);
+
+    expect(loadAiStudioSession(dest)?.cookies.map(cookie => cookie.name)).toEqual(["SAPISID"]);
   });
 
   test("saves session bundle to ~/.opencodex/aistudio-session.json", () => {

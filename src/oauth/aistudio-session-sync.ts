@@ -23,6 +23,11 @@ const MAX_SESSION_COOKIES = 256;
 const COOKIE_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}$/;
 const COOKIE_VALUE_PATTERN = /^[\x21-\x2B\x2D-\x3A\x3C-\x5B\x5D-\x7E]{0,4096}$/;
 const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
+const AI_STUDIO_COOKIE_TARGET_HOST = "alkalimakersuite-pa.clients6.google.com";
+const AI_STUDIO_COOKIE_TARGET_PATHS = [
+  "/v1internal:generateContent",
+  "/v1internal:streamGenerateContent",
+] as const;
 
 function boundedMetadataString(value: unknown, field: string): string {
   if (value === undefined || value === null || value === "") return "";
@@ -79,7 +84,11 @@ export function validateAiStudioSessionData(value: unknown): AiStudioSessionData
   if (!Array.isArray(data.cookies) || data.cookies.length === 0 || data.cookies.length > MAX_SESSION_COOKIES) {
     throw new Error("Invalid AI Studio session bundle schema: bounded cookies array required");
   }
-  const cookies = data.cookies.map(normalizedCookie);
+  // Imported bundles may originate in a browser-wide Google cookie query. Keep
+  // only cookies the canonical AI Studio transport could actually send.
+  const cookies = data.cookies.map(normalizedCookie).filter(cookie =>
+    cookieDomainMatches(AI_STUDIO_COOKIE_TARGET_HOST, cookie.domain)
+    && AI_STUDIO_COOKIE_TARGET_PATHS.some(path => cookiePathMatches(path, cookie.path)));
   if (!cookies.some(cookie => cookie.name === "SAPISID" && cookie.value.length > 0)) {
     throw new Error("Invalid AI Studio session bundle schema: valid SAPISID cookie required");
   }

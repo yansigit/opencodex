@@ -69,6 +69,9 @@ describe("Google AI Studio Native Hardened WebKit Daemon", () => {
     expect(code).toContain("0o700");
     expect(code).toContain("JSONSerialization.data(withJSONObject:");
     expect(code).toContain("cMap.domain");
+    expect(code).toContain("isCookieScopedToAiStudioTarget");
+    expect(code).toContain("alkalimakersuite-pa.clients6.google.com");
+    expect(code).not.toContain('cookies.filter { $0.domain == "google.com"');
     expect(code).toContain("exit(2)");
     expect(code).toContain("exit(1)");
   });

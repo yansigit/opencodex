@@ -44,6 +44,22 @@ describe("Google AI Studio Chrome/Brave Session Exporter Extension", () => {
     expect(code).toContain("btnAutoSync");
     expect(code).toContain("btnCopyBundle");
     expect(code).toContain("x-opencodex-api-key");
+    expect(code).toContain("filterAiStudioCookies(allCookies)");
+  });
+
+  test("exporter excludes cookies scoped to other Google hosts and paths before clipboard serialization", () => {
+    const scopeCode = readFileSync(join(EXT_DIR, "cookie-scope.js"), "utf-8");
+    const filter = Function(`${scopeCode}; return filterAiStudioCookies;`)() as (cookies: unknown[]) => Array<{ name: string }>;
+    const cookies = [
+      { name: "SAPISID", value: "shared", domain: ".google.com", path: "/", hostOnly: false },
+      { name: "CLIENTS6", value: "exact", domain: "alkalimakersuite-pa.clients6.google.com", path: "/", hostOnly: true },
+      { name: "AISTUDIO", value: "private", domain: "aistudio.google.com", path: "/", hostOnly: true },
+      { name: "ACCOUNTS", value: "private", domain: ".accounts.google.com", path: "/", hostOnly: false },
+      { name: "WRONG_PATH", value: "private", domain: ".google.com", path: "/accounts", hostOnly: false },
+    ];
+
+    expect(filter(cookies).map(cookie => cookie.name)).toEqual(["SAPISID", "CLIENTS6"]);
+    expect(scopeCode).toContain("cookie.hostOnly === true");
   });
 
   test("popup.html contains port input, auto-sync, copy, and status elements without relay status", () => {
@@ -56,6 +72,7 @@ describe("Google AI Studio Chrome/Brave Session Exporter Extension", () => {
     expect(html).toContain('id="btnCopyBundle"');
     expect(html).toContain('id="exportStatus"');
     expect(html).toContain('id="proxyApiKey"');
+    expect(html).toContain('<script src="cookie-scope.js"></script>');
     expect(html).not.toContain('id="status"');
   });
 

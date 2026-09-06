@@ -32,6 +32,33 @@ private let allowedNavigationHosts = [
     "clients6.google.com",
     "alkalimakersuite-pa.clients6.google.com",
 ]
+private let aiStudioCookieHost = "alkalimakersuite-pa.clients6.google.com"
+private let aiStudioCookiePaths = [
+    "/v1internal:generateContent",
+    "/v1internal:streamGenerateContent",
+]
+
+func cookieDomainMatchesAiStudio(_ cookie: HTTPCookie) -> Bool {
+    let rawDomain = cookie.domain.lowercased()
+    let domain = rawDomain.hasPrefix(".") ? String(rawDomain.dropFirst()) : rawDomain
+    if rawDomain.hasPrefix(".") {
+        return aiStudioCookieHost == domain || aiStudioCookieHost.hasSuffix(".\(domain)")
+    }
+    return aiStudioCookieHost == domain
+}
+
+func cookiePathMatchesAiStudio(_ cookiePath: String, requestPath: String) -> Bool {
+    if requestPath == cookiePath { return true }
+    guard requestPath.hasPrefix(cookiePath) else { return false }
+    if cookiePath.hasSuffix("/") { return true }
+    let boundary = requestPath.index(requestPath.startIndex, offsetBy: cookiePath.count)
+    return boundary < requestPath.endIndex && requestPath[boundary] == "/"
+}
+
+func isCookieScopedToAiStudioTarget(_ cookie: HTTPCookie) -> Bool {
+    cookieDomainMatchesAiStudio(cookie)
+        && aiStudioCookiePaths.contains { cookiePathMatchesAiStudio(cookie.path, requestPath: $0) }
+}
 
 func isAllowedNavigationHost(_ host: String?) -> Bool {
     guard let host else { return false }
@@ -116,9 +143,9 @@ final class LoginAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let windowId = values["windowId"] as? String ?? ""
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
                 guard let self, !self.finished else { return }
-                let googleCookies = cookies.filter { $0.domain == "google.com" || $0.domain.hasSuffix(".google.com") }
-                guard googleCookies.contains(where: { $0.name == "SAPISID" }) else { return }
-                let cookieMaps: [[String: String]] = googleCookies.map { cMap in
+                let aiStudioCookies = cookies.filter(isCookieScopedToAiStudioTarget)
+                guard aiStudioCookies.contains(where: { $0.name == "SAPISID" }) else { return }
+                let cookieMaps: [[String: String]] = aiStudioCookies.map { cMap in
                     ["name": cMap.name, "value": cMap.value, "domain": cMap.domain, "path": cMap.path]
                 }
                 let session: [String: Any] = [
