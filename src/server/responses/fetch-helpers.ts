@@ -9,6 +9,9 @@ import type { OcxProviderConfig } from "../../types";
 import type { WsData } from "../ws-bridge";
 import { waitForProviderRequestSlot } from "../../providers/request-pacing";
 import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
+import { providerTlsFetch } from "../../lib/provider-tls-profile";
+import { testProviderFetch } from "../../lib/test-provider-fetch";
+import { runtimeProviderFetch } from "../../lib/provider-runtime-fetch";
 import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 
 export { withUpstreamHttpVersion };
@@ -65,6 +68,8 @@ export interface ProviderFetchOptions {
   modelId?: string;
   /** One pacing slot was acquired immediately before this fetch wrapper was created. */
   pacingSlotAcquired?: boolean;
+  /** Explicit test/integration executor; never read from serialized provider config. */
+  fetch?: typeof globalThis.fetch;
   /** Captured selected-account observer, attached before the native WS send. */
   onCodexWsQuota?: CodexWsQuotaObserver;
   /** Synchronous admission at actual credential dispatch, after pacing/backoff. */
@@ -78,17 +83,23 @@ export function providerFetch(
   runtime: BunRuntimeGateInput = currentBunRuntimeIdentity(),
   options: ProviderFetchOptions = {},
 ): ProviderFetch {
-  const base = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
+  const base = options.fetch
+    ?? testProviderFetch(provider)
+    ?? runtimeProviderFetch(provider, options.providerName)
+    ?? globalThis.fetch;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);
   };
+  const transport = options.providerName
+    ? providerTlsFetch(options.providerName, provider, base)
+    : base;
   const httpFetch = Object.assign(
     async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
       options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
       const dispatchInit = { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 };
       return options.dispatchOverride
-        ? options.dispatchOverride(input, dispatchInit, base)
-        : base(input, dispatchInit);
+        ? options.dispatchOverride(input, dispatchInit, transport)
+        : transport(input, dispatchInit);
     },
     { preconnect },
   ) as typeof globalThis.fetch;

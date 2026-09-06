@@ -64,6 +64,7 @@ import {
 import { recordOwnedConfigPath } from "./lib/config-ownership";
 import { assertNotRealHomeUnderTest } from "./lib/test-home-guard";
 import { providerDestinationConfigError } from "./lib/destination-policy";
+import { antigravityOAuthDestinationConfigError, providerTlsProfileConfigError } from "./lib/provider-tls-profile";
 import { redactSecretString } from "./lib/redact";
 import { openRouterRoutingConfigError } from "./providers/openrouter-routing";
 import { MODEL_ALIAS_PATTERN } from "./providers/default-aliases";
@@ -1391,6 +1392,14 @@ const configSchema = z.object({
         code: "custom",
         path: ["providers", redactSecretString(name), "maxWsFrameBytes"],
         message: maxWsFrameBytesError,
+      });
+    }
+    const tlsProfileError = providerTlsProfileConfigError(name, provider);
+    if (tlsProfileError) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["providers", redactSecretString(name), "tlsProfile"],
+        message: tlsProfileError,
       });
     }
     const headersError = providerHeadersConfigError((provider as { headers?: unknown }).headers);
@@ -2841,6 +2850,10 @@ export function validateConfigCandidate(value: unknown): { ok: true; config: Ocx
   const result = configSchema.safeParse(value);
   if (result.success) {
     const config = normalizeApiKeyIds(result.data as OcxConfig);
+    for (const [name, provider] of Object.entries(config.providers)) {
+      const antigravityError = antigravityOAuthDestinationConfigError(name, provider);
+      if (antigravityError) return { ok: false, error: `providers.${name}.baseUrl: ${antigravityError}` };
+    }
     return { ok: true, config };
   }
   return { ok: false, error: schemaDiagnosticsError(result.error) };
