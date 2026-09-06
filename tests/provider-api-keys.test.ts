@@ -4,6 +4,8 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { replacePersistedConfig, saveConfig } from "../src/config";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
 import {
   addProviderApiKey,
   apiKeyPoolEntryId,
@@ -21,6 +23,7 @@ import { removeTreeWithRetry } from "./helpers/remove-tree";
 let testDir = "";
 let previousHome: string | undefined;
 let isolatedCodexHome: IsolatedCodexHome | null = null;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 function baseConfig(): OcxConfig {
   return {
@@ -35,18 +38,26 @@ function baseConfig(): OcxConfig {
 
 beforeEach(() => {
   previousHome = process.env.OPENCODEX_HOME;
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   isolatedCodexHome = installIsolatedCodexHome("ocx-provider-keys-codex-");
   testDir = mkdtempSync(join(tmpdir(), "ocx-provider-keys-"));
   process.env.OPENCODEX_HOME = testDir;
   saveConfig(baseConfig());
 });
 
-afterEach(() => {
-  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = previousHome;
-  isolatedCodexHome?.restore();
-  isolatedCodexHome = null;
-  if (testDir) removeTreeWithRetry(testDir);
+afterEach(async () => {
+  try {
+    await flushConfigDirHardeningForTests();
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = previousHome;
+    isolatedCodexHome?.restore();
+    isolatedCodexHome = null;
+    if (testDir) removeTreeWithRetry(testDir);
+  }
 });
 
 describe("provider API key pool", () => {

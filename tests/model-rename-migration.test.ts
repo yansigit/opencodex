@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig, saveConfig } from "../src/config";
@@ -10,7 +10,10 @@ import {
 } from "../src/providers/model-rename-migration";
 import { runModelRenameStartupMigration } from "../src/providers/model-rename-startup";
 import { PROVIDER_REGISTRY } from "../src/providers/registry";
+import { flushConfigDirHardeningForTests } from "../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../src/lib/windows-secret-acl";
 import type { OcxConfig } from "../src/types";
+import { removeTreeWithRetry } from "./helpers/remove-tree";
 
 const INTL_BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1";
 
@@ -20,6 +23,7 @@ const RENAME: ModelRename = {
   to: "qwen3.8-max",
   reason: "test",
 };
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
 
 /** The exact shape a config saved before d40367c0c carries (issue #1610). */
 function staleConfig(): OcxConfig {
@@ -136,9 +140,11 @@ describe("registry model rename migration (#1610)", () => {
     }
   });
 
-  test("startup persistence replays model renames onto the latest disk config", () => {
+  test("startup persistence replays model renames onto the latest disk config", async () => {
     const previousHome = process.env.OPENCODEX_HOME;
     const home = mkdtempSync(join(tmpdir(), "ocx-model-rename-startup-"));
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
     try {
       process.env.OPENCODEX_HOME = home;
       const rich = staleConfig();
@@ -151,15 +157,23 @@ describe("registry model rename migration (#1610)", () => {
       expect(disk.providers["alibaba-token-plan-intl"]!.models).toContain("qwen3.8-max");
       expect(disk.providers.cursor).toEqual(rich.providers.cursor);
     } finally {
-      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = previousHome;
-      rmSync(home, { recursive: true, force: true });
+      try {
+        await flushConfigDirHardeningForTests();
+      } finally {
+        setIcaclsRunnerForTests(null);
+        setAsyncIcaclsRunnerForTests(null);
+        if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+        else process.env.OPENCODEX_HOME = previousHome;
+        removeTreeWithRetry(home);
+      }
     }
   });
 
-  test("startup persistence failure leaves live model-rename input unchanged", () => {
+  test("startup persistence failure leaves live model-rename input unchanged", async () => {
     const previousHome = process.env.OPENCODEX_HOME;
     const home = mkdtempSync(join(tmpdir(), "ocx-model-rename-unavailable-"));
+    setIcaclsRunnerForTests(() => ICACLS_OK);
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
     try {
       process.env.OPENCODEX_HOME = home;
       const live = staleConfig();
@@ -170,9 +184,15 @@ describe("registry model rename migration (#1610)", () => {
       expect(returned).toBe(live);
       expect(live).toEqual(before);
     } finally {
-      if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
-      else process.env.OPENCODEX_HOME = previousHome;
-      rmSync(home, { recursive: true, force: true });
+      try {
+        await flushConfigDirHardeningForTests();
+      } finally {
+        setIcaclsRunnerForTests(null);
+        setAsyncIcaclsRunnerForTests(null);
+        if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+        else process.env.OPENCODEX_HOME = previousHome;
+        removeTreeWithRetry(home);
+      }
     }
   });
 });
