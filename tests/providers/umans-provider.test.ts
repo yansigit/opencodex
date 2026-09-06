@@ -234,7 +234,7 @@ describe("Umans provider", () => {
       return new Response("{}", { status: 200 });
     }) as typeof fetch;
 
-    const valid = await validateApiKey("umans", KEY_LOGIN_PROVIDERS.umans, "sk-umans-valid");
+    const valid = await validateApiKey("umans", KEY_LOGIN_PROVIDERS.umans, "sk-umans-valid", { fetch: globalThis.fetch });
     const headers = new Headers(seenInit?.headers);
     const body = JSON.parse(String(seenInit?.body)) as Record<string, unknown>;
 
@@ -258,7 +258,7 @@ describe("Umans provider", () => {
     const valid = await validateApiKey("umans", {
       ...KEY_LOGIN_PROVIDERS.umans,
       apiKeyTransport: "bearer",
-    }, "sk-umans-valid");
+    }, "sk-umans-valid", { fetch: globalThis.fetch });
     const headers = new Headers(seenInit?.headers);
 
     expect(valid).toBe(true);
