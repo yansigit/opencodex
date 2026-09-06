@@ -1,11 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { repoPath } from "../helpers/repo-root";
 
-const workflow = readFileSync(resolve(
-  import.meta.dir,
-  "../../.github/workflows/fork-upstream-sync.yml",
-), "utf8");
+const workflow = readFileSync(repoPath(".github/workflows/fork-upstream-sync.yml"), "utf8");
 
 describe("fork upstream sync workflow contract", () => {
   test("polls on a schedule and supports manual dispatch", () => {

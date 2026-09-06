@@ -42,7 +42,7 @@ Claude, Antigravity, and Cursor become thin plugins. Do not merge
 - Create: `src/routing/account-pool/affinity.ts`
 - Create: `src/routing/account-pool/cooldown.ts`
 - Create: `src/routing/account-pool/resolve.ts`
-- Test: `tests/account-pool-kernel.test.ts`
+- Test: `tests/server/account-pool-kernel.test.ts`
 
 **Interfaces:** `AccountPoolPlugin`, `AccountPoolPickReason`,
 `ACCOUNT_POOL_MAX_FAILOVERS`, `resolvePoolAccount`, `rotatePoolAccountOn429`,
@@ -53,7 +53,7 @@ Claude, Antigravity, and Cursor become thin plugins. Do not merge
   only; second concurrent session key does not move; `all-cooled`; disabled plugin
   returns active/none; failover cap 3; **402/billing does not hop**; **rate_limited
   remaining ≤5s stick-wait does not hop**.
-- [ ] Run `bun test tests/account-pool-kernel.test.ts`; expected initial failures
+- [ ] Run `bun test tests/server/account-pool-kernel.test.ts`; expected initial failures
   are missing module/export failures.
 - [ ] Implement kernel modules. Reuse `pickRoundRobinAccount` / `selectPriorityTier`
   from `src/codex/pool-rotation.ts`. Affinity ignores Desktop shared-cohort
@@ -92,7 +92,7 @@ Claude, Antigravity, and Cursor become thin plugins. Do not merge
 - [ ] Delegate affinity / 429 / cooldown to kernel. Preserve: default-off, promote
   after token success only, `local-cli` refresh guard, no promote inside
   `rotateAnthropicAccountOn429`.
-- [ ] Run `bun test tests/anthropic-account-pool.test.ts`; expected green with no
+- [ ] Run `bun test tests/adapters/anthropic/anthropic-account-pool.test.ts`; expected green with no
   intentional behavior change.
 - [ ] Wire pre-stream and streaming 429 loops.
 - [ ] Run `bun run typecheck`.
@@ -103,8 +103,8 @@ Claude, Antigravity, and Cursor become thin plugins. Do not merge
 **Files:**
 - Modify: `src/oauth/antigravity-routing.ts`
 - Modify: `src/server/responses/core.ts` (~2626–2663 bind, ~4778–4823 carousel)
-- Test: `tests/antigravity-session-affinity.test.ts`
-- Extend: `tests/antigravity-routing.test.ts`
+- Test: `tests/adapters/google/antigravity-session-affinity.test.ts`
+- Extend: `tests/adapters/google/antigravity-routing.test.ts`
 
 - [ ] On 429 and cooldown skip at bind, pick next account for this session key; do
   not `setActiveAccount` when other session affinities exist.
@@ -119,8 +119,8 @@ Claude, Antigravity, and Cursor become thin plugins. Do not merge
 **Files:**
 - Modify: `src/server/responses/core.ts` (~2601–2670 Cursor opt-in)
 - Modify: `src/providers/cursor-pool.ts` (leave unwired; comment)
-- Test: `tests/cursor-account-pool.test.ts`
-- Extend: `tests/cursor-pool.test.ts`
+- Test: `tests/providers/cursor/cursor-account-pool.test.ts`
+- Extend: `tests/providers/cursor/cursor-pool.test.ts`
 
 - [ ] If `cursorAccountPool.enabled === true` and ≥2 OAuth accounts: sticky +
   429 hop (affinity key from `_clientThreadId` / headers, **not**
@@ -145,7 +145,7 @@ Claude, Antigravity, and Cursor become thin plugins. Do not merge
 ### Task 7: Typecheck + focused suite
 
 - [ ] `bun run typecheck`
-- [ ] `bun test tests/account-pool-kernel.test.ts tests/anthropic-account-pool.test.ts tests/antigravity-routing.test.ts tests/antigravity-session-affinity.test.ts tests/cursor-pool.test.ts tests/cursor-account-pool.test.ts tests/session-affinity.test.ts`
+- [ ] `bun test tests/server/account-pool-kernel.test.ts tests/adapters/anthropic/anthropic-account-pool.test.ts tests/adapters/google/antigravity-routing.test.ts tests/adapters/google/antigravity-session-affinity.test.ts tests/providers/cursor/cursor-pool.test.ts tests/providers/cursor/cursor-account-pool.test.ts tests/server/session-affinity.test.ts`
 
 ---
 

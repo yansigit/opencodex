@@ -41,6 +41,7 @@ export type AttemptRecoveryKind =
   | "transient-5xx"
   | "connection-reset"
   | "oauth-401"
+  | "key-401"
   | "key-429"
   | "rate-limit-429"
   | "anthropic-oauth-429"
@@ -292,6 +293,7 @@ const ATTEMPT_RECOVERY_KINDS = new Set<AttemptRecoveryKind>([
   "transient-5xx",
   "connection-reset",
   "oauth-401",
+  "key-401",
   "key-429",
   "rate-limit-429",
   "anthropic-oauth-429",
@@ -737,6 +739,15 @@ let managementUsageReadInflight: {
   startedAt: number;
   abort: AbortController;
 } | null = null;
+
+/** Test seam for the same-ledger shrink branch without mutating an open Windows file. */
+export function setManagementUsageReadOpenedSizeForTests(openedSize: number): void {
+  if (!Number.isSafeInteger(openedSize) || openedSize < 0) {
+    throw new RangeError("management usage opened size must be a non-negative safe integer");
+  }
+  if (!managementUsageReadInflight) throw new Error("no management usage read is in flight");
+  managementUsageReadInflight.openedSize = openedSize;
+}
 
 /**
  * Append-tolerant snapshot of the last management read.

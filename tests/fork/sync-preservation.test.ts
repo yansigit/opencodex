@@ -1,11 +1,26 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { validateRegistry, validateRegistryTransition, loadRegistry, registryHash, registryPath, resolvedRegistryPath } from "../../scripts/fork/sync/preservation";
+import { repoPath } from "../helpers/repo-root";
 
 describe("preservation registry", () => {
   test("validates correct registry", async () => {
     const mod = await import("../../docs/fork/PRESERVATION.json");
     const registry = (mod as unknown as { default: unknown }).default ?? mod;
     expect(() => validateRegistry(registry as never)).not.toThrow();
+  });
+
+  test("baseline required tests resolve to repository files", async () => {
+    const mod = await import("../../docs/fork/PRESERVATION.json");
+    const registry = ((mod as unknown as { default: unknown }).default ?? mod) as {
+      baseline: { features: Record<string, { requiredTests: string[] }> };
+    };
+    const missing = Object.entries(registry.baseline.features).flatMap(([feature, entry]) =>
+      entry.requiredTests
+        .filter(requiredTest => !existsSync(repoPath(requiredTest)))
+        .map(requiredTest => `${feature}: ${requiredTest}`));
+
+    expect(missing).toEqual([]);
   });
 
   test("registryPath is docs/fork/PRESERVATION.json", () => {
@@ -27,7 +42,7 @@ describe("preservation registry", () => {
           decisionSource: "maintainer decision",
           ownedBehavior: "TLS stays",
           integrationPaths: ["src/lib/server-tls.ts"],
-          requiredTests: ["tests/server-tls-config.test.ts"],
+          requiredTests: ["tests/server/server-tls-config.test.ts"],
         },
       } },
       releases: {
@@ -42,7 +57,7 @@ describe("preservation registry", () => {
               forkInvariant: "TLS stays",
               equivalentOrBetter: false,
               implementationEvidence: "none",
-              exactTests: ["tests/server-tls-config.test.ts"],
+              exactTests: ["tests/server/server-tls-config.test.ts"],
             },
           },
         },
@@ -124,7 +139,7 @@ describe("preservation registry", () => {
             decisionSource: "policy",
             ownedBehavior: "TLS",
             integrationPaths: ["src/lib/server-tls.ts"],
-            requiredTests: ["tests/server-tls-config.test.ts"],
+            requiredTests: ["tests/server/server-tls-config.test.ts"],
           },
         },
       },
@@ -140,7 +155,7 @@ describe("preservation registry", () => {
               forkInvariant: "keep",
               equivalentOrBetter: false,
               implementationEvidence: "evidence",
-              exactTests: ["tests/server-tls-config.test.ts"],
+              exactTests: ["tests/server/server-tls-config.test.ts"],
             },
           },
         },
@@ -162,7 +177,7 @@ describe("preservation registry", () => {
               forkInvariant: "keep",
               equivalentOrBetter: false,
               implementationEvidence: "evidence",
-              exactTests: ["tests/server-tls-config.test.ts"],
+              exactTests: ["tests/server/server-tls-config.test.ts"],
             },
           },
         },

@@ -13,7 +13,7 @@ Code 可以使用每一個已路由的供應商——包括 OAuth 登入、帳�
 每個請求只使用**作用中**帳號。
 
 **實驗性、opt-in** 的 Claude 帳號池（`anthropicAccountPool.enabled`）會在這些 OAuth 帳號之間加入
-sticky session affinity 與 429 冷卻故障轉移。僅對**新**工作階段，`anthropicAccountPool.strategy`
+sticky session affinity 與依用量的新工作階段選擇。省略此設定時，存在兩個以上可用帳號會預設啟用 429 容錯移轉，被限流的請求可能切換到另一個帳號。明確設為 `anthropicAccountPool.enabled: false` 會同時關閉此反應式容錯移轉和帳號池。僅對**新**工作階段，`anthropicAccountPool.strategy`
 會在合格帳號之間選擇：`quota`（預設）在用量高於 `autoSwitchThreshold` 時，依
 `anthropicAccountPool.quotaWindow` 所設定的視窗挑選已知用量最低者（`five-hour` 為預設，亦可選
 `weekly` 或 `max-utilization`）；
@@ -21,7 +21,7 @@ sticky session affinity 與 429 冷卻故障轉移。僅對**新**工作階段�
 或達到閾值，然後前進。它**預設關閉**、會在 GUI 顯示警告，而且尚未經過實戰驗證——Anthropic 可能
 限制看起來像自動輪換的帳號；輪換並不能保護你免受供應商執行機制的處置。
 
-啟用時的營運契約：
+容錯移轉啟用時的營運契約：
 
 - 上游 **429** 會讓該帳號冷卻（有 `Retry-After` 時使用它，否則用預設 backoff）、清除其 affinity，
   並可能在同一個請求內輪換到另一個合格帳號（有上限）。
@@ -53,6 +53,29 @@ ocx claude
 | `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT` | 啟用 `alwaysEnableEffort` 時設為 `1`（條件注入） |
 | `CLAUDE_CODE_MAX_CONTEXT_TOKENS` / `DISABLE_COMPACT` | 設定 `maxContextTokens` 時使用的舊版上下文覆蓋項（條件注入） |
 你自行匯出的變數始終優先。額外引數會直接透傳：`ocx claude -p "hello"`。
+
+### Claude 路由關閉時的原生回退
+
+以前當 Claude 路由被關閉時，`ocx claude` 會直接報錯結束。現在它會改為啟動原生 `claude`
+執行檔，因此在關閉路由的情況下該指令仍然可用：
+
+| 路由關閉的位置 | 行為 |
+| --- | --- |
+| 設定中的 `claudeCode.enabled: false` | 原生啟動，並提示路由已停用 |
+| 執行中的代理在 `GET /api/claude-code` 回傳 `enabled: false` | 原生啟動，並提示重新啟用後重啟服務 |
+| `claudeCode.enabled` 缺少或為 `true` | 與以往一致，經代理路由 |
+
+只有明確的 `false` 才會觸發回退，因此早於該欄位的舊代理仍會維持路由。代理不存在同樣不是觸發
+條件——只要路由是開啟的，`ocx claude` 仍會照常啟動代理。
+
+原生工作階段不應繼承代理狀態，因此回退只移除能夠**證明**屬於 OpenCodex 的值：僅當
+`ANTHROPIC_BASE_URL` 指向本代理自身的回送位址與設定連接埠、且配對的 admission token 確實由代理
+簽發時才移除；此外還會移除 `CLAUDE_CODE_*` 的探索與自動上下文開關，以及只能經由代理解析的模型
+槽位（路由別名與 `provider/model` 形式）。其餘都屬於你自己的設定並會保留——無關的
+`http://localhost:8080` 閘道器和你自己的 `sk-ant-` 憑證都會保留。
+
+若儲存的 `/model` 選擇器預設值是僅限代理的模型，當 `claudeCode.model` 可在原生環境使用時會
+回退到它，否則會警告你傳入 `--model <Anthropic 模型>`。明確的 `--model` 引數始終優先。
 
 ## 認證模式
 

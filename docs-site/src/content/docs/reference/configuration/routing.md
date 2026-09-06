@@ -18,7 +18,8 @@ Routing turns the model id sent by a client into one concrete provider and upstr
 opencodex resolves the requested model in this order:
 
 1. A configured `policy/<id>` or routing-profile alias, executing the policy evaluator and routing
-   the selected candidate. An unresolved `policy/<id>` falls through to the later rules.
+   the selected candidate. An unresolved `policy/<id>` fails locally instead of falling through
+   to the later rules.
 2. A configured `<account-selector>/<native-openai-model>` namespace, routed through exactly the
    mapped stored Codex account. An invalid or unavailable exact target fails closed.
 3. A canonical `combo/<id>` or configured combo alias. Canonical ids win before alias matching.
@@ -88,6 +89,8 @@ namespace, and cannot use reserved bare native families such as `gpt-*`, `o1-*`,
 | `targets` | `{ provider: string; model: string; weight?: number }[]` | required | Ordered concrete routes. `weight` is 1–10000 and defaults to `1`. |
 | `strategy?` | `"failover" \| "round-robin" \| "random" \| "least-used" \| "reset-window"` | `"failover"` | Selection strategy. Target order is failover priority; weights shape round-robin and random draws; least-used follows recorded successes; reset-window follows the soonest quota reset. |
 | `stickyLimit?` | `number` | `1` | Successful requests retained in one round-robin batch. Range 1–100. Applies only to round-robin. |
+| `cooldownMs?` | `number` | unset → upstream fallback (5 s for request-rate 429 codes `1302`/`1305`, otherwise 60 s) | Range 1–600000. When set, applies whenever no usable upstream `Retry-After` or Codex reset signal exists, including request-rate 429s; when unset, uses the upstream fallback. Upstream signals take precedence and all cooldowns are capped at 10 minutes. |
+| `waitForCooldownMs?` | `number` | `0` | Maximum wait for the earliest eligible cooling target on each selection attempt before returning `combo_unavailable`. Range 0–600000; an abort cancels the wait. |
 | `defaultEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max" \| "ultra" \| null` | unset | Applied only when the caller omits effort and the selected target advertises the requested rung. |
 | `reasoningEffortMode?` | `"strict" \| "adaptive"` | `"strict"` | `"strict"` intersects every known target effort ladder, so a target advertising no effort control empties the combo's picker. `"adaptive"` excludes those empty ladders from the published intersection. Picker metadata only; target selection and dispatch are unchanged. |
 | `imageInput?` | `"auto" \| "disabled"` | `"auto"` | `"auto"` publishes image only when every target supports images; `"disabled"` forces text-only (drops image from published modalities and rejects image-bearing requests before dispatch). |

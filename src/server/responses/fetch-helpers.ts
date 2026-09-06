@@ -12,6 +12,7 @@ import { withUpstreamHttpVersion } from "../../lib/upstream-http-version";
 import { providerTlsFetch } from "../../lib/provider-tls-profile";
 import { testProviderFetch } from "../../lib/test-provider-fetch";
 import { runtimeProviderFetch } from "../../lib/provider-runtime-fetch";
+import type { CodexWsQuotaObserver } from "./codex-ws-metadata";
 
 export { withUpstreamHttpVersion };
 
@@ -69,6 +70,10 @@ export interface ProviderFetchOptions {
   pacingSlotAcquired?: boolean;
   /** Explicit test/integration executor; never read from serialized provider config. */
   fetch?: typeof globalThis.fetch;
+  /** Captured selected-account observer, attached before the native WS send. */
+  onCodexWsQuota?: CodexWsQuotaObserver;
+  /** Synchronous admission at actual credential dispatch, after pacing/backoff. */
+  beforeDispatch?: (headers: Headers) => void;
 }
 
 export function providerFetch(
@@ -84,8 +89,10 @@ export function providerFetch(
     ? providerTlsFetch(options.providerName, provider, base)
     : base;
   const httpFetch = Object.assign(
-    (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) =>
-      transport(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 }),
+    async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      options.beforeDispatch?.(new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)));
+      return transport(input, { ...withUpstreamHttpVersion(input, init, provider), timeout: 0 });
+    },
     { preconnect },
   ) as typeof globalThis.fetch;
   // ChatGPT Codex backend: streaming turns ride the responses_websockets
@@ -105,7 +112,7 @@ export function providerFetch(
       // used, protocol pin included: a WS turn that falls back is serving the
       // request over HTTP, and dropping the provider's `upstreamHttpVersion`
       // there would silently negotiate a transport the operator ruled out.
-      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOpts);
+      return codexWsUpstreamFetch(input, init, httpFetch, runtime, wsOpts, options.onCodexWsQuota, options.beforeDispatch);
     }
     return httpFetch(input, init);
   };

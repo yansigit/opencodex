@@ -1,0 +1,265 @@
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import * as accountStoreModule from "../../src/codex/account-store";
+import {
+  getCodexAccountCredential,
+  saveCodexAccountCredential,
+} from "../../src/codex/account-store";
+import {
+  CodexAccountDeleteCleanupError,
+  CodexAccountDeleteRollbackError,
+  deleteCodexAccount,
+} from "../../src/codex/account-lifecycle";
+import {
+  isAccountNeedsReauth,
+  markAccountNeedsReauth,
+} from "../../src/codex/account-runtime-state";
+import {
+  getAccountQuota,
+  updateAccountQuota,
+} from "../../src/codex/quota";
+import { getConfigPath, loadConfig, saveConfig } from "../../src/config";
+import * as configModule from "../../src/config";
+import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../src/lib/windows-secret-acl";
+import type { OcxConfig } from "../../src/types";
+import { removeTreeWithRetry } from "../helpers/remove-tree";
+
+let testDir = "";
+const ACCOUNT_ID = "delete-atomicity";
+let previousHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
+function seededConfig(): OcxConfig {
+  const config = loadConfig();
+  config.codexAccounts = [{
+    id: ACCOUNT_ID,
+    email: "delete-atomicity@example.test",
+    isMain: false,
+  }];
+  config.codexAccountNamespaces = { stable: ACCOUNT_ID };
+  config.codexAccountPickerEnabled = true;
+  config.pausedCodexAccountIds = [ACCOUNT_ID];
+  config.codexAccountPriorities = { [ACCOUNT_ID]: 7 };
+  config.activeCodexAccountPinned = ACCOUNT_ID;
+  config.activeCodexAccountId = ACCOUNT_ID;
+  saveConfig(config);
+  saveCodexAccountCredential(ACCOUNT_ID, {
+    accessToken: "delete-access",
+    refreshToken: "delete-refresh",
+    expiresAt: Date.now() + 60_000,
+    chatgptAccountId: "delete-chatgpt-id",
+  });
+  markAccountNeedsReauth(ACCOUNT_ID);
+  updateAccountQuota(ACCOUNT_ID, 42);
+  return config;
+}
+
+function installScratchHome(): void {
+  // These tests exercise account-delete ordering, not Windows ACL behavior. Stub BOTH runners
+  // so asynchronous hardening never spawns a real icacls.exe child that can hold the fixture open.
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+  testDir = mkdtempSync(join(tmpdir(), "ocx-codex-account-delete-atomicity-"));
+  process.env.OPENCODEX_HOME = testDir;
+}
+
+async function removeScratchHome(): Promise<void> {
+  // Settle queued ACL work before restoring env/removing the directory. Windows can hold the
+  // fixture open until a child exits, and a failed teardown otherwise poisons later tests.
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
+  if (testDir) removeTreeWithRetry(testDir);
+  testDir = "";
+}
+
+beforeEach(() => {
+  previousHome = process.env.OPENCODEX_HOME;
+  installScratchHome();
+});
+
+afterEach(async () => { await removeScratchHome(); });
+
+describe("Codex account delete persistence ordering", () => {
+  test("a config persistence failure leaves the account and destructive state intact", () => {
+    const config = seededConfig();
+    const before = structuredClone(config);
+    const saveSpy = spyOn(configModule, "saveConfigPreservingClaudeCode")
+      .mockImplementation(() => { throw new Error("forced config write failure"); });
+
+    try {
+      expect(() => deleteCodexAccount(config, ACCOUNT_ID)).toThrow("forced config write failure");
+
+      expect(config).toEqual(before);
+      expect(loadConfig().codexAccounts?.some(account => account.id === ACCOUNT_ID)).toBe(true);
+      expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
+      expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(true);
+      expect(getAccountQuota(ACCOUNT_ID)).not.toBeNull();
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
+
+  test("a failure before durable config replacement rethrows while disk remains unchanged", () => {
+    const config = seededConfig();
+    const before = structuredClone(config);
+    const beforeBytes = readFileSync(getConfigPath(), "utf8");
+    const saveSpy = spyOn(configModule, "saveConfigPreservingClaudeCode")
+      .mockImplementation(() => { throw new Error("forced pre-write failure"); });
+
+    try {
+      expect(() => deleteCodexAccount(config, ACCOUNT_ID)).toThrow("forced pre-write failure");
+      expect(config).toEqual(before);
+      expect(readFileSync(getConfigPath(), "utf8")).toBe(beforeBytes);
+      expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
+      expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(true);
+      expect(getAccountQuota(ACCOUNT_ID)).not.toBeNull();
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
+
+  test("a failure after durable config replacement leaves changed disk untouched", () => {
+    const config = seededConfig();
+    const before = structuredClone(config);
+    const beforeBytes = readFileSync(getConfigPath(), "utf8");
+    const realSave = configModule.saveConfigPreservingClaudeCode;
+    const saveSpy = spyOn(configModule, "saveConfigPreservingClaudeCode")
+      .mockImplementation(candidate => {
+        realSave(candidate);
+        throw new Error("forced post-write failure");
+      });
+
+    try {
+      expect(() => deleteCodexAccount(config, ACCOUNT_ID)).toThrow(CodexAccountDeleteRollbackError);
+
+      expect(config).toEqual(before);
+      expect(readFileSync(getConfigPath(), "utf8")).not.toBe(beforeBytes);
+      expect(loadConfig().codexAccounts?.some(account => account.id === ACCOUNT_ID)).toBe(false);
+      expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
+      expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(true);
+      expect(getAccountQuota(ACCOUNT_ID)).not.toBeNull();
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
+
+  test("a concurrent external edit remains byte-identical after uncertain failure", () => {
+    const config = seededConfig();
+    const before = structuredClone(config);
+    const realSave = configModule.saveConfigPreservingClaudeCode;
+    const saveSpy = spyOn(configModule, "saveConfigPreservingClaudeCode")
+      .mockImplementation(candidate => {
+        realSave(candidate);
+        const external = loadConfig();
+        external.port = 12345;
+        writeFileSync(getConfigPath(), JSON.stringify(external, null, 2) + "\n");
+        throw new Error("forced concurrent failure");
+      });
+
+    try {
+      expect(() => deleteCodexAccount(config, ACCOUNT_ID)).toThrow(CodexAccountDeleteRollbackError);
+      const persisted = loadConfig();
+      expect(persisted.port).toBe(12345);
+      expect(persisted.codexAccounts?.some(account => account.id === ACCOUNT_ID)).toBe(false);
+      expect(config).toEqual(before);
+      expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
+      expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(true);
+      expect(getAccountQuota(ACCOUNT_ID)).not.toBeNull();
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
+
+  test("a missing config after uncertain failure is not recreated", () => {
+    const config = seededConfig();
+    const before = structuredClone(config);
+    const realSave = configModule.saveConfigPreservingClaudeCode;
+    const saveSpy = spyOn(configModule, "saveConfigPreservingClaudeCode")
+      .mockImplementation(candidate => {
+        realSave(candidate);
+        unlinkSync(getConfigPath());
+        throw new Error("forced missing-file failure");
+      });
+
+    try {
+      expect(() => deleteCodexAccount(config, ACCOUNT_ID)).toThrow(CodexAccountDeleteRollbackError);
+      expect(existsSync(getConfigPath())).toBe(false);
+      expect(config).toEqual(before);
+      expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
+      expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(true);
+      expect(getAccountQuota(ACCOUNT_ID)).not.toBeNull();
+    } finally {
+      saveSpy.mockRestore();
+    }
+  });
+
+  test("the durable config deletion happens before credential and runtime cleanup", () => {
+    const config = seededConfig();
+    const realSave = configModule.saveConfigPreservingClaudeCode;
+    const saveSpy = spyOn(configModule, "saveConfigPreservingClaudeCode")
+      .mockImplementation(candidate => {
+        expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
+        expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(true);
+        expect(getAccountQuota(ACCOUNT_ID)).not.toBeNull();
+        realSave(candidate);
+      });
+
+    try {
+      expect(deleteCodexAccount(config, ACCOUNT_ID)).toBe(true);
+    } finally {
+      saveSpy.mockRestore();
+    }
+
+    const persisted = loadConfig();
+    expect(persisted.codexAccounts?.some(account => account.id === ACCOUNT_ID)).toBe(false);
+    expect(persisted.codexAccountNamespaces).toEqual({ stable: ACCOUNT_ID });
+    expect(config.codexAccounts?.some(account => account.id === ACCOUNT_ID)).toBe(false);
+    expect(config.pausedCodexAccountIds).toBeUndefined();
+    expect(config.codexAccountPriorities).toBeUndefined();
+    expect(config.activeCodexAccountPinned).toBeUndefined();
+    expect(config.activeCodexAccountId).toBeUndefined();
+    expect(getCodexAccountCredential(ACCOUNT_ID)).toBeNull();
+    expect(isAccountNeedsReauth(ACCOUNT_ID)).toBe(false);
+    expect(getAccountQuota(ACCOUNT_ID)).toBeNull();
+  });
+
+  test("a cleanup failure keeps the deletion durable and exposes only a fixed recovery error", () => {
+    const config = seededConfig();
+    const removeSpy = spyOn(accountStoreModule, "removeCodexAccountCredential")
+      .mockImplementation(() => {
+        throw new Error("private cleanup detail /private/codex-accounts.json Bearer secret-token");
+      });
+
+    try {
+      let thrown: unknown;
+      try {
+        deleteCodexAccount(config, ACCOUNT_ID);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(CodexAccountDeleteCleanupError);
+      expect(String((thrown as Error).message)).toBe(
+        "Account deletion was saved, but local credential cleanup did not complete. Retry removal.",
+      );
+      expect(String((thrown as Error).message)).not.toContain("private");
+      expect(String((thrown as Error).message)).not.toContain("secret-token");
+      expect(loadConfig().codexAccounts?.some(account => account.id === ACCOUNT_ID)).toBe(false);
+      expect(config.codexAccounts?.some(account => account.id === ACCOUNT_ID)).toBe(false);
+      expect(getCodexAccountCredential(ACCOUNT_ID)).not.toBeNull();
+    } finally {
+      removeSpy.mockRestore();
+    }
+
+    // The route is retry-safe even after the durable row is gone: a second delete can finish the
+    // tombstone/runtime cleanup without recreating the account or selector mapping.
+    expect(deleteCodexAccount(config, ACCOUNT_ID)).toBe(false);
+    expect(getCodexAccountCredential(ACCOUNT_ID)).toBeNull();
+    expect(loadConfig().codexAccountNamespaces).toEqual({ stable: ACCOUNT_ID });
+  });
+});

@@ -46,6 +46,7 @@ import {
   isDataPlaneAdmissionSecret,
   isProxyAdmissionSecret,
   type RequestPolicyView,
+  type DataPlaneAdmission,
 } from "./auth-cors";
 import type { AdmissionLease } from "../lib/admission";
 import { tryClaimNativeMainProfileForTurn } from "../codex/native-main-admission";
@@ -60,8 +61,67 @@ import {
   parseRequestEffortRowId,
   type ParsedEffortRowId,
 } from "./effort-row";
+import {
+  parseFastOnlyRowId,
+  parseSyntheticRowId,
+  type ParsedFastRowId,
+} from "./fast-row";
+import { supportedLadderFor } from "./effort-policy";
+import { NoEligiblePolicyCandidateError, UnknownRoutingPolicyError, routeModel } from "../router";
+import { POLICY_NAMESPACE, resolvePolicyProfileId } from "../routing/profile";
+import { evidenceFromBody } from "../routing/request-evidence";
 
 type Rec = Record<string, unknown>;
+
+function resolveClaudePolicySelector(
+  config: OcxConfig,
+  model: string,
+): { decodedModel: string; isPolicy: boolean } {
+  // Claude Code sends the readable aliases published by /v1/models, not necessarily the
+  // underlying route (`claude-ocx-policy--daily` -> `policy/daily`). Policy detection must
+  // use the same identity the Messages translator will route, while preserving an exact
+  // operator alias such as `claude-smart` when it has no Claude model-map entry.
+  const decodedModel = resolveInboundModel(model, config.claudeCode);
+  return {
+    decodedModel,
+    isPolicy: resolvePolicyProfileId(config, decodedModel) !== null
+      || decodedModel.startsWith(`${POLICY_NAMESPACE}/`),
+  };
+}
+
+function isLocalPolicyRoutingError(
+  status: number,
+  message: string,
+  logCtx: Pick<RequestLogContext, "requestedModel" | "routeDecision">,
+): boolean {
+  if (status !== 404) return false;
+  if (
+    logCtx.routeDecision?.routeKind === "policy"
+    && logCtx.routeDecision.selected.reason === "no-eligible-candidate"
+  ) {
+    return true;
+  }
+  return (
+    logCtx.requestedModel?.startsWith(`${POLICY_NAMESPACE}/`) === true
+    && message.startsWith("Unknown routing policy:")
+  );
+}
+
+/**
+ * Decode a Claude selector that may carry the fast marker.
+ *
+ * The exact form is tried first, so a real model whose alias genuinely ends in the marker
+ * keeps winning. Only then is the marker treated as synthetic and the bare base decoded:
+ * a Desktop 3P alias is a HASH registered WITHOUT the marker, so an exact lookup can never
+ * resolve a synthetic one.
+ */
+function decodeClaudeFastSelector(raw: string, cc?: OcxConfig["claudeCode"]): string {
+  const exact = resolveInboundModel(raw, cc);
+  if (exact !== raw || !raw.endsWith("--fast")) return exact;
+  const bare = raw.slice(0, -"--fast".length);
+  const decodedBase = resolveInboundModel(bare, cc);
+  return decodedBase === bare ? exact : `${decodedBase}--fast`;
+}
 
 function isRec(v: unknown): v is Rec {
   return !!v && typeof v === "object" && !Array.isArray(v);
@@ -179,7 +239,7 @@ export function promptCacheKeyForSession(sessionId: string | null): string | nul
 /** Idempotent, synchronous work for every effective Responses route resolution. */
 export function claudeFinalRouteHandler(
   parsed: { options: Record<string, unknown>; modelId: string; _rawBody?: unknown; _promptCacheKeyIsSharedCohort?: boolean },
-  route: { provider: { adapter: string; autoToolChoiceOnlyModels?: string[] }; providerName: string; modelId: string },
+  route: { provider: OcxConfig["providers"][string]; providerName: string; modelId: string },
   ctx: {
     sourceEnvelope: ClaudeSourceEnvelope;
     cacheKeySource: ClaudeCacheKeySource;
@@ -233,6 +293,12 @@ export function claudeFinalRouteHandler(
     } catch {
       // ignore estimation failures
     }
+  }
+  // Opus-shaped aliases can make every routed model look reasoning-capable to Claude
+  // clients. Strip a forced effort only when the final route explicitly has no ladder.
+  if (parsed.options.reasoning !== undefined) {
+    const ladder = supportedLadderFor({ provider: route.provider, modelId: route.modelId });
+    if (ladder !== undefined && ladder.length === 0) delete parsed.options.reasoning;
   }
   // Compatibility evaluation before network (enforce mode may reject)
   const mode = resolveClaudeCompatibilityMode(ctx.config.claudeCode);
@@ -733,7 +799,7 @@ export async function handleClaudeMessages(
   req: Request,
   config: OcxConfig,
   logCtx: RequestLogContext,
-  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease },
+  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission },
   requestPolicy: RequestPolicyView = config,
   benchmark?: ClaudeBenchmarkObserverOptions,
 ): Promise<Response> {
@@ -754,7 +820,7 @@ async function handleClaudeMessagesWithBudget(
   config: OcxConfig,
   logCtx: RequestLogContext,
   translatorBudget: TranslatorBudget,
-  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease },
+  logIds?: { requestId: string; start: number; turnAdmissionLease?: AdmissionLease; admission?: DataPlaneAdmission },
   requestPolicy: RequestPolicyView = config,
   benchmark?: ClaudeBenchmarkObserverOptions,
 ): Promise<Response> {
@@ -770,6 +836,7 @@ async function handleClaudeMessagesWithBudget(
   let cacheKeySource: ClaudeCacheKeySource = null;
   let effortOverride: string | null = null;
   let effortRow: ParsedEffortRowId | null = null;
+  let fastRow: ParsedFastRowId | null = null;
   let requestedModel = "";
   let sourceEnvelope: ClaudeSourceEnvelope | null = null;
   let headerSessionId: string | null = null;
@@ -803,11 +870,20 @@ async function handleClaudeMessagesWithBudget(
     }
     if (isRec(anthropicBody) && typeof anthropicBody.model === "string") {
       requestedModel = anthropicBody.model;
-      effortRow = parseRequestEffortRowId(requestedModel, config);
+      // Decode for Fast only. A Claude alias is `claude-ocx-<provider>--<model>`, so it
+      // already uses `--` as its own separator: stripping the marker off the RAW alias would
+      // turn `claude-ocx-p--foo--fast` into `claude-ocx-p--foo` and route a DIFFERENT model.
+      // Effort parsing keeps the raw selector, so its behaviour is untouched.
+      ({ fastRow, effortRow } = parseSyntheticRowId(
+        requestedModel,
+        config,
+        () => decodeClaudeFastSelector(requestedModel, config.claudeCode),
+      ));
       if (effortRow) {
         anthropicBody.model = effortRow.baseId;
         effortOverride = effortRow.effort;
       }
+      if (fastRow) anthropicBody.model = fastRow.baseId;
     }
     headerSessionId = claudeSessionIdFromRequest(req, anthropicBody);
     agentIds = claudeAgentIdsFromRequest(req);
@@ -842,7 +918,19 @@ async function handleClaudeMessagesWithBudget(
       );
       if (claudeConversationId) logCtx.conversationId = claudeConversationId;
     }
-    if (!effortRow && isRec(anthropicBody) && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model)) {
+    // A fast row blocks passthrough, unlike the chat case: this path forwards to Anthropic's
+    // own API, whose wire has no service_tier field and whose FastWire kind has an empty
+    // adapter set by design, so the tier would be silently dropped.
+    const policySelector = isRec(anthropicBody) && typeof anthropicBody.model === "string"
+      ? resolveClaudePolicySelector(config, anthropicBody.model)
+      : null;
+    if (
+      !effortRow
+      && !fastRow
+      && policySelector?.isPolicy !== true
+      && isRec(anthropicBody)
+      && wantsNativePassthrough(req, config, requestPolicy, anthropicBody.model)
+    ) {
       annotateClaudeInboundDecision(debugCaptureId, "anthropic", "native", featureCodesEarly);
       return await anthropicNativePassthrough(req, config, logCtx, logIds, anthropicBody, "/v1/messages");
     }
@@ -858,6 +946,10 @@ async function handleClaudeMessagesWithBudget(
     sourceEnvelope = captureClaudeSourceEnvelope(req, anthropicBody, translatorBudget);
     const translation = anthropicToResponsesTranslation(anthropicBody, config.claudeCode);
     internalBody = translation.body;
+    // The Anthropic translator builds its body from model/input/store/stream plus sampling
+    // fields only, so the caller intent is applied to the TRANSLATED body rather than the
+    // inbound one.
+    if (fastRow) internalBody.service_tier = "priority";
     translatorBudget.chargeRetained(new TextEncoder().encode(JSON.stringify(internalBody)).byteLength, { kind: "request_copies" });
     // Session header precedence feeds prompt_cache_key (header > metadata > system cohort).
     // When the x-claude-code-session-id header is present, it replaces the
@@ -960,6 +1052,9 @@ async function handleClaudeMessagesWithBudget(
     addFinalRequestLog(logIds.requestId, logIds.start, logCtx, status, meta);
   };
   const upstream = await handleResponses(internalReq, buildClaudeReplayConfig(config), logCtx, {
+    // Routing keeps Claude-only sidecar overrides; admission policy must follow the live owner.
+    codexAuthPolicy: config,
+    ...(logIds?.admission ? { admission: logIds.admission } : {}),
     ...(logIds?.turnAdmissionLease ? { turnAdmissionLease: logIds.turnAdmissionLease } : {}),
     abortSignal: req.signal,
     promptCacheKeyIsSharedCohort: cacheKeySource === "system",
@@ -1019,7 +1114,10 @@ async function handleClaudeMessagesWithBudget(
       && message === CODEX_MAIN_PROFILE_MAINTENANCE_MESSAGE;
     const transient = !nativeMainFence && isTransientUpstreamStatus(response.status);
     const outStatus = nativeMainFence ? 503 : transient ? 529 : response.status;
-    const out = new Response(JSON.stringify(anthropicErrorBody(outStatus, message)), {
+    const errorType = isLocalPolicyRoutingError(response.status, message, logCtx)
+      ? "invalid_request_error"
+      : undefined;
+    const out = new Response(JSON.stringify(anthropicErrorBody(outStatus, message, errorType)), {
       status: outStatus,
       headers: {
         "Content-Type": "application/json",
@@ -1232,6 +1330,30 @@ export async function handleClaudeCountTokens(
     model = stripOneMillionMarker(directives.route);
     raw.model = model;
   }
+  // Fast-only count requests carry a synthetic selector but never parsed an effort row.
+  // Normalize the identity before native passthrough or estimation; no tier is sent here.
+  const countFastRow = parseFastOnlyRowId(
+    config, () => decodeClaudeFastSelector(model, config.claudeCode),
+  );
+  if (countFastRow) {
+    model = countFastRow.baseId;
+    raw.model = model;
+  }
+  const policySelector = resolveClaudePolicySelector(config, model);
+  let resolvedPolicy = false;
+  if (policySelector.isPolicy) {
+    try {
+      const route = routeModel(config, policySelector.decodedModel, evidenceFromBody(raw));
+      model = route.modelId;
+      raw.model = model;
+      resolvedPolicy = true;
+    } catch (err) {
+      if (err instanceof UnknownRoutingPolicyError || err instanceof NoEligiblePolicyCandidateError) {
+        return anthropicErrorResponse(404, err.message, "invalid_request_error");
+      }
+      throw err;
+    }
+  }
   const ctHeaderSessionId = claudeSessionIdFromRequest(req, raw);
   const ctAgentIds = claudeAgentIdsFromRequest(req);
   const ctAnthropicBeta = req.headers.get("anthropic-beta") ?? undefined;
@@ -1242,7 +1364,7 @@ export async function handleClaudeCountTokens(
     ...(ctAgentIds.parentAgentId ? { parentAgentId: ctAgentIds.parentAgentId } : {}),
     ...(ctFeatureCodes.length > 0 ? { featureCodes: ctFeatureCodes } : {}),
   });
-  if (wantsNativePassthrough(req, config, requestPolicy, model)) {
+  if (!resolvedPolicy && wantsNativePassthrough(req, config, requestPolicy, model)) {
     return await anthropicNativePassthrough(req, config, { model, provider: "anthropic-native", surface: "claude" }, undefined, raw, "/v1/messages/count_tokens");
   }
   const inputTokens = estimateClaudeRequestTokens(raw, model);

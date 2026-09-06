@@ -148,18 +148,15 @@ export function hasFailoverAccountQuorum(providerName: string, now = Date.now())
 }
 
 /**
- * Whether generic rotation is active for this provider.
+ * Whether REACTIVE 429 rotation is active for this provider.
  *
- * Precedence, most specific first:
+ * An explicit provider setting wins over the global setting, and an explicit global setting
+ * wins when the provider has no override. Only when both are absent does the presence of two
+ * eligible stored accounts enable rotation by default.
  *
- *   1. `providers.<name>.oauthAccountFailover.enabled` — an operator may accept rotation on one
- *      provider and refuse it on another, because provider terms differ.
- *   2. `oauthAccountFailover.enabled` — the global switch. Anyone who already wrote `false` keeps
- *      strict single-account behaviour across this change.
- *   3. Presence: 2 or more eligible stored accounts (#2568d, owner decision).
- *
- * Only an explicit boolean overrides presence. A malformed value falls through instead of
- * throwing, because a typo in a knob must not take a provider out of service.
+ * This keeps a stored secondary credential from overriding an operator's explicit refusal:
+ * accounts may belong to different billing, retention, or policy domains, so retrying a request
+ * under another identity remains an authority decision even after upstream returns 429.
  */
 export function isGenericOAuthFailoverEnabled(
   config: OcxConfig,
@@ -172,6 +169,28 @@ export function isGenericOAuthFailoverEnabled(
   if (typeof perProvider === "boolean") return perProvider;
   const global = config.oauthAccountFailover?.enabled;
   if (typeof global === "boolean") return global;
+  return hasFailoverAccountQuorum(providerName, now);
+}
+
+/**
+ * Whether the pre-dispatch account PREFERENCE may run for this provider.
+ *
+ * Unlike reactive rotation, this moves a request that upstream has not refused, so it stays
+ * refusable: an explicit provider value wins over the global default, and a global `false`
+ * turns it off only when the provider has no override. A malformed value falls through rather
+ * than taking a provider out of service.
+ */
+function isProactivePreferenceEnabled(config: OcxConfig, providerName: string, now: number): boolean {
+  const provider = config.providers?.[providerName];
+  if (!provider || !isGenericFailoverProvider(providerName, provider)) return false;
+  const perProvider = provider.oauthAccountFailover?.enabled;
+  // Preserve the published narrow-over-broad precedence. A provider-specific true may
+  // opt this provider into proactive preference even when the global default is false;
+  // a provider-specific false refuses it even when the global setting is true.
+  if (typeof perProvider === "boolean") {
+    return perProvider && hasFailoverAccountQuorum(providerName, now);
+  }
+  if (config.oauthAccountFailover?.enabled === false) return false;
   return hasFailoverAccountQuorum(providerName, now);
 }
 
@@ -265,7 +284,9 @@ export function preferredInitialAccount(
   providerName: string,
   now = Date.now(),
 ): string | null {
-  if (!isGenericOAuthFailoverEnabled(config, providerName)) return null;
+  // The PROACTIVE predicate, not the reactive one: this steers a request upstream has not
+  // refused, so `oauthAccountFailover.enabled: false` must still be able to refuse it.
+  if (!isProactivePreferenceEnabled(config, providerName, now)) return null;
   // This runs on the initial resolution of EVERY request, and `loadAuthStore` has no
   // cache: each call chmods the config dir, chmods the secret, reads the whole file and
   // normalizes it (store.ts:136-151). So the store is consulted at most ONCE here, behind
