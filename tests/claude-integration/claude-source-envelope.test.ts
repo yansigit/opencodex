@@ -20,7 +20,7 @@ describe("Claude source envelope boundaries", () => {
 
   test("malformed tool results fail closed instead of becoming an unpaired output", () => {
     expect(() => anthropicToResponsesBody({
-      model: "m", messages: [{ role: "user", content: [{ type: "tool_result", tool_use_id: "missing", content: "secret-payload" }] }],
+      model: "m", messages: [{ role: "user", content: [{ type: "tool_result", content: "secret-payload" }] }],
     })).toThrow(/unknown|unpaired|tool/i);
   });
 });

@@ -190,7 +190,6 @@ function userMessageToItems(content: unknown, input: Rec[], elide: SkillElisionC
         if (typeof raw.tool_use_id !== "string" || raw.tool_use_id.length === 0) {
           throw new AnthropicRequestError("tool_result requires tool_use_id");
         }
-        if (!knownToolIds.has(raw.tool_use_id)) throw new AnthropicRequestError("tool_result references unknown tool_use");
         input.push({
           type: "function_call_output",
           call_id: raw.tool_use_id,
