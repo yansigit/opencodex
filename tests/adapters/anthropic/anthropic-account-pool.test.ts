@@ -169,26 +169,17 @@ describe("anthropic account pool", () => {
     expect(resolveAnthropicAccountForSession("restart-first", config).accountId).toBe(bId);
   });
 
-  test("pool-off 429 recovery commits the replacement and notifies before dispatch", async () => {
+  test("pool-off 429 recovery refuses the replacement without routing side effects", async () => {
     const { aId, bId } = await seedTwoAccounts();
     const config = cfg(false);
-    const expected = captureOAuthAccountSelection("anthropic");
-    const next = rotateAnthropicAccountOn429(config, aId, "30", "off-retry");
-    expect(next).toBe(bId);
-    const snapshot = await getAnthropicPoolAccessSnapshot(bId);
+    const before = captureOAuthAccountSelection("anthropic");
     let notifications = 0;
-    const unsubscribe = subscribeAccountSelections(event => {
-      if (event.provider === "anthropic") {
-        notifications++;
-        expect(captureOAuthAccountSelection("anthropic")?.accountId).toBe(bId);
-      }
-    });
+    const unsubscribe = subscribeAccountSelections(() => { notifications++; });
     try {
-      expect(await promoteAnthropicActiveAccount(bId, expected, {
-        config, sessionKey: "off-retry", expectedCredentialGeneration: snapshot.generation,
-      })).not.toBeNull();
-      expect(captureOAuthAccountSelection("anthropic")?.accountId).toBe(bId);
-      expect(notifications).toBe(1);
+      expect(rotateAnthropicAccountOn429(config, aId, "30", "off-retry")).toBeNull();
+      expect(captureOAuthAccountSelection("anthropic")).toEqual(before);
+      expect(captureOAuthAccountSelection("anthropic")?.accountId).not.toBe(bId);
+      expect(notifications).toBe(0);
       expect(anthropicSessionAffinitySizeForTests()).toBe(0);
     } finally { unsubscribe(); }
   });

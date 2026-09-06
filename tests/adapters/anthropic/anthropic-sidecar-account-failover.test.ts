@@ -1,8 +1,7 @@
 /**
  * The web-search sidecar is a rotation site of its own, and it reaches Anthropic through the
- * shared 429 hook rather than the main response loop. A pool that is switched off must still
- * recover there: `anthropicAccountPool.enabled: false` declines PROACTIVE routing, not the
- * reactive retry that runs only after upstream has already refused the request.
+ * shared 429 hook rather than the main response loop. With no pool setting, two usable accounts
+ * still enable the presence-based recovery default at this independent rotation site.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, expect, mock, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -113,7 +112,7 @@ afterAll(() => {
   mock.restore();
 });
 
-test("Anthropic web-search sidecar rotates on 429 when proactive pooling is disabled", async () => {
+test("Anthropic web-search sidecar rotates on 429 when the pool setting is absent", async () => {
   sidecarMode = true;
   for (let index = 0; index < 2; index += 1) {
     await saveCredential("anthropic", {
@@ -129,7 +128,6 @@ test("Anthropic web-search sidecar rotates on 429 when proactive pooling is disa
   const config = {
     port: 0,
     defaultProvider: "anthropic",
-    anthropicAccountPool: { enabled: false, strategy: "round-robin" },
     providers: {
       anthropic: {
         adapter: "test-anthropic-sidecar",

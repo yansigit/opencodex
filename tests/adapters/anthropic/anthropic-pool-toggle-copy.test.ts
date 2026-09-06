@@ -1,15 +1,12 @@
 /**
- * The Claude pool toggle must not claim ownership of 429 failover.
+ * The Claude pool toggle must state its 429 failover authority accurately.
  *
- * #3495 made reactive 429 rotation presence-activated and non-disableable, which left this
- * toggle describing behaviour it no longer controls: the off position said "Uses only the
- * active Claude account", so an operator would read a rate limit as terminal and could switch
- * the EXPERIMENTAL pool on to buy failover they already had. That is the opposite of what the
- * experimental warning directly beneath it is for.
+ * Presence enables reactive rotation by default only while the setting is absent. Once the
+ * operator explicitly turns the pool off, replay under another stored identity is off too.
  *
  * These assertions are deliberately about meaning rather than exact wording: a locale may
- * rephrase freely, but no locale may reintroduce a failover promise into the enabled strings,
- * and every locale must still say something in the disabled string. Copy drift in one of ten
+ * rephrase freely, but the enabled strings may stay focused on proactive behavior while every
+ * locale's disabled string must still state the actual off state. Copy drift in one of ten
  * files is exactly how the original inconsistency survived.
  */
 import { describe, expect, test } from "bun:test";
@@ -38,8 +35,8 @@ function valueOf(source: string, key: string): string {
 describe("Claude account pool toggle copy", () => {
   test("no locale promises 429 failover in the ENABLED descriptions", async () => {
     // "429" is the load-bearing token: every locale writes the status code as digits, including
-    // the CJK and Cyrillic ones, so this catches a reintroduced promise without needing to know
-    // the surrounding language. The flag buys sticky sessions and proactive selection only.
+    // the CJK and Cyrillic ones. The concise enabled copy remains focused on proactive behavior;
+    // the disabled copy below owns the cross-account replay statement.
     for (const path of LOCALE_PATHS) {
       const source = await Bun.file(path).text();
       expect(valueOf(source, "anthropicPool.enabledDesc"), path).not.toContain("429");
@@ -57,19 +54,16 @@ describe("Claude account pool toggle copy", () => {
     }
   });
 
-  test("English names the non-disableable failover explicitly", async () => {
-    // The source locale is the one a maintainer reads when deciding what the toggle means, so
-    // it carries the full statement: a 429 still moves, and that is not a setting.
+  test("English names the disabled failover explicitly", async () => {
     const source = await Bun.file("gui/src/i18n/en.ts").text();
     const disabled = valueOf(source, "anthropicPool.disabledDesc");
     expect(disabled).toContain("429");
-    expect(disabled).toContain("cannot be turned off");
+    expect(disabled).toContain("is off");
   });
 
   test("the experimental warning is untouched", async () => {
-    // What stays experimental is PROACTIVE multi-account routing -- the part Anthropic may
-    // restrict, and the part the flag still governs. Softening this warning while relaxing the
-    // failover gate would be the wrong trade.
+    // Proactive multi-account routing remains experimental. The authority correction does not
+    // change that warning.
     const source = await Bun.file("gui/src/i18n/en.ts").text();
     const warning = valueOf(source, "anthropicPool.experimentalWarning");
     expect(warning).toContain("Experimental and not battle-tested");

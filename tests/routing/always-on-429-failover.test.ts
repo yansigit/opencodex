@@ -7,8 +7,8 @@
  * logged in and a stock config got a hard 429 with the second account sitting idle.
  *
  * These tests pin the separation that resolves it: REACTIVE rotation (after upstream refused)
- * activates on presence and cannot be disabled, while PROACTIVE routing (affinity, quota-ranked
- * new-session selection, strategy, autoSwitchThreshold) stays behind the opt-in flag.
+ * defaults on from presence only while the flag is absent, while an explicit false remains an
+ * authority boundary and PROACTIVE routing stays behind the opt-in flag.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync } from "node:fs";
@@ -45,15 +45,18 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  clearAnthropicAccountPoolState();
-  clearPoolRotationState();
-  clearAccountQuotaCache("anthropic");
-  await flushConfigDirHardeningForTests();
-  setIcaclsRunnerForTests(null);
-  setAsyncIcaclsRunnerForTests(null);
-  if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
-  else process.env.OPENCODEX_HOME = originalHome;
-  removeTreeWithRetry(home);
+  try {
+    clearAnthropicAccountPoolState();
+    clearPoolRotationState();
+    clearAccountQuotaCache("anthropic");
+    await flushConfigDirHardeningForTests();
+  } finally {
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
+    if (originalHome === undefined) delete process.env.OPENCODEX_HOME;
+    else process.env.OPENCODEX_HOME = originalHome;
+    removeTreeWithRetry(home);
+  }
 });
 
 /** No `anthropicAccountPool` key at all: what a stock install that never opted in looks like. */
@@ -100,29 +103,28 @@ describe("Anthropic reactive 429 failover without the pool flag", () => {
     expect(getEligibleAnthropicAccounts()).toEqual([ids[1]!]);
   });
 
-  test("an explicit enabled:false does not strand the 429 either", async () => {
-    // The flag buys proactive routing. Refusing that is a real choice; refusing to retry a
-    // rate-limited request on an account the operator deliberately logged in is not.
+  test("an explicit enabled:false refuses reactive replay under another identity", async () => {
+    // A stored secondary account can belong to another billing, retention, or policy domain.
+    // The failed account must not be cooled when the operator refused cross-account recovery.
     const ids = await seedAccounts(2);
-    expect(rotateAnthropicAccountOn429(poolDisabled(), ids[0]!, null)).toBe(ids[1]);
+    expect(rotateAnthropicAccountOn429(poolDisabled(), ids[0]!, null)).toBeNull();
+    expect(getEligibleAnthropicAccounts()).toEqual(ids);
   });
 
-  test("a disabled pool does not apply its dormant proactive strategy to reactive recovery", async () => {
-    // The pool flag buys PROACTIVE routing: affinity, quota ranking, and the declared strategy.
-    // Leaving `strategy: "round-robin"` in a config whose pool is off is not an opt-in to
-    // round-robin -- it is dormant configuration. Reactive recovery must therefore fall back to
-    // the neutral quota picker rather than reactivating the strategy the operator switched off.
+  test("an absent enable flag does not apply a dormant proactive strategy to recovery", async () => {
+    // Presence still supplies the default when enabled is absent, but an unrelated retained
+    // strategy is not an opt-in to proactive round-robin selection.
     const ids = await seedAccounts(3);
     setCachedProviderAccountQuotaForTests("anthropic", ids[1]!, { fiveHourPercent: 90 });
     setCachedProviderAccountQuotaForTests("anthropic", ids[2]!, { fiveHourPercent: 10 });
-    const disabledRoundRobin = {
+    const unconfiguredRoundRobin = {
       ...poolAbsent(),
-      anthropicAccountPool: { enabled: false, strategy: "round-robin" },
+      anthropicAccountPool: { strategy: "round-robin" },
     } as OcxConfig;
 
     // Round-robin would hand back ids[1] (the next account in order); quota ordering picks the
     // account with the most headroom instead.
-    expect(rotateAnthropicAccountOn429(disabledRoundRobin, ids[0]!, null)).toBe(ids[2]);
+    expect(rotateAnthropicAccountOn429(unconfiguredRoundRobin, ids[0]!, null)).toBe(ids[2]);
   });
 
   test("a single account is still a strict no-op", async () => {
@@ -148,9 +150,9 @@ describe("Anthropic reactive 429 failover without the pool flag", () => {
 
 describe("proactive Anthropic routing stays opt-in", () => {
   test("with the pool off, selection still returns the active account and reports pool-disabled", async () => {
-    // The whole point of the split: reactive rotation turning on must not drag session affinity
-    // or quota-ranked selection on with it. An operator who never opted in still gets exactly
-    // one account per session -- they just stop getting a hard 429 when it is spent.
+    // Presence-defaulted reactive rotation must not drag session affinity or quota-ranked
+    // selection on with it. An operator who never configured the pool still gets exactly one
+    // account per healthy session.
     const ids = await seedAccounts(2);
     const selection = resolveAnthropicAccountForSession("session-1", poolAbsent());
     expect(selection.accountId).toBe(ids[0]!);
@@ -165,21 +167,12 @@ describe("proactive Anthropic routing stays opt-in", () => {
     );
     expect(picks.every(id => id === ids[0]!)).toBe(true);
   });
-  test("the rotator cannot be re-gated behind the pool flag", async () => {
-    // The original defect was ONE line at the top of rotateAnthropicAccountOn429:
-    //   if (!isAnthropicAccountPoolEnabled(config)) return null;
-    // Restoring it would strand every stock install again, and nothing else in this file would
-    // fail -- every behavioural test seeds two accounts, which satisfies the quorum either way,
-    // so they would keep passing while the feature was dead for the users who never opted in.
-    //
-    // Pin the shape instead: the flag may still appear in the rotator, but only alongside the
-    // presence check, never as a gate of its own.
+  test("the rotator distinguishes an explicit false from an absent flag", async () => {
     const source = await Bun.file("src/oauth/anthropic-routing.ts").text();
     const start = source.indexOf("export function rotateAnthropicAccountOn429");
     expect(start).toBeGreaterThan(-1);
     const body = source.slice(start, source.indexOf("\n}", start));
-    const gate = body.split("\n").find(line => line.includes("isAnthropicAccountPoolEnabled"));
-    expect(gate, "the rotator no longer references the pool flag at all").toBeDefined();
-    expect(gate, "the pool flag became a gate of its own again").toContain("hasAnthropicFailoverQuorum");
+    expect(body).toContain("if (configured === false) return null");
+    expect(body).toContain("configured !== true && !hasAnthropicFailoverQuorum(now)");
   });
 });
