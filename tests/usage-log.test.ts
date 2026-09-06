@@ -333,17 +333,27 @@ describe("usage log", () => {
   });
 
   test("a replacement does not join an in-flight read for the previous file revision", async () => {
-    writeFileSync(
-      usageLogPath(),
-      `${Array.from({ length: 2_100 }, (_, index) => persistedLine(`old-${index}`)).join("\n")}\n`,
-    );
-    const oldRead = readUsageSnapshotForManagement();
-    await new Promise<void>(resolve => setTimeout(resolve, 0));
-    writeFileSync(usageLogPath(), `${persistedLine("replacement")}\n`);
-    const newRead = readUsageSnapshotForManagement();
-    await expect(oldRead).rejects.toThrow("management usage read superseded");
-    const newSnapshot = await newRead;
-    expect(newSnapshot.entries.map(entry => entry.requestId)).toEqual(["replacement"]);
+    // Keep the writer open before the cooperative reader starts. Opening the file
+    // again with writeFileSync while Windows still has the reader open across its
+    // timer yield can block inside Bun instead of exercising the revision logic.
+    const writer = openSync(usageLogPath(), "w");
+    try {
+      const oldContents = Buffer.from(
+        `${Array.from({ length: 2_100 }, (_, index) => persistedLine(`old-${index}`)).join("\n")}\n`,
+      );
+      writeSync(writer, oldContents, 0, oldContents.byteLength, 0);
+      const oldRead = readUsageSnapshotForManagement();
+      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      const replacement = Buffer.from(`${persistedLine("replacement")}\n`);
+      truncateSync(writer, 0);
+      writeSync(writer, replacement, 0, replacement.byteLength, 0);
+      const newRead = readUsageSnapshotForManagement();
+      await expect(oldRead).rejects.toThrow("management usage read superseded");
+      const newSnapshot = await newRead;
+      expect(newSnapshot.entries.map(entry => entry.requestId)).toEqual(["replacement"]);
+    } finally {
+      closeSync(writer);
+    }
   });
 
   test("persists conversationId for Logs session correlation", () => {
