@@ -60,13 +60,32 @@ La rotation garde les deux clés valides sous le même `apiKeyId` pendant dix mi
 
 ## Docker, retour arrière et dépannage
 
-Il n’existe pas d’image Docker officielle, mais le dépôt fournit un `Dockerfile` et un `compose.yaml` maintenus pour construire localement une image Bun épinglée par digest. Au premier démarrage normal, le conteneur crée un certificat TLS auto-signé dans `/home/bun/.opencodex/container-tls/cert.pem` et sa clé privée dans `/home/bun/.opencodex/container-tls/key.pem`. La clé reste accessible au seul propriétaire dans le volume `ocx-state`, et le point de terminaison de données utilise HTTPS dès ce démarrage.
+Lors d'un retour arrière, conservez les deux volumes et leurs points de montage. Les droits des volumes existants ne sont pas corrigés automatiquement. Consultez le [guide canonique](/guides/remote-hub/#docker-compose) pour les montages nommés hors Compose et les chemins d'état personnalisés.
 
-Avant ce premier démarrage, initialisez une seule fois le jeton de données via stdin. L’outil d’amorçage accepte au plus une ligne de 512 octets, ne l’affiche jamais, refuse de remplacer un jeton existant et l’enregistre dans le fichier privé canonique `service-api-token`.
+Deux volumes distincts conservent l'état : `ocx-state` pour
+`OPENCODEX_HOME=/home/bun/.opencodex` et `codex-state` pour
+`CODEX_HOME=/home/bun/.codex`. Leurs fichiers `auth.json` ont des formats incompatibles :
+ne fusionnez pas ces répertoires. Ils restent accessibles en écriture malgré la racine en lecture seule.
 
-Installez Git et Bun sur l’hôte. Avant chaque construction, générez le manifeste canonique depuis les sources et fichiers de définition du conteneur suivis par Git, sans les modifier entre la génération et la construction. Le JSON généré reste non suivi ; `.git` est exclu du contexte Docker. Le port hôte est lié à `127.0.0.1` par défaut. Pour un accès distant, utilisez explicitement `OPENCODEX_BIND_ADDRESS=<IP-LAN-ou-Tailscale> docker compose up -d` ; `0.0.0.0` expose toutes les interfaces. Protégez cet accès par un pare-feu et un frontal TLS/tailnet authentifié.
+Le catalogue n'est pas généré automatiquement. Avant de tester `/v1/catalog` avec authentification,
+créez ou importez un fichier valide dans `/home/bun/.codex/opencodex-catalog.json`.
+Un répertoire vide renvoie normalement 404 `catalog_not_found`. Une mise à jour conserve
+`ocx-state` et ajoute `codex-state`, sans déplacer les fichiers. Sauvegardez tout catalogue
+précédemment placé dans `.opencodex`, puis transférez seulement ce catalogue avec des permissions
+réservées au propriétaire ; ne remplacez pas un `auth.json` par celui de l'autre produit.
+Si vous redéfinissez `CODEX_HOME`, montez ce répertoire exact en écriture et placez le catalogue
+par défaut dans `${CODEX_HOME}/opencodex-catalog.json`. Si `model_catalog_json` désigne un autre
+fichier, son chemin résolu doit aussi être persistant. Conservez les variables et montages
+personnalisés jusqu'à la fin d'une migration explicite.
+`docker compose down` conserve les deux volumes ; `docker compose down --volumes` supprime
+`ocx-state` et `codex-state`, avec les identifiants, l'historique d'utilisation, la clé de données,
+l'état et le catalogue Codex. Ce n'est pas une commande de mise à jour ou de redémarrage.
 
-La construction authentifie par manifeste `Dockerfile`, `compose.yaml`, `.dockerignore`, chaque fichier suivi faisant autorité sous `docker/`, les sources sous `src/` et les fichiers de paquet obligatoires, dont `package.json`, `bun.lock` et `scripts/model-metadata.source.json`. Elle compare chaque SHA-256 au contexte puis à l’image ; les fichiers manquants ou divergents, tout fichier source ou fichier Docker faisant autorité supplémentaire et les liens symboliques sont refusés.
+Il n’existe pas d’image Docker officielle, mais le dépôt fournit un `Dockerfile` et un `compose.yaml` maintenus pour construire localement une image Bun épinglée par digest. Initialisez une seule fois la clé de données via stdin ; elle est enregistrée avec des permissions réservées au propriétaire dans le volume `ocx-state` et n’est jamais affichée.
+
+Installez Git et Bun sur l’hôte. Avant chaque construction, générez le manifeste canonique depuis les sources suivies par Git, sans modifier les sources entre la génération et la construction. Le JSON généré reste non suivi ; `.git` est exclu du contexte Docker. Le port hôte est lié à `127.0.0.1` par défaut. Pour un accès distant, utilisez explicitement `OPENCODEX_BIND_ADDRESS=<IP-LAN-ou-Tailscale> docker compose up -d` ; `0.0.0.0` expose toutes les interfaces. Protégez cet accès par un pare-feu et un frontal TLS/tailnet authentifié.
+
+La construction rejette les manifestes périmés en comparant chaque SHA-256 aux fichiers du contexte puis de l’image. Les fichiers manquants ou divergents, les sources supplémentaires et les liens symboliques sont refusés. `package.json`, `bun.lock` et le seul fichier autorisé de `scripts/`, `scripts/model-metadata.source.json`, sont obligatoires.
 
 ```bash
 git clone https://github.com/lidge-jun/opencodex.git
@@ -74,40 +93,6 @@ cd opencodex
 bun scripts/generate-compatibility-version.ts
 docker compose build
 openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-token.ts
-docker compose up -d
-```
-
-Copiez uniquement le certificat public pour vérifier le point de terminaison HTTPS local :
-
-```bash
-mkdir -p .tmp
-docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
-curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
-```
-
-`OPENCODEX_PORT` règle à la fois le port publié sur l’hôte et le `tls.publicOrigin` géré par Compose ; le listener interne reste sur `10100` :
-
-```bash
-OPENCODEX_PORT=10190 docker compose up -d
-curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10190/healthz
-```
-
-Un volume conservé datant d’avant TLS est migré automatiquement au démarrage : l’identité par volume est créée et l’origine HTTPS reprend le port publié. Les chemins de certificat gérés par l’opérateur sont préservés. Le certificat généré ne couvre que `localhost` et `127.0.0.1`. Pour publier directement sous un nom distant, installez un certificat et une clé pour ce nom, puis fournissez son origine HTTPS exacte avec `OPENCODEX_PUBLIC_ORIGIN` et l’adresse de publication :
-
-```bash
-OPENCODEX_PUBLIC_ORIGIN=https://hub-name.tailnet-name.ts.net \
-OPENCODEX_BIND_ADDRESS=100.64.0.10 \
-docker compose up -d
-```
-
-Les sondes internes de santé et de disponibilité peuvent désactiver la vérification du certificat uniquement vers l’adresse fixe de loopback du conteneur, `https://127.0.0.1:10100`. Cette exception ne vaut jamais comme validation externe : l’acceptation du déploiement doit vérifier le nom d’hôte exact avec le certificat public copié ou la chaîne de confiance du système.
-
-Conservez ces variables lors des invocations Compose suivantes. Pour revenir à une ancienne image HTTP, retirez le réglage TLS pendant que l’image actuelle est encore disponible, puis démarrez l’ancienne image. Les fichiers d’identité peuvent rester dans le volume :
-
-```bash
-docker compose down
-docker compose run --rm hub bun run src/cli/index.ts config unset tls
-# sélectionner ou construire l’ancienne image, puis recréer le hub
 docker compose up -d
 ```
 

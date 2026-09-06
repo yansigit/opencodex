@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { isDeepStrictEqual } from "node:util";
 
 /**
  * Codex parses a catalog entry's `input_modalities` as a closed enum, and one out-of-enum
@@ -71,9 +70,11 @@ function readDefaultReasoningEffort(raw: unknown, efforts: string[] | undefined)
   return { value: raw };
 }
 import type { CatalogModel } from "../../codex/catalog";
-import { accountBoundNativeOpenAiSlugsBySelector, catalogModelSlug, configuredNativeAliasSlugs, disabledNativeSlugs, invalidateCodexModelsCache, nativeModelRows, NATIVE_OPENAI_MODELS, shouldIncludeAccountBoundNativeOpenAi, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
+import { accountBoundNativeOpenAiSlugsBySelector, catalogModelSlug, configuredNativeAliasSlugs, disabledNativeSlugs, invalidateCodexModelsCache, nativeModelRows, shouldIncludeAccountBoundNativeOpenAi, uniqueCatalogModelsForPublicList } from "../../codex/catalog";
 import { CatalogGatherBusyError } from "../../codex/catalog/provider-fetch";
 import { clearModelCache, getProviderLiveModelCount } from "../../codex/model-cache";
+import { NATIVE_OPENAI_MODELS } from "../../codex/catalog/native-models";
+
 import {
   DEFAULT_SUBAGENT_MODELS,
   codexAutoStartEnabled,
@@ -83,8 +84,8 @@ import {
   multiAgentGuidanceEnabled,
   providerBaseUrlConfigError,
   providerHeadersConfigError,
+  saveConfigPreservingClaudeCode,
 } from "../../config";
-import { isValidModelDiscoveryModelId } from "../../providers/model-discovery-limits";
 import {
   clearLoginState,
   getLoginStatus,
@@ -102,6 +103,7 @@ import { providerCodexAccountMode } from "../../providers/registry";
 import { encodedModelIdCollides, routedSlug, slugEquals } from "../../providers/slug-codec";
 import { knownModelIdsForProvider } from "../../router";
 import { effectiveModelAliases, MODEL_ALIAS_PATTERN } from "../../providers/default-aliases";
+import { isValidModelDiscoveryModelId } from "../../providers/model-discovery-limits";
 import { comboPublicModelId } from "../../combos/types";
 import { COMBO_NAMESPACE, comboDisabledModelSelectors, comboModelId, preservesPhysicalComboProvider } from "../../combos";
 import { clearProviderQuotaCache, fetchProviderQuotaReports } from "../../providers/quota";
@@ -150,7 +152,7 @@ import type {
 
 import { isPlainRecord, parseDebugLogQuery, tokPerSecondResult, unavailableCostReason, costResult, requestLogDto, stripRegistryOnlyStaticHeaders, fetchAllModels } from "./shared";
 import type { MetricUnavailableReason, TokPerSecondResult, CostEstimateReason, CostResult, MetricSource } from "./shared";
-import { mutateManagementConfig, saveManagementConfig, type ManagementContext } from "./context";
+import type { ManagementContext } from "./context";
 import { listManagementModelRows, loadExportModels } from "./model-rows";
 import { initialModelSelectionPending } from "../../providers/initial-model-selection";
 import { readManagementJsonBody, rethrowManagementBodyTooLarge } from "./body";
@@ -174,139 +176,24 @@ function summarizeExportedModels(client: ExportClientId, document: unknown): { m
   return EXPORT_CLIENTS[client].summarize(document);
 }
 
-type ModelMutationValue =
-  | { config: OcxConfig; alias?: string | null; aliases?: Record<string, string>; selected?: string[] }
-  | { error: string; code?: string; conflicts?: Array<{ alias: string; heldBy: string }>; status?: number };
-
-function providerDiscoveryFingerprint(provider: OcxProviderConfig): OcxProviderConfig {
-  return structuredClone(provider);
-}
-
-function adoptCommittedConfig(target: OcxConfig, source: OcxConfig): void {
-  for (const key of Object.keys(target)) delete (target as unknown as Record<string, unknown>)[key];
-  Object.assign(target, structuredClone(source));
-}
-
-function unavailableMutationResponse(reason: "missing" | "invalid" | "conflict", req: Request, config: OcxConfig): Response {
-  const message = reason === "conflict"
-    ? "config changed while applying this update; retry"
-    : `config is ${reason}`;
-  return jsonResponse({ error: message }, reason === "conflict" ? 409 : 500, req, config);
-}
-
-function applyModelVisibility(
-  config: OcxConfig,
-  scope: "models" | "provider",
-  provider: string,
-  enabled: boolean,
-  rawTargets: unknown[],
-): { ok: true; disabled: string[] } | { ok: false; error: string; status?: number; code?: string } {
-  const providerConfig = hasOwnProvider(config.providers, provider) ? config.providers[provider] : undefined;
-  if (initialModelSelectionPending(providerConfig)) {
-    return {
-      ok: false,
-      error: "Initial model discovery is pending. Refresh the model list and retry.",
-      status: 409,
-      code: "initial_model_selection_pending",
-    };
-  }
-  const isVirtualComboNamespace = provider === COMBO_NAMESPACE && !preservesPhysicalComboProvider(config);
-  if (!providerConfig && provider !== "openai" && !isVirtualComboNamespace) {
-    return { ok: false, error: "unknown model visibility provider" };
-  }
-  const accountNativeQualified = shouldIncludeAccountBoundNativeOpenAi(config)
-    ? [...accountBoundNativeOpenAiSlugsBySelector(config).entries()].flatMap(([selector, slugs]) =>
-      slugs.filter(slug => !nativeModelRows(config).some(row => row.slug === slug)).map(slug => `${selector}/${slug}`))
-    : [];
-  const supportedNative = new Set([
-    ...nativeModelRows(config).map(row => row.slug),
-    ...accountNativeQualified,
-    ...NATIVE_OPENAI_MODELS,
-  ]);
-  const targets: Array<{ id: string; native: boolean }> = [];
-  const seen = new Set<string>();
-  for (const value of rawTargets) {
-    if (!isPlainRecord(value) || typeof value.id !== "string" || (value.native !== undefined && typeof value.native !== "boolean")) {
-      return { ok: false, error: "invalid model visibility target" };
-    }
-    const id = value.id.trim();
-    const native = value.native === true;
-    if (!id || (provider === "openai") !== native || (native && !supportedNative.has(id))) {
-      return { ok: false, error: "invalid model visibility target" };
-    }
-    const key = `${native ? "native" : "routed"}:${id}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      targets.push({ id, native });
-    }
-  }
-  if (targets.length === 0) return { ok: false, error: "model visibility targets required" };
-
-  const knownComboSelectors = new Set(
-    Object.entries(config.combos ?? {}).flatMap(([id, combo]) => comboDisabledModelSelectors(id, combo)),
-  );
-  const targetComboSelectors = new Map<string, Set<string>>();
-  if (isVirtualComboNamespace) {
-    for (const target of targets) {
-      const combo = config.combos && Object.hasOwn(config.combos, target.id) ? config.combos[target.id] : undefined;
-      if (!combo) return { ok: false, error: "invalid model visibility target" };
-      targetComboSelectors.set(target.id, new Set(comboDisabledModelSelectors(target.id, combo)));
-    }
-  }
-  const matchesTarget = (stored: string, target: { id: string; native: boolean }) => target.native
-    ? stored === target.id || slugEquals(stored, "openai", target.id)
-    : isVirtualComboNamespace
-      ? targetComboSelectors.get(target.id)!.has(stored)
-      : slugEquals(stored, provider, target.id);
-
-  let disabled = [...new Set(config.disabledModels ?? [])];
-  if (enabled) {
-    if (scope === "provider") {
-      if (providerConfig && !isVirtualComboNamespace) delete providerConfig.selectedModels;
-      if (isVirtualComboNamespace) {
-        disabled = disabled.filter(stored => !knownComboSelectors.has(stored));
-      } else {
-        const nativeIds = provider === "openai" ? disabledNativeSlugs({ disabledModels: disabled }) : new Set<string>();
-        const accountNativeIds = provider === "openai" ? new Set(accountNativeQualified) : new Set<string>();
-        const nativeAliasSlugs = provider === "openai" ? configuredNativeAliasSlugs(config) : new Set<string>();
-        disabled = disabled.filter(stored => (
-          knownComboSelectors.has(stored)
-          || nativeAliasSlugs.has(stored)
-          || (!stored.startsWith(`${provider}/`) && !nativeIds.has(stored) && !accountNativeIds.has(stored))
-        ));
-      }
-    } else {
-      if (!isVirtualComboNamespace && providerConfig?.selectedModels && providerConfig.selectedModels.length > 0) {
-        const additions = targets.filter(target => !target.native).map(target => target.id);
-        providerConfig.selectedModels = [...new Set([...providerConfig.selectedModels, ...additions])];
-      }
-      disabled = disabled.filter(stored => !targets.some(target => matchesTarget(stored, target)));
-      const arrivals = config.modelDiscovery?.recentArrivals?.[provider];
-      if (arrivals) config.modelDiscovery!.recentArrivals![provider] = arrivals.filter(row => (
-        !targets.some(target => !target.native && target.id === row.id)
-      ));
-    }
-  } else {
-    for (const target of targets) {
-      const canonical = target.native
-        ? target.id
-        : isVirtualComboNamespace
-          ? comboModelId(target.id)
-          : routedSlug(provider, target.id);
-      if (!disabled.some(stored => matchesTarget(stored, target))) disabled.push(canonical);
-    }
-  }
-  config.disabledModels = disabled;
-  return { ok: true, disabled };
-}
-
 export async function handleModelRoutes(ctx: ManagementContext): Promise<Response | null> {
   const { req, url, config, deps, convergeCodexCatalog, syncClaudeAgentDefsBestEffort } = ctx;
   // A handler persists the exact config object passed in. Production defaults to
   // the real store; tests that pass an in-memory fixture inject a no-op/spy. Do not
   // bypass this seam with a dynamic config import — doing so replaced a user's
   // ~/.opencodex/config.json with the `existing-uuid` test fixture.
-  const persistConfig = (candidate: OcxConfig) => saveManagementConfig(deps, candidate);
+  const persistConfig = deps.saveConfigPreservingClaudeCode ?? saveConfigPreservingClaudeCode;
+  const convergeVisibleCatalogs = async () => {
+    const catalogRefresh = await convergeCodexCatalog();
+    const refresh = deps.refreshOwnedCatalogIntegrations
+      ?? (await import("../../integrations/catalog-refresh")).refreshOwnedCatalogIntegrations;
+    const clientIntegrations = await refresh({
+      config,
+      port: Number(url.port) || config.port,
+      models: () => loadExportModels(config),
+    });
+    return { catalogRefresh, clientIntegrations };
+  };
 
   if (url.pathname === "/api/model-discovery" && req.method === "GET") {
     const providers = Object.fromEntries(Object.entries(config.providers).map(([name, provider]) => [
@@ -332,25 +219,16 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     let body: { policy?: unknown; provider?: unknown };
     try { body = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     if (body.policy !== "on" && body.policy !== "off") return jsonResponse({ error: "policy must be on or off" }, 400);
-    const policy = body.policy;
     const provider = typeof body.provider === "string" && body.provider.trim() ? body.provider.trim() : null;
     let baselineBootstrapped = false;
     if (provider) {
       if (!hasOwnProvider(config.providers, provider)) return jsonResponse({ error: "unknown provider" }, 404);
-      const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-        const target = fresh.providers[provider];
-        if (!target) return { changed: false, value: { error: "unknown provider" } };
-        target.newModelPolicy = policy;
-        return { changed: true, value: { config: structuredClone(fresh) } };
-      });
-      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 404);
-      adoptCommittedConfig(config, outcome.value.config);
+      config.providers[provider].newModelPolicy = body.policy;
     } else {
       const wasAbsent = config.modelDiscovery?.newModelPolicy === undefined;
       config.modelDiscovery ??= {};
-      config.modelDiscovery.newModelPolicy = policy;
-      if (policy === "off" && wasAbsent) {
+      config.modelDiscovery.newModelPolicy = body.policy;
+      if (body.policy === "off" && wasAbsent) {
         const models = await fetchAllModels(config);
         const known = config.modelDiscovery.knownModels ??= {};
         const at = new Date().toISOString();
@@ -360,9 +238,9 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
         baselineBootstrapped = true;
       }
     }
-    if (!provider) persistConfig(config);
+    persistConfig(config);
     const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, policy, provider, ...(baselineBootstrapped ? { baselineBootstrapped } : {}), catalogRefresh });
+    return jsonResponse({ ok: true, policy: body.policy, provider, ...(baselineBootstrapped ? { baselineBootstrapped } : {}), catalogRefresh });
   }
 
   if (url.pathname === "/api/model-discovery/acknowledge" && req.method === "POST") {
@@ -414,25 +292,16 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     if (!isPlainRecord(raw) || (raw.alias !== null && typeof raw.alias !== "string")) return jsonResponse({ error: "alias must be a string or null" }, 400, req, config);
     const alias = typeof raw.alias === "string" ? raw.alias.trim() : null;
     if (alias && !isValidProviderName(alias)) return jsonResponse({ error: "invalid provider alias" }, 400, req, config);
-    const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-      const provider = fresh.providers[name];
-      if (!provider) return { changed: false, value: { error: `provider '${name}' not found`, status: 404 } };
-      const lower = alias?.toLowerCase();
-      const collision = lower && Object.entries(fresh.providers).find(([other, p]) =>
-        other !== name && (other.toLowerCase() === lower || p.alias?.toLowerCase() === lower));
-      const comboCollision = lower && Object.entries(fresh.combos ?? {}).find(([, combo]) => comboPublicModelId("", combo).toLowerCase() === lower);
-      const accountCollision = lower && Object.keys(fresh.codexAccountNamespaces ?? {}).find(value => value.toLowerCase() === lower);
-      if (collision || comboCollision || accountCollision) {
-        return { changed: false, value: { error: `alias conflicts with '${collision?.[0] ?? comboCollision?.[0] ?? accountCollision}'`, status: 409 } };
-      }
-      if (alias) provider.alias = alias; else delete provider.alias;
-      return { changed: true, value: { config: structuredClone(fresh), alias } };
-    });
-    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 400, req, config);
-    adoptCommittedConfig(config, outcome.value.config);
+    const lower = alias?.toLowerCase();
+    const collision = lower && Object.entries(config.providers).find(([other, p]) =>
+      other !== name && (other.toLowerCase() === lower || p.alias?.toLowerCase() === lower));
+    const comboCollision = lower && Object.entries(config.combos ?? {}).find(([, combo]) => comboPublicModelId("", combo).toLowerCase() === lower);
+    const accountCollision = lower && Object.keys(config.codexAccountNamespaces ?? {}).find(value => value.toLowerCase() === lower);
+    if (collision || comboCollision || accountCollision) return jsonResponse({ error: `alias conflicts with '${collision?.[0] ?? comboCollision?.[0] ?? accountCollision}'` }, 409, req, config);
+    if (alias) provider.alias = alias; else delete provider.alias;
+    persistConfig(config);
     const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, provider: name, alias: outcome.value.alias ?? null, catalogRefresh });
+    return jsonResponse({ ok: true, provider: name, alias, catalogRefresh });
   }
 
   const modelAliasMatch = url.pathname.match(/^\/api\/providers\/([^/]+)\/model-aliases$/);
@@ -444,58 +313,36 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     let raw: unknown;
     try { raw = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     if (!isPlainRecord(raw) || (raw.set !== undefined && !isPlainRecord(raw.set)) || (raw.remove !== undefined && !Array.isArray(raw.remove))) return jsonResponse({ error: "invalid model alias update" }, 400, req, config);
-    const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-      const provider = fresh.providers[name];
-      if (!provider) return { changed: false, value: { error: `provider '${name}' not found` } };
-      const next = { ...(provider.modelAliases ?? {}) };
-      for (const id of (raw.remove ?? []) as unknown[]) if (typeof id === "string") delete next[id];
-      const conflicts: Array<{ alias: string; heldBy: string }> = [];
-      const known = knownModelIdsForProvider(name, provider, fresh);
-      for (const [id, value] of Object.entries((raw.set ?? {}) as Record<string, unknown>)) {
-        if (typeof value !== "string" || !MODEL_ALIAS_PATTERN.test(value)) return { changed: false, value: { error: `invalid model alias for '${id}'`, status: 400 } };
-        const lower = value.toLowerCase();
-        const heldBy = Object.entries(next).find(([other, alias]) => other !== id && alias.toLowerCase() === lower)?.[0]
-          ?? known.find(native => native.toLowerCase() === lower)
-          ?? Object.entries(fresh.combos ?? {}).find(([, combo]) => comboPublicModelId("", combo).toLowerCase() === lower)?.[0];
-        if (heldBy || /^(?:gpt-|o1-|o3-|o4-|codex-)/i.test(value)) conflicts.push({ alias: value, heldBy: heldBy ?? "native OpenAI family" });
-        else next[id] = value;
-      }
-      if (conflicts.length) return { changed: false, value: { error: "model alias collision", conflicts, status: 409 } };
-      provider.modelAliases = next;
-      return { changed: true, value: { config: structuredClone(fresh), aliases: next } };
-    });
-    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({
-      error: outcome.value.error,
-      ...(outcome.value.conflicts ? { conflicts: outcome.value.conflicts } : {}),
-    }, outcome.value.status ?? 404, req, config);
-    adoptCommittedConfig(config, outcome.value.config);
+    const next = { ...(provider.modelAliases ?? {}) };
+    for (const id of (raw.remove ?? []) as unknown[]) if (typeof id === "string") delete next[id];
+    const conflicts: Array<{ alias: string; heldBy: string }> = [];
+    const known = knownModelIdsForProvider(name, provider, config);
+    for (const [id, value] of Object.entries((raw.set ?? {}) as Record<string, unknown>)) {
+      if (typeof value !== "string" || !MODEL_ALIAS_PATTERN.test(value)) return jsonResponse({ error: `invalid model alias for '${id}'` }, 400, req, config);
+      const lower = value.toLowerCase();
+      const heldBy = Object.entries(next).find(([other, alias]) => other !== id && alias.toLowerCase() === lower)?.[0]
+        ?? known.find(native => native.toLowerCase() === lower)
+        ?? Object.entries(config.combos ?? {}).find(([, combo]) => comboPublicModelId("", combo).toLowerCase() === lower)?.[0];
+      if (heldBy || /^(?:gpt-|o1-|o3-|o4-|codex-)/i.test(value)) conflicts.push({ alias: value, heldBy: heldBy ?? "native OpenAI family" });
+      else next[id] = value;
+    }
+    if (conflicts.length) return jsonResponse({ error: "model alias collision", conflicts }, 409, req, config);
+    provider.modelAliases = next;
+    persistConfig(config);
     const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, aliases: outcome.value.aliases ?? {}, catalogRefresh });
+    return jsonResponse({ ok: true, aliases: next, catalogRefresh });
   }
 
   if (url.pathname === "/api/default-aliases" && req.method === "PUT") {
     let raw: unknown;
     try { raw = await readManagementJsonBody(req); } catch (error) { rethrowManagementBodyTooLarge(error); return jsonResponse({ error: "invalid JSON body" }, 400); }
     if (!isPlainRecord(raw) || typeof raw.enabled !== "boolean" || (raw.provider !== undefined && typeof raw.provider !== "string")) return jsonResponse({ error: "enabled must be boolean" }, 400, req, config);
-    const enabled = raw.enabled;
     if (typeof raw.provider === "string") {
-      const providerName = raw.provider;
-      const provider = config.providers[providerName];
-      if (!provider) return jsonResponse({ error: `provider '${providerName}' not found` }, 404, req, config);
-      const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-        const target = fresh.providers[providerName];
-        if (!target) return { changed: false, value: { error: `provider '${providerName}' not found` } };
-        target.defaultAliases = enabled;
-        return { changed: true, value: { config: structuredClone(fresh) } };
-      });
-      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, 404, req, config);
-      adoptCommittedConfig(config, outcome.value.config);
-    } else {
-      config.defaultModelAliases = enabled;
-      persistConfig(config);
-    }
+      const provider = config.providers[raw.provider];
+      if (!provider) return jsonResponse({ error: `provider '${raw.provider}' not found` }, 404, req, config);
+      provider.defaultAliases = raw.enabled;
+    } else config.defaultModelAliases = raw.enabled;
+    persistConfig(config);
     const catalogRefresh = await convergeCodexCatalog();
     return jsonResponse({ ok: true, catalogRefresh });
   }
@@ -540,13 +387,18 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     if (!isValidModelDiscoveryModelId(modelId)) {
       return jsonResponse({ error: "modelId must be a valid model id" }, 400, req, config);
     }
-    const validationError = displayName === null ? null : modelDisplayNamesConfigError({ [modelId]: displayName });
+    const validationError = displayName === null
+      ? null
+      : modelDisplayNamesConfigError({ [modelId]: displayName });
     if (validationError) return jsonResponse({ error: validationError }, 400, req, config);
 
     const provider = config.providers[name]!;
     const hadDisplayNames = Object.hasOwn(provider, "modelDisplayNames");
     const previousDisplayNames = provider.modelDisplayNames;
-    const nextDisplayNames = Object.assign(Object.create(null) as Record<string, string>, previousDisplayNames ?? {});
+    const nextDisplayNames = Object.assign(
+      Object.create(null) as Record<string, string>,
+      previousDisplayNames ?? {},
+    );
     if (displayName === null) delete nextDisplayNames[modelId];
     else nextDisplayNames[modelId] = displayName;
     const mergedValidationError = modelDisplayNamesConfigError(nextDisplayNames);
@@ -575,7 +427,10 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       }, 503, req, config);
     }
     const row = (await listManagementModelRows(config)).find(candidate => (
-      candidate.native !== true && candidate.custom !== true && candidate.provider === name && candidate.id === modelId
+      candidate.native !== true
+      && candidate.custom !== true
+      && candidate.provider === name
+      && candidate.id === modelId
     ));
     return jsonResponse({
       ok: true,
@@ -674,8 +529,7 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const disabled = Array.isArray(body.models) ? body.models.filter((m): m is string => typeof m === "string") : [];
     config.disabledModels = disabled;
     persistConfig(config);
-    const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, disabled, catalogRefresh });
+    return jsonResponse({ ok: true, disabled, ...await convergeVisibleCatalogs() });
   }
 
   // One user-facing visibility switch spans two persisted filters: a provider allowlist and the
@@ -691,32 +545,116 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     if (!scope || !provider || !isValidProviderName(provider) || typeof body.enabled !== "boolean" || !Array.isArray(body.targets)) {
       return jsonResponse({ error: "invalid model visibility request" }, 400);
     }
-    if (initialModelSelectionPending(config.providers[provider])) {
-      return jsonResponse({
-        error: "Initial model discovery is pending. Refresh the model list and retry.",
-        code: "initial_model_selection_pending",
-      }, 409);
+
+    const providerConfig = hasOwnProvider(config.providers, provider) ? config.providers[provider] : undefined;
+    if (initialModelSelectionPending(providerConfig)) {
+      return jsonResponse({ error: "Initial model discovery is pending. Refresh the model list and retry.", code: "initial_model_selection_pending" }, 409);
+    }
+    const isVirtualComboNamespace = provider === COMBO_NAMESPACE && !preservesPhysicalComboProvider(config);
+    if (!providerConfig && provider !== "openai" && !isVirtualComboNamespace) {
+      return jsonResponse({ error: "unknown model visibility provider" }, 400);
+    }
+    const accountNativeQualified = shouldIncludeAccountBoundNativeOpenAi(config)
+      ? [...accountBoundNativeOpenAiSlugsBySelector(config).entries()].flatMap(([selector, slugs]) =>
+        slugs.filter(slug => !nativeModelRows(config).some(row => row.slug === slug)).map(slug => `${selector}/${slug}`))
+      : [];
+    const supportedNative = new Set([
+      ...nativeModelRows(config).map(row => row.slug),
+      ...accountNativeQualified,
+      // A model suppressed by an unconfirmed entitlement roster is absent from
+      // nativeModelRows, so validating against those rows alone rejected a model this build
+      // knows perfectly well and left the operator with no way to clear its disable key
+      // (#2886). Accepting the target says "this build knows this model", not "this account
+      // may use it" — visibility only writes disabledModels and routing stays gated.
+      ...NATIVE_OPENAI_MODELS,
+    ]);
+    const targets: Array<{ id: string; native: boolean }> = [];
+    const seen = new Set<string>();
+    for (const value of body.targets) {
+      if (!isPlainRecord(value) || typeof value.id !== "string" || (value.native !== undefined && typeof value.native !== "boolean")) {
+        return jsonResponse({ error: "invalid model visibility target" }, 400);
+      }
+      const id = value.id.trim();
+      const native = value.native === true;
+      const configuredOpenAiCustom = provider === "openai" && !native && providerConfig
+        && (config.customModels ?? []).some(model => model.provider === provider && model.modelId === id);
+      if (!id || (native && (provider !== "openai" || !supportedNative.has(id)))
+        || (provider === "openai" && !native && !configuredOpenAiCustom)) {
+        return jsonResponse({ error: "invalid model visibility target" }, 400);
+      }
+      const key = `${native ? "native" : "routed"}:${id}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        targets.push({ id, native });
+      }
+    }
+    if (targets.length === 0) return jsonResponse({ error: "model visibility targets required" }, 400);
+
+    const knownComboSelectors = new Set(
+      Object.entries(config.combos ?? {}).flatMap(([id, combo]) => (
+        comboDisabledModelSelectors(id, combo)
+      )),
+    );
+    const targetComboSelectors = new Map<string, Set<string>>();
+    if (isVirtualComboNamespace) {
+      for (const target of targets) {
+        const combo = config.combos && Object.hasOwn(config.combos, target.id) ? config.combos[target.id] : undefined;
+        if (!combo) return jsonResponse({ error: "invalid model visibility target" }, 400);
+        targetComboSelectors.set(target.id, new Set(comboDisabledModelSelectors(target.id, combo)));
+      }
+    }
+    const matchesTarget = (stored: string, target: { id: string; native: boolean }) => target.native
+      ? stored === target.id
+      : isVirtualComboNamespace
+        ? targetComboSelectors.get(target.id)!.has(stored)
+        : slugEquals(stored, provider, target.id);
+
+    let disabled = [...new Set(config.disabledModels ?? [])];
+    if (body.enabled) {
+      if (scope === "provider") {
+        if (providerConfig && !isVirtualComboNamespace) delete providerConfig.selectedModels;
+        if (isVirtualComboNamespace) {
+          disabled = disabled.filter(stored => !knownComboSelectors.has(stored));
+        } else {
+          const nativeIds = provider === "openai"
+            ? disabledNativeSlugs({ disabledModels: disabled })
+            : new Set<string>();
+          const accountNativeIds = provider === "openai" ? new Set(accountNativeQualified) : new Set<string>();
+          const nativeAliasSlugs = provider === "openai"
+            ? configuredNativeAliasSlugs(config)
+            : new Set<string>();
+          disabled = disabled.filter(stored => (
+            knownComboSelectors.has(stored)
+            || nativeAliasSlugs.has(stored)
+            || (!stored.startsWith(`${provider}/`) && !nativeIds.has(stored) && !accountNativeIds.has(stored))
+          ));
+        }
+      } else {
+        if (!isVirtualComboNamespace && providerConfig?.selectedModels && providerConfig.selectedModels.length > 0) {
+          const additions = targets.filter(target => !target.native).map(target => target.id);
+          providerConfig.selectedModels = [...new Set([...providerConfig.selectedModels, ...additions])];
+        }
+        disabled = disabled.filter(stored => !targets.some(target => matchesTarget(stored, target)));
+        const arrivals = config.modelDiscovery?.recentArrivals?.[provider];
+        if (arrivals) config.modelDiscovery!.recentArrivals![provider] = arrivals.filter(row => (
+          !targets.some(target => !target.native && target.id === row.id)
+        ));
+      }
+    } else {
+      for (const target of targets) {
+        const canonical = target.native
+          ? target.id
+          : isVirtualComboNamespace
+            ? comboModelId(target.id)
+            : routedSlug(provider, target.id);
+        const alreadyDisabled = disabled.some(stored => matchesTarget(stored, target));
+        if (!alreadyDisabled) disabled.push(canonical);
+      }
     }
 
-    const outcome = mutateManagementConfig<
-      { config: OcxConfig; disabled: string[] } | { error: string; status?: number; code?: string }
-    >(deps, fresh => {
-      const applied = applyModelVisibility(fresh, scope, provider, body.enabled as boolean, body.targets as unknown[]);
-      if (!applied.ok) return { changed: false, value: { error: applied.error, status: applied.status, code: applied.code } };
-      return {
-        changed: true,
-        value: { config: structuredClone(fresh), disabled: applied.disabled },
-      };
-    });
-    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({
-      error: outcome.value.error,
-      ...(outcome.value.code ? { code: outcome.value.code } : {}),
-    }, outcome.value.status ?? 400);
-    adoptCommittedConfig(config, outcome.value.config);
-    const disabled = outcome.value.disabled;
-    const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, scope, provider, enabled: body.enabled, disabled, catalogRefresh });
+    config.disabledModels = disabled;
+    persistConfig(config);
+    return jsonResponse({ ok: true, scope, provider, enabled: body.enabled, disabled, ...await convergeVisibleCatalogs() });
   }
 
   if (url.pathname === "/api/custom-models" && req.method === "GET") {
@@ -922,57 +860,19 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       return jsonResponse({ error: "Initial model discovery is pending. Refresh the model list and retry.", code: "initial_model_selection_pending" }, 409);
     }
     if (mode === "all") {
-      const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-        const target = fresh.providers[provider];
-        if (!target) return { changed: false, value: { error: "unknown provider" } };
-        if (initialModelSelectionPending(target)) {
-          return { changed: false, value: {
-            error: "Initial model discovery is pending. Refresh the model list and retry.",
-            code: "initial_model_selection_pending",
-            status: 409,
-          } };
-        }
-        // Same effect as today's empty-list PUT: no allowlist, no marker to reconcile.
-        delete target.selectedModels;
-        delete target.modelPreset;
-        return { changed: true, value: { config: structuredClone(fresh) } };
-      });
-      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({
-        error: outcome.value.error,
-        ...(outcome.value.code ? { code: outcome.value.code } : {}),
-      }, outcome.value.status ?? 404);
-      adoptCommittedConfig(config, outcome.value.config);
-      return jsonResponse({ ok: true, provider, mode, selected: [], catalogRefresh: await convergeCodexCatalog() });
+      // Same effect as today's empty-list PUT: no allowlist, no marker to reconcile.
+      delete target.selectedModels;
+      delete target.modelPreset;
+      persistConfig(config);
+      return jsonResponse({ ok: true, provider, mode, selected: [], ...await convergeVisibleCatalogs() });
     }
     if (mode === "custom") {
-      const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-        const target = fresh.providers[provider];
-        if (!target) return { changed: false, value: { error: "unknown provider" } };
-        if (initialModelSelectionPending(target)) {
-          return { changed: false, value: {
-            error: "Initial model discovery is pending. Refresh the model list and retry.",
-            code: "initial_model_selection_pending",
-            status: 409,
-          } };
-        }
-        // Keep whatever is selected; only the marker changes, so a user can pin their edits
-        // without the proxy re-materializing over them.
-        target.modelPreset = { ...(target.modelPreset ?? {}), mode: "custom" };
-        return { changed: true, value: { config: structuredClone(fresh), selected: [...(target.selectedModels ?? [])] } };
-      });
-      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({
-        error: outcome.value.error,
-        ...(outcome.value.code ? { code: outcome.value.code } : {}),
-      }, outcome.value.status ?? 404);
-      adoptCommittedConfig(config, outcome.value.config);
-      return jsonResponse({ ok: true, provider, mode, selected: outcome.value.selected });
+      // Keep whatever is selected; only the marker changes, so a user can pin their edits
+      // without the proxy re-materializing over them.
+      target.modelPreset = { ...(target.modelPreset ?? {}), mode: "custom" };
+      persistConfig(config);
+      return jsonResponse({ ok: true, provider, mode, selected: [...(target.selectedModels ?? [])] });
     }
-    if (!hasModelPreset(provider)) {
-      return jsonResponse({ error: `no model preset is shipped for provider '${provider}'` }, 400);
-    }
-    const admittedProviderFingerprint = providerDiscoveryFingerprint(target);
     const models = await fetchAllModels(config);
     const catalogIds = models.filter(m => m.provider === provider).map(m => m.id);
     const presetIds = materializeModelPreset(provider, catalogIds);
@@ -981,57 +881,35 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
       // NEVER write an empty allowlist from a preset: empty means ALL, so it would silently
       // un-curate instead of curating. Keep the previous selection and record the fallback so
       // the next convergence can retry.
-      const appliedAt = new Date().toISOString();
-      const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-        const target = fresh.providers[provider];
-        if (!target) return { changed: false, value: { error: "unknown provider" } };
-        if (!isDeepStrictEqual(providerDiscoveryFingerprint(target), admittedProviderFingerprint)) {
-          return { changed: false, value: { error: "provider changed during model discovery; retry", status: 409 } };
-        }
-        target.modelPreset = {
-          mode: "all",
-          appliedVersion: preset.version,
-          appliedAt,
-          fallback: "preset-empty",
-        };
-        return { changed: true, value: { config: structuredClone(fresh), selected: [...(target.selectedModels ?? [])] } };
-      });
-      if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-      if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 404);
-      adoptCommittedConfig(config, outcome.value.config);
+      target.modelPreset = {
+        mode: "all",
+        appliedVersion: preset.version,
+        appliedAt: new Date().toISOString(),
+        fallback: "preset-empty",
+      };
+      persistConfig(config);
       return jsonResponse({
         ok: true,
         provider,
         mode: "all",
         fallback: "preset-empty",
-        selected: outcome.value.selected,
+        selected: [...(target.selectedModels ?? [])],
       });
     }
-    const appliedAt = new Date().toISOString();
-    const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-      const target = fresh.providers[provider];
-      if (!target) return { changed: false, value: { error: "unknown provider" } };
-      if (!isDeepStrictEqual(providerDiscoveryFingerprint(target), admittedProviderFingerprint)) {
-        return { changed: false, value: { error: "provider changed during model discovery; retry", status: 409 } };
-      }
-      target.selectedModels = presetIds;
-      target.modelPreset = {
-        mode: "preset",
-        appliedVersion: preset.version,
-        appliedAt,
-      };
-      return { changed: true, value: { config: structuredClone(fresh) } };
-    });
-    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({ error: outcome.value.error }, outcome.value.status ?? 404);
-    adoptCommittedConfig(config, outcome.value.config);
+    target.selectedModels = presetIds;
+    target.modelPreset = {
+      mode: "preset",
+      appliedVersion: preset.version,
+      appliedAt: new Date().toISOString(),
+    };
+    persistConfig(config);
     return jsonResponse({
       ok: true,
       provider,
       mode: "preset",
       appliedVersion: preset.version,
       selected: presetIds,
-      catalogRefresh: await convergeCodexCatalog(),
+      ...await convergeVisibleCatalogs(),
     });
   }
   if (url.pathname === "/api/selected-models" && req.method === "PUT") {
@@ -1047,33 +925,15 @@ export async function handleModelRoutes(ctx: ManagementContext): Promise<Respons
     const models = Array.isArray(body.models)
       ? [...new Set(body.models.filter((m): m is string => typeof m === "string"))]
       : [];
-    const outcome = mutateManagementConfig<ModelMutationValue>(deps, fresh => {
-      const target = fresh.providers[provider];
-      if (!target) return { changed: false, value: { error: "unknown provider" } };
-      if (initialModelSelectionPending(target)) {
-        return { changed: false, value: {
-          error: "Initial model discovery is pending. Refresh the model list and retry.",
-          code: "initial_model_selection_pending",
-          status: 409,
-        } };
-      }
-      // Empty list clears the allowlist (provider reverts to exposing all models).
-      if (models.length > 0) target.selectedModels = models;
-      else delete target.selectedModels;
-      // Divergence is detected at the WRITE path, not by diffing (#2465): a user edit while the
-      // provider is in preset mode makes the selection theirs, and the proxy must never
-      // re-materialize over it afterwards.
-      markModelPresetDiverged(target);
-      return { changed: true, value: { config: structuredClone(fresh) } };
-    });
-    if (outcome.status === "unavailable") return unavailableMutationResponse(outcome.reason, req, config);
-    if ("error" in outcome.value) return jsonResponse({
-      error: outcome.value.error,
-      ...(outcome.value.code ? { code: outcome.value.code } : {}),
-    }, outcome.value.status ?? 404);
-    adoptCommittedConfig(config, outcome.value.config);
-    const catalogRefresh = await convergeCodexCatalog();
-    return jsonResponse({ ok: true, provider, selected: models, catalogRefresh });
+    // Empty list clears the allowlist (provider reverts to exposing all models).
+    if (models.length > 0) config.providers[provider].selectedModels = models;
+    else delete config.providers[provider].selectedModels;
+    // Divergence is detected at the WRITE path, not by diffing (#2465): a user edit while the
+    // provider is in preset mode makes the selection theirs, and the proxy must never
+    // re-materialize over it afterwards.
+    markModelPresetDiverged(config.providers[provider]);
+    persistConfig(config);
+    return jsonResponse({ ok: true, provider, selected: models, ...await convergeVisibleCatalogs() });
   }
   return null;
 }

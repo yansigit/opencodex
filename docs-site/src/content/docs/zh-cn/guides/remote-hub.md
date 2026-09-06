@@ -60,11 +60,30 @@ ocx connect rotate --admin-token-stdin
 
 ## Docker、回滚与排障
 
-opencodex 不发布官方 Docker 镜像，但仓库提供维护的 `Dockerfile` 和 `compose.yaml`，用于在本地构建按 digest 固定的 Bun 镜像。首次正常启动会在 `ocx-state` 卷的 `/home/bun/.opencodex/container-tls/cert.pem` 和 `/home/bun/.opencodex/container-tls/key.pem` 生成并保存一套自签名 TLS 身份；私钥仅所有者可读。后续启动会验证并复用它，因此数据端点使用 HTTPS。首次正常启动前，通过 stdin 初始化一次数据密钥；引导程序最多接受一行 512 字节的内容，不会输出密钥，并以仅所有者可读的权限保存规范的 `service-api-token`。
+回滚时也要保留两个卷及其挂载路径。已有卷的所有权和权限不会自动修复。有关不使用 Compose 时的命名卷挂载及单独的状态路径，请参阅[英文基准指南](/guides/remote-hub/#docker-compose)。
+
+部署使用两个独立持久卷：`ocx-state` 对应
+`OPENCODEX_HOME=/home/bun/.opencodex`，`codex-state` 对应
+`CODEX_HOME=/home/bun/.codex`。两个产品的 `auth.json` 格式不同，不能合并到同一个
+主目录。即使根文件系统只读，这两个目录也可通过各自的卷写入。
+
+此设置不会自动生成模型目录。在检查认证后的 `/v1/catalog` 前，必须生成或导入有效的
+`/home/bun/.codex/opencodex-catalog.json`；空目录返回 `catalog_not_found` 404 属于正常行为。
+升级会保留现有 `ocx-state` 并新增 `codex-state`，但不会自动迁移文件。若之前的临时方案
+将模型目录放在 `.opencodex` 下，请先备份，再仅迁移模型目录文件，并保留仅所有者可访问的权限。
+不要用一个产品的 `auth.json` 覆盖另一个。自定义 `CODEX_HOME` 时，必须将该确切目录挂载为
+可写持久卷，并在 `${CODEX_HOME}/opencodex-catalog.json` 准备默认目录文件。
+若 `model_catalog_json` 指向其他文件，也必须持久保存其解析后的路径。
+在明确完成迁移前，请保留已有的环境变量与卷路径映射。
+`docker compose down` 保留两个卷；`docker compose down --volumes` 则会删除
+`ocx-state` 和 `codex-state`，包括配置、凭据、用量记录、数据密钥及 Codex 状态和模型目录。
+这是破坏性操作，不能当作升级或重启命令使用。
+
+opencodex 不发布官方 Docker 镜像，但仓库提供维护的 `Dockerfile` 和 `compose.yaml`，用于在本地构建按 digest 固定的 Bun 镜像。首次启动前，通过 stdin 初始化一次数据密钥；密钥不会输出，并以仅所有者可读的权限保存在 `ocx-state` 卷中。
 
 宿主机需要安装 Git 和 Bun。每次构建镜像前，都应从 Git 跟踪的源码生成规范兼容性清单，生成后到构建完成前不要修改源码。生成的 JSON 不加入 Git；`.git` 不进入 Docker 构建上下文。宿主机端口默认绑定 `127.0.0.1`。远程访问须显式使用 `OPENCODEX_BIND_ADDRESS=<LAN或Tailscale-IP> docker compose up -d`；`0.0.0.0` 会公开所有接口。请使用防火墙和经过身份验证的 TLS/tailnet 前端保护访问。
 
-构建会拒绝过期清单，并将每个 SHA-256 分别与构建上下文及复制后的文件进行核对。清单对 `Dockerfile`、`compose.yaml`、`.dockerignore`、所有 Git 跟踪的 Docker 权威文件（引导、配置和探针）、`src/`，以及必需的 `package.json`、`bun.lock` 和 `scripts/model-metadata.source.json` 进行完整性验证。缺失或不匹配的文件、清单之外的源码或 Docker 权威文件，以及符号链接都会导致失败；`scripts/` 中仅纳入上述模型元数据文件。
+构建会拒绝过期清单，并将每个 SHA-256 分别与构建上下文及复制后的文件进行核对。缺失或不匹配的文件、清单之外的源码和符号链接都会导致失败。必须包含 `package.json`、`bun.lock`，以及 `scripts/` 中唯一纳入的 `scripts/model-metadata.source.json`。
 
 ```bash
 git clone https://github.com/lidge-jun/opencodex.git
@@ -75,33 +94,7 @@ openssl rand -hex 32 | docker compose run --rm -T hub bun run docker/bootstrap-t
 docker compose up -d
 ```
 
-容器以非 root 的 `bun` 用户运行，根文件系统只读，并且只发布 `10100`。复制公有证书（绝不要复制私钥），将其用作本地 CA 来验证默认的回环发布：
-
-```bash
-mkdir -p .tmp
-docker compose cp hub:/home/bun/.opencodex/container-tls/cert.pem .tmp/opencodex-container-ca.pem
-curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10100/healthz
-```
-
-`OPENCODEX_PORT` 会同时控制宿主机发布端口和自动管理的 `tls.publicOrigin`，而容器内监听端口始终是 `10100`：
-
-```bash
-OPENCODEX_PORT=10190 docker compose up -d
-curl --cacert .tmp/opencodex-container-ca.pem --fail --silent https://localhost:10190/healthz
-```
-
-远程发布必须显式设置 `OPENCODEX_BIND_ADDRESS`。自动生成的证书只覆盖 `localhost` 和 `127.0.0.1`；直接远程发布前，请用与准确远程名称匹配的证书和私钥替换卷中的身份，并设置 `OPENCODEX_PUBLIC_ORIGIN=https://准确的主机名和端口`。该值必须是准确的 HTTPS origin，不能包含路径、查询参数或片段。无论哪种方式都应使用防火墙；更推荐保留默认回环发布，并由经过身份验证的 TLS/tailnet 前端代理。
-
-升级时，保留的旧版无 TLS 卷会在启动时迁移为每卷 TLS 身份，并根据已发布的宿主机端口写入 HTTPS origin；自定义证书路径会保留。若要回滚到旧版仅 HTTP 镜像，必须在当前镜像仍可用时先停止 hub 并仅移除 TLS 设置，然后再启动旧镜像；身份文件可以留在卷中：
-
-```bash
-docker compose down
-docker compose run --rm hub bun run src/cli/index.ts config unset tls
-# 选择或构建旧镜像，然后重新创建 hub
-docker compose up -d
-```
-
-不要发布 `10101`，也不要把密钥放入 `ARG`、`ENV`、`COPY`、Compose、镜像历史或 argv。仅限容器内固定的 `https://127.0.0.1:10100` 回环地址，内部 health/readiness 探针可以使用 `rejectUnauthorized:false` 跳过证书身份验证；这只证明本地监听器和路由正常，不能作为外部验收。外部验收必须使用复制出的公有证书或系统信任库，并通过证书对应的准确主机名验证 HTTPS。healthcheck 后仍需单独验证 readiness、已认证目录和真实请求。`docker compose down` 会保留卷；`docker compose down --volumes` 还会删除配置、凭据、TLS 身份和数据密钥。
+容器以非 root 的 `bun` 用户运行，根文件系统只读，并且只发布 `10100`。不要发布 `10101`，也不要把密钥放入 `ARG`、`ENV`、`COPY`、Compose、镜像历史或 argv。healthcheck 后仍需单独验证 readiness、认证目录和真实请求。`docker compose down` 会保留卷；`docker compose down --volumes` 还会删除配置、凭据和数据密钥。
 
 - hub 宕机：可以离线断开，但远程密钥仍待吊销。
 - 目录过期：仅在临时故障时保留已验证的 LKG；认证、架构、大小或协议错误不会回退到本地提供商。

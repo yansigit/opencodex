@@ -58,6 +58,28 @@ Use `--api-key` or an OAuth login for anything secret.
 
 ## Authentication
 
+### Diagnosing missing main-account quota
+
+`ocx account list openai --quota --refresh --json` includes a `quotaRefresh` object on
+the main-account row when that operation attempts a WHAM usage read. The existing
+`GET /api/codex-auth/accounts?refresh=1` response exposes the same diagnostic.
+
+Its `status` is `ok`, `not_reported` (no parseable quota in a successful response),
+`http_error`, `timeout`, `network_error`, `invalid_response`, or `internal_error`.
+Only `http_error` includes a numeric `httpStatus`. No raw response, error message,
+credential, or account identifier is included in this object. Cache-only reads,
+credential deferrals, and invalidated account snapshots omit it; older servers
+also omit it. Absence is not proof of success. A non-success HTTP status remains
+`http_error` even if its error body cannot be read; `timeout` and `network_error`
+describe failures before headers or while reading a successful response.
+
+A valid login does not guarantee that this separate usage request succeeds.
+These categories do not change authentication, account selection, or quota
+freshness rules, and do not turn unknown quota into zero usage. This diagnostic
+currently covers the native main account, not pool-account refreshes. When
+reporting missing quota, share the category and HTTP status rather than credential
+files or a raw network capture.
+
 ### `ocx login <provider>`
 
 Start the provider's registered login flow. OAuth providers open a browser and store auto-refreshed
@@ -74,6 +96,16 @@ account pool (Reauthenticate) or the headless `ocx account reauth` flow instead.
 ocx login xai
 ocx login anthropic
 ```
+
+OAuth reauthentication preserves operator settings such as model selections, pricing overrides,
+and account failover preferences. Login-owned transport/authentication fields and registry-owned
+catalog metadata are refreshed. A live-discovery provider keeps its selected default model; a
+static provider can replace a default that no longer exists in its refreshed catalog.
+
+For Antigravity, an upstream `401` can refresh the rejected account’s OAuth credential and
+retry the request once. The retry uses that credential’s Cloud Code Assist project. If refresh
+fails or no usable project is available, the request returns an authentication error; use the
+reauthentication flow above. A second `401` does not start another refresh/retry cycle.
 
 A proxy that is already running picks up the new credential without a restart: the CLI asks it to
 reload that one provider from disk, and the request carries no credential of its own. If the
@@ -299,12 +331,11 @@ instead (exit 0), matching the dashboard's quota bars.
 
 ### `ocx account auto-switch <provider> <on|off|status|threshold <0-100>> [--json]`
 
-Controls only the `openai` Codex account pool. `on` sets 80%, `off` sets 0%, `status` reads the current
-value, and `threshold <n>` accepts an integer from 0 through 100. Other providers and invalid values
-exit 1. `--json` returns:
+Controls the `openai` Codex pool threshold, or stores a threshold for a generic OAuth pool. `on` stores 80%, `off` stores 0%, and `threshold <n>` accepts 0–100. Generic pool thresholds are currently inert: saving one does not enable threshold-based switching, change the provider enablement override, or disable reactive 429 rotation. `status` and mutation output for generic pools use the confirmed server response. For generic pools, `poolEnabled` is the stored provider override (`null` means unspecified), not inherited effective state; `inert: true` means the threshold is not applied, and unknown capability never reports `enabled: true`. API-key providers, Anthropic and invalid values are rejected.
 
 ```text
-{ provider, autoSwitchThreshold: number, enabled: boolean }
+openai: { provider, autoSwitchThreshold: number, enabled: boolean }
+generic OAuth: { provider, autoSwitchThreshold: number | null, enabled: boolean, poolEnabled: boolean | null, inert: true | null }
 ```
 
 ### `ocx account priority <provider> <account-id|main> [<-100..100|first|earlier|normal|later|last|reset>] [--json]`

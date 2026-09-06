@@ -5,6 +5,7 @@ import { readBoundedResponseBody } from "../../lib/bounded-body";
 import { isApiAuthRequired, isProxyAdmissionSecret } from "../auth-cors";
 import { structurallyValidFernetTokens } from "./encrypted-payload";
 import {
+  cachedAgentTaskRecovery,
   discardCachedAgentTaskRecovery,
   resetAgentTaskRecoveryCache,
   resolveCachedAgentTaskRecovery,
@@ -40,6 +41,18 @@ export interface AgentTaskRecoveryOptions {
   cacheEntries?: number;
 }
 
+export type AgentTaskRecoveryFailureReason =
+  | "unsupported_envelope"
+  | "admission_denied"
+  // Includes cache capacity rejection; does not imply an upstream request was attempted.
+  | "recovery_unavailable"
+  | "caller_cancelled"
+  | "input_changed";
+
+export type AgentTaskRecoveryResult =
+  | { readonly recovered: true }
+  | { readonly recovered: false; readonly reason: AgentTaskRecoveryFailureReason };
+
 export function agentTaskRecoveryConfig(config: OcxConfig): AgentTaskRecoveryOptions | null {
   const raw = config.agentTaskRecovery;
   if (!raw || raw.enabled !== true) return null;
@@ -61,7 +74,7 @@ interface AgentEnvelope {
   itemIndex: number;
   encryptedIndex: number;
   headerText: string;
-  messageType: "NEW_TASK";
+  messageType: "NEW_TASK" | "MESSAGE";
   taskName: string;
   sender: string;
   ciphertext: string;
@@ -69,7 +82,7 @@ interface AgentEnvelope {
   recipient: string;
 }
 
-const ROUTING_HEADER = /(?:^|\n)Message Type\s*:\s*(NEW_TASK)\s*\nTask name\s*:\s*(\S+)\s*\nSender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
+const ROUTING_HEADER = /(?:^|\n)Message Type\s*:\s*(NEW_TASK|MESSAGE)\s*\nTask name\s*:\s*(\S+)\s*\nSender\s*:\s*(\S+)\s*\nPayload\s*:\s*(?:\n|$)/;
 
 function findEnvelope(input: unknown): AgentEnvelope | null {
   if (!Array.isArray(input)) return null;
@@ -90,7 +103,7 @@ function findEnvelope(input: unknown): AgentEnvelope | null {
   if (!Array.isArray(content)) return null;
 
   let headerText: string | null = null;
-  let messageType: "NEW_TASK" | null = null;
+  let messageType: "NEW_TASK" | "MESSAGE" | null = null;
   let taskName: string | null = null;
   let sender: string | null = null;
   let encryptedIndex = -1;
@@ -113,7 +126,7 @@ function findEnvelope(input: unknown): AgentEnvelope | null {
           || part.text.slice(match.index + match[0].length).trim().length > 0
         ) return null;
         headerText = match[0].startsWith("\n") ? match[0].slice(1) : match[0];
-        messageType = "NEW_TASK";
+        messageType = match[1] as "NEW_TASK" | "MESSAGE";
         taskName = match[2]!;
         sender = match[3]!;
       }
@@ -274,16 +287,20 @@ interface AdmittedRecovery {
   cacheKey: string;
 }
 
+type RecoveryAdmissionResult =
+  | { admitted: true; recovery: AdmittedRecovery }
+  | { admitted: false; reason: "unsupported_envelope" | "admission_denied" };
+
 function admittedRecovery(
   req: Request,
   input: unknown,
   config: OcxConfig,
   parentThreadId?: string | null,
-): AdmittedRecovery | null {
+): RecoveryAdmissionResult {
   const envelope = findEnvelope(input);
-  if (!envelope) return null;
+  if (!envelope) return { admitted: false, reason: "unsupported_envelope" };
   const admission = recoveryAdmission(req, config);
-  if (!admission) return null;
+  if (!admission) return { admitted: false, reason: "admission_denied" };
   const cacheKey = createHash("sha256")
     .update(admission.cacheScope)
     .update("\0")
@@ -297,7 +314,7 @@ function admittedRecovery(
     .update("\0")
     .update(envelope.ciphertext)
     .digest("hex");
-  return { envelope, admission, cacheKey };
+  return { admitted: true, recovery: { envelope, admission, cacheKey } };
 }
 
 function recoveryPayload(envelope: AgentEnvelope, model: string): string {
@@ -464,23 +481,43 @@ export async function recoverEncryptedAgentTask(
   config: OcxConfig,
   context: { parentThreadId?: string | null; abortSignal?: AbortSignal } = {},
 ): Promise<boolean> {
+  return (await recoverEncryptedAgentTaskWithResult(req, input, options, config, context)).recovered;
+}
+
+/** Returns only bounded, caller-local diagnostics; no native error or payload content. */
+export async function recoverEncryptedAgentTaskWithResult(
+  req: Request,
+  input: unknown,
+  options: AgentTaskRecoveryOptions,
+  config: OcxConfig,
+  context: { parentThreadId?: string | null; abortSignal?: AbortSignal } = {},
+): Promise<AgentTaskRecoveryResult> {
   // Admission is deliberately checked before cache access. A cache hit must not
   // turn this process into a plaintext oracle for an unauthenticated caller.
   const admitted = admittedRecovery(req, input, config, context.parentThreadId);
-  if (!admitted) return false;
-  const { admission, cacheKey, envelope } = admitted;
+  if (!admitted.admitted) return { recovered: false, reason: admitted.reason };
+  const { admission, cacheKey, envelope } = admitted.recovery;
   const assignment = await resolveCachedAgentTaskRecovery(
     cacheKey,
     options.cacheEntries ?? 200,
     signal => requestRecovery(admission, envelope, options, signal),
     context.abortSignal,
   );
-  if (!assignment) return false;
-  if (context.abortSignal?.aborted || !injectAssignment(input, envelope, assignment)) {
-    discardCachedAgentTaskRecovery(cacheKey);
-    return false;
+  if (!assignment) {
+    return {
+      recovered: false,
+      reason: context.abortSignal?.aborted ? "caller_cancelled" : "recovery_unavailable",
+    };
   }
-  return true;
+  if (context.abortSignal?.aborted) {
+    discardCachedAgentTaskRecovery(cacheKey);
+    return { recovered: false, reason: "caller_cancelled" };
+  }
+  if (!injectAssignment(input, envelope, assignment)) {
+    discardCachedAgentTaskRecovery(cacheKey);
+    return { recovered: false, reason: "input_changed" };
+  }
+  return { recovered: true };
 }
 
 export function discardEncryptedAgentTaskRecovery(
@@ -490,9 +527,28 @@ export function discardEncryptedAgentTaskRecovery(
   context: { parentThreadId?: string | null } = {},
 ): void {
   const admitted = admittedRecovery(req, input, config, context.parentThreadId);
-  if (admitted) discardCachedAgentTaskRecovery(admitted.cacheKey);
+  if (admitted.admitted) discardCachedAgentTaskRecovery(admitted.recovery.cacheKey);
 }
 
 export function resetAgentTaskRecoveryState(): void {
   resetAgentTaskRecoveryCache();
+}
+
+/** Codex replays the original encrypted agent messages after tool calls. Reuse only an admitted cache hit. */
+export function restoreCachedEncryptedAgentTasks(
+  req: Request, input: unknown, config: OcxConfig,
+  context: { parentThreadId?: string | null } = {},
+): number {
+  if (!Array.isArray(input)) return 0;
+  let restored = 0;
+  for (const item of input) {
+    if (!item || typeof item !== "object" || item.type !== "agent_message") continue;
+    const single = [item];
+    // Revalidates caller credentials and the exact supported agent envelope before cache access.
+    const admitted = admittedRecovery(req, single, config, context.parentThreadId);
+    if (!admitted.admitted) continue;
+    const assignment = cachedAgentTaskRecovery(admitted.recovery.cacheKey);
+    if (assignment && injectAssignment(single, admitted.recovery.envelope, assignment)) restored += 1;
+  }
+  return restored;
 }

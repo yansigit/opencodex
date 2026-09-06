@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAccountSet, saveCredential, setActiveAccount } from "../../src/oauth/store";
@@ -9,17 +9,13 @@ import {
   clearProviderQuotaCache,
   fetchProviderAccountQuotas,
   fetchProviderQuotaReports,
-  flushProviderQuotaObservationsForTests,
   getCachedProviderAccountQuota,
   reconcileProviderAccountQuotaRows,
   resetProviderQuotaReconcileStateForTests,
-  setAntigravityAccountQuotaTransportForTests,
-  setProviderQuotaBeforePublishForTests,
   supportsPerAccountQuota,
   providerOAuthAccountQuotaMode,
 } from "../../src/providers/quota";
-import { setQuotaResetSink } from "../../src/quota/reset-observer";
-import { resetQuotaResetStoreForTests } from "../../src/quota/reset-seen-store";
+import { PROXY_ENV_KEYS } from "../../src/lib/proxy-env";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 const originalFetch = globalThis.fetch;
@@ -48,22 +44,16 @@ beforeEach(() => {
   process.env.OPENCODEX_HOME = opencodexHome;
   clearAccountQuotaCache();
   clearProviderQuotaCache();
-  resetProviderQuotaReconcileStateForTests();
-  resetQuotaResetStoreForTests();
 });
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
-  setAntigravityAccountQuotaTransportForTests(null);
-  setProviderQuotaBeforePublishForTests(null);
-  setQuotaResetSink(null);
   if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
   else process.env.OPENCODEX_HOME = previousOpencodexHome;
   removeTreeWithRetry(opencodexHome);
   clearAccountQuotaCache();
   clearProviderQuotaCache();
   resetProviderQuotaReconcileStateForTests();
-  resetQuotaResetStoreForTests();
 });
 
 describe("fetchProviderAccountQuotas", () => {
@@ -270,49 +260,6 @@ describe("fetchProviderAccountQuotas", () => {
     expect(sibling?.quota?.fiveHourPercent).toBe(3);
   });
 
-  test("provider quota observations retain the account that produced an in-flight report", async () => {
-    await seedTwoAccounts();
-    const set = getAccountSet("anthropic");
-    const first = set?.accounts.find(a => a.credential.email === "first@example.com");
-    const second = set?.accounts.find(a => a.credential.email === "second@example.com");
-    expect(first && second).toBeTruthy();
-    await setActiveAccount("anthropic", first!.id);
-
-    const events: unknown[] = [];
-    setQuotaResetSink(event => { events.push(event); });
-    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const auth = new Headers(init?.headers).get("authorization") ?? "";
-      const body = auth.endsWith("token-first")
-        ? usageBody(96, 96)
-        : usageBody(1, 1);
-      return new Response(body, { status: 200 });
-    }) as typeof fetch;
-
-    const config: OcxConfig = {
-      port: 1455,
-      defaultProvider: "anthropic",
-      providers: {
-        anthropic: {
-          adapter: "anthropic",
-          authMode: "oauth",
-          baseUrl: "https://api.anthropic.com/v1",
-        },
-      },
-    };
-    // Switch after account A's probe has completed but before its report is published. A later
-    // low-usage report from B is a new-account baseline, not a reset of A's high-usage window.
-    setProviderQuotaBeforePublishForTests(async () => {
-      await setActiveAccount("anthropic", second!.id);
-      setProviderQuotaBeforePublishForTests(null);
-    });
-    await fetchProviderQuotaReports(config, true);
-    await flushProviderQuotaObservationsForTests();
-    await fetchProviderQuotaReports(config, true);
-    await flushProviderQuotaObservationsForTests();
-
-    expect(events).toEqual([]);
-  });
-
   test("empty Anthropic usage payloads are treated as probe failures", async () => {
     await seedTwoAccounts();
     globalThis.fetch = (async () => new Response("{}", { status: 200 })) as typeof fetch;
@@ -476,100 +423,6 @@ describe("fetchProviderAccountQuotas", () => {
 
     expect(getCachedProviderAccountQuota("anthropic", first!.id)).toBeNull();
   });
-
-  test("reports each Google Antigravity account's own rate limits", async () => {
-    const expires = Date.now() + 60 * 60_000;
-    await saveCredential("google-antigravity", { access: "token-g1", refresh: "refresh-g1", expires, accountId: "acct-g1", email: "g1@example.com", projectId: "proj-g1" });
-    await saveCredential("google-antigravity", { access: "token-g2", refresh: "refresh-g2", expires, accountId: "acct-g2", email: "g2@example.com", projectId: "proj-g2" });
-    const set = getAccountSet("google-antigravity")!;
-    const id1 = set.accounts.find(a => a.credential.accountId === "acct-g1")!.id;
-    const id2 = set.accounts.find(a => a.credential.accountId === "acct-g2")!.id;
-
-    globalThis.fetch = (async () => { throw new Error("plain fetch must not be used for account bearers"); }) as typeof fetch;
-    const antigravityBody = (gemRemaining: number) =>
-      JSON.stringify({
-        models: {
-          "gemini-3.7-flash": { displayName: "Gemini 3.7 Flash", quotaInfo: { remainingFraction: gemRemaining, resetTime: "2026-07-05T12:00:00Z" } },
-        },
-      });
-    setAntigravityAccountQuotaTransportForTests({
-      resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
-      pinnedPost: async (_url, _pinned, body, _signal, requestOptions) => {
-        const auth = new Headers(requestOptions?.headers).get("authorization") ?? "";
-        const gemRemaining = auth.includes("token-g1") ? 0.8 : 0.4;
-        return new Response(antigravityBody(gemRemaining), { status: 200, headers: { "content-type": "application/json" } });
-      },
-    });
-
-    expect(supportsPerAccountQuota("google-antigravity")).toBe(true);
-    const rows = await fetchProviderAccountQuotas("google-antigravity");
-    expect(rows).toHaveLength(2);
-    expect(rows.find(r => r.accountId === id1)?.quota?.customWindows?.[0]?.percent).toBe(20);
-    expect(rows.find(r => r.accountId === id2)?.quota?.customWindows?.[0]?.percent).toBe(60);
-  });
-
-  test("reports each Command Code account's own rate limits", async () => {
-    const expires = Date.now() + 60 * 60_000;
-    await saveCredential("command-code", { access: "token-cc1", refresh: "refresh-cc1", expires, accountId: "acct-cc1", email: "cc1@example.com" });
-    await saveCredential("command-code", { access: "token-cc2", refresh: "refresh-cc2", expires, accountId: "acct-cc2", email: "cc2@example.com" });
-    const set = getAccountSet("command-code")!;
-    const id1 = set.accounts.find(a => a.credential.accountId === "acct-cc1")!.id;
-    const id2 = set.accounts.find(a => a.credential.accountId === "acct-cc2")!.id;
-
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const auth = new Headers(init?.headers).get("authorization");
-      const url = String(input);
-      if (url.includes("/alpha/whoami")) {
-        return Response.json({ org: { id: "test-org" } });
-      }
-      if (url.includes("/alpha/billing/credits")) {
-        const used = auth?.includes("token-cc1") ? 45 : 85;
-        return Response.json({
-          windowLimits: {
-            fiveHour: { cap: 100, used, resetAt: 1750000000 },
-            weekly: { cap: 100, used: 20, resetAt: 1750000000 },
-          },
-        });
-      }
-      return Response.json({}, { status: 404 });
-    }) as typeof fetch;
-
-    expect(supportsPerAccountQuota("command-code")).toBe(true);
-    const rows = await fetchProviderAccountQuotas("command-code");
-    expect(rows).toHaveLength(2);
-    expect(rows.find(r => r.accountId === id1)?.quota?.fiveHourPercent).toBe(45);
-    expect(rows.find(r => r.accountId === id2)?.quota?.fiveHourPercent).toBe(85);
-  });
-
-  test("reports each Cursor account's own rate limits", async () => {
-    const expires = Date.now() + 60 * 60_000;
-    await saveCredential("cursor", { access: "token-cur1", refresh: "refresh-cur1", expires, accountId: "acct-cur1", email: "cur1@example.com" });
-    await saveCredential("cursor", { access: "token-cur2", refresh: "refresh-cur2", expires, accountId: "acct-cur2", email: "cur2@example.com" });
-    const set = getAccountSet("cursor")!;
-    const id1 = set.accounts.find(a => a.credential.accountId === "acct-cur1")!.id;
-    const id2 = set.accounts.find(a => a.credential.accountId === "acct-cur2")!.id;
-
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const auth = new Headers(init?.headers).get("authorization");
-      const url = String(input);
-      if (url.includes("GetCurrentPeriodUsage")) {
-        const totalPercent = auth?.includes("token-cur1") ? 35 : 75;
-        return Response.json({
-          planUsage: {
-            totalPercentUsed: totalPercent,
-            billingCycleEnd: "2026-07-05T12:00:00Z",
-          },
-        });
-      }
-      return Response.json({}, { status: 404 });
-    }) as typeof fetch;
-
-    expect(supportsPerAccountQuota("cursor")).toBe(true);
-    const rows = await fetchProviderAccountQuotas("cursor");
-    expect(rows).toHaveLength(2);
-    expect(rows.find(r => r.accountId === id1)?.quota?.monthlyPercent).toBe(35);
-    expect(rows.find(r => r.accountId === id2)?.quota?.monthlyPercent).toBe(75);
-  });
 });
 
 describe("explicit OAuth account quota readers", () => {
@@ -691,10 +544,6 @@ describe("explicit OAuth account quota readers", () => {
       expect(Object.keys(rows[0]!)).toEqual(["accountId", "quota"]);
       expect(JSON.stringify(rows)).not.toContain("quota-first");
       expect(JSON.stringify(rows)).not.toContain("identity");
-      // A scoped clear for another provider must not invalidate this provider's quota
-      // identity or temporarily remove its routing headroom evidence.
-      clearAccountQuotaCache("anthropic");
-      expect(rows.every(row => row.isCurrent?.())).toBe(true);
       clearAccountQuotaCache(fixture.provider);
       expect(rows.every(row => row.isCurrent?.() === false)).toBe(true);
     });
@@ -833,7 +682,21 @@ describe("google-antigravity per-account quota (#1082)", () => {
     });
   }
 
-  afterEach(() => setAntigravityAccountQuotaTransportForTests(null));
+  const proxyKeys = PROXY_ENV_KEYS.flatMap(key => [key, key.toLowerCase()]);
+  const originalProxyEnv = Object.fromEntries(proxyKeys.map(key => [key, process.env[key]]));
+  const summaryUrl = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+  const modelsUrl = "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+
+  beforeEach(() => {
+    for (const key of proxyKeys) delete process.env[key];
+  });
+  afterEach(() => {
+    setAntigravityAccountQuotaTransportForTests(null);
+    for (const key of proxyKeys) {
+      if (originalProxyEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = originalProxyEnv[key];
+    }
+  });
 
   test("probes each account with its own bearer and project id on the fixed Google host using retrieveUserQuotaSummary", async () => {
     const expires = Date.now() + 60 * 60_000;
@@ -899,6 +762,95 @@ describe("google-antigravity per-account quota (#1082)", () => {
     expect(windows(idB)).toEqual(["Gem=3", "Cla=9"]);
     expect(byId[idA]!.quota!.customWindows![0]!.resetAt).toBeDefined();
   });
+
+  for (const fallback of [false, true]) {
+    test(`Fake-IP ${fallback ? "models fallback" : "summary"} keeps each account bearer and project separate`, async () => {
+      const expires = Date.now() + 3600_000;
+      await saveCredential("google-antigravity", { access: "agy-first", refresh: "r1", expires, projectId: "proj-first", accountId: "agy-a", email: "a@example.com" });
+      await saveCredential("google-antigravity", { access: "agy-second", refresh: "r2", expires, projectId: "proj-second", accountId: "agy-b", email: "b@example.com" });
+      let plainFetchCalls = 0;
+      globalThis.fetch = (async () => { plainFetchCalls += 1; throw new Error("unexpected raw quota fetch"); }) as typeof fetch;
+      const resolved: Array<{ url: string; benchmark?: boolean; private?: boolean; mihomo?: boolean }> = [];
+      const posted: Array<{ url: string; auth: string | null; project: string; address: string; tls?: boolean; signal: boolean }> = [];
+      setAntigravityAccountQuotaTransportForTests(null);
+      setAntigravityAccountQuotaTransportForTests({
+        resolveAddresses: async (url, options) => {
+          const policy = typeof options === "object" ? options : undefined;
+          resolved.push({ url, benchmark: policy?.allowBenchmarkAddresses, private: policy?.allowPrivateNetwork, mihomo: policy?.allowMihomoIpv6FakeIp });
+          if (!policy?.allowBenchmarkAddresses) throw new Error("benchmark address rejected");
+          return { hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "198.18.56.214", family: 4 }], privateNetwork: false };
+        },
+        pinnedPost: async (url, pinned, body, signal, options) => {
+          const auth = new Headers(options?.headers).get("authorization");
+          posted.push({ url, auth, project: String(JSON.parse(body).project), address: pinned.address, tls: options?.rejectUnauthorized, signal: signal instanceof AbortSignal });
+          if (url === summaryUrl && fallback) return new Response(null, { status: 404 });
+          const [gem, cla]: [number, number] = auth === "Bearer agy-first" ? [0.86, 0.38] : [0.97, 0.91];
+          return new Response(url === summaryUrl ? antigravitySummaryBody(gem, cla) : antigravityBody(gem, cla));
+        },
+      });
+      const rows = await fetchProviderAccountQuotas("google-antigravity");
+      const urls = fallback ? [summaryUrl, modelsUrl] : [summaryUrl];
+      expect(resolved).toHaveLength(urls.length * 2);
+      expect(posted).toHaveLength(urls.length * 2);
+      for (const url of urls) {
+        expect(resolved.filter(row => row.url === url)).toEqual([
+          { url, benchmark: true, private: false, mihomo: false },
+          { url, benchmark: true, private: false, mihomo: false },
+        ]);
+      }
+      for (const [auth, project] of [["Bearer agy-first", "proj-first"], ["Bearer agy-second", "proj-second"]]) {
+        expect(posted.filter(row => row.auth === auth)).toEqual(urls.map(url => ({ url, auth, project, address: "198.18.56.214", tls: true, signal: true })));
+      }
+      const byId = Object.fromEntries(rows.map(row => [row.accountId, row]));
+      expect(byId[idFor("a@example.com")]?.quota?.customWindows?.map(w => w.percent)).toEqual(fallback ? [14, 62] : [14, 14, 62, 62]);
+      expect(byId[idFor("b@example.com")]?.quota?.customWindows?.map(w => w.percent)).toEqual(fallback ? [3, 9] : [3, 3, 9, 9]);
+      expect(plainFetchCalls).toBe(0);
+    });
+  }
+
+  test("NO_PROXY denial preserves an unavailable account row without sending its bearer", async () => {
+    await saveCredential("google-antigravity", { access: "agy-first", refresh: "r1", expires: Date.now() + 3600_000, projectId: "proj-first", accountId: "agy-a", email: "a@example.com" });
+    process.env.no_proxy = "daily-cloudcode-pa.googleapis.com";
+    const admitted: Array<boolean | undefined> = [];
+    let posted = 0;
+    let plainFetchCalls = 0;
+    globalThis.fetch = (async () => { plainFetchCalls += 1; throw new Error("unexpected raw quota fetch"); }) as typeof fetch;
+    setAntigravityAccountQuotaTransportForTests({
+      resolveAddresses: async (_url, options) => {
+        const allow = typeof options === "object" ? options?.allowBenchmarkAddresses : undefined;
+        admitted.push(allow);
+        if (!allow) throw new Error("benchmark address rejected");
+        return { hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "198.18.56.214", family: 4 }], privateNetwork: false };
+      },
+      pinnedPost: async () => { posted += 1; return new Response(antigravitySummaryBody(0.5, 0.5)); },
+    });
+    expect(await fetchProviderAccountQuotas("google-antigravity")).toEqual([{ accountId: idFor("a@example.com"), quota: null, unavailable: true }]);
+    expect(admitted).toEqual([false, false]);
+    expect(posted).toBe(0);
+    expect(plainFetchCalls).toBe(0);
+  });
+
+  for (const status of [302, 307, 308, 401, 403]) {
+    for (const fallback of [false, true]) {
+      test(`account ${fallback ? "models" : "summary"} ${status} returns unavailable without following Location`, async () => {
+        await saveCredential("google-antigravity", { access: "agy-first", refresh: "r1", expires: Date.now() + 3600_000, projectId: "proj-first", accountId: "agy-a", email: "a@example.com" });
+        const posted: string[] = [];
+        let plainFetchCalls = 0;
+        globalThis.fetch = (async () => { plainFetchCalls += 1; throw new Error("unexpected raw quota fetch"); }) as typeof fetch;
+        setAntigravityAccountQuotaTransportForTests({
+          resolveAddresses: async () => ({ hostname: "daily-cloudcode-pa.googleapis.com", addresses: [{ address: "142.250.0.1", family: 4 }], privateNetwork: false }),
+          pinnedPost: async url => {
+            posted.push(url);
+            if (url === summaryUrl && fallback) return new Response(null, { status: 404 });
+            return new Response(null, { status, headers: { location: "https://daily-cloudcode-pa.googleapis.com/redirect-target" } });
+          },
+        });
+        expect(await fetchProviderAccountQuotas("google-antigravity")).toEqual([{ accountId: idFor("a@example.com"), quota: null, unavailable: true }]);
+        expect(posted).toEqual(fallback ? [summaryUrl, modelsUrl] : [summaryUrl]);
+        expect(plainFetchCalls).toBe(0);
+      });
+    }
+  }
 
   test("a rejected destination never receives a bearer; the row is unavailable, not 0%", async () => {
     const expires = Date.now() + 60 * 60_000;

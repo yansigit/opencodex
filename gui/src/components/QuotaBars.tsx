@@ -20,7 +20,8 @@ export type QuotaBarRow = {
 /**
  * Window ordering is computed from RAW wire identities BEFORE localization
  * (ranking on translated labels breaks the moment a locale changes copy):
- * shorter windows first — 5h, weekly, cursor first-party, cursor API, monthly.
+ * shorter windows first — 5h, weekly, cursor first-party, cursor API, monthly,
+ * then subscription credits before other custom windows.
  */
 function rawCustomWindowRank(rawLabel: string): number {
   if (rawLabel === "5h") return 0;
@@ -28,6 +29,27 @@ function rawCustomWindowRank(rawLabel: string): number {
   if (rawLabel === "API usage") return 3;
   if (rawLabel === "Total subscription credits") return 4.5;
   return 5;
+}
+
+const SUBSCRIPTION_CREDITS_LABEL = "Total subscription credits";
+
+function canonicalCustomWindowLabel(rawLabel: string): string {
+  return rawLabel.trim().toLowerCase() === SUBSCRIPTION_CREDITS_LABEL.toLowerCase()
+    ? SUBSCRIPTION_CREDITS_LABEL
+    : rawLabel;
+}
+
+/** Coverage metadata carries raw labels, while subscription rows use a canonical identity. */
+export function isCustomQuotaWindowIncomplete(
+  customLabel: string | undefined,
+  incompleteLabels?: ReadonlySet<string>,
+): boolean {
+  if (customLabel === undefined || !incompleteLabels) return false;
+  const canonical = canonicalCustomWindowLabel(customLabel);
+  for (const label of incompleteLabels) {
+    if (canonicalCustomWindowLabel(label) === canonical) return true;
+  }
+  return false;
 }
 
 function localizeCustomQuotaLabel(rawLabel: string, t: TFn): string {
@@ -48,17 +70,15 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
   if (!displayQuota) return [];
   // Intrinsic ranks for the standard slots; custom windows rank on their RAW labels.
   const ranked: Array<{ rank: number; row: QuotaBarRow }> = [];
-  const fiveHourPercent = displayQuota.fiveHourPercent ?? displayQuota.shortPercent;
-  const fiveHourResetAt = displayQuota.fiveHourResetAt ?? displayQuota.shortResetAt;
-  if (typeof fiveHourPercent === "number") {
+  if (typeof displayQuota.fiveHourPercent === "number") {
     ranked.push({
       rank: 0,
       row: {
         windowKey: "fiveHour",
         label: t("codexAuth.fiveHour"),
         limitLabel: t("quota.fiveHourLimit"),
-        percent: fiveHourPercent,
-        resetAt: fiveHourResetAt,
+        percent: displayQuota.fiveHourPercent,
+        resetAt: displayQuota.fiveHourResetAt,
       },
     });
   }
@@ -87,11 +107,12 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
     });
   }
   for (const w of displayQuota.customWindows ?? []) {
-    const localized = localizeCustomQuotaLabel(w.label, t);
+    const customLabel = canonicalCustomWindowLabel(w.label);
+    const localized = localizeCustomQuotaLabel(customLabel, t);
     ranked.push({
-      rank: rawCustomWindowRank(w.label),
+      rank: rawCustomWindowRank(customLabel),
       row: {
-        customLabel: w.label,
+        customLabel,
         label: localized,
         limitLabel: localized,
         percent: w.percent,
@@ -100,13 +121,15 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
     });
   }
   if (displayQuota.creditsUsd && typeof displayQuota.creditsUsd.percent === "number") {
-    const hasCreditCustom = displayQuota.customWindows?.some(w => /credits?/i.test(w.label));
-    if (!hasCreditCustom) {
-      const localized = localizeCustomQuotaLabel("Total subscription credits", t);
+    const hasSubscriptionCreditsCustom = displayQuota.customWindows?.some(
+      w => canonicalCustomWindowLabel(w.label) === SUBSCRIPTION_CREDITS_LABEL,
+    );
+    if (!hasSubscriptionCreditsCustom) {
+      const localized = localizeCustomQuotaLabel(SUBSCRIPTION_CREDITS_LABEL, t);
       ranked.push({
-        rank: rawCustomWindowRank("Total subscription credits"),
+        rank: rawCustomWindowRank(SUBSCRIPTION_CREDITS_LABEL),
         row: {
-          customLabel: "Total subscription credits",
+          customLabel: SUBSCRIPTION_CREDITS_LABEL,
           label: localized,
           limitLabel: localized,
           percent: displayQuota.creditsUsd.percent,
@@ -121,12 +144,15 @@ export function buildQuotaRows(quota: AccountQuota | null, plan: string | null |
 /** Max utilisation across known windows (for sorting providers by urgency). */
 export function maxQuotaUtilisation(quota: AccountQuota | null): number {
   if (!quota) return -1;
-  const vals = [quota.fiveHourPercent ?? quota.shortPercent, quota.weeklyPercent, quota.monthlyPercent]
+  const vals = [quota.fiveHourPercent, quota.weeklyPercent, quota.monthlyPercent]
     .filter((n): n is number => typeof n === "number");
   for (const w of quota.customWindows ?? []) {
     if (typeof w.percent === "number") vals.push(w.percent);
   }
-  if (typeof quota.creditsUsd?.percent === "number") {
+  const hasSubscriptionCreditsCustom = quota.customWindows?.some(
+    w => canonicalCustomWindowLabel(w.label) === SUBSCRIPTION_CREDITS_LABEL,
+  );
+  if (!hasSubscriptionCreditsCustom && typeof quota.creditsUsd?.percent === "number") {
     vals.push(quota.creditsUsd.percent);
   }
   return vals.length ? Math.max(...vals) : -1;
@@ -301,7 +327,7 @@ export default function QuotaBars({
             locale={locale}
             incomplete={row.windowKey
               ? incompleteWindowKeys?.has(row.windowKey) === true
-              : row.customLabel !== undefined && incompleteCustomWindowLabels?.has(row.customLabel) === true}
+              : isCustomQuotaWindowIncomplete(row.customLabel, incompleteCustomWindowLabels)}
           />
         ))}
       </div>
@@ -313,6 +339,7 @@ export default function QuotaBars({
       {rows.map(row => (
         <QuotaRow
           key={row.label}
+          credits={row.customLabel === SUBSCRIPTION_CREDITS_LABEL}
           label={row.label}
           percent={row.percent}
           resetAt={row.resetAt}
@@ -325,7 +352,8 @@ export default function QuotaBars({
   );
 }
 
-function QuotaRow({ label, percent, resetAt, threshold, t, locale }: {
+function QuotaRow({ credits, label, percent, resetAt, threshold, t, locale }: {
+  credits?: boolean;
   label: string;
   percent: number;
   resetAt?: number;
@@ -342,7 +370,7 @@ function QuotaRow({ label, percent, resetAt, threshold, t, locale }: {
     : undefined;
   const hasReset = reset.day !== "" || reset.time !== "";
   return (
-    <div className={`quota-row${warn ? " quota-row--warn" : ""}${exhausted ? " quota-row--exhausted" : ""}`}>
+    <div className={`quota-row${credits ? " quota-row--credits" : ""}${warn ? " quota-row--warn" : ""}${exhausted ? " quota-row--exhausted" : ""}`}>
       <span className="quota-label" title={resetTitle}>{label}</span>
       <span className="quota-reset-label">{hasReset ? t("codexAuth.resets") : ""}</span>
       <span className="quota-reset-day">{reset.day}</span>

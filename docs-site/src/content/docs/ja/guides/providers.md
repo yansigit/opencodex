@@ -114,6 +114,9 @@ ocx logout <provider>
 | `cursor` | `cursor` | `https://api2.cursor.sh` | 実験的 PKCE ログイン、HTTP/2 トランスポート、アカウント別モデル探索をサポート。 |
 | `github-copilot` | `openai-chat` | `https://api.githubcopilot.com` | 実験的。GitHub デバイスフロー + `copilot_internal` 交換（VS Code OAuth クライアント）。有効な Copilot サブスクリプションが必要で、公式のサードパーティ API ではありません。 |
 
+Google Antigravity のアカウント・プロバイダーのクォータ確認は、モデル一覧へのフォールバックも含め、固定の Google エンドポイントを使用します。その宛先では透過 Fake-IP DNS に対応し、TLS 検証、リダイレクト拒否、プライベートアドレス検査を維持します。カスタム base URL はモデル要求にのみ適用されます。`NO_PROXY` は直接接続のポリシーを維持します。
+
+
 Nous の refresh が終端失敗した場合は、再認証に `ocx login nous` を実行してください。
 
 正規の Kimi Coding Plan プリセット（`kimi` アカウントログインと `kimi-code` API key）では、

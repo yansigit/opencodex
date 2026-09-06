@@ -10,7 +10,7 @@ import { isMainAccountIdentityGenerationLive } from "../codex/main-account-cache
 import { MAIN_CODEX_ACCOUNT_ID } from "../codex/main-account";
 import { codexPlanKey } from "../codex/plan";
 import { resolveProviderApiKey } from "./key-store";
-import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, getValidAccessTokenSnapshotForAccount, type OAuthAccessSnapshot } from "../oauth";
+import { getValidAccessToken, getValidAccessTokenForAccount, getValidAccessTokenSnapshot, getValidAccessSnapshotForAccount, type OAuthAccessSnapshot } from "../oauth";
 import { getAccountCredential, getAccountSet } from "../oauth/store";
 import { antigravityUserAgent } from "../adapters/client-fingerprint";
 import {
@@ -2726,7 +2726,7 @@ export async function fetchAntigravityUsageQuota(accessToken: string, projectId:
 async function fetchAntigravityAccountQuota(accountId: string): Promise<ProviderQuota | null> {
   let snapshot: OAuthAccessSnapshot;
   try {
-    snapshot = await getValidAccessTokenSnapshotForAccount("google-antigravity", accountId);
+    snapshot = await getValidAccessSnapshotForAccount("google-antigravity", accountId);
   } catch {
     return null;
   }

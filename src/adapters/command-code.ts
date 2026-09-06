@@ -13,8 +13,6 @@ import { commandCodeReasoningEfforts, refreshCommandCodeReasoningEfforts } from 
 import { identifyRoutedModel } from "./identity";
 import { buildNonOpenAIToolCatalogNudgeForTools } from "./tool-catalog-nudge";
 import { parseDataUrl } from "./image";
-import { redactSecretString } from "../lib/redact";
-import { testProviderFetch } from "../lib/test-provider-fetch";
 
 // Retain the short ids emitted by the first local integration. New requests use the live catalog's
 // provider-native IDs directly; this map is compatibility-only and is not a model fallback list.
@@ -27,23 +25,6 @@ const COMMAND_CODE_MODEL_ALIASES: Readonly<Record<string, string>> = {
 
 function canonicalCommandCodeModelId(modelId: string): string {
   return Object.hasOwn(COMMAND_CODE_MODEL_ALIASES, modelId) ? COMMAND_CODE_MODEL_ALIASES[modelId]! : modelId;
-}
-
-/** Surface Command Code's JSON error message to sidecar callers instead of a bare HTTP status. */
-export function formatCommandCodeErrorBody(_status: number, _headers: Headers, payloadText: string): string {
-  try {
-    const payload = JSON.parse(payloadText) as unknown;
-    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return "";
-    const error = (payload as Record<string, unknown>).error;
-    const message = (error && typeof error === "object" && !Array.isArray(error)
-      ? (error as Record<string, unknown>).message
-      : undefined) ?? (payload as Record<string, unknown>).message;
-    return typeof message === "string" && message.trim()
-      ? redactSecretString(message.trim()).slice(0, 400)
-      : "";
-  } catch {
-    return "";
-  }
 }
 
 /** Flatten tool-result content for the text-only wire output, keeping an `[image]` marker per image part in content order. */
@@ -179,17 +160,13 @@ function visibleTools(parsed: OcxParsedRequest): OcxTool[] {
   if (choice === "none") return [];
   const tools = parsed.context.tools ?? [];
   if (isAllowedToolChoice(choice)) {
-    return tools
-      .filter(toolChoiceToolPredicate(choice, tools))
-      .sort((left, right) => namespacedToolName(left.namespace, left.name).localeCompare(namespacedToolName(right.namespace, right.name)));
+    return tools.filter(toolChoiceToolPredicate(choice, tools));
   }
   if (choice && typeof choice !== "string") {
     const selected = resolveToolChoiceWireName(tools, choice.name);
-    return tools
-      .filter(tool => namespacedToolName(tool.namespace, tool.name) === selected)
-      .sort((left, right) => namespacedToolName(left.namespace, left.name).localeCompare(namespacedToolName(right.namespace, right.name)));
+    return tools.filter(tool => namespacedToolName(tool.namespace, tool.name) === selected);
   }
-  return [...tools].sort((left, right) => namespacedToolName(left.namespace, left.name).localeCompare(namespacedToolName(right.namespace, right.name)));
+  return tools;
 }
 
 function toolChoiceInstruction(parsed: OcxParsedRequest): string | undefined {
@@ -220,9 +197,6 @@ function currentWorkingDirectory(): string | undefined {
 
 /** Cap the workspace listing so a large directory does not ship every entry name upstream. */
 const MAX_WORKSPACE_STRUCTURE_ENTRIES = 64;
-/** Cap directory entries scanned while selecting the stable workspace prefix. */
-export const MAX_WORKSPACE_STRUCTURE_SCAN_ENTRIES = 4096;
-// ponytail: the bounded scan trades complete directory coverage for request latency; raise only with measured need.
 /** Cap how many recent commit subjects the config carries. */
 const MAX_RECENT_COMMITS = 8;
 /** Cap each recent commit entry to keep the request bounded even for long subjects. */
@@ -239,44 +213,25 @@ function projectSlug(cwd: string): string {
   return cwd.replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase().slice(0, 64) || "workspace";
 }
 
-function firstUserText(parsed: OcxParsedRequest): string | undefined {
-  for (const msg of parsed.context.messages) {
-    if (msg.role !== "user") continue;
-    if (typeof msg.content === "string") return msg.content;
-    const first = msg.content.find(part => part.type === "text" && typeof part.text === "string");
-    if (first && first.type === "text") return first.text;
-  }
-  return undefined;
-}
-
 export function commandCodeSessionId(parsed: OcxParsedRequest): string {
-  if (parsed._commandCodeSessionId) return parsed._commandCodeSessionId;
-  // Shared prompt-cache cohorts intentionally do not identify one conversation. Keep them out
-  // of upstream session affinity or unrelated conversations can pin to the same worker.
+  // Shared prompt-cache cohorts identify a cache population, not one conversation. Using one
+  // for session affinity would pin unrelated conversations to the same upstream worker.
   const threadId = parsed._clientThreadId?.trim();
   const replayId = parsed._reasoningReplayScope?.clientThreadId?.trim();
-  const cursorId = parsed._cursorConversationId?.trim();
-  const cacheKey = !parsed._promptCacheKeyIsSharedCohort ? parsed.options.promptCacheKey?.trim() : undefined;
-  const rootText = firstUserText(parsed);
+  const cacheKey = parsed._promptCacheKeyIsSharedCohort === false
+    ? parsed.options.promptCacheKey?.trim()
+    : undefined;
   const identity = threadId
     ? ["thread", threadId]
     : replayId
       ? ["replay", replayId]
-      : cursorId
-        ? ["cursor", cursorId]
-        : cacheKey
-          ? ["cache", cacheKey]
-          : rootText
-            ? ["root", rootText]
-            : undefined;
-  const sessionId = !identity
-    ? randomUUID()
-    : (() => {
-      const hex = createHash("sha256").update(`command-code:${identity[0]}\0${identity[1]}`).digest("hex");
-      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
-    })();
-  parsed._commandCodeSessionId = sessionId;
-  return sessionId;
+      : cacheKey
+        ? ["cache", cacheKey]
+        : undefined;
+  if (!identity) return randomUUID();
+  const hex = createHash("sha256").update(`command-code:${identity[0]}\0${identity[1]}`).digest("hex");
+  // Replace the digest nibbles at the UUID version and variant positions; the skipped hex characters are intentional.
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 interface GitWorkspaceInfo {
@@ -288,8 +243,6 @@ interface GitWorkspaceInfo {
 }
 
 export const workspaceMetadataCache = new Map<string, { collectedAt: number; value: GitWorkspaceInfo }>();
-export const workspaceConfigCache = new Map<string, { collectedAt: number; value: Record<string, unknown>; sessionId?: string }>();
-export const SESSION_WORKSPACE_CONFIG_TTL_MS = 60 * 60_000;
 
 /**
  * Evict expired entries first, then the oldest live entry if at capacity.
@@ -313,34 +266,6 @@ export function pruneWorkspaceMetadataCache(now: number): void {
       }
     }
     if (oldestKey !== null) workspaceMetadataCache.delete(oldestKey);
-  }
-}
-
-export function pruneWorkspaceConfigCache(now: number): void {
-  for (const [key, entry] of workspaceConfigCache) {
-    if (!entry.sessionId && now - entry.collectedAt >= WORKSPACE_METADATA_TTL_MS) {
-      workspaceConfigCache.delete(key);
-    }
-  }
-  if (workspaceConfigCache.size >= MAX_WORKSPACE_METADATA_ENTRIES) {
-    let oldestKey: string | null = null;
-    let oldestAt = Infinity;
-    for (const [key, entry] of workspaceConfigCache) {
-      if (entry.sessionId) continue;
-      if (entry.collectedAt < oldestAt) {
-        oldestAt = entry.collectedAt;
-        oldestKey = key;
-      }
-    }
-    if (oldestKey === null) {
-      for (const [key, entry] of workspaceConfigCache) {
-        if (entry.collectedAt < oldestAt) {
-          oldestAt = entry.collectedAt;
-          oldestKey = key;
-        }
-      }
-    }
-    if (oldestKey !== null) workspaceConfigCache.delete(oldestKey);
   }
 }
 
@@ -380,53 +305,32 @@ async function gitWorkspaceInfo(cwd: string | undefined): Promise<GitWorkspaceIn
   return value;
 }
 
-export async function commandCodeConfig(cwd: string | undefined, sessionId?: string): Promise<Record<string, unknown>> {
-  const cacheKey = sessionId ? `${sessionId}:${cwd ?? ""}` : (cwd ?? "");
-  const now = Date.now();
-  const cached = cacheKey ? workspaceConfigCache.get(cacheKey) : undefined;
-  if (cacheKey) {
-    if (cached && (sessionId || now - cached.collectedAt < WORKSPACE_METADATA_TTL_MS)) return cached.value;
-  }
+async function commandCodeConfig(cwd: string | undefined): Promise<Record<string, unknown>> {
   let structure: string[] = [];
   if (cwd) {
     try {
-      // Keep only the lexicographically smallest entries within the bounded scan so filesystem
-      // enumeration order cannot change the selected prefix for the scanned portion.
+      // Iterate and stop after the cap instead of materializing every entry: a directory with a
+      // huge number of names must not stall the request path for 64 metadata rows.
       const dir = await opendir(cwd);
       try {
-        const entries = dir[Symbol.asyncIterator]();
-        for (let scanned = 0; scanned < MAX_WORKSPACE_STRUCTURE_SCAN_ENTRIES; scanned += 1) {
-          const next = await entries.next();
-          if (next.done) break;
-          const entry = next.value;
+        for await (const entry of dir) {
           if (entry.name.startsWith(".")) continue;
           structure.push(entry.name);
-          if (structure.length > MAX_WORKSPACE_STRUCTURE_ENTRIES) {
-            structure.sort();
-            structure.pop();
-          }
+          if (structure.length >= MAX_WORKSPACE_STRUCTURE_ENTRIES) break;
         }
       } finally {
         await dir.close().catch(() => undefined);
       }
     } catch { /* workspace metadata is optional */ }
   }
-  structure.sort();
   const git = await gitWorkspaceInfo(cwd);
-  const value = {
+  return {
     ...(cwd ? { workingDir: cwd } : {}),
-    date: sessionId && typeof cached?.value.date === "string"
-      ? cached.value.date
-      : new Date(now).toISOString().slice(0, 10),
+    date: new Date().toISOString().slice(0, 10),
     environment: process.platform,
     structure,
     ...git,
   };
-  if (cacheKey) {
-    if (!workspaceConfigCache.has(cacheKey)) pruneWorkspaceConfigCache(now);
-    workspaceConfigCache.set(cacheKey, { collectedAt: now, value, ...(sessionId ? { sessionId } : {}) });
-  }
-  return value;
 }
 
 function usage(value: unknown): OcxUsage | undefined {
@@ -603,14 +507,12 @@ function supportedCommandCodeEffort(provider: OcxProviderConfig, modelId: string
 }
 
 export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderAdapter {
-  const executor = testProviderFetch(provider) ?? globalThis.fetch;
+  const executor = (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch ?? globalThis.fetch;
   return {
     name: "command-code",
-    formatErrorBody: formatCommandCodeErrorBody,
     async buildRequest(parsed: OcxParsedRequest): Promise<AdapterRequest> {
       if (!provider.apiKey) throw new Error("Command Code credential missing — run ocx login command-code");
       const cwd = currentWorkingDirectory();
-      const sessionId = commandCodeSessionId(parsed);
       const tools = visibleTools(parsed);
       const toolNudge = buildNonOpenAIToolCatalogNudgeForTools(tools, parsed.options.toolChoice);
       const choiceInstruction = toolChoiceInstruction(parsed);
@@ -621,7 +523,7 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
       ].join("\n\n"), parsed.modelId);
       const reasoningEffort = supportedCommandCodeEffort(provider, parsed.modelId, parsed.options.reasoning);
       const body = {
-        config: await commandCodeConfig(cwd, sessionId), memory: "", taste: null, skills: null,
+        config: await commandCodeConfig(cwd), memory: "", taste: null, skills: null,
         permissionMode: "standard", mode: "agent",
         params: {
           model: canonicalCommandCodeModelId(parsed.modelId),
@@ -644,7 +546,7 @@ export function createCommandCodeAdapter(provider: OcxProviderConfig): ProviderA
         "x-cli-environment": "production",
         "x-taste-learning": "false",
         "x-co-flag": "false",
-        "x-session-id": sessionId,
+        "x-session-id": commandCodeSessionId(parsed),
       };
       if (cwd) headers["x-project-slug"] = projectSlug(cwd);
       return {

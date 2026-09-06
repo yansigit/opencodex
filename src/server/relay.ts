@@ -5,6 +5,7 @@ import {
   CYBER_POLICY_FALLBACK_MESSAGE,
   isCyberPolicyCode,
   isCyberPolicyMessage,
+  upstreamErrorMessageFromPayload,
 } from "../lib/errors";
 import { redactSecretString } from "../lib/redact";
 import { isTranslatorBudgetExceededError } from "../lib/translator-budget";
@@ -147,11 +148,31 @@ export function failedTailFrame(encoder: TextEncoder, err: unknown): Uint8Array 
   return encoder.encode(`\n\nevent: response.failed\ndata: ${payload}\n\n${DONE_SSE_FRAME_TEXT}`);
 }
 
+export function upstreamErrorTailFrame(encoder: TextEncoder, message: string): Uint8Array {
+  const error = {
+    type: "upstream_error",
+    code: "upstream_server_error",
+    message: redactSecretString(message).slice(0, MAX_TAIL_ERROR_MESSAGE_CHARS),
+  };
+  return encoder.encode(`event: response.failed\ndata: ${JSON.stringify({
+    type: "response.failed",
+    response: { status: "failed", error, last_error: error },
+  })}\n\n`);
+}
+
+function boundedBareUpstreamErrorMessage(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)
+    || (payload as { type?: unknown }).type !== "error") return undefined;
+  const message = upstreamErrorMessageFromPayload(payload);
+  return message ? redactSecretString(message).slice(0, MAX_TAIL_ERROR_MESSAGE_CHARS) : undefined;
+}
+
 export type SseTerminalOutputBoundary = {
   feed(chunk: Uint8Array): Uint8Array;
   finish(): Uint8Array;
   terminalSeen(): boolean;
   doneSeen(): boolean;
+  upstreamError(): string | undefined;
   dispose(): void;
 };
 
@@ -170,6 +191,7 @@ export function createSseTerminalOutputBoundary(): SseTerminalOutputBoundary {
   let done = false;
   let pendingDone: { block: Uint8Array; delimiter: Uint8Array } | null = null;
   let disposed = false;
+  let upstreamError: string | undefined;
 
   const processFrames = (
     frames: ReturnType<BoundedSseFrameBuffer["feed"]>,
@@ -181,6 +203,10 @@ export function createSseTerminalOutputBoundary(): SseTerminalOutputBoundary {
       const payload = sseDataPayload(decoder.decode(frame.block));
       const isDone = payload === "[DONE]";
       const parsed = payload === null ? undefined : parseSsePayload(payload);
+      // Observe on the client reader itself: a tee inspection branch may lag
+      // behind EOF, so its log context cannot determine the outgoing terminal.
+      const message = boundedBareUpstreamErrorMessage(parsed);
+      if (message !== undefined) upstreamError = message;
       const policyError = parsed !== undefined && isPolicyRewriteType(parsed)
         ? cyberPolicyTerminalError(parsed)
         : undefined;
@@ -239,6 +265,7 @@ export function createSseTerminalOutputBoundary(): SseTerminalOutputBoundary {
     },
     terminalSeen: () => terminal,
     doneSeen: () => done,
+    upstreamError: () => upstreamError,
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -260,7 +287,7 @@ export function relaySseWithFailedTail(
   body: ReadableStream<Uint8Array>,
   upstream: AbortController,
   onClientGone?: (reason?: unknown) => void,
-  options?: { synthesizeMissingTerminal?: boolean },
+  opts?: { upstreamError?: string },
 ): ReadableStream<Uint8Array> {
   const reader = body.getReader();
   const encoder = new TextEncoder();
@@ -303,12 +330,14 @@ export function relaySseWithFailedTail(
             if (tail.byteLength > 0) controller.enqueue(tail);
             if (terminalBoundary.terminalSeen()) {
               if (!terminalBoundary.doneSeen()) controller.enqueue(doneFrame(encoder));
-            } else if (options?.synthesizeMissingTerminal !== false) {
+            } else {
               // A clean upstream EOF is still a failed Responses turn when no
               // protocol terminal arrived. Make that state explicit so Codex
               // does not treat HTTP 200 + bare EOF as a retryable disconnect.
-              const incomplete = adapterEofIncompleteFrame(encoder);
-              controller.enqueue(incomplete);
+              const upstreamError = terminalBoundary.upstreamError() ?? opts?.upstreamError;
+              controller.enqueue(upstreamError === undefined
+                ? adapterEofIncompleteFrame(encoder)
+                : upstreamErrorTailFrame(encoder, upstreamError));
               controller.enqueue(doneFrame(encoder));
             }
             terminalBoundary.dispose();
@@ -335,13 +364,9 @@ export function relaySseWithFailedTail(
           if (partial.byteLength > 0) controller.enqueue(partial);
           if (tailTerminal) {
             if (!terminalBoundary.doneSeen()) controller.enqueue(doneFrame(encoder));
-          } else if (options?.synthesizeMissingTerminal !== false) {
+          } else {
             // Leading blank line terminates a partial SSE block so the failed frame parses cleanly.
             controller.enqueue(failedTailFrame(encoder, err));
-          } else {
-            controller.error(err);
-            upstream.abort();
-            return;
           }
           controller.close();
         } catch { /* client already torn down */ }
@@ -1359,11 +1384,16 @@ export function consumeForInspection(
   options?: InspectionConsumerOptions,
 ): void {
   const reader = body.getReader();
+  let bareUpstreamError: string | undefined;
   const inspector = (options?.inspectorFactory ?? createSseInspector)({
     onTerminal,
     logCtx,
     onCompletedResponse,
-    onParsedPayload: options?.onParsedPayload,
+    onParsedPayload: payload => {
+      const message = boundedBareUpstreamErrorMessage(payload);
+      if (message !== undefined) bareUpstreamError = message;
+      options?.onParsedPayload?.(payload);
+    },
     onFirstOutput,
     pinCompletedResponseIdToFirstSeen: options?.pinCompletedResponseIdToFirstSeen,
   });
@@ -1377,7 +1407,11 @@ export function consumeForInspection(
     onCleanEof: () => {
       if (!inspector.reported()) {
         if (logCtx) logCtx.terminalSource = "synthetic";
-        onTerminal("incomplete");
+        if (bareUpstreamError !== undefined) {
+          onTerminal("failed", httpStatusForRequestLogTerminal("failed", logCtx));
+        } else {
+          onTerminal("incomplete");
+        }
       }
     },
     onReadError: () => {

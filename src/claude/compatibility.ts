@@ -1,521 +1,192 @@
-/**
- * Claude compatibility analyzer (pure, no Lab imports).
- *
- * Detects Anthropic-specific feature usage in the sanitized source envelope
- * and decides whether a routed adapter can safely serve the request. Feature
- * codes are stable identifiers used in the bounded debug ring and (in enforce
- * mode) as a pre-network gate.
- *
- * Feature codes (Milestone 2 precise set):
- * - cache_control: any block with a cache_control field (positional prompt caching)
- * - thinking_block: thinking param or thinking/redacted_thinking blocks (unsigned/ocxr1 continuity)
- * - signed_thinking: genuine Anthropic signed thinking (thinking.signature non-empty not ocxr1: or redacted_thinking with non-empty data) — incompatible on routed adapters, fail-closed even in shadow
- * - documents: document content blocks in messages
- * - unknown_content_block: content block type not in known Anthropic vocabulary
- * - web_search_tool: hosted web_search tool/block (has lossless Responses mapping)
- * - code_execution: code_execution tool/block (no lossless routed mapping)
- * - computer_use: computer tool/block (no lossless routed mapping)
- * - mcp_tool: mcp tool declarations (no lossless routed mapping)
- * - server_tool: generic fallback for other hosted/server tool types
- * - tool_search: tool_search declaration/call (lossless via tool_search)
- * - deferred_tools: tools with defer/defer_loading or deferred beta markers
- * - structured_output: output_config.format json_schema (lossless via text.format)
- * - service_tier: top-level service_tier (lossless via Responses option)
- * - context_management: top-level context_management field (no lossless routed mapping)
- * - input_examples: tool input_examples (Anthropic-only, preserved via source envelope)
- * - beta_*: each anthropic-beta token as beta_<sanitized>
- */
-
+/** Opt-in admission for the translated Messages path; no adapter or credential state. */
 export type ClaudeCompatibilityMode = "shadow" | "enforce";
 
-export const CLAUDE_COMPATIBILITY_MODES = ["shadow", "enforce"] as const;
+// False means deliberately tolerated degradation, not lossless representation.
+const FEATURES = {
+  cache_control: false,
+  input_examples: false,
+  thinking_settings: false,
+  unknown_beta: false,
+  thinking_replay: true,
+  documents: true,
+  web_search_tool: true,
+  tool_search: true,
+  tool_reference: true,
+  deferred_tools: true,
+  strict_tools: true,
+  caller_mode: true,
+  structured_output: true,
+  service_tier: true,
+  mcp_tool: true,
+  code_execution: true,
+  computer_use: true,
+  server_tool: true,
+  context_management: true,
+  container: true,
+  inference_geo: true,
+  user_profile: true,
+  unknown_body_field: true,
+  unknown_content_block: true,
+} as const;
+
+export type ClaudeFeatureCode = keyof typeof FEATURES;
+const FEATURE_CODES = Object.keys(FEATURES) as ClaudeFeatureCode[];
+const MAX_FEATURE_CODES = 32;
+const MAX_REASON_LENGTH = 512;
+type Rec = Record<string, unknown>;
+const isRec = (value: unknown): value is Rec =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
 
 export function isClaudeCompatibilityMode(value: unknown): value is ClaudeCompatibilityMode {
-  return typeof value === "string" && (CLAUDE_COMPATIBILITY_MODES as readonly string[]).includes(value);
+  return value === "shadow" || value === "enforce";
 }
 
-export function resolveClaudeCompatibilityMode(
-  cc?: { compatibility?: unknown },
-): ClaudeCompatibilityMode {
-  return isClaudeCompatibilityMode(cc?.compatibility) ? cc.compatibility : "enforce";
+/** Project only closed codes, including when reading an untrusted persisted row. */
+export function normalizeClaudeFeatureCodes(value: unknown): ClaudeFeatureCode[] {
+  if (!Array.isArray(value)) return [];
+  const codes = new Set<ClaudeFeatureCode>();
+  for (const code of value) {
+    if (typeof code === "string" && Object.hasOwn(FEATURES, code)) codes.add(code as ClaudeFeatureCode);
+  }
+  return FEATURE_CODES.filter(code => codes.has(code)).sort().slice(0, MAX_FEATURE_CODES);
 }
 
-export type ClaudeCompatibilityDecision = "allow" | "reject" | "shadow";
+/** Never accept a caller-supplied reason, header value, model name or tool name. */
+export function claudeCompatibilityReason(codes: readonly ClaudeFeatureCode[], shadow: boolean): string | undefined {
+  const unsupported = codes.filter(code => FEATURES[code]);
+  if (unsupported.length === 0) return undefined;
+  return `${shadow ? "shadow: would reject" : "unsupported translated Claude features"}: ${unsupported.join(", ")}`
+    .slice(0, MAX_REASON_LENGTH);
+}
+
+const BODY_FIELDS = new Set([
+  "model", "max_tokens", "messages", "system", "tools", "tool_choice", "thinking",
+  "output_config", "metadata", "service_tier", "stop_sequences", "stream",
+  "temperature", "top_p", "top_k", "cache_control", "context_management",
+  "container", "inference_geo", "user_profile_id", "mcp_servers", "defer_tools", "deferred_tools",
+]);
+
+function activeDeferred(value: unknown): boolean {
+  return value === true || (Array.isArray(value) ? value.length > 0 : isRec(value) && Object.keys(value).length > 0);
+}
+
+function nonDirectCaller(value: unknown): boolean {
+  return value !== undefined && !(Array.isArray(value) && value.length === 1 && value[0] === "direct");
+}
+
+/** Complete finite detection. Only protocol content positions are visited, never schemas/arguments. */
+function detectFeatures(body: unknown, anthropicBeta?: string): Set<ClaudeFeatureCode> {
+  const codes = new Set<ClaudeFeatureCode>();
+  // Header-only beta semantics are outside this policy. No header bytes become codes.
+  if (anthropicBeta?.trim()) codes.add("unknown_beta");
+  if (!isRec(body)) return codes; // The existing Messages parser owns malformed top-level input.
+  if (Object.keys(body).some(key => !BODY_FIELDS.has(key))) codes.add("unknown_body_field");
+  for (const [field, code] of [
+    ["cache_control", "cache_control"], ["context_management", "context_management"],
+    ["container", "container"], ["inference_geo", "inference_geo"],
+    ["user_profile_id", "user_profile"], ["mcp_servers", "mcp_tool"],
+  ] as const) {
+    if (Object.hasOwn(body, field)) codes.add(code);
+  }
+  if (body.service_tier !== undefined && body.service_tier !== null) codes.add("service_tier");
+  if (isRec(body.thinking)) codes.add("thinking_settings");
+  if (isRec(body.output_config)
+    && (body.output_config.format != null || body.output_config.output_format != null)) codes.add("structured_output");
+  if (activeDeferred(body.defer_tools) || activeDeferred(body.deferred_tools)) codes.add("deferred_tools");
+
+  if (Array.isArray(body.tools)) {
+    for (const tool of body.tools) {
+      if (!isRec(tool)) continue;
+      if (Object.hasOwn(tool, "cache_control")) codes.add("cache_control");
+      if (Object.hasOwn(tool, "input_examples")) codes.add("input_examples");
+      if (tool.strict === true) codes.add("strict_tools");
+      if (tool.defer === true || tool.defer_loading === true) codes.add("deferred_tools");
+      if (nonDirectCaller(tool.allowed_callers)) codes.add("caller_mode");
+      const type = tool.type;
+      // Ordinary client function names do not convey hosted execution semantics.
+      if (type === undefined || type === "function" || type === "custom") continue;
+      if (type === "mcp_toolset") codes.add("mcp_tool");
+      else if (typeof type === "string" && /^web_search_\d{8}$/.test(type)) codes.add("web_search_tool");
+      else if (typeof type === "string" && /^tool_search(?:_tool_(?:regex|bm25))?(?:_\d{8})?$/.test(type)) codes.add("tool_search");
+      else if (typeof type === "string" && /^code_execution_\d{8}$/.test(type)) codes.add("code_execution");
+      else if (typeof type === "string" && /^computer(?:_toolset)?_\d{8}$/.test(type)) codes.add("computer_use");
+      else codes.add("server_tool");
+    }
+  }
+
+  const scanBlock = (block: unknown, position: "message" | "system" | "result") => {
+    if (!isRec(block)) return;
+    if (Object.hasOwn(block, "cache_control")) codes.add("cache_control");
+    if (position === "system" && block.type !== "text") codes.add("unknown_content_block");
+    if (position === "result" && (typeof block.type !== "string" || !["text", "image", "document", "tool_reference"].includes(block.type))) {
+      codes.add("unknown_content_block");
+    }
+    switch (block.type) {
+      case "text":
+      case "image": break;
+      case "document": codes.add("documents"); break;
+      case "thinking":
+      case "redacted_thinking": codes.add("thinking_replay"); break;
+      case "tool_reference": codes.add("tool_reference"); break;
+      case "tool_search_tool_result": codes.add("tool_search"); break;
+      case "web_search_tool_result": codes.add("web_search_tool"); break;
+      case "code_execution_tool_result":
+      case "bash_code_execution_tool_result":
+      case "text_editor_code_execution_tool_result": codes.add("code_execution"); break;
+      case "mcp_tool_use":
+      case "mcp_tool_result": codes.add("mcp_tool"); break;
+      case "tool_use":
+        if (block.caller !== undefined && (!isRec(block.caller) || block.caller.type !== "direct")) codes.add("caller_mode");
+        break;
+      case "server_tool_use":
+        switch (block.name) {
+          case "tool_search":
+          case "tool_search_tool_regex":
+          case "tool_search_tool_bm25": codes.add("tool_search"); break;
+          case "web_search": codes.add("web_search_tool"); break;
+          case "code_execution": codes.add("code_execution"); break;
+          case "computer": codes.add("computer_use"); break;
+          default: codes.add("server_tool");
+        }
+        break;
+      case "tool_result": break; // Children are visited below at the one supported nesting level.
+      default: codes.add("unknown_content_block");
+    }
+  };
+  if (Array.isArray(body.system)) for (const block of body.system) scanBlock(block, "system");
+  if (Array.isArray(body.messages)) {
+    for (const message of body.messages) {
+      if (!isRec(message) || !Array.isArray(message.content)) continue;
+      for (const block of message.content) {
+        scanBlock(block, "message");
+        if (isRec(block) && block.type === "tool_result" && Array.isArray(block.content)) {
+          for (const child of block.content) scanBlock(child, "result");
+        }
+      }
+    }
+  }
+  return codes;
+}
 
 export interface ClaudeCompatibilityResult {
-  featureCodes: string[];
+  featureCodes: ClaudeFeatureCode[];
   compatible: boolean;
-  decision: ClaudeCompatibilityDecision;
-  /** Human-readable reason when rejected, otherwise undefined. */
+  decision: "allow" | "shadow" | "reject";
   reason?: string;
 }
 
-type Rec = Record<string, unknown>;
-
-function isRec(v: unknown): v is Rec {
-  return !!v && typeof v === "object" && !Array.isArray(v);
-}
-
-function sanitizeBetaToken(raw: string): string {
-  const trimmed = raw.trim().toLowerCase();
-  if (!trimmed) return "";
-  return trimmed.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-}
-
-function walkForCacheControl(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(walkForCacheControl);
-  const rec = value as Rec;
-  if (Object.prototype.hasOwnProperty.call(rec, "cache_control")) return true;
-  return Object.values(rec).some(walkForCacheControl);
-}
-
-function hasThinkingBlock(body: Rec): boolean {
-  if (isRec(body.thinking)) return true;
-  const msgs = body.messages;
-  if (!Array.isArray(msgs)) return false;
-  for (const m of msgs) {
-    if (!isRec(m)) continue;
-    const content = m.content;
-    if (Array.isArray(content)) {
-      for (const b of content) {
-        if (!isRec(b)) continue;
-        if (b.type === "thinking" || b.type === "redacted_thinking") return true;
-      }
-    }
-  }
-  return false;
-}
-
-function hasGenuineSignedThinking(body: Rec): boolean {
-  const msgs = body.messages;
-  if (!Array.isArray(msgs)) return false;
-  for (const m of msgs) {
-    if (!isRec(m)) continue;
-    const content = (m as Rec).content;
-    if (!Array.isArray(content)) continue;
-    for (const b of content) {
-      if (!isRec(b)) continue;
-      if (b.type === "thinking") {
-        const signature = b.signature;
-        if (typeof signature === "string") {
-          if (signature.length > 0 && !signature.startsWith("ocxr1:")) return true;
-        } else if (signature != null) {
-          return true;
-        }
-      } else if (b.type === "redacted_thinking") {
-        const data = (b as Rec).data;
-        if (typeof data === "string") {
-          if (data.length > 0) return true;
-        } else if (data != null && String(data).length > 0) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-const KNOWN_CONTENT_TYPES = new Set([
-  "text", "image", "tool_use", "tool_result", "thinking", "redacted_thinking",
-  "document", "server_tool_use", "web_search_tool_result", "code_execution_tool_result",
-  "tool_search_tool_result", "mcp_tool_use", "mcp_tool_result",
-]);
-
-function hasDocuments(body: Rec): boolean {
-  const msgs = body.messages;
-  if (!Array.isArray(msgs)) return false;
-  for (const m of msgs) {
-    if (!isRec(m)) continue;
-    const content = m.content;
-    if (!Array.isArray(content)) continue;
-    for (const b of content) {
-      if (!isRec(b)) continue;
-      if (b.type === "document") return true;
-      if (b.type === "tool_result" && Array.isArray(b.content)) {
-        for (const nested of b.content) {
-          if (isRec(nested) && nested.type === "document") return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-function hasUnknownContentBlock(body: Rec): boolean {
-  const sys = body.system;
-  if (Array.isArray(sys)) {
-    for (const b of sys) {
-      if (!isRec(b)) continue;
-      const t = typeof b.type === "string" ? b.type : "";
-      if (t && t !== "text") return true;
-    }
-  }
-  const msgs = body.messages;
-  if (!Array.isArray(msgs)) return false;
-  for (const m of msgs) {
-    if (!isRec(m)) continue;
-    const content = m.content;
-    if (!Array.isArray(content)) continue;
-    for (const b of content) {
-      if (!isRec(b)) continue;
-      const t = typeof b.type === "string" ? b.type : "";
-      if (t && !KNOWN_CONTENT_TYPES.has(t)) return true;
-    }
-  }
-  return false;
-}
-
-function hasCodeExecution(body: Rec): boolean {
-  const tools = body.tools;
-  if (Array.isArray(tools)) {
-    for (const t of tools) {
-      if (!isRec(t)) continue;
-      const type = typeof t.type === "string" ? t.type : "";
-      if (type.includes("code_execution")) return true;
-    }
-  }
-  const msgs = body.messages;
-  if (Array.isArray(msgs)) {
-    for (const m of msgs) {
-      if (!isRec(m)) continue;
-      const content = m.content;
-      if (!Array.isArray(content)) continue;
-      for (const b of content) {
-        if (!isRec(b)) continue;
-        if (b.type === "code_execution_tool_result") return true;
-        if (b.type === "server_tool_use" && typeof b.name === "string" && b.name.includes("code_execution")) return true;
-      }
-    }
-  }
-  return false;
-}
-
-function hasComputerUse(body: Rec): boolean {
-  const tools = body.tools;
-  if (Array.isArray(tools)) {
-    for (const t of tools) {
-      if (!isRec(t)) continue;
-      const type = typeof t.type === "string" ? t.type : "";
-      if (type.includes("computer")) return true;
-    }
-  }
-  const msgs = body.messages;
-  if (!Array.isArray(msgs)) return false;
-  for (const m of msgs) {
-    if (!isRec(m)) continue;
-    const content = m.content;
-    if (!Array.isArray(content)) continue;
-    for (const b of content) {
-      if (!isRec(b)) continue;
-      if (typeof b.type === "string" && b.type.includes("computer")) return true;
-    }
-  }
-  return false;
-}
-
-function hasMcpTool(body: Rec): boolean {
-  const tools = body.tools;
-  if (Array.isArray(tools)) {
-    for (const t of tools) {
-      if (!isRec(t)) continue;
-      const type = typeof t.type === "string" ? t.type : "";
-      if (type === "mcp_toolset") return true;
-    }
-  }
-  const msgs = body.messages;
-  if (!Array.isArray(msgs)) return false;
-  for (const m of msgs) {
-    if (!isRec(m) || !Array.isArray(m.content)) continue;
-    for (const b of m.content) {
-      if (isRec(b) && (b.type === "mcp_tool_use" || b.type === "mcp_tool_result")) return true;
-    }
-  }
-  return false;
-}
-
-function hasWebSearchTool(body: Rec): boolean {
-  const tools = body.tools;
-  if (Array.isArray(tools)) {
-    for (const t of tools) {
-      if (!isRec(t)) continue;
-      const type = typeof t.type === "string" ? t.type : "";
-      if (type.includes("web_search")) return true;
-    }
-  }
-  const msgs = body.messages;
-  if (Array.isArray(msgs)) {
-    for (const m of msgs) {
-      if (!isRec(m)) continue;
-      const content = m.content;
-      if (!Array.isArray(content)) continue;
-      for (const b of content) {
-        if (!isRec(b)) continue;
-        if (b.type === "web_search_tool_result") return true;
-        if (b.type === "server_tool_use" && typeof b.name === "string" && b.name.includes("web_search")) return true;
-      }
-    }
-  }
-  return false;
-}
-
-function hasGenericServerTool(body: Rec): boolean {
-  const tools = body.tools;
-  if (!Array.isArray(tools)) {
-    const msgs = body.messages;
-    if (Array.isArray(msgs)) {
-      for (const m of msgs) {
-        if (!isRec(m)) continue;
-        const content = m.content;
-        if (!Array.isArray(content)) continue;
-        for (const b of content) {
-          if (!isRec(b)) continue;
-          if (b.type !== "server_tool_use") continue;
-          const name = typeof b.name === "string" ? b.name : "";
-          if (name.includes("web_search") || name.includes("code_execution") || name.includes("computer") || name.startsWith("tool_search_tool_")) continue;
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-  for (const t of tools) {
-    if (!isRec(t)) continue;
-    // Exclude known function tools, tool_search, and already-classified server tools
-    const type = typeof t.type === "string" ? t.type : "";
-    if (type === "tool_search" || type.startsWith("tool_search_tool_")) continue;
-    if (type.includes("web_search") || type.includes("code_execution") || type.includes("computer") || type === "mcp_toolset") continue;
-    if (type && type !== "function" && type !== "custom") return true;
-    if (type && typeof t.name !== "string") return true;
-  }
-  const msgs2 = body.messages;
-  if (Array.isArray(msgs2)) {
-    for (const m of msgs2) {
-      if (!isRec(m)) continue;
-      const content = m.content;
-      if (!Array.isArray(content)) continue;
-      for (const b of content) {
-        if (!isRec(b)) continue;
-        if (b.type === "server_tool_use") {
-          const n = typeof b.name === "string" ? b.name : "";
-          if (n.includes("web_search") || n.includes("code_execution") || n.includes("computer") || n.startsWith("tool_search_tool_")) continue;
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-function hasToolSearch(body: Rec): boolean {
-  const tools = body.tools;
-  if (Array.isArray(tools)) {
-    for (const t of tools) {
-      if (!isRec(t)) continue;
-      if (typeof t.type === "string" && (t.type === "tool_search" || t.type.startsWith("tool_search_tool_"))) return true;
-    }
-  }
-  const msgs = body.messages;
-  if (Array.isArray(msgs)) {
-    for (const m of msgs) {
-      if (!isRec(m)) continue;
-      const content = m.content;
-      if (!Array.isArray(content)) continue;
-      for (const b of content) {
-        if (!isRec(b)) continue;
-        if (b.type === "tool_search_tool_result") return true;
-        if (b.type === "server_tool_use"
-          && typeof b.name === "string"
-          && (b.name === "tool_search" || b.name.startsWith("tool_search_tool_"))) return true;
-      }
-    }
-  }
-  return false;
-}
-
-function hasDeferredTools(body: Rec): boolean {
-  const tools = body.tools;
-  if (Array.isArray(tools)) {
-    for (const t of tools) {
-      if (!isRec(t)) continue;
-      if (t.defer === true) return true;
-      if ((t as Rec).defer_loading === true) return true;
-      if (Object.hasOwn(t, "defer") || Object.hasOwn(t, "defer_loading")) {
-        // presence with truthy already handled; presence with explicit true is deferred
-      }
-    }
-  }
-  if (Object.hasOwn(body, "defer_tools") || Object.hasOwn(body, "deferred_tools")) return true;
-  return false;
-}
-
-function hasInputExamples(body: Rec): boolean {
-  const tools = body.tools;
-  if (!Array.isArray(tools)) return false;
-  for (const t of tools) {
-    if (!isRec(t)) continue;
-    if (Object.hasOwn(t, "input_examples")) return true;
-  }
-  return false;
-}
-
-function hasStructuredOutput(body: Rec): boolean {
-  const oc = isRec(body.output_config) ? (body.output_config as Rec) : null;
-  const nestedFormat = isRec(oc?.format) ? (oc!.format as Rec) : null;
-  const topFormat = isRec(body.output_format) ? (body.output_format as Rec) : null;
-  const fmt = nestedFormat ?? topFormat;
-  if (!fmt) return false;
-  const f = fmt as Rec;
-  if (f.type === "json_schema") return true;
-  return false;
-}
-
-function hasServiceTier(body: Rec): boolean {
-  return typeof body.service_tier === "string" && (body.service_tier as string).length > 0;
-}
-
-function hasContextManagement(body: Rec): boolean {
-  return Object.prototype.hasOwnProperty.call(body, "context_management");
-}
-
-/** Claude Code 2.1.201 sends this cache-preserving no-op on ordinary routed turns. */
-function isNoopContextManagement(body: unknown): boolean {
-  if (!isRec(body) || !isRec(body.context_management)) return false;
-  const contextManagement = body.context_management;
-  if (Object.keys(contextManagement).some(key => key !== "edits")) return false;
-  const edits = contextManagement.edits;
-  if (edits === undefined) return true;
-  if (Array.isArray(edits)) {
-    if (edits.length === 0) return true;
-    if (edits.length === 1 && isRec(edits[0])) {
-      const edit = edits[0];
-      return edit.type === "clear_thinking_20251015"
-        && edit.keep === "all"
-        && Object.keys(edit).every(key => key === "type" || key === "keep");
-    }
-  }
-  return false;
-}
-
-const KNOWN_BODY_FIELDS = new Set([
-  "model", "max_tokens", "messages", "system", "tools", "tool_choice", "thinking",
-  "output_config", "output_format", "metadata", "service_tier", "stop_sequences", "stream",
-  "temperature", "top_p", "top_k", "cache_control", "context_management",
-  "container", "inference_geo", "user_profile_id", "defer_tools", "deferred_tools",
-]);
-
-const KNOWN_OUTPUT_CONFIG_FIELDS = new Set(["effort", "format"]);
-
-function hasUnknownBodyField(body: Rec): boolean {
-  if (Object.keys(body).some(field => !KNOWN_BODY_FIELDS.has(field))) return true;
-  if (isRec(body.output_config) && Object.keys(body.output_config).some(field => !KNOWN_OUTPUT_CONFIG_FIELDS.has(field))) return true;
-  return false;
-}
-
-/**
- * Collect feature codes from a sanitized Anthropic body and anthropic-beta header.
- * Pure — no config or Lab state.
- */
-export function collectClaudeFeatureCodes(
-  body: unknown,
-  anthropicBeta?: string,
-): string[] {
-  const codes: string[] = [];
-  const rec = isRec(body) ? (body as Rec) : null;
-  if (rec) {
-    if (walkForCacheControl(body)) codes.push("cache_control");
-    if (hasContextManagement(rec)) codes.push("context_management");
-    if (Object.hasOwn(rec, "container")) codes.push("container");
-    if (Object.hasOwn(rec, "inference_geo")) codes.push("inference_geo");
-    if (Object.hasOwn(rec, "user_profile_id")) codes.push("user_profile");
-    if (hasUnknownBodyField(rec)) codes.push("unknown_body_field");
-    if (hasThinkingBlock(rec)) codes.push("thinking_block");
-    if (hasGenuineSignedThinking(rec)) codes.push("signed_thinking");
-    if (hasDocuments(rec)) codes.push("documents");
-    if (hasUnknownContentBlock(rec)) codes.push("unknown_content_block");
-    if (hasWebSearchTool(rec)) codes.push("web_search_tool");
-    if (hasCodeExecution(rec)) codes.push("code_execution");
-    if (hasComputerUse(rec)) codes.push("computer_use");
-    if (hasMcpTool(rec)) codes.push("mcp_tool");
-    if (hasGenericServerTool(rec)) codes.push("server_tool");
-    if (hasToolSearch(rec)) codes.push("tool_search");
-    if (hasDeferredTools(rec)) codes.push("deferred_tools");
-    if (hasInputExamples(rec)) codes.push("input_examples");
-    if (hasStructuredOutput(rec)) codes.push("structured_output");
-    if (hasServiceTier(rec)) codes.push("service_tier");
-  }
-  if (typeof anthropicBeta === "string" && anthropicBeta.trim().length > 0) {
-    for (const raw of anthropicBeta.split(",")) {
-      const sanitized = sanitizeBetaToken(raw);
-      if (!sanitized) continue;
-      codes.push(`beta_${sanitized}`);
-    }
-  }
-  return [...new Set(codes)].sort();
-}
-
-/**
- * Analyze compatibility for a given body/header/adapter/mode.
- * Enforce rejects when incompatible features require native Anthropic.
- * Shadow never rejects — it only records.
- */
+/** All translated targets share this policy; native passthrough never calls it. */
 export function analyzeClaudeCompatibility(
   body: unknown,
-  opts: { mode: ClaudeCompatibilityMode; adapter?: string; anthropicBeta?: string },
+  opts: { mode: ClaudeCompatibilityMode; anthropicBeta?: string },
 ): ClaudeCompatibilityResult {
-  const featureCodes = collectClaudeFeatureCodes(body, opts.anthropicBeta);
-  if (opts.adapter === "anthropic") {
-    return { featureCodes, compatible: true, decision: "allow" };
-  }
-  // Incompatible set for routed adapters (non-anthropic native).
-  // Compatible (translated or lossless): cache_control, thinking_block, web_search_tool,
-  // tool_search, structured_output, service_tier, input_examples (deferred? no), beta_*.
-  // Incompatible: features without lossless Responses mapping — they require Anthropic
-  // source preservation and must be rejected on routed targets.
-  const INCOMPATIBLE = new Set([
-    "context_management",
-    "container",
-    "inference_geo",
-    "user_profile",
-    "unknown_body_field",
-    "documents",
-    "unknown_content_block",
-    "code_execution",
-    "computer_use",
-    "mcp_tool",
-    "server_tool",
-    "input_examples",
-    "signed_thinking",
-  ]);
-  if (opts.adapter !== "openai-responses") INCOMPATIBLE.add("deferred_tools");
-  const incompatible = featureCodes.filter(c =>
-    INCOMPATIBLE.has(c) && (c !== "context_management" || !isNoopContextManagement(body))
-  );
-  // Safety invariant: genuine signed thinking is incompatible on every non-Anthropic adapter and fails closed even in shadow.
-  // Anthropic adapter already returned allow above.
-  if (incompatible.includes("signed_thinking")) {
-    return {
-      featureCodes,
-      compatible: false,
-      decision: "reject",
-      reason: `unsupported features for routed adapter ${opts.adapter ?? "unknown"}: ${incompatible.join(", ")}. Select an Anthropic route, remove the feature, or begin a fresh reasoning turn`,
-    };
-  }
-  if (opts.mode === "shadow") {
-    return {
-      featureCodes,
-      compatible: true,
-      decision: incompatible.length > 0 ? "shadow" : "allow",
-      ...(incompatible.length > 0 ? { reason: `shadow: would reject for ${incompatible.join(", ")}` } : {}),
-    };
-  }
-  if (incompatible.length > 0) {
-    return {
-      featureCodes,
-      compatible: false,
-      decision: "reject",
-      reason: `unsupported features for routed adapter ${opts.adapter ?? "unknown"}: ${incompatible.join(", ")}. Select an Anthropic route, remove the feature, or begin a fresh reasoning turn`,
-    };
-  }
-  return { featureCodes, compatible: true, decision: "allow" };
+  const detected = detectFeatures(body, opts.anthropicBeta);
+  const compatible = !FEATURE_CODES.some(code => detected.has(code) && FEATURES[code]);
+  const featureCodes = normalizeClaudeFeatureCodes([...detected]);
+  return {
+    featureCodes,
+    compatible,
+    decision: compatible ? "allow" : opts.mode === "shadow" ? "shadow" : "reject",
+    ...(!compatible ? { reason: claudeCompatibilityReason(featureCodes, opts.mode === "shadow") } : {}),
+  };
 }

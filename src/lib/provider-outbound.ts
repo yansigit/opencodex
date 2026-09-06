@@ -7,7 +7,7 @@ import {
   resolvePublicAddresses,
 } from "./destination-policy";
 import { pinnedHttpGet, pinnedHttpPost } from "./pinned-http";
-import { effectiveProxyFor, noProxyMatches, proxyForUrl } from "./proxy-env";
+import { effectiveProxyFor, noProxyMatches, outboundProxyConfigured, proxyForUrl } from "./proxy-env";
 import { publicProviderBaseUrl } from "./provider-url";
 import { antigravityOAuthDestinationConfigError, isCanonicalAntigravityUrl, providerTlsFetch } from "./provider-tls-profile";
 import { waitForProviderRequestSlot } from "../providers/request-pacing";
@@ -231,6 +231,7 @@ async function providerOutboundRequest(
       url,
     );
   }
+  const proxyConfigured = outboundProxyConfigured();
   // Snapshot the scheme-matched proxy once, before the DNS await, so admission and transport
   // below reason about the same value. `null` here means "no proxy fetch would actually use",
   // even if some other proxy variable is set.

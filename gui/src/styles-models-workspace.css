@@ -430,12 +430,6 @@
   padding: var(--space-2) 0;
 }
 
-.models-model-row-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
 .models-show-more {
   margin-top: var(--space-2);
 }
@@ -628,20 +622,6 @@
     margin-left: 0;
     justify-content: flex-start;
   }
-
-  .model-row-wrap > .models-model-row {
-    flex-wrap: wrap;
-  }
-
-  .models-model-row-actions {
-    flex: 0 0 100%;
-    justify-content: flex-end;
-  }
-
-  .models-model-row-actions .btn {
-    min-width: var(--control-touch);
-    min-height: var(--control-touch);
-  }
 }
 
 /* Mobile: sidebar is a drawer; still prefer rail-on-top for touch. */
@@ -667,9 +647,4 @@
     justify-content: flex-start;
   }
 }
-.models-cap-cluster {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--space-1);
-}
+.models-integration-warning { overflow-wrap: anywhere; }
