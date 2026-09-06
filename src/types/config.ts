@@ -830,10 +830,9 @@ export interface OcxConfig {
    * Sticky session affinity; new sessions may pick lowest known 5h usage.
    * Experimental — see docs and GUI warning before enabling.
    *
-   * Reactive 429 failover is NOT gated here. It activates on account presence, like every
-   * other multi-credential provider, and cannot be switched off: rotating away from an account
-   * upstream has just rate-limited only ever runs after a refusal, so stranding it while a
-   * second logged-in account sits idle is a defect rather than a configuration choice.
+   * Reactive 429 failover defaults on when this setting is omitted and two eligible accounts
+   * are present. An explicit `false` disables both the proactive pool and reactive replay under
+   * another identity; an explicit `true` enables the full pool contract.
    */
   anthropicAccountPool?: {
     enabled?: boolean;
@@ -850,14 +849,13 @@ export interface OcxConfig {
    * Generic OAuth multi-account PROACTIVE account preference (#2568, #695).
    *
    * Reactive 429 rotation — moving to another logged-in account of the SAME provider when one
-   * is rate-limited — is presence-driven and NOT configurable here. It activates whenever a
-   * provider has 2 or more eligible stored accounts, the same consent rule an `apiKeyPool` of
-   * two keys already applies, and a single account remains a strict no-op.
+   * is rate-limited — defaults on when both settings are omitted and 2 or more eligible accounts
+   * are present. An explicit global `false` disables it unless a provider-specific `true`
+   * overrides that choice; a provider-specific `false` always disables it for that provider.
    *
    * Proactive avoidance of an exhausted selected account requires `enabled: true`.
    * A healthy selected account retains priority; an unknown quota is not exhaustion.
    * `providers.<name>.oauthAccountFailover` overrides this per provider in either direction.
-   * Reactive 429 rotation remains presence-driven even when proactive routing is disabled.
    */
   oauthAccountFailover?: {
     enabled?: boolean;

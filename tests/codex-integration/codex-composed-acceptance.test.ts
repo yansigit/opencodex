@@ -23,15 +23,20 @@ import { join, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { Database } from "bun:sqlite";
 
-import { watchdogMs } from "../helpers/ci-watchdog";
+import { childStartupMarkerMs, watchdogMs } from "../helpers/ci-watchdog";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
+/** A fresh Windows Bun/PowerShell startup is not a 45-second latency assertion. */
+const STARTUP_MARKER_TIMEOUT_MS = childStartupMarkerMs(10_000);
 /**
- * Per-case budget. A case can start a server twice and stop it, so it must exceed the sum of
- * the watchdogs inside it or the case dies before the watchdog it was meant to bound can
- * report anything useful. On CI those watchdogs take the 30s floor, so this scales with them.
+ * A case can start the server twice. Keep both startup-marker budgets plus a
+ * shared 90 seconds for health probes and the behavior under test inside the
+ * enclosing timeout. This preserves the existing 150-second non-Windows CI
+ * ceiling and gives Windows 240 seconds.
  */
-const CASE_TIMEOUT_MS = process.env.CI === "true" ? 150_000 : 45_000;
+const CASE_TIMEOUT_MS = process.env.CI === "true"
+  ? (2 * STARTUP_MARKER_TIMEOUT_MS) + 90_000
+  : 45_000;
 
 import {
   canonicalizeCodexHome,
@@ -52,7 +57,10 @@ import { repoRoot as resolveRepoRoot } from "../helpers/repo-root";
  * passed at 47.9 s and 57.8 s — the case was inside its band, the per-request bound was
  * not. Named rather than multiplied so the next reader sees WHAT is being bounded.
  */
-const HELD_REQUEST_BUDGET_MS = SERVER_BUDGET_MS + INTERNAL_DEADLINE_MS;
+const HELD_REQUEST_BUDGET_MS = Math.max(
+  SERVER_BUDGET_MS + INTERNAL_DEADLINE_MS,
+  CASE_TIMEOUT_MS,
+);
 
 const repoRoot = resolveRepoRoot();
 const cliPath = resolve(repoRoot, "src/cli/index.ts");
@@ -101,7 +109,7 @@ async function waitFor<T>(
   // while the child was still alive and still working — `child exit=null` with both streams
   // open, which is a slow start, not a crash. The watchdog exists to bound a hung test, not
   // to assert startup latency, so it takes the repository's CI floor.
-  timeoutMs = watchdogMs(10_000),
+  timeoutMs = STARTUP_MARKER_TIMEOUT_MS,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -264,7 +272,7 @@ class Fixture {
       } catch {
         return null;
       }
-    }, "child /healthz");
+    }, "child /healthz", watchdogMs(10_000));
     expect(health).toMatchObject({ pid: child.pid, port: runtime.port });
     return { process: child, runtime, stdout, stderr };
   }
@@ -500,7 +508,8 @@ describe("WP13 composed toggle acceptance", () => {
         } }, defaultProvider: "fixture", clientIntegrations: { codex: true } });
         hold = true;
         // This request is intentionally held open while a second real HTTP
-        // mutation crosses the Windows process-backed identity path; see HELD_REQUEST_BUDGET_MS.
+        // mutation crosses the Windows process-backed identity path. Its deadline
+        // must outlive that mutation; see HELD_REQUEST_BUDGET_MS.
         const stale = fx.request(server.runtime, "/api/sync", { method: "POST" }, HELD_REQUEST_BUDGET_MS);
         await Promise.race([
           enteredGather,
@@ -510,7 +519,7 @@ describe("WP13 composed toggle acceptance", () => {
         ]);
         const off = await fx.request(server.runtime, "/api/native-integrations/codex", {
           method: "PUT", body: JSON.stringify({ enabled: false }),
-        }, SERVER_BUDGET_MS);
+        }, watchdogMs(SERVER_BUDGET_MS));
         expect(off.status).toBe(200);
         const afterOff = manifest(fx.codex);
         release();

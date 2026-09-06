@@ -470,11 +470,11 @@ export interface OcxProviderConfig {
   /**
    * Per-provider override for the generic OAuth PROACTIVE account preference (#2568, #695).
    *
-   * Reactive 429 rotation is presence-driven and cannot be refused here — 2+ logged-in accounts
-   * activate it, and a 429 with an idle second account is a defect rather than a preference.
-   * Proactive exhaustion avoidance requires explicit `true`; a healthy selected account
-   * retains priority. This overrides global `oauthAccountFailover` in either direction.
-   * Reactive 429 rotation remains available even when proactive routing is disabled.
+   * When this setting and the global setting are omitted, 2+ eligible accounts enable reactive
+   * 429 rotation by presence. An explicit provider `false` disables both proactive preference
+   * and reactive replay under another identity; an explicit `true` enables them. This overrides
+   * global `oauthAccountFailover` in either direction. A healthy selected account retains
+   * priority during proactive selection.
    */
   oauthAccountFailover?: {
     enabled?: boolean;
