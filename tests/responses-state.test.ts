@@ -1476,8 +1476,12 @@ describe("Responses previous_response_id state", () => {
 
   test("shutdown fallback spends only its reserved ACL budget", async () => {
     forceWindowsAclLane();
-    const totalMs = 500;
-    const fallbackReserveMs = 300;
+    // The 2 MiB fallback write performs real fsync work even though the ACL clock below
+    // is synthetic. Keep the real wall-clock reserve out of the assertion's critical
+    // path: run 33998058832 exhausted the old 300 ms reserve under Linux shard load.
+    const drainMs = 200;
+    const fallbackReserveMs = STORE_BUDGET_MS;
+    const totalMs = fallbackReserveMs + drainMs;
     setResponseSpillShutdownBudgetForTests({ totalMs, fallbackReserveMs });
     let release!: () => void;
     let entered!: () => void;
@@ -1495,7 +1499,9 @@ describe("Responses previous_response_id state", () => {
     setIcaclsRunnerForTests((args, timeoutMs) => {
       if (!isSpillAclTarget(args)) return ICACLS_OK;
       deadlines.push(timeoutMs);
-      aclClock += 20;
+      // Spend a meaningful share of the logical reserve per call so the total-budget
+      // assertion stays sharp without coupling it to hosted-runner filesystem latency.
+      aclClock += Math.floor(fallbackReserveMs / 8);
       return { success: true, exitCode: 0, timedOut: false, stdout: "" };
     });
     setResponseStateByteCapForTests(1_024);
@@ -1508,7 +1514,7 @@ describe("Responses previous_response_id state", () => {
       release();
     }
     await awaitResponseSpillPublicationTailForTests();
-    const logicalElapsedMs = totalMs - fallbackReserveMs + aclClock;
+    const logicalElapsedMs = drainMs + aclClock;
     expect(deadlines.length).toBeGreaterThanOrEqual(6);
     expect(Math.max(...deadlines)).toBeLessThanOrEqual(Math.floor(fallbackReserveMs / 2));
     expect(logicalElapsedMs).toBeLessThanOrEqual(totalMs);
