@@ -1,11 +1,26 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { validateRegistry, validateRegistryTransition, loadRegistry, registryHash, registryPath, resolvedRegistryPath } from "../../scripts/fork/sync/preservation";
+import { repoPath } from "../helpers/repo-root";
 
 describe("preservation registry", () => {
   test("validates correct registry", async () => {
     const mod = await import("../../docs/fork/PRESERVATION.json");
     const registry = (mod as unknown as { default: unknown }).default ?? mod;
     expect(() => validateRegistry(registry as never)).not.toThrow();
+  });
+
+  test("baseline required tests resolve to repository files", async () => {
+    const mod = await import("../../docs/fork/PRESERVATION.json");
+    const registry = ((mod as unknown as { default: unknown }).default ?? mod) as {
+      baseline: { features: Record<string, { requiredTests: string[] }> };
+    };
+    const missing = Object.entries(registry.baseline.features).flatMap(([feature, entry]) =>
+      entry.requiredTests
+        .filter(requiredTest => !existsSync(repoPath(requiredTest)))
+        .map(requiredTest => `${feature}: ${requiredTest}`));
+
+    expect(missing).toEqual([]);
   });
 
   test("registryPath is docs/fork/PRESERVATION.json", () => {
