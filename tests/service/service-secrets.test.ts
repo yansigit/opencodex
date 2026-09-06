@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as nodeFs from "node:fs";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -12,7 +13,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  loadServiceTokenFromFile,
   readServiceApiTokenState,
+  readInstalledServiceToken,
   readTokenBackupState,
   removeOrphanTokenBackup,
   replaceServiceApiTokenFile,
@@ -39,6 +42,76 @@ afterEach(() => {
 });
 
 describe("service API token ownership", () => {
+  test("round-trips a 512-byte token through the canonical file and backup readers", () => {
+    const token = "t".repeat(512);
+    const persisted = writeServiceApiTokenFile(token);
+
+    expect(lstatSync(persisted.path).size).toBe(513);
+    expect(readServiceApiTokenState()).toMatchObject({ kind: "present", token });
+    expect(readInstalledServiceToken()).toBe(token);
+
+    const backup = writeTokenBackup(persisted.fingerprint);
+    expect(lstatSync(backup.path).size).toBe(513);
+    expect(readTokenBackupState()).toMatchObject({ kind: "present", token });
+  });
+
+  test("rejects a 513-byte token in writers and canonical readers", () => {
+    const oversized = "t".repeat(513);
+    expect(() => writeServiceApiTokenFile(oversized)).toThrow("invalid service API token");
+
+    writeServiceApiTokenFile("valid-token");
+    expect(() => replaceServiceApiTokenFile(oversized)).toThrow("invalid service API token");
+
+    writeFileSync(serviceApiTokenFilePath(), oversized, { mode: 0o600 });
+    expect(readServiceApiTokenState()).toMatchObject({ kind: "unsafe" });
+    expect(readInstalledServiceToken()).toBeNull();
+    expect(loadServiceTokenFromFile({ OCX_API_TOKEN_FILE: serviceApiTokenFilePath() })).toBeNull();
+
+    rmSync(serviceApiTokenFilePath());
+    writeFileSync(serviceApiTokenBackupPath(), oversized, { mode: 0o600 });
+    expect(readTokenBackupState()).toMatchObject({ kind: "unsafe" });
+  });
+
+  test("startup loading rejects unsafe or multiline token files", () => {
+    const path = serviceApiTokenFilePath();
+    const env = { OCX_API_TOKEN_FILE: path };
+
+    writeFileSync(path, "first\nsecond\n", { mode: 0o600 });
+    expect(readServiceApiTokenState()).toMatchObject({ kind: "unsafe" });
+    expect(readInstalledServiceToken()).toBeNull();
+    expect(loadServiceTokenFromFile(env)).toBeNull();
+
+    writeFileSync(serviceApiTokenBackupPath(), "first\nsecond\n", { mode: 0o600 });
+    expect(readTokenBackupState()).toMatchObject({ kind: "unsafe" });
+
+    rmSync(path);
+    expect(loadServiceTokenFromFile({ OCX_API_TOKEN_FILE: home })).toBeNull();
+
+    const target = join(home, "token-target");
+    writeFileSync(target, "valid-token\n", { mode: 0o600 });
+    try {
+      symlinkSync(target, path);
+      expect(loadServiceTokenFromFile(env)).toBeNull();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+    }
+  });
+
+  test("POSIX readers reject a group- or world-readable token file", () => {
+    if (process.platform === "win32") return;
+    const path = serviceApiTokenFilePath();
+    writeFileSync(path, "valid-token\n", { mode: 0o644 });
+    chmodSync(path, 0o644);
+
+    expect(readServiceApiTokenState()).toMatchObject({ kind: "unsafe" });
+    expect(readInstalledServiceToken()).toBeNull();
+    expect(loadServiceTokenFromFile({ OCX_API_TOKEN_FILE: path })).toBeNull();
+
+    writeFileSync(serviceApiTokenBackupPath(), "valid-token\n", { mode: 0o644 });
+    chmodSync(serviceApiTokenBackupPath(), 0o644);
+    expect(readTokenBackupState()).toMatchObject({ kind: "unsafe" });
+  });
+
   test("writes only the exact owner path through an atomic owner-only replacement", () => {
     const token = "ocx_data_0123456789abcdef0123456789abcdef01234567";
     const persisted = writeServiceApiTokenFile(token);
