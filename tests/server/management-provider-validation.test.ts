@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
-import { managementFetch as fetch, ManagementRequest as Request } from "../helpers/management-auth";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { inMemoryManagementPersistence, isolatedDiskManagementPersistence, managementFetch as fetch, ManagementRequest as Request } from "../helpers/management-auth";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCodexAccountRecord, saveCodexAccountCredential } from "../../src/codex/account-store";
@@ -13,7 +13,7 @@ import {
   getCodexUpstreamHealth,
   recordCodexUpstreamOutcome,
 } from "../../src/codex/routing";
-import { loadConfig, saveConfig } from "../../src/config";
+import { loadConfig, mutatePersistedConfig, saveConfig } from "../../src/config";
 import { deriveProviderPresets } from "../../src/providers/derive";
 import { MAIN_CODEX_ACCOUNT_ID } from "../../src/codex/main-account";
 import {
@@ -29,7 +29,7 @@ import {
   startServer,
 } from "../../src/server";
 import { handleManagementAPI } from "../../src/server/management-api";
-import { providerEditorConfigDTO, providerManagementConfigError } from "../../src/server/auth-cors";
+import { providerManagementConfigError } from "../../src/server/auth-cors";
 import { providerEmptyToolOutputConfigError } from "../../src/config/provider-validation";
 import { providerServiceTierConfigError, withProviderServiceTierDTO } from "../../src/server/management/provider-capability-config";
 import { clearModelCache, markProviderDiscoveryFailed, markProviderDiscoveryOk } from "../../src/codex/model-cache";
@@ -47,6 +47,8 @@ import { LOCAL_PROVIDER_RELOAD_NAME_HEADER, LOCAL_PROVIDER_RELOAD_PATH } from ".
 import { getAccountSet, saveCredential } from "../../src/oauth/store";
 import { fastPolicyForModel } from "../../src/providers/service-tier";
 import { resolveWireProtocolOverride } from "../../src/server/adapter-resolve";
+import { providerTlsFetch, resetProviderTlsProfileForTests, setProviderTlsRuntimeForTest } from "../../src/lib/provider-tls-profile";
+import { shouldUseCodexWsUpstream } from "../../src/server/responses/ws-upstream";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
 // Full-suite Windows load: startServer + multi-step provider PATCH/GET flows exceed the
@@ -123,6 +125,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetProviderTlsProfileForTests();
+  setProviderTlsRuntimeForTest(undefined);
   globalThis.fetch = originalGlobalFetch;
   if (previousApiToken === undefined) delete process.env.OPENCODEX_API_AUTH_TOKEN;
   else process.env.OPENCODEX_API_AUTH_TOKEN = previousApiToken;
@@ -237,7 +241,10 @@ describe("provider management validation", () => {
       apiKey: "new-disk-key",
       headers: { "x-operator-header": "operator-owned" },
     };
-    saveConfig(diskConfig);
+    expect(mutatePersistedConfig(fresh => {
+      fresh.providers.xai = structuredClone(diskConfig.providers.xai!);
+      return { changed: true, value: null };
+    }).status).toBe("committed");
     const diskBefore = readFileSync(join(TEST_DIR, "config.json"));
     const stableBefore = structuredClone(liveConfig.providers.stable);
     const resolvedError = spyOn(destinationPolicy, "providerDestinationResolvedError")
@@ -282,7 +289,10 @@ describe("provider management validation", () => {
     saveConfig(liveConfig);
     const diskConfig = structuredClone(liveConfig);
     diskConfig.providers.xai = { ...diskConfig.providers.xai!, apiKey: "first-disk-key" };
-    saveConfig(diskConfig);
+    expect(mutatePersistedConfig(fresh => {
+      fresh.providers.xai = structuredClone(diskConfig.providers.xai!);
+      return { changed: true, value: null };
+    }).status).toBe("committed");
 
     const untrusted = new Request(`http://127.0.0.1${LOCAL_PROVIDER_RELOAD_PATH}`, {
       method: "POST",
@@ -300,7 +310,10 @@ describe("provider management validation", () => {
       .mockImplementation(async () => {
         const changed = loadConfig();
         changed.providers.xai = { ...changed.providers.xai!, apiKey: "second-disk-key" };
-        saveConfig(changed);
+        mutatePersistedConfig(fresh => {
+          fresh.providers.xai = structuredClone(changed.providers.xai!);
+          return { changed: true, value: null };
+        });
         return null;
       });
     try {
@@ -750,6 +763,34 @@ describe("provider management validation", () => {
     expect(secretNameError).toContain("[REDACTED]");
   });
 
+  test("provider management validates transient replay as a boolean", () => {
+    const base = { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" };
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      replayTransientFailures: true,
+    })).toBeNull();
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      replayTransientFailures: "true",
+    })).toContain("replayTransientFailures must be a boolean");
+  });
+
+  test("provider management bounds transient 5xx retry policies", () => {
+    const base = { adapter: "openai-chat", baseUrl: "https://api.openai.com/v1" };
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      transientRetryOn5xx: { enabled: true, attempts: 10 },
+    })).toBeNull();
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      transientRetryOn5xx: { attempts: 11 },
+    })).toContain("transientRetryOn5xx.attempts is invalid");
+    expect(providerManagementConfigError("custom", {
+      ...base,
+      transientRetryOn5xx: { typo: true },
+    })).toContain("transientRetryOn5xx has unrecognized field");
+  });
+
   test("provider management redacts provider names from auto-compaction validation errors", () => {
     const secretName = "sk-super-secret-9876";
     const error = providerManagementConfigError(secretName, {
@@ -782,7 +823,7 @@ describe("provider management validation", () => {
     let catalogRefreshes = 0;
     const request = async (path: string, init?: RequestInit) => {
       const req = new Request(`http://127.0.0.1${path}`, init);
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
       });
     };
@@ -2565,7 +2606,7 @@ describe("provider management validation", () => {
     }
   });
 
-  test("provider deletion removes that provider's custom models (#1273)", async () => {
+  test("provider deletion drops dependent custom models atomically", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
     process.env.OPENCODEX_HOME = TEST_DIR;
@@ -2603,10 +2644,10 @@ describe("provider management validation", () => {
         method: "DELETE",
       });
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ success: true, droppedCustomModels: 1 });
+      expect(await response.json()).toMatchObject({
+        droppedCustomModels: 1,
+      });
 
-      // The dashboard model page reads this route; a surviving row here is the
-      // ghost model users see pointing at a provider that no longer exists.
       const customModels = await fetch(new URL("/api/custom-models", server.url));
       expect(await customModels.json()).toEqual([
         { id: "keep-1", provider: "test-openai", modelId: "kept-model" },
@@ -2920,7 +2961,7 @@ describe("provider management validation", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body),
         });
-        return handleManagementAPI(request, new URL(request.url), liveConfig, {
+        return handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
       };
@@ -2975,7 +3016,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ name: "openai", provider: canonicalDirect }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(400);
@@ -3008,6 +3049,10 @@ describe("provider management validation", () => {
         openai: { ...canonicalDirect },
       },
     };
+    // Provider PATCH now commits through the atomic persistence API. Seed the same
+    // config on disk so this direct-handler assertion exercises the current route
+    // contract instead of the removed in-memory-only write path.
+    saveConfig(liveConfig);
     const resolvedError = spyOn(destinationPolicy, "providerDestinationResolvedError")
       .mockResolvedValue(null);
 
@@ -3020,6 +3065,7 @@ describe("provider management validation", () => {
         });
         return handleManagementAPI(request, new URL(request.url), liveConfig, {
           createManagementConvergeCodex: catalogConvergenceFactory(),
+          mutatePersistedConfig,
         });
       };
 
@@ -3272,7 +3318,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(200);
@@ -3328,7 +3374,7 @@ describe("provider management validation", () => {
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ disabled: false }),
         });
-        const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+        const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
         expect(response?.status).toBe(400);
@@ -3387,7 +3433,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(400);
@@ -3439,7 +3485,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ disabled: false }),
       });
-      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, {
+      const response = await handleManagementAPI(request, new URL(request.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(response?.status).toBe(200);
@@ -3533,6 +3579,7 @@ describe("provider management validation", () => {
     let catalogRefreshes = 0;
     const primes: string[] = [];
     const deps = {
+      ...isolatedDiskManagementPersistence(),
       clearThreadAccountMap: () => { affinityClears += 1; },
       clearProviderQuotaCache: () => { quotaCacheClears += 1; },
       createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
@@ -3621,7 +3668,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
     };
@@ -3632,7 +3679,7 @@ describe("provider management validation", () => {
         listedRequest,
         new URL(listedRequest.url),
         liveConfig,
-        { createManagementConvergeCodex: catalogConvergenceFactory() },
+        { ...isolatedDiskManagementPersistence(), createManagementConvergeCodex: catalogConvergenceFactory() },
       );
       const listed = await listedResponse!.json() as Array<Record<string, unknown>>;
       expect(listed.find(row => row.name === "xai")?.xaiResponsesOptInState).toBe("mixed");
@@ -3691,6 +3738,7 @@ describe("provider management validation", () => {
         } }),
       });
       const overwritten = await handleManagementAPI(overwrite, new URL(overwrite.url), liveConfig, {
+        ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(),
       });
       expect(overwritten?.status).toBe(200);
@@ -3726,7 +3774,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(() => { catalogRefreshes += 1; }),
       });
     };
@@ -3827,7 +3875,7 @@ describe("provider management validation", () => {
         headers: body === undefined ? undefined : { "content-type": "application/json" },
         body: body === undefined ? undefined : JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         createManagementConvergeCodex: catalogConvergenceFactory(() => {}),
       });
     };
@@ -3938,7 +3986,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         // This branch replaced the best-effort `refreshCodexCatalog` dep with the
         // convergence entry point; every other test in this file already wires it
         // that way, and this one arrived from dev still using the old shape.
@@ -4000,6 +4048,7 @@ describe("provider management validation", () => {
           adapter: "openai-chat",
           baseUrl: "http://127.0.0.1:9/v1",
           allowPrivateNetwork: true,
+          replayTransientFailures: true,
           headers: { [sentinelName]: sentinelValue },
         },
       },
@@ -4009,12 +4058,228 @@ describe("provider management validation", () => {
     const res = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
     expect(res?.status).toBe(200);
     const raw = await res!.text();
-    const rows = JSON.parse(raw) as { name: string; hasHeaders?: boolean }[];
+    const rows = JSON.parse(raw) as { name: string; hasHeaders?: boolean; replayTransientFailures?: boolean }[];
     expect(rows.find(row => row.name === "hdr")?.hasHeaders).toBe(true);
+    expect(rows.find(row => row.name === "hdr")?.replayTransientFailures).toBe(true);
     expect(rows.find(row => row.name === "openai")?.hasHeaders).toBe(false);
     expect(raw).not.toContain(sentinelName);
     expect(raw).not.toContain(sentinelValue);
   });
+
+  test("GET /api/providers exposes only redacted Antigravity TLS profile state", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+          tlsProfile: "antigravity-browser",
+          apiKey: "must-not-leak",
+        },
+      },
+    };
+    const req = new Request("http://127.0.0.1/api/providers", { method: "GET" });
+    const res = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
+    expect(res?.status).toBe(200);
+    const raw = await res!.text();
+    const row = (JSON.parse(raw) as { name: string; tlsProfile?: string; tlsProfileStatus?: string }[])
+      .find(item => item.name === "google-antigravity");
+    expect(row).toMatchObject({ tlsProfile: "antigravity-browser", tlsProfileStatus: "disabled" });
+    expect(raw).not.toContain("must-not-leak");
+  });
+
+  test("PATCH /api/providers persists the validated Antigravity TLS profile", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+        },
+      },
+    };
+    const request = new Request("http://127.0.0.1/api/providers?name=google-antigravity", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
+    });
+    const response = await handleManagementAPI(request, new URL(request.url), liveConfig, inMemoryManagementPersistence(liveConfig));
+    expect(response?.status).toBe(200);
+    expect(liveConfig.providers["google-antigravity"]?.tlsProfile).toBe("antigravity-browser");
+  });
+
+  test("POST and PATCH reject Antigravity TLS profiles outside the canonical OAuth CCA contract", async () => {
+    const canonical = {
+      adapter: "google" as const,
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+      tlsProfile: "antigravity-browser" as const,
+    };
+    const cases = [
+      { name: "other-provider", provider: { ...canonical } },
+      { name: "google-antigravity", provider: { ...canonical, authMode: "key" as const } },
+      { name: "google-antigravity", provider: { ...canonical, googleMode: "ai-studio" as const } },
+      { name: "google-antigravity", provider: { ...canonical, baseUrl: "https://example.test" } },
+    ];
+    expect(providerManagementConfigError("google-antigravity", canonical)).toBeNull();
+    for (const candidate of cases) {
+      expect(providerManagementConfigError(candidate.name, candidate.provider)).toContain("tlsProfile");
+
+      const postConfig: OcxConfig = {
+        port: 0,
+        hostname: "127.0.0.1",
+        defaultProvider: "openai",
+        openaiProviderTierVersion: 2,
+        providers: { openai: { ...canonicalDirect } },
+      };
+      const post = new Request("http://127.0.0.1/api/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name: candidate.name, provider: candidate.provider }),
+      });
+      expect((await handleManagementAPI(post, new URL(post.url), postConfig, {}))?.status).toBe(400);
+
+      const patchConfig: OcxConfig = {
+        port: 0,
+        hostname: "127.0.0.1",
+        defaultProvider: "openai",
+        openaiProviderTierVersion: 2,
+        providers: {
+          openai: { ...canonicalDirect },
+          [candidate.name]: { ...candidate.provider, tlsProfile: undefined },
+        },
+      };
+      const patch = new Request(`http://127.0.0.1/api/providers?name=${encodeURIComponent(candidate.name)}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ tlsProfile: "antigravity-browser" }),
+      });
+      expect((await handleManagementAPI(patch, new URL(patch.url), patchConfig, {}))?.status).toBe(400);
+    }
+  });
+
+  test("provider management rejects noncanonical Antigravity OAuth destinations", async () => {
+    const invalid = {
+      adapter: "google" as const,
+      baseUrl: "https://evil.example.test",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+    };
+    expect(providerManagementConfigError("google-antigravity", invalid)).toContain("canonical Antigravity");
+    const postConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      openaiProviderTierVersion: 2,
+      providers: { openai: { ...canonicalDirect } },
+    };
+    const post = new Request("http://127.0.0.1/api/providers", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "google-antigravity", provider: invalid }),
+    });
+    expect((await handleManagementAPI(post, new URL(post.url), postConfig, {}))?.status).toBe(400);
+  });
+
+  test("GET /api/providers clears active TLS status when the profile is removed", async () => {
+    const profiled = {
+      adapter: "google" as const,
+      baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+      authMode: "oauth" as const,
+      googleMode: "cloud-code-assist" as const,
+      tlsProfile: "antigravity-browser" as const,
+    };
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      providers: { openai: { ...canonicalDirect }, "google-antigravity": profiled },
+    };
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => new Response("ok"),
+      }),
+    });
+    await providerTlsFetch("google-antigravity", profiled, globalThis.fetch)("https://daily-cloudcode-pa.googleapis.com/v1internal");
+    const request = () => new Request("http://127.0.0.1/api/providers", { method: "GET" });
+    const active = await handleManagementAPI(request(), new URL(request().url), liveConfig, {});
+    const activeRow = (JSON.parse(await active!.text()) as Array<{ name: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(activeRow?.tlsProfileStatus).toBe("active");
+
+    liveConfig.providers["google-antigravity"] = {
+      ...profiled,
+      baseUrl: "https://cloudcode-pa.googleapis.com",
+    };
+    const replacedRequest = request();
+    const replaced = await handleManagementAPI(replacedRequest, new URL(replacedRequest.url), liveConfig, {});
+    const replacedRow = (JSON.parse(await replaced!.text()) as Array<{ name: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(replacedRow?.tlsProfileStatus).toBe("disabled");
+
+    liveConfig.providers["google-antigravity"] = profiled;
+
+    liveConfig.providers["google-antigravity"] = { ...profiled, tlsProfile: undefined };
+    const removedRequest = request();
+    const removed = await handleManagementAPI(removedRequest, new URL(removedRequest.url), liveConfig, {});
+    const removedRow = (JSON.parse(await removed!.text()) as Array<{ name: string; tlsProfile?: string; tlsProfileStatus?: string }>)
+      .find(row => row.name === "google-antigravity");
+    expect(removedRow).toMatchObject({ tlsProfileStatus: "disabled" });
+    expect(removedRow?.tlsProfile).toBeUndefined();
+  });
+
+  test("provider connectivity diagnostics redact profiled native errors", async () => {
+    const liveConfig: OcxConfig = {
+      port: 0,
+      hostname: "127.0.0.1",
+      defaultProvider: "openai",
+      providers: {
+        openai: { ...canonicalDirect },
+        "google-antigravity": {
+          adapter: "google",
+          baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+          authMode: "oauth",
+          googleMode: "cloud-code-assist",
+          tlsProfile: "antigravity-browser",
+        },
+      },
+    };
+    await saveCredential("google-antigravity", {
+      access: "management-access-token",
+      refresh: "management-refresh-token",
+      expires: Date.now() + 3_600_000,
+      projectId: "management-project",
+    });
+    setProviderTlsRuntimeForTest({
+      importWreq: async () => ({
+        createTransport: async () => ({ close: async () => undefined }),
+        fetch: async () => {
+          throw new Error("native management failure at http://proxy-user:proxy-secret@example.test:8080/?access_token=management-access-token");
+        },
+      }),
+    });
+    const req = new Request("http://127.0.0.1/api/providers/test?name=google-antigravity", { method: "POST" });
+    const response = await handleManagementAPI(req, new URL(req.url), liveConfig, {});
+    expect(response?.status).toBe(200);
+    const body = await response!.json() as { ok: boolean; error?: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).not.toMatch(/proxy-user|proxy-secret|management-access-token|access_token/);
+  });
+
   test("provider PATCH merges headers case-insensitively", async () => {
     if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
     mkdirSync(TEST_DIR, { recursive: true });
@@ -4036,7 +4301,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         refreshCodexCatalog: async () => {},
       });
     };
@@ -4076,7 +4341,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         refreshCodexCatalog: async () => {},
       });
     };
@@ -4116,7 +4381,7 @@ describe("provider management validation", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
-      return handleManagementAPI(req, new URL(req.url), liveConfig, {
+      return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
         refreshCodexCatalog: async () => {},
       });
     };
@@ -4208,13 +4473,6 @@ describe("provider management validation", () => {
       });
       expect(disabled.status).toBe(200);
       expect(await disabled.json()).toMatchObject({ ok: true, caps: {} });
-      expect(loadConfig().providerContextCapValues?.["test-openai"]).toBe(350_000);
-      const uncapped = await fetch(new URL("/api/models", server.url));
-      expect(uncapped.status).toBe(200);
-      const uncappedRows = await uncapped.json() as Array<{ id: string; contextWindow?: number; contextCap?: number }>;
-      const wide = uncappedRows.find(row => row.id === "wide-model");
-      expect(wide).toMatchObject({ contextWindow: 500_000 });
-      expect(wide?.contextCap).toBeUndefined();
     } finally {
       await server.stop(true);
     }
@@ -4437,7 +4695,7 @@ describe("provider transport option management contract (#1668, #2816)", () => {
     try {
       const request = async (path: string, init?: RequestInit) => {
         const req = new Request(`http://127.0.0.1${path}`, init);
-        return handleManagementAPI(req, new URL(req.url), liveConfig, {
+        return handleManagementAPI(req, new URL(req.url), liveConfig, { ...isolatedDiskManagementPersistence(),
           createManagementConvergeCodex: catalogConvergenceFactory(),
         });
       };
@@ -4522,6 +4780,62 @@ describe("provider transport option management contract (#1668, #2816)", () => {
       expect(row).toBeDefined();
       expect(row.upstreamHttpVersion).toBeUndefined();
     });
+  });
+
+  test("POST with wsUpstream: null persists nothing and inherits the environment after reload", async () => {
+    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true });
+    mkdirSync(TEST_DIR, { recursive: true });
+    process.env.OPENCODEX_HOME = TEST_DIR;
+    const liveConfig = makeConfig();
+    saveConfig(liveConfig);
+    const previousWsUpstream = process.env.OCX_CODEX_WS_UPSTREAM;
+    process.env.OCX_CODEX_WS_UPSTREAM = "true";
+    try {
+      await withRequest(liveConfig, async (request) => {
+        const created = await request("/api/providers", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            name: "ws-null-provider",
+            provider: {
+              adapter: "openai-chat",
+              baseUrl: "https://api.example.test/v1",
+              wsUpstream: null,
+            },
+          }),
+        });
+        expect(created?.status).toBe(200);
+
+        const liveProvider = liveConfig.providers["ws-null-provider"]!;
+        expect(Object.hasOwn(liveProvider, "wsUpstream")).toBe(false);
+        const onDisk = JSON.parse(readFileSync(join(TEST_DIR, "config.json"), "utf-8")) as any;
+        expect(Object.hasOwn(onDisk.providers["ws-null-provider"], "wsUpstream")).toBe(false);
+
+        const reloaded = loadConfig();
+        const reloadedProvider = reloaded.providers["ws-null-provider"]!;
+        expect(Object.hasOwn(reloadedProvider, "wsUpstream")).toBe(false);
+
+        const requestInit = {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-luna", stream: true }),
+        };
+        expect(shouldUseCodexWsUpstream(
+          "https://chatgpt.com/backend-api/codex/responses",
+          requestInit,
+          "1.4.0",
+          { wsUpstream: liveProvider.wsUpstream },
+        )).toBe(true);
+        expect(shouldUseCodexWsUpstream(
+          "https://chatgpt.com/backend-api/codex/responses",
+          requestInit,
+          "1.4.0",
+          { wsUpstream: reloadedProvider.wsUpstream },
+        )).toBe(true);
+      });
+    } finally {
+      if (previousWsUpstream === undefined) delete process.env.OCX_CODEX_WS_UPSTREAM;
+      else process.env.OCX_CODEX_WS_UPSTREAM = previousWsUpstream;
+    }
   });
 
   test("a config already holding upstreamHttpVersion: null still loads", async () => {
@@ -4677,6 +4991,14 @@ describe("provider transport option management contract (#1668, #2816)", () => {
       expect(clear?.status).toBe(200);
       expect(liveConfig.providers.openai.wsUpstream).toBeUndefined();
       expect(liveConfig.providers.openai.maxWsFrameBytes).toBeUndefined();
+
+      const forged = await request("/api/providers?name=openai", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wsUpstream: "true" }),
+      });
+      expect(forged?.status).toBe(400);
+      expect(await forged?.json()).toMatchObject({ error: expect.stringContaining("wsUpstream") });
     });
   });
 
@@ -4885,172 +5207,5 @@ describe("provider transport option management contract (#1668, #2816)", () => {
       expect(liveConfig.providers["ws-overwrite"]?.upstreamWebsocket).toBe(false);
       expect(loadConfig().providers["ws-overwrite"]?.upstreamWebsocket).toBe(false);
     });
-  });
-});
-
-test("OpenAI provider cap remembers an explicit window across off, reload, and on", async () => {
-  mkdirSync(TEST_DIR, { recursive: true });
-  process.env.OPENCODEX_HOME = TEST_DIR;
-  let live: OcxConfig = {
-    port: 0, defaultProvider: "openai", contextCapValue: 350_000,
-    providers: { openai: { adapter: "openai-responses", authMode: "forward", baseUrl: "https://chatgpt.com/backend-api/codex", liveModels: false } },
-  };
-  saveConfig(live);
-  const put = async (body: unknown) => {
-    const url = new URL("http://localhost/api/provider-context-caps");
-    const response = await handleManagementAPI(new Request(url, {method:"PUT", headers:{"content-type":"application/json"}, body:JSON.stringify(body)}), url, live, {createManagementConvergeCodex:catalogConvergenceFactory()});
-    expect(response?.status).toBe(200);
-    return response!.json();
-  };
-  expect(await put({provider:"openai",enabled:true})).toMatchObject({caps:{openai:350_000}});
-  await put({provider:"openai",enabled:true,value:128_000});
-  expect(await put({provider:"openai",enabled:false})).toMatchObject({caps:{},values:{openai:128_000}});
-  live = loadConfig();
-  expect(live.providerContextCaps).toBeUndefined();
-  expect(await put({provider:"openai",enabled:true})).toMatchObject({caps:{openai:128_000}});
-  const {nativeModelRows} = await import("../../src/codex/catalog");
-  expect(nativeModelRows(live).filter(row=>row.contextWindow !== undefined).every(row=>row.contextWindow! <= 128_000)).toBe(true);
-  await put({setAll:false});
-  expect(loadConfig().providerContextCapValues?.openai).toBe(128_000);
-  await put({setAll:true});
-  expect(loadConfig().providerContextCaps?.openai).toBe(350_000);
-});
-
-describe("remembered provider context selections", () => {
-  function selectionConfig(remembered = true): OcxConfig {
-    const live: OcxConfig = {
-      port: 0,
-      defaultProvider: "alpha",
-      contextCapValue: 350_000,
-      providers: {
-        alpha: { adapter: "openai-chat", baseUrl: "https://alpha.example.test/v1", liveModels: false },
-        beta: { adapter: "openai-chat", baseUrl: "https://beta.example.test/v1", liveModels: false },
-      },
-      providerContextCaps: { alpha: 128_000 },
-      ...(remembered ? { providerContextCapValues: { alpha: 128_000, beta: 256_000 } } : {}),
-    };
-    mkdirSync(TEST_DIR, { recursive: true });
-    process.env.OPENCODEX_HOME = TEST_DIR;
-    saveConfig(live);
-    return loadConfig();
-  }
-
-  async function request(live: OcxConfig, path: string, method: string, body?: unknown): Promise<Response> {
-    const url = new URL(path, "http://localhost");
-    const response = await handleManagementAPI(new Request(url, {
-      method,
-      ...(body === undefined ? {} : {
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      }),
-    }), url, live, { createManagementConvergeCodex: catalogConvergenceFactory() });
-    if (!response) throw new Error(`unhandled management route: ${path}`);
-    return response;
-  }
-
-  test.each(["toString", "valueOf"])("first enable ignores inherited remembered values for %s", async (provider) => {
-    let live = selectionConfig();
-    live.providers[provider] = { adapter: "openai-chat", baseUrl: "https://context.example.test/v1", liveModels: false };
-    saveConfig(live);
-    live = loadConfig();
-
-    const first = await request(live, "/api/provider-context-caps", "PUT", { provider, enabled: true });
-    expect(first.status).toBe(200);
-    expect(await first.json()).toMatchObject({ caps: { [provider]: 350_000 }, values: { [provider]: 350_000 } });
-    expect(loadConfig().providerContextCaps?.[provider]).toBe(350_000);
-    expect(Object.hasOwn(loadConfig().providerContextCapValues ?? {}, provider)).toBe(true);
-
-    expect((await request(live, "/api/provider-context-caps", "PUT", { provider, enabled: true, value: 128_000 })).status).toBe(200);
-    expect((await request(live, "/api/provider-context-caps", "PUT", { provider, enabled: false })).status).toBe(200);
-    live = loadConfig();
-    expect(Object.hasOwn(live.providerContextCaps ?? {}, provider)).toBe(false);
-    expect((await request(live, "/api/provider-context-caps", "PUT", { provider, enabled: true })).status).toBe(200);
-    expect(loadConfig().providerContextCaps?.[provider]).toBe(128_000);
-  });
-
-  test.each([
-    { body: { value: 600_000, setAll: true }, caps: { alpha: 600_000 }, values: { alpha: 600_000, beta: 256_000 }, restored: 256_000 },
-    { body: { setAll: true }, caps: { alpha: 350_000, beta: 350_000 }, values: { alpha: 350_000, beta: 350_000 }, restored: 350_000 },
-  ])("setAll payload $body preserves or replaces a disabled selection as documented", async ({ body, caps, values, restored }) => {
-    let live = selectionConfig();
-    const response = await request(live, "/api/provider-context-caps", "PUT", body);
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ caps, values });
-    live = loadConfig();
-    expect(live.providerContextCaps).toEqual(caps);
-    expect(live.providerContextCapValues).toEqual(values);
-    const enabled = await request(live, "/api/provider-context-caps", "PUT", { provider: "beta", enabled: true });
-    expect(enabled.status).toBe(200);
-    expect(await enabled.json()).toMatchObject({ caps: { ...caps, beta: restored } });
-    expect(loadConfig().providerContextCaps?.beta).toBe(restored);
-  });
-
-  test("an active-only legacy selection survives off, reload and implicit enable", async () => {
-    let live = selectionConfig(false);
-    expect(live.providerContextCapValues).toBeUndefined();
-    const initial = await request(live, "/api/provider-context-caps", "GET");
-    expect(initial.status).toBe(200);
-    expect(await initial.json()).toMatchObject({ caps: { alpha: 128_000 }, values: { alpha: 128_000 } });
-    const off = await request(live, "/api/provider-context-caps", "PUT", { provider: "alpha", enabled: false });
-    expect(off.status).toBe(200);
-    expect(await off.json()).toMatchObject({ caps: {}, values: { alpha: 128_000 } });
-    live = loadConfig();
-    expect(live.providerContextCaps).toBeUndefined();
-    expect(live.providerContextCapValues).toEqual({ alpha: 128_000 });
-    const on = await request(live, "/api/provider-context-caps", "PUT", { provider: "alpha", enabled: true });
-    expect(on.status).toBe(200);
-    expect(await on.json()).toMatchObject({ caps: { alpha: 128_000 }, values: { alpha: 128_000 } });
-    expect(loadConfig().providerContextCaps).toEqual({ alpha: 128_000 });
-  });
-
-  test("rejected cap requests leave active and disabled selections untouched in memory and on disk", async () => {
-    const live = selectionConfig();
-    const before = structuredClone(live);
-    const beforeBytes = readFileSync(join(TEST_DIR, "config.json"), "utf8");
-    for (const [body, status] of [
-      [{ provider: "beta", enabled: true, value: 0.5 }, 400],
-      [{ provider: "beta", enabled: "yes", value: 700_000 }, 400],
-      [{ provider: "beta", enabled: true, setAll: true }, 400],
-      [{ value: 700_000, setAll: "yes" }, 400],
-      [{ value: 0.5 }, 400],
-      [{ provider: "missing", enabled: true }, 404],
-      [[1, 2, 3], 400],
-      [null, 400],
-    ] as const) {
-      const response = await request(live, "/api/provider-context-caps", "PUT", body);
-      expect(response.status).toBe(status);
-      expect(live).toEqual(before);
-      expect(readFileSync(join(TEST_DIR, "config.json"), "utf8")).toBe(beforeBytes);
-    }
-  });
-
-  test.each(["DELETE", "editor"] as const)("%s removal forgets active and disabled selections in persisted and live state", async mode => {
-    const live = selectionConfig();
-    live.providers.retained = { adapter: "openai-chat", baseUrl: "https://retained.example.test/v1", liveModels: false };
-    live.defaultProvider = "retained";
-    saveConfig(live);
-    const resolved = spyOn(destinationPolicy, "providerDestinationResolvedError").mockResolvedValue(null);
-    try {
-      for (const name of ["alpha", "beta"]) {
-        const baseline = providerEditorConfigDTO(loadConfig());
-        const next = structuredClone(baseline);
-        delete next.providers[name];
-        const response = mode === "DELETE"
-          ? await request(live, `/api/providers?name=${name}`, "DELETE")
-          : await request(live, "/api/providers", "PUT", { baseline, next });
-        expect(response.status).toBe(200);
-        for (const snapshot of [live, loadConfig()]) {
-          expect(snapshot.providers[name]).toBeUndefined();
-          expect(snapshot.providers.retained).toBeDefined();
-          expect(snapshot.providerContextCaps).toBeUndefined();
-          expect(snapshot.providerContextCapValues).toEqual(name === "alpha" ? { beta: 256_000 } : undefined);
-        }
-        const caps = await request(live, "/api/provider-context-caps", "GET");
-        expect(caps.status).toBe(200);
-        expect(await caps.json()).toMatchObject({ caps: {}, values: name === "alpha" ? { beta: 256_000 } : {} });
-      }
-    } finally {
-      resolved.mockRestore();
-    }
   });
 });
