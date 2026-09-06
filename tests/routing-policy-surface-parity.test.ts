@@ -7,6 +7,7 @@ import { chatCompletionsToResponsesBody } from "../src/chat/inbound";
 import { anthropicToResponsesTranslation } from "../src/claude/inbound";
 import { DIRECTIVE_KEY_FILE } from "../src/claude/directive-key";
 import { evidenceFromBody } from "../src/routing/request-evidence";
+import { closeRequestHistoryIndex } from "../src/routing/history/indexer";
 import { flushConfigDirHardeningForTests } from "../src/config/paths";
 import {
   setAsyncIcaclsRunnerForTests,
@@ -153,6 +154,7 @@ beforeEach(() => {
 afterEach(async () => {
   adapterFactory = undefined;
   clearRequestLogsForTests();
+  closeRequestHistoryIndex();
   try {
     await flushConfigDirHardeningForTests();
   } finally {
