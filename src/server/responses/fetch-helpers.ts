@@ -86,6 +86,7 @@ export function providerFetch(
   const base = options.fetch
     ?? testProviderFetch(provider)
     ?? runtimeProviderFetch(provider, options.providerName)
+    ?? (provider as OcxProviderConfig & { fetch?: typeof globalThis.fetch }).fetch
     ?? globalThis.fetch;
   const preconnect = (...args: Parameters<typeof globalThis.fetch.preconnect>): void => {
     base.preconnect?.(...args);

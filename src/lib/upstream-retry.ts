@@ -374,7 +374,7 @@ export async function fetchWithTransientRetry(
 ): Promise<Response> {
   const configuredBudget = Math.max(
     1,
-    opts.attempts ?? (opts.replayTransientFailures ? TRANSIENT_RETRY_MAX_ATTEMPTS : 1),
+    opts.attempts ?? TRANSIENT_RETRY_MAX_ATTEMPTS,
   );
   const budget = opts.replayBudget
     ? Math.min(configuredBudget, Math.max(1, opts.replayBudget.remaining + 1))

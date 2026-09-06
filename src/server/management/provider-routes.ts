@@ -1286,6 +1286,9 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
     const canonicalBudgetOnly = name === "openai"
       && keys.length === 1
       && keys[0] === "modelAutoCompactTokenLimits";
+    const canonicalEmptyToolOutputOnly = name === "openai"
+      && keys.length === 1
+      && keys[0] === "annotateEmptyToolOutputs";
 
     // codexAccountMode keeps its dedicated side-effect path (quota cache clear, thread map
     // clear, pool prime) and is mutually exclusive with every other patch field.
@@ -1366,15 +1369,17 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
 
     const pacingOnly = keys.every(key => key === "requestPacing");
     if (applied.editorTouched && !pacingOnly) {
-      const providerError = canonicalBudgetOnly
-        ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
-        : providerManagementConfigError(
+      const providerError = canonicalEmptyToolOutputOnly
+        ? providerEmptyToolOutputConfigError(name, next)
+        : canonicalBudgetOnly
+          ? canonicalOpenAiBudgetPatchError(next, rawBody, keys, config)
+          : providerManagementConfigError(
             name,
             providerTransportValidationCandidate(next as unknown as Record<string, unknown>),
           )
-          ?? providerEmptyToolOutputConfigError(name, next);
+            ?? providerEmptyToolOutputConfigError(name, next);
       if (providerError) return jsonResponse({ error: providerError }, 400);
-      if (!canonicalBudgetOnly) {
+      if (!canonicalBudgetOnly && !canonicalEmptyToolOutputOnly) {
         const serviceTierError = providerServiceTierConfigError(name, next);
         if (serviceTierError) return jsonResponse({ error: serviceTierError }, 400);
         // Same DNS gate as POST and re-enable: the canonical built-in OpenAI forward
@@ -1410,17 +1415,19 @@ export async function handleProviderRoutes(ctx: ManagementContext): Promise<Resp
         return { changed: false, value: { error: replay.error, status: 409 } };
       }
       if (replay.editorTouched && !pacingOnly) {
-        const syncError = canonicalBudgetOnly
-          ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, fresh)
-          : providerManagementConfigError(
+        const syncError = canonicalEmptyToolOutputOnly
+          ? providerEmptyToolOutputConfigError(name, replay.next)
+          : canonicalBudgetOnly
+            ? canonicalOpenAiBudgetPatchError(replay.next, rawBody, keys, fresh)
+            : providerManagementConfigError(
               name,
               providerTransportValidationCandidate(replay.next as unknown as Record<string, unknown>),
             )
-            ?? providerEmptyToolOutputConfigError(name, replay.next);
+              ?? providerEmptyToolOutputConfigError(name, replay.next);
         if (syncError) {
           return { changed: false, value: { error: syncError, status: 409 } };
         }
-        if (!canonicalBudgetOnly) {
+        if (!canonicalBudgetOnly && !canonicalEmptyToolOutputOnly) {
           const serviceTierError = providerServiceTierConfigError(name, replay.next);
           if (serviceTierError) {
             return { changed: false, value: { error: serviceTierError, status: 409 } };
