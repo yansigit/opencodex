@@ -43,17 +43,20 @@ describe("provider-opaque tool-call metadata (#1735)", () => {
   });
 
   test("an oversized signature is refused at every boundary", () => {
-    // Matches the ceiling the Antigravity replay cache already enforces: a token this large is
-    // not a real signature, and carrying it would push unbounded state through history replay.
-    const oversized = "x".repeat(64 * 1024 + 1);
+    // Gemini 3.7 Flash thinking can emit signatures > 64 KiB on long reasoning chains;
+    // the ceiling is 1 MiB to accommodate deep thinking while bounding replay state.
+    const oversized = "x".repeat(1024 * 1024 + 1);
     const metadata = { google: { thoughtSignature: oversized } };
     expect(providerMetadataFromResponsesFunctionCall({ extra_content: { google: { thought_signature: oversized } } })).toBeUndefined();
     expect(responsesExtraContentFromProviderMetadata(metadata)).toBeUndefined();
     expect(cloneProviderOpaqueToolCallMetadata(metadata)).toBeUndefined();
 
-    // The boundary itself still passes.
-    const atLimit = "y".repeat(64 * 1024);
+    const atLimit = "y".repeat(1024 * 1024);
     expect(cloneProviderOpaqueToolCallMetadata({ google: { thoughtSignature: atLimit } })?.google?.thoughtSignature)
-      .toHaveLength(64 * 1024);
+      .toHaveLength(1024 * 1024);
+
+    const large = "z".repeat(200 * 1024);
+    expect(cloneProviderOpaqueToolCallMetadata({ google: { thoughtSignature: large } })?.google?.thoughtSignature)
+      .toHaveLength(200 * 1024);
   });
 });

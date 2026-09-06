@@ -20,7 +20,7 @@ import { getVertexAccessToken } from "../lib/gcp-adc";
 import { fetchAntigravityWithRetry, fetchVertexWithRetry } from "./google-http";
 import { safeAntigravityHttpErrorMessage, safeVertexHttpErrorMessage } from "./google-errors";
 import { sanitizeUpstreamErrorText } from "./upstream-http-error";
-import { isVertexTruncatedTurn, vertexTruncationErrorMessage } from "./google-truncation";
+import { googleTruncationErrorMessage, isVertexTruncatedTurn, vertexTruncationErrorMessage } from "./google-truncation";
 import { ANTIGRAVITY_REQUEST_UA, antigravitySessionId, isLikelyRealThoughtSignature, sanitizeAntigravityClaudeSignatures } from "./google-antigravity-wire";
 import { compileGoogleWireBody } from "./google-wire-compiler";
 import { identifyRoutedModel } from "./identity";
@@ -772,6 +772,9 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
   let vertexReplaySession: string | undefined;
   let restoreGoogleToolName = (name: string): string => name;
   const emitInTurnGroundingSourcesQueue: boolean[] = [];
+  const truncationErrorMessage = provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist"
+    ? vertexTruncationErrorMessage
+    : googleTruncationErrorMessage;
   let lastInjectedCallIds: string[] = [];
   let lastReasoningReplayScope: OcxParsedRequest["_reasoningReplayScope"];
 
@@ -1427,9 +1430,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
         }
         // Fail-closed: a turn cut off mid tool call (MAX_TOKENS / MALFORMED_FUNCTION_CALL) surfaces
         // an error instead of a silently-incomplete done. Mirrors kiro-truncation.
-        if ((provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist")
-          && isVertexTruncatedTurn(lastFinishReason, toolCallsStarted)) {
-          yield { type: "error", message: vertexTruncationErrorMessage(lastFinishReason) };
+        if (isVertexTruncatedTurn(lastFinishReason, toolCallsStarted)) {
+          yield { type: "error", message: truncationErrorMessage(lastFinishReason) };
           return;
         }
         if (!sawAnyFrame || !sawTerminalSignal) {
@@ -1685,9 +1687,8 @@ export function createGoogleAdapter(provider: OcxProviderConfig): ProviderAdapte
 
       // Fail-closed truncation, same as the stream path: a non-stream turn cut off mid tool call
       // (MAX_TOKENS / MALFORMED_FUNCTION_CALL) surfaces an error instead of a silent done.
-      if ((provider.googleMode === "vertex" || provider.googleMode === "cloud-code-assist")
-        && isVertexTruncatedTurn(candidate.finishReason, toolCallsStarted)) {
-        return finish([{ type: "error", message: vertexTruncationErrorMessage(candidate.finishReason) }]);
+      if (isVertexTruncatedTurn(candidate.finishReason, toolCallsStarted)) {
+        return finish([{ type: "error", message: truncationErrorMessage(candidate.finishReason) }]);
       }
 
       const usage = json.usageMetadata as Record<string, number> | undefined;

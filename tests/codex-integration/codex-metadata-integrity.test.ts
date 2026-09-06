@@ -40,6 +40,7 @@ describe("Codex metadata integrity", () => {
       "thread-id",
       "chatgpt-account-id",
       "x-codex-parent-thread-id",
+      "x-session-id",
     ]) {
       expect(FORWARD_HEADERS).toContain(name);
     }
@@ -73,6 +74,20 @@ describe("Codex metadata integrity", () => {
     expect(headers.get("session_id")).toBe("sess-real-1");
     expect(headers.get("thread-id")).toBe("thread-real-1");
     expect(headers.get("x-codex-parent-thread-id")).toBe("thread-1");
+  });
+
+  test("preserves every Chat to Responses session/thread alias", () => {
+    const incoming = new Headers({
+      session_id: "session-underscore",
+      "session-id": "session-hyphen",
+      "x-session-id": "session-x",
+      "thread-id": "thread-client",
+    });
+    const headers = headersForCodexAuthContext(incoming, poolAuthContext);
+    expect(headers.get("session_id")).toBe("session-underscore");
+    expect(headers.get("session-id")).toBe("session-hyphen");
+    expect(headers.get("x-session-id")).toBe("session-x");
+    expect(headers.get("thread-id")).toBe("thread-client");
   });
 
   test("does not fabricate session_id or thread-id when absent", () => {

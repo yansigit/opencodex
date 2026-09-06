@@ -21,6 +21,24 @@ async function collect(provider: OcxProviderConfig, chunks: unknown[]): Promise<
 }
 
 const vertexProvider = { adapter: "google", baseUrl: "https://x", googleMode: "vertex" } as OcxProviderConfig;
+const aiStudioProvider = { adapter: "google", baseUrl: "https://x", apiKey: "test-key" } as OcxProviderConfig;
+const ccaProvider = {
+  adapter: "google",
+  baseUrl: "https://x",
+  apiKey: "test-token",
+  googleMode: "cloud-code-assist",
+  project: "test-project",
+} as OcxProviderConfig;
+
+function ccaResponse(payload: unknown): unknown {
+  return { response: payload };
+}
+
+const googleModes: [string, OcxProviderConfig, (payload: unknown) => unknown][] = [
+  ["AI Studio", aiStudioProvider, payload => payload],
+  ["Vertex", vertexProvider, payload => payload],
+  ["CCA", ccaProvider, ccaResponse],
+];
 
 describe("vertex truncation helpers", () => {
   test("classifies cut-off finish reasons", () => {
@@ -132,6 +150,68 @@ describe("vertex parseResponse fail-closed truncation (non-streaming)", () => {
     expect(events.some(e => e.type === "done")).toBe(true);
     expect(events.some(e => e.type === "error")).toBe(false);
   });
+});
+
+describe("all Google GenerateContent modes fail closed consistently", () => {
+  for (const [label, provider, wrap] of googleModes) {
+    test(`${label} MALFORMED_FUNCTION_CALL is an error in stream and buffered paths`, async () => {
+      const payload = wrap({
+        candidates: [{ finishReason: "MALFORMED_FUNCTION_CALL" }],
+        usageMetadata: { promptTokenCount: 5, candidatesTokenCount: 0 },
+      });
+      const streamEvents = await collect(provider, [payload]);
+      const adapter = createGoogleAdapter(provider);
+      const responseEvents = await adapter.parseResponse!(
+        provider.googleMode === "cloud-code-assist"
+          ? sseResponse([payload])
+          : new Response(JSON.stringify(payload), { status: 200 }),
+      );
+      for (const events of [streamEvents, responseEvents]) {
+        expect(events.at(-1)?.type).toBe("error");
+        expect(events.some(event => event.type === "done")).toBe(false);
+        const error = events.at(-1) as Extract<AdapterEvent, { type: "error" }>;
+        expect(error.message).toContain(label === "AI Studio" ? "Google AI Studio" : "Vertex AI");
+      }
+    });
+
+    test(`${label} MAX_TOKENS without a call remains a successful incomplete stop`, async () => {
+      const payload = wrap({
+        candidates: [{ content: { parts: [{ text: "partial" }] }, finishReason: "MAX_TOKENS" }],
+      });
+      const streamEvents = await collect(provider, [payload]);
+      const adapter = createGoogleAdapter(provider);
+      const responseEvents = await adapter.parseResponse!(
+        provider.googleMode === "cloud-code-assist"
+          ? sseResponse([payload])
+          : new Response(JSON.stringify(payload), { status: 200 }),
+      );
+      for (const events of [streamEvents, responseEvents]) {
+        expect(events.at(-1)).toMatchObject({ type: "done", stopReason: "max_tokens" });
+        expect(events.some(event => event.type === "error")).toBe(false);
+      }
+    });
+
+    test(`${label} MAX_TOKENS after a call is an error in stream and buffered paths`, async () => {
+      const payloads = [
+        wrap({ candidates: [{ content: { parts: [{ functionCall: { name: "get_x", args: {} } }] } }] }),
+        wrap({ candidates: [{ finishReason: "MAX_TOKENS" }] }),
+      ];
+      const streamEvents = await collect(provider, payloads);
+      const adapter = createGoogleAdapter(provider);
+      const responsePayload = wrap({
+        candidates: [{ content: { parts: [{ functionCall: { name: "get_x", args: {} } }] }, finishReason: "MAX_TOKENS" }],
+      });
+      const responseEvents = await adapter.parseResponse!(
+        provider.googleMode === "cloud-code-assist"
+          ? sseResponse([responsePayload])
+          : new Response(JSON.stringify(responsePayload), { status: 200 }),
+      );
+      for (const events of [streamEvents, responseEvents]) {
+        expect(events.at(-1)?.type).toBe("error");
+        expect(events.some(event => event.type === "done")).toBe(false);
+      }
+    });
+  }
 });
 
 describe("usage status for google-vertex stays reported", () => {

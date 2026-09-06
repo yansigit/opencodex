@@ -48,6 +48,7 @@ export const FORWARD_HEADERS = [
   "x-codex-beta-features",
   "x-codex-installation-id",
   "x-codex-parent-thread-id",
+  "x-session-id",
   "x-codex-turn-metadata",
   "x-codex-turn-state",
   "x-codex-window-id",
@@ -616,6 +617,23 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 
 /** Codex's reserved client-tool group on Responses Lite; carries no wire prefix. */
 const SPARK_RESERVED_FUNCTIONS_NAMESPACE = "functions";
+
+function isLiteSparkRequestBody(body: unknown): boolean {
+  if (!isPlainObject(body)) return false;
+  const model = typeof body.model === "string" ? body.model : "";
+  if (!model.includes("codex-spark")) return false;
+  const input = body.input;
+  if (!Array.isArray(input)) return false;
+  for (const item of input) {
+    if (!isPlainObject(item) || item.type !== "additional_tools" || !Array.isArray(item.tools)) continue;
+    for (const tool of item.tools) {
+      if (isPlainObject(tool) && tool.type === "namespace" && tool.name === SPARK_RESERVED_FUNCTIONS_NAMESPACE) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 /**
  * Apply the routed provider's real effort ladder to an existing Responses reasoning field.
@@ -2351,6 +2369,8 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
       let routedCustomToolRepairNames: Set<string> | undefined;
       let convertedRoutedToolSearchNames: Set<string> | undefined;
       let convertedRoutedNamespaceToolAliases: Map<string, { namespace: string; name: string; kind: "function" | "custom" }> | undefined;
+      const canonicalSpark = isCanonicalOpenAiForwardProvider(provider)
+        && parsed.modelId.includes("codex-spark");
       const unexpandedMiss = !!parsed.previousResponseId && parsed._previousResponseInputExpanded !== true;
       let outBody = stripPreviousResponseId(
         parsed._rawBody,
@@ -2409,7 +2429,7 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         outBody = stripInternalChatMessageMetadataPassthrough(outBody);
         outBody = promoteClientLoadedTools(outBody);
       }
-      if (!isCanonicalOpenAiForwardProvider(provider)) {
+      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
         const rewritten = rewriteRoutedCustomToolsForUpstream(
           outBody,
           provider.supportsResponsesCustomTools,
@@ -2418,20 +2438,22 @@ export function createResponsesPassthroughAdapter(provider: OcxProviderConfig): 
         convertedRoutedCustomToolNames = rewritten.names;
         routedCustomToolRepairNames = rewritten.repairNames;
       }
-      if (!isCanonicalOpenAiForwardProvider(provider)) {
+      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
         // Run after custom-tool lowering so the search compatibility layer can choose a
         // collision-free public function name against the final routed function catalog.
         const rewritten = rewriteRoutedToolSearchForUpstream(outBody);
         outBody = rewritten.body;
         convertedRoutedToolSearchNames = rewritten.names;
       }
-      if (!isCanonicalOpenAiForwardProvider(provider)) {
+      if ((!isCanonicalOpenAiForwardProvider(provider) || canonicalSpark) && !isLiteSparkRequestBody(outBody)) {
         // Codex 0.147 emits private namespace tool groups, while public/third-party Responses
         // gateways accept only flat tool variants. Run after custom/tool-search lowering so
         // namespace children already carry their final public kind before they are promoted.
         const rewritten = rewriteRoutedNamespaceToolsForUpstream(outBody, convertedRoutedCustomToolNames);
         outBody = rewritten.body;
         convertedRoutedNamespaceToolAliases = rewritten.aliases;
+      }
+      if (!isCanonicalOpenAiForwardProvider(provider)) {
         // Preserve xAI's cached-only fail-closed semantics and image-search mapping before the
         // generic capability fallback removes the private OpenAI fields.
         outBody = normalizeXaiResponsesWebSearch(outBody, provider);
