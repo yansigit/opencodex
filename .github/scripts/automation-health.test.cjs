@@ -31,6 +31,7 @@ const {
 const NOW = "2026-09-01T12:00:00.000Z";
 const SHA_DEV = "d".repeat(40);
 const SHA_MAIN = "m".repeat(40);
+const SHA_TREE = "a".repeat(40);
 
 function run({ id, createdAt, updatedAt = createdAt, status = "completed", conclusion = "success", headSha = SHA_DEV } = {}) {
   return { id, created_at: createdAt, updated_at: updatedAt, status, conclusion, head_sha: headSha };
@@ -381,6 +382,7 @@ describe("automation health SLO checker", () => {
       aheadBy: 0,
       behindBy: 1,
       mergeBaseSha: SHA_DEV,
+      treesIdentical: true,
     };
     const mainCiSignal = {
       status: "warning",
@@ -394,10 +396,46 @@ describe("automation health SLO checker", () => {
       },
     };
 
-    assert.deepEqual(evaluateRepositoryState({ relation, prs, mainCiSignal, now: NOW }), {
-      status: "warning",
-      reason: "main promotion is awaiting protected dev reconciliation",
-    });
+    for (const status of ["queued", "in_progress", "requested", "waiting", "pending"]) {
+      assert.deepEqual(evaluateRepositoryState({
+        relation,
+        prs,
+        mainCiSignal: {
+          ...mainCiSignal,
+          latestRun: { ...mainCiSignal.latestRun, status },
+        },
+        now: NOW,
+      }), {
+        status: "warning",
+        reason: "main promotion is awaiting protected dev reconciliation",
+      });
+    }
+    for (const conclusion of ["failure", "cancelled", "stale"]) {
+      assert.equal(evaluateRepositoryState({
+        relation,
+        prs,
+        mainCiSignal: {
+          ...mainCiSignal,
+          latestRun: { ...mainCiSignal.latestRun, status: "completed", conclusion },
+        },
+        now: NOW,
+      }).status, "alert");
+    }
+    assert.equal(evaluateRepositoryState({
+      relation,
+      prs,
+      mainCiSignal,
+      now: new Date(Date.parse(NOW) + PROMOTION_RECONCILIATION_GRACE_MS + 1).toISOString(),
+    }).status, "alert");
+    assert.equal(evaluateRepositoryState({
+      relation,
+      prs,
+      mainCiSignal: {
+        ...mainCiSignal,
+        latestRun: { ...mainCiSignal.latestRun, createdAt: null, updatedAt: null },
+      },
+      now: NOW,
+    }).status, "alert");
 
     const recentlySuccessful = {
       ...mainCiSignal,
@@ -421,6 +459,7 @@ describe("automation health SLO checker", () => {
       { ...relation, behindBy: 2 },
       { ...relation, aheadBy: 1 },
       { ...relation, mergeBaseSha: "x".repeat(40) },
+      { ...relation, treesIdentical: false },
     ]) {
       assert.equal(evaluateRepositoryState({
         relation: unsafeRelation,
@@ -435,6 +474,70 @@ describe("automation health SLO checker", () => {
       mainCiSignal,
       now: NOW,
     }).status, "alert");
+  });
+
+  it("keeps an exact-tip active promotion CI window at warning when prior success is stale", () => {
+    const input = {
+      now: NOW,
+      workflowRuns: healthyRuns(),
+      ciRuns: {
+        dev: [run({ id: 50, createdAt: NOW, headSha: SHA_DEV })],
+        main: [
+          run({ id: 52, createdAt: NOW, status: "in_progress", conclusion: null, headSha: SHA_MAIN }),
+          run({ id: 51, createdAt: "2026-08-31T17:00:00.000Z", headSha: SHA_MAIN }),
+        ],
+      },
+      branchShas: { dev: SHA_DEV, main: SHA_MAIN },
+      compare: {
+        status: "behind",
+        ahead_by: 0,
+        behind_by: 1,
+        base_commit: { sha: SHA_MAIN, commit: { tree: { sha: SHA_TREE } } },
+        merge_base_commit: { sha: SHA_DEV, commit: { tree: { sha: SHA_TREE } } },
+      },
+      pullRequests: [],
+    };
+    for (const status of ["queued", "in_progress", "requested", "waiting", "pending"]) {
+      const result = evaluateHealth({
+        ...input,
+        ciRuns: {
+          ...input.ciRuns,
+          main: [{ ...input.ciRuns.main[0], status }, input.ciRuns.main[1]],
+        },
+      });
+
+      assert.ok(result.workflowSignals["ci.yml"].branches.main.lastSuccessAgeHours > 18);
+      assert.equal(result.workflowSignals["ci.yml"].branches.main.status, "warning");
+      assert.equal(result.workflowSignals["ci.yml"].status, "warning");
+      assert.equal(result.repositoryState.status, "warning");
+      assert.equal(result.status, "warning");
+    }
+
+    for (const conclusion of ["failure", "cancelled", "stale"]) {
+      const result = evaluateHealth({
+        ...input,
+        ciRuns: {
+          ...input.ciRuns,
+          main: [{ ...input.ciRuns.main[0], status: "completed", conclusion }, input.ciRuns.main[1]],
+        },
+      });
+
+      assert.equal(result.workflowSignals["ci.yml"].branches.main.status, "alert");
+      assert.equal(result.repositoryState.status, "alert");
+      assert.equal(result.status, "alert");
+    }
+
+    const contentChangingPromotion = evaluateHealth({
+      ...input,
+      compare: {
+        ...input.compare,
+        base_commit: { sha: SHA_MAIN, commit: { tree: { sha: "b".repeat(40) } } },
+      },
+    });
+    assert.equal(contentChangingPromotion.shaRelation.treesIdentical, false);
+    assert.equal(contentChangingPromotion.workflowSignals["ci.yml"].branches.main.status, "alert");
+    assert.equal(contentChangingPromotion.repositoryState.status, "alert");
+    assert.equal(contentChangingPromotion.status, "alert");
   });
 
   it("has the required read-only workflow contract", () => {

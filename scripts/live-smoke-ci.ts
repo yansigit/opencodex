@@ -23,7 +23,26 @@ export async function materializeLiveSmokeBundle(encoded: string, home: string):
   const bundle = parseBundle(encoded);
   const target = resolve(home);
   await mkdir(target, { recursive: true, mode: 0o700 });
-  await writeFile(`${target}/config.json`, `${JSON.stringify(bundle.config)}\n`, { mode: 0o600 });
+  // Live CI owns one loopback-only listener. Strip topology and TLS fields from
+  // the credential bundle so stale operator settings cannot expose another
+  // socket or make the health probe target the wrong transport.
+  const {
+    client: _client,
+    hostname: _hostname,
+    hub: _hub,
+    remoteGui: _remoteGui,
+    runtimeRole: _runtimeRole,
+    tls: _tls,
+    unauthenticatedLoopbackListener: _unauthenticatedLoopbackListener,
+    ...providerConfig
+  } = bundle.config;
+  const isolatedConfig = {
+    ...providerConfig,
+    hostname: "127.0.0.1",
+    port: 0,
+    runtimeRole: "standalone",
+  };
+  await writeFile(`${target}/config.json`, `${JSON.stringify(isolatedConfig)}\n`, { mode: 0o600 });
   await chmod(`${target}/config.json`, 0o600);
   if (bundle.auth !== undefined) {
     await writeFile(`${target}/auth.json`, `${JSON.stringify(bundle.auth)}\n`, { mode: 0o600 });

@@ -11,6 +11,7 @@ const {
   exactHeadGate,
   isMissingPullRequestError,
   REQUIRED_CHECKS,
+  retryIdempotentRead,
   summarizeAgedHolds,
   workflowRunRetryDisposition,
 } = require("./pr-automation.cjs");
@@ -141,6 +142,66 @@ describe("isMissingPullRequestError", () => {
     assert.equal(isMissingPullRequestError({ status: "404" }), true);
     assert.equal(isMissingPullRequestError({ status: 403 }), false);
     assert.equal(isMissingPullRequestError(new Error("not found")), false);
+  });
+});
+
+describe("retryIdempotentRead", () => {
+  it("retries only the allowlisted transient server statuses", async () => {
+    for (const status of [500, 502, 503, 504]) {
+      let attempts = 0;
+      const result = await retryIdempotentRead(async () => {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error("transient"), { status });
+        return status;
+      }, { sleep: async () => {} });
+      assert.equal(result, status);
+      assert.equal(attempts, 2);
+    }
+  });
+
+  it("retries transient GitHub server failures with bounded backoff", async () => {
+    const sleeps = [];
+    let attempts = 0;
+    const result = await retryIdempotentRead(async () => {
+      attempts += 1;
+      if (attempts < 3) throw Object.assign(new Error("transient"), { status: attempts === 1 ? 504 : 503 });
+      return "ok";
+    }, { sleep: async delay => sleeps.push(delay) });
+
+    assert.equal(result, "ok");
+    assert.equal(attempts, 3);
+    assert.deepEqual(sleeps, [250, 500]);
+  });
+
+  it("stops after three attempts when a transient failure persists", async () => {
+    const sleeps = [];
+    let attempts = 0;
+    const failure = Object.assign(new Error("gateway timeout"), { status: 504 });
+
+    await assert.rejects(
+      retryIdempotentRead(async () => {
+        attempts += 1;
+        throw failure;
+      }, { sleep: async delay => sleeps.push(delay) }),
+      error => error === failure,
+    );
+    assert.equal(attempts, 3);
+    assert.deepEqual(sleeps, [250, 500]);
+  });
+
+  it("fails fast for non-transient statuses and status-less errors", async () => {
+    for (const status of [400, 404, 408, 409, 422, 429, 501, 505, undefined]) {
+      let attempts = 0;
+      const failure = Object.assign(new Error("not retryable"), status === undefined ? {} : { status });
+      await assert.rejects(
+        retryIdempotentRead(async () => {
+          attempts += 1;
+          throw failure;
+        }, { sleep: async () => assert.fail("non-transient failures must not sleep") }),
+        error => error === failure,
+      );
+      assert.equal(attempts, 1, `status ${status ?? "missing"}`);
+    }
   });
 });
 

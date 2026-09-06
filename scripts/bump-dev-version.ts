@@ -53,8 +53,12 @@
  * inputs by the repository's own comparator.
  */
 
-import { existsSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
+import {
+  renameAtomicFile,
+  type AtomicRenameIO,
+} from "../src/lib/windows-atomic-replace";
 import { compareReleaseTags } from "./release-notes";
 
 /**
@@ -90,6 +94,29 @@ export interface BumpDecision {
   /** The version dev should carry. Equals `current` when `changed` is false. */
   version: string;
   reason: string;
+}
+
+/**
+ * Publish rewritten package metadata through the repository's bounded Windows
+ * sharing-violation retry. The I/O seam makes the EPERM path deterministic in tests.
+ */
+export function replacePackageJsonAtomically(
+  packageJsonPath: string,
+  rewritten: string,
+  renameIo?: AtomicRenameIO,
+): void {
+  const temp = `${packageJsonPath}.tmp-${process.pid}`;
+  try {
+    writeFileSync(temp, rewritten, "utf8");
+    renameAtomicFile(temp, packageJsonPath, renameIo, "dev-version-bump");
+  } catch (error) {
+    try {
+      if (existsSync(temp)) unlinkSync(temp);
+    } catch {
+      // Nothing more to do: the original file is untouched, which is the point.
+    }
+    throw error;
+  }
 }
 
 /**
@@ -149,8 +176,9 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  const file = Bun.file(packageJsonPath);
-  const raw = await file.text();
+  // Use a synchronous read whose descriptor is closed before the atomic replacement.
+  // Retaining a Bun.file object here can leave Windows observing a self-held handle.
+  const raw = readFileSync(packageJsonPath, "utf8");
   const parsed = JSON.parse(raw) as { version?: unknown };
   if (typeof parsed.version !== "string") {
     console.error(`${packageJsonPath} has no string version`);
@@ -182,16 +210,9 @@ if (import.meta.main) {
     // full disk mid-write would leave a truncated package.json and no way to install.
     // Write a sibling temp file, rename it into place (atomic within one filesystem), and
     // remove the temp on any failure so a crash leaves no debris.
-    const temp = `${packageJsonPath}.tmp-${process.pid}`;
     try {
-      writeFileSync(temp, rewritten, "utf8");
-      renameSync(temp, packageJsonPath);
+      replacePackageJsonAtomically(packageJsonPath, rewritten);
     } catch (err) {
-      try {
-        if (existsSync(temp)) unlinkSync(temp);
-      } catch {
-        // Nothing more to do: the original file is untouched, which is the point.
-      }
       console.error(`✗ could not write ${packageJsonPath}: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);
     }

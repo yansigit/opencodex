@@ -25,6 +25,7 @@ on:
       - "src/smoke/**"
       - "scripts/live-smoke.ts"
       - "scripts/live-smoke-ci.ts"
+      - "scripts/live-inference-supervisor.ts"
       - "package.json"
       - "bun.lock"
       - ".github/workflows/live-inference.yml"
@@ -68,6 +69,7 @@ jobs:
               - 'src/smoke/**'
               - 'scripts/live-smoke.ts'
               - 'scripts/live-smoke-ci.ts'
+              - 'scripts/live-inference-supervisor.ts'
               - 'package.json'
               - 'bun.lock'
               - '.github/workflows/live-inference.yml'
@@ -170,12 +172,32 @@ jobs:
           OPENCODEX_HOME: ${{ steps.prepare.outputs.home }}
         run: |
           log_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.log"
-          pid_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid"
-          bun run src/cli/index.ts start >"$log_file" 2>&1 &
-          echo $! > "$pid_file"
+          control_dir="$RUNNER_TEMP/ocx-live-control-${{ matrix.provider }}"
+          runtime_file="$OPENCODEX_HOME/runtime-port.json"
+          mkdir -m 700 -- "$control_dir"
+          touch "$control_dir/launch-intent"
+          bun scripts/live-inference-supervisor.ts "$control_dir" \
+            bun run src/cli/index.ts start >"$log_file" 2>&1 &
+
           for _ in $(seq 1 60); do
-            if curl --fail --silent --show-error --max-time 2 http://127.0.0.1:10100/healthz >/dev/null; then
-              exit 0
+            if [ -s "$control_dir/pid" ] && [ -s "$runtime_file" ]; then
+              proxy_pid="$(cat "$control_dir/pid")"
+              proxy_port="$(jq -er --argjson pid "$proxy_pid" \
+                'select(.pid == $pid and (.port | type) == "number" and .port > 0 and .port != 10100) | .port' \
+                "$runtime_file" 2>/dev/null || true)"
+              if [ -n "$proxy_port" ]; then
+                health="$(curl --fail --silent --show-error --max-time 2 \
+                  "http://127.0.0.1:${proxy_port}/healthz" 2>/dev/null || true)"
+                if jq -e --argjson pid "$proxy_pid" --argjson port "$proxy_port" \
+                  '.service == "opencodex" and .pid == $pid and .port == $port' \
+                  >/dev/null 2>&1 <<<"$health"; then
+                  echo "$proxy_port" > "$control_dir/port"
+                  exit 0
+                fi
+              fi
+            fi
+            if [ -s "$control_dir/stopped" ]; then
+              break
             fi
             sleep 1
           done
@@ -188,10 +210,18 @@ jobs:
         env:
           OPENCODEX_HOME: ${{ steps.prepare.outputs.home }}
         run: |
+          control_dir="$RUNNER_TEMP/ocx-live-control-${{ matrix.provider }}"
+          proxy_port="$(cat "$control_dir/port" 2>/dev/null || true)"
+          if ! [[ "$proxy_port" =~ ^[1-9][0-9]*$ ]] || [ "$proxy_port" -eq 10100 ] || [ "$proxy_port" -gt 65535 ]; then
+            echo "::error::Missing or invalid isolated proxy port."
+            exit 1
+          fi
+
           run_attempt() {
             attempt="$1"
             result_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}-attempt-${attempt}.json"
-            if bun scripts/live-smoke.ts --provider "${{ matrix.provider }}" --json >"$result_file"; then
+            if bun scripts/live-smoke.ts --provider "${{ matrix.provider }}" \
+              --url "http://127.0.0.1:${proxy_port}/v1/responses" --json >"$result_file"; then
               smoke_status=0
             else
               smoke_status=$?
@@ -220,12 +250,53 @@ jobs:
         env:
           OPENCODEX_HOME: ${{ steps.prepare.outputs.home }}
         run: |
-          pid_file="$RUNNER_TEMP/ocx-live-${{ matrix.provider }}.pid"
-          if [ -s "$pid_file" ]; then
-            kill "$(cat "$pid_file")" 2>/dev/null || true
+          control_dir="$RUNNER_TEMP/ocx-live-control-${{ matrix.provider }}"
+          cleanup_failed=false
+
+          if [ -e "$control_dir/launch-intent" ]; then
+            touch "$control_dir/stop"
+            for _ in $(seq 1 25); do
+              [ -s "$control_dir/stopped" ] && break
+              sleep 1
+            done
+            if [ ! -s "$control_dir/stopped" ]; then
+              echo "::error::The owning proxy supervisor did not confirm process exit."
+              cleanup_failed=true
+            fi
           fi
-          if [ -n "${OPENCODEX_HOME:-}" ]; then
-            rm -rf -- "$OPENCODEX_HOME"
+
+          if [ "$cleanup_failed" = false ] && [ -n "${OPENCODEX_HOME:-}" ]; then
+            if [ -e "$OPENCODEX_HOME" ]; then
+              canonical_home="$(cd -P -- "$OPENCODEX_HOME" 2>/dev/null && pwd -P || true)"
+              canonical_runner_temp="$(cd -P -- "$RUNNER_TEMP" 2>/dev/null && pwd -P || true)"
+              case "$canonical_home" in
+                "$canonical_runner_temp"/ocx-live-home.*) ;;
+                *)
+                  echo "::error::Refusing to remove a non-ephemeral OPENCODEX_HOME."
+                  exit 1
+                  ;;
+              esac
+            fi
+
+            for attempt in 1 2 3; do
+              rm -rf -- "$OPENCODEX_HOME" 2>/dev/null || true
+              if [ ! -e "$OPENCODEX_HOME" ]; then
+                break
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                sleep 1
+              fi
+            done
+            if [ -e "$OPENCODEX_HOME" ]; then
+              echo "::error::Ephemeral provider credentials were not removed."
+              cleanup_failed=true
+            fi
+          elif [ "$cleanup_failed" = true ]; then
+            echo "::error::Retaining the credential home because proxy exit is unconfirmed."
+          fi
+
+          if [ "$cleanup_failed" = true ]; then
+            exit 1
           fi
 
       - name: Reconcile Jules live-inference supervision
