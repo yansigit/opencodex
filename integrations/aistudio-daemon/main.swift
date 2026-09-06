@@ -3,12 +3,25 @@ import WebKit
 import AppKit
 
 let fileManager = FileManager.default
-let sessionFile = fileManager.homeDirectoryForCurrentUser
-    .appendingPathComponent(".opencodex", isDirectory: true)
-    .appendingPathComponent("aistudio-session.json")
+
+let args = CommandLine.arguments
+guard args.contains("--login"),
+      let outputFlag = args.firstIndex(of: "--session-output"),
+      args.indices.contains(outputFlag + 1) else {
+    fputs("Usage: aistudio-login --login --session-output <absolute-path>\n", stderr)
+    exit(1)
+}
+let sessionOutput = args[outputFlag + 1]
+guard NSString(string: sessionOutput).isAbsolutePath else {
+    fputs("Session output path must be absolute\n", stderr)
+    exit(1)
+}
+let sessionFile = URL(fileURLWithPath: sessionOutput).standardizedFileURL
 
 func writeSecureSession(_ data: Data, to url: URL) throws {
-    try fileManager.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let directory = url.deletingLastPathComponent()
+    try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     try data.write(to: url, options: [.atomic])
     try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
 }
@@ -124,12 +137,6 @@ final class LoginAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
         }
     }
-}
-
-let args = CommandLine.arguments
-guard args.contains("--login") else {
-    fputs("Usage: aistudio-login --login\n", stderr)
-    exit(1)
 }
 
 let app = NSApplication.shared
