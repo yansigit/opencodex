@@ -12,7 +12,7 @@
           "gui/src/pages/logs-filter-bar.tsx"
         ],
         "requiredTests": [
-          "tests/logs-filter.test.ts",
+          "tests/gui/logs-filter.test.ts",
           "gui/tests/logs-auto-refresh.test.tsx"
         ]
       },
@@ -24,7 +24,7 @@
           "gui/src/components/provider-workspace/CursorAccountPoolSettings.tsx"
         ],
         "requiredTests": [
-          "tests/cursor-account-pool.test.ts",
+          "tests/providers/cursor/cursor-account-pool.test.ts",
           "gui/tests/cursor-account-pool-settings.test.tsx"
         ]
       },
@@ -37,7 +37,7 @@
         ],
         "requiredTests": [
           "gui/tests/antigravity-failover-note.test.tsx",
-          "tests/google-hardening.test.ts"
+          "tests/adapters/google/google-hardening.test.ts"
         ]
       },
       "combo-catalog-provenance": {
@@ -47,7 +47,7 @@
           "src/codex/catalog/aggregation.ts"
         ],
         "requiredTests": [
-          "tests/codex-catalog.test.ts"
+          "tests/codex-integration/codex-catalog.test.ts"
         ]
       },
       "claude-code-always-sse": {
@@ -58,8 +58,8 @@
           "src/adapters/openai-responses.ts"
         ],
         "requiredTests": [
-          "tests/settings-stream-mode.test.ts",
-          "tests/chat-completions-endpoint.test.ts"
+          "tests/config/settings-stream-mode.test.ts",
+          "tests/responses/chat-completions-endpoint.test.ts"
         ]
       },
       "cursor-composer-fast-false": {
@@ -70,7 +70,7 @@
           "src/adapters/cursor/transport.ts"
         ],
         "requiredTests": [
-          "tests/cursor-adapter.test.ts"
+          "tests/providers/cursor/cursor-adapter.test.ts"
         ]
       },
       "quota-capacity-aggregation": {
@@ -81,8 +81,8 @@
           "src/codex/catalog/aggregation.ts"
         ],
         "requiredTests": [
-          "tests/provider-quota.test.ts",
-          "tests/codex-quota.test.ts"
+          "tests/providers/provider-quota.test.ts",
+          "tests/providers/codex-quota.test.ts"
         ]
       },
       "provider-request-pacing": {
@@ -92,7 +92,7 @@
           "src/providers/request-pacing.ts"
         ],
         "requiredTests": [
-          "tests/request-pacing.test.ts"
+          "tests/usage/request-pacing.test.ts"
         ]
       },
       "subscription-credit-accounting": {
@@ -103,8 +103,8 @@
           "src/providers/quota.ts"
         ],
         "requiredTests": [
-          "tests/usage-log.test.ts",
-          "tests/quota-bars-rows.test.ts"
+          "tests/usage/usage-log.test.ts",
+          "tests/gui/quota-bars-rows.test.ts"
         ]
       },
       "hosted-tool-handling": {
@@ -115,8 +115,8 @@
           "src/responses/parser.ts"
         ],
         "requiredTests": [
-          "tests/responses-tool-conformance.test.ts",
-          "tests/responses-undeclared-tool-guard.test.ts"
+          "tests/responses/responses-tool-conformance.test.ts",
+          "tests/responses/responses-undeclared-tool-guard.test.ts"
         ]
       },
       "cursor-schema-contracts": {
@@ -127,8 +127,8 @@
           "src/adapters/cursor/transport.ts"
         ],
         "requiredTests": [
-          "tests/cursor-adapter.test.ts",
-          "tests/cursor-sandbox-escalation.test.ts"
+          "tests/providers/cursor/cursor-adapter.test.ts",
+          "tests/providers/cursor/cursor-sandbox-escalation.test.ts"
         ]
       },
       "cursor-replay-remint": {
@@ -139,8 +139,8 @@
           "src/oauth/index.ts"
         ],
         "requiredTests": [
-          "tests/cursor-adapter.test.ts",
-          "tests/cursor-continuity-retention.test.ts"
+          "tests/providers/cursor/cursor-adapter.test.ts",
+          "tests/providers/cursor/cursor-continuity-retention.test.ts"
         ]
       },
       "cursor-affinity-thread-ownership": {
@@ -151,8 +151,8 @@
           "src/oauth/cursor-routing.ts"
         ],
         "requiredTests": [
-          "tests/cursor-continuity-retention.test.ts",
-          "tests/request-log-conversation.test.ts"
+          "tests/providers/cursor/cursor-continuity-retention.test.ts",
+          "tests/usage/request-log-conversation.test.ts"
         ]
       },
       "cursor-runtime-normalization": {
@@ -163,7 +163,7 @@
           "src/adapters/cursor/transport.ts"
         ],
         "requiredTests": [
-          "tests/cursor-adapter.test.ts"
+          "tests/providers/cursor/cursor-adapter.test.ts"
         ]
       },
       "cursor-blob-integrity": {
@@ -173,7 +173,7 @@
           "src/adapters/cursor/thread-continuity.ts"
         ],
         "requiredTests": [
-          "tests/cursor-continuity-retention.test.ts"
+          "tests/providers/cursor/cursor-continuity-retention.test.ts"
         ]
       },
       "subagent-fallback": {
@@ -185,8 +185,8 @@
           "src/types/config.ts"
         ],
         "requiredTests": [
-          "tests/subagent-fallback-handle-responses.test.ts",
-          "tests/config.test.ts"
+          "tests/routing/subagent-fallback-handle-responses.test.ts",
+          "tests/server/config.test.ts"
         ]
       },
       "oauth-snapshot-compatibility": {
@@ -197,8 +197,8 @@
           "src/oauth/store.ts"
         ],
         "requiredTests": [
-          "tests/oauth-refresh.test.ts",
-          "tests/oauth-upsert-preserves-api-key.test.ts"
+          "tests/oauth/oauth-refresh.test.ts",
+          "tests/oauth/oauth-upsert-preserves-api-key.test.ts"
         ]
       },
       "native-tls": {
@@ -211,10 +211,10 @@
           "src/types/config.ts"
         ],
         "requiredTests": [
-          "tests/server-tls-config.test.ts",
-          "tests/server-tls-live.test.ts",
-          "tests/management-origin-tls.test.ts",
-          "tests/proxy-liveness.test.ts"
+          "tests/server/server-tls-config.test.ts",
+          "tests/server/server-tls-live.test.ts",
+          "tests/server/management-origin-tls.test.ts",
+          "tests/server/proxy-liveness.test.ts"
         ]
       },
       "provider-validation": {
@@ -225,7 +225,7 @@
           "src/server/management/provider-routes.ts"
         ],
         "requiredTests": [
-          "tests/management-provider-validation.test.ts"
+          "tests/server/management-provider-validation.test.ts"
         ]
       },
       "atomic-api-key-rotation": {
@@ -236,8 +236,8 @@
           "src/providers/key-failover.ts"
         ],
         "requiredTests": [
-          "tests/key-failover.test.ts",
-          "tests/api-keys-routes.test.ts"
+          "tests/adapters/key-failover.test.ts",
+          "tests/server/api-keys-routes.test.ts"
         ]
       }
     }
