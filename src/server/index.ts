@@ -259,6 +259,17 @@ function isAiStudioSessionOrigin(origin: string | null, config: Pick<OcxConfig, 
   );
 }
 
+export function isLoopbackPeerAddress(address: string | null | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.toLowerCase().replace(/^\[|\]$/g, "").split("%")[0] ?? "";
+  if (normalized === "::1") return true;
+  const ipv4 = normalized.startsWith("::ffff:") ? normalized.slice("::ffff:".length) : normalized;
+  const octets = ipv4.split(".");
+  return octets.length === 4
+    && octets.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+    && Number(octets[0]) === 127;
+}
+
 function withAiStudioSessionCors(resp: Response, req: Request, config: RequestPolicyView): Response {
   const origin = req.headers.get("Origin");
   if (isAiStudioSessionOrigin(origin, config) && origin) resp.headers.set("Access-Control-Allow-Origin", origin);
@@ -1162,7 +1173,8 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
         }
         if (url.pathname === "/api/aistudio/session") {
           const origin = req.headers.get("Origin");
-          if (isAiStudioSessionOrigin(origin, policy)) {
+          const peerAddress = requestServer.requestIP(req)?.address ?? null;
+          if (isLoopbackPeerAddress(peerAddress) && isAiStudioSessionOrigin(origin, policy)) {
             return new Response(null, {
               status: 204,
               headers: {
@@ -1173,6 +1185,7 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
               },
             });
           }
+          return new Response(null, { status: 403, headers: corsHeaders() });
         }
         const managementPreflight = url.pathname.startsWith("/api/");
         const allowed = managementPreflight
@@ -1234,6 +1247,10 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname === "/api/aistudio/session" && req.method === "POST") {
+        const peerAddress = requestServer.requestIP(req)?.address ?? null;
+        if (!isLoopbackPeerAddress(peerAddress)) {
+          return withAiStudioSessionCors(withCors(formatErrorResponse(403, "forbidden", "AI Studio session import is loopback-only"), req, policy), req, policy);
+        }
         const dedicated = req.headers.get("x-opencodex-api-key")?.trim() ?? "";
         const admission = dedicated
           ? resolveDataPlaneAdmissionSecret(dedicated, config, "dedicated")
@@ -1287,26 +1304,36 @@ export function startServer(port?: number, deps: StartServerDeps = {}): Server<W
       }
 
       if (url.pathname === "/api/aistudio/login/native" && req.method === "POST") {
-        const admission = resolveApiAuth(req, policy);
-        if (!admission) return withCors(formatErrorResponse(401, "authentication_error", "opencodex API key required"), req, policy);
-        if (!isAllowedRequestOrigin(req, policy)) {
-          return withCors(formatErrorResponse(403, "origin_rejected", "cross-origin request blocked"), req, policy);
+        const peerAddress = requestServer.requestIP(req)?.address ?? null;
+        if (!isLoopbackPeerAddress(peerAddress)) {
+          return withManagementCors(jsonResponse({ ok: false, error: "Native AI Studio login is loopback-only" }, 403), req, config);
+        }
+        const localManagementAuth = {
+          attestationSecret: localAttestationSecret,
+          pid: process.pid,
+          port: boundPort ?? requestServer.port ?? listenPort,
+        };
+        const apiAuthError = requireManagementAuth(req, managementAuth, config, localManagementAuth);
+        if (apiAuthError) return withManagementCors(apiAuthError, req, config);
+        const principal = managementPrincipal(req, managementAuth, config, localManagementAuth);
+        if (principal !== "gui-session") {
+          return withManagementCors(jsonResponse({ ok: false, error: "GUI session required" }, 403), req, config);
         }
         try {
           const login = await (deps.runAiStudioNativeLogin ?? runAiStudioNativeLogin)({ signal: req.signal });
           if (login.kind === "unsupported") return jsonResponse({ ok: false, error: "Native login is only available on macOS" }, 400, req, policy);
           if (login.kind === "cancelled") return jsonResponse({ ok: false, error: "Native AI Studio login cancelled" }, 499, req, policy);
-          if (login.kind === "failed") return jsonResponse({ ok: false, error: login.error }, 500, req, policy);
+          if (login.kind === "failed") return jsonResponse({ ok: false, error: "Native AI Studio login failed" }, 500, req, policy);
           const probeRequest = new Request(new URL("/api/providers/test?name=google-aistudio", req.url), {
             method: "POST",
             headers: { Host: req.headers.get("Host") ?? "127.0.0.1" },
           });
           const probeResponse = await handleManagementAPI(probeRequest, new URL(probeRequest.url), config, managementApi);
           const probe = await probeResponse?.json().catch(() => null) as { ok?: boolean; error?: string } | null;
-          if (!probe?.ok) return jsonResponse({ ok: false, error: probe?.error ?? "AI Studio connection probe failed" }, 502, req, policy);
-          return jsonResponse({ ok: true, sessionPath: login.sessionPath }, 200, req, policy);
-        } catch (error) {
-          return jsonResponse({ ok: false, error: String(error) }, 500, req, policy);
+          if (!probe?.ok) return jsonResponse({ ok: false, error: "AI Studio connection probe failed" }, 502, req, policy);
+          return jsonResponse({ ok: true }, 200, req, policy);
+        } catch {
+          return jsonResponse({ ok: false, error: "Native AI Studio login failed" }, 500, req, policy);
         }
       }
 

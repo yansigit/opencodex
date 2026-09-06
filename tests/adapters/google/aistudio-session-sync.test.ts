@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   cookieHeaderFromSession,
   getAiStudioSessionPath,
@@ -7,11 +7,35 @@ import {
   saveAiStudioSession,
   saveAiStudioSessionFromToken,
   serializeSessionBundle,
+  validateAiStudioSessionData,
 } from "../../../src/oauth/aistudio-session-sync";
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getConfigDir } from "../../../src/config";
+import { flushConfigDirHardening } from "../../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../../src/lib/windows-secret-acl";
+import { removeTreeWithRetry } from "../../helpers/remove-tree";
+
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+const previousHome = process.env.OPENCODEX_HOME;
+let testHome = "";
+
+beforeEach(() => {
+  testHome = mkdtempSync(join(tmpdir(), "aistudio-session-"));
+  process.env.OPENCODEX_HOME = testHome;
+  setIcaclsRunnerForTests(() => ICACLS_OK);
+  setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+});
+
+afterEach(async () => {
+  await flushConfigDirHardening(testHome);
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousHome;
+  removeTreeWithRetry(testHome);
+});
 
 describe("Google AI Studio Session Bundle Exporter & Importer", () => {
   const sampleData = {
@@ -46,8 +70,31 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
     expect(() => parseSessionBundle(btoa(JSON.stringify({ selectedProject: "p1" })))).toThrow();
   });
 
+  test("rejects missing SAPISID and malformed cookie fields before persistence", () => {
+    expect(() => validateAiStudioSessionData({
+      selectedProject: "p",
+      windowId: "w",
+      cookies: [{ name: "SSID", value: "only-secondary" }],
+    })).toThrow("valid SAPISID cookie required");
+    expect(() => validateAiStudioSessionData({
+      selectedProject: "p",
+      windowId: "w",
+      cookies: [{ name: "SAPISID\r\nInjected", value: "secret" }],
+    })).toThrow("cookie name");
+    expect(() => validateAiStudioSessionData({
+      selectedProject: "p",
+      windowId: "w",
+      cookies: [{ name: "SAPISID", value: "secret;Injected=1" }],
+    })).toThrow("cookie value");
+    expect(() => validateAiStudioSessionData({
+      selectedProject: "p",
+      windowId: "w",
+      cookies: [{ name: "SAPISID", value: "secret", domain: ".attacker.example" }],
+    })).toThrow("cookie domain");
+  });
+
   test("saves session bundle to ~/.opencodex/aistudio-session.json", () => {
-    const dest = join(mkdtempSync(join(tmpdir(), "aistudio-session-")), "aistudio-session.json");
+    const dest = join(testHome, "aistudio-session.json");
     saveAiStudioSession(sampleData, dest);
     expect(existsSync(dest)).toBe(true);
 
@@ -57,14 +104,15 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
   });
 
   test("writes session credentials with owner-only permissions", () => {
-    const dest = join(mkdtempSync(join(tmpdir(), "aistudio-session-")), "aistudio-session.json");
+    const dest = join(testHome, "aistudio-session.json");
     saveAiStudioSession(sampleData, dest);
     if (process.platform !== "win32") expect(statSync(dest).mode & 0o777).toBe(0o600);
+    expect(readdirSync(testHome).some(name => name.includes("aistudio-session.json.ocx.") && name.endsWith(".tmp"))).toBe(false);
   });
 
   test("saveAiStudioSessionFromToken decodes base64 bundle and writes session file", () => {
     const encoded = serializeSessionBundle(sampleData);
-    const dest = join(mkdtempSync(join(tmpdir(), "aistudio-session-")), "aistudio-session.json");
+    const dest = join(testHome, "aistudio-session.json");
     const savedPath = saveAiStudioSessionFromToken(encoded, dest);
     expect(existsSync(savedPath)).toBe(true);
 
@@ -73,7 +121,7 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
   });
 
   test("loadAiStudioSession reads cookies into a Cookie header", () => {
-    const dest = join(mkdtempSync(join(tmpdir(), "aistudio-session-")), "aistudio-session.json");
+    const dest = join(testHome, "aistudio-session.json");
     saveAiStudioSession(sampleData, dest);
     const loaded = loadAiStudioSession(dest);
     expect(loaded?.selectedProject).toBe("gen-lang-client-123456");
@@ -85,12 +133,25 @@ describe("Google AI Studio Session Bundle Exporter & Importer", () => {
   test("loadAiStudioSession returns null for missing or invalid files", () => {
     expect(loadAiStudioSession(join(tmpdir(), "missing-aistudio-session.json"))).toBeNull();
     expect(cookieHeaderFromSession(null)).toBe("");
-    const tmpDir = mkdtempSync(join(tmpdir(), "aistudio-invalid-"));
-    const invalidJsonPath = join(tmpDir, "corrupted.json");
+    const invalidJsonPath = join(testHome, "corrupted.json");
     writeFileSync(invalidJsonPath, "not valid json", "utf-8");
     expect(loadAiStudioSession(invalidJsonPath)).toBeNull();
     writeFileSync(invalidJsonPath, JSON.stringify({ noCookies: true }), "utf-8");
     expect(loadAiStudioSession(invalidJsonPath)).toBeNull();
+  });
+
+  test("load refuses replaced links and repairs broad POSIX file permissions before reading", () => {
+    const dest = join(testHome, "aistudio-session.json");
+    saveAiStudioSession(sampleData, dest);
+    if (process.platform !== "win32") {
+      chmodSync(dest, 0o644);
+      expect(loadAiStudioSession(dest)?.cookies[0]?.name).toBe("SAPISID");
+      expect(statSync(dest).mode & 0o777).toBe(0o600);
+
+      const linked = join(testHome, "linked-session.json");
+      symlinkSync(dest, linked);
+      expect(loadAiStudioSession(linked)).toBeNull();
+    }
   });
 
   test("cookieHeaderFromSession joins cookies and filters invalid or empty entries", () => {
