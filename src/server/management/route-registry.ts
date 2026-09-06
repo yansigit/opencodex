@@ -84,6 +84,7 @@ export interface ManagementRoute {
 /** Every reachable management route. */
 export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   // server/management-api
+  { method: "POST", path: "/api/providers/test", module: "server/management-api", mutates: true },
   { method: "POST", path: "/api/stop", module: "server/management-api", mutates: true },
   // codex/auth-api
   { method: "DELETE", path: "/api/codex-auth/accounts", module: "codex/auth-api", mutates: true },

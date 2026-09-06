@@ -84,7 +84,7 @@ describe("describeImageRouted unit", () => {
       const userParts = messages[1].content as Array<{ type: string }>;
       expect(userParts.some(part => part.type === "image_url")).toBe(true);
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 
@@ -118,7 +118,7 @@ describe("describeImageRouted unit", () => {
       );
       expect(bad.error).toContain("unsupported image type");
     } finally {
-      server.stop(true);
+      await server.stop(true);
     }
   });
 });
