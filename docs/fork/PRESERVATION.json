@@ -2514,7 +2514,7 @@
           "forkInvariant": "Models keeps the fork's useModalDialog-driven V2-help, custom-provider and context dialogs, IconTrash affordances, deferred reloadAliases effect (setTimeout 0 with abort), #2465 per-provider preset preview via /api/model-presets with bounded fetch, and /api/model-discovery view whose failure must not take the page down.",
           "equivalentOrBetter": false,
           "disposition": "preserve",
-          "implementationEvidence": "Worktree Models.tsx blob 8510933a7bd8af4913bd7d9dfe304793c782adf8 contains 12 hits of fork markers (useModalDialog|IconTrash|loadPresets|model-discovery) and 7 hits of upstream markers (ModelPickerOrderEditor|ModelDisplayNameDialog|ModelPriceDialog|model-picker-order); the delta between candidate mergeBlob 862e35e and the current tree only converts the picker-draft pin from useLayoutEffect to a render-phase conditional set with the same comment, not a feature change.",
+        "implementationEvidence": "Preserved fork model controls, display-name receipts/recovery, feedback generation and provider state while integrating upstream picker ordering, effort pins and pricing. Final React Doctor fix memoizes the state-setter-only publishFeedback callback and includes it in saveDisplayName dependencies; repeated-toast behavior is unchanged. Focused display-name editor, status-toast and stale-banner suites pass 63 tests; React Doctor is clean.",
           "exactTests": [
             "cd gui && bun test tests/model-picker-order.test.ts tests/provider-catalog-marks.test.tsx tests/provider-accessibility.test.tsx"
           ]
