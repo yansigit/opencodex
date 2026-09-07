@@ -37,12 +37,16 @@ describe("CI lane manifest", () => {
       "tests/codex-integration/codex-transition-state-race.test.ts",
       "tests/codex-integration/native-main-owner-lifetime.test.ts",
       "tests/cli/ocx-launcher-runtime.test.ts",
+      "tests/clients/remote-catalog.test.ts",
       "tests/lab/lab-fabric-task.test.ts",
+      "tests/lab/lab-live-pinned-timeouts.test.ts",
       "tests/server/server-auth.test.ts",
       "tests/server/server-search.test.ts",
+      "tests/server/terminal-guard-server.test.ts",
       "tests/service/shutdown-launcher.test.ts",
       "tests/storage/storage-policy-job-responsive.test.ts",
       "tests/storage/storage-restore-job-responsive.test.ts",
+      "tests/storage/storage-mutation-race.test.ts",
       "tests/storage/storage-worker-lifecycle.test.ts",
       "tests/ci-workflows/test-runner.test.ts",
       "tests/usage/quota-reset-seen-store.test.ts",
@@ -50,6 +54,7 @@ describe("CI lane manifest", () => {
       "tests/usage/user-cost-overlay-live-reconcile.test.ts",
       "tests/usage/user-cost-overlay-provider-delete.test.ts",
       "tests/web-search/web-search-timeout-contract.test.ts",
+      "tests/web-search/web-search.test.ts",
     ]) expect(lanes.serial).toContain(historicallyLoadSensitive);
     expect(lanes.dedicated).toEqual(DEDICATED_TEST_FILES);
     expect(laneFiles("general", process.cwd())).toEqual(lanes.general);
@@ -62,7 +67,12 @@ describe("CI lane manifest", () => {
 
   test("never drops a nested test that shares a quarantined basename", () => {
     const inventory = [...discoverTestFiles(process.cwd()), "tests/nested/codex-shim.test.ts"];
-    expect(() => validateLaneManifest(inventory)).toThrow(/collides with serial basename/);
+    expect(() => validateLaneManifest(inventory)).toThrow(/collides with reserved basename/);
+  });
+
+  test("never drops a nested test that shares a dedicated basename", () => {
+    const inventory = [...discoverTestFiles(process.cwd()), "tests/nested/api-usage.test.ts"];
+    expect(() => validateLaneManifest(inventory)).toThrow(/collides with reserved basename/);
   });
 
   test("ignores a scratch directory that vanishes during inventory", () => {

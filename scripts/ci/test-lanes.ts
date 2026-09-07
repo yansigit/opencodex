@@ -10,6 +10,9 @@ export const SERIAL_TEST_FILES = [
   "tests/adapters/anthropic/anthropic-image-normalize.test.ts",
   "tests/claude-integration/claude-native-passthrough.test.ts",
   "tests/claude-integration/claude-management-api.test.ts",
+  // Uses real multi-second streaming and inactivity deadlines. The macOS
+  // promotion pool delayed both sides past their test-level bounds.
+  "tests/clients/remote-catalog.test.ts",
   "tests/codex-integration/codex-app-server-processes.test.ts",
   // Spawns multiple real `ocx start` children. Under the general Windows pool,
   // four Bun test processes can starve a healthy child past its readiness
@@ -49,12 +52,18 @@ export const SERIAL_TEST_FILES = [
   // loaded promotion pool, scheduler stalls crossed its bounded observation
   // window and changed the expected blocked/inconclusive outcome.
   "tests/lab/lab-fabric-task.test.ts",
+  // Classifies 30ms first-byte and inactivity deadlines against a local server;
+  // pool stalls can turn an inactivity timeout into a first-byte timeout.
+  "tests/lab/lab-live-pinned-timeouts.test.ts",
   "tests/usage/request-decompress.test.ts",
   // Drives a sustained real-time debounce to prove writes cannot be starved.
   // Keep its 60s product invariant, but remove unrelated suite contention.
   "tests/usage/quota-reset-seen-store.test.ts",
   "tests/responses/responses-stateless-dangling-call-repair.test.ts",
   "tests/server/server-auth.test.ts",
+  // Proves heartbeats cover a real 1.5s retry wait inside a 5s test budget.
+  // The loaded macOS pool consumed that margin without a product failure.
+  "tests/server/terminal-guard-server.test.ts",
   // Relays a real 50 MiB WebSocket frame to prove the production ceiling. On a
   // loaded macOS pool this exhausted its 15s internal deadline while the same
   // runner completed it in ~5.6s without contention.
@@ -63,6 +72,9 @@ export const SERIAL_TEST_FILES = [
   "tests/service/shutdown-launcher.test.ts",
   "tests/storage/storage-policy-job-responsive.test.ts",
   "tests/storage/storage-restore-job-responsive.test.ts",
+  // Holds the real shared mutation slot across short observation windows; pool
+  // scheduling can release the holder before the contender is dispatched.
+  "tests/storage/storage-mutation-race.test.ts",
   // Waits for a real background policy worker to settle and prove process
   // cleanup. Parallel macOS pressure can starve that worker past its 20s guard.
   "tests/storage/storage-worker-lifecycle.test.ts",
@@ -81,6 +93,9 @@ export const SERIAL_TEST_FILES = [
   // Proves a deliberately stalled response body is cut off inside a one-second
   // contract. Isolate it so unrelated macOS workers cannot consume that budget.
   "tests/web-search/web-search-timeout-contract.test.ts",
+  // Streams raw progress on 12ms intervals inside a 1s test-level deadline.
+  // It repeatedly crossed that deadline only in the loaded macOS pool.
+  "tests/web-search/web-search.test.ts",
   // Builds and parses 500,001 JSONL entries to prove the entry cap. It reached
   // the 30s test budget under pool contention and completes in ~5s in isolation.
   "tests/usage/usage-log.test.ts",
@@ -157,13 +172,13 @@ export function validateLaneManifest(inventory: string[]): {
   for (const path of reserved) {
     if (!normalized.includes(path)) throw new Error(`lane manifest path is missing: ${path}`);
   }
-  const serialByBasename = new Map(
-    serial.map(path => [path.slice(path.lastIndexOf("/") + 1), path]),
+  const reservedByBasename = new Map(
+    [...serial, ...dedicated].map(path => [path.slice(path.lastIndexOf("/") + 1), path]),
   );
   for (const path of normalized) {
-    const serialPath = serialByBasename.get(path.slice(path.lastIndexOf("/") + 1));
-    if (serialPath && path !== serialPath) {
-      throw new Error(`lane manifest path collides with serial basename: ${path} and ${serialPath}`);
+    const reservedPath = reservedByBasename.get(path.slice(path.lastIndexOf("/") + 1));
+    if (reservedPath && path !== reservedPath) {
+      throw new Error(`lane manifest path collides with reserved basename: ${path} and ${reservedPath}`);
     }
   }
   return {
