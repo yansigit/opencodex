@@ -141,7 +141,8 @@ describe("GitHub Actions hardening", () => {
     expect(ci.jobs?.["select-windows-runner"]).toBeUndefined();
     expect(ci.jobs?.test?.["timeout-minutes"]).toBe(15);
     expect(ci.jobs?.gates?.["timeout-minutes"]).toBe(15);
-    expect(ci.jobs?.["platform-macos"]?.["timeout-minutes"]).toBe(30);
+    expect(ci.jobs?.["platform-macos"]?.["timeout-minutes"]).toBe(15);
+    expect(ci.jobs?.["platform-macos-full"]?.["timeout-minutes"]).toBe(20);
     expect(ci.jobs?.["macos-control"]).toBeUndefined();
     // Higher than the Linux shards on purpose: at 15 the Windows leg cancelled a
     // shard mid-suite, which reports as neither pass nor fail (#2152).
@@ -215,7 +216,7 @@ describe("GitHub Actions hardening", () => {
     // how the first cut of that test shipped, so pin the flag rather than trusting a
     // comment. Asserted per job so a future edit cannot drop it from one leg while
     // the other still carries it.
-    for (const jobName of ["test", "platform-macos", "platform-windows"]) {
+    for (const jobName of ["test", "platform-macos", "platform-macos-full", "platform-windows"]) {
       const steps = (ci.jobs?.[jobName] as { steps?: Array<{ uses?: string; with?: Record<string, unknown> }> })?.steps ?? [];
       const checkout = steps.find(step => typeof step.uses === "string" && step.uses.includes("actions/checkout"));
       expect(`${jobName}:${String(checkout?.with?.["fetch-tags"])}`).toBe(`${jobName}:true`);
@@ -275,7 +276,8 @@ describe("GitHub Actions hardening", () => {
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test --isolate tests")).toBe(true);
     expect(hasExactShellCommand(gatesGuiRun, "cd gui && bun test tests")).toBe(false);
 
-    // macOS is focused on dev and relevant PRs; main/preview keep full control.
+    // macOS is focused on dev and relevant PRs; promotion events use two
+    // timing-balanced full-suite runners while nightly keeps the pool control.
     const macosSteps = (ci.jobs?.["platform-macos"] as {
       steps?: { name?: string; if?: string; run?: string }[];
     })?.steps ?? [];
@@ -285,8 +287,23 @@ describe("GitHub Actions hardening", () => {
     expect(macosSteps.some(step => step.run?.includes("--shard"))).toBe(false);
     const focusedMacos = macosSteps.find(step => step.name === "Focused Darwin/process lifecycle tests");
     expect(focusedMacos?.run).toContain("tests/codex-integration/codex-prompt-text-probe.test.ts");
-    const fullMacos = macosSteps.find(step => step.name === "Full macOS suite");
-    expect(fullMacos?.if).toContain("github.event_name == 'pull_request' && github.base_ref == 'main'");
+    expect(macosSteps.find(step => step.name === "Full macOS suite")).toBeUndefined();
+    const macosFull = ci.jobs?.["platform-macos-full"] as {
+      if?: string;
+      name?: string;
+      strategy?: { matrix?: { shard?: number[] } };
+      steps?: Array<{ name?: string; env?: Record<string, string>; run?: string }>;
+    } | undefined;
+    expect(macosFull?.strategy?.matrix?.shard).toEqual([1, 2]);
+    expect(macosFull?.name).toBe("macos full ${{ matrix.shard }}/2");
+    expect(macosFull?.if).toContain("github.event_name == 'pull_request' && github.base_ref == 'main'");
+    const macosFullStep = macosFull?.steps?.find(step =>
+      step.name === "Full macOS shard with isolated load-sensitive files"
+    );
+    expect(macosFullStep?.env?.TEST_SHARD).toBe("${{ matrix.shard }}/2");
+    expect(macosFullStep?.run).toContain("--lane platform-main");
+    expect(macosFullStep?.run).toContain("--lane platform-serial");
+    expect(macosFullStep?.run).toContain("--parallel=1");
     const pathPolicy = Bun.YAML.parse(await readText(".github/policies/ci-paths.yml")) as {
       macos?: string[];
       swift?: string[];
@@ -335,7 +352,7 @@ describe("GitHub Actions hardening", () => {
     expect(crashRetry).not.toContain("while true");
     expect((ci.jobs?.["platform-macos"] as { needs?: string; if?: string })?.needs).toBe("changes");
     expect((ci.jobs?.["platform-macos"] as { if?: string })?.if)
-      .toBe("(github.event_name != 'pull_request' && github.event_name != 'merge_group') || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') || needs.changes.outputs.macos == 'true'");
+      .toBe("(github.event_name == 'push' && github.ref == 'refs/heads/dev') || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') || ((github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.macos == 'true')");
 
     // Windows is required for every integration push and CI-relevant PR. The
     // changes dependency keeps documentation-only PRs cheap without letting a
@@ -436,7 +453,7 @@ describe("GitHub Actions hardening", () => {
     // accident, because the same job also ran the GUI build — splitting the suite
     // away from the gates removed that coincidence, and the shards went red on a
     // pull request before this pin existed.
-    for (const jobName of ["test", "platform-macos", "platform-windows"]) {
+    for (const jobName of ["test", "platform-macos", "platform-macos-full", "platform-windows"]) {
       const steps = (ci.jobs?.[jobName] as { steps?: { if?: string; run?: string }[] })?.steps ?? [];
       const build = steps.find(step => step.run?.includes("bun run build"));
       expect(`${jobName}:${build === undefined}`).toBe(`${jobName}:false`);
@@ -678,7 +695,12 @@ describe("GitHub Actions hardening", () => {
     }
     const macosJob = ci.jobs?.["platform-macos"] as { needs?: string; if?: string } | undefined;
     expect(`platform-macos:${macosJob?.needs}`).toBe("platform-macos:changes");
-    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:(github.event_name != 'pull_request' && github.event_name != 'merge_group') || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') || needs.changes.outputs.macos == 'true'");
+    expect(`platform-macos:${macosJob?.if}`).toBe("platform-macos:(github.event_name == 'push' && github.ref == 'refs/heads/dev') || (github.event_name == 'pull_request' && github.base_ref == 'main') || (github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/main') || ((github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.macos == 'true')");
+    const macosFullJob = ci.jobs?.["platform-macos-full"] as { needs?: string; if?: string } | undefined;
+    expect(`platform-macos-full:${macosFullJob?.needs}`).toBe("platform-macos-full:changes");
+    expect(macosFullJob?.if).toContain("github.event_name == 'workflow_dispatch'");
+    expect(macosFullJob?.if).toContain("refs/heads/main");
+    expect(macosFullJob?.if).toContain("refs/heads/preview");
   });
 
   test("cross-platform CI keeps the GUI lint and build gates", async () => {
