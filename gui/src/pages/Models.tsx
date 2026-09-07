@@ -1,19 +1,26 @@
 import { CodexStaleBanner } from "../components/codex-stale-banner";
+import ModelPickerOrderEditor from "../components/ModelPickerOrderEditor";
+import ModelDisplayNameDialog from "../components/ModelDisplayNameDialog";
+import ModelPriceDialog from "../components/ModelPriceDialog";
 import { fetchCodexAppServerState } from "../codex-app-server-state";
 import type { AppServerStateOutcome } from "../codex-app-server-state";
 import { useCodexRestart } from "../use-codex-restart";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Switch, Notice, EmptyState, Select, Tooltip } from "../ui";
-import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil, IconTrash } from "../icons";
+import { IconChevron, IconBoxes, IconInfo, IconCheck, IconAlert, IconRefresh, IconPencil } from "../icons";
 import { useT } from "../i18n/shared";
 import type { TFn, TKey } from "../i18n/shared";
 import { modelLabel } from "../model-display";
-import { formatNamespacedModelId, formatProviderDisplayName, providerDisplaySlug } from "../provider-icons";
+import { formatProviderDisplayName, providerDisplaySlug } from "../provider-icons";
 import { readJsonIfOk, readJsonOrThrow } from "../fetch-json";
 import { describeIntegrationRefusalParts } from "./integrations/refusal-copy";
 import { readSessionListCache, writeSessionListCache } from "../session-list-cache";
 import { setClientResourceData } from "../client-resource";
-import { createBoundedFetch } from "../bounded-fetch";
+import { createBoundedFetch, type BoundedFetch } from "../bounded-fetch";
+import {
+  isModelPickerUsage, isPickerOrderSaved, isPickerOrderSettings, modelPickerOrder, modelPickerOrderMode,
+  type ModelPickerOrderMode, type PickerOrderSettings, type PickerOrderSaved, type ModelPickerUsage,
+} from "../model-picker-order";
 import { startVisibilityPoll } from "../visibility-poll";
 import { useDataSurface } from "../data-surface";
 import { DataSurfaceSkeleton } from "../components/data-surface";
@@ -67,7 +74,7 @@ import {
   type V2Status,
 } from "./models-shared";
 import { EmptyProviderHint } from "./models-provider-hints";
-import { shadowCallModelOptions, useModalDialog } from "./dashboard-shared";
+import { shadowCallModelOptions } from "./dashboard-shared";
 import { shadowSourceModelBadge, shadowSourceModelLabel } from "./shadow-call-source";
 
 type CachedModelsPage = {
@@ -142,26 +149,48 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     return () => { appServerMounted.current = false; };
   }, []);
 
-  const reloadAppServerState = useCallback((signal?: AbortSignal) => {
-    void fetchCodexAppServerState(apiBase, { signal }).then(outcome => {
-      if (signal?.aborted || !appServerMounted.current) return;
+  const appServerRead = useRef<BoundedFetch | null>(null);
+  const appServerReadGeneration = useRef(0);
+  const appServerReadBase = useRef(apiBase);
+  const cancelAppServerRead = useCallback(() => {
+    appServerReadGeneration.current++;
+    appServerRead.current?.controller.abort();
+    appServerRead.current?.clear();
+    appServerRead.current = null;
+  }, []);
+  const reloadAppServerState = useCallback(async () => {
+    // An old restart callback must not start an A read after the page moved to B.
+    if (!appServerMounted.current || appServerReadBase.current !== apiBase) return;
+    cancelAppServerRead();
+    const generation = appServerReadGeneration.current;
+    const bounded = createBoundedFetch(15_000);
+    appServerRead.current = bounded;
+    try {
+      const outcome = await fetchCodexAppServerState(apiBase, { signal: bounded.signal });
+      if (bounded.signal.aborted || !appServerMounted.current
+        || appServerReadBase.current !== apiBase || generation !== appServerReadGeneration.current
+        || appServerRead.current !== bounded) return;
       setAppServerState(outcome.state);
-    });
-  }, [apiBase]);
+    } finally {
+      // The observation owns its deadline until settlement, independently of PUT.
+      bounded.clear();
+      if (appServerRead.current === bounded) appServerRead.current = null;
+    }
+  }, [apiBase, cancelAppServerRead]);
 
   // onSettled, not a per-button callback: the sidebar control knows nothing about
   // this page, and a restart succeeding there must still clear the banner here.
   const { restarting: codexRestarting, restart: handleCodexRestart } = useCodexRestart(apiBase, {
-    onSettled: () => reloadAppServerState(),
+    onSettled: () => { void reloadAppServerState(); },
   });
 
   useEffect(() => {
-    // Once on mount, on apiBase change, and when a restart settles anywhere in the
-    // app (restartEpoch) — never a timer.
-    const controller = new AbortController();
-    reloadAppServerState(controller.signal);
-    return () => controller.abort();
-  }, [reloadAppServerState, restartEpoch]);
+    // Once on mount/base change or restart completion, never on a timer.
+    appServerReadBase.current = apiBase;
+    setAppServerState(null);
+    void reloadAppServerState();
+    return cancelAppServerRead;
+  }, [apiBase, cancelAppServerRead, reloadAppServerState, restartEpoch]);
 
 
 
@@ -217,6 +246,47 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [contextCaps, setContextCaps] = useState<Record<string, number>>(() => cached?.contextCaps ?? {});
   const [contextCapValues, setContextCapValues] = useState<Record<string, number>>(() => cached?.contextCapValues ?? {});
   const [contextCapValue, setContextCapValue] = useState(() => cached?.contextCapValue ?? 350_000);
+  const pickerCacheKey = `${cacheKey}:picker-order`;
+  const cachedPicker = useMemo(() => {
+    const value = readSessionListCache<unknown>(pickerCacheKey);
+    return isPickerOrderSettings(value) ? value : undefined;
+  }, [pickerCacheKey]);
+  const [pickerDraft, setPickerDraft] = useState<ModelPickerOrderMode | null>(null);
+  const [pickerBusy, setPickerBusy] = useState(false);
+  const pickerFlight = useRef<BoundedFetch | null>(null);
+  const pickerGeneration = useRef(0);
+  const pickerResource = useDataSurface<PickerOrderSettings>(
+    pickerCacheKey, [apiBase],
+    useCallback(async (signal: AbortSignal) => {
+      const response = await fetch(`${apiBase}/api/subagent-models`, { signal });
+      const data = await readJsonOrThrow<unknown>(response);
+      if (!isPickerOrderSettings(data)) throw new Error("picker settings payload missing");
+      if (signal.aborted) throw new Error("picker settings request aborted");
+      writeSessionListCache(pickerCacheKey, data);
+      return data;
+    }, [apiBase, pickerCacheKey]),
+    { isEmpty: () => false, enabled: catalogActive, deadlineMs: 15_000, initialData: cachedPicker },
+  );
+  const pickerSettings = pickerResource.state.data;
+  const pickerMode = pickerDraft ?? modelPickerOrderMode(
+    pickerSettings?.pickerAvailable ?? [], pickerSettings?.pickerOrder ?? [], pickerSettings?.pickerOrderMode,
+  );
+  useLayoutEffect(() => {
+    pickerGeneration.current++;
+    setPickerDraft(null);
+    setPickerBusy(false);
+    return () => {
+      pickerGeneration.current++;
+      pickerFlight.current?.controller.abort();
+      pickerFlight.current?.clear();
+      pickerFlight.current = null;
+      cancelAppServerRead();
+    };
+  }, [apiBase, catalogActive, cancelAppServerRead]);
+  useLayoutEffect(() => {
+    // Pin inferred Custom before any late GET can switch mode and unmount its draft.
+    if (catalogActive && pickerDraft === null && pickerMode === "custom") setPickerDraft("custom");
+  }, [catalogActive, pickerDraft, pickerMode]);
   const [customCap, setCustomCap] = useState("");
   const [showCustom, setShowCustom] = useState(false);
   const [providerCapCustomOpen, setProviderCapCustomOpen] = useState<Record<string, boolean>>({});
@@ -267,11 +337,25 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [threadsCustom, setThreadsCustom] = useState("");
   const [showThreadsCustom, setShowThreadsCustom] = useState(false);
   const [v2HelpOpen, setV2HelpOpen] = useState(false);
-  const v2HelpTriggerRef = useRef<HTMLButtonElement>(null);
-  const v2HelpDialogRef = useModalDialog(v2HelpOpen, v2HelpTriggerRef);
   const [customModalOpen, setCustomModalOpen] = useState(false);
-  const customModalTriggerRef = useRef<HTMLButtonElement>(null);
-  const customDialogRef = useModalDialog(customModalOpen, customModalTriggerRef);
+  const [displayNameModel, setDisplayNameModel] = useState<ModelRow | null>(null);
+  const [priceModel, setPriceModel] = useState<ModelRow | null>(null);
+  const priceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [displayNameSaving, setDisplayNameSaving] = useState(false);
+  const [displayNameRequestError, setDisplayNameRequestError] = useState<string | null>(null);
+  const [displayNameRecovery, setDisplayNameRecovery] = useState<{
+    value: string | null | undefined;
+    confirmed: boolean;
+  } | null>(null);
+  const [displayNameCurrentPending, setDisplayNameCurrentPending] = useState(false);
+  const displayNameRequestRef = useRef<BoundedFetch | null>(null);
+  const displayNameSavingRef = useRef(false);
+  useEffect(() => () => {
+    displayNameRequestRef.current?.controller.abort();
+    displayNameRequestRef.current?.clear();
+    displayNameRequestRef.current = null;
+  }, []);
+  const displayNameTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const reloadAliases = useCallback(async (signal?: AbortSignal) => {
     const response = await fetch(`${apiBase}/api/aliases`, { signal });
@@ -280,11 +364,8 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   }, [apiBase]);
   useEffect(() => {
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => void reloadAliases(controller.signal), 0);
-    return () => {
-      window.clearTimeout(timeout);
-      controller.abort();
-    };
+    void reloadAliases(controller.signal);
+    return () => controller.abort();
   }, [reloadAliases]);
 
   const saveProviderAlias = async (provider: string) => {
@@ -352,8 +433,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const [contextDefaultTouched, setContextDefaultTouched] = useState(false);
   const [contextSaving, setContextSaving] = useState(false);
   const [contextError, setContextError] = useState("");
-  const contextModalTriggerRef = useRef<HTMLButtonElement>(null);
-  const contextDialogRef = useModalDialog(contextModalProvider !== null, contextModalTriggerRef);
   const [hoveredModel, setHoveredModel] = useState<{ namespaced: string; rect: DOMRect } | null>(null);
   const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [shadowCall, setShadowCall] = useState<ShadowCallData | null>(null);
@@ -484,17 +563,18 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   );
   const catalogState = catalogResource.state;
 
-  const load = useCallback(async (force = false): Promise<boolean> => {
+  const load = useCallback(async (force = false, signal?: AbortSignal): Promise<boolean> => {
     if (loadPendingRef.current && !force) return false;
     loadPendingRef.current = true;
     const generation = ++loadGenerationRef.current;
     try {
-      const next = await fetchCatalog(new AbortController().signal);
+      const next = await fetchCatalog(signal ?? new AbortController().signal);
       if (!shouldApplyLoadGeneration(generation, loadGenerationRef.current)) return false;
       applyCatalog(next);
       // Follow-up mutation refreshes retain their existing awaitable contract while publishing
       // the result through the same shared store used by the initial catalog subscription.
       setClientResourceData(cacheKey, next);
+      pickerResource.refresh();
       return true;
     } catch {
       return false;
@@ -503,32 +583,119 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         loadPendingRef.current = false;
       }
     }
-  }, [applyCatalog, cacheKey, fetchCatalog]);
+  }, [applyCatalog, cacheKey, fetchCatalog, pickerResource.refresh]);
 
-  /** #2465: load the per-provider preset preview. */
-  const loadPresets = useCallback(async () => {
-    const bounded = createBoundedFetch(15_000);
+  const finishDisplayNameEdit = useCallback(() => {
+    const trigger = displayNameTriggerRef.current;
+    setDisplayNameModel(null);
+    setDisplayNameRequestError(null);
+    setDisplayNameRecovery(null);
+    setDisplayNameCurrentPending(false);
+    window.setTimeout(() => {
+      if (trigger?.isConnected) trigger.focus();
+    }, 0);
+  }, []);
+
+  const closeDisplayNameEdit = useCallback(() => {
+    if (!displayNameSavingRef.current) finishDisplayNameEdit();
+  }, [finishDisplayNameEdit]);
+
+  // undefined retries only the read after a confirmed write or an unknown outcome.
+  const saveDisplayName = useCallback(async (displayName: string | null | undefined) => {
+    const model = displayNameModel;
+    if (!model || displayNameSavingRef.current) return;
+    const bounded = createBoundedFetch(60_000);
+    displayNameRequestRef.current = bounded;
+    displayNameSavingRef.current = true;
+    setDisplayNameSaving(true);
+    setDisplayNameRequestError(null);
+    // A failed convergence retry cannot invalidate an earlier persistence receipt
+    // for the same value. Editing the draft clears recovery and starts a new intent.
+    let confirmed = displayNameRecovery?.confirmed === true
+      && (displayName === undefined || displayName === displayNameRecovery.value);
+    let receivedReceipt = displayName === undefined;
+    let refreshOnly = displayName === undefined;
     try {
-      const response = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
-      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(response);
-      setPresets(data?.providers ?? {});
-    } catch {
-      // A preset preview is decoration on top of a working Models page; failing to load it must
-      // not take the page down.
-      setPresets({});
+      if (displayName !== undefined) {
+        const response = await fetch(
+          `${apiBase}/api/providers/${encodeURIComponent(model.provider)}/model-display-names`,
+          {
+            method: "PUT",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ modelId: model.id, displayName }),
+            signal: bounded.signal,
+          },
+        );
+        // The route can persist the value and return 503 when catalog convergence fails.
+        // Keep that receipt instead of throwing away saved:true with the error body.
+        type DisplayNameReceipt = {
+          saved?: boolean;
+          error?: string;
+          displayName?: string;
+          displayNameOverride?: string | null;
+          displayNameSource?: ModelRow["displayNameSource"];
+        };
+        const result: DisplayNameReceipt | undefined = response.ok
+          ? await readJsonOrThrow<DisplayNameReceipt>(response, t("models.displayNameSaveFailed"))
+          : await response.json();
+        bounded.signal.throwIfAborted();
+        if (!result || typeof result !== "object" || Array.isArray(result)
+          || (!response.ok && result.saved !== true && typeof result.error !== "string")) {
+          throw new Error(t("models.displayNameSaveFailed"));
+        }
+        receivedReceipt = true;
+        const receiptConfirmed = response.ok || result.saved === true;
+        confirmed = confirmed || receiptConfirmed;
+        if (receiptConfirmed) {
+          const override = result.displayNameOverride === null ? undefined
+            : result.displayNameOverride ?? displayName ?? undefined;
+          const fields: Pick<ModelRow, "displayName" | "displayNameOverride" | "displayNameSource"> = {
+            displayName: result.displayName ?? override,
+            displayNameOverride: override,
+            displayNameSource: result.displayNameSource ?? (override ? "operator" : undefined),
+          };
+          setModels(current => current.map(row => row.namespaced === model.namespaced ? { ...row, ...fields } : row));
+          setDisplayNameModel({ ...model, ...fields });
+          // A saved:true reset receipt omits the provider's effective fallback label.
+          setDisplayNameCurrentPending(fields.displayName === undefined);
+        }
+        if (!response.ok) {
+          throw new Error(result.error || t("models.displayNameSaveFailed"));
+        }
+        refreshOnly = true;
+      }
+      if (!await load(true, bounded.signal)) throw new Error(t("models.loadFail"));
+      bounded.signal.throwIfAborted();
+      publishFeedback(true, confirmed
+        ? t(displayName === null || (displayName === undefined && displayNameRecovery?.value === null)
+          ? "models.displayNameResetDone" : "models.displayNameSaved")
+        : t("models.displayNameReloaded"));
+      finishDisplayNameEdit();
+    } catch (error) {
+      if (displayNameRequestRef.current !== bounded) return;
+      // A dropped connection or unreadable body can hide a committed write just
+      // like a timeout. Reconcile by reading; never replay an unchanged old draft.
+      const unknownOutcome = !receivedReceipt || bounded.signal.aborted;
+      if (unknownOutcome && !confirmed) setDisplayNameCurrentPending(true);
+      setDisplayNameRecovery(confirmed || unknownOutcome || refreshOnly
+        ? { value: refreshOnly || unknownOutcome ? undefined : displayName, confirmed }
+        : null);
+      setDisplayNameRequestError(confirmed
+        ? t("models.displayNameSavedRefreshFailed")
+        : unknownOutcome || refreshOnly
+          ? t("models.displayNameOutcomeUnknown")
+          : error instanceof Error && error.message
+            ? error.message
+            : t("models.displayNameSaveFailed"));
     } finally {
       bounded.clear();
+      if (displayNameRequestRef.current === bounded) {
+        displayNameRequestRef.current = null;
+        displayNameSavingRef.current = false;
+        setDisplayNameSaving(false);
+      }
     }
-  }, [apiBase]);
-
-  const loadModelDiscovery = useCallback(async () => {
-    try {
-      const response = await fetch(`${apiBase}/api/model-discovery`);
-      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(response)) ?? null);
-    } catch {
-      setModelDiscovery(null);
-    }
-  }, [apiBase]);
+  }, [apiBase, displayNameModel, displayNameRecovery, finishDisplayNameEdit, load, t]);
 
   // Shadow/v2 controls must not wait on the models catalog (live discovery can be slow).
   useEffect(() => {
@@ -551,7 +718,18 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
       window.clearTimeout(timeout);
       stop();
     };
-  }, [catalogActive, loadModelDiscovery, loadPresets, loadShadowCall, loadV2]);
+    // oxlint-disable-next-line react/react-compiler -- existing exhaustive-deps exception is intentional
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- loadPresets is a plain async loader
+    // like the rest of this file's; a useCallback wrapper trips PreserveManualMemo, and the
+    // effect only ever needs the current closure. Verified 2026-08-27: converting both loaders
+    // to useCallback and completing the dep array turns ONE warning into five react-compiler
+    // errors - two PreserveManualMemo, two Immutability (they are declared ~430 lines below this
+    // effect), and one EffectSetState - so the note above still holds against oxlint 1.78.
+    // Both gates suppress this one rule for this one file by config rather than by comment:
+    // gui/.oxlintrc.json (override) and gui/doctor.config.json (ignore.overrides). An in-file
+    // react-doctor-disable comment was tried and removed - it changed nothing, and
+    // react/react-compiler penalises a component for carrying suppressions at all.
+  }, [catalogActive, loadShadowCall, loadV2]);
 
   const groups = useMemo(
     () => buildProviderModelGroups(models, providers),
@@ -566,9 +744,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const catalogCountReady = models.length > 0 || catalogState.data !== undefined;
 
   const openContextSettings = (group: ProviderModelGroup<ModelRow>) => {
-    contextModalTriggerRef.current = document.activeElement?.tagName === "BUTTON"
-      ? document.activeElement as HTMLButtonElement
-      : null;
     const modelIds = [...new Set([
       ...group.rows.map(model => model.id),
       ...group.configuredModels,
@@ -970,6 +1145,32 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
     if (!v2 || v2.multiAgentMode === mode) return;
     await putV2Setting({ multiAgentMode: mode });
   };
+
+
+  /**
+   * #2465: load the per-provider preset preview. Rules are evaluated server-side against the
+   * CURRENT catalog, so the count shown is the count an apply would produce.
+   */
+  const loadPresets = async () => {
+    try {
+      const bounded = createBoundedFetch(15_000);
+      const r = await fetch(`${apiBase}/api/model-presets`, { signal: bounded.signal });
+      const data = await readJsonIfOk<{ providers?: Record<string, ModelPresetView> }>(r);
+      setPresets(data?.providers ?? {});
+    } catch {
+      // A preset preview is decoration on top of a working Models page; failing to load it must
+      // not take the page down.
+      setPresets({});
+    }
+  };
+
+  const loadModelDiscovery = async () => {
+    try {
+      const r = await fetch(`${apiBase}/api/model-discovery`);
+      setModelDiscovery((await readJsonIfOk<ModelDiscoveryView>(r)) ?? null);
+    } catch { setModelDiscovery(null); }
+  };
+
   const saveModelDiscovery = async (policy: "on" | "off", provider?: string) => {
     const r = await fetch(`${apiBase}/api/model-discovery`, {
       method: "PUT", headers: { "content-type": "application/json" },
@@ -1089,6 +1290,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const onRowLeave = () => {
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = setTimeout(() => setHoveredModel(null), 120);
+  };
+
+  const keepRowTipOpen = () => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
   };
 
   const addCustomModel = async (
@@ -1268,7 +1473,6 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                 className="btn btn-ghost btn-sm text-caption"
                 onClick={(e) => {
                   e.stopPropagation();
-                  customModalTriggerRef.current = e.currentTarget;
                   setCustomModalMode("add");
                    setCustomModalProvider(provider);
                    setCustomModalId("");
@@ -1473,79 +1677,73 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                      <Switch on={!off} onClick={() => void applyVisibility("models", provider, [{ id: m.id, native: m.native === true }], off)} disabled={busy || m.initialSelectionPending} label={m.native ? m.id : m.namespaced} />
                      {m.initialSelectionPending && <span className="models-chip muted" role="status">{t("models.initialSelectionPending")}</span>}
                      {aliases.models[provider]?.[m.id] && <strong className="mono text-control">{aliases.models[provider][m.id].alias}</strong>}
-                      <code className="mono text-control" style={{ color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{m.native ? modelLabel(m.id) : formatNamespacedModelId(m.namespaced, t)}</code>
+                     <span className="models-model-identity">
+                       <code className="mono text-control" style={{ color: off ? "var(--faint)" : "var(--text)", textDecoration: off ? "line-through" : "none" }}>{m.native ? modelLabel(m.id) : m.namespaced}</code>
+                       {!m.native && m.displayName?.trim() && m.displayName.trim() !== m.namespaced && (
+                         <span className="models-model-friendly text-caption">{m.displayName.trim()}</span>
+                       )}
+                     </span>
                      {aliases.models[provider]?.[m.id]?.source === "builtin" && <span className="models-chip muted text-caption">{t("models.aliasAuto")}</span>}
                      <button type="button" className="btn btn-ghost btn-sm" aria-label={t("models.editModelAlias")} title={t("models.editModelAlias")} onClick={() => void saveModelAlias(provider, m.id)}><IconPencil style={{ width: 13, height: 13 }} /></button>
+                     {!m.native && !m.custom && (
+                       <button
+                         type="button"
+                         className="btn btn-ghost btn-sm text-caption models-display-name-trigger"
+                         aria-haspopup="dialog"
+                         aria-label={t("models.displayNameActionLabel", { model: m.namespaced })}
+                         onClick={event => {
+                           displayNameTriggerRef.current = event.currentTarget;
+                           setDisplayNameRequestError(null);
+                           setDisplayNameRecovery(null);
+                           setDisplayNameCurrentPending(false);
+                           setDisplayNameModel(m);
+                         }}
+                       >
+                         {t("models.displayNameAction")}
+                       </button>
+                     )}
                      {m.custom && (
                        <span className="models-chip muted mono text-caption">
                          {t("models.customBadge")}
                        </span>
                      )}
-                     {m.custom && m.customId && (
-                       <span className="models-model-row-actions">
+                     {!m.native && m.provider !== "combo" && (
+                       <>
+                         {m.manualPricing === true && <span className="models-chip muted text-caption">{t("pricing.override.badge")}</span>}
                          <button
                            type="button"
-                           className="btn btn-ghost btn-sm text-caption"
-                           aria-label={t("models.customEditNamed", { name: m.displayName ?? m.id })}
+                           className="btn btn-ghost btn-sm text-caption models-display-name-trigger"
+                           aria-haspopup="dialog"
+                           aria-label={t("pricing.override.actionLabel", { model: m.namespaced })}
                            onClick={event => {
-                             customModalTriggerRef.current = event.currentTarget;
-                             setCustomModalMode("edit");
-                             setCustomModalProvider(m.provider);
-                             setCustomModalId(m.customId!);
-                             setCustomFormModelId(m.id);
-                             setCustomFormDisplayName(m.displayName ?? "");
-                             setCustomFormContextWindow(m.contextWindow ? String(m.contextWindow) : "");
-                             setCustomFormShowCustomCtx(false);
-                             setCustomFormModalities(m.inputModalities ?? ["text"]);
-                             setCustomFormReasoning(Array.isArray(m.reasoningEfforts));
-                             setCustomFormReasoningEfforts(m.reasoningEfforts ?? []);
-                             customFormReasoningInitializedRef.current = Array.isArray(m.reasoningEfforts);
-                             setCustomError("");
-                             setCustomModalOpen(true);
-                             setHoveredModel(null);
+                             priceTriggerRef.current = event.currentTarget;
+                             setPriceModel(m);
                            }}
-                         ><IconPencil width={13} height={13} aria-hidden="true" /></button>
-                         <button
-                           type="button"
-                           className="btn btn-ghost btn-sm text-caption"
-                           aria-label={t("models.customDeleteNamed", { name: m.displayName ?? m.id })}
-                           style={{ color: "var(--red)" }}
-                           onClick={() => {
-                             if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
-                               void deleteCustomModel(m.customId!);
-                             }
-                             setHoveredModel(null);
-                           }}
-                         ><IconTrash width={13} height={13} aria-hidden="true" /></button>
-                       </span>
+                         >
+                           {t("pricing.override.action")}
+                         </button>
+                       </>
                      )}
                      {!m.custom && recentIds.has(m.id) && <span className="badge badge-amber">{t("models.newBadge")}</span>}
                      {m.contextCapped && <span className="models-chip muted mono text-caption">{t("models.contextCappedValue", { value: fmtK(m.contextCap ?? contextCapValue) })}</span>}
                    </div>
                    {hoveredModel?.namespaced === m.namespaced && (() => {
                      const r = hoveredModel.rect;
-                     const tipWidth = Math.max(0, Math.min(480, window.innerWidth - 16));
-                     const tipLeft = Math.max(8, Math.min(r.left + 24, window.innerWidth - tipWidth - 8));
-                     const tipTop = Math.max(8, r.bottom + 4);
-                     const roomBelow = Math.max(0, window.innerHeight - tipTop - 8);
-                     const roomAbove = Math.max(0, r.top - 12);
-                     const flipUp = roomBelow < Math.min(360, roomAbove);
-                     const tipMaxHeight = Math.min(360, flipUp ? roomAbove : roomBelow);
+                     const tipTop = r.bottom + 4;
+                     const flipUp = tipTop + 360 > window.innerHeight;
                      return (
                        <div
-                         className={`model-tip${flipUp ? " flip-up" : ""}`}
+                         className={`model-tip${m.custom ? " has-actions" : ""}${flipUp ? " flip-up" : ""}`}
                          role="tooltip"
                          style={{
                            position: "fixed",
-                           left: tipLeft,
-                           width: "max-content",
-                           minWidth: Math.min(320, tipWidth),
-                           maxWidth: tipWidth,
-                           maxHeight: tipMaxHeight,
+                           left: r.left + 24,
                            ...(flipUp
-                             ? { bottom: Math.max(8, window.innerHeight - r.top + 4) }
+                             ? { bottom: window.innerHeight - r.top + 4 }
                              : { top: tipTop }),
                          }}
+                         onMouseEnter={keepRowTipOpen}
+                         onMouseLeave={onRowLeave}
                        >
                           <div className="model-tip-id">{m.native ? m.id : m.namespaced}</div>
                          {m.displayName && <div className="model-tip-display">{m.displayName}</div>}
@@ -1572,6 +1770,46 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
                            <span className="model-tip-key">{t("models.tipStatus")}</span>
                            <span className="model-tip-val">{off ? t("models.tipDisabled") : t("models.tipActive")}</span>
                          </div>
+                         {m.custom && m.customId && (
+                           <div className="model-tip-actions">
+                             <button
+                               type="button"
+                               className="btn btn-ghost btn-sm text-caption"
+                               onClick={() => {
+                                 setCustomModalMode("edit");
+                                 setCustomModalProvider(m.provider);
+                                 setCustomModalId(m.customId!);
+                                 setCustomFormModelId(m.id);
+                                 setCustomFormDisplayName(m.displayName ?? "");
+                                 setCustomFormContextWindow(m.contextWindow ? String(m.contextWindow) : "");
+                                 setCustomFormShowCustomCtx(false);
+                                 setCustomFormModalities(m.inputModalities ?? ["text"]);
+                                 // Only a STORED ladder counts as "configured": an inherited one
+                                 // would show a phantom override that saves "inherit" over the
+                                 // provider row's current metadata.
+                                 setCustomFormReasoning(Array.isArray(m.reasoningEfforts));
+                                 setCustomFormReasoningEfforts(m.reasoningEfforts ?? []);
+                                 // A stored ladder — even an explicit empty one — is a real
+                                 // configuration: re-enabling must preserve it, not reseed.
+                                 customFormReasoningInitializedRef.current = Array.isArray(m.reasoningEfforts);
+                                 setCustomError("");
+                                 setCustomModalOpen(true);
+                                 setHoveredModel(null);
+                               }}
+                             >{t("models.customEdit")}</button>
+                             <button
+                               type="button"
+                               className="btn btn-ghost btn-sm text-caption"
+                               style={{ color: "var(--red)" }}
+                               onClick={() => {
+                                 if (window.confirm(t("models.customDeleteConfirm", { name: m.displayName ?? m.id }))) {
+                                   void deleteCustomModel(m.customId!);
+                                 }
+                                 setHoveredModel(null);
+                               }}
+                             >{t("models.customDelete")}</button>
+                           </div>
+                         )}
                        </div>
                      );
                    })()}
@@ -1594,6 +1832,64 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const visibleGroups = selectedProvider
     ? groups.filter(group => group.provider === selectedProvider)
     : groups;
+
+  const acceptPickerOrder = (data: PickerOrderSaved & { catalogRefresh?: unknown }, custom = false) => {
+    // A receipt proves only the saved fields. No old chosen/available snapshot is promoted.
+    const next: PickerOrderSettings = { pickerOrder: data.pickerOrder, pickerOrderMode: data.pickerOrderMode, pickerAvailable: [] };
+    setClientResourceData(pickerCacheKey, next);
+    writeSessionListCache(pickerCacheKey, next);
+    if (custom) setPickerDraft("custom");
+    pickerResource.refresh();
+    const refresh = data.catalogRefresh;
+    const converged = refresh !== null && typeof refresh === "object"
+      && "status" in refresh && refresh.status === "committed"
+      && "degraded" in refresh && refresh.degraded === false;
+    publishFeedback(converged, t(converged ? "models.pickerOrder.saved" : "models.pickerOrder.pending"));
+    void reloadAppServerState();
+  };
+
+  const savePickerOrder = async () => {
+    if (pickerFlight.current || !pickerSettings || pickerResource.state.showError || pickerMode === "custom") return;
+    const owner = pickerGeneration.current;
+    const mode = pickerMode;
+    const available = pickerSettings.pickerAvailable;
+    const bounded = createBoundedFetch(15_000);
+    pickerFlight.current = bounded;
+    setPickerBusy(true);
+    const owns = () => pickerGeneration.current === owner && pickerFlight.current === bounded;
+    const current = () => owns() && !bounded.signal.aborted;
+    try {
+      let usage: ModelPickerUsage[] = [];
+      if (mode === "most-used") {
+        const response = await fetch(`${apiBase}/api/usage?range=all&surface=all`, { signal: bounded.signal });
+        if (!current()) return;
+        const payload = await readJsonOrThrow<{ models?: unknown }>(response, t("models.pickerOrder.usageFailed"));
+        if (!current()) return;
+        if (!isModelPickerUsage(payload?.models)) throw new Error(t("models.pickerOrder.usageFailed"));
+        usage = payload.models;
+      }
+      if (!current()) return;
+      const order = modelPickerOrder(mode, available, usage, models);
+      const response = await fetch(`${apiBase}/api/subagent-models`, {
+        method: "PUT", headers: { "Content-Type": "application/json" }, signal: bounded.signal,
+        body: JSON.stringify({ pickerOrder: order, pickerOrderMode: mode === "default" ? null : mode }),
+      });
+      if (!current()) return;
+      const data = await readJsonOrThrow<unknown>(response, t("models.saveFailed"));
+      if (!isPickerOrderSaved(data) || !("ok" in data) || data.ok !== true) throw new Error(t("models.saveFailed"));
+      if (!current()) return;
+      acceptPickerOrder({ pickerOrder: data.pickerOrder, pickerOrderMode: data.pickerOrderMode,
+        catalogRefresh: "catalogRefresh" in data ? data.catalogRefresh : undefined });
+      setPickerDraft(null);
+    } catch (error) {
+      if (owns()) {
+        publishFeedback(false, error instanceof Error ? error.message : t("models.networkError"));
+      }
+    } finally {
+      bounded.clear();
+      if (owns()) { pickerFlight.current = null; setPickerBusy(false); }
+    }
+  };
 
   const controlsBlock = (
     <>
@@ -1641,10 +1937,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               className="btn btn-ghost btn-sm"
               style={{ width: 24, height: 24, minWidth: 24, flex: "0 0 24px", padding: 0, borderRadius: "var(--radius-pill)", color: "var(--muted)" }}
               disabled={!v2}
-              onClick={event => {
-                v2HelpTriggerRef.current = event.currentTarget;
-                setV2HelpOpen(true);
-              }}
+              onClick={() => setV2HelpOpen(true)}
               aria-label={t("models.v2Label")}
               aria-haspopup="dialog"
             >
@@ -1757,6 +2050,38 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
         <span className="muted text-label leading-body">{t("models.setAllHint", { value: fmtK(contextCapValue) })}</span>
       </div>
 
+      <div className="row models-cap-row" aria-busy={pickerBusy || pickerResource.state.refreshing}>
+        <span className="muted text-control">{t("models.pickerOrder.label")}</span>
+        <Select
+          value={pickerMode}
+          options={[
+            { value: "default", label: t("models.pickerOrder.default") },
+            { value: "alphabetical", label: t("models.pickerOrder.alphabetical") },
+            { value: "provider", label: t("models.pickerOrder.provider") },
+            { value: "most-used", label: t("models.pickerOrder.mostUsed") },
+            { value: "custom", label: t("models.pickerOrder.custom") },
+          ]}
+          onChange={value => setPickerDraft(value as ModelPickerOrderMode)}
+          disabled={pickerBusy || !pickerSettings || pickerResource.state.showError}
+          label={t("models.pickerOrder.label")}
+        />
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void savePickerOrder()}
+          disabled={pickerBusy || !pickerSettings || pickerResource.state.showError || pickerMode === "custom"
+            || (pickerMode !== "default" && pickerSettings.pickerAvailable.length === 0)}>
+          {t(pickerBusy ? "models.pickerOrder.applying" : "models.pickerOrder.apply")}
+        </button>
+        {pickerResource.state.showError && <>
+          <span role="alert">{t("models.pickerOrder.loadFailed")}</span>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => pickerResource.refresh()}>
+            {t("models.pickerOrder.retry")}
+          </button>
+        </>}
+        <span className="muted text-label leading-body">{t("models.pickerOrder.hint")}</span>
+      </div>
+      {pickerMode === "custom" && <ModelPickerOrderEditor key={apiBase} apiBase={apiBase} active={catalogActive}
+        identities={models} onBusyChange={setPickerBusy} onAccepted={data => acceptPickerOrder(data, true)} />}
+
+
       {(() => {
         const customCount = models.filter(m => m.custom).length;
         if (customCount === 0) return null;
@@ -1800,11 +2125,10 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
   const modalsBlock = (
     <>
       {v2HelpOpen && (
-        <dialog ref={v2HelpDialogRef} className="modal-overlay" aria-labelledby="models-v2-help-title" onCancel={event => { event.preventDefault(); setV2HelpOpen(false); }}>
-          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} onClick={() => setV2HelpOpen(false)} />
+        <div className="modal-overlay" role="dialog" aria-modal="true" aria-label={t("models.v2Label")} onClick={() => setV2HelpOpen(false)} onKeyDown={e => { if (e.key === "Escape") setV2HelpOpen(false); }}>
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3 id="models-v2-help-title">{t("models.v2Label")}</h3>
+              <h3>{t("models.v2Label")}</h3>
               <button type="button" className="btn btn-ghost btn-sm" onClick={() => setV2HelpOpen(false)} aria-label={t("common.close")}>&times;</button>
             </div>
             <div className="modal-desc leading-relaxed" style={{ whiteSpace: "pre-line" }}>
@@ -1819,24 +2143,23 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               <button type="button" className="btn btn-primary" onClick={() => setV2HelpOpen(false)}>{t("common.ok")}</button>
             </div>
           </div>
-        </dialog>
+        </div>
       )}
 
       {contextModalProvider && (
-        <dialog
-          ref={contextDialogRef}
+        <div
           className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
           aria-label={t("models.contextSettings")}
-          aria-labelledby="models-context-dialog-title"
-          onCancel={event => {
-            event.preventDefault();
-            if (!contextSaving) setContextModalProvider(null);
+          onClick={() => { if (!contextSaving) setContextModalProvider(null); }}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && !contextSaving) setContextModalProvider(null);
           }}
         >
-          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={contextSaving} onClick={() => setContextModalProvider(null)} />
           <div className="modal-card" onClick={event => event.stopPropagation()}>
             <div className="modal-head">
-              <h3 id="models-context-dialog-title">{t("models.contextSettingsTitle", {
+              <h3>{t("models.contextSettingsTitle", {
                 provider: formatProviderDisplayName(contextModalProvider, t),
               })}</h3>
               <button
@@ -1918,23 +2241,23 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               </button>
             </div>
           </div>
-        </dialog>
+        </div>
       )}
 
       {customModalOpen && (
-        <dialog
-          ref={customDialogRef}
+        <div
           className="modal-overlay"
-          aria-labelledby="models-custom-dialog-title"
-          onCancel={event => {
-            event.preventDefault();
-            if (!customSaving) setCustomModalOpen(false);
+          role="dialog"
+          aria-modal="true"
+          aria-label={t("models.customAdd")}
+          onClick={() => { if (!customSaving) setCustomModalOpen(false); }}
+          onKeyDown={(e) => {
+            if (e.key === "Escape" && !customSaving) setCustomModalOpen(false);
           }}
         >
-          <button type="button" className="modal-backdrop-dismiss" aria-label={t("common.close")} tabIndex={-1} disabled={customSaving} onClick={() => setCustomModalOpen(false)} />
           <div className="modal-card" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3 id="models-custom-dialog-title">
+              <h3>
                 {customModalMode === "add"
                   ? t("models.customAddTitle", { provider: formatProviderDisplayName(customModalProvider, t) })
                   : t("models.customEditTitle", { provider: formatProviderDisplayName(customModalProvider, t) })}
@@ -2130,7 +2453,7 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
               </button>
             </div>
           </div>
-        </dialog>
+        </div>
       )}
     </>
   );
@@ -2356,6 +2679,36 @@ export default function Models({ apiBase, restartEpoch = 0 }: { apiBase: string;
           </ErrorBoundary>
         )}
       </div>
+
+      {displayNameModel && (
+        <ModelDisplayNameDialog
+          model={displayNameModel}
+          saving={displayNameSaving}
+          requestError={displayNameRequestError}
+          currentNamePending={displayNameCurrentPending}
+          mutationOutcomeUnknown={displayNameRecovery?.confirmed === false}
+          onRetry={displayNameRecovery ? () => void saveDisplayName(displayNameRecovery.value) : undefined}
+          onEdit={() => setDisplayNameRecovery(null)}
+          onSave={value => void saveDisplayName(value)}
+          onReset={() => void saveDisplayName(null)}
+          onClose={closeDisplayNameEdit}
+        />
+      )}
+      {priceModel && (
+        <ModelPriceDialog
+          key={`${apiBase}/${priceModel.namespaced}`}
+          model={priceModel}
+          apiBase={apiBase}
+          onRefresh={signal => load(true, signal)}
+          onClose={() => {
+            const trigger = priceTriggerRef.current;
+            setPriceModel(null);
+            window.setTimeout(() => {
+              if (trigger?.isConnected) trigger.focus();
+            }, 0);
+          }}
+        />
+      )}
     </>
   );
 

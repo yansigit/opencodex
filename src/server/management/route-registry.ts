@@ -340,6 +340,8 @@ export const MANAGEMENT_ROUTES: readonly ManagementRoute[] = [
   { method: "GET", path: "/api/request-history/{id}/route-decision", module: "server/management/request-history-routes", mutates: false, mechanism: "ends-with" },
   { method: "PUT", path: "/api/providers/{provider}/alias", module: "server/management/model-routes", mutates: true, mechanism: "regex" },
   { method: "PUT", path: "/api/providers/{provider}/model-aliases", module: "server/management/model-routes", mutates: true, mechanism: "regex" },
+  { method: "GET", path: "/api/providers/{provider}/model-costs", module: "server/management/model-routes", mutates: false, mechanism: "regex" },
+  { method: "PUT", path: "/api/providers/{provider}/model-costs", module: "server/management/model-routes", mutates: true, mechanism: "regex" },
   { method: "PUT", path: "/api/custom-models/{id}", module: "server/management/model-routes", mutates: true, mechanism: "regex" },
   { method: "DELETE", path: "/api/custom-models/{id}", module: "server/management/model-routes", mutates: true, mechanism: "regex" },
   { method: "GET", path: "/api/lab/subjects/{id}", module: "server/management/lab-routes", mutates: false, mechanism: "regex", exempt: { reason: "local-transport", why: "ocx lab reads the same rows from the local SQLite projection; src/cli/lab.ts imports ../lab/query directly and never fetches /api/lab." } },

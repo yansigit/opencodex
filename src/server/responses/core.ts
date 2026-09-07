@@ -3921,7 +3921,7 @@ async function handleResponsesInner(
     }
   }
   const isOAuth401ReplayProvider = isAntigravityOAuth
-    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro" || route.providerName === "cursor")
+    || ((route.providerName === "xai" || route.providerName === "github-copilot" || route.providerName === "kiro" || route.providerName === "cursor" || route.providerName === "orcarouter-oauth")
       && route.provider.authMode === "oauth");
   let sentOAuthSnapshot: OAuthAccessSnapshot | undefined;
   let replayOAuthCredentialSnapshot: Pick<OAuthAccessSnapshot, "accountId" | "generation"> | undefined;
@@ -6525,7 +6525,10 @@ async function handleResponsesInner(
     : undefined;
   if (ccaInTurnGrounding) parsed._ccaInTurnGrounding = ccaInTurnGrounding;
   const canRunWebSearch = webSearchWinsMedia && !ccaInTurnGrounding;
-  const rotateSidecarProviderOn429 = async (retryAfter: string | null): Promise<ProviderAdapter | null> => {
+  const rotateSidecarProviderOn429 = async (
+    retryAfter: string | null,
+    responseHeaders?: Headers,
+  ): Promise<ProviderAdapter | null> => {
     const rotated = rotateProviderTransportOn429(config, route.providerName, route.provider, {
       retryAfter,
       now: Date.now(),

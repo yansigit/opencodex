@@ -109,8 +109,7 @@ account selector がある場合、5 項目の制限は bare native の選択が
 先頭モデルの順序を変更するサポート手段は、`subagentModels` を並べ替えることです。
 ダッシュボードの **Sub-agents** ページでは bare native id と routed id を並べ替えられます。
 設定と `ocx agent subagents set` は exact account-qualified
-`<selector>/<native-openai-model>` id も受け付けますが、ダッシュボードはこれらの id を表示せず、
-リストの保存時にも保持しません。設定する id は最大 5 つにしてください。account selector がある
+`<selector>/<native-openai-model>` id も受け付けます。ダッシュボードは保存済みの id を現在利用できなくても保持します。設定する id は最大 5 つにしてください。account selector がある
 場合は 1 つの bare native が複数の selector-qualified 行に展開されるため、設定した選択肢と公開
 される行は必ずしも一対一ではありません。
 
@@ -155,3 +154,11 @@ V1 には OpenCodex の推奨候補リストを注入しません。V2 にはク
 
 `disabledModels` と各プロバイダーの `selectedModels` は
 表示の有無を制御するフィールドです。別の `modelOrder`、`providerOrder`、priority map 設定はありません。
+
+## ダッシュボードの並び順プリセット
+
+**Models**でデフォルト、モデル名A–Z、プロバイダー別、使用量スナップショットを選び、順序を適用します。現在選択可能なルーティングIDと `modelPickerOrderMode`（`alphabetical`、`provider`、`most-used`）を保存します。使用量は適用時に保持された全履歴を一度だけ読み、再読込やモデルの増減では再計算しません。既存のカスタム・ネイティブ全体順は明示的な適用まで保持されます。デフォルトは候補が空でも両フィールドを削除できます。
+
+`GET/PUT /api/subagent-models` の `chosen` と `available` は無効・欠落した保存済みrosterも保持します。`pickerAvailable` は選択可能なルーティングIDのみです。Modelsは `pickerOrder` と `pickerOrderMode` を送り、`models` は送りません。Rosterだけの保存は順序設定を維持し、不正入力・保存失敗は以前の状態を保ちます。
+
+featured・ネイティブの優先順位帯を保ち、CodexカタログとClaude検出のルーティンググループに適用します。Claudeのネイティブ先頭グループと明示的なDesktopプロファイル・alias所有権は維持されます。OpenCodexのガイド順位とfallback設定は変わりませんが、ネイティブCodexの上位5候補や推奨デフォルトは変わる場合があります。保存による再起動は行いません。更新が保留中、または古いカタログを保持するクライアントでは開き直しが必要な場合があります。

@@ -34,6 +34,7 @@ const PROVIDER_ALIASES: Record<string, string> = {
   "moonshot": "moonshot",
   "zhipu-bigmodel": "zai",
   "zhipu-bigmodel-coding": "zai",
+  "zhipu-bigmodel-responses": "zai",
   "minimax": "minimax",
   "minimax-cn": "minimax"
 } as const;

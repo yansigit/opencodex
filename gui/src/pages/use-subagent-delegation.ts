@@ -23,6 +23,8 @@ export type DelegationPatch = {
 
 /** Ultra mode (Proactive delegation for every model/effort) via /api/v2. */
 export type UltraModeState = {
+  loaded?: boolean;
+  keepNativeChatGptOnV1?: boolean;
   enabled: boolean;
   hintText: string | null;
   multiAgentV2Enabled: boolean;

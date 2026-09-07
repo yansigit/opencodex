@@ -44,6 +44,8 @@ import {
   RequestedModelSchema,
   RequestedModel_ModelParameterbytesSchema,
   ResumeActionSchema,
+  RequestContextSchema,
+  RequestContextEnvSchema,
   ThinkingMessageSchema,
   ToolCallSchema,
   UserMessageActionSchema,
@@ -56,10 +58,10 @@ import {
   buildCursorToolDefinitions,
   cursorToolWireName,
   cursorRequestHasShellAlias,
+  cursorRequestUsesCodeMode,
   CURSOR_SHELL_ALIAS_SYSTEM_NOTE,
   OCX_RESPONSES_TOOL_PROVIDER,
 } from "./tool-definitions";
-import { buildCursorRequestContext } from "./request-context";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -88,6 +90,24 @@ export const CURSOR_INVOCATION_ARGUMENTS_BYTE_LIMIT = 2 * 1024;
  */
 export const CURSOR_EXTERNAL_TOOL_CONTINUATION_TEXT =
   "Continue: the requested tool results are provided in the conversation history above.";
+
+/** Runtime timezone for protobuf RequestContextEnv (dynamic, never hardcoded). */
+function runtimeTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone ?? "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/** Builds a RequestContext with env.timeZone populated dynamically. */
+function buildRequestContext() {
+  return create(RequestContextSchema, {
+    env: create(RequestContextEnvSchema, {
+      timeZone: runtimeTimeZone(),
+    }),
+  });
+}
 
 function jsonBlob(value: unknown): { data: Uint8Array; serialized: string } {
   const serialized = JSON.stringify(value);
@@ -203,6 +223,7 @@ function assistantRootText(
 function rootPromptMessages(
   request: CursorRunRequest,
   requestScope: CursorBlobRequestScopeToken,
+  codeMode: boolean,
   /**
    * Calls indexed from the FULL history. The checkpoint path replays only a suffix of
    * `rawMessages`, so a result in that suffix can have its originating call before the cut; indexing
@@ -297,7 +318,7 @@ function rootPromptMessages(
     normalized: string,
   ): void => {
     const previous = replayRuns.get(role);
-    if (echoToolResultInRoot && previous?.text === normalized) {
+    if (externalModel && previous?.text === normalized) {
       const runLength = previous.length + 1;
       if (runLength > maxRunLength) maxRunLength = runLength;
       const marked = `${normalized}\n[note: this exact output was produced ${runLength} times in a row]`;
@@ -333,7 +354,6 @@ function rootPromptMessages(
         }, "user", { messageIndex: i }));
       }
     } else if (message.role === "assistant") {
-      if (externalModel && message.phase === "commentary") continue;
       // External Cursor clients do not replay hidden reasoning as assistant-visible prompt text.
       // Native Composer state can preserve it through ThinkingMessage/history structures.
       const text = assistantRootText(message, !externalModel).trim();
@@ -369,13 +389,12 @@ function rootPromptMessages(
       // the same payload as assistant-role "[Tool Result]" / "[tool_result]" text teaches Auto
       // to echo that envelope as chat instead of continuing from the structured result.
       if (!echoToolResultInRoot) continue;
+      // #1920: the prefix must reflect the NORMALIZED error state (an empty
+      // node_repl result is an error even when the runtime said isError=false).
+      const prefix = normalizedToolResult(message, contentToText(message.content), codeMode).isError ? "[Tool Error]" : "[Tool Result]";
       // The bound compares in full-history space: this loop's `i` is already full-history on the
       // full-replay path, and `knownCallsOffset` re-bases it when only a suffix is replayed.
-      const text = externalToolResultToText(
-        message,
-        callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i),
-        request.modelId.includes("grok-4.6") || request.modelId.startsWith("composer-2.5"),
-      );
+      const text = `${prefix}\n${toolResultToText(message, callBefore(replayedCalls, decodeCursorCallId(message.toolCallId), knownCallsOffset + i), codeMode)}`;
       pushDeduped(toolResultRootPayload(text), "toolResult", { messageIndex: i, text }, text);
     }
   }
@@ -385,7 +404,7 @@ function rootPromptMessages(
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same tool call repeated ${maxToolCallCount} times in this user turn. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
     }, "user", {}));
-  } else if (echoToolResultInRoot && maxRunLength >= 3) {
+  } else if (externalModel && maxRunLength >= 3) {
     entries.push(rootBlobCandidate({
       role: "user",
       content: [{ type: "text", text: `[context note] The transcript above contains the same output repeated ${maxRunLength} times in a row. Repeating it again is a failure. Take a DIFFERENT action now, or state plainly what is blocking progress.` }],
@@ -812,6 +831,7 @@ function countImages(parts: DecodedResultPart[] | undefined): number {
  */
 function toolResultContentItems(
   message: OcxToolResultMessage,
+  codeMode: boolean,
   decoded?: DecodedResultPart[],
   maxImages = Number.POSITIVE_INFINITY,
   normalizedText?: NormalizedToolResult,
@@ -822,10 +842,10 @@ function toolResultContentItems(
   })];
   if (!parts) {
     const normalized = normalizedText
-      ?? normalizedToolResult(message, typeof message.content === "string" ? message.content : "");
+      ?? normalizedToolResult(message, typeof message.content === "string" ? message.content : "", codeMode);
     return textItem(normalized.text);
   }
-  const normalized = normalizedText ?? normalizedDecodedTextResult(message, parts);
+  const normalized = normalizedText ?? normalizedDecodedTextResult(message, parts, codeMode);
   if (normalized) {
     // #1920/#1866: empty or failure-state Computer Use / node_repl results are
     // normalized before they reach the native wire. Pure-text part arrays use
@@ -1041,40 +1061,17 @@ function toolCallsByCallId(messages: readonly OcxMessage[]): Map<string, Extract
 function toolResultToText(
   message: OcxToolResultMessage,
   call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
+  codeMode = false,
 ): string {
-  const normalized = normalizedToolResult(message, contentToText(message.content));
-  const name = namespacedToolName(message.toolNamespace, message.toolName);
-  const label = normalized.isError ? "Tool error" : "Tool output";
+  const normalized = normalizedToolResult(message, contentToText(message.content), codeMode);
   return [
     "[tool_result]",
-    `${label} for ${name}`,
     `call_id: ${decodeCursorCallId(message.toolCallId)}`,
+    `name: ${namespacedToolName(message.toolNamespace, message.toolName)}`,
     ...(call ? [toolInvocationLine(call)] : []),
-    ...(normalized.isError ? ["is_error: true"] : []),
+    `is_error: ${normalized.isError}`,
     "output:",
     normalized.text,
-  ].join("\n");
-}
-
-function externalToolResultToText(
-  message: OcxToolResultMessage,
-  call?: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
-  protocolEnvelope = false,
-): string {
-  const normalized = normalizedToolResult(message, contentToText(message.content));
-  if (protocolEnvelope) {
-    const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
-    const completion = normalized.isError
-      ? ""
-      : "\n[completed: this tool invocation already ran successfully; do not repeat it]";
-    return `${prefix}\n${toolResultToText(message, call)}${completion}`;
-  }
-  const label = normalized.isError ? "Tool error" : "Tool output";
-  return [
-    `${label} for ${namespacedToolName(message.toolNamespace, message.toolName)} (call_id: ${decodeCursorCallId(message.toolCallId)}, is_error: ${normalized.isError}):`,
-    ...(call ? [toolInvocationLine(call)] : []),
-    normalized.text,
-    ...(!normalized.isError ? ["[completed: this tool invocation already ran successfully; do not repeat it]"] : []),
   ].join("\n");
 }
 
@@ -1082,12 +1079,16 @@ function externalToolResultToText(
  * Shared #1920 normalization entry: pure-text results only. Image-bearing or
  * encrypted results pass through untouched (their content is not plain text).
  */
-function normalizedToolResult(message: OcxToolResultMessage, text: string): NormalizedToolResult {
-  if (message.containsEncryptedContent) return { text, isError: message.isError };
+function normalizedToolResult(message: OcxToolResultMessage, text: string, codeMode: boolean): NormalizedToolResult {
+  if (message.containsEncryptedContent
+    || (Array.isArray(message.content) && message.content.some(part => part.type !== "text"))) {
+    return { text, isError: message.isError };
+  }
   return normalizeCursorToolResultText(text, {
     toolName: message.toolName,
     toolNamespace: message.toolNamespace,
     isError: message.isError,
+    codeMode,
   });
 }
 
@@ -1099,9 +1100,10 @@ function normalizedToolResult(message: OcxToolResultMessage, text: string): Norm
 function normalizedDecodedTextResult(
   message: OcxToolResultMessage,
   parts: DecodedResultPart[],
+  codeMode: boolean,
 ): NormalizedToolResult | undefined {
   if (parts.some(part => part.kind !== "text")) return undefined;
-  return normalizedToolResult(message, parts.map(part => part.kind === "text" ? part.text : "").join("\n"));
+  return normalizedToolResult(message, parts.map(part => part.kind === "text" ? part.text : "").join("\n"), codeMode);
 }
 
 function argBytes(value: unknown): Uint8Array {
@@ -1116,6 +1118,7 @@ function toolCallStep(
   part: Extract<OcxAssistantContentPart, { type: "toolCall" }>,
   requestScope: CursorBlobRequestScopeToken,
   result?: OcxToolResultMessage,
+  codeMode = false,
 ): Uint8Array {
   const args: Record<string, Uint8Array> = {};
   for (const [key, value] of Object.entries(part.arguments ?? {})) args[key] = argBytes(value);
@@ -1137,7 +1140,7 @@ function toolCallStep(
               providerIdentifier: OCX_RESPONSES_TOOL_PROVIDER,
               args,
             }),
-            ...(result ? { result: toolResultPart(result, decodedResult, maxImages) } : {}),
+            ...(result ? { result: toolResultPart(result, codeMode, decodedResult, maxImages) } : {}),
           }),
         },
       }),
@@ -1158,17 +1161,17 @@ function toolCallStep(
   return storeCursorBlob(encoded, requestScope);
 }
 
-function toolResultPart(message: OcxToolResultMessage, decoded?: DecodedResultPart[], maxImages?: number) {
+function toolResultPart(message: OcxToolResultMessage, codeMode: boolean, decoded?: DecodedResultPart[], maxImages?: number) {
   const parts = decoded ?? decodeResultParts(message);
   const normalized = parts
-    ? normalizedDecodedTextResult(message, parts)
-    : normalizedToolResult(message, typeof message.content === "string" ? message.content : "");
+    ? normalizedDecodedTextResult(message, parts, codeMode)
+    : normalizedToolResult(message, typeof message.content === "string" ? message.content : "", codeMode);
   return create(McpToolResultSchema, {
     result: {
       case: "success",
       value: create(McpSuccessSchema, {
         isError: normalized?.isError ?? message.isError,
-        content: toolResultContentItems(message, parts, maxImages, normalized),
+        content: toolResultContentItems(message, codeMode, parts, maxImages, normalized),
       }),
     },
   });
@@ -1206,6 +1209,7 @@ function lastActionIndex(messages: readonly OcxMessage[] | undefined): number {
 function conversationTurns(
   request: CursorRunRequest,
   requestScope: CursorBlobRequestScopeToken,
+  codeMode: boolean,
   historyMessageStart = 0,
   /** Calls indexed from the FULL history; see {@link rootPromptMessages}. */
   knownCalls?: Map<string, Extract<OcxAssistantContentPart, { type: "toolCall" }>>,
@@ -1246,7 +1250,6 @@ function conversationTurns(
     const fullIndex = knownCallsOffset + start + w;
     if (message.role === "assistant") {
       if (!current) continue;
-      if (externalModel && message.phase === "commentary") continue;
       for (const part of message.content) {
         if (externalModel) {
           // Working external-model clients replay only assistant text. Native mcpToolCall and
@@ -1277,33 +1280,29 @@ function conversationTurns(
         // #1920/#1866: this external-replay site bypasses toolResultToText, so it
         // must consume the normalizer directly — cursor/grok-4.6 is the exact
         // reported repro path for empty Computer Use results.
+        const normalized = normalizedToolResult(message, contentToText(message.content), codeMode);
+        const prefix = normalized.isError ? "[Tool Error]" : "[Tool Result]";
         // Name the invocation here as well, for the same reason the root replay does: a result with
         // no visible originating call reads as an interrupted attempt (devlog 260829 000_rca).
         const call = callBefore(turnCalls, decodeCursorCallId(message.toolCallId), fullIndex);
+        const invocation = call ? `${toolInvocationLine(call)}\n` : "";
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, {
-              text: externalToolResultToText(
-                message,
-                call,
-                (request.modelId.includes("grok-4.6") || request.modelId.startsWith("composer-2.5"))
-                  && message.toolName !== "exec",
-              ),
-            }),
+            value: create(AssistantMessageSchema, { text: `${prefix}\n${invocation}${normalized.text}` }),
           },
         })), requestScope));
         continue;
       }
       const priorCall = pendingToolCalls.get(message.toolCallId);
       if (priorCall) {
-        current.steps.push(toolCallStep(priorCall, requestScope, message));
+        current.steps.push(toolCallStep(priorCall, requestScope, message, codeMode));
         pendingToolCalls.delete(message.toolCallId);
       } else {
         current.steps.push(storeCursorBlob(toBinary(ConversationStepSchema, create(ConversationStepSchema, {
           message: {
             case: "assistantMessage",
-            value: create(AssistantMessageSchema, { text: toolResultToText(message) }),
+            value: create(AssistantMessageSchema, { text: toolResultToText(message, undefined, codeMode) }),
           },
         })), requestScope));
       }
@@ -1380,9 +1379,9 @@ function buildPreparedCursorRunRequest(
   options?: { estimateInputTokens?: boolean },
 ): PreparedCursorRunRequest {
   const rawText = activePromptText(request);
+  // Use the same visible catalog as mcp_tools, including tool_choice, for every history path.
   const visibleTools = cursorToolsForActivePrompt(request.tools, rawText, request.toolChoice);
-  const mcpToolDefs = buildCursorToolDefinitions(visibleTools, request.toolChoice);
-  const requestContext = buildCursorRequestContext({ system: request.system, tools: mcpToolDefs });
+  const codeMode = cursorRequestUsesCodeMode(visibleTools, request.toolChoice);
   const lastRole = request.messages.at(-1)?.role;
   const text = lastRole === "user" || lastRole === "developer"
     ? appendCursorGenericToolUseHint(request.tools, rawText)
@@ -1430,13 +1429,13 @@ function buildPreparedCursorRunRequest(
               // OmniRoute / cursor-agent always send mode=1 on UserMessage.
               mode: 1,
             }),
-            requestContext,
+            requestContext: buildRequestContext(),
           }),
         }
       : {
           case: "resumeAction",
           value: create(ResumeActionSchema, {
-            requestContext,
+            requestContext: buildRequestContext(),
           }),
         },
   });
@@ -1486,7 +1485,7 @@ function buildPreparedCursorRunRequest(
         // against the raw limit left a band of a few hundred bytes below it where the checkpoint was kept,
         // the suffix budget collapsed, and the newest tool result vanished. Adding `systemBytes` moved the
         // band without closing it. Asking pruning what survived cannot drift from what pruning does.
-        const suffixRoots = rootPromptMessages(suffixRequest, requestScope, fullHistoryCalls, suffixStart, carriedRoots);
+        const suffixRoots = rootPromptMessages(suffixRequest, requestScope, codeMode, fullHistoryCalls, suffixStart, carriedRoots);
         const suffixSystemCount = systemPromptBlobs(suffixRequest).length;
         // A tool continuation whose own result did not survive is worthless: that result is the whole
         // reason the turn exists. "Kept SOMETHING" is not enough either — inside the band this fix first
@@ -1558,7 +1557,7 @@ function buildPreparedCursorRunRequest(
           // checkpoint is re-decoded and re-abandoned each turn until TTL, which is wasted work rather
           // than wrong output (audit r8 rounds 3 and 4).
         } else {
-        const suffixTurns = conversationTurns(suffixRequest, requestScope, suffixRoots.historyMessageStart, fullHistoryCalls, suffixStart);
+        const suffixTurns = conversationTurns(suffixRequest, requestScope, codeMode, suffixRoots.historyMessageStart, fullHistoryCalls, suffixStart);
         const suffixHistoryIds = suffixRoots.ids.slice(suffixSystemCount);
         const suffixHistorySerialized = suffixRoots.serialized.slice(suffixSystemCount);
         conversationState = create(ConversationStateStructureSchema, {
@@ -1588,10 +1587,10 @@ function buildPreparedCursorRunRequest(
     }
   }
   if (!conversationState) {
-    rootPromptMessagesState = rootPromptMessages(request, requestScope);
+    rootPromptMessagesState = rootPromptMessages(request, requestScope, codeMode);
     conversationState = create(ConversationStateStructureSchema, {
       rootPromptMessagesJson: rootPromptMessagesState.ids,
-      turns: conversationTurns(request, requestScope, rootPromptMessagesState.historyMessageStart),
+      turns: conversationTurns(request, requestScope, codeMode, rootPromptMessagesState.historyMessageStart),
       todos: [],
       pendingToolCalls: [],
       previousWorkspaceUris: [],
@@ -1603,6 +1602,9 @@ function buildPreparedCursorRunRequest(
       readPaths: [],
     });
   }
+  // Hoisted out of the mcp_tools spread below so the estimate can read the same
+  // filtered definitions the wire carries. Both helpers are pure.
+  const mcpToolDefs = buildCursorToolDefinitions(visibleTools, request.toolChoice);
   // The envelope is measured HERE, on the final root set, and nowhere else.
   //
   // `rootPromptMessages` cannot do it: it sees only a checkpoint suffix, so 192 checkpoint roots

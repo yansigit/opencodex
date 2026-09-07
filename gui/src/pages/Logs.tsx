@@ -14,15 +14,7 @@ import { EmptyState, Notice } from "../ui";
 import Debug from "./Debug";
 import { LogsFilterBar } from "./logs-filter-bar";
 import { logsClockAnchor, logsClockNow, type LogsClockAnchor } from "./logs-clock";
-import {
-  DEFAULT_LOG_FILTER_STATE,
-  extractLogFilterOptions,
-  filterLogs,
-  hasActiveLogFilters,
-  normalizedAgentKind,
-  type LogFilterState,
-  type PersistedAgentKind,
-} from "./logs-filter";
+import { DEFAULT_LOG_FILTER_STATE, extractLogFilterOptions, filterLogs, hasActiveLogFilters, type LogFilterState } from "./logs-filter";
 
 import type { LogsTab } from "./logs-tab-keydown";
 import { logsTabKeyDown, readTabFromHash, selectLogsTab } from "./logs-tab-keydown";
@@ -35,6 +27,7 @@ import {
   sanitizeLogEntryRouteDecision,
   validCachedRouteDecision,
 } from "./log-route-decision";
+import { mergeLogDelta, parseLogPollResponse } from "./log-poll";
 
 function logsCacheKey(apiBase: string): string {
   return `ocx.logs.list.v1:${apiBase}`;
@@ -114,11 +107,6 @@ type AttemptRecoveryKind =
   | "rate-limit-429"
   | "anthropic-oauth-429"
   | "image-413"
-  | "cursor-envelope-echo"
-  | "cursor-routing-commentary"
-  | "cursor-duplicate-tool-call"
-  | "cursor-overflow-remint"
-  | "cursor-invalid-argument"
   | "empty-completion";
 
 interface LogAttempt {
@@ -148,7 +136,6 @@ export interface LogEntry {
   timestamp: number;
   model: string;
   provider: string;
-  agentKind?: PersistedAgentKind | string;
   surface?: LogSurface;
   conversationId?: string;
   /**
@@ -191,20 +178,6 @@ export interface LogEntry {
     selected?: { provider?: string; model?: string; reason?: string };
     candidates?: Array<{ provider?: string; model?: string; eligible?: boolean; exclusions?: Array<{ code?: string }> }>;
   };
-}
-
-function agentKindLabelKey(kind: LogEntry["agentKind"]): "logs.agent.main" | "logs.agent.subagent" | "logs.agent.internal" | "logs.agent.unknown" {
-  const keys = {
-    main: "logs.agent.main",
-    subagent: "logs.agent.subagent",
-    internal: "logs.agent.internal",
-    unknown: "logs.agent.unknown",
-  } as const;
-  return keys[normalizedAgentKind(kind)];
-}
-
-function AgentKindBadge({ kind, t }: { kind: LogEntry["agentKind"]; t: TFn }) {
-  return <span className="badge badge-muted" title={t("logs.agent.badgeTitle")}>{t(agentKindLabelKey(kind))}</span>;
 }
 
 function validCachedLogs(cached: LogEntry[] | null): LogEntry[] | null {
@@ -325,11 +298,6 @@ const RECOVERY_KIND_KEYS = {
   "rate-limit-429": "logs.detail.attempt.recovery.rateLimit429",
   "anthropic-oauth-429": "logs.detail.attempt.recovery.anthropicOauth429",
   "image-413": "logs.detail.attempt.recovery.image413",
-  "cursor-envelope-echo": "logs.detail.attempt.recovery.cursorEnvelopeEcho",
-  "cursor-routing-commentary": "logs.detail.attempt.recovery.cursorRoutingCommentary",
-  "cursor-duplicate-tool-call": "logs.detail.attempt.recovery.cursorDuplicateToolCall",
-  "cursor-overflow-remint": "logs.detail.attempt.recovery.cursorOverflowRemint",
-  "cursor-invalid-argument": "logs.detail.attempt.recovery.cursorInvalidArgument",
   "empty-completion": "logs.detail.attempt.recovery.emptyCompletion",
 } as const satisfies Record<AttemptRecoveryKind, string>;
 
@@ -418,11 +386,16 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const filterClockRef = useRef<{
     key: string; anchor?: LogsClockAnchor; active: boolean; request: number;
   }>({ key: resourceKey, active: false, request: 0 });
+  const logPollRef = useRef<{ key: string; cursor: string | null; rows: LogEntry[] }>(
+    { key: resourceKey, cursor: null, rows: [] },
+  );
   // Invalidate the old resource at commit, before passive resource-loader effects.
   // A late body read must not mutate this page's clock, cache or retry state.
   useLayoutEffect(() => {
     const clock = { key: resourceKey, active: true, request: 0 };
     filterClockRef.current = clock;
+    // Cached display rows never establish a cursor, including A -> B -> A.
+    logPollRef.current = { key: resourceKey, cursor: null, rows: [] };
     setFilterClockNow(Date.now());
     return () => { clock.active = false; };
   }, [resourceKey]);
@@ -495,29 +468,39 @@ export default function Logs({ apiBase }: { apiBase: string }) {
       logRetryRef.current = retry;
     }
     if (retry.failures > 0 && Date.now() < retry.nextAttemptAt) throw retry.error;
+    const poll = logPollRef.current;
+    const cursor = poll.key === resourceKey ? poll.cursor : null;
+    const url = `${apiBase}/api/logs?limit=2000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
     try {
-      const res = await fetch(`${apiBase}/api/logs?limit=2000`, { signal });
+      const res = await fetch(url, { signal });
       if (!res.ok) throw new Error(`${res.status} ${res.statusText}`.trim());
-      const body = await res.json() as LogEntry[] | { logs?: LogEntry[]; generatedAt?: unknown };
+      const body: unknown = await res.json();
       const receivedAt = performance.now();
-      const raw = Array.isArray(body) ? body : (body.logs ?? []);
-      const next = raw.map(sanitizeLogEntryRouteDecision);
+      const parsed = parseLogPollResponse<LogEntry>(body);
+      const incoming = parsed.rows.map(sanitizeLogEntryRouteDecision);
+      const next = cursor && parsed.cursor && !parsed.reset
+        ? mergeLogDelta(poll.rows, incoming) : incoming;
       // The resource-store generation guard runs only after this loader returns.
       // Guard these local side effects here as fetch/body readers may ignore abort.
       if (!isCurrent()) throw signal.reason ?? new DOMException("Obsolete log request", "AbortError");
-      // Reconcile the selected provider when the accepted snapshot changes, using the
-      // latest user state rather than filters captured when the request started. The model
-      // value is an intentional free-text query and must survive ring rollover.
+      logPollRef.current = { key: resourceKey, cursor: parsed.cursor, rows: next };
+      // Reconcile when the accepted snapshot changes, using the latest user state
+      // rather than filters captured when the request started. Persist disappearance
+      // as All so a later ring cannot resurrect a cleared selection.
       const options = extractLogFilterOptions(next);
       setFilters(previous => {
+        const model = previous.model.trim().toLowerCase();
         const provider = previous.provider.trim().toLowerCase();
+        const nextModel = model
+          ? options.models.find(option => option.trim().toLowerCase() === model) ?? ""
+          : "";
         const nextProvider = provider
           ? options.providers.find(option => option.trim().toLowerCase() === provider) ?? ""
           : "";
-        if (previous.provider === nextProvider) return previous;
-        return { ...previous, provider: nextProvider };
+        if (previous.model === nextModel && previous.provider === nextProvider) return previous;
+        return { ...previous, model: nextModel, provider: nextProvider };
       });
-      const sample = logsClockAnchor(Array.isArray(body) ? undefined : body.generatedAt, receivedAt);
+      const sample = logsClockAnchor(parsed.generatedAt, receivedAt);
       if (sample) clock.anchor = sample;
       setFilterClockNow(logsClockNow(clock.anchor, receivedAt, Date.now()));
       logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
@@ -554,6 +537,7 @@ export default function Logs({ apiBase }: { apiBase: string }) {
   const fetchLogs = logsResource.refresh;
   const retryLogs = useCallback(() => {
     logRetryRef.current = { key: resourceKey, failures: 0, nextAttemptAt: 0, error: null };
+    logPollRef.current = { key: resourceKey, cursor: null, rows: [] };
     fetchLogs({ forceLoading: true });
   }, [fetchLogs, resourceKey]);
 
@@ -837,7 +821,6 @@ export default function Logs({ apiBase }: { apiBase: string }) {
                  <td className="mono log-col-model" title={modelTitle(log, t)}>
                   <span className="logs-model-cell">
                    <span>{modelLabel(log.resolvedModel ?? log.model)}</span>
-                      <AgentKindBadge kind={log.agentKind} t={t} />
                       {log.shadowCallRewrittenFrom && (
                         <span
                           className="badge badge-muted"
@@ -998,7 +981,6 @@ function LogDetailDialog({
             )}
             <span className="muted">{t("logs.col.model")}</span><span className="mono">{modelLabel(detail.resolvedModel ?? detail.model)}</span>
             <span className="muted">{t("logs.col.provider")}</span><span>{formatProviderDisplayName(detail.provider, t)}</span>
-            <span className="muted">{t("logs.filter.agent.label")}</span><AgentKindBadge kind={detail.agentKind} t={t} />
             {(detail.requestedEffort || detail.effectiveEffort) && (
               <><span className="muted">{t("logs.col.effort")}</span><span className="mono">{effortLabel(detail)}{reasoningWire ? ` (${reasoningWire})` : ""}</span></>
             )}

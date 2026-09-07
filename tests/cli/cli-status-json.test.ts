@@ -10,9 +10,11 @@ import { fileURLToPath } from "node:url";
 import { isConnectionRefused, isUncleanExitEvidence, proxyHealthFailureReason, resolveStatusPid, selectListenTarget } from "../../src/cli/status";
 import * as statusFacade from "../../src/cli/status";
 import * as statusProbes from "../../src/cli/status-probes";
+import { packageVersion } from "../../src/cli/help";
+import { getDefaultConfig } from "../../src/config";
 import { findDeadPid } from "../helpers/dead-pid";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
-import { STORE_BUDGET_MS } from "../helpers/test-budget";
+import { INTERNAL_DEADLINE_MS, SPAWN_BUDGET_MS, STORE_BUDGET_MS } from "../helpers/test-budget";
 import { inspectClientRotationRecoveryGate, readClientConnectionState } from "../../src/client/state";
 import * as lifecycleLock from "../../src/client/lifecycle-lock";
 import { writeDesktopDisconnectReceipt } from "../../src/claude/desktop-remote-store";
@@ -27,6 +29,84 @@ function runStatusJson(opencodexHome: string) {
     encoding: "utf8",
   });
 }
+
+describe("status version skew projection", () => {
+  test.each([
+    ["0.0.1", "the running proxy is older"],
+    ["999999.0.0", "this ocx on PATH is older"],
+    [packageVersion(), null],
+    [`${packageVersion()}+skew-fixture`, "neither can be identified as older"],
+    ["not-a-version", "neither can be identified as older"],
+    ["unknown", null],
+    ["0.0.0", null],
+    [undefined, null],
+  ] as const)("projects proxy %s in JSON and human output", async (proxyVersion, expected) => {
+    const home = mkdtempSync(join(tmpdir(), "ocx-status-skew-"));
+    const codexHome = join(home, "codex");
+    let server: ReturnType<typeof Bun.serve> | undefined;
+    try {
+      // Explicit CODEX_HOME must exist before the CLI imports codex/paths.ts.
+      mkdirSync(codexHome, { recursive: true });
+      server = Bun.serve({
+        hostname: "127.0.0.1", port: 0,
+        fetch(request) {
+          return new URL(request.url).pathname === "/healthz"
+            ? Response.json({ service: "opencodex", status: "ok", version: proxyVersion, uptime: 1 })
+            : new Response("not found", { status: 404 });
+        },
+      });
+      writeFileSync(join(home, "config.json"), JSON.stringify({
+        ...getDefaultConfig(), port: server.port, hostname: "127.0.0.1", codexAutoStart: false,
+      }));
+      for (const json of [true, false]) {
+        // Async child execution lets the fixture answer the real identity/health probes.
+        const child = Bun.spawn([process.execPath, cliPath, "status", ...(json ? ["--json"] : [])], {
+          cwd: repoRoot,
+          env: { ...process.env, OPENCODEX_HOME: home, CODEX_HOME: codexHome },
+          stdout: "pipe", stderr: "pipe",
+        });
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGKILL");
+        }, INTERNAL_DEADLINE_MS);
+        try {
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
+          ]);
+          expect(timedOut).toBe(false);
+          // Preserve both gates while surfacing the child error when startup fails.
+          expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+          if (json) {
+            const parsed = JSON.parse(stdout);
+            expect(parsed.schemaVersion).toBe(1);
+            expect(Object.keys(parsed.versionSkew).sort()).toEqual(["cliVersion", "proxyVersion", "skewed", "warning"]);
+            expect(parsed.versionSkew.cliVersion).toBe(packageVersion());
+            expect(parsed.versionSkew.proxyVersion).toBe(proxyVersion ?? null);
+            expect(parsed.versionSkew.skewed).toBe(expected !== null);
+            if (expected === null) expect(parsed.versionSkew.warning).toBeNull();
+            else expect(parsed.versionSkew.warning).toContain(expected);
+          } else if (expected === null) {
+            expect(stdout).not.toContain("does not match the running proxy");
+          } else {
+            expect(stdout).toContain(expected);
+          }
+        } finally {
+          clearTimeout(timer);
+          if (child.exitCode === null) child.kill("SIGKILL");
+          await child.exited;
+        }
+      }
+      expect(existsSync(join(home, "ocx.pid"))).toBe(false);
+    } finally {
+      try {
+        await server?.stop(true);
+      } finally {
+        removeTreeWithRetry(home);
+      }
+    }
+  }, SPAWN_BUDGET_MS);
+});
 
 function withRecoveryStatusFixture(work: (fixture: {
   home: string;

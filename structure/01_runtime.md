@@ -166,6 +166,22 @@ OAuth presets resolve discovery against the same canonical registry transport as
 before any adapter-specific transport override, so a stale configured `baseUrl` cannot receive an
 OAuth bearer token.
 
+The BigModel Coding Plan Responses preset uses the separately documented
+`https://open.bigmodel.cn/api/v1` transport and a static catalog. Its provider row
+disables live discovery: a local Codex `models.json` example does not establish an
+authenticated HTTP models endpoint. Its static context and reasoning metadata are
+kept in the canonical registry, including an explicit empty selectable effort
+ladder for `glm-5-turbo`.
+
+Raycast is a managed client export, not an upstream model provider. Its YAML
+contribution owns only the unique `providers/[id=opencodex]` entry, with the
+existing manifest and fingerprint checks protecting user-owned provider values.
+Ambiguous selector matches and incompatible containers cannot be adopted or
+mutated. Catalog refresh uses the existing owned-integration activation check;
+an unowned client remains disconnected. OpenCodex omits Raycast API-key fields
+and exports only to eligible local targets. Pro detection is an advisory hint,
+not an authentication or entitlement decision.
+
 ## Remote Hub hardening ownership
 
 `src/remote/protocol.ts` owns pure interval/feature negotiation. `src/client/hub-client.ts` owns bounded, schema-validated remote catalog consumption and key-id probes. `src/client/hub-relay.ts` is a fixed-authority management relay with URL, header, body, redirect, and stream bounds. The public data listener remains the direct client→hub path; the loopback management ingress never serves data-plane routes.

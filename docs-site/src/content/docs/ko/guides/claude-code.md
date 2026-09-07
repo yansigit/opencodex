@@ -199,9 +199,17 @@ Claude Code 2.1.129 이상은 `GET /v1/models?limit=1000`에서 게이트웨이 
 제공해요. 두 계열은 계속 디코딩할 수 있으므로 어느 형식이든 `settings.json`에 저장한 모델이
 계속 작동해요.
 
-Claude Desktop의 하단 선택기로 이미 실행 중인 3P 대화의 모델이 바뀌지 않는다면, 그 대화에서
-`/model <id>`를 사용하세요. OpenCodex는 선택기 상태를 따로 볼 수 없고 각 요청에 실린 모델 ID를
-라우팅해요. 적용 결과는 **Logs → requestedModel**에서 확인할 수 있어요.
+Claude Desktop의 하단 선택기로 이미 실행 중인 3P 대화의 모델이 바뀌지 않는다면,
+`/model <id>`를 시도할 수 있지만, 문제가 있는 Desktop 빌드에서는 이 우회 방법도 실패할 수 있어요.
+[이슈 #3782](https://github.com/lidge-jun/opencodex/issues/3782)에는 Windows의
+Claude Desktop 1.46388.4에서 하단 선택기와 `/model`로 각각 변경해도 대화가 처음 모델을 계속
+사용한다는 보고가 있어요. 이 보고만으로는 클라이언트나 라우팅의 어느 구성 요소가 이 동작을
+일으키는지 확정할 수 없어요.
+
+OpenCodex의 Claude Desktop 프로필에서 원하는 기본 모델을 선택하고, 프로필을 다시 적용한 뒤
+새 대화를 시작하는 방법도 시도할 수 있어요. 이는 문제 해결을 위한 시도이며 해결을 보장하지는
+않아요. OpenCodex는 선택기 상태를 볼 수 없고 각 요청에 실린 모델 ID를 라우팅해요.
+클라이언트가 실제로 무엇을 보내는지는 **Logs → requestedModel**에서 확인하세요.
 
 **별칭 문법 규칙:** provider에는 `/`나 `--`를 넣을 수 없고 `native`와 같아도 안 돼요. `/`와 `~`가
 없는 plain model ID는 v1 접두사 `claude-ocx-…`를 유지해요. `/` 또는 `~`가 있는 model ID는 v2
@@ -433,11 +441,13 @@ Claude Code의 `/effort` 설정은 어댑터에서도 유지돼요.
 | Assistant 텍스트 | `output_text` |
 | Assistant `tool_use` | `function_call`(`input` → JSON 문자열로 변환한 `arguments`) |
 | 사용자 `tool_result` | `function_call_output`(`is_error` → `[tool error]` 접두사) |
-| `thinking` / `redacted_thinking` 재생 | 버려요 |
+| `thinking` / `redacted_thinking` 재생 | 서명과 비공개 페이로드를 제한된 `ocxr1` 봉투에 담은 `reasoning` 항목 |
 | Function 도구 | `{type: "function"}`(`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, 이름 지정 함수→`{type:"function",name}`, 호스팅 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
+
+의도한 Anthropic 어댑터에서는 숨기지 않은 서명 블록(빈 thinking 포함)과 불투명 redacted 블록을 보존해요. `hideThinkingSummary` 정책은 유지돼요. 로컬에서 숨긴 서명 텍스트를 Claude 클라이언트에 노출하지 않으며, 이 숨김 경계를 통한 무손실 재생은 아직 보장하지 않아요. 이전 결합 봉투는 스트리밍 텍스트가 이미 전송됐다면 원래 블록 순서를 복원할 수 없어요. `claudeCode.compatibility: "enforce"`는 여전히 thinking 재생을 거절해요. 실제 Anthropic 수락이나 캐시 적중 개선을 증명한 것은 아니며 [#3719](https://github.com/lidge-jun/opencodex/issues/3719)는 열어 둬요.
 
 **오류 조건(400):** 잘못된 JSON, 누락되거나 빈 `model`, 누락되거나 빈 `messages`, 지원하지 않는
 role, `tool_use_id` 없는 `tool_result`, id/name 없는 `tool_use`, name 없는 이름 지정 `tool_choice`예요.
@@ -449,7 +459,8 @@ role, `tool_use_id` 없는 `tool_result`, id/name 없는 `tool_use`, name 없는
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | 텍스트 delta | `content_block_start` → `content_block_delta`(text) → `content_block_stop` |
-| 추론 요약/텍스트 | 합성 signature가 있는 `thinking` 블록 |
+| 추론 요약/텍스트 | 재생된 서명 또는 제한된 `ocxr1` 폴백이 있는 `thinking` 블록 |
+| 비공개 추론 | 추론 봉투에서 재생되는 `redacted_thinking` 블록 |
 | Function-call 프레임 | `input_json_delta`가 있는 `tool_use` 블록 |
 | 종료 이벤트 | `message_delta` → `message_stop` |
 | 종료 전에 EOF | 502 형식 `api_error` |

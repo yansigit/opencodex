@@ -37,6 +37,24 @@ custom catalog remains the native metadata/template authority even when a bundle
 warm. Both paths may use an admitted matching bundled memo only as installed-runtime capability
 evidence to remove unsupported reasoning efforts; convergence never probes Codex itself.
 
+Custom Astra and Daybreak rows acquire native reasoning capability only through the existing
+canonical `openai` forward destination and explicit capability-source predicate. The shared
+custom-row producer bounds their merged effort lists against pinned per-model Codex metadata,
+preserves an explicit empty list without a default, and recovers an incompatible nonempty list
+to the native default singleton. A default must belong to the projected list. Other custom rows
+keep their declaration precedence; a GPT model name, display alias, or arbitrary gateway is not
+native provenance. Stored configuration and native capability maps are unchanged.
+
+The observed-state merge tracks the current invocation's freshly generated custom row objects
+after detaching its inputs. Those rows already own their complete reasoning projection, so the
+merge does not append `max` again. This also keeps a generic none-only custom row none-only;
+ordinary retained provider rows still receive the existing mock-tier policy. A persisted custom
+marker alone never grants this exemption. Both gather entry points, retained sync, management
+convergence and direct Codex model discovery use the same producer. The legacy runtime effort
+union clamp remains separate; it is not a per-model or per-client-version grammar oracle.
+Existing thread settings and the reported Desktop 0.153.4 gateway rejection require separate
+runtime evidence. Codex's native `ultra` mode is preserved and is not a literal API wire promise.
+
 When account selectors are enabled, the sync path may also observe exact, visible, API-supported
 OpenAI-family ids from Codex's user-owned catalog/cache. Only rows with native catalog provenance
 are trusted; unknown ids are carried through startup cache invalidation as hidden observations and
@@ -126,6 +144,18 @@ the canonical `provider/model`. Its display name uses the provider's exact `mode
 then trusted catalog metadata such as a configured qualified provider/model alias, then the public slug.
 This overlay never changes route identity or the upstream wire model, and its catalog fingerprint makes
 a label edit refresh Codex output.
+
+Supported bare native GPT rows also consume `providers.openai.modelDisplayNames`. Retained sync
+and convergence pass the same map to the observed-state merge. After native normalization and
+ordering, the merge applies the exact nonblank trimmed label and saves
+`opencodex_native_display_name: { slug, original, applied }` in the local catalog only. The next
+merge detaches its inputs, removes that marker, and restores `original` only if the native slug
+still matches and the current name equals `applied`. Removing or blanking the override therefore
+restores the owned name before normal native metadata upgrades. Divergent external names remain
+subject to those upgrades: Astra still replaces non-pinned names with its pinned native name.
+Template-derived rows discard the marker. The overlay leaves model IDs, metadata (including
+capabilities), ordering, routed combo aliases, custom rows and account-qualified rows unchanged;
+it does not relabel HTTP model listings or virtual `*-pro` rows.
 
 ## Native passthrough
 
@@ -316,6 +346,15 @@ wire-clamps ultra/max to each model's real top rung (e.g. gpt-5.5 ultra → xhig
 (`src/server/effort-policy.ts`): they lower or preserve the requested effort rather than rejecting
 the request, and they never raise it.
 
+Operator-owned `pinnedReasoningEffort`, `modelPinnedReasoningEfforts`, and root
+`modelPinnedEfforts` resolve before applicable effort caps at the final destination.
+Provider model pins precede provider-wide pins, then global selector/destination pins.
+A pin can raise the effective caller effort; the later cap can still lower or omit it.
+`none` means explicit-effort omission (provider default), not guaranteed reasoning disablement.
+Compaction maintenance is exempt. Pins are user overlays and do not alter registry seeds,
+model discovery or advertised ladders. Native Chat normalizes newly pinned values through
+provider wire mapping; unpinned native requests retain their existing pass-through contract.
+
 [Decision Log]
 - 목적과 의도: Xiaomi MiMo의 공식 OpenAI Chat endpoint가 실제로 받지 않는 `max`/
   `ultra` reasoning tier를 catalog에 노출하지 않도록 한다.
@@ -455,3 +494,18 @@ behaviors.
   prunes them without provider discovery, and catalog failure falls back to unmarked definitions so
   startup remains available. A later dashboard save or `ocx claude` launch restores missing context
   markers after a transient failure.
+
+
+### Saved picker presets
+
+The Models page saves routed snapshots in `modelPickerOrder` and records their origin in
+`modelPickerOrderMode` (`alphabetical`, `provider`, `most-used`). Mode is UI provenance, not a
+catalog sorting policy: catalog writers consume the saved array. Routed-only featured/native
+bands and complete-picker natural-rank preservation remain as described above. Public
+`buildCatalogEntries` accepts the order as its final argument and applies the complete-order
+pass after building. On-disk convergence retains its existing post-merge final pass.
+
+Claude ModelInfo ordering receives optional `{ modelPickerOrder, featured }` after `fastRows`.
+It orders routed output groups after alias deduplication, preserving the collision winner and
+base/1M/Fast siblings. Native groups and explicit Desktop profile ownership are unchanged.
+Native Codex advertisements still follow display priority; private guidance ranks do not freeze them.

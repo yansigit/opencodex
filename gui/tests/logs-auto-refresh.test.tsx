@@ -6,7 +6,7 @@ import { LanguageProvider } from "../src/i18n/provider";
 import { clearClientResourceStoresForTests } from "../src/client-resource";
 import Logs from "../src/pages/Logs";
 
-const globals = ["document", "window", "navigator", "localStorage", "IS_REACT_ACT_ENVIRONMENT", "ResizeObserver"] as const;
+const globals = ["document", "window", "navigator", "localStorage", "sessionStorage", "IS_REACT_ACT_ENVIRONMENT", "ResizeObserver"] as const;
 let previousGlobals: Record<(typeof globals)[number], unknown>;
 let testWindow: Window;
 const originalFetch = globalThis.fetch;
@@ -89,6 +89,7 @@ beforeEach(() => {
     window: { configurable: true, value: testWindow },
     navigator: { configurable: true, value: testWindow.navigator },
     localStorage: { configurable: true, value: testWindow.localStorage },
+    sessionStorage: { configurable: true, value: testWindow.sessionStorage },
   });
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   installLayoutStubs(testWindow);
@@ -427,13 +428,7 @@ test("Logs: attempt details render exact reasoning wire values without legacy pl
         status: 503,
         durationMs: 10,
         sendCount: 1,
-        recoveryKinds: [
-          "cursor-envelope-echo",
-          "cursor-routing-commentary",
-          "cursor-duplicate-tool-call",
-          "cursor-overflow-remint",
-          "cursor-invalid-argument",
-        ],
+        recoveryKinds: [],
         usageStatus: "unreported",
         requestedEffort: "minimal",
         effectiveEffort: "low",
@@ -489,11 +484,6 @@ test("Logs: attempt details render exact reasoning wire values without legacy pl
   const rows = [...container.querySelectorAll<HTMLTableRowElement>(".log-detail-attempts tbody tr")];
   expect(rows).toHaveLength(3);
   expect(rows[0]?.textContent).toContain("minimal → low (thinking_budget=0)");
-  expect(rows[0]?.textContent).toContain("Cursor replay envelope recovery");
-  expect(rows[0]?.textContent).toContain("Cursor routing commentary recovery");
-  expect(rows[0]?.textContent).toContain("Cursor duplicate tool-call recovery");
-  expect(rows[0]?.textContent).toContain("Cursor overflow conversation recovery");
-  expect(rows[0]?.textContent).toContain("Cursor invalid-argument recovery");
   expect(rows[1]?.textContent).toContain("high → enabled (thinking.type=enabled)");
   expect(rows[2]?.textContent).toContain("legacy-model");
   expect(rows[2]?.querySelectorAll("br")).toHaveLength(1);
@@ -526,36 +516,6 @@ test("Logs: inside-card clicks keep the detail dialog open; backdrop dismiss clo
 
   await act(async () => { backdrop.click(); });
   expect(container.querySelector("dialog")).toBeNull();
-
-  await act(async () => { root.unmount(); });
-});
-
-test("Logs: agent badges identify rows and detail dialogs, including unknown origins", async () => {
-  const mainLog = { ...sampleLog, requestId: "req-main", agentKind: "main" };
-  const unknownLog = {
-    ...sampleLog,
-    requestId: "req-unknown",
-    model: "unknown-model",
-    agentKind: "unexpected-origin",
-  };
-  globalThis.fetch = (async input => {
-    if (!String(input).includes("/api/logs")) return new Response(null, { status: 404 });
-    return jsonResponse([mainLog, unknownLog]);
-  }) as typeof fetch;
-
-  const { root, container } = await mountLogs();
-  await flushMicrotasks();
-
-  const rows = [...container.querySelectorAll<HTMLTableRowElement>(".logs-table tbody tr")];
-  expect(rows.some(row => row.textContent?.includes("Main"))).toBe(true);
-  expect(rows.some(row => row.textContent?.includes("Unknown"))).toBe(true);
-
-  const unknownRow = rows.find(row => row.textContent?.includes("req-unknown"));
-  expect(unknownRow).toBeTruthy();
-  await act(async () => { unknownRow!.querySelector<HTMLButtonElement>(".log-detail-btn")!.click(); });
-  const dialog = container.querySelector("dialog");
-  expect(dialog?.textContent).toContain("Agent");
-  expect(dialog?.textContent).toContain("Unknown");
 
   await act(async () => { root.unmount(); });
 });
@@ -628,8 +588,8 @@ async function changeLogSelect(container: HTMLElement, label: string, value: str
   await flushMicrotasks();
 }
 
-async function enterLogSearch(container: HTMLElement, label: "Model" | "Conversation", value: string): Promise<void> {
-  const input = container.querySelector<HTMLInputElement>(`.logs-filter-container input[aria-label="${label}"]`)!;
+async function enterConversation(container: HTMLElement, value: string): Promise<void> {
+  const input = container.querySelector<HTMLInputElement>('.logs-filter-container input[type="search"]')!;
   await act(async () => {
     Object.getOwnPropertyDescriptor(testWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
     input.dispatchEvent(new testWindow.Event("input", { bubbles: true }));
@@ -637,9 +597,6 @@ async function enterLogSearch(container: HTMLElement, label: "Model" | "Conversa
   await flushMicrotasks();
   expect(input.value).toBe(value);
 }
-
-const enterModel = (container: HTMLElement, value: string) => enterLogSearch(container, "Model", value);
-const enterConversation = (container: HTMLElement, value: string) => enterLogSearch(container, "Conversation", value);
 
 function serveLogSnapshot(readRows: () => unknown[], onRequest?: () => void): void {
   globalThis.fetch = (async input => {
@@ -686,13 +643,12 @@ function trackFilterClock() {
 
 test("Logs: rich controls intersect rows while options retain the unfiltered ring", async () => {
   const matching = {
-    ...sampleLog, requestId: "match", model: "model-needle-final", status: 500,
-    agentKind: "main", shadowCallRewrittenFrom: "helper-model",
+    ...sampleLog, requestId: "match", model: "model-a", status: 500,
+    shadowCallRewrittenFrom: "helper-model",
   };
   const rows = [
     { ...matching, requestId: "other-provider", provider: "xai" },
-    { ...matching, requestId: "other-agent", agentKind: "subagent" },
-    { ...matching, requestId: "other-model", model: "model-other" },
+    { ...matching, requestId: "other-model", model: "model-a-plus" },
     { ...matching, requestId: "other-status", status: 200 },
     { ...matching, requestId: "not-intercepted", shadowCallRewrittenFrom: undefined },
     { ...matching, requestId: "other-surface", surface: "claude" },
@@ -703,19 +659,18 @@ test("Logs: rich controls intersect rows while options retain the unfiltered rin
   try {
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual([
-      "match", "other-surface", "not-intercepted", "other-status", "other-model", "other-agent", "other-provider",
+      "match", "other-surface", "not-intercepted", "other-status", "other-model", "other-provider",
     ]);
     await act(async () => { container.querySelector<HTMLButtonElement>("#logs-surface-codex")!.click(); });
     await changeLogSelect(container, "Provider", "openai");
-    await changeLogSelect(container, "Agent", "main");
-    await enterModel(container, "needle");
+    await changeLogSelect(container, "Model", "model-a");
     await changeLogSelect(container, "Status", "errors");
     const intercepted = container.querySelector<HTMLInputElement>('.logs-filter-container input[type="checkbox"]')!;
     await act(async () => { intercepted.click(); });
     expect(visibleRequestIds(container)).toEqual(["match"]);
-    expect(container.querySelector(".logs-filter-status")?.textContent).toContain("Showing 1 of 7");
-    expect([...container.querySelectorAll<HTMLOptionElement>("#logs-filter-model-options option")].map(option => option.value))
-      .toEqual(["model-needle-final", "model-other"]);
+    expect(container.querySelector(".logs-filter-status")?.textContent).toContain("Showing 1 of 6");
+    expect([...container.querySelectorAll<HTMLOptionElement>('select[aria-label="Model"] option')].map(option => option.value))
+      .toEqual(["", "model-a", "model-a-plus"]);
     expect([...container.querySelectorAll<HTMLOptionElement>('select[aria-label="Provider"] option')].map(option => option.value))
       .toEqual(["", "openai", "xai"]);
   } finally {
@@ -805,39 +760,38 @@ test("Logs: relative clock is replaced on window changes and cleared on All, Deb
   }
 });
 
-test("Logs: ring rollover retains a free-text model query and clears only a vanished provider selection", async () => {
+test("Logs: ring rollover clears only vanished model and provider selections", async () => {
   let rows = [{ ...sampleLog, model: "model-a", status: 500, conversationId: "conversation-a" }];
   serveLogSnapshot(() => rows);
   const { root, container } = await mountLogs();
   try {
     await flushMicrotasks();
-    await enterModel(container, "model-a");
+    await changeLogSelect(container, "Model", "model-a");
     await changeLogSelect(container, "Provider", "openai");
     await changeLogSelect(container, "Status", "errors");
     await changeLogSelect(container, "Time", "1h");
     await enterConversation(container, "conversation-a");
     const select = (label: string) => container.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;
-    const model = container.querySelector<HTMLInputElement>('input[aria-label="Model"]')!;
     rows = [{ ...rows[0]!, model: "model-b" }];
     await advanceSilentRefresh();
-    expect(model.value).toBe("model-a");
+    expect(select("Model").value).toBe("");
     expect(select("Provider").value).toBe("openai");
-    expect(visibleRequestIds(container)).toEqual([]);
-    await enterModel(container, "model-b");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    await changeLogSelect(container, "Model", "model-b");
     rows = [{ ...rows[0]!, provider: "xai" }];
     await advanceSilentRefresh();
     expect(select("Provider").value).toBe("");
-    expect(model.value).toBe("model-b");
+    expect(select("Model").value).toBe("model-b");
     expect(select("Status").value).toBe("errors");
     expect(select("Time").value).toBe("1h");
-    expect(container.querySelector<HTMLInputElement>('input[aria-label="Conversation"]')!.value).toBe("conversation-a");
+    expect(container.querySelector<HTMLInputElement>('.logs-filter-container input[type="search"]')!.value).toBe("conversation-a");
     expect(visibleRequestIds(container)).toEqual(["req-1"]);
   } finally {
     await act(async () => { root.unmount(); });
   }
 });
 
-test("Logs: casing-only rollover retains model query text and reconciles provider spelling", async () => {
+test("Logs: casing-only rollover retains model and provider selection with current option spellings", async () => {
   let rows = [
     { ...sampleLog, requestId: "selected", model: "GPT-5", provider: "OpenAI" },
     { ...sampleLog, requestId: "other-model", model: "model-other", provider: "OpenAI" },
@@ -847,18 +801,18 @@ test("Logs: casing-only rollover retains model query text and reconciles provide
   const { root, container } = await mountLogs();
   try {
     await flushMicrotasks();
-    await enterModel(container, "GPT-5");
+    await changeLogSelect(container, "Model", "GPT-5");
     await changeLogSelect(container, "Provider", "OpenAI");
     await changeLogSelect(container, "Status", "success");
     const select = (label: string) => container.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;
-    const model = container.querySelector<HTMLInputElement>('input[aria-label="Model"]')!;
-    expect(model.value).toBe("GPT-5");
+    expect(select("Model").value).toBe("GPT-5");
     expect(select("Provider").value).toBe("OpenAI");
     expect(visibleRequestIds(container)).toEqual(["selected"]);
 
     rows = rows.map(row => ({ ...row, model: row.model === "GPT-5" ? "gpt-5" : row.model }));
     await advanceSilentRefresh();
-    expect(model.value).toBe("GPT-5");
+    expect(select("Model").value).toBe("gpt-5");
+    expect(select("Model").selectedOptions[0]?.value).toBe("gpt-5");
     expect(select("Provider").value).toBe("OpenAI");
     expect(visibleRequestIds(container)).toEqual(["selected"]);
 
@@ -866,7 +820,7 @@ test("Logs: casing-only rollover retains model query text and reconciles provide
     await advanceSilentRefresh();
     expect(select("Provider").value).toBe("openai");
     expect(select("Provider").selectedOptions[0]?.value).toBe("openai");
-    expect(model.value).toBe("GPT-5");
+    expect(select("Model").value).toBe("gpt-5");
     expect(select("Status").value).toBe("success");
     expect(visibleRequestIds(container)).toEqual(["selected"]);
     expect(container.querySelector(".logs-filter-status")?.textContent).toContain("Showing 1 of 3");
@@ -908,7 +862,7 @@ test("Logs: detail conversation action and reset use the same filter state", asy
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["other"]);
     expect(container.querySelector("dialog")).toBeNull();
-    expect(container.querySelector<HTMLInputElement>('input[aria-label="Conversation"]')!.value).toBe("22".repeat(16));
+    expect(container.querySelector<HTMLInputElement>('.logs-filter-container input[type="search"]')!.value).toBe("22".repeat(16));
   } finally {
     try {
       if (mounted) await act(async () => { mounted!.root.unmount(); });
@@ -998,6 +952,156 @@ const PROXY_NOW = 1_800_000_000_000;
 function proxyLogEnvelope(generatedAt: unknown, logs: unknown[]) {
   return { generatedAt, timeZone: "UTC", total: logs.length, logs };
 }
+
+function cursorLogEnvelope(generatedAt: unknown, logs: unknown[], cursor: string, reset = false) {
+  return { ...proxyLogEnvelope(generatedAt, logs), cursor, reset };
+}
+
+test("Logs: append, empty delta, mutation reset and legacy fallback keep the complete window", async () => {
+  const urls: string[] = [];
+  let step = 0;
+  const responses = [
+    cursorLogEnvelope(PROXY_NOW, [sampleLog], "c0"),
+    cursorLogEnvelope(PROXY_NOW, [], "c0"),
+    cursorLogEnvelope(PROXY_NOW, [updatedLog], "c1"),
+    cursorLogEnvelope(PROXY_NOW, [], "c1"),
+    cursorLogEnvelope(PROXY_NOW, [{ ...sampleLog, model: "gpt-mutated", durationMs: 987 }], "c2", true),
+    [updatedLog],
+    { logs: [sampleLog] },
+  ];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    if (!url.includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(url);
+    return jsonResponse(responses[step]);
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    await flushMicrotasks();
+    expect(urls[0]).toBe("http://localhost/api/logs?limit=2000");
+    step = 1;
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=c0");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    step = 2;
+    await advanceSilentRefresh();
+    expect(visibleRequestIds(container)).toEqual(["req-2", "req-1"]);
+    await changeLogSelect(container, "Model", "gpt-test");
+    step = 3;
+    await advanceSilentRefresh();
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.value).toBe("gpt-test");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    step = 4;
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=c1");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    expectTableLoaded(container, "gpt-mutated");
+    expect(container.textContent).toContain("987");
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.value).toBe("");
+    step = 5;
+    await advanceSilentRefresh();
+    expect(visibleRequestIds(container)).toEqual(["req-2"]);
+    step = 6;
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toBe("http://localhost/api/logs?limit=2000");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: an empty delta advances the proxy clock without discarding retained rows", async () => {
+  let step = 0;
+  const row = { ...sampleLog, timestamp: PROXY_NOW - 5 * 60_000 };
+  globalThis.fetch = (async input => {
+    if (!String(input).includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    return jsonResponse(cursorLogEnvelope(step ? PROXY_NOW + 20 * 60_000 : PROXY_NOW, step ? [] : [row], "same"));
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    await flushMicrotasks();
+    await changeLogSelect(container, "Time", "15m");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    step = 1;
+    await advanceSilentRefresh();
+    expect(visibleRequestIds(container)).toEqual([]);
+    await changeLogSelect(container, "Time", "all");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    expect(JSON.parse(sessionStorage.getItem("ocx.logs.list.v1:http://localhost")!)).toHaveLength(1);
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: malformed polls preserve cursor/cache, back off, and explicit retry reads a full snapshot", async () => {
+  let failing = false;
+  const urls: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    if (!url.includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(url);
+    if (failing) return jsonResponse({ logs: [], cursor: "poison", reset: "false" });
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, url.includes("cursor=") ? [] : [sampleLog], "good"));
+  }) as typeof fetch;
+  const { root, container } = await mountLogs();
+  try {
+    await flushMicrotasks();
+    failing = true;
+    await advanceSilentRefresh();
+    const count = urls.length;
+    await advanceSilentRefresh();
+    expect(urls).toHaveLength(count);
+    await advanceSilentRefresh(14000);
+    expect(container.textContent).toContain("Could not load request logs.");
+    expect(visibleRequestIds(container)).toEqual(["req-1"]);
+    expect(urls.slice(1).every(url => url.includes("cursor=good"))).toBe(true);
+    expect(JSON.parse(sessionStorage.getItem("ocx.logs.list.v1:http://localhost")!)).toHaveLength(1);
+    failing = false;
+    await act(async () => { clickRetry(container); });
+    await flushMicrotasks();
+    expect(urls.at(-1)).toBe("http://localhost/api/logs?limit=2000");
+    expectTableLoaded(container, "gpt-test");
+  } finally {
+    await act(async () => { root.unmount(); });
+  }
+});
+
+test("Logs: A to B to A and remount start without a cached cursor", async () => {
+  const urls: string[] = [];
+  globalThis.fetch = (async input => {
+    const url = String(input);
+    if (!url.includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(url);
+    const name = url.startsWith("http://proxy-a/") ? "a" : "b";
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, url.includes("cursor=") ? [] : [
+      { ...sampleLog, requestId: name },
+    ], `cursor-${name}`));
+  }) as typeof fetch;
+  const first = await mountLogs("http://proxy-a");
+  try {
+    await flushMicrotasks();
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=cursor-a");
+    for (const name of ["b", "a"]) {
+      const start = urls.length;
+      await renderLogsAt(first.root, `http://proxy-${name}`);
+      await advanceSilentRefresh();
+      expect(urls[start]).toBe(`http://proxy-${name}/api/logs?limit=2000`);
+      expect(visibleRequestIds(first.container)).toEqual([name]);
+    }
+  } finally {
+    await act(async () => { first.root.unmount(); });
+  }
+  const start = urls.length;
+  const remount = await mountLogs("http://proxy-a");
+  try {
+    await advanceSilentRefresh();
+    expect(urls[start]).toBe("http://proxy-a/api/logs?limit=2000");
+    expect(visibleRequestIds(remount.container)).toEqual(["a"]);
+  } finally {
+    await act(async () => { remount.root.unmount(); });
+  }
+});
 
 async function renderLogsAt(root: Root, apiBase: string): Promise<void> {
   await act(async () => {
@@ -1151,6 +1255,7 @@ function delayedLogBody() {
 
 test("Logs: a late body from an aborted old apiBase cannot poison the new proxy clock", async () => {
   const late = delayedLogBody();
+  const urls: string[] = [];
   let oldSignal: AbortSignal | undefined;
   let oldRequests = 0;
   const wall = jest.spyOn(Date, "now").mockReturnValue(PROXY_NOW + 6 * 60 * 60_000);
@@ -1160,14 +1265,15 @@ test("Logs: a late body from an aborted old apiBase cannot poison the new proxy 
   globalThis.fetch = (async (input, init) => {
     const url = String(input);
     if (!url.includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(url);
     if (url.startsWith("http://proxy-a/")) {
       oldRequests++;
       oldSignal = init?.signal ?? undefined;
       return late.response;
     }
-    return jsonResponse(proxyLogEnvelope(PROXY_NOW, [
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, url.includes("cursor=") ? [] : [
       { ...sampleLog, requestId: "proxy-b", timestamp: PROXY_NOW - 60_000 },
-    ]));
+    ], "cursor-b"));
   }) as typeof fetch;
   let mounted: Awaited<ReturnType<typeof mountLogs>> | undefined;
   try {
@@ -1178,15 +1284,19 @@ test("Logs: a late body from an aborted old apiBase cannot poison the new proxy 
     await renderLogsAt(root, "http://proxy-b");
     expect(oldSignal?.aborted).toBe(true);
     await changeLogSelect(container, "Time", "15m");
-    await enterModel(container, "gpt-test");
+    await changeLogSelect(container, "Model", "gpt-test");
     await changeLogSelect(container, "Provider", "openai");
     await act(async () => { container.querySelector<HTMLInputElement>(".logs-auto-refresh input")!.click(); });
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["proxy-b"]);
-    await act(async () => { late.resolve(proxyLogEnvelope(PROXY_NOW + 12 * 60 * 60_000, [])); });
+    await act(async () => { late.resolve(cursorLogEnvelope(PROXY_NOW + 12 * 60 * 60_000, [], "poison", true)); });
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["proxy-b"]);
-    expect(container.querySelector<HTMLInputElement>('input[aria-label="Model"]')!.value).toBe("gpt-test");
+    expect(JSON.parse(sessionStorage.getItem("ocx.logs.list.v1:http://proxy-b")!)).toHaveLength(1);
+    await act(async () => { container.querySelector<HTMLInputElement>(".logs-auto-refresh input")!.click(); });
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=cursor-b");
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.value).toBe("gpt-test");
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!.value).toBe("openai");
     monotonic += 30_000;
     await act(async () => { jest.advanceTimersByTime(30_000); });
@@ -1205,6 +1315,7 @@ test("Logs: a late body from an aborted old apiBase cannot poison the new proxy 
 
 test("Logs: aborting an in-flight refresh before pausing cannot replace the accepted clock", async () => {
   const late = delayedLogBody();
+  const urls: string[] = [];
   let requests = 0;
   let lateSignal: AbortSignal | undefined;
   const wall = jest.spyOn(Date, "now").mockReturnValue(PROXY_NOW - 6 * 60 * 60_000);
@@ -1213,14 +1324,15 @@ test("Logs: aborting an in-flight refresh before pausing cannot replace the acce
   const clock = trackFilterClock();
   globalThis.fetch = (async (input, init) => {
     if (!String(input).includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
+    urls.push(String(input));
     requests++;
     if (requests === 2) {
       lateSignal = init?.signal ?? undefined;
       return late.response;
     }
-    return jsonResponse(proxyLogEnvelope(PROXY_NOW, [
+    return jsonResponse(cursorLogEnvelope(PROXY_NOW, String(input).includes("cursor=") ? [] : [
       { ...sampleLog, requestId: "current", timestamp: PROXY_NOW - 60_000 },
-    ]));
+    ], "accepted-cursor"));
   }) as typeof fetch;
   let mounted: Awaited<ReturnType<typeof mountLogs>> | undefined;
   try {
@@ -1234,7 +1346,7 @@ test("Logs: aborting an in-flight refresh before pausing cannot replace the acce
     await flushMicrotasks();
     expect(lateSignal?.aborted).toBe(true);
     const pausedRequests = requests;
-    await act(async () => { late.resolve(proxyLogEnvelope(PROXY_NOW + 12 * 60 * 60_000, [])); });
+    await act(async () => { late.resolve(cursorLogEnvelope(PROXY_NOW + 12 * 60 * 60_000, [], "poison", true)); });
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["current"]);
     monotonic += 30_000;
@@ -1242,6 +1354,9 @@ test("Logs: aborting an in-flight refresh before pausing cannot replace the acce
     await flushMicrotasks();
     expect(visibleRequestIds(container)).toEqual(["current"]);
     expect(requests).toBe(pausedRequests);
+    await act(async () => { container.querySelector<HTMLInputElement>(".logs-auto-refresh input")!.click(); });
+    await advanceSilentRefresh();
+    expect(urls.at(-1)).toContain("cursor=accepted-cursor");
   } finally {
     try {
       if (mounted) await act(async () => { mounted!.root.unmount(); });
@@ -1253,7 +1368,7 @@ test("Logs: aborting an in-flight refresh before pausing cannot replace the acce
   }
 });
 
-test("Logs: reappearing rows satisfy a retained model query without resurrecting a cleared provider", async () => {
+test("Logs: reappearing options do not resurrect selections cleared by a successful rollover", async () => {
   const original = { ...sampleLog, requestId: "original", model: "model-a", provider: "openai" };
   const replacement = { ...sampleLog, requestId: "replacement", model: "model-b", provider: "xai" };
   let rows = [original];
@@ -1261,22 +1376,21 @@ test("Logs: reappearing rows satisfy a retained model query without resurrecting
   const { root, container } = await mountLogs();
   try {
     await flushMicrotasks();
-    await enterModel(container, "model-a");
+    await changeLogSelect(container, "Model", "model-a");
     await changeLogSelect(container, "Provider", "openai");
     await changeLogSelect(container, "Status", "success");
     rows = [replacement];
     await advanceSilentRefresh();
     const select = (label: string) => container.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`)!;
-    const model = container.querySelector<HTMLInputElement>('input[aria-label="Model"]')!;
-    expect(model.value).toBe("model-a");
+    expect(select("Model").value).toBe("");
     expect(select("Provider").value).toBe("");
-    expect(visibleRequestIds(container)).toEqual([]);
+    expect(visibleRequestIds(container)).toEqual(["replacement"]);
     rows = [original, replacement];
     await advanceSilentRefresh();
-    expect(model.value).toBe("model-a");
+    expect(select("Model").value).toBe("");
     expect(select("Provider").value).toBe("");
     expect(select("Status").value).toBe("success");
-    expect(visibleRequestIds(container)).toEqual(["original"]);
+    expect(visibleRequestIds(container)).toEqual(["replacement", "original"]);
   } finally {
     await act(async () => { root.unmount(); });
   }
@@ -1292,27 +1406,27 @@ test("Logs: a pending refresh reconciles the user's latest selection rather than
   globalThis.fetch = (async input => {
     if (!String(input).includes("/api/logs")) return jsonResponse({ timeZone: "UTC" });
     requests++;
-    return requests === 1 ? jsonResponse(original) : late.response;
+    return requests === 1 ? jsonResponse(cursorLogEnvelope(PROXY_NOW, original, "initial")) : late.response;
   }) as typeof fetch;
   const { root, container } = await mountLogs();
   try {
     await flushMicrotasks();
-    await enterModel(container, "model-a");
+    await changeLogSelect(container, "Model", "model-a");
     await changeLogSelect(container, "Provider", "openai");
     await advanceSilentRefresh();
     expect(requests).toBe(2);
-    await enterModel(container, "model-b");
+    await changeLogSelect(container, "Model", "model-b");
     await changeLogSelect(container, "Provider", "xai");
     await changeLogSelect(container, "Status", "errors");
     expect(visibleRequestIds(container)).toEqual(["b"]);
     await act(async () => {
-      late.resolve([
+      late.resolve(cursorLogEnvelope(PROXY_NOW, [
         { ...original[0]!, requestId: "other", model: "model-other" },
         { ...original[1]!, requestId: "current", model: "MODEL-B", provider: "XAI" },
-      ]);
+      ], "replaced", true));
     });
     await flushMicrotasks();
-    expect(container.querySelector<HTMLInputElement>('input[aria-label="Model"]')!.value).toBe("model-b");
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!.value).toBe("MODEL-B");
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="Provider"]')!.value).toBe("XAI");
     expect(container.querySelector<HTMLSelectElement>('select[aria-label="Status"]')!.value).toBe("errors");
     expect(visibleRequestIds(container)).toEqual(["current"]);

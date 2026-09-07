@@ -3,7 +3,7 @@ import { createOpenAIChatAdapter } from "../../src/adapters/openai-chat";
 import { createResponsesPassthroughAdapter as createResponsesPassthroughAdapterProduction } from "../../src/adapters/openai-responses";
 import { openaiResponsesUrl } from "../../src/adapters/openai-responses-url";
 import { normalizeResponsesCodeMode } from "../../src/adapters/responses-code-mode";
-import { CODE_MODE_RESULT_ECHO_SENTENCE, EMPTY_EXEC_OUTPUT_MESSAGE, FAILED_EXEC_OUTPUT_MESSAGE } from "../../src/adapters/exec-tool-result-normalize";
+import { CODE_MODE_HOST_CONTRACT_SENTENCE, CODE_MODE_RESULT_ECHO_SENTENCE, EMPTY_EXEC_OUTPUT_MESSAGE, FAILED_EXEC_OUTPUT_MESSAGE } from "../../src/adapters/exec-tool-result-normalize";
 import { chatCompletionsToResponsesBody } from "../../src/chat/inbound";
 import { anthropicToResponsesBody } from "../../src/claude/inbound";
 import { parseRequest } from "../../src/responses/parser";
@@ -51,7 +51,7 @@ describe("native routed code-mode result visibility", () => {
     const before = JSON.stringify(body);
     const request = createResponsesPassthroughAdapter(routed).buildRequest(parseRequest(body));
     const wire = JSON.parse(request.body);
-    expect(wire.instructions).toBe(`Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}`);
+    expect(wire.instructions).toBe(`Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}\n\n${CODE_MODE_HOST_CONTRACT_SENTENCE}`);
     expect(wire.tools.find((tool: { name: string }) => tool.name === "exec").parameters.properties.input.description)
       .toContain(CODE_MODE_RESULT_ECHO_SENTENCE);
     expect(JSON.stringify(body)).toBe(before);
@@ -103,6 +103,31 @@ describe("native routed code-mode result visibility", () => {
     expect(second.instructions).toBe(first.instructions);
   });
 
+  test("annotates a paired exec result that carries a host failure string without touching the program", () => {
+    const failure = "Script failed\nWall time 0.1 seconds\nOutput:\nScript error:\ntool `apply_patch` expects a string input";
+    const body = raw(failure);
+    const wire = JSON.parse(createResponsesPassthroughAdapter(routed).buildRequest(parseRequest(body)).body);
+    expect(wire.input[1].output).toBe(`${failure}\n[recovery: tools.apply_patch takes exactly one string argument; pass the patch text itself, not an object such as {input: ...}.]`);
+    expect(JSON.parse(wire.input[0].arguments).input).toBe(body.input[0].input);
+    // Replayed history already carrying the hint is not annotated twice: the output item and the
+    // program keep their identity, and a second pass over the normalized body is a deep no-op.
+    const replayed = raw(wire.input[1].output);
+    const once = normalizeResponsesCodeMode(replayed, parseRequest(replayed), routed) as typeof replayed;
+    expect(once.input[1]).toBe(replayed.input[1]);
+    expect(once.input[0]).toBe(replayed.input[0]);
+    expect(normalizeResponsesCodeMode(once, parseRequest(once), routed)).toEqual(once);
+  });
+
+  test("a replayed body that already carries the echo rule gains only the missing contract sentence", () => {
+    const body = { ...raw(), instructions: `Keep this instruction.\n\n${CODE_MODE_RESULT_ECHO_SENTENCE}` };
+    const parsed = parseRequest(body);
+    const first = normalizeResponsesCodeMode(body, parsed, routed) as typeof body;
+    expect(first.instructions).toBe(`${body.instructions}\n\n${CODE_MODE_HOST_CONTRACT_SENTENCE}`);
+    expect(first.instructions.split(CODE_MODE_RESULT_ECHO_SENTENCE).length).toBe(2);
+    const second = normalizeResponsesCodeMode(first, parsed, routed) as typeof body;
+    expect(second.instructions).toBe(first.instructions);
+  });
+
   test("official OpenAI and non-code-mode catalogs remain untouched", () => {
     const body = raw();
     for (const native of [provider, { ...routed, baseUrl: "https://api.openai.com/v1" }]) {
@@ -110,6 +135,7 @@ describe("native routed code-mode result visibility", () => {
       const wire = JSON.parse(createResponsesPassthroughAdapter(native).buildRequest(parseRequest(body)).body);
       expect(wire.instructions).toBe(body.instructions);
       expect(JSON.stringify(wire.tools)).not.toContain(CODE_MODE_RESULT_ECHO_SENTENCE);
+      expect(JSON.stringify(wire)).not.toContain("Host contract for the nested helpers");
     }
     for (const tools of [
       [{ type: "function", name: "exec", parameters: { type: "object" } }],
@@ -567,6 +593,58 @@ describe("DeepSeek Responses endpoint contract", () => {
 
       expect(body.reasoning?.effort).toBe("xhigh");
     }
+  });
+
+  test.each([undefined, "max", "ultra"])("BigModel Turbo omits outbound effort %s and preserves summary requests", (effort) => {
+    const id = "zhipu-bigmodel-responses";
+    const config: OcxConfig = {
+      port: 10100,
+      defaultProvider: id,
+      providers: { [id]: providerConfigSeed(getProviderRegistryEntry(id)!) },
+    };
+    const route = routeModel(config, `${id}/glm-5-turbo`);
+    for (const withSummary of [false, true]) {
+      const raw = {
+        model: route.modelId,
+        input: "ping",
+        ...(effort !== undefined || withSummary ? {
+          reasoning: {
+            ...(effort !== undefined ? { effort } : {}),
+            ...(withSummary ? { summary: "auto" } : {}),
+          },
+        } : {}),
+      };
+      const before = structuredClone(raw);
+      const request = createResponsesPassthroughAdapter(route.provider).buildRequest(parseRequest(raw));
+      const wire = JSON.parse(request.body);
+      expect(request.url).toBe("https://open.bigmodel.cn/api/v1/responses");
+      if (withSummary) expect(wire.reasoning).toEqual({ summary: "auto" });
+      else expect(wire).not.toHaveProperty("reasoning");
+      expect(raw).toEqual(before);
+    }
+  });
+
+  test("a provider-wide empty ladder removes schema-valid raw effort", () => {
+    const keyed = { adapter: "openai-responses", baseUrl: "https://example.test/v1", authMode: "key" as const };
+    const raw = { model: "model", input: "ping", reasoning: { effort: "high", summary: "auto" } };
+    const wire = JSON.parse(createResponsesPassthroughAdapter({ ...keyed, reasoningEfforts: [] })
+      .buildRequest(parseRequest(raw)).body);
+    expect(wire.reasoning).toEqual({ summary: "auto" });
+    expect(raw.reasoning.effort).toBe("high");
+  });
+
+  test("empty-ladder repair preserves unknown, non-rankable and native forward effort behavior", () => {
+    const keyed = { adapter: "openai-responses", baseUrl: "https://example.test/v1", authMode: "key" as const };
+    for (const unchanged of [keyed, { ...keyed, reasoningEfforts: ["enabled"] }, { ...provider, reasoningEfforts: [] }]) {
+      const raw = { model: "gpt-5.6-sol", input: "ping", reasoning: { effort: "ultra" } };
+      const wire = JSON.parse(createResponsesPassthroughAdapter(unchanged).buildRequest(parseRequest(raw)).body);
+      expect(wire.reasoning.effort).toBe("ultra");
+    }
+    // A model-specific nonempty ladder overrides a provider-wide empty declaration.
+    const wire = JSON.parse(createResponsesPassthroughAdapter({
+      ...keyed, reasoningEfforts: [], modelReasoningEfforts: { model: ["low", "high", "max"] },
+    }).buildRequest(parseRequest({ model: "model", input: "ping", reasoning: { effort: "ultra" } })).body);
+    expect(wire.reasoning.effort).toBe("max");
   });
 
   test("a config saved before the fix is backfilled, and a hand-set path is preserved", () => {

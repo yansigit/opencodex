@@ -112,8 +112,7 @@ have expanded into selector-qualified groups.
 Use `subagentModels` to choose and order the leading models that Codex also advertises to
 `spawn_agent`. The dashboard's **Sub-agents** page can reorder bare native and routed ids. Use
 `ocx agent subagents set` or edit the opencodex configuration for exact
-`<selector>/<native-openai-model>` choices; the dashboard does not list those choices and omits them
-if it saves the roster. Use at most five configured ids. With account selectors, one bare native
+`<selector>/<native-openai-model>` choices; the dashboard retains those ids once saved, including choices currently unavailable. Use at most five configured ids. With account selectors, one bare native
 choice can expand into multiple selector-qualified catalog rows, so configured choices and
 advertised rows are not necessarily one-to-one.
 
@@ -171,3 +170,32 @@ not reorder the native tool's advertised list.
 
 `disabledModels` and each provider's `selectedModels` remain visibility fields,
 not ordering controls. There is no separate `modelOrder`, `providerOrder`, or priority-map setting.
+
+## Dashboard picker presets
+
+On **Models**, choose **Default**, **A–Z by model**, **Group by provider**, or **Most used snapshot**, then **Apply order**. This saves the currently visible routed ids and `modelPickerOrderMode` (`alphabetical`, `provider`, or `most-used`). Most used reads all retained usage once when applied; reloads restore the snapshot without fetching usage again. New or removed models do not automatically recompute it. A manually saved order, including a complete/native order, remains untouched until you explicitly apply a replacement. Default clears both picker fields, even when no routed models are available.
+
+The controls use `GET/PUT /api/subagent-models`: `chosen` and `available` retain saved roster choices, including disabled or missing models; `pickerAvailable` contains only eligible routed catalog ids. The Models page sends `pickerOrder` and `pickerOrderMode`, never `models`. Roster-only saves preserve picker settings. Invalid combined updates and failed persistence leave the previous picker/roster state intact.
+
+Routed-only presets keep the existing featured/native priority bands. They affect the Codex catalog and Claude discovery's routed groups; Claude's native prefix and explicit Desktop profile/alias ownership remain unchanged. OpenCodex guidance ranks and configured fallback settings are preserved, but native Codex's advertised five and recommended default can change with display priority. Saving does not restart clients; a catalog refresh may remain pending, and clients holding an old catalog may need reopening.
+
+
+### Custom routed order
+
+Choose **Custom order** on Models to load a fresh routed snapshot. Drag a movable row before
+another row, or use its Up/Down buttons, then **Save draft**. Featured routed rows stay at the
+front in their configured rank and cannot move. Native rows are not shown; this is not a preview
+of the complete native picker. Surviving saved rows keep their relative order and new candidates
+follow the current candidate list. Every save sends the complete routed list, without changing
+the featured roster.
+
+An order containing bare native ids remains protected until you explicitly apply a routed preset
+or Default. Selecting a different option alone does not replace it. Unknown featured state blocks
+editing. Before saving, the editor checks a fresh snapshot; changes preserve your draft and block
+saving until **Reload and discard draft** loads current settings. Request failures retain the
+draft. Accepted saves can still have a pending catalog refresh; reload before editing again.
+
+The editor also requires an unambiguous model identity for every routed candidate. If the model
+catalog is incomplete, refresh the Models page before editing; reloading picker settings alone
+cannot restore missing catalog identities. Featured choices are matched exactly without trimming;
+duplicate choices use their last configured position, and canonical ids take precedence over raw ids.
