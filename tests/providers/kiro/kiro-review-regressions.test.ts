@@ -39,10 +39,10 @@ let tmp: string;
 
 function config(): OcxConfig {
   return {
-    port: 10100,
+    port: 19346,
     defaultProvider: "openai",
     openaiProviderTierVersion: 2,
-    providers: {},
+    providers: { openai: { adapter: "openai-responses", baseUrl: "https://api.openai.com/v1" } },
   };
 }
 

@@ -4,7 +4,7 @@ import {
   isValidModelDiscoveryModelId,
   MODEL_DISCOVERY_MAX_MODELS,
 } from "../providers/model-discovery-limits";
-import { modelRecordValue } from "../reasoning-effort";
+import { isDeclaredReasoningEffort, modelRecordValue } from "../reasoning-effort";
 import {
   isWirePinnedModel,
   MODEL_ADAPTER_OVERRIDE_ALLOWED,
@@ -60,6 +60,75 @@ export function azureCredentialConfigError(provider: {
   if (Object.hasOwn(provider, "apiKeyPool")) return "azureCredential conflicts with apiKeyPool";
   if (provider.authMode !== undefined && provider.authMode !== "key") {
     return "azureCredential requires authMode key or omitted";
+  }
+  return null;
+}
+
+/** Operator pins share one strict boundary across config and management writes. */
+export function pinnedReasoningEffortConfigError(value: unknown, allowClear = false): string | null {
+  if (value === undefined || (allowClear && (value === null || value === ""))) return null;
+  return typeof value === "string" && isDeclaredReasoningEffort(value)
+    ? null : "pinnedReasoningEffort must be a declared reasoning effort";
+}
+
+export function modelPinnedEffortsConfigError(
+  value: unknown,
+  field = "modelPinnedEfforts",
+  allowTombstones = false,
+): string | null {
+  if (value === undefined || (allowTombstones && value === null)) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    return `${field} must be a plain object`;
+  }
+  const keys = new Set<string>();
+  for (const [key, effort] of Object.entries(value)) {
+    const normalized = key.trim();
+    if (!normalized || ["__proto__", "prototype", "constructor"].includes(normalized)) {
+      return `${field} keys must be nonblank model ids and must not be reserved object keys`;
+    }
+    if (keys.has(normalized)) return `${field} keys must be unique after trimming`;
+    keys.add(normalized);
+    if (allowTombstones && (effort === null || effort === "")) continue;
+    if (typeof effort !== "string" || !isDeclaredReasoningEffort(effort)) {
+      return `${field} values must be declared reasoning efforts`;
+    }
+  }
+  return null;
+}
+
+/** Apply a validated map patch; null clears the field, entry tombstones remove one key. */
+export function mergeModelPinnedEfforts(
+  current: Record<string, string> | undefined,
+  patch: unknown,
+): Record<string, string> | undefined {
+  if (patch === undefined) return current === undefined ? undefined : { ...current };
+  if (patch === null) return undefined;
+  const next = Object.fromEntries(Object.entries(current ?? {}).map(([key, value]) => [key.trim(), value]));
+  for (const [key, effort] of Object.entries(patch as Record<string, string | null>)) {
+    if (effort === null || effort === "") delete next[key.trim()];
+    else next[key.trim()] = effort;
+  }
+  return Object.keys(next).length ? next : undefined;
+}
+
+export function providerReasoningPinsConfigError(provider: Record<string, unknown>): string | null {
+  return pinnedReasoningEffortConfigError(provider.pinnedReasoningEffort)
+    ?? modelPinnedEffortsConfigError(provider.modelPinnedReasoningEfforts, "modelPinnedReasoningEfforts");
+}
+
+/** Validate only pin fields, including callers that bypass the whole-config schema. */
+export function configReasoningPinsConfigError(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const globalError = modelPinnedEffortsConfigError(raw.modelPinnedEfforts);
+  if (globalError) return globalError;
+  if (raw.providers && typeof raw.providers === "object") {
+    for (const provider of Object.values(raw.providers)) {
+      if (!provider || typeof provider !== "object") continue;
+      const error = providerReasoningPinsConfigError(provider as Record<string, unknown>);
+      if (error) return error;
+    }
   }
   return null;
 }

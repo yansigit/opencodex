@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { INTERNAL_DEADLINE_MS, STORE_BUDGET_MS } from "../helpers/test-budget";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as atomicWrite from "../../src/config/atomic-write";
 import * as oauthStore from "../../src/oauth/store";
@@ -8,8 +9,10 @@ import {
   resetHardenedStateForTests,
   setAsyncIcaclsRunnerForTests,
   setIcaclsRunnerForTests,
+  setPlatformForTests,
 } from "../../src/lib/windows-secret-acl";
 import { flushConfigDirHardeningForTests } from "../../src/config/paths";
+import { setSyntheticWindowsPrincipalForTests } from "../../src/lib/windows-user-principal";
 import {
   getAccountCredential,
   getAccountSet,
@@ -40,8 +43,19 @@ import {
 } from "../../src/oauth/antigravity-routing";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
 
-const TEST_DIR = join(import.meta.dir, ".tmp-oauth-store-multi-test");
+let TEST_DIR: string;
 let previousOpencodexHome: string | undefined;
+const ICACLS_OK = { success: true, exitCode: 0, timedOut: false, stdout: "" };
+
+async function cleanupOAuthStoreFixture(): Promise<void> {
+  await flushConfigDirHardeningForTests();
+  setIcaclsRunnerForTests(null);
+  setAsyncIcaclsRunnerForTests(null);
+  resetHardenedStateForTests();
+  if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
+  else process.env.OPENCODEX_HOME = previousOpencodexHome;
+  if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
+}
 
 const cred = (over: Partial<OAuthCredentials> = {}): OAuthCredentials => ({
   access: "access-1",
@@ -64,8 +78,7 @@ async function selectionAccounts() {
 describe("multi-account auth store", () => {
   beforeEach(() => {
     previousOpencodexHome = process.env.OPENCODEX_HOME;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-    mkdirSync(TEST_DIR, { recursive: true });
+    TEST_DIR = mkdtempSync(join(tmpdir(), "ocx-oauth-store-multi-"));
     process.env.OPENCODEX_HOME = TEST_DIR;
     resetHardenedStateForTests();
     setIcaclsRunnerForTests(() => ({
@@ -74,19 +87,65 @@ describe("multi-account auth store", () => {
       timedOut: false,
       stdout: "",
     }));
-    setAsyncIcaclsRunnerForTests(async () => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
+    setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
   });
 
-  afterEach(async () => {
-    await flushConfigDirHardeningForTests();
-    setIcaclsRunnerForTests(null);
-    setAsyncIcaclsRunnerForTests(null);
-    resetHardenedStateForTests();
-    if (previousOpencodexHome === undefined) delete process.env.OPENCODEX_HOME;
-    else process.env.OPENCODEX_HOME = previousOpencodexHome;
-    if (existsSync(TEST_DIR)) removeTreeWithRetry(TEST_DIR);
-  });
+  afterEach(cleanupOAuthStoreFixture);
 
+  test("fixture cleanup waits for a held config-directory ACL flight before restoring home or deleting files", async () => {
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let markStarted!: () => void;
+    const started = new Promise<void>(resolve => { markStarted = resolve; });
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+    let cleaning: Promise<unknown> | undefined;
+    let cleanupSettled = false;
+    setPlatformForTests("win32");
+    // Keep SID discovery hermetic on Windows as well as on forced POSIX lanes.
+    setSyntheticWindowsPrincipalForTests("*S-1-5-21-1-2-3-1001");
+    setAsyncIcaclsRunnerForTests(async () => {
+      markStarted();
+      await held;
+      return ICACLS_OK;
+    });
+    try {
+      // A real store read starts the production-tracked directory hardening flight.
+      expect(getAccountSet("xai")).toBeNull();
+      await Promise.race([
+        started,
+        new Promise<never>((_, reject) => {
+          deadlineTimer = setTimeout(() => reject(new Error("ACL runner did not start")), INTERNAL_DEADLINE_MS);
+        }),
+      ]);
+      clearTimeout(deadlineTimer);
+      cleaning = cleanupOAuthStoreFixture().then(
+        () => { cleanupSettled = true; return null; },
+        (error: unknown) => { cleanupSettled = true; return error; },
+      );
+      // An event-loop checkpoint lets an incorrectly unawaited cleanup finish; no sleep oracle.
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(cleanupSettled).toBe(false);
+      expect(process.env.OPENCODEX_HOME).toBe(TEST_DIR);
+      expect(existsSync(TEST_DIR)).toBe(true);
+
+      release();
+      expect(await cleaning).toBeNull();
+      expect(cleanupSettled).toBe(true);
+      expect(process.env.OPENCODEX_HOME).toBe(previousOpencodexHome);
+      expect(existsSync(TEST_DIR)).toBe(false);
+    } finally {
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      // Even a broken cleanup must not release the held flight into the real runner.
+      setAsyncIcaclsRunnerForTests(async () => ICACLS_OK);
+      release();
+      try {
+        await cleaning;
+        await flushConfigDirHardeningForTests();
+      } finally {
+        setPlatformForTests(null);
+      }
+    }
+  }, STORE_BUDGET_MS);
   test("legacy single-credential auth.json normalizes and round-trips without losing login", async () => {
     const authPath = join(TEST_DIR, "auth.json");
     mkdirSync(TEST_DIR, { recursive: true, mode: 0o700 });

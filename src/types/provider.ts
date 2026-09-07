@@ -513,6 +513,10 @@ export interface OcxProviderConfig {
   modelReasoningEfforts?: Record<string, string[]>;
   /** Model-specific default Codex reasoning tier; must also be present in the visible tier list. */
   modelDefaultReasoningEfforts?: Record<string, string>;
+  /** Operator-owned effort override; none omits effort and uses the provider default. */
+  pinnedReasoningEffort?: string;
+  /** Per-model operator override, ahead of provider-wide and global pins; caps still apply. */
+  modelPinnedReasoningEfforts?: Record<string, string>;
   /**
    * Model-specific Codex reasoning-summary capability. Set false when an OpenAI-compatible
    * Responses backend rejects Codex summary-delivery fields for that model.

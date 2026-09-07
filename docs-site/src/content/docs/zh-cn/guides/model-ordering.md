@@ -104,7 +104,7 @@ subagentModels = [
 
 自定义开头模型顺序的受支持方式是重新排列 `subagentModels`。仪表盘的 **Sub-agents** 页面可以调整
 裸原生和路由 id 的顺序。配置和 `ocx agent subagents set` 也接受精确的账户限定
-`<selector>/<native-openai-model>` id，但仪表盘不会提供这些 id，保存列表时也不会保留它们。配置的
+`<selector>/<native-openai-model>` id，仪表盘会保留已保存的 id，即使当前不可用。配置的
 id 请勿超过五个。存在账户 selector 时，一个裸原生选项可能展开为多个 selector-qualified 行，因此
 已配置的选项与公布的行不一定一一对应。
 
@@ -145,3 +145,11 @@ V2 在客户端目录状态允许时，可以额外接收基于原有优先级�
 
 `disabledModels` 和各提供商的 `selectedModels` 仍是可见性字段。没有独立的 `modelOrder`、
 `providerOrder` 或优先级映射设置。
+
+## 仪表盘排序预设
+
+在 **Models** 中选择默认、按模型名 A–Z、按提供商或使用量快照，再应用顺序。保存当前可用的路由 ID 和 `modelPickerOrderMode`（`alphabetical`、`provider`、`most-used`）。使用量排序仅在应用时读取一次保留的全部历史；重新打开或模型增减不会重新计算。已有自定义、原生完整顺序会保留，直到明确应用替换。即使没有可用模型，默认也能清除两个字段。
+
+`GET/PUT /api/subagent-models` 的 `chosen`、`available` 保留禁用或缺失的已存 roster；`pickerAvailable` 只包含可选路由 ID。Models 只发送 `pickerOrder`、`pickerOrderMode`，不发送 `models`。只保存 roster 不影响排序，非法输入或保存失败会保留原状态。
+
+预设保留精选、原生优先级区间，应用于 Codex 目录与 Claude 发现列表的路由分组。Claude 原生前缀、明确的 Desktop 配置及 alias 归属不变。OpenCodex 指导排序与 fallback 设置不变，但原生 Codex 工具显示的前五候选及推荐默认模型可能改变。保存不会重启客户端；目录刷新可能尚未完成，旧列表可能需要重新打开客户端。

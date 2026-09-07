@@ -34,11 +34,18 @@ import type { V2RoutedDelegationBridgeState } from "../../pages/use-subagent-del
 
 export interface SubagentsWorkspaceProps {
   available: string[];
+  fallbackAvailable?: string[];
   chosen: string[];
   busy?: boolean;
   onToggle: (m: string) => void;
   onMove: (i: number, dir: -1 | 1) => void;
   onSave: () => void;
+  fallback: string[];
+  fallbackPollMs: number;
+  fallbackBusy: boolean;
+  onFallbackChange: (models: string[]) => void;
+  onFallbackPollMsChange: (pollMs: number) => void;
+  onFallbackSave: () => void;
   delegation: {
     model: string;
     effort: string;
@@ -80,11 +87,13 @@ export const FEATURED_MAX = 5;
 
 export default function SubagentsWorkspace({
   available,
+  fallbackAvailable,
   chosen,
   busy = false,
   onToggle,
   onMove,
   onSave,
+  fallback, fallbackPollMs, fallbackBusy, onFallbackChange, onFallbackPollMsChange, onFallbackSave,
   delegation,
   roles,
 }: SubagentsWorkspaceProps) {
@@ -302,6 +311,13 @@ export default function SubagentsWorkspace({
             childInstructions={delegation.childInstructions}
             childInstructionsSaving={delegation.childInstructionsSaving}
             onChildInstructionsSave={delegation.onChildInstructionsSave}
+            fallback={fallback}
+            fallbackPollMs={fallbackPollMs}
+            fallbackBusy={fallbackBusy}
+            availableModels={fallbackAvailable ?? available}
+            onFallbackChange={onFallbackChange}
+            onFallbackPollMsChange={onFallbackPollMsChange}
+            onFallbackSave={onFallbackSave}
           />
         </section>
       </div>

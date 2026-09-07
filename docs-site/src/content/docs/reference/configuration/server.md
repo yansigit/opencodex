@@ -429,6 +429,21 @@ These settings govern `/v1/messages`, `/v1/messages/count_tokens`, the `ocx clau
 | `claudeCode.subagentEffort?` | `"low" \| "medium" \| "high" \| "xhigh" \| "max"` | inherit | Effort written to generated `~/.claude/agents/ocx-*.md`; separate from Codex guidance and proxy caps. Restart through `ocx claude` to regenerate. |
 | `claudeCode.compatibility?` | `"shadow" \| "enforce"` | `enforce` | Compatibility gate for routed Claude ingress: `enforce` rejects unsupported requests before upstream activity with `400 invalid_request_error`; `shadow` records ordinary incompatibilities without rejecting, but signed-thinking ownership and other safety invariants still fail closed. |
 
+The compatibility policy applies to Claude Code, Desktop and other clients using translated
+Messages, including `?beta=true` and non-streaming requests. Omitted or invalid modes use
+`enforce`; native Anthropic routes bypass the gate. The fork preserves supported Responses
+mappings, including strict/deferred tool definitions on the OpenAI Responses adapter,
+tool search, structured output and service tier. Unsupported protocol semantics reject before
+inference; genuine Anthropic signed thinking also rejects on translated routes in `shadow`.
+See the [compatibility feature matrix](/guides/claude-code/#compatibility-mode) for exact rules.
+
+Shadow evidence contains only fixed protocol codes and derived reasons, retained in request
+logs and `usage.jsonl` and restored on restart. Its rejection diagnostics exclude features
+supported by the final adapter. Configure the mode in `config.json` and restart the proxy to
+load it; there is no dedicated GUI setter. Count-tokens and direct Responses/Chat APIs are
+outside this policy; successful token counting does not imply Messages admission. This
+setting does not add a global authorization boundary.
+
 Auto auth selects subscription when stored Claude auth is found, proxy when none is found, and
 subscription with a warning when detection is inconclusive. See
 [Claude Code auth mode](/guides/claude-code/#auth-mode).

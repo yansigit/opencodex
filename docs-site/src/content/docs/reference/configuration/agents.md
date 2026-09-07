@@ -299,3 +299,29 @@ apply. `max` and `ultra` are accepted, while the dashboard offers `low` through 
 
 For a beginner-oriented explanation of v1, default, and v2 behavior, see
 [Sub-agent surfaces](/guides/sub-agent-surface/).
+
+## Global model effort pins
+
+The optional root `modelPinnedEfforts` map fills or overrides incoming effort choices when
+neither a provider model pin nor a provider-wide pin is configured. For example:
+
+```json
+{
+  "modelPinnedEfforts": {
+    "example-provider/example-model": "high"
+  }
+}
+```
+
+Lookup checks the final selector before provider-prefix normalization, then the qualified
+`provider/model` destination, then its bare upstream model ID. Original combo aliases and
+synthetic effort-row selector IDs are not global pin keys; configure the concrete destination.
+Synthetic-row effort and combo defaults are preserved as the effective input before pinning.
+Each selected destination resolves its own pin, then applicable caps and wire normalization.
+Compaction requests are exempt. `none` means effort omission and provider-default behavior,
+not guaranteed reasoning disablement.
+
+`GET /api/effort-caps` includes the map. `PUT /api/effort-caps` accepts `modelPinnedEfforts`
+alongside the existing caps: omitted fields stay unchanged, `null` clears the map, and a map
+entry set to `null` or `""` deletes only that key. Invalid combined updates leave both caps
+and pins unchanged. Saving a pin does not alter the featured subagent roster.

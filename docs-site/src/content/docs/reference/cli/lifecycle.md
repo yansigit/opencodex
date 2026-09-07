@@ -88,6 +88,19 @@ are left in place.
 
 ### `ocx status [--json]`
 
+Status and `ocx doctor` compare this CLI's version with the running proxy. If the CLI is newer,
+restart the proxy using the intended current installation; for a background service, run
+`ocx service repair` (`ocx service restart` is an alias). If the proxy is newer, upgrade the CLI
+or resolve `PATH` to the intended installation. These diagnostics do not repair the service or
+change whether requests are allowed.
+
+Identical version strings and the `unknown` / `0.0.0` placeholders suppress the warning, as does
+an absent proxy version. Doctor does not report placeholders as a confirmed match. Different
+strings still produce a neutral warning when they cannot be strictly parsed as SemVer or differ
+only in build metadata; neither side is called older. Versions are not trimmed and a leading `v`
+is not normalized. JSON exposes the same advice in `versionSkew`, whose fields remain
+`cliVersion`, `proxyVersion`, `skewed`, and `warning`.
+
 Print a read-only diagnostic summary: proxy PID, `/healthz` reachability, dashboard URL, config path,
 default provider, Codex autostart setting, service state, shim state, and the redacted effective Codex
 home. Only the explicit, high-confidence Windows Orca runtime-home signature adds an actionable App-home
@@ -261,9 +274,10 @@ bundled Bun paths are deliberately rediscovered after upgrades instead of being 
 Definitions installed before this change still carry the old versioned paths and cannot migrate
 themselves — once the old executable is deleted, no opencodex code runs to fix it. Run
 `ocx service repair` once after upgrading; after that, each service start follows the launcher.
-An already-running proxy is not replaced by an external upgrade: restart the service (or run
-`ocx service repair`) so the new build serves, and treat a CLI/proxy version mismatch warning as
-exactly that signal.
+An already-running proxy is not replaced by an external upgrade: when the installed CLI is newer
+than the running proxy, restart the service (or run `ocx service repair`) so the new build serves.
+If the proxy is newer instead, check the CLI installation and `PATH` as described under
+[`ocx status`](#ocx-status---json).
 
 | Subcommand | Action |
 | --- | --- |

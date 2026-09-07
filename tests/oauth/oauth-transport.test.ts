@@ -11,6 +11,25 @@ describe("OAuth transport boundary", () => {
     expect(executor).not.toHaveBeenCalled();
   });
 
+  test("loopback HTTP is opt-in only and never applies to remote hosts", async () => {
+    const executor = mock(async () => new Response("unexpected")) as typeof fetch;
+    // Default policy keeps loopback plain HTTP rejected too.
+    await expect(oauthFetch("http://127.0.0.1:9999/token", {}, executor)).rejects.toThrow(OAuthTransportError);
+    expect(executor).not.toHaveBeenCalled();
+    // Opting in admits only the loopback hosts, still not remote HTTP.
+    const options = { allowLoopbackHttp: true } as const;
+    await expect(oauthFetch("http://router.example/token", options, executor)).rejects.toThrow(OAuthTransportError);
+    expect(executor).not.toHaveBeenCalled();
+    for (const host of ["127.0.0.1:9999", "[::1]:9999", "localhost:9999"]) {
+      await expect(oauthFetch(`http://${host}/token`, options, executor)).resolves.toBeInstanceOf(Response);
+    }
+    // The opt-in never widens remote HTTPS or credential rules.
+    await expect(oauthFetch("https://auth.example/token", options, executor)).resolves.toBeInstanceOf(Response);
+    await expect(oauthFetch("https://user:secret@127.0.0.1/token", options, executor))
+      .rejects.toThrow(OAuthTransportError);
+    expect(executor).toHaveBeenCalledTimes(4);
+  });
+
   test("rejects malformed or credential-bearing endpoint URLs without echoing them", async () => {
     const executor = mock(async () => new Response("unexpected")) as typeof fetch;
     for (const url of ["not-a-url?token=secret", "https://user:secret@127.0.0.1/token"]) {

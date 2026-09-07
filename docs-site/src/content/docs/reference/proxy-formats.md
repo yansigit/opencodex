@@ -306,11 +306,38 @@ Non-streaming output has `object: "chat.completion"`. Streaming output uses SSE 
 `data: [DONE]`. Tool-call and usage information are translated back where the source events carry
 them.
 
+ If a streaming Chat request receives a complete JSON Responses result upstream, the proxy
+synthesizes SSE from the converted completion. It preserves answer and reasoning content,
+function tool calls (with a separate stream `index` for each call), usage, and the converted
+`finish_reason`, including `tool_calls` and `length`. This fallback delivers the completed result
+in chunks; it cannot provide token-by-token delivery before the upstream JSON response arrives.
+It does not issue an additional inference request. An incomplete response caused by the output
+token limit or content filtering retains `length` or `content_filter`, even if it includes tool
+output. Other incomplete boundaries return an upstream error instead of claiming a normal finish.
+
+Refusal text stays separate from answer text: JSON completions use nullable `message.refusal`,
+and streaming chunks use `delta.refusal`. Native Chat JSON-to-SSE and SSE-to-JSON conversions
+preserve that field; native streaming relay preserves the provider's refusal deltas. On translated
+Responses streams, refusal parts are buffered until the terminal event and emitted once in their
+original output/content order. Compatible repeated or sparse snapshots do not duplicate or erase
+text. Contradictory refusal snapshots and buffer overflow produce a typed error without a successful
+finish or `[DONE]`. This preserves the upstream refusal; it does not introduce a proxy policy decision.
+
+Because the internal execution path is Responses-based, a provider adapter can impose a narrower
+feature set. For example, a request feature that cannot be represented by the selected adapter is
+ returned as an error instead of silently changing its meaning.
+
 ## `POST /v1/messages` and `count_tokens`
 
 These endpoints speak the Anthropic Messages dialect used by Claude Code and compatible clients.
 Most requests are translated to Responses, routed normally, then translated back to Anthropic JSON
 or Anthropic SSE.
+
+On translated Messages requests, reasoning replay shares the request's translation budget.
+Envelope admission includes encoding/decoding copy overhead, not just the original signature
+length. Requests exceeding this budget return HTTP 413 with `translation_buffer_limit`;
+signatures and opaque reasoning data are never truncated to make a request fit. Native
+Anthropic passthrough retains its separate body-size contract.
 
 Base64 and URL image sources are translated in user messages and nested tool results. File-backed
 images (`source.type: "file"`) require native Anthropic passthrough; translated routes return a
@@ -430,8 +457,15 @@ conversation.
 
 | Route type | Behavior |
 | --- | --- |
-| Canonical ChatGPT or official OpenAI route | Forwards the request to the native `/responses/compact` endpoint with the resolved account and model authentication |
+| Canonical ChatGPT or official OpenAI route | Tries the native `/responses/compact` endpoint with the resolved account and model authentication; HTTP 404 falls back to a regular Responses compaction turn |
 | Other routed model | Runs an internal, non-streaming, no-tools compaction turn with a `compaction_trigger`; requires exactly one synthetic `compaction` item whose `encrypted_content` is an `ocx1:` envelope; decodes that summary into v1 replacement history |
+
+If the native compact endpoint returns HTTP 404, OpenCodex retries compaction through a regular
+Responses turn with the same model selector and session headers. Canonical ChatGPT fallback
+turns use upstream SSE; the compact caller still receives JSON. A completed native opaque
+compaction item is preserved, while an `ocx1:` summary is decoded into replacement user history.
+Failed or incomplete fallback turns return an error instead of replacement history. Other
+native compact statuses retain their existing handling.
 
 Codex names a bare OpenAI-family model (for example `gpt-5.6-sol`) for its compaction turns
 regardless of which provider the operator routes ordinary turns to. Ordinary requests reserve
@@ -443,7 +477,30 @@ default provider is enabled and is not itself an OpenAI-family entry; account-qu
 such as `side/gpt-5.6-sol` still fail closed. The proxy logs one notice per provider when this
 fallback engages. Configurations with an enabled canonical `openai` provider are unchanged.
 
-Native compact responses are buffered with a 32 MiB maximum, including responses whose declared
+Inbound bodies on both `/v1/responses` and `/v1/responses/compact` retain the shared 256 MiB
+wire/decompression admission limit. Application-level size rejection returns HTTP 413 with
+`type` and `code` both `invalid_request_error`. Its message includes a bounded diagnostic suffix,
+for example:
+
+```text
+Decompressed request body exceeds 268435456 bytes [measurement=decoded_lower_bound; bytes=268435457]
+```
+
+| Measurement | Meaning of `bytes` |
+| --- | --- |
+| `declared_wire` | Numeric `Content-Length` declared by the sender; rejected before reading, not a measured decoded size |
+| `observed_wire_lower_bound` | Wire bytes encountered when reading stopped; the complete body may be larger |
+| `decoded_exact` | Exact size of the buffer supplied to the identity decoder or returned by a decoder |
+| `decoded_lower_bound` | Admission limit plus one after inflation aborts; a lower bound, never the exact decoded size |
+
+The suffix contains only a fixed category and a finite numeric byte value. Rejected bodies are
+not read or inflated further, parsed for item counts, or retained for diagnostics. Legacy errors
+without measurement provenance retain the limit-only message. Bun's listener can reject an
+oversized wire body before application diagnostics run, so not every 413 carries this suffix.
+A lower-bound diagnostic cannot establish the complete compact payload size. The admission
+limit and retry behavior are unchanged.
+
+Native compact responses are buffered with a separate 32 MiB maximum, including responses whose declared
 `Content-Length` already exceeds the limit. The compact-specific failures include:
 
 | Status | Type or code | Meaning |

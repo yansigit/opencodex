@@ -215,6 +215,15 @@ HTTP/SSE.
 
 ### Authless Codex Desktop (opt-in)
 
+In **Dashboard → Overview**, **Open Codex without signing in** controls this existing
+opt-in preference. The switch defaults to **off** when the setting is absent or false;
+an existing explicit `codexDesktopAuthless: true` stays enabled. The dashboard saves
+the preference and runs a full sync. Restart Codex Desktop after changing it.
+If synchronization fails, the saved preference remains and the dashboard shows the error;
+retry **Sync** before restarting. Account-gated Desktop features may be unavailable
+when enabled. Upstream credentials, local eligibility, remote admission authentication
+and user-owned gateway settings retain their existing requirements.
+
 Codex Desktop shows its ChatGPT login screen whenever the active provider requires OpenAI auth. If
 your OpenCodex setup never uses ChatGPT credentials (routed providers only, or a blocked
 `chatgpt.com`), you can opt out of that gate:
@@ -329,6 +338,13 @@ converts it to the nested `tools.apply_patch` call before the tool-completion ev
 Codex. Native custom calls and converted function calls use the same completion rule;
 patch previews are held while their executable form is unresolved. JavaScript that merely
 contains patch text and unrelated native custom payloads stay unchanged.
+
+Routed code-mode turns are also told the host's rules for the nested helpers before the first
+call: `tools.apply_patch` takes one string that opens and closes with the bare patch marker lines,
+the isolate has no `import`, and long-running commands are polled through `write_stdin`. When a
+code-mode exec result on the native routed Responses, Kiro, or Cursor path still carries one of the host's
+failure messages, opencodex appends a one-line hint naming the rule. This change does not rewrite
+the model's code or its patch text.
 
 Ordinary routed Responses function calls also use the original declared parameter schema at
 completion: integral floats in integer fields and integral numbers in string-only fields are
@@ -570,3 +586,10 @@ ocx restore back # point plain Codex at the running proxy again
 When opencodex runs as a managed [background service](/reference/cli/#ocx-service), it sets
 `OCX_SERVICE=1` so a service-driven restart does **not** thrash the Codex config — only an explicit
 `ocx stop` / `ocx service stop` restores native Codex.
+
+
+### Sub-agent fallback and V2 compatibility
+
+In **Subagents → Delegation settings**, edit the ordered fallback chain and its availability polling interval (5000–600000 ms), then save it separately from the featured roster. A configured target that is no longer advertised remains in the chain until you remove it. The roster and fallback chain are separate settings; this editor does not make the roster replace the fallback policy.
+
+When a routed preferred model may receive V2 work from a native ChatGPT parent, the panel explains the upstream encrypted-task limitation. Readable tasks from routed parents are unaffected. The guidance uses `/api/v2` mode and native V1 pin state; the current API does not expose recovery activation or request-specific eligibility, so the panel reports those as unknown. V1/plaintext-compatible delegation remains an alternative. Experimental V2 recovery, where eligible and explicitly enabled, adds quota usage, latency, backend dependence and possible fidelity loss; it does not repair the upstream protocol. See [sub-agent surfaces](/guides/sub-agent-surface/) and [the upstream limitation](https://github.com/lidge-jun/opencodex/issues/92).

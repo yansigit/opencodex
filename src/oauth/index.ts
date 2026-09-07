@@ -46,6 +46,7 @@ import { loginCursor, refreshCursorToken } from "./cursor";
 import { loginGithubCopilot, refreshGithubCopilotToken, validateCopilotApiBaseUrl } from "./github-copilot";
 import { loginCommandCode, refreshCommandCodeToken } from "./command-code";
 import { loginMetaMuse, refreshMetaMuseToken } from "./meta-muse";
+import { loginOrcaRouter, orcaRouterInferenceBaseUrl, refreshOrcaRouterKey } from "./orcarouter";
 import { ANTIGRAVITY_REQUEST_UA } from "../adapters/google-antigravity-wire";
 import { deriveOAuthDefaultModel, deriveOAuthProviderConfig } from "../providers/derive";
 import { apiKeyPoolEntryId, sanitizeApiKeyValue } from "../providers/api-keys";
@@ -185,7 +186,7 @@ export interface LoginFlowLifecycle {
 }
 
 interface OAuthProviderDef {
-  login(ctrl: OAuthController, opts?: LoginOpts): Promise<OAuthCredentials>;
+  login(ctrl: OAuthController, opts?: LoginOpts, providerConfig?: OcxProviderConfig): Promise<OAuthCredentials>;
   refresh(
     refreshToken: string,
     signal?: AbortSignal,
@@ -193,6 +194,8 @@ interface OAuthProviderDef {
   ): Promise<OAuthCredentials>;
   /** provider entry written into config.json on first login. */
   providerConfig: OcxProviderConfig;
+  /** Resolve login-owned config from the latest disk state (for configurable OAuth origins). */
+  resolveProviderConfig?: (config: OcxConfig) => OcxProviderConfig;
   defaultModel: string;
   /**
    * Built-in proactive-refresh policy, risk-tiered by the provider's ToS exposure (devlog
@@ -221,6 +224,27 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderDef> = {
     refresh: refreshCommandCodeToken,
     providerConfig: oauthConfig("command-code"),
     defaultModel: oauthDefaultModel("command-code"),
+    defaultRefreshPolicy: "disabled",
+  },
+  "orcarouter-oauth": {
+    login: (ctrl, _opts, providerConfig) => loginOrcaRouter(ctrl, {
+      baseUrl: process.env.ORCAROUTER_API_BASE_URL
+        ?? process.env.ORCAROUTER_BASE_URL
+        ?? providerConfig?.baseUrl,
+      authBaseUrl: process.env.ORCAROUTER_AUTH_BASE_URL,
+    }),
+    refresh: refreshOrcaRouterKey,
+    providerConfig: oauthConfig("orcarouter-oauth"),
+    resolveProviderConfig: config => ({
+      ...oauthConfig("orcarouter-oauth"),
+      baseUrl: orcaRouterInferenceBaseUrl(
+        process.env.ORCAROUTER_API_BASE_URL
+          ?? process.env.ORCAROUTER_BASE_URL
+          ?? config.providers["orcarouter-oauth"]?.baseUrl,
+      ),
+    }),
+    defaultModel: oauthDefaultModel("orcarouter-oauth"),
+    // The credential is a durable API key. There is no refresh endpoint.
     defaultRefreshPolicy: "disabled",
   },
   xai: {
@@ -575,6 +599,7 @@ const FORCE_REFRESH_PROVIDERS = new Set([
   "kiro",
   "google-antigravity",
   "cursor",
+  "orcarouter-oauth",
 ]);
 
 export async function forceRefreshOAuthAccessSnapshot(
@@ -1472,10 +1497,11 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   const namespaceCollision = codexAccountNamespaceProviderCollisionError(config.codexAccountNamespaces, provider);
   if (namespaceCollision) throw new Error(namespaceCollision);
   const existing = config.providers[provider];
+  const providerConfig = def.resolveProviderConfig?.(config) ?? def.providerConfig;
   // Clone operator state, including xAI wire choices and their migration version.
-  const next: OcxProviderConfig = structuredClone(existing ?? def.providerConfig);
+  const next: OcxProviderConfig = structuredClone(existing ?? providerConfig);
   for (const field of OAUTH_LOGIN_OWNED_PROVIDER_FIELDS) {
-    const value = def.providerConfig[field];
+    const value = providerConfig[field];
     if (value === undefined) delete next[field];
     else next[field] = structuredClone(value) as never;
   }
@@ -1484,7 +1510,7 @@ export function upsertOAuthProvider(config: OcxConfig, provider: string): void {
   if (next.googleMode === "cloud-code-assist") delete next.project;
   // Login used to rebuild the whole row from the preset, so catalog data refreshed
   // immediately. Keep that timing without overwriting unrelated operator-owned fields.
-  applyOAuthPresetCatalog(next, def.providerConfig);
+  applyOAuthPresetCatalog(next, providerConfig);
   // The original Command Code seed was an implementation-owned static catalog, not an
   // operator opt-out. Promote that exact legacy shape when OAuth login refreshes the row.
   if (provider === "command-code" && existing && isLegacyCommandCodeStaticCatalog(existing)) {
@@ -1566,8 +1592,8 @@ export async function runLogin(
   const loadLatestConfig = deps.loadConfig ?? loadConfig;
   const mutateLatestConfig = deps.mutatePersistedConfig ?? mutatePersistedConfig;
   const initializeLatestConfig = deps.initializePersistedConfigIfMissing ?? initializePersistedConfigIfMissing;
-  if (provider !== "chatgpt") {
-    const preflightConfig = loadLatestConfig();
+  const preflightConfig = provider !== "chatgpt" ? loadLatestConfig() : undefined;
+  if (preflightConfig) {
     const namespaceCollision = codexAccountNamespaceProviderCollisionError(
       preflightConfig.codexAccountNamespaces,
       provider,
@@ -1580,7 +1606,10 @@ export async function runLogin(
   const previousKiroAccounts = shouldRollbackKiroAccounts ? getAccountSet(provider) : undefined;
   const previousKiroActiveId = previousKiroAccounts?.activeAccountId;
   const previousKiroAccountIds = new Set(previousKiroAccounts?.accounts.map(account => account.id) ?? []);
-  const rawCred = await def.login(ctrl, opts);
+  const loginProviderConfig = preflightConfig
+    ? (def.resolveProviderConfig?.(preflightConfig) ?? preflightConfig.providers[provider] ?? def.providerConfig)
+    : def.providerConfig;
+  const rawCred = await def.login(ctrl, opts, loginProviderConfig);
   const cred: OAuthCredentials = rawCred.source ? rawCred : { ...rawCred, source: "oauth" };
   const settleKiroTransaction = deps.settleKiroLoginTransaction ?? settleKiroLoginTransaction;
   try {

@@ -238,6 +238,14 @@ See [Combos](/guides/combos/) for target strategies, cooldowns, aliases, and rou
 
 ### Logs, usage, and storage
 
+`GET /api/logs` accepts an optional opaque `cursor` from its previous response. The envelope preserves
+`logs`, `total`, `generatedAt` and `timeZone`, and adds `cursor` and `reset`. Without a cursor it returns
+the full filtered window. A valid unchanged prefix returns only appended rows; `reset: true` replaces
+the client window after edits, eviction, query changes or restart. Invalid cursors return HTTP 400 with
+`error.code: "invalid_cursor"`. Authentication is unchanged. The dashboard falls back to full snapshots
+for older servers. This reduces response bytes for stable windows; server projection remains bounded
+by the current window size.
+
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
 | `GET /api/logs` | Query filtered in-memory request logs | — |
@@ -246,7 +254,7 @@ See [Combos](/guides/combos/) for target strategies, cooldowns, aliases, and rou
 | `GET /api/debug/usage-logs` | Read bounded usage-debug entries | — |
 | `GET /api/debug/injection-logs` | Read bounded guidance-injection debug entries | — |
 | `GET /api/claude/inbound-debug` | Read Claude inbound debug state and entries | — |
-| `GET /api/usage` | Stream the complete usage ledger into compact aggregates, then incrementally fold verified appends; summarize by range and client surface, with a Codex `accounts` breakdown keyed by stable non-PII log labels | Returns an `error: "read_failed"` summary if storage cannot be read |
+| `GET /api/usage` | Stream the complete usage ledger into compact aggregates, then incrementally fold verified appends; summarize by preset or inclusive custom window and client surface, with a Codex `accounts` breakdown keyed by stable non-PII log labels | 400 invalid custom bounds; returns an `error: "read_failed"` summary if storage cannot be read |
 | `GET /api/storage` | Scan Codex storage usage by bucket | Returns an `error: "scan_failed"` payload on scan failure |
 | `POST /api/storage/cleanup/preview` | Preview archived-session cleanup and return a binding digest | 400 `invalid_json` or `invalid_percent` |
 | `POST /api/storage/cleanup` | Quarantine or permanently remove the previewed archived set | 400 invalid input; 409 stale/busy/referenced state; 500 filesystem/database failure |
@@ -274,6 +282,23 @@ an earlier file prefix from 7-day, 30-day, or all-history totals. `managementUsa
 accepted for compatibility with bounded legacy readers, but changing it no longer expands or reduces
 the history summarized by this endpoint.
 
+Pass both `since` and `until` to select an inclusive custom interval. Each accepts integer Unix
+epoch **milliseconds**, or a full ISO datetime with an explicit timezone. Invalid dates, negative
+or out-of-range values, reversed bounds, and a single bound are rejected. Custom bounds override
+`range`; the response keeps the preset `range` field for compatibility and adds `customWindow: true`,
+the exact `since`, and `until`. `generatedAt` remains the time the report was produced.
+
+Custom windows filter individual ledger entries before daily aggregation, including partial first
+and last days. They preserve `surface`, `provider`, `model`, and `apiKeyId` filtering and never reuse
+or overwrite unfiltered preset summaries. The daily chart remains capped at 366 local calendar days;
+totals cover the full requested interval. Snapshot-window fields describe the scanned ledger before
+the time filter, so they can extend beyond the requested bounds.
+
+The Usage page accepts local date/time inputs. Its selected ending minute includes the entire
+minute through `:59.999`. Choosing a preset or clearing the custom window restores preset behavior.
+This adds exact range selection and existing cost estimates; it does not add hourly chart buckets
+or offline reporting.
+
 The runtime ledger is append-only. Replacing or truncating it, or changing local pricing/time-zone
 inputs, triggers a complete rebuild. If you manually edit an older row in place while the proxy is
 running, restart the proxy (or replace the file) before relying on the new total; incremental refreshes
@@ -292,6 +317,29 @@ re-estimated from the pricing active when the summary is read. This is an API-eq
 not a subscription charge. New main-pool requests use the reserved `main` label; legacy bare
 `openai` rows remain in an ambiguous bucket instead of being reassigned from current configuration.
 
+Manual model prices can also be edited from **Models → Price**. A manual-pricing badge survives
+catalog reloads. Prices are stored in `providers.<name>.modelCosts` and survive catalog sync.
+Explicit all-zero user rates mean a known-zero estimate; **Reset to automatic** removes the
+override and restores the usual catalog fallback. These remain display estimates, not bills.
+
+`GET /api/providers/{provider}/model-costs` returns `{ provider, modelCosts }`, with sanitized
+four-rate entries keyed by exact upstream model ID. `PUT` on the same route accepts
+`{ modelId, cost }`, where `cost` is `{ input, output, cacheRead, cacheWrite }` or `null` to reset.
+All four rates must be finite numbers from 0 through 1,000,000, in USD per 1M tokens.
+Unknown fields and malformed rates are rejected. A write preserves other models' overrides
+and returns `{ ok: true, provider, modelId, cost }`; reset returns `cost: null`.
+
+```bash
+ocx models price ollama/custom-model --json
+ocx models set-price ollama/custom-model --input 0.50 --output 1.50
+ocx models set-price ollama/custom-model --input 0 --output 0
+ocx models set-price ollama/custom-model --auto
+```
+
+Omitted CLI cache-read/cache-write rates default to zero. Use `--cache-read` and `--cache-write`
+to set them explicitly. A provider name remains an exact configuration identity; account display
+labels are not editable provider names.
+
 Rows in `models`, `providers`, and `days[].models` also carry `cacheHitRate`: the share of input
 tokens served from the provider's prompt cache, clamped to `[0, 1]`. It is `null` — never `0` —
 when the provider reported no cache telemetry or the row has no input tokens, because "no cache
@@ -302,6 +350,10 @@ misleading.
 Storage cleanup endpoints can move or permanently remove archived session data. Always preview
 first and submit the returned digest. Prefer quarantine when recovery may be needed.
 :::
+
+Cleanup recovery manifests are published atomically, preserving the previous complete record
+if a replacement fails before publication. This does not reverse a permanent purge: restore
+can still fail when a recorded session has no surviving rollout file.
 
 ### Models and catalog
 
@@ -407,7 +459,7 @@ whether to star the repository.
 
 | Method and path | Purpose | Notable errors |
 | --- | --- | --- |
-| `GET /api/system/memory` | Return scalar process, heap, stream, response-state, watchdog, and active-turn metrics. Response-state diagnostics include spill-write status, consecutive failures, fixed privacy-safe failure class, and last failure/success timestamps; raw errors and paths are never returned. | — |
+| `GET /api/system/memory` | Return scalar process, heap, stream, response-state, watchdog, and active-turn metrics. Response-state diagnostics include spill-write status, consecutive failures, fixed privacy-safe failure class, and last failure/success timestamps. `spillLastWriteFailureOrigin` is `retry_returned_timeout`, `timeout_memo_refusal`, or null; cumulative `spillAclRetryReturnedTimeouts` and `spillAclTimeoutMemoRefusals` count terminal failed publications. See [Windows spill diagnostics](/troubleshooting/windows-memory/) for process-local semantics. Raw errors and paths are never returned. | — |
 | `POST /api/system/restart` | Begin a drain-aware process restart without removing client injection | Returns 202; repeated calls report the existing drain |
 | `POST /api/stop` | Stop the service, restore native Codex, remove managed Grok injection, and drain the proxy | 409 service ownership conflict; 409 `respawnable_service` when a Windows Task Scheduler wrapper could respawn the proxy and the caller is not `ocx stop` (nothing is changed); 409 when the installed manager refuses to stop; 409 `service_state_unknown` when the Task Scheduler state cannot be read (nothing is changed; repair the query and retry) |
 | `GET /api/system/codex-app-server` | Report whether running Codex app-servers predate the current model catalog | — |

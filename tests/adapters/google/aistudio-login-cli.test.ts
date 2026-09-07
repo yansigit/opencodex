@@ -11,6 +11,8 @@ import { join } from "node:path";
 import * as readline from "node:readline";
 import { enrichProviderFromRegistry } from "../../../src/providers/derive";
 import type { OcxProviderConfig } from "../../../src/types";
+import { flushConfigDirHardeningForTests } from "../../../src/config/paths";
+import { setAsyncIcaclsRunnerForTests, setIcaclsRunnerForTests } from "../../../src/lib/windows-secret-acl";
 
 describe("google-aistudio provider registration & instructions", () => {
   test("registry entry has clear label, description, and dashboard instructions", () => {
@@ -108,12 +110,17 @@ describe("handleAiStudioLogin uses native login without bridge fallback", () => 
     previousHome = process.env.OPENCODEX_HOME;
     tempHome = mkdtempSync(join(tmpdir(), "ocx-aistudio-cli-"));
     process.env.OPENCODEX_HOME = tempHome;
+    setIcaclsRunnerForTests(() => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
+    setAsyncIcaclsRunnerForTests(async () => ({ success: true, exitCode: 0, timedOut: false, stdout: "" }));
     openUrlMod = await import("../../../src/lib/open-url");
     proxyLivenessMod = await import("../../../src/server/proxy-liveness");
     configMod = await import("../../../src/config");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await flushConfigDirHardeningForTests();
+    setIcaclsRunnerForTests(null);
+    setAsyncIcaclsRunnerForTests(null);
     if (previousHome === undefined) delete process.env.OPENCODEX_HOME;
     else process.env.OPENCODEX_HOME = previousHome;
     if (tempHome) rmSync(tempHome, { recursive: true, force: true });
@@ -128,23 +135,26 @@ describe("handleAiStudioLogin uses native login without bridge fallback", () => 
     const errors: string[] = [];
     const openSpy = spyOn(openUrlMod, "openUrl").mockImplementation((url: string) => { opened.push(url); });
     const findSpy = spyOn(proxyLivenessMod, "findLiveProxy").mockResolvedValue(null as any);
-    const loadSpy = spyOn(configMod, "loadConfig").mockReturnValue({ providers: {} } as any);
-    const saveSpy = spyOn(configMod, "saveConfig").mockImplementation(() => {});
+    const loadSpy = spyOn(configMod, "loadConfig").mockReturnValue({ ...configMod.getDefaultConfig(), port: 19346 });
     const rlClose = () => {};
-    const rlMock = { close: rlClose } as any;
     const createSpy = spyOn(readline, "createInterface").mockReturnValue({
       question: (_prompt: string, cb: (ans: string) => void) => cb(choice),
       close: rlClose,
     } as any);
     const nativeResult = opts.nativeResult ?? { kind: "authenticated" as const };
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const restorePlatform = () => Object.defineProperty(process, "platform", originalPlatform);
     const nativeSpy = spyOn(await import("../../../src/oauth/aistudio-native-daemon"), "runAiStudioNativeLogin")
-      .mockResolvedValue(
-        nativeResult.kind === "authenticated"
+      .mockImplementation(async () => {
+        // Spoof only native-login selection, never the subsequent real filesystem
+        // commit: Windows mode bits cannot satisfy the POSIX privacy assertion.
+        restorePlatform();
+        return nativeResult.kind === "authenticated"
           ? { kind: "authenticated", sessionPath: join(tempHome, "aistudio-session.json") }
           : nativeResult.kind === "failed"
             ? { kind: "failed", error: nativeResult.error ?? "Native AI Studio login failed" }
-            : { kind: "cancelled" },
-      );
+            : { kind: "cancelled" };
+      });
     const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => { logs.push(args.map(String).join(" ")); });
     const errorSpy = spyOn(console, "error").mockImplementation((...args: unknown[]) => { errors.push(args.map(String).join(" ")); });
     const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
@@ -164,7 +174,6 @@ describe("handleAiStudioLogin uses native login without bridge fallback", () => 
       openSpy.mockRestore();
       findSpy.mockRestore();
       loadSpy.mockRestore();
-      saveSpy.mockRestore();
       createSpy.mockRestore();
       nativeSpy.mockRestore();
       logSpy.mockRestore();
@@ -188,9 +197,13 @@ describe("handleAiStudioLogin uses native login without bridge fallback", () => 
   });
 
   test("native WebKit login (empty choice on darwin) does NOT open bridge URL", async () => {
-    const { opened } = await runWithChoice("", { platform: "darwin" });
+    const { opened, logs } = await runWithChoice("", { platform: "darwin" });
     const bridgeOpens = opened.filter(u => u.includes("/aistudio/bridge"));
     expect(bridgeOpens).toEqual([]);
+    expect(logs.join("\n")).toContain("authenticated successfully");
+    const persisted = JSON.parse(readFileSync(join(tempHome, "config.json"), "utf8"));
+    expect(persisted.providers["google-aistudio"].googleMode).toBe("ai-studio-web");
+    expect(persisted.providers["google-aistudio"].baseUrl).toBe("https://alkalimakersuite-pa.clients6.google.com");
   });
 
   test("non-darwin empty choice does not open bridge URL", async () => {

@@ -163,9 +163,18 @@ Claude Code 2.1.129 以降は `GET /v1/models?limit=1000` でゲートウェイ�
 提供します。両系列は継続してデコードできるため、どちらの形式でも `settings.json` に保存したモデルは
 引き続き動作します。
 
-Claude Desktop のフッターピッカーで実行中の 3P 会話のモデルが切り替わらない場合は、その会話で
-`/model <id>` を使用してください。OpenCodex はピッカーの状態を直接参照できず、各リクエストに
-含まれるモデル ID をルーティングします。結果は **Logs → requestedModel** で確認できます。
+Claude Desktop のフッターピッカーで実行中の 3P 会話のモデルが切り替わらない場合は、
+`/model <id>` を試せますが、影響を受ける Desktop ビルドではこの回避策も失敗することがあります。
+[Issue #3782](https://github.com/lidge-jun/opencodex/issues/3782) では、Windows 上の
+Claude Desktop 1.46388.4 で、フッターピッカーと `/model` のどちらで変更しても、会話が最初の
+モデルを使い続けると報告されています。この報告だけでは、クライアントやルーティングのどの
+コンポーネントがこの動作の原因なのかは確定できません。
+
+OpenCodex の Claude Desktop プロファイルで希望するデフォルトモデルを選択し、プロファイルを
+再適用して、新しい会話を開始することも試せます。これはトラブルシューティングの手順であり、
+解決を保証するものではありません。OpenCodex はピッカーの状態を参照できず、各リクエストに
+含まれるモデル ID をルーティングします。クライアントが何を送信しているかは
+**Logs → requestedModel** で確認してください。
 
 **エイリアス構文ルール:** provider には `/` や `--` を含められず `native` と同じでもいけません。
 `/` も `~` も含まない plain な model ID は v1 接頭辞 `claude-ocx-…` のままです。`/` または `~` を含む
@@ -392,11 +401,13 @@ Claude Code の `/effort` 設定はアダプターでも維持されます。
 | Assistant テキスト | `output_text` |
 | Assistant `tool_use` | `function_call`(`input` → JSON 文字列に変換した `arguments`) |
 | ユーザー `tool_result` | `function_call_output`(`is_error` → `[tool error]` 接頭辞) |
-| `thinking` / `redacted_thinking` 再生 | 破棄 |
+| `thinking` / `redacted_thinking` 再生 | シグネチャと秘匿ペイロードを境界付き `ocxr1` エンベロープに保持した `reasoning` 項目 |
 | Function ツール | `{type: "function"}`(`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`、`none`→`none`、`any`→`required`、名前指定関数→`{type:"function",name}`、ホスト型 WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
+
+意図した Anthropic アダプターでは、非表示でない署名付きブロック（空の thinking を含む）と不透明な redacted ブロックを保持します。`hideThinkingSummary` は変更しません。ローカルで隠した署名付きテキストは Claude クライアントに公開せず、この非表示境界での無損失再生は未確認です。旧形式の結合エンベロープは、テキスト送信後に元のブロック順を復元できません。`claudeCode.compatibility: "enforce"` は引き続き thinking 再生を拒否します。実際の Anthropic 受理やキャッシュ改善の証明ではなく、[#3719](https://github.com/lidge-jun/opencodex/issues/3719) は未解決です。
 
 **エラー条件(400):** 不正な JSON、欠落または空の `model`、欠落または空の `messages`、未サポートの
 role、`tool_use_id` のない `tool_result`、id/name のない `tool_use`、name のない名前指定 `tool_choice` です。
@@ -408,7 +419,8 @@ role、`tool_use_id` のない `tool_result`、id/name のない `tool_use`、na
 | `response.created` | `message_start` + `ping` |
 | Heartbeat | `ping` |
 | テキスト delta | `content_block_start` → `content_block_delta`(text) → `content_block_stop` |
-| 推論要約/テキスト | 合成シグネチャ付きの `thinking` ブロック |
+| 推論要約/テキスト | 再生されたシグネチャ、または境界付き `ocxr1` フォールバックを持つ `thinking` ブロック |
+| 秘匿化された推論 | 推論エンベロープから再生される `redacted_thinking` ブロック |
 | Function-call フレーム | `input_json_delta` を持つ `tool_use` ブロック |
 | 終了イベント | `message_delta` → `message_stop` |
 | 終了前に EOF | 502 形式 `api_error` |

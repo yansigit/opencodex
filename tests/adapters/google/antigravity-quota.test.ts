@@ -15,6 +15,7 @@ import type { OcxConfig } from "../../../src/types";
 const originalFetch = globalThis.fetch;
 const previousOpencodexHome = process.env.OPENCODEX_HOME;
 let opencodexHome: string;
+let initialProbes = 0;
 
 const DAILY_HOST = "https://daily-cloudcode-pa.googleapis.com";
 const PROD_HOST = "https://cloudcode-pa.googleapis.com";
@@ -86,13 +87,20 @@ beforeEach(async () => {
     projectId: PROJECT,
   });
   clearProviderQuotaCache();
+  initialProbes = 0;
   setAntigravityAccountQuotaTransportForTests({
     resolveAddresses: async () => ({
       hostname: "daily-cloudcode-pa.googleapis.com",
       addresses: [{ address: "142.250.0.1", family: 4 }],
       privateNetwork: false,
     }),
-    pinnedPost: async () => jsonResponse({}, 404),
+    pinnedPost: async (url, _address, body, signal, options) => {
+      // Exercise richer fallback after the primary summary/catalog are unavailable.
+      // The fixture executor now sits behind the pinned transport seam, not beside it.
+      if (initialProbes++ < 2) return jsonResponse({}, 404);
+      expect(options?.rejectUnauthorized).toBe(true);
+      return globalThis.fetch(url, { method: "POST", body, signal, headers: options?.headers, redirect: "error" });
+    },
   });
 });
 
@@ -494,6 +502,7 @@ describe("Antigravity live quota", () => {
 
     const valid = await fetchProviderQuotaReports(config(), true);
     rejected = true;
+    initialProbes = 0; // Keep the second refresh on the same richer-fallback path.
     const rejectedRefresh = await fetchProviderQuotaReports(config(), true);
 
     expect(valid.reports).toHaveLength(1);

@@ -10,6 +10,9 @@ export const SERIAL_TEST_FILES = [
   "tests/adapters/anthropic/anthropic-image-normalize.test.ts",
   "tests/claude-integration/claude-native-passthrough.test.ts",
   "tests/claude-integration/claude-management-api.test.ts",
+  // Real descendant termination needs a fresh process and the shared loaded
+  // startup budget; its marker and child/grandchild reaping assertions remain.
+  "tests/claude-integration/claude-certification.test.ts",
   // Uses real multi-second streaming and inactivity deadlines. The macOS
   // promotion pool delayed both sides past their test-level bounds.
   "tests/clients/remote-catalog.test.ts",
@@ -60,6 +63,15 @@ export const SERIAL_TEST_FILES = [
   // Keep its 60s product invariant, but remove unrelated suite contention.
   "tests/usage/quota-reset-seen-store.test.ts",
   "tests/responses/responses-stateless-dangling-call-repair.test.ts",
+  // Repeated real listener/config lifecycles hang a reused macOS Bun worker
+  // after the quotaWindow round-trip in the full pool (reproduced twice), while
+  // all 21 tests pass in a fresh process and in the server-only suite. Preserve
+  // the lifecycle assertions and deadlines; give this file its own process.
+  "tests/server/account-pool-management-api.test.ts",
+  // A reused Bun 1.4 macOS worker can spin during this file's first server
+  // lifecycle (sampled at 99% CPU); contain its debug/server globals in a fresh
+  // process while retaining every endpoint assertion and original deadline.
+  "tests/server/api-debug.test.ts",
   "tests/server/server-auth.test.ts",
   // Proves heartbeats cover a real 1.5s retry wait inside a 5s test budget.
   // The loaded macOS pool consumed that margin without a product failure.

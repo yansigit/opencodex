@@ -60,7 +60,28 @@ La rotation garde les deux clés valides sous le même `apiKeyId` pendant dix mi
 
 ## Docker, retour arrière et dépannage
 
-Il n’existe pas d’image Docker officielle, mais le dépôt fournit un `Dockerfile` et un `compose.yaml` maintenus pour construire localement une image Bun épinglée par digest. Au premier démarrage normal, le conteneur crée un certificat TLS auto-signé dans `/home/bun/.opencodex/container-tls/cert.pem` et sa clé privée dans `/home/bun/.opencodex/container-tls/key.pem`. La clé reste accessible au seul propriétaire dans le volume `ocx-state`, et le point de terminaison de données utilise HTTPS dès ce démarrage.
+Lors d'un retour arrière, conservez les deux volumes et leurs points de montage. Les droits des volumes existants ne sont pas corrigés automatiquement. Consultez le [guide canonique](/guides/remote-hub/#docker-compose) pour les montages nommés hors Compose et les chemins d'état personnalisés.
+
+Deux volumes distincts conservent l'état : `ocx-state` pour
+`OPENCODEX_HOME=/home/bun/.opencodex` et `codex-state` pour
+`CODEX_HOME=/home/bun/.codex`. Leurs fichiers `auth.json` ont des formats incompatibles :
+ne fusionnez pas ces répertoires. Ils restent accessibles en écriture malgré la racine en lecture seule.
+
+Le catalogue n'est pas généré automatiquement. Avant de tester `/v1/catalog` avec authentification,
+créez ou importez un fichier valide dans `/home/bun/.codex/opencodex-catalog.json`.
+Un répertoire vide renvoie normalement 404 `catalog_not_found`. Une mise à jour conserve
+`ocx-state` et ajoute `codex-state`, sans déplacer les fichiers. Sauvegardez tout catalogue
+précédemment placé dans `.opencodex`, puis transférez seulement ce catalogue avec des permissions
+réservées au propriétaire ; ne remplacez pas un `auth.json` par celui de l'autre produit.
+Si vous redéfinissez `CODEX_HOME`, montez ce répertoire exact en écriture et placez le catalogue
+par défaut dans `${CODEX_HOME}/opencodex-catalog.json`. Si `model_catalog_json` désigne un autre
+fichier, son chemin résolu doit aussi être persistant. Conservez les variables et montages
+personnalisés jusqu'à la fin d'une migration explicite.
+`docker compose down` conserve les deux volumes ; `docker compose down --volumes` supprime
+`ocx-state` et `codex-state`, avec les identifiants, l'historique d'utilisation, la clé de données,
+l'état et le catalogue Codex. Ce n'est pas une commande de mise à jour ou de redémarrage.
+
+Il n’existe pas d’image Docker officielle, mais le dépôt fournit un `Dockerfile` et un `compose.yaml` maintenus pour construire localement une image Bun épinglée par digest. Au premier démarrage normal, le conteneur crée un certificat TLS auto-signé dans `/home/bun/.opencodex/container-tls/cert.pem` et sa clé privée dans `/home/bun/.opencodex/container-tls/key.pem`; la clé reste accessible au seul propriétaire dans le volume `ocx-state` et le point de terminaison de données utilise HTTPS.
 
 Avant ce premier démarrage, initialisez une seule fois le jeton de données via stdin. L’outil d’amorçage accepte au plus une ligne de 512 octets, ne l’affiche jamais, refuse de remplacer un jeton existant et l’enregistre dans le fichier privé canonique `service-api-token`.
 

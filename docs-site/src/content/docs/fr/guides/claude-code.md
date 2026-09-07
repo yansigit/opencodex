@@ -290,8 +290,16 @@ anciens alias hachés et les identifiants `claude-ocx-<provider>--<model>` des c
 toujours résolus.
 
 Si le sélecteur situé au bas de Claude Desktop ne modifie pas le modèle d'une conversation 3P déjà en cours,
-utilisez `/model <id>` dans cette conversation. OpenCodex ne peut pas observer l'état du sélecteur ; il
-achemine l’identifiant du modèle porté par chaque requête. Confirmez le résultat sous **Journaux → requestModel**.
+vous pouvez essayer `/model <id>`, mais ce contournement peut également échouer sur les versions de Desktop
+concernées. Le [ticket #3782](https://github.com/lidge-jun/opencodex/issues/3782) rapporte que sous Windows,
+avec Claude Desktop 1.46388.4, la conversation continue d'utiliser son modèle initial après des changements
+via le sélecteur du bas comme via `/model`. Ce signalement ne permet pas d'établir quel composant du client
+ou du routage est à l'origine de ce comportement.
+
+Vous pouvez aussi essayer de sélectionner le modèle par défaut souhaité dans le profil Claude Desktop
+d'OpenCodex, de réappliquer ce profil et de démarrer une nouvelle conversation. Il s'agit d'une étape de
+dépannage, sans garantie de résolution. OpenCodex ne peut pas observer l'état du sélecteur ; il achemine
+l'identifiant du modèle porté par chaque requête. Vérifiez ce que le client envoie sous **Logs → requestedModel**.
 
 Les modèles dont la fenêtre de contexte de référence atteint 1M obtiennent une ligne supplémentaire `…[1m]` dans le sélecteur.
 Sa sélection indique à Claude Code la fenêtre complète de 1M pour ce modèle, tout en maintenant le compactage automatique ; le proxy retire
@@ -526,11 +534,13 @@ Le proxy traduit chaque requête Anthropic Messages API au format Codex Response
 | Texte assistant | `output_text` |
 | Assistant `tool_use` | `function_call` (`input` → JSON-stringifié `arguments`) |
 | Utilisateur `tool_result` | `function_call_output` (`is_error` → préfixe `[tool error]`) |
-| Relecture de `thinking` / `redacted_thinking` | Ignorée |
+| Relecture de `thinking` / `redacted_thinking` | Éléments `reasoning` avec enveloppes `ocxr1` bornées pour les signatures et les contenus masqués |
 | Outils fonctionnels | `{type: "function"}` (`web_search*` → `{type: "web_search"}`) |
 | `tool_choice` | `auto`→`auto`, `none`→`none`, `any`→`required`, fonction nommée→`{type:"function",name}`, hébergée WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
+
+Sur l’adaptateur Anthropic prévu, les blocs signés non masqués (y compris thinking vide) et les blocs redacted opaques sont préservés. `hideThinkingSummary` reste inchangé : le texte signé masqué localement n’est pas exposé aux clients Claude ; sa relecture sans perte via cette frontière reste non établie. Les anciennes enveloppes combinées ne permettent pas de rétablir l’ordre après émission du texte en streaming. `claudeCode.compatibility: "enforce"` refuse toujours la relecture thinking. Cela ne prouve ni l’acceptation réelle par Anthropic ni une amélioration du cache ; [#3719](https://github.com/lidge-jun/opencodex/issues/3719) reste ouvert.
 
 **Cas d'erreur (400) :** JSON mal formé ; `model` absent ou vide ; `messages` absent ou vide ; rôle non pris en charge ;
 `tool_result` sans `tool_use_id` ; `tool_use` sans identifiant ni nom ; `tool_choice` nommé sans nom.
@@ -542,7 +552,8 @@ Le proxy traduit chaque requête Anthropic Messages API au format Codex Response
 | `response.created` | `message_start` + `ping` |
 | Battement de coeur | `ping` |
 | Deltas de texte | `content_block_start` → `content_block_delta` (texte) → `content_block_stop` |
-| Résumé ou texte de raisonnement | Bloc `thinking` avec signature synthétique |
+| Résumé ou texte de raisonnement | Bloc `thinking` avec la signature relue, ou une enveloppe de secours `ocxr1` bornée |
+| Raisonnement expurgé | Blocs `redacted_thinking` relus depuis l'enveloppe de raisonnement |
 | Trames d'appel de fonction | Bloc `tool_use` avec `input_json_delta` |
 | Événement terminal | `message_delta` → `message_stop` |
 | EOF avant la borne | style 502 `api_error` |

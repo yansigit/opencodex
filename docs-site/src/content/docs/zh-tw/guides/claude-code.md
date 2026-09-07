@@ -428,11 +428,13 @@ Claude Code 的 `/effort` 設定會完整保留並傳遞給適配器：
 | Assistant 文字 | `output_text` |
 | Assistant `tool_use` | `function_call`（`input` → JSON 字串化的 `arguments`） |
 | 使用者 `tool_result` | `function_call_output`（`is_error` → `[tool error]` 字首） |
-| 重放 `thinking` / `redacted_thinking` | 丟棄 |
+| 重放 `thinking` / `redacted_thinking` | `reasoning` 項目；簽名與遮蔽載荷保存在有界 `ocxr1` 信封中 |
 | Function 工具 | `{type: "function"}`（`web_search*` → `{type: "web_search"}`） |
 | `tool_choice` | `auto`→`auto`，`none`→`none`，`any`→`required`，指定名稱 function→`{type:"function",name}`，hosted WebSearch/web_search→`{type:"web_search"}` |
 | `max_tokens` | `max_output_tokens` |
 | `stop_sequences` | `stop` |
+
+在預期的 Anthropic 適配器上，保留未隱藏的簽名區塊（包括空 thinking）和不透明的 redacted 區塊。`hideThinkingSummary` 政策不變：不會向 Claude 用戶端公開本地隱藏的簽名文字，尚未證明經過此隱藏邊界的無損重播。舊版組合信封在串流文字發出後無法恢復原始區塊順序。`claudeCode.compatibility: "enforce"` 仍拒絕 thinking 重播。這不證明真實 Anthropic 接受請求或快取命中改善；[#3719](https://github.com/lidge-jun/opencodex/issues/3719) 仍未關閉。
 
 **錯誤情況（400）：**JSON 格式錯誤；缺少/空的 `model`；缺少/空的 `messages`；不支援的
 role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定名稱的 `tool_choice`
@@ -445,7 +447,8 @@ role；`tool_result` 缺少 `tool_use_id`；`tool_use` 缺少 id/name；指定�
 | `response.created` | `message_start` + `ping` |
 | 心跳 | `ping` |
 | 文字增量 | `content_block_start` → `content_block_delta`（文字）→ `content_block_stop` |
-| 推理摘要/文字 | 帶合成簽名的 `thinking` 塊 |
+| 推理摘要/文字 | 帶重播簽名或有界 `ocxr1` 備援信封的 `thinking` 塊 |
+| 遮蔽推理 | 從推理信封重播的 `redacted_thinking` 塊 |
 | Function-call 幀 | 帶 `input_json_delta` 的 `tool_use` 塊 |
 | 終止事件 | `message_delta` → `message_stop` |
 | 在終止事件前 EOF | 502 風格的 `api_error` |

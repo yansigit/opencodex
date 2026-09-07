@@ -152,7 +152,7 @@ predictions. Explicit provider/model price overrides still take precedence.
 | `modelAutoCompactTokenLimits?` | `Record<string, number>` | Positive safe-integer per-model soft auto-compaction budgets. Values can only lower the effective 90%-of-context/max-input envelope and are omitted when no authoritative context window is known. For canonical `openai`, keys must be exact supported native model IDs without provider or account-selector prefixes. Provider PATCH merges entries; set a key to `null` to delete it or the whole field to `null` to clear the map. These `null` tombstones are PATCH-only. |
 | `defaultMaxOutputTokens?` | `number` | Provider-wide `openai-chat` fallback when the client omits `max_output_tokens`. |
 | `modelMaxOutputTokens?` | `Record<string, number>` | Positive per-model `openai-chat` fallback budgets; exact/pattern matches beat the provider default. |
-| `modelCosts?` | `Record<string, Cost4>` | Per-model display prices (USD per 1M tokens), keyed by that provider's exact upstream model id — not a provider identifier or a routed `provider/model` label, e.g. `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`. Any model id is a valid key — custom providers may target any OpenAI-compatible endpoint through the `openai-chat` adapter, and local or internal provider ids work even when they are absent from the built-in catalogs. User-configured prices win over the built-in catalogs in the Logs `~$` and Usage estimates; historical entries are repriced from the current overlay, so editing a price can move past totals. The fallback order is user `modelCosts` → exact official correction → jawcode catalog → expected-price overlay → model-level vendor fallback, and an all-zero entry falls through to the next source in that sequence. Each rate must be a non-negative finite number at most 1,000,000 (USD per 1M tokens); out-of-range rows are rejected by the management boundary and dropped on load. Display-time estimation only: overlays never affect routing, account selection, quotas, or billing. |
+| `modelCosts?` | `Record<string, Cost4>` | Per-model display prices (USD per 1M tokens), keyed by that provider's exact upstream model id — not a provider identifier or a routed `provider/model` label, e.g. `{ "deepseek-v4-flash": { "input": 0.14, "output": 0.28, "cacheRead": 0.0028, "cacheWrite": 0 } }`. Any model id is a valid key — custom providers may target any OpenAI-compatible endpoint through the `openai-chat` adapter, and local or internal provider ids work even when they are absent from the built-in catalogs. User-configured prices win over the built-in catalogs in the Logs `~$` and Usage estimates; historical entries are repriced from the current overlay, so editing a price can move past totals. The fallback order is user `modelCosts` → exact official correction → jawcode catalog → expected-price overlay → model-level vendor fallback, and an explicit all-zero user entry means a known-zero estimate; delete that model entry to restore automatic pricing. All-zero catalog metadata still falls through. Each rate must be a non-negative finite number at most 1,000,000 (USD per 1M tokens); out-of-range rows are rejected by the management boundary and dropped on load. Display-time estimation only: overlays never affect routing, account selection, quotas, or billing. |
 | `headers?` | `Record<string, string>` | Extra upstream headers. Authorization, cookies, API-key headers, embedded newlines, and invalid names are rejected. |
 | `openRouterRouting?` | `OpenRouterProviderRouting` | Default OpenRouter `order`, `only`, and `allowFallbacks` preferences; valid only for canonical OpenRouter with `openai-chat`. |
 | `modelOpenRouterRouting?` | `Record<string, OpenRouterProviderRouting>` | Exact model-id overrides that replace the provider-wide OpenRouter preference. |
@@ -165,7 +165,7 @@ predictions. Explicit provider/model price overrides still take precedence.
 | `modelReasoningEfforts?` | `Record<string, string[]>` | Per-model labels. An empty list hides effort control. As with `reasoningEfforts`, each configured `google`-adapter ladder asserts `thinkingLevel` capability; direct and Vertex non-image requests use the flat Gemini path, while Cloud Code Assist sends it under its request envelope. |
 | `modelSupportsReasoningSummaries?` | `Record<string, boolean>` | Set a model to `false` to stop advertising summaries and strip summary-delivery fields. |
 | `modelReasoningSummaryDelivery?` | `Record<string, "sequential" \| "sequential_cutoff" \| "concurrent" \| "concurrent_cutoff">` | Per-model Responses delivery enum; rewrites an existing delivery field. |
-| `modelAdapters?` | `Record<string, string>` | Per-model `openai-chat` or `openai-responses` wire override for mixed-wire gateways. Explicit entries beat registry defaults. The OpenCode Go preset selects Responses for `gpt-5.6-luna` while leaving sibling models on their documented wires; DeepSeek can select native Responses for `deepseek-v4-flash`; and GitHub Copilot declares Responses-only defaults for its GPT-5 family (`gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`) because those models reject `/chat/completions` for agent traffic. Models without a built-in default (for example `gpt-5.4-nano`) can be opted in here. Single-wire upstream pins and canonical ChatGPT forward reject overrides. |
+| `modelAdapters?` | `Record<string, string>` | Per-model `openai-chat` or `openai-responses` wire override for mixed-wire gateways. Explicit entries beat registry defaults. The OpenCode Go preset selects Responses for `gpt-5.6-luna` while leaving sibling models on their documented wires; DeepSeek can select native Responses for `deepseek-v4-flash`; and GitHub Copilot declares Responses-only defaults for the following models (`gpt-5.3-codex`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-6-astra`, `grok-4.5`, `grok-4.6`, `mai-code-1.1-flash`, `mai-code-1-flash-picker`) because those models reject `/chat/completions` for agent traffic. Models without a built-in default (for example `gpt-5.4-nano`) can be opted in here. Single-wire upstream pins and canonical ChatGPT forward reject overrides. |
 | xAI Chat Completions (dashboard / CLI) | switch | Grok 4.5/4.6 OAuth Responses requests default to Responses. Existing Chat overrides are migrated once on upgrade; later Chat choices are preserved. Turn on to select Chat for both models, off to select Responses. CLI: `ocx provider edit xai --xai-chat on` or `--xai-chat off` (running proxy required). Mixed means only one model currently uses Chat. Other overrides and tier policy stay unchanged. API-key and translated Chat/Anthropic defaults are unchanged. |
 | `xaiResponsesXSearch?` | `boolean` | Disabled by default. On an xAI Responses destination, append the provider-hosted `x_search` declaration only when a live `web_search` tool survives final request normalization. Existing declarations are not duplicated, caller `tool_choice`/`allowed_tools` selectors are never widened, and this is separate from the web-search sidecar's `search.xSearch` options. |
 | `modelPreferHostedTools?` | `Record<string,string[]>` | Exact-model opt-in for non-forward Responses gateways that reserve a hosted-tool namespace. Currently accepts only `["image_generation"]`; a matching model must use the `openai-responses` wire and support that hosted tool. It removes colliding client `image_gen` declarations and rewrites their selectors to preserve caller tool choice. For OpenAI API virtual `-pro` models, the selected public ID is matched first and the resolved base wire-model ID is a fallback. `modelAdapters` resolves the public ID first, then the base ID; the second resolution determines the final wire. Other models retain normal alias behavior. |
@@ -204,6 +204,43 @@ predictions. Explicit provider/model price overrides still take precedence.
 | `unsafeAllowNativeLocalExec?` | `boolean` | Cursor legacy boolean, equivalent to `nativeLocalExec: "on"` only when the newer field is unset. |
 | `nativeLocalExec?` | `"off" \| "codex-sandbox" \| "on"` | Cursor local-exec policy. `off` is default; `codex-sandbox` currently fails closed like `off`. |
 
+Custom-model `reasoningEfforts` normally override discovered provider metadata. The bounded
+exception is an explicit Astra or Daybreak custom row on the canonical `openai` Codex-forward
+destination: its advertised list is intersected with that model's pinned native capabilities.
+An explicit empty list remains empty with no default; a nonempty incompatible list falls back
+to the native default as a single choice. Defaults must belong to the final list. This changes
+the catalog projection, not stored configuration or arbitrary gateway models sharing a GPT name.
+See [custom native catalog examples](/guides/codex-app-models/).
+
+### Operator-pinned reasoning effort
+
+Set `pinnedReasoningEffort` on an existing provider to override incoming effort choices, or
+use `modelPinnedReasoningEfforts` for individual upstream model IDs. Per-model provider pins
+win over the provider-wide pin; the root `modelPinnedEfforts` map is the fallback. These are
+operator settings, not provider-registry defaults. They do not change model discovery or the
+advertised effort ladder.
+
+```json
+{
+  "pinnedReasoningEffort": "high",
+  "modelPinnedReasoningEfforts": {
+    "example-model": "max"
+  }
+}
+```
+
+Merge these fields into the existing provider row. Accepted values are `none`, `minimal`,
+`low`, `medium`, `high`, `xhigh`, `max`, and `ultra`. **`none` removes the explicit effort field**;
+it uses the provider's default behavior and does not guarantee that reasoning is disabled.
+Applicable effort caps still run after the pin, and provider wire mapping/normalization can
+lower or omit an unsupported value. `ultra` is normalized before it reaches an upstream wire.
+Compaction maintenance requests are exempt from pins.
+
+`PATCH /api/providers?name=<provider>` accepts these fields. Omit a field to preserve it;
+use `null` to clear a scalar or the whole map. A map entry set to `null` or `""` removes that
+entry while preserving other entries. Malformed writes are rejected before saving. A malformed
+optional pin in a hand-edited file is ignored on load without discarding the rest of the config.
+
 ### Discovered model display names
 
 Use `modelDisplayNames` when a provider returns machine friendly ids but the Codex model picker
@@ -225,6 +262,16 @@ all other provider settings. The example includes the surrounding required field
 }
 ```
 
+Supported bare native GPT rows in the local Codex catalog also accept exact labels in
+`providers.openai.modelDisplayNames`, for example `"gpt-6-astra": "GPT 6 Astra"`.
+Both startup synchronization and local catalog convergence reapply these labels. Removing a label
+restores the original native name only when the row's display name still matches the applied
+override. A newer external display name is preserved subject to existing native metadata normalization;
+for example, Astra (`gpt-6-astra`) still replaces a non-pinned name with its pinned native name.
+The label overlay leaves model IDs, metadata (including capabilities), ordering,
+routed combo aliases, and account-qualified rows unchanged. This local catalog override does
+not relabel the HTTP model listings or virtual `*-pro` rows.
+
 The effective label order is operator `modelDisplayNames`, then provider catalog metadata, then the
 normal `provider/model` fallback. The routed selector remains `xai/grok-4.6`, while the upstream
 wire model remains `grok-4.6`. Labels are display only. They do not change authentication, adapter
@@ -233,6 +280,20 @@ label. A management client can set or reset one label with
 `PUT /api/providers/:provider/model-display-names` and a body of
 `{ "modelId": "grok-4.6", "displayName": "Grok 4.6" }`; send `displayName: null` to reset it.
 Provider `PATCH` does not edit this map. Use this dedicated `PUT` endpoint to change or remove labels.
+
+The dashboard exposes the same durable setting on **Models**. Expand the provider, find a
+discovered model, and choose **Name**. The dialog keeps the exact `provider/model` selector visible
+while you save a friendly label. Choose **Reset name** to return to provider metadata or the normal
+selector fallback. **Name** changes presentation only; the separate alias pencil changes the
+short routing alias and is not a display name editor. Native OpenAI and custom model rows keep their
+existing controls.
+
+If the change is saved but refreshing fails, the dialog reflects the saved override and keeps
+**Retry** available. Retry repeats catalog convergence when the server reported it failed, or
+reloads the list when only the list request failed. Reset recovery keeps the reset operation;
+it does not restore the old name. Requests have a 60-second deadline covering the write and its
+follow-up list refresh. A timeout does not undo a write: use **Retry** to check the current name
+before making another change.
 
 ## Codex catalog and root `config.toml` settings
 
@@ -358,6 +419,19 @@ return `429 RESOURCE_EXHAUSTED` for consumer accounts even when quota remains. `
 google-antigravity` and the dashboard connection test warn about that explicit override without
 rewriting it.
 
+OrcaRouter exposes both forms explicitly: `orcarouter` is the manual API-key provider and
+`orcarouter-oauth` runs browser consent with S256 PKCE, then stores the returned durable API key as
+an account credential. The public defaults intentionally split authentication
+(`https://www.orcarouter.ai`) from inference (`https://api.orcarouter.ai/v1`). Set
+`ORCAROUTER_BASE_URL` before the first account login for a one-origin self-hosted deployment, or use
+`ORCAROUTER_AUTH_BASE_URL` and `ORCAROUTER_API_BASE_URL` for separate origins.
+For a loopback/private self-hosted endpoint, **before the first login**, create or update
+`providers["orcarouter-oauth"]` with `adapter: "openai-chat"`, the intended `baseUrl`,
+`authMode: "oauth"`, and an explicit `allowPrivateNetwork: true`. Login preserves that operator
+setting and never grants it from a URL override. Without it, destination validation rejects the
+local endpoint for inference and model discovery. The OAuth browser callback listener itself
+does not require this provider opt-in. See the [OrcaRouter setup example](/guides/providers/).
+
 ## Provider diagnostic outbound safety
 
 Dashboard connection tests and live model discovery use a bounded GET-only transport. Without an
@@ -432,13 +506,30 @@ rotation may trigger provider restrictions.
 | `anthropicAccountPool.enabled?` | `boolean` | `false` | Enable sticky session affinity and quota-ranked new-session selection. When this key is omitted, two or more usable accounts enable reactive 429 failover by presence. An explicit `false` disables that failover as well as the pool. |
 | `anthropicAccountPool.autoSwitchThreshold?` | `number` | `80` | For new sessions, when the active account reaches this threshold, choose the lowest known cached usage in the configured window; the account chosen does not itself have to be at or above the threshold. `0` disables **proactive** usage-based switching only — new-session selection and routing recovery after an eligible 429 still consult `quotaWindow`. |
 | `anthropicAccountPool.strategy?` | `"quota" \| "round-robin" \| "fill-first"` | `"quota"` | New-session strategy; `quota` ranks accounts by the window set by `quotaWindow`, and `fill-first` evaluates its drain threshold in that same window. |
-| `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | The cached provider-reported utilization bar used for usage-aware account selection. `five-hour` keeps the original behavior. `weekly` scores the weekly bar and skips accounts whose 5-hour bar is exhausted while another eligible account remains, but falls back to exhausted candidates when none do. `max-utilization` scores the highest known bar, so it can use 5-hour usage before weekly usage is available; if neither is known, the account follows unknown-usage ordering. Known usage ranks before unknown usage under the opt-in `weekly` and `max-utilization` windows only; an omitted or explicit `five-hour` preserves the legacy ordering. If every eligible account is unknown, selection still returns one in eligible order. After the documented lower-5-hour tie-break, exact ties preserve eligible order. A healthy affinity-bound session is not proactively rebalanced. For new-session assignment and routing recovery after an eligible 429 replacement, `quota` ranks eligible candidates directly with this window; `fill-first` advances in stable order using this window's threshold and exhaustion rules; `round-robin` ignores it. Cooldown, failover limits, and reauthentication eligibility remain separate local state. Per-account weekly bars are only known once the dashboard Providers page has polled them. |
+| `anthropicAccountPool.quotaWindow?` | `"five-hour" \| "weekly" \| "max-utilization"` | `"five-hour"` | The cached provider-reported utilization bar used for usage-aware account selection. `five-hour` keeps the original behavior. `weekly` scores the weekly bar and skips accounts whose 5-hour bar is exhausted while another eligible account remains, but falls back to exhausted candidates when none do. `max-utilization` scores the highest known bar, so it can use 5-hour usage before weekly usage is available; if neither is known, the account follows unknown-usage ordering. Known usage ranks before unknown usage under the opt-in `weekly` and `max-utilization` windows only; an omitted or explicit `five-hour` preserves the legacy ordering. If every eligible account is unknown, selection still returns one in eligible order. After the documented lower-5-hour tie-break, exact ties preserve eligible order. A healthy affinity-bound session is not proactively rebalanced. For new-session assignment and routing recovery after an eligible 429 replacement, `quota` ranks eligible candidates directly with this window; `fill-first` advances in stable order using this window's threshold and exhaustion rules; `round-robin` ignores it. Cooldown, failover limits, and reauthentication eligibility remain separate local state. Per-account weekly bars come from usage probes or observed response headers. |
 | `anthropicAccountPool.stickyLimit?` | `number` | `1` | Successful new-session binds retained on one round-robin selection. Range 1–100. |
 
-When reactive failover is active, 429 records bounded cooldown from `Retry-After` or a default backoff and may rotate
-within the request. Affinity is process-local and size-bounded. Credential 401/403 marks the account
-as needing reauthentication. If all eligible accounts are cooling, clients receive 429 with
+When reactive failover is active, 429 records cooldown and may rotate within the request. The cooldown length comes
+from a usable `Retry-After`, otherwise from the latest valid reset time among rate-limit windows
+Anthropic reports as `rejected`, including weekly windows. Valid upstream deadlines are not
+shortened to a fixed cooldown ceiling; non-finite or unrepresentable deadlines are ignored.
+A refusal with no usable deadline falls back to a 60-second default backoff. Affinity is process-local
+and size-bounded. Credential 401/403 marks the account as needing reauthentication. If all eligible accounts are cooling, clients receive 429 with
 `Retry-After` when known, not an authentication error.
+
+Anthropic responses also report the serving account's 5-hour and weekly utilization, and whichever
+of those two a given response carries is recorded against that account — each window independently,
+on refusals as well as successes. Usage-aware selection therefore works from the accounts you
+actually use, without waiting for the dashboard Providers page to poll them. These readings refresh
+the existing row rather than replacing it, so the model-scoped weekly bars that only the usage
+endpoint reports are preserved until their known reset time passes. Expired measurements become
+unknown, including retained standard windows omitted by later headers. A reset-only header cannot
+extend an older utilization measurement. Values with no known reset retain their existing behavior;
+missing measurements are never replaced with zero usage.
+
+Header observations do not postpone usage probes or clear a failed
+probe's unavailable status. After restart, cached Anthropic observations remain available while
+the next quota read probes again, because the saved observations do not include the probe clock.
 
 :::caution[Experimental]
 Leave this disabled unless you understand Anthropic account policy risk. Prefer manual
@@ -771,6 +862,12 @@ When not to opt in: a proxy running as a headless service (systemd, launchd, Tas
 container usually has no unlocked keychain session, so requests would fail closed. Use an
 `${ENV_VAR}` reference in the service environment there instead. Env references are left untouched
 by `store`.
+
+The `zhipu-bigmodel-responses` preset seeds `glm-5.3` and `glm-5-turbo` with
+`liveModels: false` for `https://open.bigmodel.cn/api/v1`. Its static roster and
+per-model context, effort, and summary metadata come from the
+[BigModel Responses guide](/guides/providers/#bigmodel-coding-plan-over-responses).
+The official local `models.json` example does not establish a live `/models` API.
 
 With `liveModels: false`, an empty or omitted `models` list seeds the configured `defaultModel`
 first, followed by `retainModels`; duplicate ids are removed while preserving first occurrence.

@@ -6,6 +6,7 @@ import { saveConfig } from "../../src/config";
 import { startServer } from "../../src/server";
 import { handleResponses } from "../../src/server/responses";
 import { isEagerRelaySseResponse } from "../../src/server/relay";
+import { createGrokResponsesControlFrameBlockRewrite } from "../../src/server/grok-responses-control-frame";
 import type { OcxConfig } from "../../src/types";
 import { installIsolatedCodexHome, type IsolatedCodexHome } from "../helpers/isolated-codex-home";
 import { removeTreeWithRetry } from "../helpers/remove-tree";
@@ -58,12 +59,26 @@ const CODEX_SPARSE_TERMINAL_EVENTS = [
   },
 ];
 
-function sparseSseBody(events: readonly Record<string, unknown>[] = SPARSE_EVENTS): ReadableStream<Uint8Array> {
+const GROK_CONTROL_FRAME_EVENTS = [
+  {
+    type: "codex.rate_limits",
+    rate_limits: { primary: { used_percent: 12, window_minutes: 60, reset_at: 123 } },
+  },
+  { type: "codex.response.metadata", headers: { "x-models-etag": "fixture" } },
+  { type: "response.created", response: { id: "resp_control" } },
+  { type: "response.completed", response: { id: "resp_control", status: "completed", output: [] } },
+];
+
+function sparseSseBody(
+  events: readonly Record<string, unknown>[] = SPARSE_EVENTS,
+  includeEventNames = false,
+): ReadableStream<Uint8Array> {
   return new ReadableStream<Uint8Array>({
     start(controller) {
       const encoder = new TextEncoder();
       for (const event of events) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        const eventLine = includeEventNames ? `event: ${event.type}\n` : "";
+        controller.enqueue(encoder.encode(`${eventLine}data: ${JSON.stringify(event)}\n\n`));
       }
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
       controller.close();
@@ -74,6 +89,7 @@ function sparseSseBody(events: readonly Record<string, unknown>[] = SPARSE_EVENT
 function stubSparseGateway(
   origin: string,
   events: readonly Record<string, unknown>[] = SPARSE_EVENTS,
+  includeEventNames = false,
 ): void {
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const requestUrl = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -82,7 +98,7 @@ function stubSparseGateway(
       return Response.json({ data: [] });
     }
     if (url.origin === origin && url.pathname.endsWith("/responses")) {
-      return new Response(sparseSseBody(events), {
+      return new Response(sparseSseBody(events, includeEventNames), {
         status: 200,
         headers: { "content-type": "text/event-stream" },
       });
@@ -102,6 +118,61 @@ afterEach(async () => {
   await isolated.restore();
   removeTreeWithRetry(TEST_DIR);
 });
+
+for (const controlType of ["codex.rate_limits", "codex.response.metadata"]) {
+  describe(`Grok control frame ${controlType}`, () => {
+    test.each(["{}", "not-json"])("filters an event-only discriminator with payload %s", payload => {
+      const rewrite = createGrokResponsesControlFrameBlockRewrite();
+      expect(rewrite(`event: ${controlType}\ndata: ${payload}`)).toEqual([]);
+    });
+
+    test("filters a data-only discriminator without an event field", () => {
+      const rewrite = createGrokResponsesControlFrameBlockRewrite();
+      expect(rewrite(`data: {"type":"${controlType}"}`)).toEqual([]);
+    });
+
+    test.each(["{}", "not-json"])("filters the last event field with payload %s", payload => {
+      const rewrite = createGrokResponsesControlFrameBlockRewrite();
+      expect(rewrite(`event: message\nevent: ${controlType}\ndata: ${payload}`)).toEqual([]);
+    });
+
+    test("preserves completion when the last event field overrides a control type", () => {
+      const block = `event: ${controlType}\nevent: response.completed\ndata: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}`;
+      expect(createGrokResponsesControlFrameBlockRewrite()(block)).toEqual([block]);
+    });
+
+    test.each(["event:", "event: ", "event"])("honors the empty reset %s", reset => {
+      const block = `event: ${controlType}\n${reset}\ndata: {}`;
+      expect(createGrokResponsesControlFrameBlockRewrite()(block)).toEqual([block]);
+    });
+
+    test("still filters the JSON type after an empty event reset", () => {
+      const block = `event: ${controlType}\nevent:\ndata: {"type":"${controlType}"}`;
+      expect(createGrokResponsesControlFrameBlockRewrite()(block)).toEqual([]);
+    });
+
+    test.each([`event:  ${controlType}`, `event:\t${controlType}`, `event: ${controlType} `])(
+      "preserves significant event-value whitespace in %s",
+      eventLine => {
+        const block = `${eventLine}\ndata: {}`;
+        expect(createGrokResponsesControlFrameBlockRewrite()(block)).toEqual([block]);
+      },
+    );
+
+    test("recognizes a CRLF event field without an optional space", () => {
+      expect(createGrokResponsesControlFrameBlockRewrite()(`event:message\r\nevent:${controlType}\r\ndata: {}`)).toEqual([]);
+    });
+
+    test("does not retain the event type across blocks or consume ordinary content", () => {
+      const rewrite = createGrokResponsesControlFrameBlockRewrite();
+      expect(rewrite(`event: ${controlType}\ndata: {}`)).toEqual([]);
+      for (const block of ["data: {}", "data: not-json", ": heartbeat", "data: [DONE]",
+        `data: {"type":"response.output_text.delta","delta":"${controlType}"}`]) {
+        expect(rewrite(block)).toEqual([block]);
+      }
+    });
+  });
+}
 
 describe("responsesSnapshotRepair through /v1/responses", () => {
   test.skipIf(process.platform !== "darwin")(
@@ -322,6 +393,49 @@ describe("responsesSnapshotRepair through /v1/responses", () => {
         status: "completed",
         content: [{ type: "output_text", text: "hello", annotations: [] }],
       });
+    } finally {
+      await server.stop(true);
+    }
+  });
+  test.each([true, false])("the Grok marker filters Codex control frames at the client boundary (event names: %s)", async includeEventNames => {
+    const gateway = "https://grok-control-frame.example.test";
+    stubSparseGateway(gateway, GROK_CONTROL_FRAME_EVENTS, includeEventNames);
+    saveConfig({
+      port: 0,
+      defaultProvider: "sparse",
+      providers: {
+        sparse: {
+          adapter: "openai-responses",
+          baseUrl: `${gateway}/v1`,
+          authMode: "key",
+          apiKey: "test-key",
+        },
+      },
+    } as OcxConfig);
+
+    const server = startServer(0);
+    try {
+      const request = (grokMarker: boolean) => originalFetch(new URL("/v1/responses", server.url), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...(grokMarker ? { "x-opencodex-grok": "1" } : {}),
+        },
+        body: JSON.stringify({ model: "sparse-model", input: "hi", stream: true }),
+      });
+
+      const grokResponse = await request(true);
+      expect(grokResponse.status).toBe(200);
+      const grokText = await grokResponse.text();
+      expect(grokText).not.toContain("codex.rate_limits");
+      expect(grokText).not.toContain("codex.response.metadata");
+      expect(grokText).toContain('"type":"response.completed"');
+
+      const ordinaryResponse = await request(false);
+      expect(ordinaryResponse.status).toBe(200);
+      const ordinaryText = await ordinaryResponse.text();
+      expect(ordinaryText).toContain("codex.rate_limits");
+      expect(ordinaryText).toContain("codex.response.metadata");
     } finally {
       await server.stop(true);
     }
