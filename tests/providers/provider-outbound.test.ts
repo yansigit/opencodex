@@ -378,13 +378,16 @@ describe("provider outbound GET transport", () => {
 
   test("proxy mode reaches one real proxy across outbound, connection-test, and model-discovery paths", async () => {
     const childHome = mkdtempSync(join(tmpdir(), "ocx-provider-proxy-e2e-"));
+    const childEnv = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => !proxyKeys.includes(key.toUpperCase())),
+    );
     const child = Bun.spawn([
       process.execPath,
       "tests/fixtures/provider-outbound-e2e.ts",
     ], {
       cwd: process.cwd(),
       env: {
-        ...process.env,
+        ...childEnv,
         OPENCODEX_HOME: childHome,
       },
       stdout: "pipe",
